@@ -17,7 +17,7 @@ Key concepts covered in this module:
 - Comprehension vs generator performance tradeoffs
 - `toolz` / `cytoolz` for functional pipelines
 
-Python version coverage: 3.11 / 3.12.
+Python version coverage: 3.13 / 3.14.
 
 ---
 
@@ -216,19 +216,23 @@ result: list[str] = list(passing_names)  # ["Alice", "Carol"]
 total: int = reduce(add, [10, 20, 30], 0)  # 60
 ```
 
-Performance note: `map()` with a built-in C function is faster than a comprehension calling the same function, because Python does not need to look up the name in a bytecode loop:
+Performance note: the `map` versus comprehension question changed shape in Python 3.12, when PEP 709 inlined list, dict and set comprehensions into the surrounding code object instead of compiling them to a hidden nested function. Comprehensions got up to 2x faster, and the two rules of thumb that follow are the current state, not the pre-3.12 folklore:
 
 ```python
 import timeit
 
-# map with C built-in int: ~0.14s for 1M elements
+# C built-in callable: map still wins, but only barely.
+# measured ~0.33s vs ~0.35s for 10 x 1M elements -- roughly 5-10%
 timeit.timeit("list(map(int, data))", setup="data=[str(x) for x in range(1_000_000)]", number=10)
-
-# comprehension: ~0.20s for 1M elements (name lookup + CALL overhead)
 timeit.timeit("[int(x) for x in data]", setup="data=[str(x) for x in range(1_000_000)]", number=10)
+
+# Python lambda: the comprehension now wins by a wide margin.
+# measured ~0.32s vs ~0.19s for 10 x 1M elements -- the comprehension is ~70% faster
+timeit.timeit("list(map(lambda x: x*2, data))", setup="data=list(range(1_000_000))", number=10)
+timeit.timeit("[x*2 for x in data]", setup="data=list(range(1_000_000))", number=10)
 ```
 
-However, for pure Python lambda functions, list comprehensions are 15-20% faster than `map(lambda ...)` because the interpreter optimizes comprehension bytecode.
+Read it as a rule about *what you pass*, not about `map` itself. With a C callable, `map` avoids one name lookup per element and edges ahead by single-digit percent — not worth restructuring code for. With a Python `lambda`, `map` pays a full Python call per element while the inlined comprehension pays none, so the comprehension is roughly 1.7x faster. Absolute times are machine-dependent; the direction and the rough magnitude are not.
 
 ### 6.3 functools.partial
 
@@ -319,7 +323,7 @@ employees = [
     Employee("Carol", 88000, "Engineering"),
 ]
 
-# attrgetter: compiled C, ~30% faster than lambda e: e.salary
+# attrgetter: compiled C, and clearer at a glance than lambda e: e.salary
 by_salary = sorted(employees, key=attrgetter("salary"), reverse=True)
 
 # itemgetter: for dictionaries
@@ -335,43 +339,45 @@ total = reduce(add, [10, 20, 30, 40])   # 100
 product = reduce(mul, [1, 2, 3, 4, 5]) # 120
 ```
 
-`itemgetter("score")` compiles to a single C function call. `lambda r: r["score"]` requires bytecode interpretation (LOAD_FAST, LOAD_CONST, BINARY_SUBSCR). The difference is measurable at scale: for a sort of 1 million records, `itemgetter` is roughly 25-30% faster.
+`itemgetter("score")` compiles to a single C function call. `lambda r: r["score"]` requires a Python frame plus bytecode interpretation (`LOAD_FAST`, `LOAD_CONST`, `BINARY_SUBSCR`). Measured on a sort of 1 million dicts, `itemgetter` is roughly **5-10% faster end to end**, and `attrgetter` over dataclass instances only a few percent. Reach for them for clarity and picklability first; the speed is a small bonus.
 
-**The idea behind it.** "A sort does not call your key function once per record — it calls it on the
-order of `N log N` times, so a per-call cost you would never notice gets multiplied by twenty."
-The saving is not that `itemgetter` is dramatically faster per call; it is that the call count is
-enormous.
+**The idea behind it.** "`sorted(key=f)` calls `f` exactly once per element, not once per
+comparison — so the key-function cost is linear in `N` while the sort itself is `N log N`, and the
+key can only ever be a slice of the total."
 
 | Symbol | What it is |
 |---|---|
-| `N` | Records being sorted — 1,000,000 in the claim above |
-| `log2(N)` | Roughly how many comparison rounds a merge-based sort needs. `log2(1,000,000)` = 19.93 |
-| `N x log2(N)` | Upper bound on comparisons, hence on key-function invocations without caching |
+| `N` | Records being sorted — 1,000,000 in the measurement above |
+| key calls | Exactly `N`. CPython extracts all keys into an array first (decorate-sort-undecorate) |
+| comparisons | About `N x log2(N)`, but they compare the *already-extracted* keys, not the records |
 | `itemgetter` | One C-level `__getitem__`. No Python frame is pushed |
 | `lambda r: r["score"]` | A Python function: frame setup, `LOAD_FAST`, `LOAD_CONST`, `BINARY_SUBSCR`, return |
 
-**Walk one example.** Multiply the per-call gap by the call count for `N = 1,000,000`:
+**Walk one example.** Verify the call count, then multiply by the per-call gap:
 
 ```
-  log2(1,000,000)              =        19.93
-  comparisons  N x log2(N)     = 19,931,568        about 20 million
+  Instrument the key function and sort 100,000 dicts:
 
-  a per-call gap of only 20 nanoseconds:
-      19,931,568 x 20 ns       = 0.399 seconds of pure key-function overhead
+      N            =   100,000
+      key calls    =   100,000        <- exactly N, NOT N log N
+      N x log2(N)  = 1,660,964        <- this is the COMPARISON count, on extracted keys
 
-  scaled down, the same gap is invisible:
-    N =     1,000  ->      9,966 calls  x 20 ns = 0.0002 s    unmeasurable
-    N =   100,000  ->  1,660,964 calls  x 20 ns = 0.033 s     barely visible
-    N = 1,000,000  -> 19,931,568 calls  x 20 ns = 0.399 s     shows up in a p99
+  Now the measured 1,000,000-record sort:
+
+      sorted(key=itemgetter('score'))   0.518 s
+      sorted(key=lambda r: r['score'])  0.562 s
+      difference                        0.044 s  over 1,000,000 key calls
+                                                 = about 44 ns per call
+
+      key-function share of the whole sort:  0.044 / 0.562 = 7.8%
 ```
 
-There is a second, larger effect Python hides here: `sorted(key=...)` actually applies the key
-**once per element** (the decorate-sort-undecorate strategy), then sorts the extracted keys — so the
-key runs `N` times, not `N log N`, and it is the *comparison* of the extracted values that runs
-`N log N` times. Both counts are far larger than `N` feels like it should be, and both are the
-reason the same 25-30% shows up reliably in benchmarks. The practical takeaway is unchanged and
-worth stating that way in an interview: **in a sort, the key function sits inside the hottest loop
-in the program, so it is the one place a C callable is always worth reaching for.**
+The ceiling on this optimisation is therefore that 8%: even a *free* key function could not do
+better, because the other 92% is the comparison-and-move work that no key choice touches. Scaled
+down it disappears entirely — at `N = 1,000` the whole gap is `1,000 x 44 ns = 44 microseconds`.
+The honest interview answer is: **`itemgetter` is the right default because it is C, picklable,
+and self-documenting, but if a sort is your bottleneck the fix is a smaller `N` or a different
+data structure, not a faster key.**
 
 ### 6.6 Immutability Patterns
 
@@ -458,7 +464,7 @@ summarize = juxt([min, max, sum, len])
 summarize([3, 1, 4, 1, 5, 9])  # (1, 9, 23, 6)
 ```
 
-`cytoolz` is a Cython implementation of `toolz`. It is API-compatible and approximately 10x faster for pipeline-heavy workloads. Use `cytoolz` in production where throughput matters; use `toolz` in development for simpler installation.
+`cytoolz` is a Cython implementation of `toolz`. It is API-compatible, and its own README puts the gain at "typically 2-5x faster with a few spectacular exceptions". Read that carefully: it speeds up *toolz's own plumbing*, not your callbacks. Measured over 10,000 records, `cytoolz.groupby` and `cytoolz.reduceby` came in about 1.2-1.3x faster than `toolz`, while `pipe` over `map`/`filter` with Python callbacks was a dead heat — because the Python function call per element dominates and Cython cannot remove it. Use `cytoolz` when the toolz combinators themselves are hot (`groupby`, `reduceby`, `join`, `merge_with` over large collections); the drop-in swap costs nothing, but do not budget for an order of magnitude.
 
 `pipe` and `compose` are easy to mix up because their argument order is reversed while their execution order is identical — the diagram below lines the two calls up side by side on the same three functions `f`, `g`, `h`:
 
@@ -675,14 +681,14 @@ def fetch_records(config: QueryConfig) -> list[dict]:
 | Approach | Readability | Performance | Memory | Debuggability | Best For |
 |---|---|---|---|---|---|
 | `for` loop | High | Baseline | O(n) | Easy (step-through) | Complex multi-step with branching |
-| List comprehension | High | +15-20% vs map+lambda | O(n) | Good | Transformations over small-medium data |
-| `map` + C built-in | Medium | Fastest for built-ins | O(1) lazy | Medium | Type conversion at scale |
-| `map` + lambda | Low | -20% vs comprehension | O(1) lazy | Poor (lambda name) | Avoid in most cases |
+| List comprehension | High | ~1.7x vs map+lambda (inlined since 3.12, PEP 709) | O(n) | Good | Transformations over small-medium data |
+| `map` + C built-in | Medium | Fastest for built-ins, but only by 5-10% | O(1) lazy | Medium | Type conversion at scale |
+| `map` + lambda | Low | ~1.7x slower than a comprehension | O(1) lazy | Poor (lambda name) | Avoid in most cases |
 | `filter` + lambda | Low | Comparable | O(1) lazy | Poor | Prefer comprehension with `if` |
 | `toolz.pipe` | Medium-High | Slight overhead vs raw | O(1) | Good (named stages) | Long ETL pipelines |
-| `cytoolz.pipe` | Medium-High | ~10x vs toolz | O(1) | Good | Production pipelines |
+| `cytoolz.pipe` | Medium-High | 2-5x vs toolz on toolz's own combinators; ~1x when Python callbacks dominate | O(1) | Good | `groupby`/`reduceby`/`join` over large collections |
 | `functools.partial` | High | Faster than lambda | Negligible | Excellent | Currying, validator chains |
-| `operator.itemgetter` | Medium | +25-30% vs lambda | Negligible | Good | Sort keys on dicts/tuples |
+| `operator.itemgetter` | Medium | +5-10% on a whole sort | Negligible | Good | Sort keys on dicts/tuples |
 
 ---
 
@@ -746,17 +752,19 @@ items = list(range(1_000_000))
 
 # BROKEN: slower and harder to read for pure Python functions
 doubled = list(map(lambda x: x * 2, items))
-# timeit: ~0.18s — lambda adds CALL overhead on every element
+# ~0.032 s per pass — a full Python call per element
 ```
 
 ```python
-# FIX option A: list comprehension (20% faster for pure Python)
+# FIX option A: list comprehension (~1.7x faster for pure Python callables,
+# because PEP 709 [3.12] inlined comprehensions into the enclosing code object)
 doubled = [x * 2 for x in items]
-# timeit: ~0.09s
+# ~0.019 s per pass
 
-# FIX option B: keep map when using a C built-in (fastest)
+# FIX option B: keep map when using a C built-in — still the fastest, but the
+# margin over a comprehension is only 5-10%, not a reason to restructure code
 strings = ["1", "2", "3"]
-ints = list(map(int, strings))  # int is a C type — this is the fastest option
+ints = list(map(int, strings))
 ```
 
 ### Pitfall 3: Using reduce for Built-in Accumulations
@@ -802,13 +810,14 @@ question is only whether each of those crossings pays Python's function-call tax
 | `sum` cost | `N-1` combinations inside one C loop. Zero Python frames pushed |
 | short-circuit | `any`/`all` stop at the first decisive element; `reduce` cannot — it always folds all `N-1` |
 
-**Walk one example.** Fold 1,000,000 integers, measured with `timeit` on CPython 3.13:
+**Walk one example.** Fold 1,000,000 integers, measured with `timeit` on CPython 3.13. Read the
+ratios, not the seconds — the absolute times move with the machine, the ratios do not:
 
 ```
   approach                       Python calls      per-run time     vs sum()
-  sum(d)                                    0        0.0025 s        1.0x
-  reduce(operator.add, d)             999,999        0.0159 s        6.3x slower
-  reduce(lambda a, b: a + b, d)       999,999        0.0318 s       12.7x slower
+  sum(d)                                    0        0.0024 s        1.0x
+  reduce(operator.add, d)             999,999        0.0149 s        ~6x slower
+  reduce(lambda a, b: a + b, d)       999,999        0.0285 s       ~12x slower
 ```
 
 The two `reduce` rows do the same 999,999 additions; the second is twice as slow again purely
@@ -893,8 +902,8 @@ See `../decorators_and_closures/README.md` for `functools.wraps` and `lru_cache`
 | `itertools` (stdlib) | Yes | Chain, product, groupby | Yes (C) | Universal | `chain`, `islice`, `groupby`, `takewhile`, `dropwhile` |
 | `operator` (stdlib) | N/A | Yes (use with map/sort) | Yes (C) | Universal | `itemgetter`, `attrgetter`, `methodcaller`; no install |
 | `toolz` | Yes (lazy variants) | Excellent (`pipe`, `compose`, `curry`) | No (pure Python) | Moderate | Best API for functional pipelines; easy to install |
-| `cytoolz` | Yes | Same API as toolz | Yes (Cython, ~10x) | High-throughput ETL | Requires C extension; drop-in replacement for toolz |
-| `fn.py` | Partial | `>>` operator chaining | No | Low (unmaintained) | Haskell-inspired; mostly a curiosity in 2024; avoid in new projects |
+| `cytoolz` | Yes | Same API as toolz | Yes (Cython, 2-5x on toolz's own combinators) | High-throughput ETL | Requires C extension; drop-in replacement for toolz |
+| `fn.py` | Partial | `>>` operator chaining | No | Avoid | Haskell-inspired; last release 2023 and effectively unmaintained. Use `toolz` instead |
 
 ---
 
@@ -906,11 +915,11 @@ A pure function always returns the same output for the same input and has no sid
 
 **Q2: Why is `map(int, strings)` faster than `[int(s) for s in strings]`?**
 
-`map(int, strings)` calls the C-implemented `int` type directly for each element with no Python bytecode per-element overhead. The list comprehension must execute `LOAD_GLOBAL int`, `LOAD_FAST s`, `CALL_FUNCTION 1` bytecodes for every element. When the callable is a C built-in, `map` avoids that overhead. The difference is roughly 25-35% faster for type conversions at scale. The advantage disappears or reverses when the callable is a Python lambda, because `map` must then invoke Python function call machinery on each iteration.
+`map(int, strings)` calls the C-implemented `int` type directly for each element, while the comprehension executes `LOAD_GLOBAL int`, `LOAD_FAST s` and `CALL` bytecodes every time round. That still favours `map`, but only by about 5-10% on a million-element conversion — much less than the pre-3.12 gap, because PEP 709 [3.12] inlined comprehensions into the enclosing code object and removed the hidden function call that used to make them lose. The advantage reverses outright when the callable is a Python lambda: `map` then pays a full Python call per element while the inlined comprehension pays none, and the comprehension comes out roughly 1.7x faster. The rule to remember is "C callable, `map` is marginally ahead; Python callable, comprehension wins clearly".
 
 **Q3: When would you choose `functools.partial` over a lambda?**
 
-Prefer `partial` when: (1) you want introspectability — `partial.func`, `partial.args`, `partial.keywords` reveal what was frozen; (2) you are freezing arguments of an existing named function and want the resulting callable to carry the original function's identity; (3) performance matters in a hot loop — `partial` avoids per-call lambda evaluation overhead. Use a lambda when: the transformation is so simple it has no reuse value, or when you need to rearrange argument order (which `partial` cannot do — use `lambda` or a named function instead).
+Prefer `partial` whenever you are only freezing arguments rather than adding behaviour, because it stays introspectable and picklable where a lambda is neither. Three concrete reasons: `partial.func`, `partial.args` and `partial.keywords` reveal exactly what was frozen; the result carries the original function's identity, so it survives `multiprocessing` and task-queue serialisation that would reject a lambda; and it is a C type, so on a trivial target it costs about 35 ns per call against 60 ns for an equivalent Python closure. Use a lambda when the transformation has no reuse value, or when you need to rearrange argument order — `partial` can only fill leading positional arguments and keywords, so reordering needs a lambda or a named function.
 
 **Q4: What does `functools.singledispatch` do, and how does dispatch work for subclasses?**
 
@@ -918,11 +927,11 @@ Prefer `partial` when: (1) you want introspectability — `partial.func`, `parti
 
 **Q5: What is the memory difference between a list comprehension and a generator expression for 1 million elements?**
 
-A list comprehension allocates all elements at once: for 1 million Python `int` objects (8 bytes each on a 64-bit CPython), the list itself uses roughly 8 MB. A generator expression is a generator object that occupies approximately 200 bytes regardless of the sequence length — it computes one element at a time on each `next()` call. For a single-pass aggregation like `sum(x*x for x in range(1_000_000))`, the generator is the correct choice. If you need multiple passes or random access, materialize to a list once.
+A list comprehension allocates everything at once, and the honest total is about 40 MB, not the 8.4 MB `sys.getsizeof` reports. The 8.4 MB is only the pointer array — one 8-byte slot per element — while the 1,000,000 boxed `int` objects it points at add another 31.9 MB that `getsizeof` never counts because it is not recursive. A generator expression is a single generator object of 200 bytes regardless of sequence length, plus whichever one `int` is alive right now, so the true ratio is around 175,000x. For a single-pass aggregation like `sum(x*x for x in range(1_000_000))`, the generator is the correct choice. If you need multiple passes, `len()`, or random access, materialize to a list once and pay the 40 MB deliberately.
 
 **Q6: How does `operator.itemgetter` outperform `lambda r: r["score"]` in a sort?**
 
-`operator.itemgetter("score")` returns a C-level callable that performs a single `__getitem__` call directly. `lambda r: r["score"]` is a Python function object: each invocation requires Python to set up a frame, execute `LOAD_FAST r`, `LOAD_CONST "score"`, `BINARY_SUBSCR`, and `RETURN_VALUE`. For a sort of N records, this overhead is incurred N × log N times (the number of comparisons). On 1 million records, `itemgetter` is approximately 25-30% faster in benchmarks.
+It skips the Python frame: `itemgetter("score")` is a C-level callable doing one `__getitem__`, while the lambda sets up a frame and runs `LOAD_FAST`, `LOAD_CONST`, `BINARY_SUBSCR`, `RETURN_VALUE` on every call. Note the call count: `sorted(key=...)` extracts the key **exactly N times**, once per element, and then sorts the extracted keys — the `N log N` comparisons operate on those keys, never on your function. So the key-function cost is linear and bounded. Measured over 1 million dicts the whole sort ran 0.518 s with `itemgetter` against 0.562 s with the lambda: about 44 ns per call, and roughly 8% of total sort time. Choose `itemgetter` because it is picklable, introspectable and self-documenting; the 5-10% is a bonus, not the reason.
 
 **Q7: What makes `dataclass(frozen=True)` different from a regular dataclass, and what does it generate?**
 
@@ -930,7 +939,7 @@ A list comprehension allocates all elements at once: for 1 million Python `int` 
 
 **Q8: Why does Python's `reduce` hide performance issues that built-ins like `sum()` or `any()` avoid?**
 
-`sum()`, `any()`, `all()`, `max()`, `min()` are implemented in C and operate over the iterable in a tight C loop, never entering Python per-element. `functools.reduce` calls a Python callable on every pair of accumulated values, which means the Python function call machinery fires N-1 times. For `reduce(lambda a, b: a + b, numbers)` vs `sum(numbers)`, the built-in is roughly 5-10x faster on large sequences. The semantic issue is readability: `reduce` also hides short-circuit behavior — `any()` stops as soon as it finds `True`, but `reduce(lambda a, b: a or b, flags)` evaluates every element.
+`sum()`, `any()`, `all()`, `max()`, `min()` are implemented in C and operate over the iterable in a tight C loop, never entering Python per-element. `functools.reduce` calls a Python callable on every pair of accumulated values, which means the call machinery fires N-1 times. Measured over 1 million integers, `sum` beat `reduce(operator.add, ...)` by about 6x and `reduce(lambda a, b: a + b, ...)` by about 12x — the extra 2x purely because a `lambda` frame costs more to enter than `operator.add`'s C entry point. The bigger issue is not constant-factor speed but lost short-circuiting: `any()` stops at the first `True`, while `reduce(lambda a, b: a or b, flags)` always folds all N-1 pairs, turning a best case of O(1) into O(N).
 
 **Q9: What is `toolz.pipe` and how does it differ from `toolz.compose`?**
 
@@ -950,7 +959,7 @@ In Python 3.9+, `functools.cache` is equivalent to `lru_cache(maxsize=None)` but
 
 **Q13: Does wrapping a function with `functools.partial` avoid the mutable-default-argument trap?**
 
-No — `functools.partial` does not fix the mutable-default-argument trap because the default value is still evaluated once when the wrapped function's `def` statement executes, and `partial` simply calls that same function object on every invocation. `add_item = partial(append_to)` on a function defined as `def append_to(item, collection=[]):` still shares one `[]` list across every call made through `add_item`, exactly as it would through the original function. The fix is unchanged from the non-`partial` case: give the wrapped function a `None` default and construct a fresh mutable object inside its body before `partial` ever touches it. Always fix mutable defaults at the function definition, not at the call site, because every wrapper — `partial`, decorators, or plain aliasing — inherits the same shared object.
+No — `partial` inherits the trap rather than fixing it. The default value is evaluated once when the wrapped function's `def` statement executes, and `partial` simply calls that same function object on every invocation. `add_item = partial(append_to)` on a function defined as `def append_to(item, collection=[]):` still shares one `[]` list across every call made through `add_item`, exactly as it would through the original function. The fix is unchanged from the non-`partial` case: give the wrapped function a `None` default and construct a fresh mutable object inside its body before `partial` ever touches it. Always fix mutable defaults at the function definition, not at the call site, because every wrapper — `partial`, decorators, or plain aliasing — inherits the same shared object.
 
 **Q14: What does `operator.methodcaller` do, and when is it preferable to a lambda that calls a method?**
 
@@ -962,7 +971,7 @@ No — `functools.partial` does not fix the mutable-default-argument trap becaus
 
 **Q16: What is the practical difference between `toolz` and `cytoolz` in a production pipeline?**
 
-`cytoolz` is a Cython-compiled reimplementation of `toolz` with an API-identical surface, so switching from `import toolz` to `import cytoolz as toolz` requires no code changes but yields roughly a 10x speedup for pipeline-heavy workloads. `toolz` is pure Python, which makes it trivially installable anywhere CPython runs but leaves its `pipe`/`compose`/`curry` machinery subject to normal Python function-call overhead at every stage. The module's guidance is concrete: switch to `cytoolz` once any pipeline processes more than 10,000 records per request. Use plain `toolz` during local development for simpler installation, and `cytoolz` in any production path where per-request throughput matters.
+`cytoolz` is a drop-in Cython reimplementation of `toolz`, so `import cytoolz as toolz` is a free swap that needs no code changes. Its own README puts the gain at "typically 2-5x faster with a few spectacular exceptions", and the qualification that matters is *what* gets faster: Cython removes the overhead of toolz's own combinators, not of the Python functions you hand them. Measured over 10,000 records, `cytoolz.groupby` and `cytoolz.reduceby` came in about 1.2-1.3x ahead, while `pipe` over `map`/`filter` with Python callbacks was a dead heat, because the per-element Python call dominates and no amount of Cython removes it. Take `cytoolz` for free when the toolz combinators themselves are hot — `groupby`, `reduceby`, `join`, `merge_with` over large collections — and do not plan capacity around an order-of-magnitude win that will not arrive.
 
 ---
 
@@ -970,7 +979,7 @@ No — `functools.partial` does not fix the mutable-default-argument trap becaus
 
 **1. Name every function in a pipeline.** Avoid anonymous lambdas inside `map`, `filter`, or `toolz.pipe` in production code. Named functions produce readable tracebacks, can be tested in isolation, and can be reused. Reserve lambdas for truly one-off, trivial expressions in a REPL or test file.
 
-**2. Use `operator.itemgetter` / `attrgetter` for sort keys.** They are faster than lambdas, immediately signal "I am accessing a field", and compose cleanly with `sorted`, `min`, `max`, and `itertools.groupby`.
+**2. Use `operator.itemgetter` / `attrgetter` for sort keys.** They immediately signal "I am accessing a field", they are picklable (so they survive `multiprocessing`), and they compose cleanly with `sorted`, `min`, `max`, and `itertools.groupby`. They are also a little faster than a lambda — 5-10% on a whole sort — but pick them for the first three reasons.
 
 **3. Materialize lazily and late.** Chain `map`, `filter`, and generator expressions for as long as possible before calling `list()`. If you only need `sum()` or `any()`, never materialize — let the consuming function drive the iterator.
 
@@ -982,7 +991,7 @@ No — `functools.partial` does not fix the mutable-default-argument trap becaus
 
 **7. Prefer `partial` over `lambda` for partially applied named functions.** `partial` is introspectable, picklable (important for `multiprocessing` and task queues), and carries the original function's `__doc__` and `__name__` when combined with `functools.wraps`.
 
-**8. Use `cytoolz` in production pipelines.** If `toolz` is used in any code path that processes more than 10,000 records per request, switch to `cytoolz`. The API is identical; the speedup is ~10x with zero code changes.
+**8. Take `cytoolz` where the combinators are hot, but measure before budgeting for it.** The API is identical and the swap is free, so there is no reason not to. Expect 2-5x on toolz's own machinery (`groupby`, `reduceby`, `join`) and close to nothing on a `pipe` whose stages are Python callables — the per-element Python call dominates and Cython cannot remove it.
 
 **9. Test pure functions with property-based testing.** Pure functions are ideal targets for `hypothesis`: you do not need mocks, fixtures, or side-effect cleanup. Generate random inputs and assert algebraic properties (commutativity, associativity, idempotency).
 

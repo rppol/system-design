@@ -320,7 +320,12 @@ print(greet.__doc__)        # 'Return a greeting.'  ← correct
 print(greet.__wrapped__)    # <function greet at 0x...>  ← original accessible
 ```
 
-`functools.wraps` calls `functools.update_wrapper` which copies `__module__`, `__name__`, `__qualname__`, `__annotations__`, `__doc__`, and sets `__wrapped__` to the original function. This matters for introspection tools, Sphinx, FastAPI's OpenAPI schema generation, and `help()`.
+`functools.wraps` calls `functools.update_wrapper`, which copies everything in
+`functools.WRAPPER_ASSIGNMENTS` — `__module__`, `__name__`, `__qualname__`, `__doc__`,
+`__annotations__` and `__type_params__` (the last added in 3.12 so PEP 695 generic
+parameters survive the wrap) — updates `wrapper.__dict__` from `wrapped.__dict__`, and sets
+`__wrapped__` to the original function. This matters for introspection tools, Sphinx,
+FastAPI's OpenAPI schema generation, and `help()`.
 
 ### 6.5 Parametrized decorator factory
 
@@ -418,7 +423,7 @@ print(fibonacci.cache_info())
 
 Cache key is built from positional args and keyword args using `_make_key`. All arguments must be **hashable**. Passing a list raises `TypeError: unhashable type: 'list'`. For `maxsize=None` the underlying data structure is a plain dict (O(1) lookup); for finite `maxsize` it uses an internal doubly-linked list to implement LRU eviction (O(1) operations via dict + list).
 
-**Thread safety:** `lru_cache` is thread-safe in CPython as of 3.8 (uses a reentrant lock internally). Hit-rate overhead is ~50 ns per cache hit on a 2023 laptop.
+**Thread safety:** `lru_cache` is thread-safe in CPython — `_lru_cache_wrapper` is a C type that takes an internal lock around the bookkeeping, so concurrent callers cannot corrupt the linked list. It does *not* serialise the wrapped function: two threads that miss on the same key both run the body, and the second store wins. A cache hit costs on the order of tens of nanoseconds — measured 20 ns for a single small-int argument on one machine, and it scales with the number and hashing cost of the arguments, so measure your own rather than reusing that figure.
 
 **Read it like this.** `CacheInfo` is two counters that answer one question: "what fraction of calls
 never had to run your function?" Everything you care about — hit rate, effective latency, whether
@@ -430,7 +435,7 @@ the cache is even earning its keep — falls out of those two numbers.
 | `misses` | Calls that ran the body and then stored the result |
 | `hits + misses` | Total calls that reached the wrapper |
 | `h` | Hit rate, `hits / (hits + misses)` — a fraction between 0 and 1 |
-| `t_hit` | Cost of a hit: the dict lookup, ~50 ns as measured above |
+| `t_hit` | Cost of a hit: key construction plus the dict lookup, tens of ns |
 | `t_miss` | Cost of a miss: the full function body plus the store |
 | `eff` | Effective average latency, `h * t_hit + (1 - h) * t_miss` |
 | `currsize` | Entries currently held; capped by `maxsize` (128 here) |
@@ -446,7 +451,7 @@ the cache is even earning its keep — falls out of those two numbers.
 ```
 
 Now push a realistic `t_miss` through the same formula — a 2 ms database read memoized with a
-50 ns hit:
+hit taken as 50 ns, a round figure at the top of the measured range:
 
 ```
   eff = h * t_hit + (1 - h) * t_miss        t_hit = 50 ns = 0.00005 ms, t_miss = 2 ms
@@ -490,9 +495,9 @@ print(c.__dict__)  # {'radius': 5.0, 'area': 78.539...}
 
 `cached_property` works as a **non-data descriptor**: on first access Python calls `__get__`, computes the value, and stores it directly in the instance `__dict__`. On subsequent accesses the instance dict shadows the descriptor. This means:
 
-- The class must have a writable `__dict__` (no `__slots__` without explicit slot for cache).
-- **NOT thread-safe** by default. Two threads accessing simultaneously can compute twice.
-- Invalidation requires `del instance.area`.
+- The class must have a writable `__dict__` (no `__slots__` without an explicit `__dict__` slot).
+- **NOT thread-safe.** Two threads racing the first access both compute, and the second store wins. The per-instance lock the implementation used to hold was removed in 3.12 because it serialised *all* instances of the class behind one lock and deadlocked on re-entrant access; there is no lock in `functools.cached_property` today.
+- Invalidation requires `del instance.area`, which raises `AttributeError: 'Circle' object has no attribute 'area'` if the value was never computed — so guard it or catch it in reset helpers.
 
 ### 6.9 Stacking decorators
 
@@ -537,29 +542,30 @@ layers times the per-layer call cost, times how often you call it.
 | `n * L * d` | Total wall-clock the stack costs across the window |
 | `t_body` | Cost of the original function's own work — the thing you are comparing against |
 
-**Walk one example.** Measured on CPython 3.13 with `timeit`, one `functools.wraps` layer over a
-trivial `def bare(x): return x + 1`, best of 7 runs of 1,000,000 calls:
+**Walk one example.** Measured on CPython 3.13 with `timeit`, `functools.wraps` layers over a
+trivial `def bare(x): return x + 1`, best of 7 runs of 2,000,000 calls. Absolute numbers move
+with CPU and build, so treat `d` as "roughly 40 ns per layer" and re-measure on your target:
 
 ```
-  bare(x)          34.7 ns per call
-  wrapped(x)       75.8 ns per call
-  d = 75.8 - 34.7 = 41.1 ns per layer per call
+  bare(x)          18.8 ns per call
+  wrapped(x)       62.4 ns per call     -> d ~= 43 ns
+  3 layers        135.1 ns per call     -> d ~= 39 ns per layer
 
-  Over a 1,000,000-call hot loop, L = 1:
-      n * L * d = 1e6 * 1 * 41.1 ns = 0.041 s      -- 41 ms
+  Take d ~= 40 ns. Over a 1,000,000-call hot loop, L = 1:
+      n * L * d = 1e6 * 1 * 40 ns = 0.040 s      -- 40 ms
 
   Same loop, L = 3 stacked wrappers:
-      n * L * d = 1e6 * 3 * 41.1 ns = 0.123 s      -- 123 ms
+      n * L * d = 1e6 * 3 * 40 ns = 0.120 s      -- 120 ms
 ```
 
 Now decide whether that matters by comparing `d` against `t_body`, not against zero:
 
 ```
-  t_body = 41 ns   (trivial arithmetic)      -> overhead 100% -- decorator doubles the call
+  t_body = 19 ns   (trivial arithmetic)      -> overhead 210% -- decorator triples the call
   t_body = 10 us   (a JSON parse)            -> overhead 0.4% -- invisible
   t_body = 2 ms    (a DB round trip)         -> overhead 0.002% -- unmeasurable
 
-  A FastAPI route at 1,000 req/s with L = 3:  1000 * 3 * 41.1 ns = 0.00012 s/s
+  A FastAPI route at 1,000 req/s with L = 3:  1000 * 3 * 40 ns = 0.00012 s/s
   = 0.012% of one core. The auth + logging + tracing stack is free at that scale.
 ```
 
@@ -618,7 +624,7 @@ In FastAPI routes, the timing decorator wraps the coroutine, so it must be decla
 
 **Django:** `@login_required`, `@permission_required`, `@cache_page(60 * 15)` are parametrized decorators wrapping view functions. `@staticmethod` and `@classmethod` are built-in class-based decorators implementing the descriptor protocol.
 
-**FastAPI:** `@app.get`, `@app.post` are method calls returning parametrized decorators that register routes at import time. `@app.on_event("startup")` follows the same pattern.
+**FastAPI:** `@app.get`, `@app.post` are method calls returning parametrized decorators that register routes at import time. Startup and shutdown work is registered with the `lifespan=` argument to `FastAPI(...)` — an `@asynccontextmanager` async generator that yields once, so the code before the `yield` runs at startup and the code after runs at shutdown.
 
 **Python stdlib:** `@property` is a class-based descriptor decorator. `@functools.total_ordering` fills in missing comparison methods. `@contextlib.contextmanager` transforms a generator into a context manager.
 
@@ -636,7 +642,7 @@ In FastAPI routes, the timing decorator wraps the coroutine, so it must be decla
 | Introspectability | Need explicit attributes on wrapper | Natural attributes on instance | `cache_info()` |
 | Descriptor support | Must implement `__get__` manually | Implement `__get__` manually | N/A |
 | Code clarity | Compact for stateless wrapping | Verbose but explicit for stateful | Zero boilerplate |
-| Thread safety | Depends on implementation | Depends on implementation | Safe in CPython 3.8+ |
+| Thread safety | Depends on implementation | Depends on implementation | Bookkeeping is locked; the body is not (two threads can both miss and both compute) |
 | Async support | Must mirror async/sync of wrapped | Same | Sync only (use `async_lru` for async) |
 
 | Approach | When to Choose |
@@ -917,7 +923,7 @@ Always place FastAPI's `@app.get/post/...` as the **outermost** decorator (topmo
 ## 12. Interview Questions with Answers
 
 **Q1: What is a closure, and what three conditions must be true for one to form?**
-A closure forms when (1) there is a nested function, (2) the nested function references at least one free variable from the enclosing scope, and (3) the enclosing function returns (or otherwise exposes) the nested function. When these hold, Python packages the referenced variables into cell objects accessible via `func.__closure__`, keeping them alive beyond the lifetime of the outer function's stack frame. Inspect them with `inspect.getclosurevars(func)`.
+A closure is a function that keeps access to variables from its enclosing scope after that scope has finished. It forms when three things hold: there is a nested function, the nested function references at least one free variable from the enclosing scope, and the enclosing function returns or otherwise exposes the nested function. When these hold, Python packages the referenced variables into cell objects accessible via `func.__closure__`, keeping them alive beyond the lifetime of the outer function's stack frame. Inspect them with `inspect.getclosurevars(func)`.
 
 **Q2: What is the difference between `global` and `nonlocal`?**
 `global` declares that a name refers to the module-level namespace; `nonlocal` declares that a name refers to the nearest enclosing function scope (not global). Use `nonlocal` when you need to *rebind* (assign to) a variable in a closure — mere mutation of a mutable object does not require it. `global` is needed to rebind module-level names from within a function.
@@ -926,7 +932,7 @@ A closure forms when (1) there is a nested function, (2) the nested function ref
 `@decorator` above `def f` is syntactic sugar for `f = decorator(f)` which Python executes when it encounters the `def` statement during module parsing. This means decorator setup code (outer function body) runs once at import time. The wrapper's body runs per call. This matters in FastAPI: `@app.get("/path")` registers the route immediately when the module is imported, regardless of whether the app has started.
 
 **Q4: What does `functools.wraps` actually do under the hood?**
-It calls `functools.update_wrapper(wrapper, wrapped, assigned=WRAPPER_ASSIGNMENTS, updated=WRAPPER_UPDATES)`. This copies `__module__`, `__name__`, `__qualname__`, `__annotations__`, `__doc__` from `wrapped` to `wrapper`, updates `wrapper.__dict__` with `wrapped.__dict__`, and sets `wrapper.__wrapped__ = wrapped`. Without it, tools like `help()`, Sphinx, and FastAPI's OpenAPI generator see the wrapper's attributes instead of the original function's, producing wrong documentation and schema.
+It calls `functools.update_wrapper(wrapper, wrapped, assigned=WRAPPER_ASSIGNMENTS, updated=WRAPPER_UPDATES)`. `WRAPPER_ASSIGNMENTS` is `('__module__', '__name__', '__qualname__', '__doc__', '__annotations__', '__type_params__')` — the last entry added in 3.12 so a PEP 695 generic function keeps its type parameters through the wrap. `WRAPPER_UPDATES` is `('__dict__',)`, so the wrapper's dict is updated from the wrapped function's rather than replaced. It also sets `wrapper.__wrapped__ = wrapped`. Without it, tools like `help()`, Sphinx, and FastAPI's OpenAPI generator see the wrapper's attributes instead of the original function's, producing wrong documentation and schema.
 
 **Q5: Explain the three-level structure of a parametrized decorator.**
 Level 1 is the *factory function* (e.g., `retry(max_attempts=3)`) — it receives configuration and returns the decorator. Level 2 is the *decorator* — it receives the function to wrap and returns the wrapper. Level 3 is the *wrapper* — it runs on every invocation, implementing the actual behavior. The factory exists solely to create a closure over the configuration values so the decorator and wrapper can access them without being passed those values explicitly.
@@ -938,7 +944,7 @@ Use a class-based decorator when the decorator needs per-function mutable state 
 The cache key becomes `(self, *args, **kwargs)`. The `lru_cache` dictionary holds a strong reference to `self`, preventing garbage collection even after all other references to the instance are dropped. In a web server that creates short-lived objects per request, this is a memory leak — objects accumulate in the cache until `maxsize` evicts them or the process restarts. Fix by using `cached_property` for single computed values, `methodtools.lru_cache` (weak-reference keying), or restructuring the cache to class level with an explicit key that does not include `self`.
 
 **Q8: What is `functools.cached_property` and how does it differ from `@property` + manual caching?**
-`cached_property` is a non-data descriptor: on first access it computes the value and stores it in the instance's `__dict__` under the property name; subsequent access reads from `__dict__` directly without calling the descriptor again. Vs `@property` + manual cache: zero boilerplate, no `if self._val is None` guard. Limitations: not thread-safe (two simultaneous threads can both compute), requires a writable `__dict__` (incompatible with `__slots__` unless a `__dict__` slot is added), and invalidation requires `del instance.prop`.
+`cached_property` is a non-data descriptor that computes the value on first access and stores it in the instance's `__dict__` under the property name. Subsequent access finds it in `__dict__` and never reaches the descriptor again, which is why the second read costs a plain attribute lookup. Against `@property` plus a manual cache it saves the `if self._val is None` guard and the private backing attribute. Limitations: it is not thread-safe — the internal lock was removed in 3.12 because it serialised every instance of the class behind one lock, so two threads racing the first access both compute; it requires a writable `__dict__`, so it is incompatible with `__slots__` unless `"__dict__"` is one of the slots; and invalidation is `del instance.prop`, which raises `AttributeError` if the value was never computed.
 
 **Q9: Describe the late-binding closure bug and two ways to fix it.**
 The bug: closures capture the *variable* (cell reference), not its *value* at creation time. In a loop `[lambda: i for i in range(5)]`, all five lambdas share one cell pointing to `i`; after the loop `i == 4`, so all return 4. Fix 1 — default argument binding: `lambda i=i: i` — default args are evaluated at function definition time, creating a fresh binding per iteration. Fix 2 — factory function: `def make_f(i): return lambda: i` — each call creates a new closure scope with its own `i` cell.
@@ -947,16 +953,12 @@ The bug: closures capture the *variable* (cell reference), not its *value* at cr
 Application order is bottom-up: the decorator closest to `def` is applied first, the topmost decorator last. This means `@a` on top and `@b` below is equivalent to `f = a(b(f))`. Execution order is the reverse — top-down: `a`'s wrapper runs first, calls `b`'s wrapper, which calls the original function. For FastAPI routes, `@app.get` must be topmost (outermost) so it receives the final wrapped function and can inspect its signature for dependency injection and schema generation.
 
 **Q11: How do you write a type-safe decorator factory that preserves the wrapped function's signature?**
-Use `typing.ParamSpec` (Python 3.10+) to capture the parameter spec and `typing.Callable[[ParamSpec], ReturnType]` for the return type:
+Declare the decorator generic over a `ParamSpec` and a return `TypeVar`, and annotate the wrapper's `*args` and `**kwargs` with `P.args` and `P.kwargs`. With PEP 695 syntax [3.12] the parameters are declared inline on the `def`, so nothing has to be created at module scope:
 
 ```python
-from typing import Callable, TypeVar
-from typing import ParamSpec
+from collections.abc import Callable
 
-P = ParamSpec("P")
-R = TypeVar("R")
-
-def log_calls(func: Callable[P, R]) -> Callable[P, R]:
+def log_calls[**P, R](func: Callable[P, R]) -> Callable[P, R]:
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         print(f"calling {func.__name__}")
@@ -964,22 +966,22 @@ def log_calls(func: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 ```
 
-Without `ParamSpec`, type checkers lose parameter information at the decoration boundary, which breaks IDE autocompletion for decorated FastAPI endpoints.
+Without a `ParamSpec`, type checkers lose parameter information at the decoration boundary, which breaks IDE autocompletion for decorated FastAPI endpoints. Note that `functools.wraps` copies `__type_params__` since 3.12, so a generic function keeps its type parameters through the wrap.
 
 **Q12: What is `functools.partial` and when is it better than a closure?**
-`functools.partial(func, *args, **kwargs)` returns a new callable with some arguments pre-filled. Prefer it over a closure when you only need to bind arguments (not add behavior), when you want the result to be introspectable (`partial_obj.func`, `.args`, `.keywords`), or when performance is critical (`partial` is C-implemented, ~15% faster than a Python wrapper). Use a closure when you need to add behavior around the call.
+`functools.partial(func, *args, **kwargs)` returns a new callable with some arguments pre-filled. Prefer it over a closure when you only need to bind arguments (not add behavior), when you want the result to be introspectable (`partial_obj.func`, `.args`, `.keywords`), or when the call is hot: `partial` is a C type, and on a trivial target it measured 35 ns per call against 60 ns for an equivalent Python closure wrapper — roughly 40% cheaper, though both are dwarfed by any real function body. Use a closure when you need to add behavior around the call.
 
 **Q13: How would you make a cached_property thread-safe?**
-Three options: (1) implement a custom descriptor that acquires a per-instance `threading.Lock` before checking and setting the cached value — safe but adds lock overhead per access; (2) accept the duplicate-compute race for idempotent properties where computing twice is harmless and bounded; (3) restructure to compute at `__init__` and store in a plain attribute. Python 3.12 does not add thread-safety to `cached_property` — the custom lock-based descriptor remains the recommended production solution.
+Wrap it yourself, because the standard library will not do it for you. Three options: (1) implement a custom descriptor that takes a **per-instance** `threading.Lock` before checking and setting the cached value — correct, and the per-instance scope is the important part; (2) accept the duplicate-compute race for idempotent properties where computing twice is harmless and bounded; (3) restructure to compute in `__init__` and store in a plain attribute. Do not expect a future version to fix it: `functools.cached_property` used to hold a lock and it was **removed** in 3.12, precisely because it was a single class-level lock that serialised every instance and could deadlock on re-entrant access. A per-instance lock is the safe replacement.
 
 **Q14: Explain `__wrapped__` and why it matters.**
 `functools.wraps` sets `wrapper.__wrapped__ = func` (the original function). This chain allows tooling to unwrap decorators: `inspect.unwrap(f)` follows `__wrapped__` links until it reaches a function with no `__wrapped__`. FastAPI uses `inspect.unwrap` to find the original handler's signature for dependency injection parsing. Without `__wrapped__`, FastAPI cannot discover path parameters and query dependencies, causing runtime errors or incorrect OpenAPI schemas.
 
 **Q15: What is the difference between a decorator that wraps a function and one that replaces it entirely?**
-Most decorators return a wrapper that calls the original function (transparent wrapping). A *replacement decorator* returns something entirely different — e.g., `@functools.total_ordering` returns a modified class, `@dataclass` returns a new class, `@property` returns a descriptor object. For class decorators, replacement is common: `@dataclass` inspects and modifies the class, then returns it (or a new class). Understanding whether a decorator wraps or replaces is critical for debugging: if `isinstance(obj, OriginalClass)` returns `False` after decoration, the decorator replaced the class.
+Most decorators return a wrapper that calls the original function (transparent wrapping). A *replacement decorator* returns something entirely different — `@property` returns a descriptor object, not a function at all. Class decorators mostly *mutate and return the same class*: `@functools.total_ordering` adds methods to the class it was given, and plain `@dataclass` adds `__init__`/`__repr__`/`__eq__` in place, so `Cls is decorated_Cls`. The exception worth knowing is `@dataclass(slots=True)` (and `weakref_slot=True`), which cannot add `__slots__` to a live class and therefore builds and returns a **new** class object — any method that captured the old one through a zero-argument `super()` `__class__` cell now points at a stale class. Understanding whether a decorator wraps, mutates, or replaces is critical for debugging: an `isinstance` check that suddenly fails after decoration means replacement.
 
 **Q16: How would you implement a decorator that works correctly on both regular functions and async functions?**
-Inspect with `inspect.iscoroutinefunction(func)` and return either an async or sync wrapper:
+Branch at decoration time on `inspect.iscoroutinefunction(func)` and return an `async def` wrapper or a plain one — never a single wrapper that tries to handle both. The check happens once, when the decorator runs, so the per-call path stays branch-free:
 
 ```python
 import asyncio

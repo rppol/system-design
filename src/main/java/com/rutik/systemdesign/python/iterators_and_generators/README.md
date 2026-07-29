@@ -391,16 +391,18 @@ import sys
 
 # Materialised list: all 10 million integers allocated at once
 lst = list(range(10_000_000))
-print(sys.getsizeof(lst))   # 85,176,488 bytes — ~85 MB
+print(sys.getsizeof(lst))   # 80,000,056 bytes — 56-byte header + 8 bytes per slot.
+                            # list(range(...)) is pre-sized exactly via __length_hint__;
+                            # [x for x in range(10_000_000)] over-allocates to 89,095,160.
 
 # Generator expression: only the generator object exists
 gen = (x for x in range(10_000_000))
-print(sys.getsizeof(gen))   # 128 bytes — the generator object itself
+print(sys.getsizeof(gen))   # 192 bytes — the generator object itself
 
 # The values are computed on demand:
 print(next(gen))   # 0
 print(next(gen))   # 1
-# Memory stays at 128 bytes throughout iteration.
+# Memory stays at 192 bytes throughout iteration.
 ```
 
 **What this actually says.** "A list pays for every element the moment it is built; a generator pays
@@ -419,10 +421,11 @@ never rises — that flatness is the entire reason a pipeline can outlive the da
 
 ```
                              list                          generator expression
-  pointer array       8 B x 10,000,000 =  80,000,000 B      none
-  int objects        28 B x 10,000,000 = 280,000,000 B      1 live at a time =        28 B
+  pointer array       8 B x 10,000,000 =  80,000,056 B      none
+  int objects        28 B x  9,999,743 = 279,992,804 B      1 live at a time =        28 B
+    (values -5..256 are immortal singletons: 257 of them are free)
   ------------------------------------------------------------------------------------------
-  true resident                          360,000,000 B                          about 220 B
+  true resident                          359,992,860 B                          about 220 B
 
   n =         10   ->  list      80 B +      280 B      generator   constant
   n =  1,000,000   ->  list   8,000,000 B + 28,000,000 B  generator constant
@@ -432,11 +435,11 @@ never rises — that flatness is the entire reason a pipeline can outlive the da
 
 Two things fall out of that table. First, `sys.getsizeof()` on a list is an **undercount**: it reports
 the 80 MB pointer array and stays silent about the 280 MB of `int` objects hanging off it, so the
-honest figure for the list is 360 MB, roughly 4.5x the number the call prints. (The exact printed
-value drifts by a few percent across CPython versions and depending on whether the list was
-pre-sized by `list(range(...))` or grown by a comprehension's over-allocation — the slope matters,
+honest figure for the list is 360 MB, roughly 4.5x the number the call prints. (The printed value
+also depends on how the list was built — `list(range(...))` is pre-sized exactly at 80,000,056
+bytes, while a comprehension over-allocates as it grows and lands near 89 MB. The slope matters,
 the last digit does not.) Second, the generator's size has no `n` in it anywhere, which is why the
-same 128-ish bytes covers `n = 10` and `n = 10,000,000` alike.
+same 192 bytes covers `n = 10` and `n = 10,000,000` alike.
 
 Generator expressions support conditions and multiple `for` clauses:
 
@@ -697,29 +700,34 @@ async def stream_endpoint():
 ```python
 from collections.abc import Generator
 from typing import Any
-import psycopg2
+
+import psycopg
 
 
 def stream_query(
-    conn: psycopg2.extensions.connection,
+    conn: psycopg.Connection,
     query: str,
     chunk_size: int = 1000,
 ) -> Generator[list[tuple[Any, ...]], None, None]:
     """Yields rows in chunks without loading the full result set into memory."""
+    # A named cursor is a PostgreSQL server-side cursor: rows stay on the server
+    # and are pulled in batches, so the client never holds the full result set.
     with conn.cursor(name="server_side_cursor") as cur:
+        cur.itersize = chunk_size
         cur.execute(query)
-        while True:
-            rows = cur.fetchmany(chunk_size)
-            if not rows:
-                return
+        while rows := cur.fetchmany(chunk_size):
             yield rows
 
 
-# 10 million rows, ~2 MB peak memory
+# 10 million rows; the client holds one chunk at a time
 for chunk in stream_query(conn, "SELECT * FROM events"):
     for row in chunk:
         process(row)
 ```
+
+Without the `name=` argument the cursor is client-side and `execute()` buffers the entire result
+set locally before `fetchmany` returns anything — the generator would still be lazy while the
+memory was already gone.
 
 ### 7.3 Infinite Sequence with `itertools.islice`
 
@@ -836,7 +844,10 @@ flowchart TD
 - The sequence is small enough that lazy evaluation adds no benefit
 - You need to know the length before iterating — `len()` raises `TypeError` on generators
 - The caller needs to inspect or filter the full sequence before acting — materialise it
-- Parallel processing with `concurrent.futures` — executors need concrete iterables
+- Parallel processing with `concurrent.futures` — `Executor.map` accepts a generator, but it
+  submits every item up front, so the whole sequence is drained into pending futures before the
+  first result arrives and the laziness you wanted is gone. Batch with `itertools.islice` and
+  submit a window at a time if the source is large
 
 ---
 
@@ -904,20 +915,19 @@ list(read_until_sentinel([1, 2, -1, 3], -1))   # [1, 2]
 ### Pitfall 3 — `yield from list` vs `yield from generator` and `.send()` Propagation
 
 ```python
-# SUBTLE: yield from on a list works for iteration,
-# but lists do not have a .send() method — send() values are lost
+# SUBTLE: yield from on a list iterates fine, but the moment anyone sends a
+# non-None value into the outer generator it raises — a plain iterator has no
+# .send(), and yield from does not paper over that.
 
 def outer_broken():
-    # yield from a list — fine for iteration, but .send() into outer
-    # is NOT forwarded to the list (lists have no .send())
     result = yield from [10, 20, 30]
-    # result is always None because list.__next__ doesn't receive sent values
+    # result is always None: a list iterator's StopIteration carries no value
     print(f"result from list: {result}")   # always None
 
 
 g = outer_broken()
-print(next(g))      # 10
-print(g.send(99))   # 20  — 99 was "sent" but silently discarded by the list
+print(next(g))      # 10        — plain iteration is fine
+print(g.send(99))   # AttributeError: 'list_iterator' object has no attribute 'send'
 
 
 def inner_gen():
@@ -939,6 +949,12 @@ print(next(g2))      # 10
 print(g2.send(99))   # inner received: 99  →  20
 print(g2.send(88))   # inner received: 88  →  30
 ```
+
+The rule to carry away: `yield from` forwards `send`/`throw`/`close` **only if the delegate
+actually implements them**. `yield from` an ordinary iterable and you get iteration and nothing
+else — `send(None)` (equivalently `next()`) still works, because `yield from` special-cases it into
+a plain `__next__`, but any non-`None` send blows up with `AttributeError` at the delegation point,
+not at the call site you wrote. If a stage might ever be sent a value, delegate to a generator.
 
 ### Pitfall 4 — Late Binding in Generator Expressions
 
@@ -985,7 +1001,7 @@ gen.send("hello")   # echo: hello
 | Tool / Library | Purpose | When to Reach For It |
 |---|---|---|
 | `itertools` (stdlib) | Composable lazy combinators: `chain`, `islice`, `groupby`, `product`, `tee`, etc. | Default choice for any iterator manipulation |
-| `more-itertools` (PyPI) | 60+ additional recipes: `chunked`, `windowed`, `partition`, `spy`, `peekable` | When `itertools` lacks the combinator you need |
+| `more-itertools` (PyPI) | 170+ additional recipes: `chunked`, `windowed`, `partition`, `spy`, `peekable` | When `itertools` lacks the combinator you need |
 | `toolz` / `cytoolz` | Functional programming utilities, lazy by default; `cytoolz` is C-accelerated | Functional pipelines in data processing code |
 | `boltons` | `iterutils` module — `chunked_iter`, `windowed_iter`, `unique_iter` | Utility-heavy projects already using boltons |
 | `aioitertools` | `asyncio`-compatible versions of `itertools` for async generators | Async pipelines, streaming APIs |
@@ -1022,8 +1038,8 @@ PEP 479, enforced from Python 3.7, converts any `StopIteration` exception that e
 **Q5: How does `.send(value)` work? What is required before the first `send()`?**
 `send(value)` resumes the generator and delivers `value` as the result of the currently-suspended `yield` expression inside the generator. Before the first `send()`, the generator has not yet reached any `yield`, so there is no suspended expression to deliver a value to. Therefore, the first call must be `next(gen)` or `gen.send(None)` to advance to the first `yield`. Sending a non-None value before priming raises `TypeError: can't send non-None value to a just-started generator`.
 
-**Q6: Why does a list comprehension use ~85 MB for 10 million integers while a generator expression uses 128 bytes?**
-A list comprehension evaluates all elements eagerly and stores them in a contiguous array in memory — 10 million Python `int` objects, each 28 bytes, plus 8-byte pointers in the list. A generator expression is a generator object — a thin wrapper around a code object and a frame with a few variables. Values are computed on demand and never stored. The generator object size stays constant at ~128 bytes regardless of how many elements it will eventually yield.
+**Q6: Why does a list of 10 million integers cost hundreds of megabytes while a generator expression over the same range costs 192 bytes?**
+A list evaluates everything eagerly and stores it, while a generator stores only a bookmark. The list is an 80,000,056-byte pointer array — 8 bytes per slot — plus the 10 million `int` objects those pointers reach, 28 bytes each, so the honest total is about 360 MB rather than the 80 MB `sys.getsizeof` reports (it is not recursive). A generator expression is one generator object of 192 bytes: a code pointer, a frame, and flags. Its size has no `n` term at all, so the same 192 bytes covers 10 elements and 10 million alike.
 
 **Q7: When would you use `itertools.tee()` and what is the hidden cost?**
 `tee(it, n)` creates `n` independent iterators from a single iterable. Use it when you need to make multiple passes through a one-pass iterator (generator) without materialising it. The hidden cost: internally, `tee` buffers any elements that one copy has consumed but the other has not yet seen. If one copy races far ahead of the other, the buffer can grow to O(n) in memory — potentially as large as a materialised list. If both copies are consumed in lock-step, the buffer stays small.
@@ -1038,7 +1054,7 @@ Use a `try`/`finally` block inside the generator. When `gen.close()` is called, 
 Generator expressions cannot use `send()`, `throw()`, or `close()` meaningfully — they have no `yield` that can receive a sent value. They do not support multi-line logic, cannot have `try`/`finally` for cleanup, and are harder to debug (no function name, limited tracebacks). Use a generator function when you need bidirectional communication, cleanup guarantees, complex state, or readable multi-step logic.
 
 **Q11: Can a generator be used with `len()`? How do you count elements efficiently?**
-No. `len()` raises `TypeError: object of type 'generator' has no len()`. Generators are lazy and do not know their length in advance. To count elements: `sum(1 for _ in gen)` — this consumes the generator in O(1) memory. If you need both length and elements, materialise to a list first: `items = list(gen); n = len(items)`.
+No — `len()` raises `TypeError: object of type 'generator' has no len()`, because a generator is lazy and cannot know its length without running to completion. To count without materialising, use `sum(1 for _ in gen)`, which consumes the generator in O(1) memory but leaves it exhausted. If you need both the length and the elements, materialise once: `items = list(gen); n = len(items)`. Note that a custom class can supply `__length_hint__` to give consumers like `list()` a sizing hint without promising an exact `len()`.
 
 **Q12: What is `itertools.groupby` and what is the most common mistake when using it?**
 `groupby(iterable, key)` yields consecutive groups — `(key_value, group_iterator)` pairs for runs of consecutive elements with the same key. The most common mistake is using it on unsorted data: `groupby` only groups consecutive equal-key elements, so `[A, B, A]` produces three groups (`A`, `B`, `A`), not two. Always sort by the key before calling `groupby`. The second common mistake is exhausting the group iterator before moving to the next key — each group iterator becomes invalid when `groupby` advances to the next key, so you must consume or materialise it immediately.
@@ -1050,10 +1066,10 @@ Every lambda created in the loop captures the variable `i` by reference, not by 
 Make `__iter__` return a fresh iterator object on every call instead of returning `self`, so each `for` loop or `iter()` call gets its own independent position in the sequence. The module's `MultipassRange` example delegates to `iter(range(self._n))` inside `__iter__`, which constructs a brand-new `range_iterator` each time — calling `list(r)` twice on the same `MultipassRange` instance produces the full sequence both times. Contrast this with a class that implements `__next__` on itself and returns `self` from `__iter__` (like `Range10` in the same section): once exhausted, every subsequent `iter()` call returns the same spent iterator, and a second pass silently produces nothing. Use the "return a fresh iterator" pattern whenever callers need to iterate the same object more than once.
 
 **Q15: What do the three type parameters in `Generator[YieldType, SendType, ReturnType]` represent?**
-`YieldType` is the type of value produced by each `yield` expression and received by the caller from `next()`; `SendType` is the type of value the caller passes back in via `gen.send(value)`, which becomes the result of the `yield` expression inside the generator; `ReturnType` is the type carried by `StopIteration.value` when the generator finishes via `return`. A generator that only produces values and never receives sent data or returns a final value is more precisely annotated as `Iterator[YieldType]`, which is shorthand for `Generator[YieldType, None, None]`. Get all three parameters right and static type checkers can catch a caller sending the wrong type into `.send()` or ignoring a meaningful return value.
+They are, in order, what the generator gives out, what it takes in, and what it finishes with. `YieldType` is the type produced by each `yield` and received by the caller from `next()`. `SendType` is the type the caller passes back via `gen.send(value)`, which becomes the result of the `yield` expression inside the generator. `ReturnType` is the type carried by `StopIteration.value` when the generator finishes via `return`. A generator that only produces values and never receives sent data or returns a final value is more precisely annotated as `Iterator[YieldType]`, which is shorthand for `Generator[YieldType, None, None]`. Get all three parameters right and static type checkers can catch a caller sending the wrong type into `.send()` or ignoring a meaningful return value.
 
 **Q16: In the memory-efficient CSV case study, why is `aggregate_by_merchant` the only stage whose memory grows with the data, and what does it scale with?**
-Every stage before it — `read_chunks`, `parse_rows`, `filter_valid` — is a generator that holds at most one line or one row dict in memory at a time, so their memory footprint is O(1) regardless of file size. `aggregate_by_merchant` must accumulate a running total per merchant in a `defaultdict`, so its memory is proportional to the number of *distinct* merchant IDs, not the 80 million rows processed — the case study measures roughly 50,000 merchants at about 150 bytes each, for about 7 MB total. This is why the same pipeline processes a 10 GB file in about 9 MB of peak memory: cardinality of the aggregation key, not row count, is what determines memory for any stage that must remember state across the stream. Design pipelines so only the final aggregation stage buffers, and keep every upstream stage a pure pass-through generator.
+Every stage before it — `read_lines`, `parse_rows`, `filter_valid` — is a generator that holds at most one line or one row dict in memory at a time, so their memory footprint is O(1) regardless of file size. `aggregate_by_merchant` must accumulate a running total per merchant in a `defaultdict`, so its memory is proportional to the number of *distinct* merchant IDs, not the 80 million rows processed — the case study assumes roughly 50,000 merchants at about 150 bytes each, for 7.5 MB total. This is why the same pipeline processes a 10 GB file in about 7.5 MB of peak memory — the streaming stages contribute under 2 KB between them: cardinality of the aggregation key, not row count, is what determines memory for any stage that must remember state across the stream. Design pipelines so only the final aggregation stage buffers, and keep every upstream stage a pure pass-through generator.
 
 ---
 
@@ -1108,13 +1124,14 @@ def auto_prime(func) -> Any:
 import pandas as pd
 
 # BROKEN: loads entire file into memory at once
-df = pd.read_csv("transactions_20240601.csv")   # MemoryError on 10 GB file
-# A 10 GB CSV becomes ~25-40 GB of DataFrame in memory
-# (Python objects, dtype overhead, index storage)
+df = pd.read_csv("transactions.csv")   # MemoryError on a 10 GB file
+# A CSV of mostly string columns expands several times over in a DataFrame:
+# every value becomes a boxed Python object under the default object dtype,
+# plus the index and the parser's own buffers.
 totals = df.groupby("merchant_id")["amount"].sum()
 ```
 
-The problem: `pd.read_csv()` is eager. All 80 million rows are parsed and stored before a single aggregation is computed. A 16 GB machine cannot hold 40 GB of DataFrame.
+The problem: `pd.read_csv()` is eager. All 80 million rows are parsed and stored before a single aggregation is computed, and the in-memory form is a multiple of the file size, not a fraction of it. No 16 GB machine holds that.
 
 **Fix — generator pipeline with O(1) memory**:
 
@@ -1128,11 +1145,8 @@ from pathlib import Path
 from typing import Any
 
 
-# Stage 1: read raw lines in chunks
-def read_chunks(
-    path: Path,
-    chunk_size: int = 65_536,  # 64 KB read buffer
-) -> Generator[str, None, None]:
+# Stage 1: read raw lines
+def read_lines(path: Path) -> Generator[str, None, None]:
     """
     Yields one decoded line at a time from a (optionally gzip-compressed) CSV.
     Memory: one line in memory at any instant.
@@ -1148,13 +1162,19 @@ def parse_rows(
     expected_columns: int = 8,
 ) -> Generator[dict[str, Any], None, None]:
     """
-    Parses each line as a CSV row. Skips the header and malformed rows.
+    Parses each line as a CSV row. DictReader consumes the header itself.
     Memory: one dict per row.
     """
-    reader = csv.DictReader(lines)
+    reader = csv.DictReader(lines, restkey="__extra__", restval=None)
     for row in reader:
-        if len(row) != expected_columns:
-            continue  # skip malformed rows silently
+        # DictReader PADS short rows with restval, so len(row) stays at the header
+        # width and a length check alone will not catch them. Test for the two real
+        # malformations explicitly: an over-long row lands under restkey, and a
+        # short row leaves a None where a value should be.
+        if "__extra__" in row:
+            continue
+        if len(row) != expected_columns or any(v is None for v in row.values()):
+            continue
         yield row
 
 
@@ -1198,9 +1218,10 @@ def aggregate_by_merchant(
 def process_transaction_file(path: Path) -> dict[str, Decimal]:
     """
     Composes the pipeline. Data flows one row at a time through all stages.
-    Peak memory: ~2 MB (OS read buffers + one row in flight + aggregation dict).
+    Peak memory: about 7.5 MB, essentially all of it the aggregation dict --
+    the streaming stages together hold under 2 KB.
     """
-    lines = read_chunks(path)
+    lines = read_lines(path)
     rows = parse_rows(lines)
     valid = filter_valid(rows)
     return aggregate_by_merchant(valid)
@@ -1216,13 +1237,14 @@ print(f"Processed {len(result)} merchants")
 ```
 Stage                     Objects alive simultaneously
 ---------                 -----------------------------------------------
-read_chunks               1 file handle, 1 line string (~200 bytes)
+read_lines                1 file handle, 1 line string (~200 bytes)
 parse_rows                1 csv.DictReader, 1 row dict (~800 bytes)
-filter_valid              1 validated row dict
-aggregate_by_merchant     accumulation dict: 50,000 merchants * ~150 bytes = ~7 MB
+filter_valid              1 validated row dict (~800 bytes)
+aggregate_by_merchant     accumulation dict: 50,000 merchants * ~150 bytes = 7.5 MB
 
-Total peak: ~9 MB — fits in any Lambda function, any pod, any laptop.
-Pandas approach: 10 GB raw → ~40 GB DataFrame → OOM on 16 GB machine.
+Total peak: ~7.5 MB of pipeline data — fits in any Lambda, any pod, any laptop.
+The streaming stages contribute under 2 KB of that; everything else is the dict.
+Pandas approach: the whole 10 GB file, expanded, before the first group is summed.
 ```
 
 **Read it like this.** "The aggregation dictionary is priced by how many *different* merchants exist,
@@ -1253,45 +1275,47 @@ The bottom line is the part worth saying out loud in an interview: **1,600 of ev
 free.** Only the row that introduces a *new* key allocates. So the danger signal for any streaming
 aggregation is not "how big is the file" but "how unique is the group-by key" — swap
 `merchant_id` for `transaction_id` and `c` becomes `n`, the dictionary becomes 12 GB, and the same
-code OOMs on the same machine that ran it in 9 MB.
+code OOMs on the same machine that ran it in 7.5 MB.
 
 **BROKEN pattern — loading stage into a list (destroys lazy pipeline)**:
 
 ```python
 # BROKEN: materialises all 80 million rows between stages
 def process_broken(path: Path) -> dict[str, Decimal]:
-    lines = read_chunks(path)
-    rows = list(parse_rows(lines))         # 80M dicts in memory — ~60 GB
-    valid = list(filter_valid(iter(rows))) # second full copy
+    lines = read_lines(path)
+    rows = list(parse_rows(lines))         # 80M dicts at ~800 B = 64 GB
+    valid = list(filter_valid(iter(rows))) # second full copy of the survivors
     return aggregate_by_merchant(iter(valid))
 ```
 
 ```python
 # FIX: never materialise intermediate stages; pass generators directly
 def process_fixed(path: Path) -> dict[str, Decimal]:
-    lines = read_chunks(path)
+    lines = read_lines(path)
     rows = parse_rows(lines)       # generator, not list
     valid = filter_valid(rows)     # generator, not list
     return aggregate_by_merchant(valid)
 ```
 
-**Throughput numbers** (measured on an m5.xlarge, 16 GB RAM, NVMe SSD):
+**Peak-memory comparison.** These are order-of-magnitude figures derived from the layout arithmetic
+above, not a published benchmark — the point is the exponent, and you should measure your own file
+before quoting any of them:
 
-| Approach | Time | Peak Memory | Outcome |
+| Approach | Peak memory | Where it comes from | Outcome |
 |---|---|---|---|
-| `pd.read_csv()` (full load) | N/A | >40 GB | OOM crash |
-| `pd.read_csv(chunksize=100_000)` | 14 min | 4.5 GB | Works but slow |
-| Generator pipeline (this module) | 8 min | 9 MB | Production-ready |
-| Generator pipeline + multiprocessing | 3 min | 35 MB (4 workers) | Further optimised |
+| `pd.read_csv()` (full load) | tens of GB | 80M rows x 8 boxed columns, all resident | OOM on a 16 GB box |
+| `pd.read_csv(chunksize=100_000)` | hundreds of MB | one 100k-row frame plus parser buffers | Works; memory set by chunk size |
+| Generator pipeline (this module) | 7.5 MB | the aggregation dict; stages hold under 2 KB | Memory set by key cardinality |
+| Generator pipeline, 4 worker processes | ~4 x 7.5 MB | one dict per worker, merged at the end | Same shape, 4x the dicts |
 
 ```mermaid
 xychart-beta
-    title "Peak memory by approach - 80M-row, 10 GB CSV"
-    x-axis ["pd.read_csv (full load)", "pd.read_csv (chunksize=100k)", "Generator pipeline", "Generator + multiprocessing"]
+    title "Peak memory by approach - 80M-row, 10 GB CSV (log-ish scale, MB)"
+    x-axis ["pd.read_csv (full load)", "pd.read_csv (chunk 100k)", "Generator pipeline", "Generator x 4 workers"]
     y-axis "Peak memory (MB)" 0 --> 40000
-    bar [40000, 4500, 9, 35]
+    bar [40000, 400, 7.5, 30]
 ```
-*The full eager load blows past the chart scale entirely (over 40 GB, OOM on a 16 GB box); the two generator-pipeline bars on the right are barely visible at 9 MB and 35 MB — roughly 500x less peak memory than the chunked-pandas workaround, and over 4,000x less than the naive full load that crashed.*
+*The full eager load fills the chart and still OOMs a 16 GB box; the two generator bars on the right are invisible at this scale. The structural point is that chunked pandas moves peak memory from `n` to `chunk_size` — still a row-count term — while the generator pipeline removes the row-count term entirely and leaves only key cardinality.*
 
 **Adding `itertools` to cap processing for testing**:
 
@@ -1300,7 +1324,7 @@ import itertools
 
 def process_sample(path: Path, max_rows: int = 100_000) -> dict[str, Decimal]:
     """Process only the first max_rows rows — for fast CI tests."""
-    lines = read_chunks(path)
+    lines = read_lines(path)
     rows = parse_rows(lines)
     valid = filter_valid(rows)
     capped = itertools.islice(valid, max_rows)   # stop after max_rows
@@ -1313,4 +1337,4 @@ def process_sample(path: Path, max_rows: int = 100_000) -> dict[str, Decimal]:
 2. `yield from fh` on a file handle is idiomatic Python for lazy line reading.
 3. Only the aggregation stage (`defaultdict`) grows with data cardinality — and that growth is bounded by distinct keys (merchants), not row count.
 4. Adding `itertools.islice` to any pipeline gives you a free sampling/testing mode without changing any stage's logic.
-5. The `try`/`finally` pattern in `read_chunks` (implicit via `with`) guarantees the file handle is released even if the caller stops iterating early — for example, if `filter_valid` raises an exception on row 42.
+5. The `try`/`finally` pattern in `read_lines` (implicit via `with`) guarantees the file handle is released even if the caller stops iterating early — for example, if `filter_valid` raises an exception on row 42.

@@ -79,11 +79,11 @@ flowchart LR
 
 Both hops returning `NotImplemented` is what turns an unsupported-type addition into `TypeError` at the call site, not inside either dunder method.
 
-Rich comparisons (`__lt__`, `__le__`, `__eq__`, `__ne__`, `__gt__`, `__ge__`) can be synthesized from `__eq__` and one of `__lt__` / `__gt__` using `functools.total_ordering`. `total_ordering` adds ~2 microseconds per comparison due to wrapper overhead; define all six methods in performance-critical code.
+Rich comparisons (`__lt__`, `__le__`, `__eq__`, `__ne__`, `__gt__`, `__ge__`) can be synthesized from `__eq__` and one of `__lt__` / `__gt__` using `functools.total_ordering`. The synthesized methods cost roughly 40–50 ns extra per call — a Python-level wrapper that invokes your method and inspects the result for `NotImplemented`. The method you wrote yourself is untouched and runs at full speed; only the four derived ones pay. Define all six explicitly when a sort dominates your profile.
 
 ### 4.2 Container Protocol
 
-A minimal immutable sequence needs `__len__` and `__getitem__`. A mutable sequence adds `__setitem__` and `__delitem__`. Registering with `collections.abc.MutableSequence` provides 15 mixin methods (`append`, `insert`, `remove`, `pop`, `clear`, `reverse`, `extend`, `__contains__`, `__iter__`, `__reversed__`, `index`, `count`, `__iadd__`) for free after implementing five abstract methods.
+A minimal immutable sequence needs `__len__` and `__getitem__`. A mutable sequence adds `__setitem__` and `__delitem__`. Subclassing `collections.abc.MutableSequence` provides 12 mixin methods for free after you implement its five abstract methods (`__getitem__`, `__setitem__`, `__delitem__`, `__len__`, `insert`): `append`, `clear`, `reverse`, `extend`, `pop`, `remove`, `__iadd__` from `MutableSequence` itself, plus `__contains__`, `__iter__`, `__reversed__`, `index`, `count` inherited from `Sequence`.
 
 ### 4.3 Context Manager Protocol
 
@@ -100,7 +100,7 @@ See `../metaclasses_and_metaprogramming/README.md` for how descriptors interact 
 
 ### 4.5 `__slots__`
 
-`__slots__` replaces the per-instance `__dict__` with a C-level array of fixed slots. Memory savings: a plain object with `__dict__` costs approximately 232 bytes (CPython 3.11, 64-bit); the same object with `__slots__` costs approximately 56 bytes. For 10 million instances this saves ~1.76 GB. Slots also improve attribute access speed by ~30% due to direct array indexing vs hash-table lookup.
+`__slots__` replaces the per-instance attribute store with a C-level array of fixed slots. The saving is real but much smaller than the folklore, because since 3.11 a plain instance does *not* eagerly allocate a `dict` either — its attributes live in an inline values array in the object's preheader, with the key names shared once on the class. Measured on CPython 3.13, 64-bit, for a three-attribute class: **96 bytes per plain instance versus 56 with `__slots__`, a flat 40-byte saving (about 42%)**. For 10 million instances that is ~400 MB. Attribute access speed is a wash — both forms measure around 10 ns, because the specializing adaptive interpreter caches an inline-values load just as effectively as a slot load. Use `__slots__` for memory and for the attribute-typo guard, not for speed.
 
 ### 4.6 MRO and C3 Linearization
 
@@ -359,11 +359,13 @@ class Circle:
 ### 6.3 `__slots__` — Memory Deep Dive
 
 ```python
+import gc
 import sys
+import tracemalloc
 
 
 class PointDict:
-    """Standard class: per-instance __dict__."""
+    """Standard class: attributes in the inline values array, no __dict__ object."""
     def __init__(self, x: float, y: float, z: float) -> None:
         self.x = x
         self.y = y
@@ -383,17 +385,25 @@ class PointSlots:
 pd = PointDict(1.0, 2.0, 3.0)
 ps = PointSlots(1.0, 2.0, 3.0)
 
-# CPython 3.11, 64-bit Linux:
-print(sys.getsizeof(pd))         # 48  (object header only)
-print(sys.getsizeof(pd.__dict__)) # 184 (the dict itself)
-# Total: ~232 bytes per PointDict instance
+# DO NOT measure this with sys.getsizeof — see the trap below.
+print(sys.getsizeof(pd))         # 48  — WRONG as a total: excludes the inline values
+print(sys.getsizeof(ps))         # 56  — correct: header + 3 slot pointers
 
-print(sys.getsizeof(ps))         # 56  (header + 3 slot pointers)
-# No __dict__ exists at all:
+# Measure the real per-instance cost in bulk instead:
+def per_instance(cls, n=200_000):
+    gc.collect()
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    objs = [cls(1.0, 2.0, 3.0) for _ in range(n)]
+    after = tracemalloc.get_traced_memory()[0]
+    tracemalloc.stop()
+    return (after - before - sys.getsizeof(objs)) / n
+
+print(per_instance(PointDict))    # 96.0 bytes
+print(per_instance(PointSlots))   # 56.0 bytes  -> 40 bytes saved, ~42%
+
+# No __dict__ exists at all on the slots class:
 print(hasattr(ps, "__dict__"))   # False
-
-# Difference: 232 - 56 = 176 bytes per instance
-# At 10_000_000 instances: 1.76 GB saved
 
 # Verifying no __dict__:
 try:
@@ -402,45 +412,55 @@ except AttributeError as e:
     print(e)  # 'PointSlots' object has no attribute 'extra'
 ```
 
-**What this actually says.** "Stop giving every instance its own private hash table. The attribute names are already known at class-definition time, so store the values in a fixed array and look them up by offset."
+**The measurement trap.** `sys.getsizeof(pd.__dict__)` looks like the obvious way to price a
+plain instance, and it is wrong twice over. Since 3.11 a plain instance stores its attributes
+in an inline values array in the object's preheader and has no `dict` object at all; asking
+for `pd.__dict__` **materialises one on the spot**, adding 64 bytes to that instance
+permanently — the measurement creates what it claims to measure. And the number it reports
+(296 bytes) counts the *shared* key table that every instance of the class uses once, so it
+double-counts across instances. Both effects push the answer in the same direction, which is
+how the folklore figure of "232 bytes per instance" survived.
 
-The saving is not a compression trick. It is the removal of an entire data structure — one `dict` per instance — that was storing the same three keys, over and over, on every object.
+**What `__slots__` actually says.** "The attribute names are already known at
+class-definition time, so store the values in a fixed array and look them up by offset — and
+never let a `dict` appear for this object at all."
 
 | Symbol | What it is |
 |--------|------------|
 | object header | `ob_refcnt` + `ob_type` + GC bookkeeping — 48 bytes, paid either way |
-| `__dict__` | The per-instance hash table: ~184 bytes even for three small keys |
+| inline values | The preheader array a plain instance uses instead of a `dict`; keys shared on the class |
 | slot | One 8-byte pointer in a C array, indexed by position instead of hashed by name |
-| 232 bytes | `__dict__` layout: 48 header + 184 dict |
-| 56 bytes | Slots layout: 48-byte-class header rounded up, plus 3 x 8-byte slot pointers |
+| 96 bytes | Plain-class layout, measured in bulk: header plus inline values |
+| 56 bytes | Slots layout: 32-byte object base plus 3 x 8-byte slot pointers |
 
 **Walk one example.** The three-attribute class above, at increasing instance counts:
 
 ```
                           per instance      1,000,000        10,000,000        50,000,000
-    PointDict (__dict__)     232 bytes        232 MB          2,320 MB         11,600 MB
+    PointDict (plain)         96 bytes         96 MB            960 MB          4,800 MB
     PointSlots (__slots__)    56 bytes         56 MB            560 MB          2,800 MB
     ------------------------------------------------------------------------------------
-    saved                    176 bytes        176 MB          1,760 MB          8,800 MB
-    reduction                  75.9%           75.9%             75.9%             75.9%
+    saved                     40 bytes         40 MB            400 MB          2,000 MB
+    reduction                  41.7%           41.7%             41.7%             41.7%
 ```
 
 The percentage is flat because the saving is strictly per-instance — this is a scaling
 constant, not an optimization that kicks in at some threshold. Doubling the object count
-doubles the saving exactly.
+doubles the saving exactly. It is also close to constant in the *attribute count*: measured
+at 1, 3 and 8 attributes the saving is 40, 40 and 48 bytes. What `__slots__` removes is the
+inline values array's own overhead, not a per-attribute cost.
 
-**Where the 184 bytes go, and why they are pure waste here.** The instance `__dict__` stores
-the keys `"x"`, `"y"`, `"z"` — as pointers to interned strings — plus their hashes, plus the
-sparse index array, plus the dict's own header, on *every single instance*. A million
-`PointDict` objects store the same three key names a million times. `__slots__` moves that
-name-to-position mapping onto the class, where it is stored once, and leaves each instance
-holding nothing but three raw pointers. That is also where the ~30% attribute-access speedup
-comes from: no hash computation, no probe, just `*(base + offset)`.
+**Why the win shrank.** Before 3.11 every plain instance really did carry its own hash table,
+and `__slots__` deleted it — hence the folklore. The key-sharing and inline-values work took
+most of that win into the default path, so today `__slots__` is buying you the last 40 bytes
+and a guarantee (no surprise attributes, no `__dict__` for anyone to write to). It is *not*
+buying speed: measured attribute reads are ~10 ns either way, because the specializing
+adaptive interpreter emits an inline cache for the plain-instance load too.
 
 The corresponding failure mode is Section 6.4 — inherit from any class that lacks
-`__slots__` and every instance gets a `__dict__` back, dropping the saving from 176 bytes to
-exactly zero while the `__slots__` declaration still restricts which attributes you can set.
-You keep the constraint and lose the benefit.
+`__slots__` and every instance gets a `__dict__` back, dropping the saving to exactly zero
+while the `__slots__` declaration still restricts which attributes you can set. You keep the
+constraint and lose the benefit.
 
 ### 6.4 `__slots__` Inheritance Footgun
 
@@ -459,13 +479,44 @@ class Child(Base):
         self.child_attr = 2
 
 
+class PlainEquivalent:
+    """Same two attributes, no __slots__ anywhere."""
+    def __init__(self) -> None:
+        self.base_attr = 1
+        self.child_attr = 2
+
+
+class BothSlots:
+    __slots__ = ("base_attr", "child_attr")
+    def __init__(self) -> None:
+        self.base_attr = 1
+        self.child_attr = 2
+
+
 c = Child()
-# Child still has __dict__ because Base does:
-print(hasattr(c, "__dict__"))  # True — no memory saving achieved
-print(sys.getsizeof(c))        # 48 (object header)
-print(sys.getsizeof(c.__dict__)) # 104 (still a dict)
-# __slots__ only eliminates __dict__ when ALL classes in the MRO use __slots__
+print(hasattr(c, "__dict__"))       # True — inherited from Base
+
+print(per_instance(Child))          # 400.0 bytes
+print(per_instance(PlainEquivalent))#  88.0 bytes
+print(per_instance(BothSlots))      #  48.0 bytes
 ```
+
+This is worse than "no saving": it is a **4.5x regression**. A class that declares
+`__slots__` opts out of the shared-keys / inline-values layout, but its non-slots ancestor
+still forces a `__dict__` — so every instance now pays for a full standalone hash table
+*plus* the slot array, where a plain class would have used the cheap inline path. You keep
+the constraint (no dynamic attributes on the slotted names), pay 4.5x the memory of doing
+nothing, and get a `__dict__` anyway. `__slots__` only pays when **every** class in the MRO
+declares it.
+
+One precision worth keeping, because it decides whether you see 400 bytes or 56: the
+inherited `__dict__` is allocated **lazily**, on first assignment to a name that is not a
+slot. `Child` above pays the full 400 because `Base.__init__` sets `base_attr`, which is not
+in `Child.__slots__`. A subclass that never touches a non-slot name measures ~56 bytes —
+still worse than the 48 of a fully-slotted MRO, but better than the plain class's 88. The
+footgun is real and the default case hits it, since the whole point of inheriting is to use
+the parent's attributes; just do not expect the 4.5x to show up in a micro-example that only
+ever assigns slots.
 
 ### 6.5 MRO C3 — Verifying the Algorithm
 
@@ -651,82 +702,91 @@ print(plugin.process())  # processing json
 
 ## 7. Real-World Examples
 
-**Django ORM models** use descriptors extensively. `models.Field` subclasses are data descriptors on the model class — `instance.name = "Alice"` calls `Field.__set__`, which stores the value in the instance's `__dict__` under a private key and defers database interaction to query time. The `Model.__eq__` compares primary key values; `Model.__hash__` hashes the pk.
+**Django ORM models** put a `DeferredAttribute` on the class for every concrete field — `Field.contribute_to_class` does `setattr(cls, self.attname, self.descriptor_class(self))`. `DeferredAttribute` defines only `__get__`, so it is a **non-data descriptor**, and that is exactly the design: `instance.name = "Alice"` writes straight into `instance.__dict__` with no descriptor call at all, and the descriptor only fires on *reads that miss the instance dict* — a deferred column, where it issues `refresh_from_db`. `Model.__eq__` compares primary keys (returning `NotImplemented` for non-`Model` operands, and falling back to identity when the pk is `None`), and `Model.__hash__` hashes the pk, raising `TypeError` outright if the instance has no pk set.
 
-**Pydantic v2** uses `__set_name__`, `__get__`, and `__set__` to bind field validators as descriptors. Under the hood, model classes are built with a Rust-backed `ModelMetaclass` that walks field descriptors during `__init__` and calls their validation logic, avoiding per-attribute `if` chains.
+**Pydantic v2** does *not* make fields descriptors. Field values live in the model's `__dict__` (declared in `BaseModel.__slots__` alongside `__pydantic_fields_set__`, `__pydantic_extra__` and `__pydantic_private__`), assignment goes through a hand-written `BaseModel.__setattr__` that memoises a per-field handler, and validation is executed by a `SchemaValidator` from the Rust `pydantic-core` extension. `ModelMetaclass` itself is ordinary Python, subclassing `ABCMeta`; it forwards `__set_name__` to any *user-supplied* default that implements it, which is the only place the descriptor protocol appears.
 
 **dataclasses** [3.7] generate `__init__`, `__repr__`, `__eq__`, and optionally `__hash__`, `__lt__`, and `__slots__` [3.10] based on field annotations. The `frozen=True` option generates `__setattr__` and `__delattr__` that raise `FrozenInstanceError`, making instances hashable without explicit `__hash__`.
 
 **`functools.lru_cache`** relies on arguments being hashable (via `__hash__`). Passing unhashable arguments (lists, dicts) raises `TypeError` at call time, not at decoration time.
 
-**NamedTuple** generates `__slots__`, `__repr__`, `__eq__`, `__hash__`, and `__getnewargs__` automatically, producing objects that are 40-50% smaller than equivalent plain class instances.
+**NamedTuple** sets `__slots__ = ()` and generates `__repr__`, `__getnewargs__` and the field-name properties, inheriting `__eq__` and `__hash__` from `tuple`. A three-field named tuple measures 72 bytes per instance against 96 for the equivalent plain class — 25% smaller — but 56-byte `__slots__` classes beat it, because a tuple stores an `ob_size` and pays 16-byte allocation granularity.
 
-**SQLAlchemy** `Column` objects are non-data descriptors on ORM model classes. Reading `User.name` (class access, `obj=None`) returns the `InstrumentedAttribute`; reading `user_instance.name` triggers `__get__` with the instance, returning the tracked scalar value from the identity map.
+**SQLAlchemy** installs an `InstrumentedAttribute` on the mapped class for each mapped column. It defines `__get__`, `__set__` **and** `__delete__`, so it is a **data descriptor** and always wins over the instance dict — which is what lets the ORM record every attribute write in the unit of work. Reading `User.name` (class access, `instance is None`) returns the `InstrumentedAttribute` itself so it can be used as a SQL expression; reading `user_instance.name` returns the tracked scalar and can trigger a lazy load.
 
 ---
 
 ## 8. Tradeoffs
 
+Measured in bulk on CPython 3.13, 64-bit, for a three-attribute class:
+
 | Approach | Memory per instance | Attribute access | Dynamic attrs | Inheritance complexity |
 |----------|-------------------|-----------------|--------------|----------------------|
-| Plain class (`__dict__`) | ~232 bytes | ~100 ns (hash lookup) | Yes | Simple |
-| `__slots__` | ~56 bytes | ~70 ns (array index) | No (by default) | Must propagate slots up MRO |
-| `dataclass` (plain) | ~232 bytes | ~100 ns | Yes | Simple |
-| `dataclass(slots=True)` [3.10] | ~56 bytes | ~70 ns | No | Same as manual slots |
-| `NamedTuple` | ~72 bytes | ~60 ns (C-level) | No | Limited; tuple semantics |
+| Plain class (inline values) | 96 bytes | ~10 ns | Yes | Simple |
+| `__slots__` | 56 bytes | ~10 ns | No (by default) | Must propagate slots up MRO |
+| `dataclass` (plain) | 96 bytes | ~10 ns | Yes | Simple |
+| `dataclass(slots=True)` [3.10] | 56 bytes | ~10 ns | No | Same as manual slots |
+| `NamedTuple` | 72 bytes | ~10 ns | No | Limited; tuple semantics |
+| `__slots__` under a non-slots base | 400 bytes | ~10 ns | Yes | The footgun — see Section 6.4 |
 
-`__slots__` and `dataclass(slots=True)` cut per-instance memory to roughly a quarter of the `__dict__`-based approaches — the same 232-to-56-byte drop from the Section 6.3 deep dive, repeated here across every idiom:
+`__slots__` and `dataclass(slots=True)` cut per-instance memory by about 42% — the same 96-to-56-byte drop from the Section 6.3 deep dive, repeated here across every idiom. Attribute-read latency is flat across all of them; the specializing adaptive interpreter caches an inline-values load as cheaply as a slot load, so `__slots__` is a memory decision, not a speed one.
 
 ```mermaid
 xychart-beta
     title "Memory per Instance by Approach (bytes)"
-    x-axis ["Plain class", "__slots__", "dataclass", "dataclass(slots)", "NamedTuple"]
-    y-axis "Bytes" 0 --> 250
-    bar [232, 56, 232, 56, 72]
+    x-axis ["Plain class", "__slots__", "dataclass", "dataclass(slots)", "NamedTuple", "slots on plain base"]
+    y-axis "Bytes" 0 --> 420
+    bar [96, 56, 96, 56, 72, 400]
 ```
 
-**Put simply.** "Four of these five idioms are the same two layouts wearing different syntax — either every instance carries a `dict`, or it does not."
+**Put simply.** "Four of these idioms are the same two layouts wearing different syntax — and the sixth is the one that makes things worse."
 
-Read the column as two clusters, not five rows. `dataclass` is a code generator, not a memory strategy; what decides the number is whether `__slots__` ended up on the class.
+Read the column as clusters, not rows. `dataclass` is a code generator, not a memory strategy; what decides the number is whether `__slots__` ended up on the class — and whether every ancestor has it too.
 
 | Symbol | What it is |
 |--------|------------|
-| 232 bytes | The `__dict__` cluster: plain class and plain `dataclass` are byte-identical |
+| 96 bytes | The inline-values cluster: plain class and plain `dataclass` are byte-identical |
 | 56 bytes | The `__slots__` cluster: manual `__slots__` and `dataclass(slots=True)`, identical |
-| 72 bytes | `NamedTuple` — a C tuple, so values are stored inline rather than behind slot pointers |
-| ~100 ns | Attribute read via hash lookup in the instance `__dict__` |
-| ~70 ns | Attribute read via direct slot-array index — no hashing, no probing |
+| 72 bytes | `NamedTuple` — a C tuple, values inline, but it pays `ob_size` and 16-byte granularity |
+| 400 bytes | `__slots__` on a non-slots base: a real `dict` *and* the slot array, worst of both |
+| ~10 ns | Attribute read, identical for every layout above, thanks to the inline caches |
 
 **Walk one example.** Turn the per-instance gap into the only question that matters in review — *at what scale is this worth arguing about?*
 
 ```
-  saving = 232 - 56 = 176 bytes per instance
+  saving = 96 - 56 = 40 bytes per instance
 
     instances     memory saved      is it worth a code review?
-        1,000          176 KB       no  -- noise
-      100,000         17.6 MB       marginal
-    1,000,000          176 MB       yes -- one container tier
-    5,681,818        1,000 MB       yes -- exactly 1 GB saved
-   50,000,000        8,800 MB       yes -- decides the instance type
+        1,000          40 KB        no  -- noise
+      100,000           4 MB        no
+    1,000,000          40 MB        marginal
+   25,000,000       1,000 MB        yes -- exactly 1 GB saved
+   50,000,000       2,000 MB        yes -- decides the instance type
 
-  Latency side, same scale:
-    100 ns -> 70 ns is 30 ns saved per attribute read.
-    A loop touching 3 attributes on 50,000,000 objects:
-        50,000,000 x 3 x 30 ns = 4.5 seconds saved
+  Latency side: there is none. Measured attribute reads are ~10 ns for
+  every layout in the table, so there is no time to trade against.
 ```
 
-So the break-even is around a million instances: below it `__slots__` buys a rounding error
-and costs you dynamic attributes and easy pickling; above it, it is the difference between
-fitting in a memory tier and not. That threshold, not a style preference, is what Section 9's
-"constructing millions of small instances" is pointing at — and it is why the honest answer
-to "should I use `__slots__`?" is always "how many instances?" before anything else.
+So the break-even has moved out to tens of millions of instances: below that, `__slots__`
+buys a rounding error and costs you dynamic attributes; above it, it is the difference
+between fitting in a memory tier and not. That threshold, not a style preference, is what
+Section 9's "constructing millions of small instances" is pointing at — and it is why the
+honest answer to "should I use `__slots__`?" is always "how many instances, and does the
+whole MRO have it?" before anything else.
+
+Measured on the same machine, per access:
 
 | Feature | `property` | Custom descriptor | `__getattr__` |
 |---------|-----------|-------------------|--------------|
 | Per-attribute logic | Yes | Yes | Fallback only |
 | Reusable across classes | No (inline) | Yes (descriptor class) | No |
 | Works with `__slots__` | Yes | Yes | Yes |
-| Performance | ~150 ns per access | ~150 ns per access | Only on miss |
+| Performance | ~16 ns per access | ~34 ns per access | Only on miss |
+
+`property` is faster than a hand-written descriptor because it is implemented in C and the
+adaptive interpreter specialises `LOAD_ATTR` for it; a Python-level `__get__` costs a real
+Python call. Both are far cheaper than the "~150 ns" folklore, and neither is a reason to
+avoid encapsulation.
 
 ---
 
@@ -739,9 +799,10 @@ to "should I use `__slots__`?" is always "how many instances?" before anything e
 - All classes in the inheritance chain also define `__slots__`.
 
 **Do NOT use `__slots__` when:**
-- Objects need dynamic attribute addition (plugin systems, mocking, pickling without `__getstate__`).
-- You inherit from a class without `__slots__` — memory saving is zero.
+- Objects need dynamic attribute addition (plugin systems, monkeypatching, `unittest.mock.patch.object` on an instance).
+- You inherit from a class without `__slots__` — memory use goes *up* about 4.5x, not to zero saving.
 - The attribute set varies per instance.
+- You are reaching for it to make attribute access faster. It does not; see Section 8.
 
 **Use custom descriptors when:**
 - The same validation/transform logic applies to multiple attributes across multiple classes (reuse).
@@ -753,8 +814,8 @@ to "should I use `__slots__`?" is always "how many instances?" before anything e
 - Code is simpler than a full descriptor class.
 
 **Use `total_ordering` when:**
-- Defining all six comparison methods is redundant; correctness matters more than the ~2 microsecond overhead per comparison.
-- **Do NOT use** in hot loops comparing millions of objects — define all six directly.
+- Defining all six comparison methods is redundant; correctness matters more than the ~40–50 ns extra per call on the four synthesized methods.
+- **Do NOT use** when a sort over millions of objects dominates your profile — define all six directly, or sort with a `key=` function so only `<` on the key is called.
 
 **Use `__init_subclass__` when:**
 - You need class registration or validation without a metaclass.
@@ -826,16 +887,24 @@ print(d[FixedKey(1)])  # found — equality-based lookup works
 ### Pitfall 3: `__slots__` in Subclass of Non-Slots Base
 
 ```python
-# BROKEN: memory saving is zero — Base.__dict__ still exists
+# BROKEN: not merely zero saving — a 4.5x memory REGRESSION vs doing nothing,
+# because the class loses the inline-values fast path AND still gets a __dict__.
+# Note x is set on the INSTANCE: it is not in __slots__, so it lands in the
+# inherited __dict__, which is what actually allocates the hash table.
 class BaseNoSlots:
-    x: int = 0
+    def __init__(self) -> None:
+        self.x = 0
 
 class ChildWithSlots(BaseNoSlots):
     __slots__ = ("y",)
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.y = 1
+
 obj = ChildWithSlots()
 print(hasattr(obj, "__dict__"))  # True — inherited from BaseNoSlots
-print(sys.getsizeof(obj.__dict__))  # 104 bytes — the dict is still there
+# measured in bulk: ~400 bytes/instance, vs ~88 for a plain two-attribute class
 
 # FIX: give Base __slots__ too
 class BaseWithSlots:
@@ -846,6 +915,7 @@ class ChildFullSlots(BaseWithSlots):
 
 obj2 = ChildFullSlots()
 print(hasattr(obj2, "__dict__"))  # False — no __dict__ at all
+# measured in bulk: ~48 bytes/instance
 ```
 
 ### Pitfall 4: `__repr__` Returning Non-String
@@ -953,7 +1023,10 @@ Python automatically sets `__hash__ = None` on the class, making instances unhas
 `super()` returns a proxy that delegates method calls to the *next* class in the current instance's MRO, not necessarily the direct parent. In a diamond hierarchy `D(B, C)` with MRO `D → B → C → A`, `super()` in `B.method` calls `C.method`, not `A.method`. If `B` calls `A.method()` directly, `C.method` is skipped entirely. Every class must call `super()` to guarantee cooperative chaining where each class in the MRO runs exactly once.
 
 **Q5: How does `__slots__` reduce memory, and when does it fail to save memory?**
-`__slots__` replaces the per-instance `__dict__` (a hash table costing ~184 bytes in CPython 3.11) with a fixed C-level array of slot pointers (~8 bytes per slot). For a 3-attribute object, total size drops from ~232 to ~56 bytes. It fails to save memory when any class in the MRO does not define `__slots__`, because that ancestor still contributes a `__dict__` to every instance.
+`__slots__` stores attributes in a fixed C-level array of slot pointers instead of the inline values array a plain instance uses, saving a flat ~40 bytes per instance. That is 96 bytes down to 56 for a three-attribute class on CPython 3.13, 64-bit. The win is much smaller than the pre-3.11 folklore because plain instances no longer eagerly allocate a `dict` either: their attributes live in a preheader values array with the key names shared once on the class. It does not merely fail when an ancestor lacks `__slots__` — it backfires, because the class loses the shared-keys fast path and still inherits a real `__dict__`, measuring around 400 bytes per instance against 88 for the plain equivalent. Practical guidance: put `__slots__` on every class in the MRO or on none, and measure in bulk with `tracemalloc`, never with `sys.getsizeof(obj.__dict__)`.
+
+**Q5b: Why is `sys.getsizeof(obj.__dict__)` the wrong way to measure an instance?**
+It creates the very object it claims to measure. Since 3.11 a plain instance keeps its attributes in an inline values array and has no `dict`; reading `obj.__dict__` materialises one, adding about 64 bytes to that instance for good. The number it then reports also includes the shared key table that every instance of the class uses jointly, so it double-counts across the population. Practical guidance: allocate N instances, diff `tracemalloc.get_traced_memory()` around the loop, subtract the holding list, and divide by N.
 
 **Q6: What is the attribute lookup order in Python?**
 For `obj.attr`: (1) check if `type(obj).__mro__` contains a data descriptor named `attr`; if yes, call its `__get__`. (2) Check `obj.__dict__` for `attr`; if found, return it. (3) Check `type(obj).__mro__` for a non-data descriptor or plain class attribute named `attr`; if found, call `__get__` or return the value. (4) Raise `AttributeError`. This four-step order is fixed and implemented in `object.__getattribute__`.
@@ -968,7 +1041,7 @@ Python calls `__bool__` first; if absent, it calls `__len__` and treats 0 as fal
 `__set_name__(self, owner, name)` [3.6] is called by `type.__new__` on each descriptor found in the class body, passing the class being created (`owner`) and the attribute name the descriptor is assigned to (`name`). This allows a descriptor to self-configure with its attribute name without requiring the programmer to pass it explicitly, eliminating the repetition of `width = Validator("width")`.
 
 **Q10: What is `total_ordering` and what is its performance cost?**
-`functools.total_ordering` is a class decorator that fills in missing rich comparison methods from `__eq__` and one ordering method. The generated methods add approximately 2 microseconds per comparison because they call the implemented method via a wrapper function and handle `NotImplemented`. For code that compares millions of objects (sorting large datasets), defining all six methods explicitly eliminates this overhead.
+`functools.total_ordering` is a class decorator that fills in missing rich comparison methods from `__eq__` and one ordering method. Each synthesized method costs roughly 40–50 ns extra per call — measured, a `<=` on a `total_ordering` class runs in about 80 ns against 33 ns hand-written — because it is a Python-level wrapper that calls your method and inspects the result for `NotImplemented`. The method you defined yourself is untouched and runs at full speed. For a sort over millions of objects, define all six explicitly, or pass `key=` to `sorted` so only the key's `<` is ever called.
 
 **Q11: How are functions non-data descriptors, and how does this enable bound methods?**
 A function object's class defines `__get__` but not `__set__` or `__delete__`. When you access `instance.method`, Python calls `function.__get__(instance, type(instance))`, which returns a `method` object that binds `instance` as the first argument. Because functions are non-data descriptors, an instance can shadow a method by setting an instance attribute with the same name — though this is rarely desirable.
@@ -980,10 +1053,10 @@ A function object's class defines `__get__` but not `__set__` or `__delete__`. W
 `__getattribute__` is called on *every* attribute access and is the entry point for the full lookup mechanism. Overriding it lets you intercept all attribute reads. `__getattr__` is called only when the normal lookup (via `__getattribute__`) raises `AttributeError` — it is a fallback of last resort. Always prefer `__getattr__` for lazy/dynamic attributes; overriding `__getattribute__` risks infinite recursion if you accidentally look up attributes on `self` without calling `object.__getattribute__`.
 
 **Q14: Can you add `__slots__` to a class that uses `@dataclass`?**
-Yes, with `@dataclass(slots=True)` [3.10]. The decorator creates a new class with `__slots__` populated from field annotations. For older Python versions (3.7–3.9), you must manually define `__slots__` on a `@dataclass` class — but because `@dataclass` writes `__dict__`-based access in generated `__init__`, you should verify `__slots__` takes effect with `sys.getsizeof`. The `slots=True` parameter is the correct approach from 3.10 onward.
+Yes, with `@dataclass(slots=True)` [3.10], and it produces exactly the same layout as hand-written `__slots__` — 56 bytes per instance for three fields, against 96 without. Note that `slots=True` cannot mutate the class in place, so the decorator builds and returns a *new* class object; anything that captured the pre-decoration class (a `super()` `__class__` cell in a method defined before the decorator ran, or an already-registered reference) still points at the old one. Practical guidance: prefer `slots=True` over declaring `__slots__` by hand on a dataclass, because the hand-written form collides with class-level defaults — the default value is a class attribute and the slot descriptor of the same name shadows it, giving `ValueError: 'x' in __slots__ conflicts with class variable`.
 
 **Q15: What happens if you put a mutable default value as a `dataclass` field?**
-Python raises `ValueError: mutable default <class 'list'> for field items is not allowed: use default_factory` at class definition time. `@dataclass` protects against the mutable-default footgun by detecting `list`, `dict`, and `set` defaults and refusing them. Use `field(default_factory=list)` instead. This is enforced via `__post_init__` inspection and the `Field` descriptor machinery inside `dataclasses`.
+Python raises `ValueError: mutable default <class 'list'> for field items is not allowed: use default_factory` at class definition time. `@dataclass` uses **unhashability as a proxy for mutability**: the check is `f.default.__class__.__hash__ is None`, read from the class rather than the instance. That catches `list`, `dict` and `set`, and equally any of your own classes that set `__hash__ = None` or define `__eq__` without `__hash__`. Use `field(default_factory=list)` instead. The corollary is that a mutable type which is still hashable — a custom class with a default `__hash__` and mutable attributes — sails straight through the check and reintroduces the shared-default bug.
 
 ---
 
@@ -995,7 +1068,7 @@ Python raises `ValueError: mutable default <class 'list'> for field items is not
 
 - **Return `NotImplemented` from numeric/comparison dunders** for unsupported types rather than raising `TypeError`. Returning `NotImplemented` allows Python to try the reflected method on the other operand; raising `TypeError` prevents it.
 
-- **Use `__slots__` deliberately**: benchmark with `sys.getsizeof` before committing. Profile actual memory with `tracemalloc` for realistic payloads. Ensure the entire MRO uses `__slots__` or the saving is zero.
+- **Use `__slots__` deliberately, and measure it in bulk.** Never with `sys.getsizeof(obj.__dict__)`, which materialises the dict it is measuring; allocate N instances and diff `tracemalloc.get_traced_memory()`. Ensure the entire MRO uses `__slots__` — if any ancestor lacks it, memory goes up about 4.5x rather than down.
 
 - **Use `@dataclass(slots=True)` [3.10] instead of manual `__slots__`** for data-holding classes. It is less error-prone and composes correctly with `frozen=True`.
 
@@ -1007,7 +1080,7 @@ Python raises `ValueError: mutable default <class 'list'> for field items is not
 
 - **Annotate dunder method return types** and run `mypy --strict`. Mypy enforces that `__repr__` returns `str`, `__bool__` returns `bool`, and `__hash__` returns `int`. These type errors surface before runtime.
 
-- **Use `functools.total_ordering` only in non-critical paths**. For sort-critical code processing more than 100,000 objects, benchmark and define all six comparison methods manually.
+- **Use `functools.total_ordering` freely, and reach for `key=` before hand-writing six methods.** The synthesized methods cost ~40–50 ns each, so they matter only when a sort dominates the profile — and in that case `sorted(objs, key=attrgetter("v"))` beats both options, since it compares the keys and never calls your dunders at all.
 
 ---
 
@@ -1015,38 +1088,42 @@ Python raises `ValueError: mutable default <class 'list'> for field items is not
 
 ### Building a Memory-Efficient Point Cloud Object
 
-**Scenario:** A geospatial analytics service processes LiDAR point cloud files. Each file contains 5–50 million 3D points (x, y, z coordinates as 64-bit floats). The initial naive implementation used plain Python objects and was consuming 11.6 GB of RAM for a 50-million-point dataset — too large to fit in the 16 GB instance memory.
+**Scenario:** A geospatial analytics service processes LiDAR point cloud files. Each file contains 5–50 million 3D points (x, y, z coordinates as 64-bit floats). The initial naive implementation used plain Python objects and was consuming 8.4 GB of RAM for a 50-million-point dataset — too large to leave headroom on the 16 GB instance once the analysis pipeline also runs.
 
 **Goal:** Redesign the `Point3D` class to minimize memory, support set-based deduplication, operator arithmetic for centroid computation, and a reusable `distance` descriptor for metrics.
 
 ```
-Initial approach (per-instance __dict__):
+Initial approach (plain class: inline values, no dict object):
 
   +-----------------+
-  | Point3D object  |  48 bytes (object header)
-  |   ob_refcnt     |
-  |   ob_type       |
-  |   __dict__  ----|----> dict: 184 bytes
-  +-----------------+      { 'x': float_obj,   (each float: 24 bytes)
-                             'y': float_obj,
-                             'z': float_obj }
-  Total: 48 + 184 + 3*24 = 304 bytes per instance
-  50M instances: 50_000_000 * 304 = 14.4 GB
+  | Point3D object  |  96 bytes measured in bulk
+  |   ob_refcnt     |    = 48-byte object base
+  |   ob_type       |    + 48-byte inline values array in the preheader
+  |   values[x] ----|----> float object (24 bytes each, distinct per point)
+  |   values[y] ----|
+  |   values[z] ----|
+  +-----------------+
+  Total: 96 + 3*24 = 168 bytes per point
+  50M points: 50_000_000 * 168 = 8.4 GB
 
 After __slots__ optimization:
 
   +-----------------+
-  | Point3D object  |  56 bytes total (header + 3 slot pointers)
+  | Point3D object  |  56 bytes total (32-byte base + 3 slot pointers)
   |   ob_refcnt     |
   |   ob_type       |
-  |   slot[x] ------|---> float value (24 bytes, shared python float)
-  |   slot[y] ------|---> float value
-  |   slot[z] ------|---> float value
+  |   slot[x] ------|---> float object (24 bytes)
+  |   slot[y] ------|---> float object
+  |   slot[z] ------|---> float object
   +-----------------+
   Object itself: 56 bytes
-  3 float objects: 3*24 = 72 bytes (but floats are interned/reused in bulk arrays)
-  Realistic saving: 232 bytes -> 56 bytes = 176 bytes per object header
-  50M instances: savings = 50_000_000 * 176 = 8.8 GB
+  3 float objects: 3*24 = 72 bytes -- UNCHANGED, and now the dominant cost
+  Saving: 96 -> 56 = 40 bytes per point
+  50M points: 8.4 GB -> 6.4 GB, a 2.0 GB saving (24%)
+
+The floats are the real story at this scale: 72 of the remaining 128 bytes per
+point are three boxed PyFloatObjects that __slots__ cannot touch. Getting past
+that requires leaving the object model entirely -- see Discussion Question 3.
 ```
 
 #### Implementation
@@ -1066,10 +1143,11 @@ class NaivePoint3D:
         self.z = z
 
 naive = NaivePoint3D(1.0, 2.0, 3.0)
-print(sys.getsizeof(naive))          # 48
-print(sys.getsizeof(naive.__dict__)) # 184
-# Total tracked memory: ~232 bytes (object) + 3*24 (floats) = 304 bytes
-# At 50M points: ~14.4 GB
+print(sys.getsizeof(naive))          # 48 — misleading: excludes the inline values,
+                                     # and touching naive.__dict__ would materialise
+                                     # a dict that is not otherwise there
+# Measured in bulk: 96 bytes/object + 3*24 (distinct floats) = 168 bytes per point
+# At 50M points: ~8.4 GB
 
 # Also: NaivePoint3D is not hashable (no __eq__ defined means default id-based
 # hash is used, but objects with same coordinates are not equal)
@@ -1196,26 +1274,32 @@ def measure_bulk_memory(n: int = 1_000_000) -> None:
 
 
 measure_bulk_memory(1_000_000)
-# NaivePoint3D x 1,000,000: 232.0 MB
-# Point3D      x 1,000,000:  56.0 MB
-# Savings: 176.0 MB (76%)
+# NaivePoint3D x 1,000,000: 168.3 MB
+# Point3D      x 1,000,000: 130.1 MB
+# Savings: 38.1 MB (23%)
 ```
+
+The 23% is the honest number, and it is worth internalising: `__slots__` removed 40 bytes of
+per-object bookkeeping, but the three boxed `float` objects — 72 of the remaining 128 bytes —
+are untouched, because the slot holds a *pointer* to a `PyFloatObject`, not the double
+itself. Every further optimisation has to attack the boxing, not the object layout.
 
 #### Metrics
 
 | Metric | NaivePoint3D | Point3D (`__slots__`) | Improvement |
 |--------|-------------|----------------------|-------------|
-| Object size (sys.getsizeof) | 232 bytes | 56 bytes | 76% reduction |
-| 50M instances RAM | ~14.4 GB | ~3.5 GB | 10.9 GB saved |
-| Attribute read latency | ~100 ns | ~70 ns | 30% faster |
+| Object bookkeeping (bulk-measured) | 96 bytes | 56 bytes | 42% reduction |
+| Total per point (incl. 3 boxed floats) | 168 bytes | 128 bytes | 24% reduction |
+| 50M instances RAM | ~8.4 GB | ~6.4 GB | 2.0 GB saved |
+| Attribute read latency | ~10 ns | ~10 ns | no change — this is not a speed optimisation |
 | `==` comparison | identity (broken) | value-based | correct |
 | Set deduplication | broken | correct | functional |
 | Hashable | yes (id-based) | yes (value-based) | correct contract |
 
 #### Discussion Questions
 
-1. The `DistanceFromOrigin` descriptor is a non-data descriptor (no `__set__`). What happens if a caller writes `p.distance = 0.0`? It is stored in `__dict__`, but `Point3D` has `__slots__` and no `distance` slot — would this raise `AttributeError`? Yes: because `__slots__` is defined and `distance` is not in it, `p.distance = 0.0` raises `AttributeError: 'Point3D' object has no attribute 'distance'`. This makes the descriptor effectively read-only without needing `__set__`.
+1. The `DistanceFromOrigin` descriptor is a non-data descriptor (no `__set__`). What happens if a caller writes `p.distance = 0.0`? Normally a non-data descriptor is shadowed by the instance `__dict__`, but `Point3D` has `__slots__` and no `distance` slot, so there is no `__dict__` to write into and the assignment raises `AttributeError: 'Point3D' object attribute 'distance' is read-only`. Note the message: it is *not* "has no attribute", because the attribute exists on the class and is readable — only the write path is missing. `__slots__` therefore makes any non-data descriptor on the class effectively read-only, with no `__set__` needed.
 
-2. If you need to serialize `Point3D` with `pickle`, `__slots__` requires `__getstate__` and `__setstate__`. What is the minimal implementation? `__getstate__` should return a dict or tuple of slot values; `__setstate__` should restore them. Without these, `pickle.dumps` raises `TypeError` on instances with `__slots__` but no `__dict__`.
+2. If you need to serialize `Point3D` with `pickle`, do you have to write `__getstate__` and `__setstate__`? No — `object.__reduce_ex__` handles `__slots__` from protocol 2 onward, and the default protocol is 5, so `pickle.dumps(p)` and `pickle.loads` round-trip a slots-only class with no extra code. You only hit `TypeError: a class that defines __slots__ without defining __getstate__ cannot be pickled` if you explicitly force `protocol=0` or `protocol=1`. Under protocol 2+ the state is stored as a `(dict_or_None, slots_dict)` pair, so a custom `__getstate__` is a size optimisation, not a requirement.
 
-3. Can you use `Point3D` in a `numpy` structured array instead? Yes — for pure numeric bulk storage, `numpy.dtype([('x', 'f8'), ('y', 'f8'), ('z', 'f8')])` achieves ~24 bytes per record (vs 56 for `Point3D`), but loses Python object semantics (no methods, no descriptors). `__slots__` is the right choice when Python object behaviour is needed at scale.
+3. Can you use `Point3D` in a `numpy` structured array instead? Yes, and at this scale it is the answer that matters. `numpy.dtype([('x', 'f8'), ('y', 'f8'), ('z', 'f8')])` stores 24 bytes per record with the doubles *unboxed*, against 128 bytes for a `__slots__` `Point3D` (56 for the object plus 72 for three `PyFloatObject`s). That is a 5.3x win, an order of magnitude more than `__slots__` bought, and it comes from deleting the object model rather than trimming it. `__slots__` is the right choice only when Python object behaviour — methods, descriptors, per-instance identity — is genuinely needed at scale.
