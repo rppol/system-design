@@ -910,66 +910,82 @@ See `../decorators_and_closures/README.md` for `functools.wraps` and `lru_cache`
 ## 12. Interview Questions with Answers
 
 **Q1: What is a pure function, and why does it matter for caching with `lru_cache`?**
+**Short:** A pure function always returns the same output for the same input with no side effects, making it safe to cache.
 
 A pure function always returns the same output for the same input and has no side effects — no I/O, no global state mutation, no randomness. This matters for `lru_cache` because the cache stores `(args, kwargs) -> result` mappings. If the function reads external state (a global variable, a database, the clock), the cached result may be stale on subsequent calls. Only pure functions are safe to cache because their output is entirely determined by their arguments, so the cached mapping is always valid.
 
 **Q2: Why is `map(int, strings)` faster than `[int(s) for s in strings]`?**
+**Short:** map(int, strings) only slightly beats a comprehension in 3.12+ and loses outright once the callable is a lambda.
 
 `map(int, strings)` calls the C-implemented `int` type directly for each element, while the comprehension executes `LOAD_GLOBAL int`, `LOAD_FAST s` and `CALL` bytecodes every time round. That still favours `map`, but only by about 5-10% on a million-element conversion — much less than the pre-3.12 gap, because PEP 709 [3.12] inlined comprehensions into the enclosing code object and removed the hidden function call that used to make them lose. The advantage reverses outright when the callable is a Python lambda: `map` then pays a full Python call per element while the inlined comprehension pays none, and the comprehension comes out roughly 1.7x faster. The rule to remember is "C callable, `map` is marginally ahead; Python callable, comprehension wins clearly".
 
 **Q3: When would you choose `functools.partial` over a lambda?**
+**Short:** functools.partial is preferable to a lambda whenever you are only freezing arguments, since it stays picklable and introspectable.
 
 Prefer `partial` whenever you are only freezing arguments rather than adding behaviour, because it stays introspectable and picklable where a lambda is neither. Three concrete reasons: `partial.func`, `partial.args` and `partial.keywords` reveal exactly what was frozen; the result carries the original function's identity, so it survives `multiprocessing` and task-queue serialisation that would reject a lambda; and it is a C type, so on a trivial target it costs about 35 ns per call against 60 ns for an equivalent Python closure. Use a lambda when the transformation has no reuse value, or when you need to rearrange argument order — `partial` can only fill leading positional arguments and keywords, so reordering needs a lambda or a named function.
 
 **Q4: What does `functools.singledispatch` do, and how does dispatch work for subclasses?**
+**Short:** functools.singledispatch dispatches on the first argument's type, falling back to the nearest registered ancestor in its MRO.
 
 `@singledispatch` registers a generic function that routes to type-specific implementations based on the type of its first argument, stored in a dispatch dictionary keyed by type. When you call `serialize(obj)`, it looks up `type(obj)` in the registry. If not found, it walks the MRO of `type(obj)` and uses the first registered ancestor — so if you register `list` and call with a `deque`, it will use the `list` implementation if `deque` is not separately registered. This gives you method-overloading semantics without class hierarchies.
 
 **Q5: What is the memory difference between a list comprehension and a generator expression for 1 million elements?**
+**Short:** A generator expression is a fixed ~200 bytes regardless of length, versus roughly 40 MB for a million-element list.
 
 A list comprehension allocates everything at once, and the honest total is about 40 MB, not the 8.4 MB `sys.getsizeof` reports. The 8.4 MB is only the pointer array — one 8-byte slot per element — while the 1,000,000 boxed `int` objects it points at add another 31.9 MB that `getsizeof` never counts because it is not recursive. A generator expression is a single generator object of 200 bytes regardless of sequence length, plus whichever one `int` is alive right now, so the true ratio is around 175,000x. For a single-pass aggregation like `sum(x*x for x in range(1_000_000))`, the generator is the correct choice. If you need multiple passes, `len()`, or random access, materialize to a list once and pay the 40 MB deliberately.
 
 **Q6: How does `operator.itemgetter` outperform `lambda r: r["score"]` in a sort?**
+**Short:** operator.itemgetter beats an equivalent lambda in sorted(key=...) because it is a C-level callable that skips the Python frame.
 
 It skips the Python frame: `itemgetter("score")` is a C-level callable doing one `__getitem__`, while the lambda sets up a frame and runs `LOAD_FAST`, `LOAD_CONST`, `BINARY_SUBSCR`, `RETURN_VALUE` on every call. Note the call count: `sorted(key=...)` extracts the key **exactly N times**, once per element, and then sorts the extracted keys — the `N log N` comparisons operate on those keys, never on your function. So the key-function cost is linear and bounded. Measured over 1 million dicts the whole sort ran 0.518 s with `itemgetter` against 0.562 s with the lambda: about 44 ns per call, and roughly 8% of total sort time. Choose `itemgetter` because it is picklable, introspectable and self-documenting; the 5-10% is a bonus, not the reason.
 
 **Q7: What makes `dataclass(frozen=True)` different from a regular dataclass, and what does it generate?**
+**Short:** dataclass(frozen=True) blocks attribute writes and auto-generates a field-based __hash__, making instances valid dict keys.
 
 `@dataclass(frozen=True)` sets `__setattr__` and `__delattr__` to raise `FrozenInstanceError` on any attribute write, effectively making instances immutable. It also auto-generates `__hash__` (which is suppressed in regular mutable dataclasses because mutable objects should not be hashable). The generated `__hash__` is based on all fields. This makes frozen dataclass instances safe to use as dictionary keys and in sets, and safe to share across threads without locks.
 
 **Q8: Why does Python's `reduce` hide performance issues that built-ins like `sum()` or `any()` avoid?**
+**Short:** functools.reduce loses to C-implemented built-ins like sum() because it invokes a Python callable on every pairing.
 
 `sum()`, `any()`, `all()`, `max()`, `min()` are implemented in C and operate over the iterable in a tight C loop, never entering Python per-element. `functools.reduce` calls a Python callable on every pair of accumulated values, which means the call machinery fires N-1 times. Measured over 1 million integers, `sum` beat `reduce(operator.add, ...)` by about 6x and `reduce(lambda a, b: a + b, ...)` by about 12x — the extra 2x purely because a `lambda` frame costs more to enter than `operator.add`'s C entry point. The bigger issue is not constant-factor speed but lost short-circuiting: `any()` stops at the first `True`, while `reduce(lambda a, b: a or b, flags)` always folds all N-1 pairs, turning a best case of O(1) into O(N).
 
 **Q9: What is `toolz.pipe` and how does it differ from `toolz.compose`?**
+**Short:** toolz.pipe applies functions left to right in data-flow order, while toolz.compose applies them right to left like math notation.
 
 Both compose functions, but differ in argument order and evaluation direction. `pipe(data, f, g, h)` applies `f` first, then `g`, then `h` — data flows left to right, matching reading order. `compose(h, g, f)(data)` applies `f` first — right to left, matching mathematical notation f∘g∘h. `pipe` is more readable for data pipelines; `compose` is more natural when constructing reusable function objects. Both are semantically equivalent: `pipe(x, f, g, h) == compose(h, g, f)(x)`.
 
 **Q10: How do you safely use a `frozenset` or `tuple` as a dictionary key when the elements contain custom objects?**
+**Short:** A tuple or frozenset is hashable only when every element inside it is hashable, so custom objects need value-based __eq__/__hash__.
 
 A `tuple` is hashable if and only if all its elements are hashable. For custom objects, Python uses `id()` by default for `__hash__` and identity for `__eq__`, which is usually wrong for value semantics. To make a custom object hashable with value semantics: (1) define `__eq__` based on the object's fields, then (2) define `__hash__` as a hash of the same fields, ensuring the contract `a == b` implies `hash(a) == hash(b)`. `@dataclass(frozen=True)` handles both automatically. A `frozenset` requires all its elements to be hashable, so you can use `frozenset` of `frozenset` for nested sets but not `frozenset` of `list`.
 
 **Q11: When does using a functional pipeline with `toolz.pipe` become harder to debug than a `for` loop?**
+**Short:** A toolz.pipe traceback points at the failing stage function rather than the pipeline, so anonymous lambdas make debugging harder.
 
 When an exception is raised inside a stage of a `toolz.pipe` call, the traceback shows the anonymous lambda or the inner stage function, not the pipeline structure, making it harder to identify which stage failed. Additionally, lazy generators inside a pipe delay exceptions until iteration, which can be far from the pipeline definition. Mitigation strategies: name each stage function (avoid anonymous lambdas inside `pipe`), add a `tap`/`do` stage that logs intermediate values, and prefer `cytoolz.pipe` with named functions so tracebacks include meaningful function names.
 
 **Q12: How does `functools.cache` differ from `functools.lru_cache(maxsize=None)`?**
+**Short:** functools.cache is lru_cache(maxsize=None) without the LRU bookkeeping, trading eviction for a slightly faster unbounded cache.
 
 In Python 3.9+, `functools.cache` is equivalent to `lru_cache(maxsize=None)` but is implemented without the LRU overhead (no doubly-linked list maintenance, no lock per access in CPython). This makes `cache` slightly faster per call for pure memoization when you do not need eviction. The tradeoff is unbounded memory growth — `cache` never evicts entries. Use `cache` for functions with a small, finite input space (e.g., a few dozen distinct values); use `lru_cache(maxsize=N)` when the input space is large and you need to bound memory usage.
 
 **Q13: Does wrapping a function with `functools.partial` avoid the mutable-default-argument trap?**
+**Short:** functools.partial does not fix the mutable-default-argument trap, since it shares whatever default object the wrapped function has.
 
 No — `partial` inherits the trap rather than fixing it. The default value is evaluated once when the wrapped function's `def` statement executes, and `partial` simply calls that same function object on every invocation. `add_item = partial(append_to)` on a function defined as `def append_to(item, collection=[]):` still shares one `[]` list across every call made through `add_item`, exactly as it would through the original function. The fix is unchanged from the non-`partial` case: give the wrapped function a `None` default and construct a fresh mutable object inside its body before `partial` ever touches it. Always fix mutable defaults at the function definition, not at the call site, because every wrapper — `partial`, decorators, or plain aliasing — inherits the same shared object.
 
 **Q14: What does `operator.methodcaller` do, and when is it preferable to a lambda that calls a method?**
+**Short:** operator.methodcaller returns a picklable, introspectable callable for one named method call, unlike an equivalent lambda.
 
 `operator.methodcaller(name, *args)` returns a callable that invokes `obj.name(*args)` on whatever object it is later called with, giving you a picklable, introspectable stand-in for `lambda obj: obj.name(*args)`. It is most useful inside `map()` or as a `sorted(key=...)` argument when the transformation is "call this one method on every element" — `list(map(methodcaller("lower"), words))` reads as intent rather than mechanism. Unlike a lambda, a `methodcaller` object can be pickled and sent across `multiprocessing` process boundaries, and its `repr()` shows the method name for debugging. Reach for it whenever the transformation is a bare method call with fixed arguments; fall back to a lambda only when you need arbitrary expressions around the call.
 
 **Q15: What does `toolz.curry` automate that `functools.partial` requires you to do manually?**
+**Short:** toolz.curry automatically returns a partially-applied function when called with too few arguments, replacing manual partial calls.
 
 `toolz.curry` automatically returns a partially-applied function whenever you call a curried function with fewer arguments than it needs, without you having to call `partial` explicitly at each call site. Decorating `multiply(x, y)` with `@curry` lets you write `double = multiply(2)` directly — the curry machinery detects that one argument is missing and hands back a new callable waiting for the rest, whereas the same effect with plain `functools.partial` requires writing `partial(multiply, 2)` every time. This makes curried functions compose more naturally in a `toolz.pipe`/`compose` chain, since each stage can be built by simple application rather than explicit `partial` calls. The trade-off is an extra dependency and a style that is unfamiliar to engineers who have not used a curry-based functional library before.
 
 **Q16: What is the practical difference between `toolz` and `cytoolz` in a production pipeline?**
+**Short:** cytoolz is a drop-in Cython reimplementation of toolz that speeds up its own combinators, not the Python callbacks passed to them.
 
 `cytoolz` is a drop-in Cython reimplementation of `toolz`, so `import cytoolz as toolz` is a free swap that needs no code changes. Its own README puts the gain at "typically 2-5x faster with a few spectacular exceptions", and the qualification that matters is *what* gets faster: Cython removes the overhead of toolz's own combinators, not of the Python functions you hand them. Measured over 10,000 records, `cytoolz.groupby` and `cytoolz.reduceby` came in about 1.2-1.3x ahead, while `pipe` over `map`/`filter` with Python callbacks was a dead heat, because the per-element Python call dominates and no amount of Cython removes it. Take `cytoolz` for free when the toolz combinators themselves are hot — `groupby`, `reduceby`, `join`, `merge_with` over large collections — and do not plan capacity around an order-of-magnitude win that will not arrive.
 

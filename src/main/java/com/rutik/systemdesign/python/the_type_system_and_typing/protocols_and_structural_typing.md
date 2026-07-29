@@ -1175,6 +1175,7 @@ static and validate the data rather than the shape.
 ## 12. Interview Questions with Answers
 
 **Q: What is structural subtyping and how does `typing.Protocol` implement it?**
+**Short:** Structural subtyping matches a type by its shape rather than its class hierarchy, and Protocol implements this for mypy.
 Structural subtyping means a type is compatible based on its shape — the methods and attributes
 it has — rather than its class hierarchy. `Protocol` [PEP 544, 3.8] defines a set of required
 members; any class that provides those members (with compatible signatures) satisfies the Protocol,
@@ -1182,6 +1183,7 @@ verified by mypy/pyright at analysis time without runtime enforcement unless `@r
 is added.
 
 **Q: How does Protocol differ from ABC?**
+**Short:** Protocol matches structurally with no inheritance required, while ABC requires explicit subclassing and instantiation checks.
 ABC requires explicit inheritance (nominal subtyping) and can provide default method bodies; it
 raises `TypeError` at instantiation if abstract methods are missing. Protocol uses structural
 matching — no inheritance needed — and is verified statically, not at instantiation. Prefer
@@ -1189,6 +1191,7 @@ Protocol for library boundaries and dependency injection; prefer ABC when you ne
 implementation or runtime instantiation enforcement.
 
 **Q: What does `@runtime_checkable` do and what are its limitations?**
+**Short:** @runtime_checkable enables isinstance against a Protocol, but the check only confirms member names exist, not their signatures.
 It allows `isinstance(obj, SomeProtocol)` at runtime. The check is *shallow*: it only verifies
 that each Protocol member name resolves on the object, via `inspect.getattr_static()`. It does NOT
 verify that the attribute is callable, has the right signature, or returns the right type. A class
@@ -1199,12 +1202,14 @@ parameters to the same `isinstance()` — so for a security-sensitive gate write
 structural verification to mypy.
 
 **Q: When would you use a callable Protocol instead of `Callable[[X], Y]`?**
+**Short:** A callable Protocol can express keyword-only or **kwargs parameters that a plain Callable type cannot represent.
 When the callable has keyword-only arguments, `*args`, or `**kwargs` that `Callable` cannot
 express. `Callable[[str], str]` matches any one-argument str-to-str function. A callable
 Protocol can require `def __call__(self, text: str, *, lowercase: bool = False) -> str`,
 restricting to functions that accept that exact keyword argument.
 
 **Q: What is the difference between a covariant and contravariant TypeVar in a Protocol?**
+**Short:** A covariant TypeVar suits producer positions, a contravariant one suits consumer positions, and invariant suits both.
 Covariant (`T_co = TypeVar("T_co", covariant=True)`): safe for *producer / output* positions.
 A `Container[Dog]` satisfies `Container[Animal]` — you can use the more specific output where
 the less specific is expected. Contravariant (`T_contra`, `contravariant=True`): safe for
@@ -1213,6 +1218,7 @@ accepts any animal also handles dogs. Invariant (default): must match exactly; s
 the type is both read and written (mutable containers).
 
 **Q: Why must `Protocol` appear in the MRO when composing multiple Protocols?**
+**Short:** Protocol must appear explicitly in the MRO when composing protocols, or structural typing semantics are lost.
 Without `Protocol` in the MRO, Python (and mypy) treats the composed class as a concrete class
 inheriting from Protocol bases. The structural-typing semantics are lost — mypy requires
 explicit inheritance to satisfy the combined type, defeating the purpose. Adding `Protocol`
@@ -1220,11 +1226,13 @@ explicitly (e.g., `class ReadWritable(Readable, Writable, Protocol)`) preserves 
 typing for the composed interface.
 
 **Q: Can Protocol method bodies be inherited by conforming classes?**
+**Short:** Protocol method bodies exist only on the Protocol class itself and are never inherited by conforming classes.
 No. Method bodies written inside a Protocol class exist only on the Protocol class itself. They
 do not propagate to conforming classes. If you want shared implementation, use an ABC mixin,
 a concrete base class, or a separate utility function alongside the Protocol.
 
 **Q: How does mypy verify that a class satisfies a Protocol?**
+**Short:** mypy checks Protocol conformance at each call site, not at the conforming class's own definition.
 At each call site where a Protocol is expected, mypy checks that the actual argument's type
 has all Protocol members with compatible signatures. It does not check this at class definition
 time. This means you can define `PostgresRepository` before writing the `Repository` Protocol
@@ -1232,15 +1240,18 @@ and mypy will verify compatibility when you first pass a `PostgresRepository` wh
 is expected.
 
 **Q: What happens with `isinstance(x, P)` if `P` is a non-`@runtime_checkable` Protocol?**
+**Short:** isinstance against a non-runtime-checkable Protocol raises TypeError, since only @runtime_checkable protocols support it.
 Python raises `TypeError: Instance and class checks can only be used with @runtime_checkable protocols`. Decorate the Protocol with `@runtime_checkable` to use it with `isinstance()`; without the decorator the Protocol is a purely static construct. Do not confuse this with the other Protocol `TypeError`, which is a different failure: `Protocols with non-method members don't support issubclass(). Non-method members: 'name'.` fires on `issubclass()` — never `isinstance()` — against a Protocol that declares a plain data attribute, and it fires even when the Protocol *is* `@runtime_checkable`, because a class object cannot be inspected for an instance attribute that only exists after `__init__`.
 
 **Q: How do standard-library `SupportsInt`, `Sized`, and `Iterable` relate to Protocol?**
+**Short:** SupportsInt, Sized, and Iterable are pre-defined standard-library Protocols formalizing existing dunder-method contracts.
 They are pre-defined Protocols in the `typing` module that formalize Python's existing dunder-
 method contracts. `SupportsInt` requires `__int__`; `Sized` requires `__len__`; `Iterable[T]`
 requires `__iter__`. They allow existing built-in types (`int`, `list`, `dict`, `str`) to satisfy
 structural type annotations without inheriting from anything.
 
 **Q: How would you type-hint a function that accepts any file-like object supporting read and write?**
+**Short:** A composed Protocol requiring read and write methods types any file-like object without inheriting from a base class.
 Define a composed Protocol:
 ```python
 from typing import Protocol
@@ -1254,9 +1265,11 @@ not inherit from `io.IOBase` is rejected. Reach for `BinaryIO` only when you gen
 file object", and write your own Protocol when you mean "anything with `read` and `write`".
 
 **Q: What is the performance cost of `@runtime_checkable isinstance()` checks?**
+**Short:** A warm @runtime_checkable isinstance check costs about 0.2 microseconds, roughly twice an equivalent ABC check.
 Far less than most people assume: about `0.2 µs` per warm call for a 3-member Protocol on CPython 3.13, against `0.11 µs` for an equivalent ABC. The cold path — the first check of each new class — performs an `inspect.getattr_static()` lookup per Protocol member and costs roughly `1.1 µs`; after that the ABC machinery's per-class cache answers it. So a million-iteration loop pays about `0.2 s`, roughly 2x the ABC equivalent, whether the stream is homogeneous or spans thousands of classes. In hot loops prefer EAFP (`try/except AttributeError`) or hoist the check out of the loop — mostly because it gives you a narrowed type mypy can verify, and only secondarily for the microseconds.
 
 **Q: How do you express a Protocol for an object that must support `async with` (async context manager)?**
+**Short:** An async context manager Protocol declares async __aenter__ and __aexit__ methods that any conforming class must implement.
 ```python
 from typing import Protocol, Self
 class AsyncContextManager(Protocol):
@@ -1266,6 +1279,7 @@ class AsyncContextManager(Protocol):
 Any class that implements both dunder methods satisfies the Protocol structurally.
 
 **Q: Can a `dataclass` satisfy a Protocol?**
+**Short:** A dataclass satisfies a Protocol automatically whenever its generated fields and methods match the required members.
 Yes, and no special handling is needed on either side. A `@dataclass`-decorated class is an ordinary
 class with auto-generated `__init__`, `__repr__`, and `__eq__`; if it has all the methods and
 attributes the Protocol requires, with compatible types, mypy considers it a structural match. The
@@ -1273,6 +1287,7 @@ generated field annotations count as attribute members, so a dataclass satisfies
 Protocol such as `HasName` without writing anything extra.
 
 **Q: How does Protocol support the Dependency Inversion Principle in Python?**
+**Short:** Protocol lets a high-level module own the interface it depends on, inverting the dependency onto its implementors.
 High-level modules define the interface as a Protocol. Low-level modules implement it without
 importing the Protocol. The type checker verifies the match at the injection site. This inverts
 the dependency: the interface is owned by the consumer (high-level module), not the implementor.

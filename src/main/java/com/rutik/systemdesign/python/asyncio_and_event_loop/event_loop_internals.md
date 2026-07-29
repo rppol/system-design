@@ -908,51 +908,83 @@ asyncio.run(main(), debug=True)
 ## 12. Interview Questions with Answers
 
 **Q1: What is `_run_once()` and in what order does it execute its phases?**
+**Short:** _run_once() polls I/O, sweeps expired timers into _ready, then drains _ready last.
+
 `_run_once()` is the inner loop body in `BaseEventLoop`, called in a `while True` by `run_forever()`. The order matters and is not the intuitive one: it first purges cancelled `TimerHandle`s from the heap, then computes a poll timeout (`0` if `_ready` is non-empty or the loop is stopping, else the time until the earliest timer capped at `MAXIMUM_SELECT_TIMEOUT`, else `None`), then calls `selector.select(timeout)` — the only blocking syscall — then `_process_events()` to turn ready file descriptors into handles, then moves expired timers from the heap into `_ready`, and only then drains `_ready` up to a pre-snapshot `ntodo` count. The two counter-intuitive parts: timers are swept into `_ready` *after* the poll, not before, and `_ready` is drained *last* — the source comments that drain as "the only place where callbacks are actually called".
 
 **Q2: Why does `asyncio` process the entire `_ready` deque before calling `selector.select`?**
+**Short:** asyncio drains all of _ready before selecting so already-runnable callbacks aren't delayed.
+
 Callbacks in `_ready` represent work that is already known to be runnable (either explicitly scheduled or awoken by a past I/O event). Skipping to the selector before draining them would mean re-entering the kernel unnecessarily and potentially missing an already-enqueued done-callback. The cost is that a burst of `call_soon` callbacks can starve the selector — there is no preemption.
 
 **Q3: Explain how `Future.__await__` suspends a coroutine.**
+**Short:** Future.__await__ yields itself, which Task.__step turns into a done-callback registration.
+
 `Future.__await__` is a generator-based coroutine method. When `not self.done()`, it executes `yield self` — the `SEND` bytecode opcode sees a yielded value from the iterator and passes it up through the coroutine chain to `Task.__step`. The Task checks `result._asyncio_future_blocking`, registers `Task.__wakeup` as a done-callback via `add_done_callback`, and returns. When `Future.set_result()` fires, it calls `loop.call_soon(cb)` for each done-callback, re-enqueueing the Task in `_ready`.
 
 **Q4: What is `asyncio.sleep(0)` doing at the bytecode level?**
+**Short:** asyncio.sleep(0) does a bare yield, so Task.__step reschedules it via call_soon for the next tick.
+
 `asyncio.sleep(0)` calls the `@types.coroutine`-decorated `__sleep0()`, which executes a bare `yield`. This causes `Task.__step` to receive `None` as the yielded result (not a Future), which triggers the branch `result is None → loop.call_soon(self.__step)`. The Task is re-added to `_ready` and resumes on the *next* tick. Exactly one selector pass happens between the suspend and the resume (assuming nothing else is in `_ready`).
 
 **Q5: Why is `call_soon` not thread-safe, and how does `call_soon_threadsafe` fix it?**
+**Short:** call_soon_threadsafe adds a lock and wakes select() via a byte written to a loopback socket pair.
+
 `call_soon` appends a `Handle` to `_ready` (a `deque`) and does not hold a lock. A concurrent write from another thread while the event loop thread is iterating `_ready` in Phase 5 would corrupt the deque (CPython's deque append is thread-safe at the C level, but the loop's `ntodo` snapshot would miss the appended item). `call_soon_threadsafe` appends under `self._write_lock` and then writes one byte to `self._ssock` (a loopback socket pair). The event loop's selector watches `self._csock`; the byte makes `select()` return immediately, so the new callback runs in the next tick without waiting for the full timeout.
 
 **Q6: What is `Task.__step` and when is it called?**
+**Short:** Task.__step is the callback that drives a coroutine forward by calling coro.send(None).
+
 `Task.__step` is a bound method registered as a `Handle` in `_ready` (via `call_soon`). When the Handle fires, `__step` calls `coro.send(None)` to drive the coroutine one step. If the coroutine `yield`s a pending Future, `__step` registers itself as a done-callback on that Future. If the coroutine raises `StopIteration`, `__step` calls `Future.set_result`. If the coroutine raises any exception, `__step` calls `Future.set_exception`. The Task is never in `_ready` while it is waiting on a Future — it is "parked" on the Future's `_callbacks` list.
 
 **Q7: How does `asyncio.run()` differ from manually creating and running a loop?**
+**Short:** asyncio.run() guarantees full shutdown of async generators and the executor that a manual loop skips.
+
 `asyncio.run()` creates a brand new event loop, runs the coroutine on it, and guarantees full shutdown even on exceptions. It sets the new loop as current for the thread, wraps the coroutine in a Task, calls `run_forever()` (which exits when the Task completes), then calls `loop.run_until_complete(loop.shutdown_asyncgens())` to close any open async generators, then `loop.run_until_complete(loop.shutdown_default_executor())`, then `loop.close()`. Driving a hand-made loop with `run_until_complete(coro)` skips the async-generator and executor shutdown, so async generators can be finalized after the loop is gone. Pass `loop_factory=` to `asyncio.run()` when you need a non-default loop implementation.
 
 **Q8: Why is uvloop 2-4x faster than `SelectorEventLoop`?**
+**Short:** uvloop is faster because libuv's C event loop replaces Python-level timer and I/O dispatch.
+
 uvloop replaces the Python-level `_run_once` with a Cython extension calling libuv's `uv_run()`. All timer management, I/O polling, and callback dispatch happen in C with no Python frame overhead per callback. DNS resolution uses `uv_getaddrinfo` (truly async, non-blocking), while `SelectorEventLoop` calls `socket.getaddrinfo` via a thread-pool executor. The GIL is released for the entire libuv loop iteration, not just the `select()` syscall.
 
 **Q9: What happens when two coroutines `await` the same `Future`?**
+**Short:** All Tasks awaiting the same Future register as done-callbacks and all resume once it resolves.
+
 Both register their `Task.__wakeup` as done-callbacks via `add_done_callback`. When `Future.set_result(v)` fires, the loop calls `call_soon` for each callback in `self._callbacks`, appending all waiting Tasks to `_ready`. All awaiting Tasks will resume in the next (or same, depending on snapshot) tick. The Future stores one result; all awaiters receive the same value. This is the mechanism behind `asyncio.Event` — multiple Tasks wait on a single Future (the event's internal future).
 
 **Q10: What is the `_asyncio_future_blocking` flag and why does it exist?**
+**Short:** _asyncio_future_blocking marks a yielded object as a schedulable Future rather than an arbitrary value.
+
 It is the marker that tells `Task.__step` a yielded object is a schedulable asyncio Future rather than an arbitrary generator value. `Future.__await__` sets `self._asyncio_future_blocking = True` immediately before `yield self`. `Task.__step` checks `getattr(result, '_asyncio_future_blocking', None)` — if truthy, it registers the done-callback; if `None` or falsy and result is not `None`, it logs a warning about an unexpected yield value.
 
 **Q11: How does `asyncio.timeout(seconds)` work at the loop level?**
+**Short:** asyncio.timeout() schedules a call_later callback that cancels the task if the deadline passes first.
+
 `asyncio.timeout(n)` (3.11+) returns a context manager. On entry, it schedules a `call_later(n, cancel_task)` callback in `_scheduled`. If the inner coroutine finishes before the deadline, it calls `h.cancel()` on the `TimerHandle` (marks it cancelled so `_run_once` skips it when dequeued). If time expires, `cancel_task` fires `task.cancel()` which raises `CancelledError` into the task via `Task.__step(exc=CancelledError())`.
 
 **Q12: What does `loop.add_reader(fd, cb)` do internally?**
+**Short:** loop.add_reader() registers the file descriptor with the selector so ready events enqueue its callback.
+
 It calls `self._selector.register(fd, selectors.EVENT_READ, (cb, None))` (or `modify` if already registered for write). The key–data pair maps the file descriptor to `(reader_handle, writer_handle)`. In Phase 4 of `_run_once`, `_process_events` iterates the list returned by `selector.select`, looks up the key data, and appends the appropriate handle to `_ready`.
 
 **Q13: How do you run asyncio code from a synchronous context when a loop is already running?**
+**Short:** You cannot re-enter a running loop, so use run_coroutine_threadsafe from a separate thread instead.
+
 You cannot re-enter the loop, so you either schedule without blocking or hand the work to a different thread. Inside async code that cannot own the loop, `asyncio.ensure_future(coro)` or `loop.create_task(coro)` schedules it and returns immediately. From a genuinely synchronous thread, `asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=...)` submits to the running loop and blocks *that* thread, not the loop's. In a Jupyter cell the answer is simpler than either: the cell body is already async, so write `await coro()` directly. Do not reach for a loop-reentrancy monkey-patch — the well-known one was archived in 2024 and does not work on 3.14, and re-entrancy breaks the `ntodo` snapshot invariant that keeps a tick finite.
 
 **Q14: What is the `asyncio` debug mode and what does it catch?**
+**Short:** asyncio debug mode logs slow callbacks and unawaited coroutines but adds heavy per-object overhead.
+
 Enabled via `asyncio.run(main(), debug=True)` or `PYTHONASYNCIODEBUG=1`. It: (1) logs at WARNING level any callback taking longer than `loop.slow_callback_duration`, default 0.1 s; (2) records the source traceback when Futures and Tasks are created (expensive, but it is what makes "Task was destroyed but it is pending" actionable); (3) enables `ResourceWarning` for unclosed transports and event loops; (4) warns on unawaited coroutines. The overhead is not a fixed percentage and can be severe: it scales with how many Tasks and callbacks you create, because the traceback capture is per object. On a task-creation-heavy microbenchmark it measured over 3x slower. That is why it is a development and CI switch, not a production one — in production, set `loop.slow_callback_duration` without full debug mode.
 
 **Q15: Why can `asyncio` not parallelize CPU-bound work with threads, and what is the fix?**
+**Short:** The GIL serializes threads on CPU-bound Python code, so ProcessPoolExecutor is the real fix.
+
 The GIL ensures only one Python thread runs bytecode at any instant. Two threads running pure Python are serialized — one waits while the other holds the GIL. `loop.run_in_executor(ThreadPoolExecutor)` is only effective for I/O-bound work that releases the GIL during the syscall (file read, network read). For CPU-bound pure-Python work (regex, JSON parsing, attribute-heavy loops), the fix is `ProcessPoolExecutor` — separate processes have independent GILs. Free-threading is the other route: PEP 703 landed as an experimental build in 3.13 and became officially supported in 3.14 (PEP 779), and on a free-threaded interpreter multiple threads do run Python bytecode concurrently. Two caveats keep it from being a drop-in answer here: it requires the free-threaded build, not a flag on a normal one, and asyncio's own event loop is still single-threaded by design, so free-threading widens what a `run_in_executor` thread pool can do rather than changing how the loop schedules.
 
 **Q16: How does structured concurrency in `asyncio.TaskGroup` differ from `asyncio.gather`?**
+**Short:** TaskGroup cancels all siblings and raises an ExceptionGroup, while gather re-raises only the first error.
+
 `TaskGroup` is a context manager that owns its child tasks. If any child raises an unhandled exception, `TaskGroup` cancels all remaining siblings and re-raises as an `ExceptionGroup`. The parent waits for all siblings to finish cancellation before propagating the exception. `asyncio.gather` re-raises only the first exception and leaves the other awaitables running; with `return_exceptions=True` it raises nothing at all and you must inspect the returned list yourself. `TaskGroup` follows the structured concurrency principle: tasks cannot outlive the scope that created them.
 
 ---

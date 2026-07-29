@@ -1256,18 +1256,24 @@ async def safe_consumer(url: str) -> dict | None:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the most common async bug in FastAPI services, and how do you detect it?**
+**Short:** Calling a blocking sync call inside an async def route stalls the whole event loop.
+
 Calling a blocking synchronous function (like `requests.get()` or `time.sleep()`) inside an
 `async def` route — this stalls the entire event loop for the duration of the call. Detect it
 by enabling `loop.set_debug(True)` (warns when a callback takes > 100ms), by adding Sentry's
 `AsyncioIntegration`, or by profiling with `yappi` which reports coroutine wall time.
 
 **Q2: What is the difference between `asyncio.to_thread()` and `loop.run_in_executor()`?**
+**Short:** asyncio.to_thread() is sugar for loop.run_in_executor(None, fn, *args) on the default thread pool.
+
 `asyncio.to_thread(fn, *args)` is syntactic sugar introduced in Python 3.9 for
 `loop.run_in_executor(None, fn, *args)`. Both submit the callable to the default
 `ThreadPoolExecutor`. Use `to_thread()` for I/O-bound sync work; use `run_in_executor(pool)`
 with a `ProcessPoolExecutor` when you need to bypass the GIL for CPU-bound work.
 
 **Q3: How large is the default thread pool used by `asyncio.to_thread()`?**
+**Short:** The default asyncio thread pool size is min(32, os.process_cpu_count() + 4).
+
 `min(32, (os.process_cpu_count() or 1) + 4)` — the default `ThreadPoolExecutor` size in
 CPython, computed from `os.process_cpu_count()` since 3.13 so it respects CPU affinity and
 `PYTHON_CPU_COUNT`. On a 4-CPU container: `min(32, 8) = 8` threads. The 9th concurrent
@@ -1277,11 +1283,15 @@ invisible in traces. For high-concurrency workloads, create a custom pool and pa
 `run_in_executor`.
 
 **Q4: What is the difference between `asyncio.Semaphore` and `asyncio.Lock`?**
+**Short:** A Lock allows one concurrent holder; a Semaphore(n) allows up to n concurrent holders.
+
 `Lock` allows exactly 1 concurrent holder. `Semaphore(n)` allows up to `n` concurrent holders.
 A `Lock` is a `Semaphore(1)`. Use `Semaphore` to bound concurrency (e.g., max 20 DB connections
 at once); use `Lock` for mutual exclusion (e.g., protecting a shared counter or cache).
 
 **Q5: Why does unbounded `asyncio.gather()` over 10,000 URLs fail?**
+**Short:** Unbounded gather() overwhelms whichever resource runs out first, such as the connection pool or file descriptors.
+
 Because nothing in `gather()` bounds concurrency, so the limit that bites is whichever
 resource runs out first rather than one you chose. With `httpx.AsyncClient` defaults
 (`max_connections=100`, 5s pool timeout) the surplus coroutines queue on the connection pool
@@ -1291,6 +1301,8 @@ target starts returning 429. Fix: gate each coroutine on `async with asyncio.Sem
 so the concurrency is a reviewable constant.
 
 **Q6: What is jitter in retry logic, and why does it matter?**
+**Short:** Jitter is a random delay added to backoff so failed retries don't all fire in lockstep.
+
 Jitter is a random delay added to the exponential backoff interval. Without jitter, N services
 that fail simultaneously all retry at the same intervals (1s, 2s, 4s, …), creating a
 thundering herd that repeatedly hammers the recovering service. Full jitter draws the delay
@@ -1298,6 +1310,8 @@ from `uniform(0, min(max_delay, base * 2^attempt))`, spreading retries across th
 and reducing load on the target by a factor of N.
 
 **Q7: What is the difference between `asyncio.timeout()` and `asyncio.wait_for()`?**
+**Short:** asyncio.timeout() is a composable context manager while wait_for() wraps a single awaitable.
+
 The difference is composition, not the exception they raise. `asyncio.timeout()` (3.11) is an
 async context manager, so it can put one deadline over a whole block that itself contains
 `async with` statements; `asyncio.wait_for()` wraps a single awaitable at the `await` site.
@@ -1306,18 +1320,24 @@ not a subclass, so `asyncio.TimeoutError is TimeoutError` is `True` and one `exc
 TimeoutError:` covers both.
 
 **Q8: What happens when you call `asyncio.create_task()` but don't store the return value?**
+**Short:** An unreferenced Task can be garbage-collected and cancelled before it finishes.
+
 The `Task` object has no strong reference, so Python's garbage collector may collect and
 cancel it before it finishes. CPython logs a warning: "Task was destroyed but it is pending!".
 Fix: store the task in a module-level `set` and register a `done_callback` to discard it
 when complete — this keeps a strong reference for the task's lifetime without causing a leak.
 
 **Q9: How do you implement backpressure in an async producer/consumer system?**
+**Short:** A bounded asyncio.Queue(maxsize=N) applies backpressure by suspending the producer when full.
+
 Use `asyncio.Queue(maxsize=N)`. The producer calls `await queue.put(item)`, which suspends
 the producer coroutine when the queue is full (maxsize reached), applying backpressure.
 Consumer calls `await queue.get()` and `queue.task_done()`. The bounded queue acts as a
 buffer and flow-control mechanism between producers and consumers with different throughputs.
 
 **Q10: What are the three states of a circuit breaker, and when does it transition between them?**
+**Short:** A circuit breaker cycles through CLOSED, OPEN, and HALF-OPEN states based on failure counts.
+
 CLOSED (normal): requests pass through; failure counter increments on exceptions. OPEN
 (fail-fast): after `failure_threshold` consecutive failures, the breaker opens; all requests
 immediately raise `RuntimeError` without calling the downstream service. HALF-OPEN (probing):
@@ -1325,6 +1345,8 @@ after `recovery_timeout` seconds, one probe request is allowed through; if it su
 breaker closes; if it fails the breaker reopens with a fresh timeout.
 
 **Q11: How do async generators differ from regular generators, and when should you use them?**
+**Short:** Async generators use yield inside async def and are consumed with async for, so each yield can await.
+
 Regular generators use `yield` and are consumed with a synchronous `for` loop. Async generators
 use `yield` inside `async def` and are consumed with `async for`, meaning each `yield` point
 can suspend at an `await` call inside the generator body. Use async generators for lazy I/O
@@ -1332,6 +1354,8 @@ streaming: HTTP pagination, database cursor iteration, log tailing — anywhere 
 process items as they arrive without loading all into memory first.
 
 **Q12: How does `contextlib.aclosing()` prevent resource leaks in async generators?**
+**Short:** aclosing() awaits gen.aclose() on exit so cleanup runs synchronously instead of as a deferred task.
+
 It turns a deferred cleanup into a synchronous one at the point of exit. When `async for`
 exits early via `return`, `break` or an exception, asyncio's PEP 525 finalizer hook schedules
 `aclose()` as a *task* — so even in refcounted CPython the generator's `finally` block runs
@@ -1341,6 +1365,8 @@ awaits `gen.aclose()` on exit, so the connection or file handle in that `finally
 before the next line of the caller runs.
 
 **Q13: How would you debug a FastAPI service where all requests are slow but CPU usage is low?**
+**Short:** Slow requests with low CPU usage is the signature of blocking sync calls inside async routes.
+
 Low CPU + slow requests in an async service is the classic blocking-in-async signature.
 Steps: (1) enable `loop.set_debug(True)` and watch for slow-callback warnings; (2) add
 `yappi` profiling with `clock_type=WALL` to see which coroutines have high wall time;
@@ -1349,6 +1375,8 @@ Steps: (1) enable `loop.set_debug(True)` and watch for slow-callback warnings; (
 default Starlette thread pool (default: 40 threads).
 
 **Q14: What is the difference between `async for` and `asyncio.gather()` for consuming multiple async sources?**
+**Short:** async for streams items sequentially from one source while gather() runs many coroutines concurrently.
+
 `async for` processes items sequentially from a single async generator — each item is awaited
 in turn. `asyncio.gather()` runs multiple coroutines concurrently, collecting all results
 when all complete. Use `async for` when you need ordered, lazy streaming from one source.
@@ -1357,6 +1385,8 @@ and collect results. Combining both: use an async generator as a lazy source, th
 bounded concurrent consumers with `gather()`.
 
 **Q: Why does a request that times out often fail to trip the circuit breaker wrapping it?**
+**Short:** CancelledError is a BaseException, so an except-Exception breaker never counts a timeout as a failure.
+
 Because `asyncio.CancelledError` inherits from `BaseException`, not `Exception`, so a breaker
 whose failure arm is `except Exception:` never counts a timeout. `asyncio.timeout()` cancels
 the inner task and converts the cancellation to `TimeoutError` only at the context manager's
@@ -1367,6 +1397,8 @@ protects, so the `TimeoutError` is raised by `fn()` and travels through the `exc
 Exception:` arm.
 
 **Q: Is `asyncio.Semaphore` acquisition fair, or can a coroutine be starved?**
+**Short:** asyncio.Semaphore acquisition is FIFO, so waiting coroutines cannot be starved by new arrivals.
+
 It is FIFO — waiters are queued in a `deque` and woken in arrival order. CPython's
 `Semaphore.acquire()` deliberately refuses the fast path whenever the semaphore is locked
 ("Maintain FIFO, wait for others to start even if `_value > 0`"), so a newly arriving
@@ -1376,6 +1408,8 @@ waits about `(k / C) x L`. Starvation is therefore not a failure mode you need t
 around, unlike with a naive counter-plus-Event implementation.
 
 **Q15: How do you safely propagate context (e.g., request IDs, auth tokens) across await boundaries in asyncio?**
+**Short:** contextvars.ContextVar propagates values like request IDs across await boundaries into child tasks.
+
 Use `contextvars.ContextVar`. Unlike `threading.local`, `ContextVar` values are inherited by
 child tasks (copies of the context are made at `asyncio.create_task()` time). Set the value
 at the start of a request, and it is accessible in all coroutines spawned within that request's

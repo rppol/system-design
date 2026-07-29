@@ -1024,51 +1024,83 @@ gen.send("hello")   # echo: hello
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between an iterable and an iterator?**
+**Short:** An iterable's __iter__ returns an iterator, while an iterator itself implements both __iter__ and __next__.
+
 An iterable implements `__iter__()` and returns an iterator. An iterator implements both `__iter__()` (returning `self`) and `__next__()` (returning the next item or raising `StopIteration`). A list is iterable but not itself an iterator; calling `iter(lst)` produces a `list_iterator` which is an iterator. You can call `iter()` on a list multiple times to get independent traversals; you cannot on an iterator.
 
 **Q2: What happens when you call a generator function?**
+**Short:** Calling a generator function runs no code immediately; it just returns a generator object that starts executing on the first next().
+
 No code inside the function runs. Calling a generator function returns a generator object immediately. Execution begins only when `next()` is called on the generator object. The function body runs until it hits a `yield`, at which point the yielded value is returned to the caller and the function suspends, preserving all local variables and execution position in its internal frame.
 
 **Q3: What does `yield from` do that a simple `for x in sub: yield x` loop does not?**
+**Short:** yield from transparently forwards send(), throw(), and close() into the sub-generator, which a manual for loop discards.
+
 `yield from` transparently delegates `send()`, `throw()`, and `close()` into the sub-generator, and captures its `StopIteration.value` as the expression result. A manual `for` loop discards sent values (the sub-generator's `yield` expressions always receive `None`) and does not propagate `throw()` or `close()` into the sub-generator. This transparent delegation is how `await` is implemented — `await coro` desugars to `yield from coro`.
 
 **Q4: Explain PEP 479. What problem does it solve?**
+**Short:** PEP 479 turns a StopIteration that escapes a generator body into a RuntimeError, so it can no longer silently end an outer loop.
+
 PEP 479, enforced from Python 3.7, converts any `StopIteration` exception that escapes a generator body into `RuntimeError`. Before this, if a helper called inside a generator raised `StopIteration` unexpectedly (for example, calling `next()` on an exhausted iterator), it would silently terminate the `for` loop consuming the generator — a very hard-to-debug bug. The fix is to never `raise StopIteration` inside a generator; use `return` instead, which raises `StopIteration` safely through the generator machinery.
 
 **Q5: How does `.send(value)` work? What is required before the first `send()`?**
+**Short:** send(value) delivers value to the currently suspended yield, so the first call must be next(gen) or gen.send(None) to prime it.
+
 `send(value)` resumes the generator and delivers `value` as the result of the currently-suspended `yield` expression inside the generator. Before the first `send()`, the generator has not yet reached any `yield`, so there is no suspended expression to deliver a value to. Therefore, the first call must be `next(gen)` or `gen.send(None)` to advance to the first `yield`. Sending a non-None value before priming raises `TypeError: can't send non-None value to a just-started generator`.
 
 **Q6: Why does a list of 10 million integers cost hundreds of megabytes while a generator expression over the same range costs 192 bytes?**
+**Short:** A ten-million-element generator expression costs a flat 192 bytes because it stores a bookmark, not the materialized values.
+
 A list evaluates everything eagerly and stores it, while a generator stores only a bookmark. The list is an 80,000,056-byte pointer array — 8 bytes per slot — plus the 10 million `int` objects those pointers reach, 28 bytes each, so the honest total is about 360 MB rather than the 80 MB `sys.getsizeof` reports (it is not recursive). A generator expression is one generator object of 192 bytes: a code pointer, a frame, and flags. Its size has no `n` term at all, so the same 192 bytes covers 10 elements and 10 million alike.
 
 **Q7: When would you use `itertools.tee()` and what is the hidden cost?**
+**Short:** itertools.tee() creates independent iterators from one iterable, but buffers unread elements if the copies fall out of lock-step.
+
 `tee(it, n)` creates `n` independent iterators from a single iterable. Use it when you need to make multiple passes through a one-pass iterator (generator) without materialising it. The hidden cost: internally, `tee` buffers any elements that one copy has consumed but the other has not yet seen. If one copy races far ahead of the other, the buffer can grow to O(n) in memory — potentially as large as a materialised list. If both copies are consumed in lock-step, the buffer stays small.
 
 **Q8: What is the generator-based coroutine pattern and how does it relate to `async/await`?**
+**Short:** Generator-based coroutines predate async/await, and await expr is essentially syntactic sugar for yield from expr.
+
 Before `async/await` (Python 3.5), coroutines were written as generator functions using `yield` and `yield from`. The event loop would `send()` futures into generators, which would `yield from` them. `await expr` in Python 3.5+ is syntactic sugar for `yield from expr` with additional restrictions (only awaitable objects allowed). Async generators (Python 3.6+) combine `async def` with `yield` and are iterated using `async for`.
 
 **Q9: How do you handle cleanup (releasing resources) in a generator?**
+**Short:** Cleanup in a generator belongs in a try/finally block, since gen.close() injects GeneratorExit at the suspended yield.
+
 Use a `try`/`finally` block inside the generator. When `gen.close()` is called, Python injects a `GeneratorExit` exception at the suspended `yield`. The `finally` block runs whether the generator is closed early or exhausted normally. This guarantees file handles, database connections, and locks are released even if the caller stops iterating before the generator is exhausted.
 
 **Q10: What are the limitations of generator expressions compared to generator functions?**
+**Short:** Generator expressions cannot use send(), throw(), or close(), and support no multi-line logic or try/finally cleanup.
+
 Generator expressions cannot use `send()`, `throw()`, or `close()` meaningfully — they have no `yield` that can receive a sent value. They do not support multi-line logic, cannot have `try`/`finally` for cleanup, and are harder to debug (no function name, limited tracebacks). Use a generator function when you need bidirectional communication, cleanup guarantees, complex state, or readable multi-step logic.
 
 **Q11: Can a generator be used with `len()`? How do you count elements efficiently?**
+**Short:** len() fails on a generator because it is lazy, so counting elements without materializing means using sum(1 for _ in gen).
+
 No — `len()` raises `TypeError: object of type 'generator' has no len()`, because a generator is lazy and cannot know its length without running to completion. To count without materialising, use `sum(1 for _ in gen)`, which consumes the generator in O(1) memory but leaves it exhausted. If you need both the length and the elements, materialise once: `items = list(gen); n = len(items)`. Note that a custom class can supply `__length_hint__` to give consumers like `list()` a sizing hint without promising an exact `len()`.
 
 **Q12: What is `itertools.groupby` and what is the most common mistake when using it?**
+**Short:** itertools.groupby only groups consecutive equal-key elements, so it silently produces wrong groups on unsorted input.
+
 `groupby(iterable, key)` yields consecutive groups — `(key_value, group_iterator)` pairs for runs of consecutive elements with the same key. The most common mistake is using it on unsorted data: `groupby` only groups consecutive equal-key elements, so `[A, B, A]` produces three groups (`A`, `B`, `A`), not two. Always sort by the key before calling `groupby`. The second common mistake is exhausting the group iterator before moving to the next key — each group iterator becomes invalid when `groupby` advances to the next key, so you must consume or materialise it immediately.
 
 **Q13: Why do `[lambda: i for i in range(3)]` all return `2` when called, and how do you fix it?**
+**Short:** Lambdas built in a loop share one cell and read its final value at call time, so [lambda: i for i in range(3)] all return 2.
+
 Every lambda created in the loop captures the variable `i` by reference, not by its value at creation time, so all three closures share the same cell and see whatever `i` equals after the loop finishes — which is `2`. This is late binding: a closure looks up a free variable in its enclosing scope at call time, not at definition time, and by the time any of the three lambdas is actually invoked, the loop has already finished and `i` has settled on its final value. The fix is to force early binding by capturing the current value as a default argument: `[lambda i=i: i for i in range(3)]`, which creates a new parameter `i` per lambda that is bound at definition time. This trap applies equally to generator expressions and any closure built inside a loop, not just list comprehensions.
 
 **Q14: How do you design a custom iterable class that supports multiple independent traversals?**
+**Short:** A custom iterable supports multiple passes only if __iter__ returns a fresh iterator object on every call instead of self.
+
 Make `__iter__` return a fresh iterator object on every call instead of returning `self`, so each `for` loop or `iter()` call gets its own independent position in the sequence. The module's `MultipassRange` example delegates to `iter(range(self._n))` inside `__iter__`, which constructs a brand-new `range_iterator` each time — calling `list(r)` twice on the same `MultipassRange` instance produces the full sequence both times. Contrast this with a class that implements `__next__` on itself and returns `self` from `__iter__` (like `Range10` in the same section): once exhausted, every subsequent `iter()` call returns the same spent iterator, and a second pass silently produces nothing. Use the "return a fresh iterator" pattern whenever callers need to iterate the same object more than once.
 
 **Q15: What do the three type parameters in `Generator[YieldType, SendType, ReturnType]` represent?**
+**Short:** In Generator[YieldType, SendType, ReturnType], the three parameters describe what a generator yields, receives, and returns.
+
 They are, in order, what the generator gives out, what it takes in, and what it finishes with. `YieldType` is the type produced by each `yield` and received by the caller from `next()`. `SendType` is the type the caller passes back via `gen.send(value)`, which becomes the result of the `yield` expression inside the generator. `ReturnType` is the type carried by `StopIteration.value` when the generator finishes via `return`. A generator that only produces values and never receives sent data or returns a final value is more precisely annotated as `Iterator[YieldType]`, which is shorthand for `Generator[YieldType, None, None]`. Get all three parameters right and static type checkers can catch a caller sending the wrong type into `.send()` or ignoring a meaningful return value.
 
 **Q16: In the memory-efficient CSV case study, why is `aggregate_by_merchant` the only stage whose memory grows with the data, and what does it scale with?**
+**Short:** aggregate_by_merchant is the only stage whose memory grows with distinct merchant IDs, not with the number of rows processed.
+
 Every stage before it — `read_lines`, `parse_rows`, `filter_valid` — is a generator that holds at most one line or one row dict in memory at a time, so their memory footprint is O(1) regardless of file size. `aggregate_by_merchant` must accumulate a running total per merchant in a `defaultdict`, so its memory is proportional to the number of *distinct* merchant IDs, not the 80 million rows processed — the case study assumes roughly 50,000 merchants at about 150 bytes each, for 7.5 MB total. This is why the same pipeline processes a 10 GB file in about 7.5 MB of peak memory — the streaming stages contribute under 2 KB between them: cardinality of the aggregation key, not row count, is what determines memory for any stage that must remember state across the stream. Design pipelines so only the final aggregation stage buffers, and keep every upstream stage a pure pass-through generator.
 
 ---

@@ -733,51 +733,83 @@ Now `mypy --strict consumer_code/` sees the library's type annotations and catch
 ## 12. Interview Questions with Answers
 
 **Q1: What problem does `pyproject.toml` solve, and which PEPs define it?**
+**Short:** pyproject.toml replaces setup.py and scattered config files with one declarative file standardized by PEP 517, 518, and 621.
+
 `pyproject.toml` provides a single, declarative file that replaces `setup.py`, `setup.cfg`, `MANIFEST.in`, and scattered tool config files. PEP 517 decouples build frontends from backends via a standard interface. PEP 518 introduces the `[build-system]` table so tools know which backend to invoke. PEP 621 standardizes the `[project]` metadata table (name, version, dependencies). Before these PEPs, `setup.py` executed arbitrary Python code during install, making builds non-reproducible and creating security risks.
 
 **Q2: What is the difference between a wheel and an sdist, and when does each matter?**
+**Short:** A wheel is a pre-built archive installed by copying files, while an sdist is raw source that must be built at install time.
+
 A wheel (`.whl`) is a pre-built archive — install time is just unzipping and copying files. An sdist (`.tar.gz`) is raw source that requires running the build backend at install time, which may involve compiling C extensions. Pure Python wheels use the tag `py3-none-any` and work everywhere. C extension wheels are platform-specific (e.g., `cp313-cp313-manylinux_2_17_x86_64`). In production Docker builds, always install from wheels — missing a wheel for your platform triggers an sdist build that may fail if the build tools are absent.
 
 **Q3: Explain how `uv` achieves 10-100x speed improvement over `pip`.**
+**Short:** uv is a Rust tool that installs from a hard-linked global cache with a parallel resolver, making a warm-cache install ~10ms.
+
 `uv` is written in Rust and uses several techniques: a global wheel cache (`~/.cache/uv/`) with hard links (install is a metadata operation, not a copy), a parallel SAT resolver that resolves dependencies concurrently rather than sequentially, and pre-compiled Rust routines for TOML parsing, hash verification, and file system operations. On a warm cache hit, installing a package is ~10ms vs. pip's ~200ms because no network request or file copy occurs — only a directory entry is created.
 
 **Q4: What is an editable install and when do you use it?**
+**Short:** An editable install points imports at the source tree instead of copying files, so local edits appear without reinstalling.
+
 `pip install -e .` or `uv pip install -e .` installs the package by reference to the source tree instead of copying files into `site-packages`. Python's import machinery finds the package at `src/mypackage/` directly. Changes to source files are immediately reflected without reinstalling. Use editable installs during development when you have multiple internal packages that depend on each other — without it, you would need to reinstall after every change. Never use editable installs in production containers.
 
 **Q5: Why should library packages not commit a lock file, while application projects should?**
+**Short:** Libraries should not commit a lock file because consumers never read it, while applications must commit one for reproducibility.
+
 A library (published to PyPI) is consumed by many different applications, each with its own set of dependencies. Committing a lock file would have no effect on consumers (they don't read your lock file) and could falsely imply the exact pinned versions are required. The library should declare loose bounds in `[project.dependencies]` and let the consumer's resolver find compatible versions. An application (deployed to a specific environment) must be fully reproducible — every developer and every CI run must produce the same environment — so committing the lock file guarantees this.
 
 **Q6: What does `py.typed` do and what happens if you omit it from a library?**
+**Short:** py.typed signals that a package ships type information; without it, mypy treats every call into that package as returning Any.
+
 `py.typed` is an empty marker file defined in PEP 561. Its presence in a package's directory signals to type checkers (mypy, pyright) that the package ships type information and that type checking should be applied to it. Without `py.typed`, mypy treats the entire package as `Any` — all calls to the library's functions return `Any`, all type errors in usage are suppressed, and consumers lose all IDE autocompletion and type safety benefits. Fix: create an empty `src/mylib/py.typed` and ensure it is included in the wheel.
 
 **Q7: How does `ruff` differ from `flake8` + `black` + `isort`, and why would you migrate?**
+**Short:** ruff is a single Rust binary reimplementing flake8, black, and isort rules, running 10-100x faster than the three combined.
+
 `ruff` is a single Rust binary that implements the rules of `flake8` (and 50+ plugins), `black`-compatible formatting, and `isort` import sorting. It is 10-100x faster — checking the entire CPython codebase takes under 1 second vs. 30+ seconds with flake8. It uses the same configuration format (`pyproject.toml`) for all rules. Migration is a drop-in replacement for most projects: `ruff check` replaces `flake8`, `ruff format` replaces `black`, and isort configuration maps directly to `[tool.ruff.lint.isort]`. The main reason not to migrate is if you use a custom flake8 plugin that ruff does not yet support.
 
 **Q8: What is `pre-commit` and how does it differ from running linters in CI?**
+**Short:** pre-commit runs the same checks as CI locally before a commit, giving developers immediate feedback instead of a CI failure cycle.
+
 `pre-commit` is a framework that installs git hooks (stored in `.pre-commit-config.yaml`) that run before each commit on the developer's machine. It creates isolated environments for each hook. The key difference from CI: pre-commit catches issues before they are committed, giving the developer immediate feedback and preventing a CI failure cycle. CI still runs the same checks (via `pre-commit run --all-files`) as the authoritative gate, but the developer loop is much faster. `pre-commit autoupdate` keeps hook versions current.
 
 **Q9: Explain semantic versioning constraints: what is the difference between `^1.2.0` and `~1.2.0` in poetry?**
+**Short:** Caret ^1.2.0 allows any 1.x update assuming semver, while tilde ~1.2.0 restricts updates to patch releases only.
+
 `^1.2.0` (caret) allows updates that do not change the left-most non-zero digit: for `>=1.0.0`, this means `>=1.2.0, <2.0.0`. It assumes semantic versioning is honored — any 1.x version is backward compatible. `~1.2.0` (tilde) allows only patch-level updates: `>=1.2.0, <1.3.0`. Use caret for most dependencies where you trust the upstream project follows semver. Use tilde when you are conservative about minor version changes, e.g., a library that has historically made breaking changes in minor releases.
 
 **Q10: How do you set up a full dependency resolution and lock workflow with `uv`?**
+**Short:** A full uv lock workflow pins dependencies with SHA-256 hashes and installs with --require-hashes to block supply chain attacks.
+
 Declare direct dependencies in `pyproject.toml` under `[project.dependencies]` with loose lower bounds. Run `uv pip compile pyproject.toml --all-extras -o requirements.lock` to generate a fully pinned lock file with SHA-256 hashes for every package. Commit `requirements.lock` to the repository. In CI and Docker, run `uv pip install --require-hashes -r requirements.lock` — the `--require-hashes` flag makes the install fail if any package hash does not match, preventing supply chain attacks. To upgrade a specific package: `uv pip compile --upgrade-package fastapi pyproject.toml -o requirements.lock`.
 
 **Q11: What is the src layout and why is it preferred over a flat layout?**
+**Short:** The src layout keeps the local directory off sys.path during tests, forcing an installed package so tests match production.
+
 The src layout places package source under `src/mypackage/` rather than directly in the project root. Without the src layout, running `pytest` from the project root makes `import mypackage` resolve to the local directory (not the installed package), hiding import errors that would appear in production (e.g., missing `__init__.py`, incorrect package data). With the src layout, the local directory is never on `sys.path` during tests — you must install the package (even as editable) before tests run, making the test environment match production more closely.
 
 **Q12: How do you publish a package to PyPI in a CI/CD pipeline?**
+**Short:** Publishing to PyPI in CI means building wheel and sdist artifacts, validating them with twine check, then uploading with a token.
+
 Configure `PYPI_TOKEN` as a repository secret. In the release workflow (triggered by a version tag), run `python -m build` to produce the wheel and sdist in `dist/`. Run `twine check dist/*` to verify the artifacts meet PyPI requirements (valid metadata, valid README rendering). Run `twine upload dist/* --non-interactive --username __token__ --password $PYPI_TOKEN`. Alternatively, use `uv publish --token $PYPI_TOKEN`. Use TestPyPI for staging. For automated version bumping, integrate `python-semantic-release` which reads conventional commit messages to determine the next version, updates `pyproject.toml`, creates a git tag, and triggers the release workflow.
 
 **Q13: What happens when you build a wheel with C extensions on an x86_64 machine and copy it into an arm64 Docker container?**
+**Short:** A wheel built with C extensions on x86_64 fails to import in an arm64 container because the compiled .so has the wrong architecture.
+
 The import fails at runtime because the compiled `.so` file inside the wheel contains x86_64 machine code that the arm64 container's Python interpreter cannot load. Wheel filenames encode the target platform (`cp313-cp313-manylinux_2_17_x86_64` versus `...macosx_13_0_arm64`), so `pip`/`uv` reject an incompatible wheel during a normal install, but a wheel copied in manually as a build artifact skips that check and fails only when the code actually imports. Fix it with Docker's multi-platform build support (`docker buildx build --platform linux/amd64,linux/arm64`) so each architecture gets its own compiled wheel, or install from the lock file inside each target container's own build stage.
 
 **Q14: What causes different lint results between a developer's local `ruff` run and CI when both use `pre-commit`?**
+**Short:** A pinned pre-commit ruff revision can drift from a developer's local binary, so identical commands pass locally but fail in CI.
+
 The `rev:` field pinned in `.pre-commit-config.yaml` can drift out of sync with the `ruff` version installed in a developer's local environment. `pre-commit` creates an isolated environment per hook using the pinned `rev`, so CI always runs the exact pinned version, but a developer who ran `ruff check` directly instead of `pre-commit run` uses whatever version their local binary happens to be. New rules added between the pinned and installed versions produce lint results that pass locally but fail in CI, or the reverse. Run `pre-commit autoupdate` on a regular cadence and commit the updated `rev` so both paths converge on the same version.
 
 **Q15: How can `from __future__ import annotations` break a Pydantic v2 model in a FastAPI project?**
+**Short:** from __future__ import annotations turns type hints into unevaluated strings, breaking Pydantic v2 forward-reference resolution.
+
 It turns every type annotation into an unevaluated string, so Pydantic can no longer resolve forward references to build the model's validators at class-definition time. Normally Pydantic inspects `__annotations__` immediately when the class body executes; with deferred evaluation enabled it sees the literal string `"UUID"` instead of the `UUID` class and cannot resolve it without extra help. The fix is to call `model_rebuild()` once all referenced types are in scope. This mostly bites nested or forward-referenced models defined across multiple files where the referenced type is not yet imported at parse time.
 
 **Q16: How do `mypy` and `pyright` differ in strictness, and why might a team run both?**
+**Short:** mypy is a stricter, lower-noise CI gate while pyright surfaces more real errors with more false positives, so teams run both.
+
 `mypy` is more conservative and produces fewer false positives, which makes it a safer gate for blocking CI on type errors. `pyright`, which also powers Pylance in VS Code, is more aggressive and surfaces more real errors, at the cost of more false positives that can frustrate a hard CI gate. A common split is running `pyright` in the IDE for fast, in-editor feedback during development, while `mypy --strict` runs in CI as the authoritative check that must pass before merge. This gives developers early, high-recall signal without letting pyright's noisier findings block a release.
 
 ---

@@ -921,69 +921,91 @@ Related reading: [ML data pipelines](../../ml/data_pipelines_and_processing/READ
 ## 12. Interview Questions with Answers
 
 **Q: A teammate un-paused a DAG that had been off for a year and the warehouse fell over — what happened and how do you prevent it?**
+**Short:** catchup=True reschedules every missed interval at once, flooding downstream systems with concurrent runs.
 The DAG had `catchup=True` so Airflow immediately scheduled a run for every missed interval since `start_date`, hundreds of concurrent runs stampeding the warehouse. Catchup makes the scheduler reconcile all historical intervals at once the moment the DAG becomes active. Set `catchup=False` as the default, cap `max_active_runs_per_dag`, and reprocess history deliberately with a bounded `airflow dags backfill --start-date ... --end-date ...` instead of relying on un-pause.
 
 **Q: How does Airflow detect and handle a zombie task after a worker is OOM-killed?**
+**Short:** The scheduler reaps a task as a zombie after scheduler_zombie_task_threshold (300s default) of missed heartbeats.
 A zombie is a `task_instance` still marked `running` whose worker stopped sending heartbeats, and the scheduler reaps it after `scheduler_zombie_task_threshold` (300s default). The worker updates a heartbeat timestamp while alive, so a crashed or OOM-killed process stops refreshing it, and the scheduler's zombie check flips the row to `up_for_retry` (or `failed` if retries are exhausted). Keep tasks idempotent so the automatic retry is safe, and right-size worker memory so OOM kills are rare in the first place.
 
 **Q: 200 poke sensors are running and the whole cluster freezes with no tasks progressing — what is going on and what are two fixes?**
+**Short:** Poke sensors each hold a worker slot for their whole wait, so enough of them can starve every other task of slots.
 Each poke sensor occupies a worker slot for its entire wait, so 200 of them can consume every slot and leave nothing free to run the tasks they are waiting on, a self-inflicted deadlock. Poke mode trades cheap logic for an expensive held slot. Fix one, switch the sensors to **deferrable** mode so the waits move to the Triggerer and hold zero worker slots; fix two, use **reschedule** mode so a sensor releases its slot between pokes, or confine sensors to a dedicated pool so they can never starve real work.
 
 **Q: Why must an Airflow task be idempotent even if you set retries=0?**
+**Short:** Airflow's at-least-once execution model can rerun a task via backfill, manual clear, or zombie reaping regardless of retries.
 Because Airflow guarantees at-least-once execution and several mechanisms re-run a task regardless of the retry count, so non-idempotent logic corrupts data eventually. Backfills, a manual "clear and re-run", zombie reaping, and scheduler failover can all execute the same logical date more than once even with `retries=0`. Write every task so re-running for the same `logical_date` yields the same result, using delete-then-insert, `INSERT OVERWRITE`, or a MERGE keyed on the data interval.
 
 **Q: An engineer pushed a 200 MB DataFrame through XCom and the scheduler started OOMing — what went wrong?**
+**Short:** XCom values are stored as rows in the metadata database, so a large payload bloats the DB and exhausts memory.
 XCom values are serialized into rows in the metadata database, so a 200 MB payload bloats the DB and gets deserialized into scheduler/worker memory, causing OOM and slow queries. XCom is designed for kilobyte-scale hand-offs like a file path or a small dict, not bulk data. Pass a pointer (an S3 URI or table name) through XCom and keep the data in the external store, or install a custom XCom backend that transparently spills large values to S3.
 
 **Q: How do multiple Airflow schedulers run active-active with no elected leader?**
+**Short:** Multiple schedulers coordinate through database row locks (FOR UPDATE SKIP LOCKED) rather than leader election.
 They coordinate purely through database row locks (a `FOR UPDATE SKIP LOCKED` select), so each scheduler claims a disjoint batch of schedulable task instances without blocking on the others. There is no leader election and no coordinator, correctness comes entirely from the database refusing to hand the same locked rows to two schedulers while `SKIP LOCKED` lets each grab different rows lock-free. Run Postgres or MySQL 8+ (which support `SKIP LOCKED`) and add schedulers to scale near-linearly for higher throughput.
 
 **Q: What is the difference between logical_date and the wall-clock time a task runs?**
+**Short:** logical_date marks the start of the data interval a run covers, and the run executes only after that interval ends.
 `logical_date` is the start of the data interval a run covers, while the run actually executes only after that interval ends, so the two differ by one interval. A daily run labeled `2026-07-14` fires at `2026-07-15 00:00` because only then is the 14th's data complete. Always derive your processing window from the run's data interval rather than `datetime.now()`, or every run will silently process the wrong day.
 
 **Q: Why is importing a heavy library or opening a connection at the top level of a DAG file a scheduler problem?**
+**Short:** Top-level DAG file code reruns on every scheduler parse cycle, so heavy imports or I/O there create a parse storm.
 Top-level code executes on every DAG parse, and the DAG processor re-parses each file as often as every `min_file_process_interval` (30s), so heavy imports or connections run constantly and starve parsing. At hundreds of DAGs this becomes a parse storm that hammers external systems and delays scheduling. Move all heavy imports and I/O inside task functions so they run only at execution time, keeping the module body cheap.
 
 **Q: How does a deferrable operator free a worker slot while it waits?**
+**Short:** A deferrable operator raises TaskDeferred to hand its wait to the Triggerer, freeing its worker slot immediately.
 It raises `TaskDeferred` with a trigger, which moves the task to the `deferred` state and releases its worker slot, then the Triggerer awaits the condition on an asyncio event loop. When the trigger fires, the scheduler moves the task back to `scheduled` and re-queues it on any free slot where its `method_name` resumes. One triggerer multiplexes thousands of such async waits, so replace long-running poke sensors with deferrable ones to reclaim slots.
 
 **Q: When should you use dynamic task mapping instead of a top-level Python loop to create tasks?**
+**Short:** Dynamic task mapping (.expand()) builds tasks from run-time data, while a top-level loop only sees parse-time values.
 Use dynamic task mapping (`.expand()`) whenever the number of tasks depends on data known only at run time, because a top-level `for` loop runs at parse time and can only see parse-time values. Mapping creates map-indexed task instances at run time from an upstream task's output, up to `max_map_length` (1024), and shows each as a separate try in the UI. Reserve top-level loops for a small, static, parse-time-known set, and use `.expand()` for anything data-dependent to avoid parse-time coupling.
 
 **Q: How do you choose between the Celery and Kubernetes executors?**
+**Short:** Celery suits many short homogeneous tasks on warm workers; Kubernetes suits tasks needing per-task isolation or resources.
 Choose Celery for many short, homogeneous tasks where warm workers give near-instant startup, and Kubernetes when you need per-task isolation, per-task resources, or zero idle cost. The Kubernetes executor spins a fresh pod per task, paying a 10–60s cold start but isolating dependencies and letting each task request its own CPU, memory, or GPU. For mixed workloads use a hybrid so short tasks go to Celery and heavy isolated ones to pods.
 
 **Q: What do trigger rules and depends_on_past versus wait_for_downstream control?**
+**Short:** Trigger rules gate a task against its upstreams, while depends_on_past and wait_for_downstream gate it against its own prior runs.
 Trigger rules decide when a task runs relative to its upstreams, while `depends_on_past` and `wait_for_downstream` instead gate a task against its own previous runs. The default rule is `all_success`, and alternatives like `all_done`, `one_failed`, and `none_failed_min_one_success` handle cleanup-on-failure and fan-in branches; `depends_on_past=True` blocks a task until its own instance in the prior run succeeded, and `wait_for_downstream` additionally waits for the prior run's immediate downstream. Use trigger rules for cleanup branches and `depends_on_past` for strictly sequential, order-dependent pipelines.
 
 **Q: Two DAGs overwhelm a shared database — how do pools and priority_weight arbitrate contention?**
+**Short:** A pool caps concurrent access to a shared resource, and priority_weight orders which waiting tasks get its slots first.
 A pool caps how many slot-consuming tasks touch a shared resource at once, and `priority_weight` orders tasks competing for those slots so higher-priority work goes first. Create a `warehouse` pool of, say, 5 slots and assign both DAGs' warehouse tasks to it, and no matter how many are ready Airflow runs at most 5 concurrently. Raise `priority_weight` on latency-sensitive tasks so they win contested slots, and size the pool to the external system's real connection limit.
 
 **Q: What are the headline changes in Airflow 3.0?**
+**Short:** Airflow 3.0 adds a Task Execution API, promotes datasets to first-class assets, and ships a React UI on FastAPI.
 Airflow 3.0 (April 2025) adds a Task Execution API so workers no longer touch the metadata DB directly, promotes datasets to first-class assets, and ships a React UI on a FastAPI server. It also makes backfills scheduler-managed, introduces DAG versioning so the UI shows the exact code a past run used, and removes `sla`/`sla_miss_callback` outright (Deadline Alerts don't arrive until 3.1). The Task Execution API is the foundation for non-Python and remote execution, but that arrived gradually rather than in 3.0 itself — the EdgeExecutor shipped as an experimental provider package (AIP-69), and Go/Java task runtimes didn't land until 3.3. Plan upgrades around the worker-DB boundary change, the datasets-to-assets rename, and the SLA removal when migrating from 2.x.
 
 **Q: The metadata DB has grown to hundreds of GB and queries are slow — how do you scale and clean it?**
+**Short:** Growing task_instance, xcom, log, and dag_run tables are trimmed with scheduled airflow db clean runs.
 The `task_instance`, `xcom`, `log`, and `dag_run` tables grow unbounded, so you cap them with periodic `airflow db clean --clean-before-timestamp` runs and keep XComs tiny. Long-running clusters accumulate years of history that inflate every scheduler query, so archive or delete old rows on a schedule and offload task logs to object storage instead of the DB. Also use Postgres over MySQL for large deployments and monitor table sizes so cleanup runs before performance degrades.
 
 **Q: When would you pick Temporal or Dagster over Airflow?**
+**Short:** Temporal fits durable, low-latency, long-running workflows, and Dagster fits asset-first typed data platforms.
 Pick Temporal for durable, millisecond-latency, long-running or human-in-the-loop workflows that persist per-step state, and Dagster when you want an asset-first, strongly-typed, locally-testable data platform. Airflow is a batch scheduler built around data intervals, so it fits scheduled ETL and retraining but not low-latency event-driven orchestration or fine-grained asset lineage as a first principle. Match the tool to the workload — Airflow for batch on a schedule, Temporal for durable execution, Dagster for asset-centric data engineering.
 
 **Q: In what order does Airflow resolve a connection, and what is the risk of a secrets backend?**
+**Short:** Airflow checks the secrets backend first, then environment variables, then the metadata DB, using the first hit.
 Airflow checks the configured secrets backend first, then environment variables (`AIRFLOW_CONN_*`), then the metadata DB, using the first hit. Because the backend is queried on every lookup, a per-task connection fetch can hammer Vault or Secrets Manager, and a mis-scoped `connections_prefix` silently falls through to env or DB instead of erroring. Set the prefixes correctly, enable backend caching, and avoid the anti-pattern of hard-coding credentials in the DAG file where they leak into every parse and into git.
 
 **Q: Why were SubDAGs removed, and what should you use instead?**
+**Short:** SubDAGs were removed because the SubDagOperator held a worker slot for its entire child DAG, causing deadlocks.
 SubDAGs were removed in Airflow 3.0 because the `SubDagOperator` itself held a worker slot while running its child DAG, causing deadlocks when the child's tasks needed slots the operator was occupying. They also confused concurrency accounting and the UI. Use **TaskGroups** for visual/logical grouping within one DAG, or split into separate asset-linked DAGs for real decoupling, and use setup/teardown tasks for resource lifecycle instead of a SubDAG wrapper.
 
 **Q: Task logs disappeared after a Kubernetes pod was deleted — how do you fix and prevent this?**
+**Short:** KubernetesExecutor pods are deleted after each task, taking local logs unless remote logging is enabled.
 The logs were only on the pod's local disk, which is destroyed when the KubernetesExecutor deletes the pod after the task, so enable remote logging to S3, GCS, or Elasticsearch. With `remote_logging = True` and a `remote_base_log_folder`, logs are streamed live over the worker log-serving port 8793 during the run and read from the remote store afterward. Configure remote logging on day one for any pod-per-task or autoscaled-worker deployment, because ephemeral compute makes local logs unreliable.
 
 **Q: Which scheduler metrics tell you the cluster is unhealthy, and what does a parse storm look like?**
+**Short:** A parse storm shows as DAG parse time and scheduler loop duration climbing together while queued tasks pile up.
 Alert on five signals: scheduler loop duration, DAG parse time, open executor slots, queued tasks, and starving tasks. Concretely, `scheduler_loop_duration` nearing the 5s heartbeat, `dag_processing.total_parse_time` nearing the 30s parse interval, `executor.open_slots` near 0, `executor.queued_tasks` growing, and `scheduler.tasks.starving` persistently above 0. A parse storm shows as `total_parse_time` and `scheduler_loop_duration` climbing together while tasks queue, so ship these to StatsD or OpenTelemetry and page on that pair to catch it early.
 
 **Q: A DAG with `depends_on_past=True` silently stopped advancing — every later run just sits, no errors anywhere. Why?**
+**Short:** depends_on_past blocks every later run once one prior instance fails or is never rerun, silently freezing progress.
 One earlier run of that task failed, or was manually cleared and never re-run, and `depends_on_past` blocks each later instance until its own prior-run instance reaches `success`. The blocked task instances sit in `none` state rather than `failed`, which reads as "not due yet" instead of "broken," so the wedge can go unnoticed for days — and it compounds with `catchup=True` into a growing backlog that never advances. Clear the offending run (with "downstream" to clear its children too), or replace `depends_on_past` with an explicit upstream data check so a real failure surfaces loudly instead of gating the schedule invisibly.
 
 **Q: What replaced SLAs in Airflow 3, and how do Deadline Alerts differ from the old sla_miss_callback?**
+**Short:** Deadline Alerts attach a time threshold to the whole DAG run, unlike the old per-task sla_miss_callback.
 `sla` and `sla_miss_callback` were removed outright in Airflow 3.0, and **Deadline Alerts** (AIP-86) arrived later, in 3.1, as their experimental replacement. The old SLA was per-task and only checked once the scheduler evaluated that task, so a run that simply hung was never flagged; a Deadline Alert attaches a reference point plus interval to the **DAG run** as a whole, and every scheduler pass compares that deadline against now, firing the callback within about one `scheduler_heartbeat_sec` of expiry regardless of whether the run ever finishes. Migrate SLA-based alerting to a `DeadlineAlert` on `DeadlineReference.DAGRUN_QUEUED_AT` or `DAGRUN_LOGICAL_DATE` rather than assuming the old per-task callback still exists.
 
 ---

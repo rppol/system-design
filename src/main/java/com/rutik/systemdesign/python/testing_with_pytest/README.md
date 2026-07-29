@@ -848,66 +848,82 @@ An entirely untested 200-line feature lands with the build green, and there is r
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `scope="function"` and `scope="session"` for a fixture, and when would you choose each?**
+**Short:** Function scope creates a fresh fixture per test, while session scope creates it once for the whole run.
 
 `scope="function"` creates a new fixture instance before each test and tears it down after; `scope="session"` creates the instance once for the entire test run and tears it down after the last test. Choose `function` scope for any fixture that holds mutable state — database connections that receive writes, mock objects, temporary files with content. Choose `session` scope for expensive read-only resources: loading a large ML model, establishing a DB schema, compiling a regex corpus. A practical rule: start with function scope; only widen to session when profiling shows setup cost dominates test runtime.
 
 **Q2: How does `conftest.py` work, and why do you not need to import fixtures from it?**
+**Short:** conftest.py fixtures are auto-discovered by pytest up the directory tree, so no import is ever needed.
 
 pytest automatically discovers all `conftest.py` files in the directory tree from the rootdir down to the test file. When a test function declares a parameter name, pytest searches for a matching fixture starting from the closest `conftest.py` and walking upward to the rootdir `conftest.py`. Because discovery is automatic, fixtures in `conftest.py` are available to all tests at or below that directory level without any import. This mechanism enables shared fixtures (e.g., a DB connection, an HTTP client) to be defined once and used everywhere without coupling test modules to each other.
 
 **Q3: What is the difference between `Mock`, `MagicMock`, and `AsyncMock`?**
+**Short:** MagicMock pre-configures dunder methods that plain Mock lacks, and AsyncMock makes the mock awaitable.
 
 `Mock` is the base object that records attribute access and method calls. `MagicMock` extends `Mock` by pre-configuring magic (dunder) methods — `__enter__`, `__exit__`, `__len__`, `__iter__`, etc. — making it usable as a context manager or iterable without additional setup. `AsyncMock` makes the object awaitable; calling it returns a coroutine, and `assert_awaited_once_with` checks awaited calls. Use `MagicMock` as the default for synchronous code; use `AsyncMock` for async code. Use `Mock` only when you explicitly do not want dunder support (to catch accidental iteration or context-manager usage).
 
 **Q4: Explain `monkeypatch` and how it differs from `unittest.mock.patch`.**
+**Short:** monkeypatch is a pytest fixture that auto-reverts attribute, env, and dict changes after each test.
 
 `monkeypatch` is a pytest fixture that provides methods to temporarily modify attributes, environment variables, dictionary entries, and the working directory. Changes are automatically reverted after the test without a context manager or decorator. `unittest.mock.patch` is a context manager or decorator that replaces a named attribute with a `Mock` for the duration of a `with` block or function call. The key difference: `monkeypatch` is more Pythonic for simple attribute replacements and environment variables; `patch` integrates with the `Mock` ecosystem and is better for full mock objects where you need to verify call counts and arguments.
 
 **Q5: How does `@pytest.mark.parametrize` with `indirect=True` work?**
+**Short:** With indirect=True, the parametrize value becomes request.param inside the fixture instead of a plain test argument.
 
 When `indirect=True` is passed, pytest treats the parametrize value not as a direct argument to the test but as the `param` attribute of a `FixtureRequest` object passed to the named fixture. The fixture can use `request.param` to return different objects based on the parameter. This enables parametrizing fixture behavior — for example, a `user` fixture that returns admin, editor, or viewer user objects based on the parameter string — keeping the test body clean and the parametrize list readable.
 
 **Q6: What is the difference between a stub and a spy?**
+**Short:** A stub returns a fixed canned value, while a spy wraps the real implementation and records calls to it.
 
 A stub replaces a dependency and returns a fixed canned value without executing any real logic. It answers "what should this dependency return?" A spy wraps the real implementation, lets it execute, but also records calls so you can assert on them afterward. Use a stub when you do not trust the real dependency in a test (network, DB, time). Use a spy when you want to verify interaction without changing behavior — for example, checking that a cache is read before the DB without replacing the cache implementation.
 
 **Q7: How would you test a FastAPI endpoint that has a dependency injection override?**
+**Short:** app.dependency_overrides swaps a real FastAPI dependency for a test double for the duration of the test.
 
 Use `app.dependency_overrides` — a dictionary on the FastAPI application instance. Map the real dependency callable to a lambda or function that returns a test double. Drive the patched `app` with `AsyncClient(transport=ASGITransport(app=app), base_url="http://test")`, which calls the ASGI app in-process without opening a socket. After the test (or in the fixture teardown), call `app.dependency_overrides.clear()` to restore the original wiring. This approach tests the full request/response cycle including serialization and middleware without hitting real databases or external services.
 
 **Q8: How does `hypothesis` shrinking work, and why does it matter?**
+**Short:** Hypothesis shrinking repeatedly reduces a failing input to the smallest example that still reproduces the failure.
 
 When `hypothesis` finds a falsifying input, it does not report that raw input immediately. It runs a shrinking phase that systematically reduces the counterexample — removing list elements, decreasing integers, shortening strings — until it finds the minimal input that still fails the property. The result is a small, readable counterexample rather than a 10,000-element list. Shrinking matters because developers cannot debug a 10,000-integer list; they can debug a 2-integer list.
 
 **Q9: What does `pytest-cov --cov-fail-under=80` do in CI, and what does 80% coverage miss?**
+**Short:** --cov-fail-under=80 fails the CI build when measured line coverage drops below 80 percent.
 
 `--cov-fail-under=80` causes pytest to exit with a non-zero status code if the measured line coverage falls below 80%, which fails the CI build. This enforces a coverage floor. What 80% coverage misses: branch coverage (whether both sides of every `if` are exercised), integration paths (a line can be executed without testing its correctness), and concurrency bugs. Coverage is a necessary but not sufficient signal; use it as a floor, not a target.
 
 **Q10: How do you test a function that calls `time.time()` or `datetime.now()`?**
+**Short:** Patching the time or datetime reference in the module under test, or freezing it with freezegun, makes it deterministic.
 
 Three approaches in order of preference: (1) `monkeypatch.setattr("app.module.time", lambda: 1_700_000_000.0)` — patch the function reference in the module under test. (2) `freezegun` — `@freeze_time("2024-01-01 12:00:00")` decorator freezes `datetime.now()`, `time.time()`, and `date.today()` globally for the test. (3) Inject a clock callable as a dependency — the production code calls `clock()` instead of `time.time()`, and tests pass a lambda. Approach 3 is most design-correct; approach 2 is most convenient for legacy code.
 
 **Q11: What is `capsys` and when would you use it over `caplog`?**
+**Short:** capsys captures stdout and stderr text, while caplog captures structured Python logging records instead.
 
 `capsys` captures text written to `sys.stdout` and `sys.stderr`. `caplog` captures Python `logging` records. Use `capsys` when testing a function that uses `print()` or writes directly to stderr — for example, a CLI entry point. Use `caplog` when testing a function that uses the `logging` module — FastAPI, Celery workers, database adapters all log via `logging`. `caplog` is preferable because it gives access to structured record attributes (`levelname`, `name`, `message`) not available in raw text.
 
 **Q12: How do you avoid test pollution when using `@pytest.fixture(scope="module")`?**
+**Short:** Module-scoped fixtures get polluted when one test mutates shared state, so keep them read-only or copy per test.
 
 Module-scoped fixtures are shared across all tests in a file. Pollution occurs when one test mutates the fixture's state. Mitigation strategies: (1) design module-scoped fixtures to return read-only objects or frozen dataclasses; (2) if the resource must be mutable, use `copy.deepcopy` inside the test to get a private copy; (3) document the fixture's contract — "this fixture is read-only" — and enforce it with a `@property`-based wrapper that raises `AttributeError` on assignment. The safest long-term choice is to prefer function scope and widen to module scope only after measuring a real performance cost.
 
 **Q13: What is a "Fake" test double, and why does the case study use `fakeredis.FakeRedis()` instead of a `Mock`?**
+**Short:** A Fake, like fakeredis.FakeRedis, actually executes real dependency logic instead of returning canned Mock values.
 
 A Fake is a working, simplified implementation of a real dependency that actually executes the logic rather than returning pre-programmed canned values like a Stub or recording calls like a Mock. It earns that behavior by doing real work — incrementing a counter, applying a TTL — instead of returning canned data. `fakeredis.FakeRedis()` implements Redis's real command semantics in memory, so `incr()` and `expire()` behave identically to production Redis, which lets the rate-limiter test suite catch real off-by-one bugs in the sliding-window logic that a `Mock` would simply never notice because a `Mock` has no actual counting behavior. The trade-off is that a Fake must be maintained to track the real dependency's behavior as it evolves, while a `Mock` requires no such upkeep. Prefer a Fake over a Mock for any dependency with meaningful internal logic — persistence layers, caches, message queues — and reserve `Mock`/`MagicMock` for verifying that a call happened with the right arguments.
 
 **Q14: What happens when you stack two `@pytest.mark.parametrize` decorators on the same test function?**
+**Short:** Stacking two parametrize decorators runs the test once for every combination in their Cartesian product.
 
 Stacking two `@parametrize` decorators produces the Cartesian product of both parameter sets, running the test body once for every combination drawn from the two lists. For example, `@parametrize("fmt", ["json", "csv"])` combined with `@parametrize("rows", [0, 100, 10_000])` runs the test body 2 × 3 = 6 times, once for every `(fmt, rows)` combination. This is a fast way to cover a full matrix of boundary conditions — output formats crossed with input sizes — without writing the combinations out by hand or nesting loops inside the test. The order the decorators are applied controls the order test IDs are generated in pytest's output, which matters when reading a failure report but not for correctness. Use stacked parametrize sparingly: a matrix of 3+ decorators can produce dozens of cases that are slow to run and hard to debug individually.
 
 **Q15: What does `filterwarnings = ["error"]` do in a pytest CI configuration, and why is it valuable?**
+**Short:** Setting filterwarnings to error turns every Python warning raised during a test run into an immediate failure.
 
 Setting `filterwarnings = ["error"]` in `pyproject.toml` converts every Python warning raised during a test run into a test failure instead of a silently-printed message. Deprecation notices from dependencies then stop the build immediately rather than scrolling past in CI logs. This catches deprecated API usage — a library function slated for removal, an implicit type coercion — while it is still a warning, giving the team time to fix it before the next dependency upgrade turns it into a hard breaking change. Without this setting, warnings accumulate silently for months and then surface all at once as a wall of failures during a routine dependency upgrade. Combine it with narrower `filterwarnings` entries (ignoring one known third-party warning by module) when a specific dependency cannot be fixed immediately.
 
 **Q16: In the rate-limiter case study, why does `test_limit_five_broken` pollute later tests, and how does `monkeypatch.setattr` fix it?**
+**Short:** monkeypatch.setattr changes a module attribute for one test only, automatically restoring the original value after.
 
 `test_limit_five_broken` sets `limiter.LIMIT = 5` directly on the module object, and because Python modules are singletons shared across the test session, that change persists for every later test. This silently corrupts tests such as `test_rate_limit_boundary`, which then checks against the wrong limit with no indication of why. `monkeypatch.setattr("app.limiter.LIMIT", 5)` makes the same change but records the original value first, and pytest automatically restores it when the test function returns, regardless of whether the test passed or failed. This is the same automatic-teardown guarantee that makes `monkeypatch.setenv` and `monkeypatch.setattr` on object methods safe to use freely. Never mutate a module-level constant or global directly in a test; always route the change through `monkeypatch` so cleanup is guaranteed.
 

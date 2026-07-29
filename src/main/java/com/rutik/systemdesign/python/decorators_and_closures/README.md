@@ -923,36 +923,47 @@ Always place FastAPI's `@app.get/post/...` as the **outermost** decorator (topmo
 ## 12. Interview Questions with Answers
 
 **Q1: What is a closure, and what three conditions must be true for one to form?**
+**Short:** A closure needs a nested function, a captured free variable, and the outer function exposing it.
 A closure is a function that keeps access to variables from its enclosing scope after that scope has finished. It forms when three things hold: there is a nested function, the nested function references at least one free variable from the enclosing scope, and the enclosing function returns or otherwise exposes the nested function. When these hold, Python packages the referenced variables into cell objects accessible via `func.__closure__`, keeping them alive beyond the lifetime of the outer function's stack frame. Inspect them with `inspect.getclosurevars(func)`.
 
 **Q2: What is the difference between `global` and `nonlocal`?**
+**Short:** `global` rebinds a module-level name; `nonlocal` rebinds a name in an enclosing function scope.
 `global` declares that a name refers to the module-level namespace; `nonlocal` declares that a name refers to the nearest enclosing function scope (not global). Use `nonlocal` when you need to *rebind* (assign to) a variable in a closure — mere mutation of a mutable object does not require it. `global` is needed to rebind module-level names from within a function.
 
 **Q3: Why does `@decorator` syntax run at import time, not at call time?**
+**Short:** `@decorator` runs at import time because it's sugar for `f = decorator(f)` executed at `def`.
 `@decorator` above `def f` is syntactic sugar for `f = decorator(f)` which Python executes when it encounters the `def` statement during module parsing. This means decorator setup code (outer function body) runs once at import time. The wrapper's body runs per call. This matters in FastAPI: `@app.get("/path")` registers the route immediately when the module is imported, regardless of whether the app has started.
 
 **Q4: What does `functools.wraps` actually do under the hood?**
+**Short:** `functools.wraps` copies `__name__`, `__doc__`, and related metadata from the wrapped function.
 It calls `functools.update_wrapper(wrapper, wrapped, assigned=WRAPPER_ASSIGNMENTS, updated=WRAPPER_UPDATES)`. `WRAPPER_ASSIGNMENTS` is `('__module__', '__name__', '__qualname__', '__doc__', '__annotations__', '__type_params__')` — the last entry added in 3.12 so a PEP 695 generic function keeps its type parameters through the wrap. `WRAPPER_UPDATES` is `('__dict__',)`, so the wrapper's dict is updated from the wrapped function's rather than replaced. It also sets `wrapper.__wrapped__ = wrapped`. Without it, tools like `help()`, Sphinx, and FastAPI's OpenAPI generator see the wrapper's attributes instead of the original function's, producing wrong documentation and schema.
 
 **Q5: Explain the three-level structure of a parametrized decorator.**
+**Short:** A parametrized decorator nests a factory, a decorator, and a wrapper across three call levels.
 Level 1 is the *factory function* (e.g., `retry(max_attempts=3)`) — it receives configuration and returns the decorator. Level 2 is the *decorator* — it receives the function to wrap and returns the wrapper. Level 3 is the *wrapper* — it runs on every invocation, implementing the actual behavior. The factory exists solely to create a closure over the configuration values so the decorator and wrapper can access them without being passed those values explicitly.
 
 **Q6: When should you use a class-based decorator instead of a function-based one?**
+**Short:** Class-based decorators suit cases needing persistent, externally inspectable per-function state.
 Use a class-based decorator when the decorator needs per-function mutable state that must persist across calls and be externally inspectable or resettable (e.g., `process.call_count`, circuit breaker state). Implement `__init__` to store the wrapped function and configuration, `__call__` for the wrapping behavior, and `__get__` if the decorator should work correctly on instance methods (to bind `self`). Function-based decorators are simpler for stateless concerns.
 
 **Q7: What happens if you apply `@lru_cache` to an instance method without any workaround?**
+**Short:** `@lru_cache` on a method keys on `self`, leaking memory by keeping instances alive indefinitely.
 The cache key becomes `(self, *args, **kwargs)`. The `lru_cache` dictionary holds a strong reference to `self`, preventing garbage collection even after all other references to the instance are dropped. In a web server that creates short-lived objects per request, this is a memory leak — objects accumulate in the cache until `maxsize` evicts them or the process restarts. Fix by using `cached_property` for single computed values, `methodtools.lru_cache` (weak-reference keying), or restructuring the cache to class level with an explicit key that does not include `self`.
 
 **Q8: What is `functools.cached_property` and how does it differ from `@property` + manual caching?**
+**Short:** `cached_property` stores its computed value in the instance `__dict__` after the first access.
 `cached_property` is a non-data descriptor that computes the value on first access and stores it in the instance's `__dict__` under the property name. Subsequent access finds it in `__dict__` and never reaches the descriptor again, which is why the second read costs a plain attribute lookup. Against `@property` plus a manual cache it saves the `if self._val is None` guard and the private backing attribute. Limitations: it is not thread-safe — the internal lock was removed in 3.12 because it serialised every instance of the class behind one lock, so two threads racing the first access both compute; it requires a writable `__dict__`, so it is incompatible with `__slots__` unless `"__dict__"` is one of the slots; and invalidation is `del instance.prop`, which raises `AttributeError` if the value was never computed.
 
 **Q9: Describe the late-binding closure bug and two ways to fix it.**
+**Short:** Late-binding closures share one variable across loop iterations; default args fix it per iteration.
 The bug: closures capture the *variable* (cell reference), not its *value* at creation time. In a loop `[lambda: i for i in range(5)]`, all five lambdas share one cell pointing to `i`; after the loop `i == 4`, so all return 4. Fix 1 — default argument binding: `lambda i=i: i` — default args are evaluated at function definition time, creating a fresh binding per iteration. Fix 2 — factory function: `def make_f(i): return lambda: i` — each call creates a new closure scope with its own `i` cell.
 
 **Q10: How does stacking decorators work, and what order are they applied and executed?**
+**Short:** Decorators apply bottom-up but execute top-down, so `@app.get` must sit outermost.
 Application order is bottom-up: the decorator closest to `def` is applied first, the topmost decorator last. This means `@a` on top and `@b` below is equivalent to `f = a(b(f))`. Execution order is the reverse — top-down: `a`'s wrapper runs first, calls `b`'s wrapper, which calls the original function. For FastAPI routes, `@app.get` must be topmost (outermost) so it receives the final wrapped function and can inspect its signature for dependency injection and schema generation.
 
 **Q11: How do you write a type-safe decorator factory that preserves the wrapped function's signature?**
+**Short:** A `ParamSpec`-typed decorator preserves the wrapped function's exact parameter signature for type checkers.
 Declare the decorator generic over a `ParamSpec` and a return `TypeVar`, and annotate the wrapper's `*args` and `**kwargs` with `P.args` and `P.kwargs`. With PEP 695 syntax [3.12] the parameters are declared inline on the `def`, so nothing has to be created at module scope:
 
 ```python
@@ -969,18 +980,23 @@ def log_calls[**P, R](func: Callable[P, R]) -> Callable[P, R]:
 Without a `ParamSpec`, type checkers lose parameter information at the decoration boundary, which breaks IDE autocompletion for decorated FastAPI endpoints. Note that `functools.wraps` copies `__type_params__` since 3.12, so a generic function keeps its type parameters through the wrap.
 
 **Q12: What is `functools.partial` and when is it better than a closure?**
+**Short:** `functools.partial` pre-binds arguments to a callable and runs faster than an equivalent closure.
 `functools.partial(func, *args, **kwargs)` returns a new callable with some arguments pre-filled. Prefer it over a closure when you only need to bind arguments (not add behavior), when you want the result to be introspectable (`partial_obj.func`, `.args`, `.keywords`), or when the call is hot: `partial` is a C type, and on a trivial target it measured 35 ns per call against 60 ns for an equivalent Python closure wrapper — roughly 40% cheaper, though both are dwarfed by any real function body. Use a closure when you need to add behavior around the call.
 
 **Q13: How would you make a cached_property thread-safe?**
+**Short:** A thread-safe `cached_property` needs a per-instance lock, since 3.12 removed its own class-level lock.
 Wrap it yourself, because the standard library will not do it for you. Three options: (1) implement a custom descriptor that takes a **per-instance** `threading.Lock` before checking and setting the cached value — correct, and the per-instance scope is the important part; (2) accept the duplicate-compute race for idempotent properties where computing twice is harmless and bounded; (3) restructure to compute in `__init__` and store in a plain attribute. Do not expect a future version to fix it: `functools.cached_property` used to hold a lock and it was **removed** in 3.12, precisely because it was a single class-level lock that serialised every instance and could deadlock on re-entrant access. A per-instance lock is the safe replacement.
 
 **Q14: Explain `__wrapped__` and why it matters.**
+**Short:** `functools.wraps` sets `__wrapped__` so tools like `inspect.unwrap` can recover the original function.
 `functools.wraps` sets `wrapper.__wrapped__ = func` (the original function). This chain allows tooling to unwrap decorators: `inspect.unwrap(f)` follows `__wrapped__` links until it reaches a function with no `__wrapped__`. FastAPI uses `inspect.unwrap` to find the original handler's signature for dependency injection parsing. Without `__wrapped__`, FastAPI cannot discover path parameters and query dependencies, causing runtime errors or incorrect OpenAPI schemas.
 
 **Q15: What is the difference between a decorator that wraps a function and one that replaces it entirely?**
+**Short:** Most decorators wrap and call the original function, but some, like `@property`, replace it entirely.
 Most decorators return a wrapper that calls the original function (transparent wrapping). A *replacement decorator* returns something entirely different — `@property` returns a descriptor object, not a function at all. Class decorators mostly *mutate and return the same class*: `@functools.total_ordering` adds methods to the class it was given, and plain `@dataclass` adds `__init__`/`__repr__`/`__eq__` in place, so `Cls is decorated_Cls`. The exception worth knowing is `@dataclass(slots=True)` (and `weakref_slot=True`), which cannot add `__slots__` to a live class and therefore builds and returns a **new** class object — any method that captured the old one through a zero-argument `super()` `__class__` cell now points at a stale class. Understanding whether a decorator wraps, mutates, or replaces is critical for debugging: an `isinstance` check that suddenly fails after decoration means replacement.
 
 **Q16: How would you implement a decorator that works correctly on both regular functions and async functions?**
+**Short:** An async-safe decorator branches once at decoration time on `inspect.iscoroutinefunction`.
 Branch at decoration time on `inspect.iscoroutinefunction(func)` and return an `async def` wrapper or a plain one — never a single wrapper that tries to handle both. The check happens once, when the decorator runs, so the per-call path stays branch-free:
 
 ```python

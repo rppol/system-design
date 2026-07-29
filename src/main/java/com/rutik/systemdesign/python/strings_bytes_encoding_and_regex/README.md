@@ -854,6 +854,7 @@ and always log or alert when replacements occur.
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `str` and `bytes` in Python 3, and why does the distinction matter for a FastAPI service?**
+**Short:** str holds Unicode code points while bytes holds raw octets, and ASGI delivers HTTP bodies as bytes.
 `str` is a sequence of Unicode code points; `bytes` is a sequence of raw octets. The distinction
 matters because the ASGI interface delivers HTTP bodies as `bytes`. FastAPI (via Starlette) decodes
 the body to `str` only for JSON and form data endpoints. A file upload or a streaming endpoint
@@ -861,23 +862,27 @@ works with raw `bytes`. Confusing the two causes `TypeError` at runtime and can 
 data if an implicit coercion somehow occurs (it never does in Python 3, which raises immediately).
 
 **Q2: What does `len("你好")` return and why?**
+**Short:** len() counts Unicode code points, not encoded bytes, so a two-character string returns 2.
 It returns 2. `len()` on a `str` counts Unicode code points, not bytes. "你" is U+4F60 and "好" is
 U+597D — two code points. Their UTF-8 encoding is 3 bytes each (6 bytes total), but `len()` does
 not know or care about the encoding. Use `len(s.encode("utf-8"))` to get the byte count.
 
 **Q3: What is PEP 393 and why does it matter for memory efficiency?**
+**Short:** PEP 393 lets CPython store each string at 1, 2, or 4 bytes per character based on its widest code point.
 PEP 393 (CPython 3.3) introduced "compact" string storage: CPython picks the narrowest width (1, 2,
 or 4 bytes per code point) based on the highest code point in the string. A pure-ASCII 1 000-char
 string uses 1 000 bytes of data; adding a single emoji widens every character to 4 bytes, costing
 4 000 bytes. A corpus of ASCII product names is 4x smaller than if stored as UCS-4.
 
 **Q4: What is the UTF-8 BOM and how do you handle it in Python?**
+**Short:** The UTF-8 BOM is U+FEFF, and utf-8-sig strips it on decode while adding it back on encode.
 The BOM is U+FEFF, encoded as `\xef\xbb\xbf` in UTF-8. Windows tools (Notepad, Excel) prepend it.
 Decoding with `"utf-8"` leaves a `﻿` character at position 0; `"utf-8-sig"` strips it on read
 and adds it on write. Use `"utf-8-sig"` when consuming Windows CSV files or producing Excel-compatible
 output.
 
 **Q5: Explain `memoryview` and when you would use it instead of slicing a `bytes` object.**
+**Short:** memoryview gives a zero-copy view into a buffer, avoiding the copy that slicing bytes performs each time.
 `memoryview` is a zero-copy view into any buffer-protocol object (`bytes`, `bytearray`,
 `array.array`, NumPy). Slicing a `memoryview` creates a new view into the same memory — no
 allocation. Slicing `bytes` allocates and copies each time. Use it when making many slices of a
@@ -885,18 +890,21 @@ large buffer: binary protocol parsing, video frames, `socket.send()` of sub-rang
 roughly 1 KB; below that, copy overhead is negligible.
 
 **Q6: What is the difference between `re.match()`, `re.search()`, and `re.fullmatch()`?**
+**Short:** re.fullmatch requires the entire string to match, unlike match or search, which allow partial matches.
 `re.match()` anchors only at the start but does not require consuming the full string. `re.search()`
 scans for the first match anywhere in the string. `re.fullmatch()` requires the pattern to span the
 entire string. For input validation always use `re.fullmatch()` — `re.match()` silently accepts
 trailing garbage after a valid prefix.
 
 **Q7: What are named groups in regex and how do you use them?**
+**Short:** Named groups, written (?P<name>...), let you read captures by name via group() or groupdict().
 Named groups use the syntax `(?P<name>...)`. After a match, `m.group("name")` and `m.groupdict()`
 return the captured text by name. Named groups make patterns self-documenting and protect code from
 breaking when groups are reordered. Example: `r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})"`.
 In `re.sub()`, named back-references are written as `\g<name>`.
 
 **Q8: What is catastrophic backtracking and how do you prevent it?**
+**Short:** Catastrophic backtracking is exponential-time regex matching caused by ambiguous nested quantifiers like (a+)+.
 Catastrophic backtracking occurs when an NFA regex engine explores O(2^n) paths on a non-matching
 input, caused by ambiguous nested quantifiers like `(a+)+`. Prevention: (1) rewrite the pattern —
 `(a+)+` becomes `a+`; (2) use the `regex` library's atomic groups `(?>a+)+` to prevent backtracking
@@ -904,6 +912,7 @@ into a committed match; (3) for user-supplied patterns, run matching in a subpro
 hard wall-clock timeout and kill the process if it exceeds it.
 
 **Q9: Why should `re.compile()` be called at module level, and what is the internal cache in the `re` module?**
+**Short:** Compiling patterns at module level with re.compile avoids paying the internal pattern-cache lookup on every call.
 `re.compile()` translates the pattern into a compiled `re.Pattern` object once. Without it,
 `re.match(pattern_str, text)` checks an internal LRU cache (512 entries in CPython 3.11); a cache
 hit still pays a dict-lookup cost, and a miss triggers full recompilation. Module-level
@@ -911,18 +920,21 @@ hit still pays a dict-lookup cost, and a miss triggers full recompilation. Modul
 makes the intent explicit to readers.
 
 **Q10: What are non-capturing groups and why use them over capturing groups?**
+**Short:** Non-capturing groups (?:...) group sub-patterns without allocating a back-reference, making them slightly faster.
 `(?:...)` groups sub-expressions without allocating a numbered back-reference or storing the match.
 Use them for alternation or repetition when the captured text is not needed: `(?:jpg|png)+`.
 They are slightly faster (no capture bookkeeping), keep `m.groups()` uncluttered, and prevent
 consumers from accidentally depending on a specific group number.
 
 **Q11: What does the `re.DOTALL` flag do and when is it needed?**
+**Short:** re.DOTALL makes the dot metacharacter also match newline characters, which it excludes by default.
 By default `.` matches any character except `\n`. With `re.DOTALL` (alias `re.S`), `.` also
 matches newlines. Use it when the match target spans multiple lines — extracting a multi-line block
 from HTML, or capturing a JSON value that contains embedded newlines. Without it, `.+` truncates at
 the first `\n`.
 
 **Q12: How does f-string performance compare to `.format()` and `%` formatting?**
+**Short:** f-strings are the fastest of Python's string formatting methods, roughly 3x faster than .format().
 f-strings are the fastest of the three. On CPython 3.11, micro-benchmarks show f-strings are
 roughly 3x faster than `.format()` and 1.5–2x faster than `%`. f-strings compile to
 `FORMAT_VALUE` / `BUILD_STRING` bytecode opcodes; `.format()` requires a method call plus runtime
@@ -930,6 +942,7 @@ format-string parsing; `%` scans the format string at runtime. For most web serv
 negligible, but in tight loops generating thousands of log lines or CSV rows per second it adds up.
 
 **Q13: Why does decoding bytes with `latin-1` never raise `UnicodeDecodeError`, even on corrupted or wrong-encoding data?**
+**Short:** latin-1 maps every byte 0-255 to a code point, so it never raises UnicodeDecodeError even on wrong-encoding data.
 `latin-1` maps every possible byte value 0-255 directly to a Unicode code point, so no byte
 sequence is ever invalid for it. This makes it tempting to use as a universal "safe" fallback when
 the real encoding is unknown, but decoding UTF-8 bytes as `latin-1` produces a string that decodes
@@ -939,6 +952,7 @@ correct expected encoding, which fails loudly and visibly, over silently corrupt
 `latin-1`.
 
 **Q14: What is the difference between the `replace`, `ignore`, and `backslashreplace` error handlers when decoding bytes?**
+**Short:** The replace handler substitutes invalid bytes with a placeholder, ignore silently drops them, and backslashreplace shows their hex value.
 All three decide what happens when a byte sequence cannot be decoded, but they produce different
 output for the invalid bytes. `errors="replace"` substitutes each invalid byte with the Unicode
 replacement character, preserving the string's length and making corruption visible without
@@ -948,6 +962,7 @@ renders invalid bytes as an escaped hex sequence like `\xe9`, the most useful ch
 because it preserves the exact original byte value in a readable form.
 
 **Q15: What do the regex lookbehind `(?<=...)` and negative lookahead `(?!...)` assertions match, and how do they differ from capturing groups?**
+**Short:** Lookaround assertions match surrounding context without consuming characters or including them in the result.
 Lookbehind and lookahead assertions check that surrounding text matches a pattern without
 consuming it or including it in the match result. `(?<=\$)\d+` matches digits only when
 immediately preceded by a literal `$`, but the `$` itself is not part of the returned match,
@@ -957,6 +972,7 @@ workaround. Because they consume zero characters, lookaround assertions combine 
 rest of the pattern without disturbing group numbering.
 
 **Q16: What does the `{x=}` self-documenting f-string specifier print, and how do the `!r` and `!a` conversion flags differ?**
+**Short:** The {x=} f-string specifier prints both the source expression and its evaluated value together.
 `{x=}` (added in Python 3.8) expands to both the literal source expression and its value,
 printing `x = 42` instead of just `42`. This is a debugging convenience that eliminates writing
 `print(f"x={x}")` by hand and keeps the printed label in sync automatically if the variable name

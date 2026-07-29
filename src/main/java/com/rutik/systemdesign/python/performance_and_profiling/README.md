@@ -802,51 +802,83 @@ flowchart LR
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `tottime` and `cumtime` in cProfile, and which do you use to find the actual bottleneck?**
+**Short:** tottime excludes callee time and cumtime includes it, so sorting by tottime finds the function actually burning CPU cycles.
+
 `tottime` is time spent inside a function excluding callees; `cumtime` is total time including all nested calls. To find the function actually burning CPU cycles, sort by `tottime` — a function with high `cumtime` but low `tottime` is slow only because it calls slow children, not because its own code is inefficient.
 
 **Q2: Why is `LOAD_GLOBAL` slower than `LOAD_FAST`, and how can you exploit this in a hot loop?**
+**Short:** LOAD_GLOBAL costs two dictionary lookups per access while LOAD_FAST is a direct array index, so hoisting globals to locals helps hot loops.
+
 `LOAD_GLOBAL` performs a dictionary lookup in `globals()` and falls through to `builtins` if not found — two dict operations per access. `LOAD_FAST` is a direct array index into the frame's `fastlocals` array. In a tight loop, hoist frequently-accessed globals and built-ins into local variables at function entry: `sqrt = math.sqrt` before the loop reduces each access to a `LOAD_FAST`.
 
 **Q3: How does CPython 3.11's specializing adaptive interpreter work, and what speedup does it deliver?**
+**Short:** CPython 3.11's adaptive interpreter specializes hot bytecode after about 8 executions, delivering roughly 25% faster throughput.
+
 The interpreter observes each bytecode instruction at runtime. After approximately 8 executions of the same instruction path, it replaces the generic opcode with a specialized variant — for example, `LOAD_ATTR` becomes `LOAD_ATTR_INSTANCE_VALUE` when the attribute is consistently found in the instance `__dict__` at offset 0. If the type changes, the instruction deoptimizes back to generic. This delivered ~25% throughput improvement over Python 3.10 on the pyperformance benchmark suite, with hot integer loops seeing 2-3x speedup. [3.11]
 
 **Q4: When would you choose `py-spy` over `cProfile`, and why?**
+**Short:** py-spy samples a running process via OS-level inspection with under 1% overhead, unlike cProfile's 1.5-3x instrumentation cost.
+
 Use `py-spy` when you need to profile a running production process without modifying code or restarting it, and when you cannot afford >1% latency overhead. `py-spy` uses OS-level process inspection (ptrace on Linux, task_for_pid on macOS) to sample the call stack at 100 Hz — overhead is under 1%. `cProfile` hooks every function call via `sys.setprofile`, adding 1.5-3x overhead and requiring code instrumentation, making it unsuitable for production traffic.
 
 **Q5: What is the performance difference between `sorted(key=lambda x: x.attr)` and `sorted(key=attrgetter("attr"))`, and why?**
+**Short:** attrgetter beats an equivalent lambda in sorted(key=...) by roughly 30-40% because it is a C callable with no Python frame per call.
+
 `attrgetter` is implemented in C and performs attribute access without creating a Python function frame per comparison. The lambda creates a Python closure and incurs frame push/pop, argument marshaling, and `CALL` opcode overhead on every comparison. For 10,000 records, `attrgetter` is approximately 30-40% faster. The difference grows with list size because `key` is called O(n) times during sort.
 
 **Q6: How does `tracemalloc` differ from `memory_profiler`, and when would you use each?**
+**Short:** memory_profiler measures OS-level RSS deltas per line, while tracemalloc traces the Python allocator to attribute memory precisely.
+
 `memory_profiler` measures RSS (resident set size) delta per line using OS-level memory queries — it shows the total process memory footprint change. `tracemalloc` hooks Python's memory allocator and records allocation traces with file and line number, enabling you to identify which code path allocated specific objects and track peak allocation. Use `memory_profiler` for quick "which function is bloating RSS" investigation; use `tracemalloc` for precise allocation auditing and leak detection by comparing snapshots over time.
 
 **Q7: Explain the `timeit.repeat()` pattern and why you should take the minimum, not the mean.**
+**Short:** timeit.repeat() should be read by its minimum value, since that is the stable lower bound and the mean is skewed by GC and OS noise.
+
 `timeit.repeat(stmt, number=N, repeat=R)` runs the statement `N` times per trial and repeats for `R` trials, returning a list of `R` total times. You take the minimum because it represents the fastest your hardware can execute the code path with minimal OS interference. The mean is skewed upward by GC pauses, OS scheduling preemptions, and cache misses that are not intrinsic to the code being measured. The minimum is the stable lower bound; variance above it is noise.
 
 **Q8: What are the practical limitations of Cython, and when is mypyc a better choice?**
+**Short:** Cython needs a C toolchain and non-standard syntax, while mypyc compiles ordinary type-annotated Python with no syntax changes.
+
 Cython requires a C compiler toolchain at build time and produces platform-specific `.so` files, complicating packaging and cross-platform distribution. Cython syntax (`cdef`, `cpdef`) is non-standard Python and requires separate `.pyx` files. mypyc compiles standard mypy-annotated Python — no syntax changes, same source file, easier CI integration. mypyc is better for well-typed, non-dynamic Python codebases where you want speedup without a build system change. Cython is better for tight numeric loops that need explicit C type declarations and Numpy buffer protocol integration.
 
 **Q9: How would you use `dis` to verify that a Python optimization actually changes the bytecode?**
+**Short:** Comparing dis.dis() output for two versions of a function proves an optimization changed the bytecode before benchmarking it.
+
 Call `dis.dis(original_func)` and `dis.dis(optimized_func)`, count the number of opcodes in the hot section, and confirm that the optimized version has fewer or cheaper opcodes. For example, confirming that `global_x += 1` generates `LOAD_GLOBAL` + `STORE_GLOBAL` while `local_x += 1` generates `LOAD_FAST` + `STORE_FAST` proves the optimization is real at the bytecode level before benchmarking.
 
 **Q10: A FastAPI endpoint takes 600ms P99. Walk through your profiling workflow.**
+**Short:** Diagnosing a slow endpoint starts with py-spy in production, then cProfile and line_profiler on staging to isolate the exact line.
+
 Step 1: attach `py-spy` to the production worker to get a flamegraph without disruption — identify the top frame. Step 2: if the hot frame is in Python code (not I/O), run `cProfile` on a staging replica with a realistic request payload to get function-level `tottime`. Step 3: use `line_profiler` on the identified hot function to find the exact line. Step 4: check if the bottleneck is algorithmic (fix logic), a slow library call (switch to faster library like `orjson`), or a repeated attribute lookup in a loop (local alias). Step 5: benchmark the fix with `timeit` and load-test on staging to confirm P99 improvement before deploying.
 
 **Q11: What does the `dis` module reveal about `x += 1` for a global vs local variable, and what is the opcode count difference?**
+**Short:** A local x += 1 compiles to fast array opcodes, while the global form uses LOAD_GLOBAL/STORE_GLOBAL dictionary operations instead.
+
 For a local variable, `x += 1` compiles to `LOAD_FAST x`, `LOAD_CONST 1`, `BINARY_OP +=`, `STORE_FAST x` — 4 opcodes, 2 of which are fast array operations. For a global variable, it compiles to `LOAD_GLOBAL x`, `LOAD_CONST 1`, `BINARY_OP +=`, `STORE_GLOBAL x` — 4 opcodes but `LOAD_GLOBAL` and `STORE_GLOBAL` each perform a dictionary operation. In a loop executing 10 million iterations, this difference accounts for approximately 15-20% slower execution.
 
 **Q12: How does the `join()` pattern for string building avoid the O(n^2) behavior of `+` concatenation?**
+**Short:** "".join(fragments) allocates one buffer after measuring total length, avoiding the O(n^2) copying that += concatenation causes.
+
 Python strings are immutable. Each `s += fragment` allocates a new string object of length `len(s) + len(fragment)`, copies both strings into it, and discards the old `s`. Over `n` fragments, total bytes copied sum to 0 + 1 + 2 + ... + n = O(n^2). `"".join(fragments)` first computes the total length in one pass, allocates one buffer of that size, then copies each fragment once — O(n) total bytes copied. For 1,000 strings of average length 10, join is approximately 10x faster and eliminates quadratic memory allocation.
 
 **Q13: What does `line_profiler` add over `cProfile`, and what does it cost?**
+**Short:** line_profiler reports per-line timing inside one function at roughly 3-5x overhead, higher than cProfile's per-function view.
+
 `line_profiler` reports execution time for every individual line inside a decorated function, not just an aggregate per function like `cProfile`. Decorate the target function with `@profile` and run `kernprof -l -v script.py` to get an annotated source listing showing hits and time per line, pinpointing exactly which line inside a slow function is the bottleneck. The overhead is higher than cProfile's 1.5-3x, roughly 3-5x, because it must instrument every line rather than every function call. Reserve it for the specific function cProfile already identified as hot, rather than running it across an entire codebase.
 
 **Q14: Why is `time.time()` around a code block an unreliable way to benchmark Python code?**
+**Short:** time.time() around a code block includes OS scheduling jitter and GC pauses, making its readings vary by roughly plus or minus 30%.
+
 `time.time()` measures wall-clock time, which includes OS scheduling jitter, GC pauses, and background I/O that have nothing to do with the code being measured. A single `time.time()` measurement of `sum(range(1_000_000))` can vary by roughly ±30% between runs on identical hardware because of this noise. `timeit`, by contrast, disables the garbage collector during the run and repeats the statement many times, producing results stable to within about ±2% across runs. Reserve `time.time()` for coarse-grained request-level latency logging, and use `timeit` whenever a 10-20% difference actually matters.
 
 **Q15: Why does `timeit` disable garbage collection by default, and when should you re-enable it?**
+**Short:** timeit disables garbage collection by default so an unrelated GC pause does not inflate the measurement of the code under test.
+
 `timeit` calls `gc.disable()` before running the timed statement so that an unrelated GC pause triggered by prior allocations does not inflate the measurement. This isolates the code under test from garbage-collection noise, but it also means the benchmark no longer reflects production behavior where GC is always enabled and does periodically pause execution. Re-enable it explicitly with `setup="import gc; gc.enable()"` when benchmarking heavily allocating code and you specifically want realistic end-to-end numbers including GC overhead. For most micro-benchmarks comparing two implementations, leaving GC disabled is the right default since it isolates the comparison from allocation-pattern noise.
 
 **Q16: How does `memray` improve on `memory_profiler` for production memory debugging?**
+**Short:** memray traces every allocation, including inside C extensions, letting it attribute memory that memory_profiler's RSS deltas miss.
+
 `memray` traces every memory allocation, including allocations made inside C extensions, and renders the results as an interactive flamegraph. `memory_profiler` only reports line-by-line RSS deltas measured from the OS, which misses allocations freed within the same line and cannot attribute memory to a call stack inside a C extension like NumPy or a database driver. `memray`, built by Bloomberg, hooks the allocator itself, so it shows exactly which Python and native call stack is responsible for each byte allocated. Use `memray` when investigating a leak involving third-party C extensions; `memory_profiler` remains adequate for quick pure-Python line-level checks.
 
 ---

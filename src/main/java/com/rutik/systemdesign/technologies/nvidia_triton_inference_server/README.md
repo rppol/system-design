@@ -940,93 +940,123 @@ The flags that actually change between a laptop smoke test and a production laun
 ## 12. Interview Questions with Answers
 
 **Q: Dynamic batching can 3x throughput — what does it cost, and when would you disable it?**
+**Short:** Dynamic batching trades a bounded per-request queue delay for 2-4x higher GPU throughput.
 Dynamic batching trades a bounded per-request queue delay for far higher GPU throughput, typically 2-4x on GPU-bound models. The batcher holds requests up to `max_queue_delay_microseconds` so it can fuse them into one wide kernel launch, so every request pays up to that delay even under light load. Disable it (or set the delay to 0) when the SLO is tighter than the smallest useful batch delay, when the model has no batch dimension, or when the client already sends full batches. Set the delay from `perf_analyzer` data, budgeting roughly 5-10% of your P99 SLO.
 
 **Q: Why does max_batch_size: 0 silently disable batching even with a dynamic_batching block present?**
+**Short:** max_batch_size: 0 declares the model has no batch dimension, so the dynamic batcher has nothing to batch along.
 Because `max_batch_size` is the contract that tells Triton the model's first tensor dimension is a batchable axis. Setting it to 0 declares the model has no batch dimension, so the dynamic batcher has nothing to batch along and every request runs alone regardless of the `dynamic_batching {}` block. The config looks correct but GPU utilization stays low under load. Always set `max_batch_size > 0` and verify batch formation via the exec-count to request-count ratio in the metrics.
 
 **Q: When do two instances on one GPU help throughput, and when do they hurt?**
+**Short:** A second instance helps when one instance can't saturate the GPU, but hurts once VRAM or SMs are already maxed.
 Two instances help when a single model cannot saturate the GPU, because each instance runs on its own CUDA stream so compute and data movement overlap. They hurt when the model already fills the SMs or when 2x the weights plus activations exceeds VRAM and causes contention or OOM. The rule of thumb is that count 2 is the sweet spot for small/medium models and count 4+ shows diminishing returns. Size instances from a model_analyzer sweep and a memory audit, never from intuition.
 
 **Q: How do you choose between an ensemble and a BLS Python model?**
+**Short:** An ensemble suits a fixed DAG pipeline, while BLS suits branching, looping, or conditional control flow between models.
 Choose an ensemble when the pipeline is a fixed DAG with no conditional logic, because Triton runs the whole graph server-side with the lowest overhead and one client call. Choose BLS when you need branching, looping, or skipping models, since it is a Python script that calls other models imperatively. The cost of BLS is running inside the Python backend with its per-instance stub-process overhead. Default to an ensemble and reach for BLS only when the control flow genuinely varies per request.
 
 **Q: What metric should drive Triton autoscaling, and why not GPU utilization?**
+**Short:** Triton autoscaling should key on queue duration, since GPU utilization only rises after latency has already degraded.
 Autoscale on queue duration, exposed as `nv_inference_queue_duration_us`, because rising queue time is the leading indicator that capacity is short. GPU utilization is a trap: it reads high precisely because the GPU is already saturated, so it fires only after latency has degraded. Queue time climbs before the SLO breaks, giving the HPA runway to add pods in time. Wire Prometheus to scrape 8002 and set the HPA target on queue duration per model.
 
 **Q: What breaks if you serve a stateful model without sequence batching?**
+**Short:** Without sequence batching, a stateful model's requests scatter across instances and lose their per-session state.
 Requests from one session scatter across instances, so the per-session state each request expects is not there and outputs are wrong or corrupt. The sequence batcher exists to route all requests sharing a correlation id to the same instance and to signal boundaries via the START/END/READY/CORRID control inputs. Without it, a conversation or streaming-ASR model has no coherent state between turns. Enable `sequence_batching` and populate the control inputs for any model that carries state across requests.
 
 **Q: When should you run vLLM inside Triton versus running raw vLLM directly?**
+**Short:** Running vLLM inside Triton pays off only when you also serve non-LLM models needing one unified batching and metrics surface.
 Run vLLM inside Triton when you also serve non-LLM or multi-framework models and want one standardized batching, metrics, and versioning surface across all of them. Run raw vLLM when you are a pure-LLM shop, because the extra Triton layer buys little and a single-purpose server is simpler to operate. Triton's advantage is consolidation and uniform ops, not LLM performance, since the heavy lifting is the vLLM engine either way. Decide on how heterogeneous your model fleet is, not on LLM throughput.
 
 **Q: The first request after loading is 100x slower than the rest — what causes it and how do you fix it?**
+**Short:** The first request pays one-time kernel autotuning and context setup that a model_warmup block can absorb before READY.
 The first request pays one-time initialization: TensorRT/cuBLAS kernel autotuning, CUDA context and memory-pool setup, and lazy graph compilation, none of which the warm path repeats. The fix is a `model_warmup` block that fires synthetic requests at load time, so the model only reaches READY after the expensive autotuning is already done. Warm up at the batch sizes you expect in production so the tuned kernels match real traffic. This also keeps the explicit-mode load transition honest, since READY then means truly ready.
 
 **Q: What is the difference between perf_analyzer and model_analyzer?**
+**Short:** perf_analyzer profiles one configuration, while model_analyzer searches many configurations for the best tradeoff.
 perf_analyzer measures a single configuration, sweeping concurrency and batch to report throughput, latency percentiles, and the queue-versus-compute split. model_analyzer searches across many configurations, launching Triton with different instance counts and batching settings and reporting the Pareto frontier of throughput, latency, and GPU memory. You use perf_analyzer to validate or profile one config and model_analyzer to discover the best config. Run model_analyzer first to pick a config, then perf_analyzer to confirm it against realistic traffic.
 
 **Q: What does the decoupled transaction policy enable, and which workloads need it?**
+**Short:** Decoupled mode lets one request produce many responses, which is what token-by-token LLM streaming requires.
 Decoupled mode lets one request produce many responses instead of exactly one, which is what token streaming requires. The backend calls the response sender once per generated token and closes the stream with a final flag, and clients consume it over gRPC. LLM backends like vLLM and TensorRT-LLM depend on it to stream tokens as they are generated. Set `model_transaction_policy { decoupled: true }` on any model that emits an incremental stream rather than a single result.
 
 **Q: How should you reason about Python backend performance?**
+**Short:** The Python backend runs each instance as a separate stub process, so throughput scales with instance count, not threads.
 Treat the Python backend as flexible glue, not a hot path, because each instance is a separate stub process talking to the core over shared memory. Separate processes dodge the GIL across instances, so you scale Python throughput with `instance_group.count` rather than threads. The costs are shared-memory sizing (`--shm-size`), serialization of tensors across the boundary, and the risk of memory growth if you retain buffers between calls. Use it for pre/post-processing and BLS, and push compute-heavy work into a TensorRT or ONNX backend.
 
 **Q: How do you run a canary using Triton's version policy?**
+**Short:** An explicit version_policy with specific versions serves old and new model versions side by side for a controlled canary.
 Use `version_policy: { specific { versions: [1, 2] } }` to serve the current and new versions side by side from the same model, then shift traffic between them at the router or client. `latest{num_versions:N}` serves the N highest versions and `all{}` serves every version directory, but explicit `specific` is what makes a controlled canary possible. Because versions are just numbered directories, rolling back is copying or removing a folder, not rebuilding. Pair this with explicit model control so each load and unload is atomic and auditable.
 
 **Q: Why prefer explicit model-control mode in production over poll mode?**
+**Short:** Explicit mode makes every load and unload an intentional, atomic, auditable API call instead of a background rescan.
 Explicit mode loads and unloads only via the model-control API, so every deployment is intentional, atomic, and auditable, and there is no background rescan racing your writes. Poll mode periodically rescans the repository and picks up changes automatically, which is convenient in dev but offers no control over timing and no atomic-swap guarantee. In production you want a deploy to be an API call you can gate, log, and roll back. Start with an allowlist and drive changes through `POST /v2/repository/models/{name}/load`.
 
 **Q: How does concurrent execution relate to CUDA streams?**
+**Short:** Each model instance runs on its own CUDA stream, letting independent instances overlap compute and data transfer.
 Each model instance Triton creates runs on its own CUDA stream, and independent streams let the GPU overlap kernels and data transfers instead of serializing them. So `instance_group.count: 2` means two batches can be in flight — one computing while the other copies inputs host-to-device — which is how added instances raise utilization. The ceiling is SM and memory-bandwidth contention: past the point where streams fight for the same resources, more instances stop helping. Tune instance count against a utilization and memory sweep, not by adding streams blindly.
 
 **Q: What are the correctness rules for Triton's response cache?**
+**Short:** Triton's response cache is only correct for deterministic models, never a sampled LLM or any stateful model.
 The response cache returns a stored output whenever the input tensors exactly match a previous request, skipping compute entirely. It is only correct for deterministic models where identical inputs must yield identical outputs, such as a greedy classifier or an embedding model. It is wrong for any sampled or stateful model — a temperature-sampled LLM must not serve a cached token stream, and a stateful model's output depends on more than the current input. Enable it per model only after confirming determinism, and size the shared cache to your working set.
 
 **Q: How do you choose between the TensorRT and ONNX Runtime backends?**
+**Short:** TensorRT gives the lowest latency on a fixed GPU architecture, while ONNX Runtime trades some speed for portability.
 Choose TensorRT for the lowest latency on NVIDIA GPUs, accepting that the compiled engine is specific to a GPU architecture and TensorRT version and rebuilds on mismatch. Choose ONNX Runtime for portability, since one graph runs across heterogeneous GPUs and even CPU with fast cold starts and no per-arch engine. The classic failure is shipping an engine built for one compute capability to a mixed-GPU pool, causing 10-minute cold-start rebuilds. Use TensorRT on homogeneous fleets where latency is critical and ONNX on mixed or fast-iterating fleets.
 
 **Q: How does CUDA shared-memory I/O reduce latency, and when is it worth the complexity?**
+**Short:** CUDA shared-memory I/O passes an on-GPU tensor by IPC handle, skipping the host round-trip for co-located requests.
 Shared-memory I/O lets the client hand Triton a pointer to a registered memory region instead of serializing tensor bytes over the socket, so a large input is read in place. CUDA shared memory goes further: an already-on-GPU tensor is passed by CUDA IPC handle and never round-trips through host memory, removing roughly 0.5-2 ms of copy per large request. It is only usable when client and server share a host, since the pointer is meaningless across the network. Reach for it on I/O-bound large-tensor models where the copy dominates, and skip it for small payloads where registration overhead outweighs the saving.
 
 **Q: How do you stop a batch-scoring flood from starving interactive traffic on a shared Triton server?**
+**Short:** Priority levels and bounded queues let interactive requests jump ahead of bulk batch-scoring traffic under load.
 Use the dynamic batcher's priority levels and per-priority queue policies so interactive requests jump ahead of bulk ones. Give interactive traffic a high priority level with a short timeout (say 5 ms) and put batch scoring at a lower priority, and set `max_queue_size` so overload rejects requests fast instead of queueing unbounded. Rejection is the correct failure mode under overload because a bounded queue preserves latency for what you do admit. Alternatively or additionally, use the rate limiter's resource budgets to cap how often the heavy model executes.
 
 **Q: How does the TensorRT-LLM backend's in-flight batching differ from dynamic batching, and what is Triton's multi-node story?**
+**Short:** In-flight batching admits a new sequence the moment another finishes, keeping the GPU saturated during mixed-length generation.
 In-flight batching admits a new sequence into the running batch as soon as another emits its EOS token, so the GPU stays saturated where static dynamic batching would idle waiting for the whole batch. It handles mixed-length generation this way, and combined with a paged KV cache it lifts LLM throughput 2-4x. Multi-GPU parallelism is orchestrated by an MPI launcher with one rank per GPU, and a real deployment is an ensemble of tokenizer preprocessing, generation, and detokenizer postprocessing. Critically, Triton is single-node: one model must fit within one node's GPUs, so multi-node serving relies on the TensorRT-LLM MPI orchestrator spanning nodes or a router in front of node-local servers.
 
 **Q: How do you localize a P99 latency regression to queueing versus compute versus I/O in Triton?**
+**Short:** Per-request trace spans split latency into queue, compute, and I/O phases to localize a P99 regression's cause.
 Enable tracing and read the per-request span breakdown, which splits latency into receive, queue, compute-input, compute-infer, compute-output, and send phases. A high QUEUE span means you are capacity-bound (add instances or scale out), a high COMPUTE_INFER means the model itself is slow (optimize or quantize), and high COMPUTE_INPUT/receive means I/O (consider shared memory). Sample at a low rate like 1 in 100 because tracing every request is expensive, and export via OpenTelemetry so the Triton spans join the app's end-to-end distributed trace. The same split is available cheaply as the `nv_inference_queue_duration_us` and `nv_inference_compute_infer_duration_us` Prometheus histograms.
 
 **Q: When do you write a custom C++ backend instead of using the Python backend?**
+**Short:** A custom C++ backend removes the stub-process hop the Python backend pays, justified only by measured need.
 Write a C++ backend when you need every microsecond, are wrapping a runtime Triton does not ship, or the logic is compute-heavy and would be GIL-bound in Python. The C++ backend implements the backend C API directly, so there is no stub-process hop and no tensor serialization across a shared-memory boundary, unlike the Python backend. The Python backend wins on iteration speed and glue code, which is why most teams start there and only drop to C++ for a proven hot path. Treat it like choosing a hand-written CUDA kernel over a NumPy prototype — justified by measured need, not default.
 
 **Q: How does Triton serve models straight from S3 or GCS, and what is a repository agent for?**
+**Short:** Triton can pull models directly from a cloud bucket, and a repository agent verifies or transforms them at load time.
 Point `--model-repository` at an `s3://`, `gs://`, or `as://` URL and Triton pulls models into a local cache at load time, with credentials supplied through the standard cloud environment variables. A repository agent runs at load time to transform or gate a model: the built-in checksum agent verifies file hashes from `config.pbtxt` and refuses a corrupted or tampered artifact, and custom agents can decrypt or fetch from a bespoke store. Avoid polling a cloud bucket in production because it is rate-limit-prone and non-atomic. Prefer explicit mode and push load calls from CI after the upload finishes.
 
 **Q: When should you embed Triton in-process instead of running the server?**
+**Short:** Embedding Triton in-process suits a co-located single-tenant caller, cutting overhead to microseconds versus a full RPC.
 Embed in-process when the caller is co-located and single-tenant, so the C API or Python in-process API give you Triton's batching and metrics as a library call instead of a full RPC. The overhead drops to microseconds because there is no socket or serialization. Run the standalone server when many clients, languages, or pods must share the models, since you then want independent scaling, isolation, and the model-control API surface. NVIDIA DeepStream and Holoscan embed the C API to keep inference inside a C++ media pipeline. Choose by co-location and tenancy, not by raw latency alone.
 
 **Q: What problem does ragged batching solve, and how does it work?**
+**Short:** Ragged batching concatenates variable-length inputs into one buffer instead of padding them all to the same length.
 Ragged batching lets variable-length inputs batch together without padding them all to a common length, which would waste 2-10x the compute on short sequences. It concatenates the per-request tensors into one flat buffer and adds a generated offsets or element-count tensor the backend uses to unpack each request's slice. You enable it with `allow_ragged_batch: true` on the input plus a `batch_input` describing the index tensor. Use it for NLP token sequences and any variable-length input where padding to the max length would dominate cost.
 
 **Q: When do you use implicit state tensors versus explicit CORRID state in sequence batching?**
+**Short:** Implicit state suits a fixed-shape tensor Triton carries automatically, while explicit CORRID suits a backend-managed KV cache.
 Use implicit state when the per-sequence state is a fixed-shape tensor Triton can carry between requests, so the backend just reads and writes it without owning a session store. You declare it as input/output state pairs with an initial state. Use explicit CORRID handling when the state is large, external, or needs custom eviction — for example a KV cache the backend manages keyed by correlation id. Both rely on the sequence batcher routing a session's requests to the same instance. Prefer implicit for simple recurrent state and explicit for anything you must control directly.
 
 **Q: What is the difference between the local and Redis response caches, and what is safe to cache?**
+**Short:** The local cache is fastest but per-replica, while the Redis cache is shared across replicas at the cost of a network hop.
 The local cache is an in-process LRU that is fastest but per-replica and lost on restart, while the Redis cache is shared across replicas at the cost of a network hop. A Redis hit computed on one pod can serve another. The cache key is a hash of model name, version, and input bytes, so only deterministic models are safe to cache — never a sampled LLM, a stateful model, or anything time-dependent. Watch `nv_cache_num_hits_per_model` and disable the cache if hit rate is low on high-cardinality inputs, where it is pure overhead. Enable it per model with `response_cache { enable: true }` only after confirming determinism.
 
 **Q: Why can a TensorRT model that worked in testing fail in production with a shape error?**
+**Short:** A TensorRT engine's optimization profile fixes each dimension's min/opt/max range, and an out-of-range request fails outright.
 Because a TensorRT engine is built with optimization profiles that fix the min/opt/max range of every dynamic dimension, and a request outside that range fails rather than falling back. If testing only sent batch sizes up to 8 but production sends 16, the engine built for max 8 rejects it. The fix is to build the engine for the full production shape distribution, setting `opt` to the common batch and `max` above the largest expected. This is the TensorRT analog of the compute-capability mismatch — engines are specialized artifacts, so build them for what production will actually send.
 
 **Q: Why would you serve an XGBoost model on Triton instead of a CPU service?**
+**Short:** The FIL backend runs large tree ensembles on the GPU with dynamic batching at sub-millisecond latency.
 Serve it on the FIL backend when the tree ensemble is large or latency-critical, because FIL runs thousands of trees on the GPU with dynamic batching at sub-millisecond latency for batches of hundreds. It also lets classic ML share one server, one metrics surface, and one ops story with your deep models instead of running a separate CPU fleet. Fraud and ranking stacks that mix gradient-boosted trees with neural nets consolidate both behind Triton for exactly this reason. Reach for it when tree-model latency or fleet consolidation matters, and keep small low-QPS trees on CPU where a GPU is overkill.
 
 **Q: What happens to GPU work when a gRPC streaming client disconnects mid-generation?**
+**Short:** A gRPC cancellation only stops GPU generation if the backend actually polls for it; HTTP has no cancellation at all.
 A gRPC stream cancellation propagates to the backend as a cancellation flag the backend must poll, and an unchecked backend keeps generating anyway. TRT-LLM and vLLM backends check request-cancellation state between decode steps and stop early, but a custom backend that never polls burns GPU time generating tokens for a client that already hung up. HTTP has no mid-request cancellation primitive at all, so a client abort there leaves the backend running to completion regardless. Prefer gRPC for any LLM streaming route and confirm your backend actually polls for cancellation before relying on it to free capacity.
 
 **Q: Can you change a served model's precision from FP16 to INT8 by editing config.pbtxt, without rebuilding it?**
+**Short:** Precision is baked into the compiled artifact at build time, so changing it requires rebuilding, not editing config.
 No — precision is baked into the artifact at build time, not a runtime toggle in config.pbtxt. A TensorRT engine's FP16/INT8/FP8 kernels are selected when the engine is compiled (FP8 requires Hopper or newer), SmoothQuant/AWQ quantization is applied during the TensorRT-LLM build step, and ONNX Runtime quantization happens at model-export time — Triton's config only selects which pre-built artifact and backend to load. A precision change therefore means rebuilding and redeploying a new artifact, typically as a separate model version, not editing a config field. Budget capacity accordingly: INT8 roughly doubles throughput over FP16 for the same model, so plan one engine build per precision-per-GPU-architecture combination you intend to serve.
 
 ---

@@ -817,74 +817,92 @@ def get_user_name(data: dict) -> str:
 ## 12. Interview Questions with Answers
 
 **Q1:** What is the difference between `is` and `==` in Python, and when should you use each?
+**Short:** `is` tests identity (same object); `==` tests value equality via `__eq__`.
 
 `is` tests object identity; `==` tests value equality. Concretely, `is` asks whether two references point to the same object in memory (`id(a) == id(b)`), while `==` calls `__eq__`. Use `is` only for singletons: `None`, `True`, `False`, and explicitly defined sentinel objects. For all other comparisons — strings, numbers, containers, custom objects — use `==`. Using `is` to compare strings works by accident due to interning and will silently fail with runtime-constructed strings.
 
 **Q2:** Why can `a = 257; b = 257; a is b` return `False`?
+**Short:** CPython only caches small ints -5 to 256 as singletons, so 257 may not be cached.
 
 CPython caches integers only in the range -5 to 256 as singletons. Values outside this range are freshly allocated objects each time the literal appears in a new code object. In a script, `257` on line 1 and `257` on line 2 may be the same compile-time constant (the compiler folds constants within a code object), but across a REPL session boundary or separate function bodies they will be different objects. Always use `==` for numeric equality.
 
 **Q3:** List all falsy values in Python.
+**Short:** Python has eleven built-in falsy values, plus any object with a false `__bool__` or `__len__`.
 
 There are eleven built-in falsy values, plus any object that declares itself falsy. The built-ins: `None`, `False`, `0`, `0.0`, `0j`, `""`, `b""`, `[]`, `()`, `{}`, and `set()` — with `frozenset()` and `range(0)` behaving the same way. Any object whose `__bool__` returns `False`, or whose `__len__` returns `0`, joins them. Everything else — including `"0"`, `[None]`, `0.00001` — is truthy.
 
 **Q4:** What is the mutable-default-argument trap, and how do you fix it?
+**Short:** Mutable default arguments are evaluated once at `def` time and shared across all calls.
 
 Default argument values are evaluated once when the `def` statement executes, not once per call. A mutable default (like `[]` or `{}`) is therefore shared across all calls that use the default. The fix is to use `None` as the default and create a fresh mutable object inside the function body: `def f(items: list | None = None): if items is None: items = []`. This pattern is so common that forgetting it in a code review is considered a significant oversight.
 
 **Q5:** When is EAFP preferred over LBYL, and when is LBYL preferred?
+**Short:** EAFP suits the common-success case; LBYL suits the common-failure case.
 
 EAFP wins when success is the common case; LBYL wins when failure is. The reason is that entering a `try` that does not raise costs on the order of 10 ns since 3.11's zero-cost exceptions, while a precondition check always costs at least one attribute lookup or syscall, on every single call including the successful ones. LBYL is preferred when failure is the common case (making exception construction the bottleneck), when the operation has irreversible side effects, or when you need granular feedback about which precondition failed (common in form validators).
 
 **Q6:** Does a list comprehension variable leak into the enclosing scope in Python 3?
+**Short:** Python 3 comprehension variables stay scoped to the comprehension and never leak.
 
 No. In Python 3, list, dict, and set comprehensions and generator expressions each execute in their own implicit scope. The iteration variable is local to the comprehension. This is the opposite of Python 2 behaviour. Plain `for` loops still leak their variable into the enclosing scope in both Python 2 and 3.
 
 **Q7:** What problem does the walrus operator `:=` [3.8] solve?
+**Short:** The walrus operator `:=` assigns and returns a value in one expression, avoiding double computation.
 
 It eliminates double computation when you need to both assign a value and test it in one expression. The canonical example is `while chunk := file.read(8192):` — without walrus you either assign before the loop (making it less readable) or call `read()` twice. It also enables comprehension filters that use the computed value: `[c for s in data if (c := s.strip())]`.
 
 **Q8:** What are the four main pattern kinds in `match`/`case` [3.10]?
+**Short:** `match`/`case` supports literal, capture, class, and sequence patterns, plus OR patterns and guards.
 
 Literal patterns match exact values (`case 404:`). Capture patterns bind a name to the matched value (`case x:`). Class patterns match the type and optionally destructure attributes (`case Command(action="quit"):`). Sequence patterns match tuple or list structure (`case (x, y):`). Additionally, OR patterns combine alternatives (`case 200 | 201:`), and any pattern can have a guard clause (`case n if n > 0:`).
 
 **Q9:** When should you use a generator expression instead of a list comprehension?
+**Short:** Generator expressions avoid materializing an intermediate list when a result is consumed once.
 
 Use a generator expression when the result is consumed exactly once and you do not need its length or random access. Passing `(x**2 for x in data)` to `sum()`, `max()`, or `any()` avoids materialising an intermediate list in memory — for 10 million elements this saves roughly 80 MB (8 bytes per Python int reference). Use a list comprehension when you need to iterate the result multiple times, check `len()`, index into it, or pass it to a function that requires a sequence.
 
 **Q10:** How does Python determine the truthiness of a custom class instance?
+**Short:** Python checks `__bool__` first, then `__len__` (zero is falsy), else the instance is always truthy.
 
 Python calls `__bool__` first; if that is not defined, it calls `__len__` and treats a return value of `0` as `False`. If neither is defined, the instance is always truthy (the object exists). To make a class semantically Boolean (a `BankAccount` with zero balance should be falsy), implement `__bool__`. To make a container class behave like built-in containers, implement `__len__`.
 
 **Q11:** Why is `if x is not None` preferred over `if x != None`?
+**Short:** `is not None` is an unspoofable identity test, while `!= None` can be overridden by `__ne__`.
 
 `is not None` is a guaranteed identity test against the singleton `None` object — it cannot be overridden. `!= None` calls `x.__ne__(None)`, which can return any value from a custom `__eq__` or `__ne__`. Third-party library objects (NumPy arrays, SQLAlchemy column expressions) override `__eq__` in ways that return non-Boolean objects, making `x != None` raise an exception or produce unexpected results in a Boolean context. `is not None` is always safe.
 
 **Q12:** What is the difference between starred unpacking in assignment and in function calls?
+**Short:** Starred unpacking in assignment collects extra items into a list; in calls it unpacks an iterable.
 
 In assignment (`first, *rest = items`), the starred variable collects zero or more elements from the iterable as a `list`. It can appear in any position but only once per assignment target. In function calls (`func(*args)`), the star unpacks an iterable into positional arguments. `**kwargs` in a call unpacks a mapping into keyword arguments. Both use the same `*` syntax but operate in different contexts — the assignment form is a language feature; the call form is an operator on the argument list.
 
 **Q13:** What makes a string literal eligible for compile-time interning in CPython, and why is relying on it dangerous?
+**Short:** Only identifier-like literals are interned at compile time, so relying on `is` for strings is unsafe.
 
 Only literals that look like identifiers — no spaces, no punctuation, nothing that could not be a variable name. So `"hello"` is commonly interned at compile time while `"hello world"` is not. This is a CPython implementation detail, not a language guarantee: other implementations may intern differently or not at all, and even CPython's exact interning rules have changed across versions. Code that writes `if name is "Alice":` works by accident in a REPL where short literals get folded, then fails silently in production once `name` is built at runtime by concatenation or `.format()`. Always compare strings with `==`; reserve `is` for singletons and objects you explicitly interned yourself with `sys.intern()`.
 
 **Q14:** When should you prefer a `dict` dispatch table over `match`/`case` [3.10], even though both can route on a value?
+**Short:** A `dict` dispatch table beats `match`/`case` for O(1) routing on a single scalar key.
 
 Prefer a `dict` of callables whenever you are routing on a single scalar key and do not need to destructure. A `dict` lookup is O(1) and reads as plain function-call syntax, while `match`/`case` compiles to a sequence of pattern tests with no O(1) guarantee. `match`/`case` earns its keep when the routing decision depends on *structure* — nested tuples, dataclass attributes, sequence length — because a `dict` key cannot express "any 2-tuple whose second element is zero" the way a sequence pattern can. Guard clauses (`case n if n > 0:`) and OR patterns (`case 200 | 201:`) let a single `match` block layer extra conditions that a plain dict dispatch cannot express without wrapping each value in a function. Reach for `match`/`case` when you need destructuring, and a `dict` when you only need name-to-function routing.
 
 **Q15:** Why can't you use the walrus operator `:=` directly inside a `lambda` body?
+**Short:** The walrus operator needs parentheses inside a `lambda` body or it raises `SyntaxError`.
 
 The walrus operator `:=` [3.8] can appear inside a `lambda` body, but only when parenthesized: `lambda: (x := 5)` is legal, while the unparenthesized `lambda: x := 5` is a `SyntaxError`. Python's grammar accepts an assignment expression as a lambda's body only when parentheses turn it into a single atom; without them, `:=` is not a valid top-level lambda-body expression. In practice this rarely matters because a `lambda` that needs to assign-and-reuse a value is a sign the logic should be a named function instead, where a walrus can be used freely with or without parentheses. If you hit the unparenthesized form's `SyntaxError`, the quick fix is to add parentheses around the assignment; the more maintainable fix is to extract the lambda's body into a small named function. This is a narrow, low-frequency gotcha, but it explains why some walrus refactors that work at module level fail when moved into a `sorted(key=lambda x: ...)` call without the extra parens.
 
 **Q:** Does a list comprehension still create its own stack frame in Python 3.12+?
+**Short:** PEP 709 inlined comprehensions in Python 3.12, so they no longer create a nested stack frame.
 
 No — PEP 709 inlined list, dict and set comprehensions into the enclosing function in 3.12, so there is no nested code object and no per-comprehension function call. The scoping guarantee is unchanged: the iteration variable is still isolated and still does not leak, but it is now enforced by compiler-managed name isolation rather than by a real frame. You can prove it by inspecting `f.__code__.co_consts` for a nested code object — a comprehension has none, while a generator expression still shows `<genexpr>`. Generator expressions are deliberately excluded because a genexp must be suspendable, and suspension is exactly what a frame provides. The two practical effects: comprehensions got roughly twice as fast on small iterables, and tracebacks raised inside one no longer show a `<listcomp>` line.
 
 **Q:** Does Python warn you when you write `is` against a string literal?
+**Short:** CPython emits a `SyntaxWarning` when `is` compares against a string literal since Python 3.8.
 
 Yes — CPython emits `SyntaxWarning: "is" with 'str' literal. Did you mean "=="?` at compile time, and has since 3.8. That makes the textbook form of the bug (`if name is "Alice":`) one you should never ship, because the compiler and every linter catch it for free. The dangerous variant is the one that produces no warning at all: `is` against a *variable* that merely happens to hold an interned value, such as `expected = "Alice"` followed by `if name is expected:`. That passes every test written with literal fixtures and starts returning `False` the moment `name` arrives from `json.loads()` or user input. Reserve `is` for `None`, `True`, `False`, enum members, and sentinels you created yourself.
 
 **Q16:** What is `sys.intern()` and when would you use it explicitly?
+**Short:** `sys.intern()` forces a string into CPython's intern table so future equal strings share one object.
 
 `sys.intern(string)` forces a string into CPython's intern table and returns the canonical interned copy, guaranteeing that all future calls with an equal string return the identical object. The main use case is a micro-optimization for large symbol tables or parsers that compare the same strings millions of times — once interned, comparisons can safely use `is` instead of `==`, and duplicate strings share one object in memory instead of many. This differs from the automatic compile-time interning of identifier-like literals (see Q13): `sys.intern()` works on any string, including ones built at runtime, and the guarantee is explicit rather than an implementation accident. Only reach for it after profiling shows string comparison or memory duplication is an actual bottleneck — for typical application code, `==` on regular strings is already fast enough.
 

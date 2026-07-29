@@ -872,51 +872,83 @@ use `proc.communicate()` which reads stdout/stderr concurrently.
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between a naive and an aware datetime in Python, and why does it matter in production?**
+**Short:** A naive datetime carries no tzinfo and represents a floating local time, while an aware datetime maps to one unambiguous instant.
+
 A naive datetime has `tzinfo=None`; it represents a "floating" local time with no timezone context. An aware datetime has a `tzinfo` object attached; it represents an unambiguous instant on the UTC timeline. In production, storing naive datetimes in a database and comparing them with aware datetimes raises `TypeError`. More subtly, `datetime.now().timestamp()` returns the Unix epoch relative to the local machine's timezone, producing wrong results when the service runs on UTC-configured servers versus developer laptops in UTC-5.
 
 **Q2: How does `zoneinfo.ZoneInfo` differ from `datetime.timezone(timedelta(hours=-5))`?**
+**Short:** zoneinfo.ZoneInfo loads the IANA database and applies daylight saving transitions, unlike a fixed-offset timezone that never changes.
+
 `timezone(timedelta(hours=-5))` is a fixed-offset timezone that never changes. It does not know about daylight saving time. `ZoneInfo("America/New_York")` [3.9] loads the IANA timezone database and correctly applies EST (-5) in winter and EDT (-4) in summer, including the exact transition moments. Always use named `ZoneInfo` timezones for wall-clock scheduling and fixed offsets only when you truly mean a fixed UTC offset.
 
 **Q3: Describe the logging hierarchy and how propagation works.**
+**Short:** Logging propagation walks a record from a child logger up through each parent logger's handlers unless propagate=False is set.
+
 `logging.getLogger("app.api.users")` creates (or retrieves) a logger whose parent is `app.api`, whose parent is `app`, whose parent is the root logger. When a record is emitted, the logger checks its own level; if the record passes, it is passed to each handler on that logger, then the record walks up to the parent logger and repeats — unless `propagate=False` is set on a logger in the chain. This means you can attach a single JSON handler to the `"app"` logger and all child loggers automatically use it.
 
 **Q4: Why should libraries never call `logging.basicConfig()`?**
+**Short:** Libraries should never call logging.basicConfig() because it can install a plain handler before the application configures its own.
+
 `basicConfig()` is idempotent — it is a no-op if the root logger already has handlers. If a library calls it first, it installs a plain-text `StreamHandler` on the root logger before the application has a chance to configure JSON handlers or file handlers. Subsequent `basicConfig()` or `dictConfig()` calls from the application may then find the root logger already configured and fail silently or produce duplicate plain-text lines. Library code should only call `logging.getLogger(__name__)` and let applications own the root configuration.
 
 **Q5: How do you inject per-request context (such as `request_id`) into every log line in a FastAPI service?**
+**Short:** Per-request context like request_id is injected into logs via a ContextVar read inside a LoggerAdapter's process() method.
+
 Use `contextvars.ContextVar` to store the `request_id` for the current async task context. Create a `logging.LoggerAdapter` subclass whose `process()` method reads from the `ContextVar` and injects it into `extra`. In a FastAPI HTTP middleware, set the `ContextVar` at the start of each request and reset it in a `finally` block. Because `asyncio` copies the context for each task, concurrent requests do not bleed `request_id` into each other.
 
 **Q6: What does `check=True` do in `subprocess.run()` and when would you omit it?**
+**Short:** check=True in subprocess.run() raises CalledProcessError on a non-zero exit code, and should only be omitted to inspect it yourself.
+
 `check=True` raises `subprocess.CalledProcessError` if the child process exits with a non-zero return code. Omit it only when you explicitly want to inspect `result.returncode` yourself — for example, when you run a linter and want to distinguish exit code 0 (no issues), 1 (issues found), and 2 (fatal error). In all other cases, `check=True` prevents silently swallowing failures.
 
 **Q7: Why is `shell=True` dangerous, and what is the correct alternative?**
+**Short:** shell=True lets a shell interpret metacharacters in the command string, so untrusted input can inject arbitrary shell commands.
+
 With `shell=True`, the command string is passed to `/bin/sh -c "..."`. The shell interprets metacharacters: semicolons, backticks, `$()`, pipes, and redirects. If any part of the command includes user-supplied data, an attacker can inject arbitrary shell commands. The fix is to pass arguments as a Python list to `subprocess.run()`: the OS calls `execve` directly with the list elements as `argv`, so no shell is involved and no metacharacter interpretation occurs.
 
 **Q8: How do you stream subprocess output in an async FastAPI endpoint?**
+**Short:** Streaming subprocess output in async FastAPI uses asyncio.create_subprocess_exec and iterates its stdout without blocking the loop.
+
 Use `asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)` to get an `asyncio.subprocess.Process`. Then iterate `async for line in proc.stdout:` to yield lines as they arrive without blocking the event loop. Use a `StreamingResponse` with an async generator in FastAPI to push those lines to the client over HTTP chunked transfer encoding.
 
 **Q9: How do you add a subcommand (like `git commit` or `git push`) to an `argparse` parser?**
+**Short:** argparse subcommands are added by calling add_subparsers() once, then add_parser() for each subcommand like commit or push.
+
 Call `parser.add_subparsers(dest="command", required=True)` to create a subparser group. Then call `subparsers.add_parser("commit")` and `subparsers.add_parser("push")` to register each subcommand, optionally adding their own arguments. After `args = parser.parse_args()`, branch on `args.command`. Setting `required=True` ensures the parser exits with a usage error if no subcommand is given.
 
 **Q10: What is the `isEnabledFor` pattern and when is it critical?**
+**Short:** isEnabledFor guards expensive log-message construction so it only runs when the logger's effective level would actually emit it.
+
 `logger.isEnabledFor(logging.DEBUG)` returns `True` only if the effective level of the logger is DEBUG or lower. Without this guard, any expression used to construct the log message — f-strings, `repr()` calls, JSON serialization — is evaluated unconditionally before `logger.debug()` decides whether to emit the record. In a tight loop processing thousands of items per second, this constant evaluation can add measurable CPU overhead. The guard makes the expensive work conditional on the level actually being active.
 
 **Q11: How does `datetime.timestamp()` behave on a naive datetime, and what is the safer alternative?**
+**Short:** datetime.timestamp() on a naive datetime assumes the local system timezone, so the safer approach is always working with aware datetimes.
+
 `naive_dt.timestamp()` assumes the naive datetime is in the local system timezone and converts to Unix epoch accordingly. If the server is in UTC and the developer's machine is in UTC-5, the same naive datetime produces different epoch values. The safe alternative is to always work with aware datetimes: `aware_dt.timestamp()` uses the attached `tzinfo` and produces a deterministic result regardless of the system timezone.
 
 **Q12: How do you prevent log records from being emitted multiple times (duplicate log lines)?**
+**Short:** Duplicate log lines come from handlers attached at multiple levels of the hierarchy while propagation is still enabled.
+
 Duplicate lines almost always mean a handler is attached at multiple levels of the logger hierarchy while propagation is still enabled. Fix: attach handlers to exactly one logger (typically `"app"` or the root), and set `propagate=False` on any logger that has its own handlers to prevent the record from walking up to a parent that also has a handler. Alternatively, attach handlers only to the root logger and rely entirely on propagation.
 
 **Q13: What is the `fold` attribute on a `datetime` object, and what ambiguity does it resolve?**
+**Short:** The fold attribute disambiguates the one wall-clock hour that repeats during the fall daylight-saving transition.
+
 `fold` disambiguates the one wall-clock hour that repeats every autumn when clocks are set back for daylight saving time. During the fall-back transition a time like `01:30` occurs twice — once while still in daylight time, once after switching to standard time — and without `fold`, both instants print identically even though they differ by an hour in UTC. Setting `fold=0` (the default) selects the first occurrence and `fold=1` selects the second; `ZoneInfo`-aware datetimes use it to compute the correct UTC offset for each. Spring-forward is the opposite failure mode — a gap rather than a repeat — where a wall-clock time like `02:30` never exists at all on that day.
 
 **Q14: What does the `utc=True` parameter do on `TimedRotatingFileHandler`, and what happens if you omit it?**
+**Short:** utc=True on TimedRotatingFileHandler rotates at UTC midnight, keeping rotation boundaries consistent across servers in different regions.
+
 `utc=True` makes the handler rotate log files at UTC midnight instead of the server's local midnight. Without it, rotation timing is computed from the server's local timezone, so a fleet of servers running in different regions rotates at different real-world instants, and a non-UTC server can rotate at an unexpected wall-clock hour relative to your monitoring dashboards. This can split a single day's traffic across two rotated files or merge two different days' traffic into one, depending on the offset. Always pass `utc=True` for services deployed across multiple regions so rotation boundaries stay consistent everywhere.
 
 **Q15: When would you reach for `structlog` instead of the stdlib `logging` module?**
+**Short:** structlog is worth adopting once you need a declarative processor chain for binding context, rather than stitching Formatter and LoggerAdapter.
+
 Choose `structlog` when you need a processor-chain API that composes context binding, filtering, and formatting as explicit pipeline steps rather than subclassing `Formatter`. stdlib `logging` builds structured output by writing a custom `Formatter` and stitching context together with `LoggerAdapter` and `ContextVar`, which works but scatters the logic across several extension points. `structlog` lets you bind context once (`log = log.bind(request_id=rid)`) and chain processors like timestamping, JSON-rendering, and exception-formatting declaratively. For most services the stdlib approach is sufficient with zero extra dependencies; adopt `structlog` once you need reusable processor chains across many services.
 
 **Q16: What is the practical CPU cost of switching log output from plain text to JSON in production, and why is it usually acceptable?**
+**Short:** Formatting a log record as JSON instead of plain text costs roughly 5 microseconds extra per record, negligible next to its parseability.
+
 Formatting a log record as JSON instead of plain text costs roughly 5 microseconds of extra CPU time per record. That overhead comes from constructing a dict of fields and calling `json.dumps()` for every record, rather than a single `%`-style string interpolation. At typical application log volumes this adds well under a millisecond to total request latency, negligible compared to the value of having every log line machine-parseable by ELK, Datadog, or another log aggregator. Reserve plain-text formatting for local development, where terminal readability outweighs the parsing benefit.
 
 ---

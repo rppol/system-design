@@ -966,6 +966,7 @@ and [`cuda/tensor_cores_and_mixed_precision`](../../cuda/tensor_cores_and_mixed_
 ## 12. Interview Questions with Answers
 
 **Q: Why is THROUGHPUT mode slower for a single request than LATENCY mode?**
+**Short:** THROUGHPUT partitions CPU cores into multiple streams, so one request only gets a fraction of the cores.
 Because THROUGHPUT partitions the CPU cores into several **streams**, so one request
 runs on only a fraction of the cores instead of all of them. LATENCY mode gives a
 single request every core of a NUMA node, minimizing its wall-clock time; THROUGHPUT
@@ -974,6 +975,7 @@ you have one user at a time, THROUGHPUT is the wrong hint — it makes that user
 longer while buying concurrency you aren't using.
 
 **Q: What's the difference between the AUTO, MULTI, and HETERO virtual devices?**
+**Short:** AUTO picks one best device for the whole model, HETERO splits a graph across devices by op, and MULTI is legacy.
 AUTO picks one best device for the **whole model** (and can serve the first requests on
 CPU while an accelerator warms up); HETERO splits **one graph across devices op-by-op**
 by affinity; MULTI runs the model on several devices in parallel and is **legacy**,
@@ -982,12 +984,14 @@ a single unsupported op would otherwise block the accelerator, and prefer
 `CUMULATIVE_THROUGHPUT` over MULTI to saturate multiple devices at once.
 
 **Q: Does OpenVINO need a GPU, and does it run on AMD CPUs or NVIDIA GPUs?**
+**Short:** OpenVINO is CPU-first and needs no GPU, but it does not run on NVIDIA GPUs at all.
 No GPU is needed — OpenVINO is **CPU-first** and the CPU plugin is always available. It
 runs on any x86-64 CPU (including AMD, though INT8 acceleration needs Intel's VNNI/AMX)
 and on ARM64. It does **not** run on NVIDIA GPUs — there is no CUDA device; for NVIDIA
 hardware you use Triton or vLLM. OpenVINO's GPU/NPU plugins target **Intel** silicon.
 
 **Q: What changed between Model Optimizer (`mo`) and `ovc`/`convert_model`?**
+**Short:** The mo CLI was removed in 2025.0 and replaced by ovc and convert_model, which dropped the old preprocessing flags.
 The `mo` CLI was **removed in 2025.0**; `ovc` and the Python `convert_model` replaced
 it, and they deliberately **dropped the preprocessing flags** (`--mean_values`,
 `--scale_values`, `--reverse_input_channels`). That preprocessing moved into the runtime's
@@ -995,6 +999,7 @@ it, and they deliberately **dropped the preprocessing flags** (`--mean_values`,
 the **default** on conversion, whereas with `mo` it was opt-in.
 
 **Q: Why did INT8 quantization tank my model's accuracy, and how do you fix it?**
+**Short:** Post-training INT8 quantization can lose accuracy on wide-dynamic-range layers like LayerNorm and softmax.
 Plain post-training quantization learns activation ranges from a small calibration set,
 and layers with wide dynamic ranges (LayerNorm, attention, final softmax) can lose too
 much precision. The fix is `nncf.quantize_with_accuracy_control` with a `max_drop`
@@ -1003,6 +1008,7 @@ point** until accuracy is within budget — or `ignored_scope` to skip known-fra
 layers, or weight-only compression for LLMs.
 
 **Q: Why is the first inference on a GPU or NPU slow, and how do you hide it?**
+**Short:** GPU and NPU plugins compile kernels at compile_model time, which makes the first inference take seconds.
 Because those plugins **compile kernels at `compile_model` time**, which takes seconds.
 Two mechanisms hide it: `ov::cache_dir` serializes the compiled blob so subsequent loads
 **import** in milliseconds, and AUTO's **CPU-first startup fallback** serves the opening
@@ -1010,6 +1016,7 @@ requests on the always-ready CPU while the accelerator compiles in the backgroun
 hot-swaps. In production you should set `cache_dir` on every replica.
 
 **Q: If `read_model` can load ONNX directly, why bother producing IR?**
+**Short:** Converting to IR gives faster loading, no framework dependency, default FP16 compression, and caching.
 IR gives **faster load** (no framework parse), **no framework dependency** in the
 production image (just the runtime), **default FP16 compression** halving the weights,
 and clean **caching**. Direct ONNX read is fine for prototyping, but a converted IR
@@ -1017,6 +1024,7 @@ artifact is the leaner, faster deployment unit — and the conversion is where y
 FP16/INT8 optimization anyway.
 
 **Q: What's the difference between `nncf.quantize` and `nncf.compress_weights`, and why use each?**
+**Short:** nncf.quantize does full INT8 activation and weight quantization, while compress_weights compresses only weights.
 `quantize` does full **INT8 activation + weight** quantization from a calibration set —
 right for CNNs, where compute is the bottleneck. `compress_weights` compresses **weights
 only** (INT8/INT4) and leaves activations FP16 — right for **LLMs**, where decode is
@@ -1024,6 +1032,7 @@ memory-bandwidth-bound so shrinking the streamed weights is the win. You quantiz
 ResNet; you compress-weights a Llama.
 
 **Q: Why doesn't my application reproduce `benchmark_app`'s throughput numbers?**
+**Short:** A synchronous single-request loop can't match benchmark_app's THROUGHPUT hint run with multiple requests in flight.
 Almost always because the app runs a **synchronous loop with one infer request** while
 `benchmark_app` runs the `THROUGHPUT` hint with multiple requests in flight. Match the
 **hint**, keep `optimal_number_of_infer_requests` requests in flight via
@@ -1031,6 +1040,7 @@ Almost always because the app runs a **synchronous loop with one infer request**
 top cause of the gap.
 
 **Q: How do asynchronous inference and multiple infer requests increase throughput?**
+**Short:** Asynchronous infer requests overlap host-side pre- and post-processing with device compute instead of leaving it idle.
 A single synchronous `infer()` leaves the device **idle** during host-side pre/post-
 processing. Running several `InferRequest`s asynchronously overlaps that host work with
 device compute — while the device runs frame N, the host preprocesses N+1 and post-
@@ -1038,6 +1048,7 @@ processes N−1. It's the CPU-and-edge analog of Triton's concurrent model insta
 it's the single biggest real-world throughput lever.
 
 **Q: What is `optimal_number_of_infer_requests` and how should an app use it?**
+**Short:** optimal_number_of_infer_requests tells an app how many concurrent requests it needs to saturate the device.
 It's a property the **compiled model** exposes telling you how many concurrent infer
 requests the plugin needs to saturate the device under the chosen hint. Your app should
 read it after `compile_model` and size its `AsyncInferQueue` (or request pool) to that
@@ -1045,6 +1056,7 @@ number — hard-coding a different count either under-utilizes the device or ove
 it. It's the bridge between the hint's stream count and your app's concurrency.
 
 **Q: What does the LATENCY vs THROUGHPUT hint concretely change per device?**
+**Short:** LATENCY creates one stream over all CPU cores, while THROUGHPUT creates multiple streams each on a core subset.
 On CPU, LATENCY creates **one stream over all cores** and THROUGHPUT creates **N streams
 each on a core subset**. On GPU, THROUGHPUT additionally enables **automatic batching**
 (the BATCH device) and picks a larger optimal request count. In both cases you're
@@ -1052,6 +1064,7 @@ declaring intent and letting the plugin derive streams, threads, batch size, and
 rather than setting `num_streams`/`inference_num_threads` by hand.
 
 **Q: AUTO placed my model on CPU even though the box has an Arc GPU — why?**
+**Short:** AUTO falls back to CPU when the GPU plugin isn't visible, often because /dev/dri isn't mounted in a container.
 Usually the GPU plugin isn't **visible** to the runtime: in a container that means
 `/dev/dri` isn't mounted or the process isn't in the render group; on bare metal it can
 mean missing GPU drivers or an unsupported op forcing CPU. Check
@@ -1059,6 +1072,7 @@ mean missing GPU drivers or an unsupported op forcing CPU. Check
 so a missing GPU is a loud failure, not a silent CPU fallback.
 
 **Q: What's a stateful model, and why is a stateful LLM export dramatically faster?**
+**Short:** A stateful model keeps its KV cache in device memory across infer calls instead of passing it in and out per token.
 A stateful model holds internal state via `ReadValue`/`Assign` ops; for an LLM that
 state is the **KV cache**, kept in device memory across `infer()` calls. A stateless
 export would pass the growing KV cache in and out as tensors **every token**, and that
@@ -1066,6 +1080,7 @@ data movement dominates. `optimum-intel` exports LLMs stateful by default for ex
 this reason; `reset_state()` clears the cache between sequences.
 
 **Q: What can and can't run on the NPU?**
+**Short:** The NPU runs quantized, static-shape models well for sustained, power-constrained workloads, not peak throughput.
 The NPU runs quantized (INT8) and FP16 models well for **sustained, power-constrained**
 workloads, and prefers **static shapes** — a dynamic-shape model may fail to compile or
 fall back. It's a perf-per-watt device (AI-PC background tasks), not a peak-throughput
@@ -1073,6 +1088,7 @@ one; a latency-critical burst may still be faster on the CPU/GPU. Feed it static
 and INT8 and it shines; feed it a dynamic transformer and it struggles.
 
 **Q: When do you serve with OVMS versus embedding the runtime versus Triton?**
+**Short:** Embed the runtime for lowest-latency in-process serving, use OVMS for an Intel-only network service, Triton for mixed hardware.
 Embed the runtime for **in-process** inference with no network hop (the default and
 lowest latency). Use **OVMS** when you need a **network service** with KServe/TF-Serving
 APIs, versioning, and hot-reload but your hardware is Intel. Use **Triton** when you
@@ -1080,6 +1096,7 @@ need one control plane across **heterogeneous accelerators** (NVIDIA GPUs + Inte
 — and note Triton can host OpenVINO via its OpenVINO backend.
 
 **Q: What exactly is in the `.xml` versus the `.bin`, and what's the compatibility rule?**
+**Short:** The .xml holds the model topology and the .bin holds its weights, and IR compatibility is forward-only.
 The `.xml` holds the **topology** — opset-versioned layers and the edges between their
 ports — and the `.bin` holds the **weights** at byte offsets the `.xml` references. The
 compatibility rule is **forward-only**: a newer runtime reads an older IR, but an older
@@ -1087,6 +1104,7 @@ runtime may reject a newer IR. Pin the runtime that produces the IR to be no new
 the runtime that consumes it, or a partial rollout will fail to load models.
 
 **Q: Why bake preprocessing into the graph with `PrePostProcessor`?**
+**Short:** PrePostProcessor bakes resize, color-convert, and normalize into the graph so they run on-device, not the host thread.
 Because otherwise resize/color-convert/normalize runs on the **host Python thread**,
 which becomes the bottleneck and leaves the device idle. `PrePostProcessor` compiles
 those steps into the model graph so they run **on the device** and can be fused, and it
@@ -1094,6 +1112,7 @@ lets the model accept raw camera tensors (u8, NHWC, BGR) directly. It's also whe
 removed `mo --mean_values` functionality now lives.
 
 **Q: What does a dynamic-shape model cost, and when should you `reshape` to static?**
+**Short:** Dynamic shapes stop the plugin from specializing kernels to a fixed size, making inference slower than static.
 Dynamic dimensions prevent the plugin from **specializing kernels** to a fixed shape, so
 inference is slower and memory planning is looser. If your real input size is fixed,
 `reshape()` to a static shape for the fastest kernels; if it varies within a range, use
@@ -1101,6 +1120,7 @@ inference is slower and memory planning is looser. If your real input size is fi
 particular needs static shapes.
 
 **Q: FP16 compression is on by default — when can it hurt, and how do you disable it?**
+**Short:** FP16 compression is safe for almost any model but can be disabled with ovc --compress_to_fp16=False when needed.
 FP16 halves the `.bin` with negligible loss for almost all models, but a model with
 weights outside the FP16 range or extreme dynamic range can lose accuracy. Disable it
 with `ovc --compress_to_fp16=False` (or the equivalent `save_model` argument) to keep
@@ -1108,6 +1128,7 @@ FP32 weights. Note the flag exists to turn compression **off** — it's already 
 default.
 
 **Q: What makes a good calibration dataset for PTQ, and how many samples?**
+**Short:** A good PTQ calibration set is around 300 representative samples matching the production input distribution.
 Around **300 representative samples** that match the production input distribution —
 enough to estimate activation ranges without over-fitting to a narrow slice. A
 `transform_fn` maps each dataloader item to the model's expected input. Too few samples
@@ -1115,6 +1136,7 @@ or an unrepresentative set gives bad ranges and accuracy loss; the samples don't
 labels for plain PTQ (they do for accuracy-aware validation).
 
 **Q: How is OpenVINO's automatic batching different from Triton's dynamic batching?**
+**Short:** OpenVINO batches concurrent requests within one process, while Triton's dynamic batcher batches across network clients.
 OpenVINO's BATCH device batches **concurrent infer requests within one process** and
 requires the app to keep many requests in flight (gated by `AUTO_BATCH_TIMEOUT`,
 default 1000 ms). Triton's dynamic batcher batches across **network clients** on the
@@ -1122,6 +1144,7 @@ server side. OpenVINO's is a client-side concurrency mechanism (implicit under t
 THROUGHPUT hint); Triton's is a server-side request aggregator.
 
 **Q: What's the difference between `optimum-intel`, `openvino-genai`, and the raw Runtime for LLMs?**
+**Short:** optimum-intel exports Hugging Face models to OpenVINO, and openvino-genai is the lightweight runtime that generates from them.
 `optimum-intel` is the **export/optimize bridge** from Hugging Face (produces an
 OpenVINO LLM). `openvino-genai` is the **generation runtime** — tokenization, sampling,
 continuous batching, speculative decoding — a lightweight C++-backed loop you call with
@@ -1129,6 +1152,7 @@ continuous batching, speculative decoding — a lightweight C++-backed loop you 
 own loop. Most LLM apps export with optimum-intel and serve with openvino-genai.
 
 **Q: What do `group_size` and `ratio` control in INT4 weight compression?**
+**Short:** group_size sets how many weights share a quantization scale, and ratio sets what fraction of layers go to INT4.
 `group_size` is how many weights share one quantization scale — smaller groups (e.g. 128)
 mean more scales, better accuracy, and a slightly larger file. `ratio` is the fraction
 of layers compressed to INT4 versus kept at the more accurate INT8 — e.g. `ratio=0.8`
@@ -1136,12 +1160,14 @@ puts 80% at INT4 and keeps the 20% most sensitive layers at INT8. Together they 
 model size against accuracy.
 
 **Q: Can OpenVINO train or fine-tune a model?**
+**Short:** OpenVINO is inference-only and cannot train or fine-tune a model itself.
 No — OpenVINO is **inference-only**. NNCF's quantization-aware training (QAT) runs
 **inside** PyTorch or TensorFlow's training loop; OpenVINO consumes the trained/QAT'd
 result. If you need to train, you use the framework; OpenVINO optimizes and deploys what
 comes out. This is the clean split from a training-and-serving stack.
 
 **Q: How do P-core/E-core hybrid CPUs change scheduling, and what hints control it?**
+**Short:** The scheduling_core_type hint chooses whether streams land on P-cores or E-cores on hybrid client CPUs.
 On hybrid client CPUs, streams can land on slow **E-cores** and drag throughput. The
 `scheduling_core_type` hint (`PCORE_ONLY` / `ECORE_ONLY` / `ANY_CORE`) chooses which
 cores streams use, and `enable_hyper_threading` toggles logical cores. On uniform server
@@ -1149,6 +1175,7 @@ CPUs these don't apply. A common surprise is throughput halving because streams 
 onto E-cores — `PCORE_ONLY` fixes it.
 
 **Q: When would you use `torch.compile(backend="openvino")` instead of exporting IR?**
+**Short:** torch.compile(backend="openvino") accelerates a churning PyTorch model in place without an explicit IR export step.
 When the model **churns in PyTorch** and you want OpenVINO acceleration without an
 explicit export/convert step — `torch.compile(backend="openvino")` `[2023.1+]` traces and
 runs it through OpenVINO in-place. Exporting IR is better for a stable model you deploy
@@ -1156,6 +1183,7 @@ repeatedly (faster load, no framework deps, cacheable). The compile backend trad
 for zero conversion friction during rapid iteration.
 
 **Q: When is ONNX Runtime with the OpenVINO Execution Provider better than the native runtime?**
+**Short:** The OpenVINO Execution Provider accelerates supported ops in an existing ONNX Runtime deployment and falls back per-op.
 When you already have an **ONNX Runtime deployment** and want Intel acceleration without
 rewriting to the OpenVINO API — the OpenVINO EP accelerates supported ops and **falls
 back per-op** to ORT's default EP for the rest. The native runtime gives more control
@@ -1163,6 +1191,7 @@ back per-op** to ORT's default EP for the rest. The native runtime gives more co
 the low-friction path for an existing ORT stack.
 
 **Q: What happens when the GPU plugin hits an operation it can't run?**
+**Short:** Plain GPU errors on an unsupported op at compile time, while HETERO falls that op back to CPU and keeps the rest on GPU.
 Under plain GPU it's an error at compile time; under **HETERO** the unsupported op runs
 on the fallback device (CPU) while the rest stays on the GPU; under **AUTO** the whole
 model may be placed on a device that supports it. The senior move is to `query_model`
@@ -1170,6 +1199,7 @@ first to see op affinity, then choose HETERO to keep most of the graph on the ac
 rather than dropping the whole model to CPU.
 
 **Q: How does model caching decide when to rebuild, and what invalidates it?**
+**Short:** The model cache key comes from the model hash, runtime version, and compile properties, so any change forces a recompile.
 The cache key is derived from the **model hash, the runtime version, and the compile
 properties**. Any of them changing — an upgraded OpenVINO, a different hint, a `reshape`
 — produces a new key and forces a recompile; an exact match imports the cached blob in
@@ -1177,6 +1207,7 @@ milliseconds. This is why an upgrade transparently rebuilds caches, and why you 
 share a `cache_dir` across runtime versions expecting hits.
 
 **Q: How do remote tensors enable zero-copy video inference on the iGPU?**
+**Short:** Wrapping a GPU-decoded frame as an ov::RemoteTensor lets the GPU plugin infer on it without a host copy round-trip.
 A decoded video frame from the GPU's media engine already lives in **GPU memory**;
 wrapping it as an `ov::RemoteTensor` lets the GPU plugin infer on it **without copying**
 to host and back. For high-FPS analytics that per-frame GPU→host→GPU round-trip is often
@@ -1184,6 +1215,7 @@ the bottleneck, so eliminating it is what makes a real-time pipeline real-time r
 than dropping frames.
 
 **Q: What is CUMULATIVE_THROUGHPUT, and why did it replace the MULTI device?**
+**Short:** CUMULATIVE_THROUGHPUT fans requests across all candidate devices at once, folding MULTI's function into AUTO.
 `CUMULATIVE_THROUGHPUT` is an AUTO performance mode that **fans inference requests across
 all candidate devices at once** to sum their throughput. It replaced the separate MULTI
 device because it folds multi-device throughput into the same AUTO + hints model instead
@@ -1191,12 +1223,14 @@ of being a distinct device you configure by hand — one consistent API for "use
 device" and "use them all."
 
 **Q: Why is INT8 typically 2–4× faster than FP32 on a modern Xeon, but not on an old one?**
+**Short:** INT8's speedup comes from AVX-512 VNNI and AMX instructions, which an older CPU without them can't exploit.
 Because the speedup comes from **hardware INT8 instructions** — AVX-512 VNNI and AMX —
 that pack 8-bit MACs densely; a CPU without VNNI/AMX has to emulate INT8 and sees little
 gain. So INT8's payoff is hardware-gated: big on Cascade Lake / Sapphire Rapids, modest
 on a pre-VNNI chip. Always check the target CPU's ISA before promising INT8 speedups.
 
 **Q: What is the practical difference between `save_model` compressing to FP16 and NNCF INT8?**
+**Short:** FP16 compression is a free, calibration-free size halving, while NNCF INT8 is a lossy quantization needing calibration data.
 `save_model` / `ovc` FP16 compression is a **lossless-ish, calibration-free** halving of
 the weights that's on by default and safe for almost any model. NNCF INT8 is a **lossy,
 calibration-dependent** quantization that needs representative data and can shift accuracy

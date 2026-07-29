@@ -885,48 +885,78 @@ Always call `super().__init_subclass__(**kwargs)` and `super().__new__(mcs, name
 ## 12. Interview Questions with Answers
 
 **Q1: What is a metaclass in Python and how does it relate to `type`?**
+**Short:** A metaclass is the class of a class, and type is the default metaclass Python uses to build every user-defined class.
+
 A metaclass is the class of a class — it is the factory responsible for creating class objects. `type` is the default metaclass for all user-defined classes. When you write `class Foo: ...`, Python calls `type("Foo", (object,), namespace)` to produce the class object. Every custom metaclass must inherit from `type` because `type.__new__` contains the machinery to allocate and configure class objects. A practical implication: `type(MyClass)` returns its metaclass, just as `type(obj)` returns `obj`'s class.
 
 **Q2: What is the difference between `__new__` and `__init__` in a metaclass?**
+**Short:** A metaclass's __new__ allocates and returns the class object, while __init__ then configures the already-created class.
+
 `__new__(mcs, name, bases, namespace)` is called first and must return the new class object; it controls allocation. `__init__(cls, name, bases, namespace)` is called on the already-created class and performs post-creation configuration. Use `__new__` when you need to modify `namespace`, rename the class, or change `bases` before allocation. Use `__init__` for side effects like registering the class in a global dictionary. If `__new__` returns an object that is not an instance of the metaclass, `__init__` is skipped.
 
 **Q3: What does `__prepare__` do and when would you override it?**
+**Short:** __prepare__ runs before the class body executes and returns the namespace mapping that the body will populate.
+
 `__prepare__(mcs, name, bases, **kwargs)` is called before the class body is executed and must return the namespace dictionary in which the body will run. The default returns `{}`. Override it to return a custom mapping — for example, `collections.OrderedDict` to capture definition order (unnecessary in Python 3.7+ where `dict` is ordered), or a `_EnumDict` that rejects duplicate member names. `__prepare__` must be a `classmethod` or `staticmethod` on the metaclass.
 
 **Q4: When should you prefer `__init_subclass__` over a metaclass?**
+**Short:** Prefer __init_subclass__ over a metaclass whenever you only need to react to subclass creation, since it avoids metaclass conflicts.
+
 Prefer `__init_subclass__` when you only need to react to subclass creation — plugin registration, auto-indexing, enforcing required class variables. It requires no `Meta` class, avoids metaclass conflict, plays well with cooperative inheritance via `super()`, and is far more readable. Use a metaclass only when you need `__prepare__`, need to modify `bases` or `namespace` before the class exists, or need to intercept class creation for third-party base classes you do not control.
 
 **Q5: What is a data descriptor vs a non-data descriptor?**
+**Short:** A data descriptor defines __set__ (or __delete__) and outranks the instance __dict__, while a non-data descriptor does not.
+
 A data descriptor defines `__set__` (and/or `__delete__`) in addition to `__get__`. A non-data descriptor defines only `__get__`. The distinction controls priority in attribute lookup: data descriptors take priority over the instance `__dict__`, while the instance `__dict__` takes priority over non-data descriptors. `property` is a data descriptor; `staticmethod` and `classmethod` and plain functions are non-data descriptors. This is why `f.x = 99` overwrites a function binding on an instance (`f.__dict__["x"] = 99`) but cannot shadow a `property`.
 
 **Q6: Explain `__set_name__` and what problem it solves.**
+**Short:** __set_name__ lets a descriptor learn its own attribute name automatically, removing the need to pass it explicitly at construction.
+
 `__set_name__(self, owner, name)` is called by `type.__new__` on every descriptor object assigned as a class attribute, passing the owning class and the attribute name. Before [3.6], descriptors had to be constructed with the attribute name explicitly: `username = ValidatedField("username", str)`. With `__set_name__`, the descriptor self-registers: `username = ValidatedField(str)` and the descriptor learns it is stored as `"username"` automatically. This eliminates the DRY violation and prevents mismatches where the variable name differs from the string passed to `__init__`.
 
 **Q7: What is the difference between `__getattr__` and `__getattribute__`?**
+**Short:** __getattribute__ runs on every attribute access, while __getattr__ fires only after normal lookup raises AttributeError.
+
 `__getattribute__` is called on **every** attribute access, before any dictionary lookup. `__getattr__` is called only when the normal attribute lookup (including `__getattribute__`) raises `AttributeError`. Override `__getattr__` for proxy patterns, lazy loading, or dynamic attributes — it is safe and low-risk. Override `__getattribute__` only when you need to intercept all attribute reads unconditionally; you must call `object.__getattribute__(self, name)` internally or risk infinite recursion.
 
 **Q8: How does `abc.ABCMeta` enforce abstract methods?**
+**Short:** ABCMeta collects every @abstractmethod across the MRO into __abstractmethods__ and blocks instantiation while it is non-empty.
+
 `ABCMeta.__new__` collects all methods decorated with `@abstractmethod` across the MRO into `cls.__abstractmethods__` (a `frozenset`). `object.__new__` checks this set at instantiation time: if it is non-empty, it raises `TypeError`. Subclasses that override all abstract methods get an empty `__abstractmethods__` and can be instantiated. The `register()` method adds a class as a virtual subclass without inheritance, making `isinstance(obj, MyABC)` return `True` even though the class does not inherit from the ABC.
 
 **Q9: How does `@dataclass` generate `__init__` and what is the `field()` factory for?**
+**Short:** @dataclass builds __init__ from annotated class attributes, and field(default_factory=fn) avoids sharing one mutable default.
+
 The `@dataclass` decorator inspects `cls.__annotations__` at decoration time, builds an `__init__` function with positional parameters matching the annotated attributes in definition order, and attaches it to the class. For attributes with `field(default_factory=fn)`, the generated `__init__` calls `fn()` each time a new instance is created, avoiding the shared-mutable-default trap. `field()` also controls `repr=`, `compare=`, `hash=`, `init=`, and `metadata`. The `fields(cls)` function returns a tuple of `Field` objects for introspection.
 
 **Q10: What is `__class_getitem__` and how does it enable generics?**
+**Short:** __class_getitem__ is the classmethod that makes MyClass[SomeType] subscription syntax work without inheriting from Generic[T].
+
 `__class_getitem__(cls, item)` is a classmethod called when you write `MyClass[SomeType]`. Python's built-in `list`, `dict`, `tuple` implement it to return `types.GenericAlias` objects that carry type information for static type checkers. User-defined classes implement it to support the same `Class[T]` subscription syntax without inheriting from `Generic[T]`. For type-checker integration, combining `__class_getitem__` with `typing.Generic` is the standard pattern.
 
 **Q11: What causes a metaclass conflict and how do you resolve it?**
+**Short:** A metaclass conflict happens when a class inherits from bases whose metaclasses share no inheritance relationship.
+
 A metaclass conflict occurs when a class tries to inherit from two bases whose metaclasses are not related by inheritance — Python cannot determine which metaclass to use for the derived class. The error message is `TypeError: metaclass conflict: the metaclass of a derived class must be a (non-strict) subclass of the metaclasses of all its bases`. Resolution: create a merged metaclass that inherits from both conflicting metaclasses, or eliminate one of the metaclasses by replacing it with `__init_subclass__` or a class decorator.
 
 **Q12: How does the descriptor protocol interact with `__slots__`?**
+**Short:** Because __slots__ creates a data descriptor per slot, it takes priority over the instance dict while eliminating __dict__ itself.
+
 When a class defines `__slots__ = ("x",)`, Python creates a `member_descriptor` (a data descriptor) for each slot name on the class. This data descriptor stores the value in a C-level slot in the instance struct rather than in `__dict__`. Because it is a data descriptor, it takes priority over any instance dict entry — but `__slots__` eliminates `__dict__` entirely for slotted attributes, saving roughly 40-50 bytes per instance for classes with many instances. See `../data_model_and_objects/README.md` for `__slots__` coverage.
 
 **Q13: Can a metaclass change what bases a class inherits from?**
+**Short:** A metaclass can replace the bases tuple inside __new__ before calling super().__new__, changing what the class inherits from.
+
 Yes. In `__new__`, the `bases` tuple can be replaced before calling `super().__new__`. This is used by `abc.ABCMeta` to strip `ABC` from `bases` (to avoid diamond problems in the final class MRO) and by some ORMs to inject a mixin automatically. Modifying `bases` is powerful but fragile — always verify MRO correctness with `cls.__mro__` after the fact.
 
 **Q14: What is `typing.Protocol` and how does it differ from `abc.ABC`?**
+**Short:** typing.Protocol enables structural subtyping based on matching methods, while abc.ABC requires explicit nominal inheritance.
+
 `Protocol` (PEP 544, Python 3.8+) enables structural subtyping: a class satisfies a `Protocol` if it has the required methods and attributes, regardless of inheritance. No `register()` call or explicit inheritance is needed — static type checkers (mypy, pyright) verify compatibility. `abc.ABC` uses nominal subtyping: a class must explicitly inherit from the ABC or be registered. See `../the_type_system_and_typing/README.md` for full `Protocol` coverage.
 
 **Q15: Walk through what Python does when it executes `class Foo(Bar, metaclass=Meta): x = 1`.**
+**Short:** Creating a class with a custom metaclass runs __prepare__, executes the body in that namespace, then calls __new__ and __init__.
+
 1. Python calls `Meta.__prepare__("Foo", (Bar,))` to get the class namespace (default `{}`).
 2. The class body `x = 1` is executed inside that namespace, producing `{"x": 1, "__module__": ..., "__qualname__": "Foo"}`.
 3. Python calls `Meta("Foo", (Bar,), namespace)`, which invokes `Meta.__call__`.
@@ -937,6 +967,8 @@ Yes. In `__new__`, the `bases` tuple can be replaced before calling `super().__n
 8. `Bar.__init_subclass__` is called with `Foo` as the argument.
 
 **Q16: How does the `property` built-in work as a data descriptor?**
+**Short:** property is a built-in data descriptor whose __set__ makes it win over instance.__dict__ ahead of plain attribute assignment.
+
 `property` is a built-in type that implements `__get__`, `__set__`, and `__delete__`. `__get__` calls the getter function; `__set__` calls the setter (or raises `AttributeError` if none is defined); `__delete__` calls the deleter. Because it defines `__set__`, it is a data descriptor and therefore wins over `instance.__dict__`. The `@property`, `@x.setter`, `@x.deleter` decorator syntax creates and replaces `property` objects on the class with increasingly populated getter/setter/deleter slots.
 
 ---

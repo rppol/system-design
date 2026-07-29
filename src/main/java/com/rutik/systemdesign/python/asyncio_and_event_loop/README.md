@@ -964,6 +964,8 @@ async def fixed_dynamic(urls: list[str]) -> list[str]:
 ## 12. Interview Questions with Answers
 
 **Q1: What is a Python coroutine and how does it differ from a regular function?**
+**Short:** A coroutine is an async def function that suspends at await points and resumes later.
+
 A coroutine is a function declared with `async def` that can suspend execution at `await` points
 and resume later, preserving its local state between suspensions. Unlike a regular function which
 runs to completion when called, calling an `async def` function returns a coroutine object that
@@ -973,6 +975,8 @@ does not execute until driven by an event loop or awaited by another coroutine. 
 `create_task` — you will get a RuntimeWarning and the body will never run.
 
 **Q2: How does the asyncio event loop schedule and run coroutines?**
+**Short:** Each loop iteration polls I/O readiness via epoll/kqueue/select, then runs the ready callbacks.
+
 The event loop maintains two queues: `_ready` (callbacks to run immediately) and `_scheduled`
 (timers). Each iteration it calls `epoll_wait()` (Linux), `kqueue` (macOS), or `select()` with a
 timeout equal to the nearest scheduled callback, collects I/O-ready file descriptors, resolves
@@ -983,6 +987,8 @@ can stretch to low milliseconds. The key point for interviews: it is single-thre
 cooperative — there are no preemptions, only voluntary `await`-point yields.
 
 **Q3: What is the difference between asyncio.gather() and asyncio.TaskGroup?**
+**Short:** TaskGroup is a structured concurrency scope, while gather() just cancels the rest on the first error.
+
 `gather()` runs awaitables concurrently and returns an ordered list of results; on the first
 exception it cancels all remaining awaitables and re-raises only that one exception (unless
 `return_exceptions=True`). `TaskGroup` (3.11+) is a structured concurrency scope: all tasks
@@ -992,6 +998,8 @@ collected into a single `ExceptionGroup` so callers can handle multiple simultan
 enforces task lifetimes, makes error handling exhaustive, and composes correctly with cancellation.
 
 **Q4: What exactly happens when task.cancel() is called?**
+**Short:** task.cancel() only schedules a CancelledError to be raised at the task's next await point.
+
 `task.cancel()` does not immediately stop the task. It schedules a `CancelledError` to be raised
 at the task's next `await` point. If the coroutine is currently suspended waiting on a Future, the
 Future is cancelled and `CancelledError` is thrown into the coroutine on its next `send()`. The
@@ -1001,6 +1009,8 @@ pending cancel requests. The practical guidance: always use `try/finally` (not `
 CancelledError: return`) for resource cleanup in long-running tasks.
 
 **Q5: What is structured concurrency and why does it matter?**
+**Short:** Structured concurrency means a spawned task cannot outlive the scope that created it.
+
 Structured concurrency is the principle that a spawned task cannot outlive the scope in which it
 was created. In asyncio, `TaskGroup` enforces this: the `async with asyncio.TaskGroup()` block does
 not exit until every task spawned inside it has finished or been cancelled. This eliminates entire
@@ -1011,6 +1021,8 @@ still running and ensuring clean shutdown requires manual bookkeeping. The pract
 `TaskGroup` for any concurrent fan-out where you need to wait for all results or guarantee cleanup.
 
 **Q6: How does asyncio handle CPU-bound work?**
+**Short:** asyncio handles CPU-bound work poorly by default because it blocks the entire event loop thread.
+
 It does not handle CPU-bound work well by default. A CPU-bound operation inside `async def` blocks
 the entire event loop thread for its duration, preventing any other coroutine from running. The
 correct approach is to offload CPU work to a thread pool via `asyncio.to_thread(fn, *args)` (3.9+)
@@ -1021,6 +1033,8 @@ function takes more than ~5 ms of CPU time, do not call it directly in `async de
 `asyncio.to_thread`.
 
 **Q7: What is the difference between asyncio.sleep(0) and asyncio.sleep(n)?**
+**Short:** asyncio.sleep(0) yields for one loop iteration while sleep(n) waits on an actual timer.
+
 `asyncio.sleep(0)` yields control to the event loop for exactly one iteration and reschedules the
 current coroutine on `_ready` immediately. It has no timer overhead and resumes as fast as the
 event loop can cycle (~5–50 µs). `asyncio.sleep(n)` registers a timer callback at `now + n`
@@ -1031,6 +1045,8 @@ practical guidance: sprinkle `await asyncio.sleep(0)` in tight async loops that 
 contain natural I/O yield points.
 
 **Q8: How do async generators work and where are they useful?**
+**Short:** An async def function containing yield is an async generator, consumed with async for.
+
 An `async def` function containing `yield` is an async generator. It returns an
 `AsyncGenerator[YieldType, SendType]` object consumed with `async for`. Each iteration calls
 `__anext__()`, which drives the generator until the next `yield`, allowing `await` inside the
@@ -1041,6 +1057,8 @@ use `AsyncGenerator[T, None]` as the return type annotation and always ensure th
 iterates to exhaustion or explicitly closes the generator to trigger cleanup in `finally` blocks.
 
 **Q9: What is anyio and why would you use it instead of asyncio directly?**
+**Short:** anyio is a compatibility layer that provides one API over both the asyncio and trio backends.
+
 `anyio` is an async compatibility layer that provides a unified API over asyncio and trio backends.
 Its `TaskGroup`, `move_on_after`, and `fail_after` primitives work identically on both runtimes.
 FastAPI and Starlette use anyio internally, so application code that uses anyio primitives runs
@@ -1050,6 +1068,8 @@ anyio in library code that should remain backend-agnostic; in application code t
 asyncio (e.g., a service that runs only under uvicorn), direct asyncio is fine and simpler.
 
 **Q10: How do you debug a misbehaving async application?**
+**Short:** Enable asyncio debug mode with PYTHONASYNCIODEBUG=1 to log slow callbacks and unawaited coroutines.
+
 Start with `PYTHONASYNCIODEBUG=1` or `loop.set_debug(True)` — this logs slow callbacks (>100 ms
 by default), coroutines that were created but never awaited, and resources not properly closed.
 Set `sys.set_coroutine_origin_tracking_depth(10)` before creating coroutines to get full
@@ -1063,6 +1083,8 @@ The practical guidance: always run with debug mode on in development; in product
 `slow_callback_duration = 0.05` (50 ms) to catch accidental blocking code early.
 
 **Q11: How does asyncio interact with threads?**
+**Short:** asyncio bridges to threads via to_thread, run_in_executor, and run_coroutine_threadsafe.
+
 asyncio and threads coexist through three bridges, one per direction and one for custom pools.
 In detail: (1) `asyncio.to_thread(fn, *args)` (3.9+)
 runs a synchronous function in the default `ThreadPoolExecutor` and returns a coroutine that
@@ -1075,6 +1097,8 @@ for simplicity; only use `run_coroutine_threadsafe` when you need to bridge from
 thread (e.g., a callback-based framework) into an already-running event loop.
 
 **Q12: What causes "RuntimeWarning: coroutine was never awaited"?**
+**Short:** The warning means a coroutine object was created but never awaited, so its body never ran.
+
 This warning means a coroutine object was created (by calling `async def fn()`) but `.send(None)`
 was never called on it — the function body never executed. The most common cause is calling a
 coroutine function without `await`: `result = fetch(url)` instead of `result = await fetch(url)`.
@@ -1083,6 +1107,8 @@ practical guidance: treat this warning as an error in CI by setting
 `PYTHONWARNINGS=error::RuntimeWarning`.
 
 **Q13: How does backpressure work in asyncio?**
+**Short:** asyncio.Queue(maxsize=N) provides backpressure by suspending the producer once the queue is full.
+
 `asyncio.Queue(maxsize=N)` is the primary backpressure mechanism. When the queue is full,
 `await queue.put(item)` suspends the producer until a consumer calls `queue.get()`. This prevents
 a fast producer from buffering unlimited items in memory. For network-level backpressure,
@@ -1092,6 +1118,8 @@ producer/consumer pipeline with mismatched speeds should use a bounded `Queue`; 
 `write()` in a loop without `drain()` is a common memory leak pattern in WebSocket servers.
 
 **Q14: What is asyncio.timeout() and how does it differ from asyncio.wait_for()?**
+**Short:** asyncio.timeout() composably wraps a whole block while wait_for() wraps only a single awaitable.
+
 `asyncio.timeout(delay)` (3.11+) is an async context manager that puts one deadline over a whole
 block, while `asyncio.wait_for(coro, timeout)` can only wrap a single awaitable at the `await`
 site. Both work the same way underneath: at expiry they cancel the task and convert the resulting
@@ -1103,6 +1131,8 @@ independently. The practical guidance: prefer `asyncio.timeout()` for new code; 
 `anyio.fail_after()` when the code must also run on trio.
 
 **Q15: How do you implement a graceful shutdown for a FastAPI application?**
+**Short:** FastAPI's lifespan context manager cancels background tasks and closes pools on SIGTERM.
+
 FastAPI exposes a `lifespan` async context manager (added in FastAPI 0.93) where you initialize
 resources on entry and perform cleanup on exit. During shutdown, uvicorn sends SIGTERM, which triggers the lifespan
 context manager's exit. Inside the exit, cancel all background tasks, wait for in-flight requests
@@ -1113,6 +1143,8 @@ with `await asyncio.gather` in the shutdown path — stray tasks that hold DB co
 most common cause of connection pool exhaustion on redeploys.
 
 **Q16: What is the difference between a Future and a Task?**
+**Short:** A Future is a manually resolved result placeholder; a Task is a Future subclass that drives a coroutine.
+
 `asyncio.Future` is a low-level result placeholder: it can be in pending, done, or cancelled state,
 and callbacks can be added to it with `add_done_callback`. It is manually resolved by calling
 `future.set_result(value)` or `future.set_exception(exc)`. `asyncio.Task` is a `Future` subclass
@@ -1123,6 +1155,8 @@ The practical guidance: always use `create_task` for coroutines; only use bare `
 bridging with callback-based code (e.g., wrapping a callback-style API into an awaitable).
 
 **Q17: How does asyncio perform I/O multiplexing?**
+**Short:** asyncio multiplexes I/O with epoll on Linux, kqueue on macOS/BSD, and IOCP on Windows.
+
 On Linux, asyncio uses `epoll` via the `selectors.EpollSelector`; on macOS and BSD, it uses
 `kqueue`; on Windows, it uses `IOCP` (I/O Completion Ports) via the ProactorEventLoop (default
 on Windows since 3.8). The event loop registers file descriptors with the selector and calls
@@ -1134,6 +1168,8 @@ Python overhead of `Task.__step`. The practical guidance: `uvloop` replaces the 
 libuv's event loop, reducing per-connection overhead by 2–4x on I/O-heavy workloads.
 
 **Q18: What is shield() and when should you use it?**
+**Short:** asyncio.shield() protects an awaitable from the outer task's cancellation so it keeps running.
+
 `asyncio.shield(coro_or_future)` wraps an awaitable so that external cancellation of the outer
 Task does not propagate into the shielded operation. If the outer task is cancelled, the `await
 asyncio.shield(inner)` raises `CancelledError` in the outer task, but `inner` continues running.
@@ -1145,6 +1181,8 @@ structured concurrency where possible, and always ensure the shielded task is tr
 during shutdown.
 
 **Q: What does `asyncio.eager_task_factory` change about when a Task's coroutine starts?**
+**Short:** eager_task_factory runs a Task's coroutine synchronously up to its first suspension point.
+
 It makes `create_task()` run the coroutine synchronously until its first suspension point,
 instead of deferring the whole body to the next loop pass. A coroutine that returns without ever
 awaiting a pending Future is then never scheduled as a Task at all, which removes the `_ready`
@@ -1156,6 +1194,8 @@ of the `create_task()` call rather than at the later `await`. Enable it with
 coroutines which usually complete immediately, and measure rather than assume.
 
 **Q: Can you mix `except*` and plain `except` clauses on the same `try` statement?**
+**Short:** Mixing except and except* clauses on the same try statement is a SyntaxError.
+
 No — it is a `SyntaxError`: "cannot have both 'except' and 'except*' on the same 'try'". This
 bites in exactly the place you want both: a `TaskGroup` whose failures arrive as an
 `ExceptionGroup` (needing `except*`) wrapped in an `asyncio.timeout()` whose expiry arrives as a

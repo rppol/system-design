@@ -1235,12 +1235,14 @@ Java erase generic parameters at runtime, but Python retains the annotation stri
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `TypeVar` with a bound and one with constraints?**
+**Short:** A bounded TypeVar accepts any subtype of one type, while a constrained TypeVar accepts only an exact listed set.
 A bounded TypeVar (`T = TypeVar("T", bound=Foo)`) accepts `Foo` and any subtype of `Foo` — an
 open set. A constrained TypeVar (`T = TypeVar("T", str, bytes)`) accepts exactly those listed types
 (closed set) and treats subtypes as their parent constraint. Use bounds when you need any subtype;
 use constraints when you need an exact one-of selection.
 
 **Q2: Why is `list` invariant while `Sequence` is covariant in Python's type system?**
+**Short:** list is invariant because it supports writes that could corrupt it, while read-only Sequence is safely covariant.
 `list` is invariant because it supports both reads (`__getitem__`) and writes (`__setitem__`,
 `append`). If `list[Dog]` were covariant and accepted where `list[Animal]` is expected, you could
 `append(Cat())` to a `list[Dog]`, corrupting it. `Sequence` is read-only (no mutation methods), so
@@ -1248,6 +1250,7 @@ accepting `Sequence[Dog]` where `Sequence[Animal]` is expected is safe — you o
 Animals, and every Dog is an Animal.
 
 **Q3: How does `Protocol` differ from an ABC, and when do you choose one over the other?**
+**Short:** Protocol matches structurally without inheritance, while an ABC requires explicit subclassing to satisfy it.
 `Protocol` is structurally typed — any class with the required attributes/methods satisfies it
 without inheritance. ABC is nominally typed — subclasses must explicitly inherit. Choose `Protocol`
 when defining interfaces for third-party classes you do not control, for plugin architectures, and
@@ -1255,12 +1258,14 @@ for testing (mock objects satisfy protocols without inheriting base classes). Us
 to enforce inheritance hierarchy and provide shared implementation via `@abstractmethod`.
 
 **Q4: What is `ParamSpec` and what problem does it solve that `TypeVar` cannot?**
+**Short:** ParamSpec captures a callable's full parameter list, which a single TypeVar cannot preserve through a wrapper.
 `ParamSpec` [3.10] captures the full parameter list (positional + keyword) of a callable, not just
 a single type. A regular `TypeVar` bound to `Callable[..., R]` loses parameter names and types in
 the wrapper, breaking IDE autocomplete and mypy checks on arguments. `ParamSpec` preserves the
 exact signature through the wrapper function via the `P.args` / `P.kwargs` components.
 
 **Q5: What does `@runtime_checkable` do and what is its limitation?**
+**Short:** @runtime_checkable enables isinstance checks on a Protocol, but the check only verifies names, not signatures.
 It enables `isinstance()` checks against a `Protocol` at runtime. Without it, `isinstance(x,
 MyProtocol)` raises `TypeError`. The limitation: the check is shallow — it only verifies that
 attributes and methods with the required names exist, not that their signatures match. A method
@@ -1268,6 +1273,7 @@ with the wrong signature or even a non-callable attribute with the right name pa
 Static checkers (mypy) are stricter and check signatures.
 
 **Q6: Explain how FastAPI uses type annotations to build its request validation logic.**
+**Short:** FastAPI reads type hints with include_extras=True to turn each parameter annotation into a Pydantic validation field.
 FastAPI calls `get_type_hints(endpoint, include_extras=True)` to retrieve the full annotated types
 (including `Annotated` metadata) and `inspect.signature()` to retrieve defaults. It maps each
 parameter annotation to a Pydantic field, then generates a validation model for query parameters,
@@ -1275,9 +1281,11 @@ path parameters, body, and headers. The `include_extras=True` flag is critical �
 `Annotated[int, Query(ge=1)]` reduces to `int` and the `Query` constraint is dropped silently.
 
 **Q7: What is the difference between `__annotations__` and `get_type_hints()`?**
+**Short:** __annotations__ holds raw, possibly unresolved values, while get_type_hints always returns resolved type objects.
 `__annotations__` is a raw dict on the class or function whose contents depend on the annotation mode, while `get_type_hints()` always returns resolved type objects. Under PEP 563 (`from __future__ import annotations`) the dict holds strings. Under Python 3.14's PEP 649/749 default the annotations are compiled into a hidden `__annotate__` function and evaluated lazily on first access, so the dict holds real objects — the common misconception is that 3.14 stores strings, which it does not; `annotationlib.get_annotations(obj, format=Format.STRING)` is how you ask for strings there. `get_type_hints()` evaluates and resolves forward references like `"Node | None"` in the defining module's namespace, which is why library code that reads annotations at runtime should always go through it rather than touching `__annotations__` directly.
 
 **Q8: How does `Annotated` enable Pydantic v2's field-level validation without subclassing?**
+**Short:** Annotated[int, Field(gt=0)] lets Pydantic v2 attach reusable field validation metadata without subclassing a model.
 `Annotated[int, Field(gt=0)]` stores `Field(gt=0)` as metadata alongside the base type `int`.
 Pydantic v2 calls `get_type_hints(model, include_extras=True)`, extracts the `FieldInfo` object
 from the `Annotated` metadata tuple, and builds a JSON Schema validator from it. This lets you
@@ -1286,6 +1294,7 @@ across multiple models without inheritance, unlike Pydantic v1 validators which 
 `@validator` classmethods.
 
 **Q9: What is `TypeGuard` and how does it differ from a plain boolean check?**
+**Short:** TypeGuard lets a user-defined predicate narrow a variable's type the same way isinstance narrows it for mypy.
 A plain `if isinstance(x, str)` allows mypy to narrow `x` to `str` inside the block because mypy
 has built-in knowledge of `isinstance`. `TypeGuard` [3.10] extends this to *user-defined*
 predicates — if a function returns `TypeGuard[list[str]]`, mypy narrows the checked variable to
@@ -1297,6 +1306,7 @@ where `TypeGuard[str]` yields `str` / `int | str`. Default to `TypeIs`, since it
 semantics; use `TypeGuard` only when the negative branch legitimately proves nothing.
 
 **Q10: What are the rules for when a TypeVar should be covariant vs contravariant vs invariant?**
+**Short:** Mark a TypeVar covariant if the class only produces values of that type, contravariant if it only consumes them.
 Use the producer/consumer mnemonic: if a class only *produces* (returns) values of type T, mark T
 covariant — it is safe to substitute a subtype. If a class only *consumes* (accepts) values of type
 T, mark T contravariant — it is safe to substitute a supertype. If a class does both (e.g., a
@@ -1305,6 +1315,7 @@ container as "a source of T", use covariant; if "a sink for T", use contravarian
 invariant.
 
 **Q11: How does PEP 695 [3.12] improve generic syntax over the pre-3.12 approach?**
+**Short:** PEP 695 adds inline generic syntax like def f[T], removing the need for separate module-level TypeVar declarations.
 PEP 695 introduces inline type parameter syntax: `def f[T](x: T) -> T:` instead of
 `T = TypeVar("T"); def f(x: T) -> T:`. This eliminates module-level TypeVar declarations, removes
 the need for `Generic[T]` base class, avoids TypeVar name string duplication (`TypeVar("T")` where
@@ -1312,6 +1323,7 @@ the need for `Generic[T]` base class, avoids TypeVar name string duplication (`T
 `type` statement (`type Vector[T] = list[T]`) also replaces the verbose `TypeAlias` annotation.
 
 **Q12: What is `LiteralString` [3.11] and why does it matter for security?**
+**Short:** LiteralString only accepts actual string literals, letting static checkers catch SQL-injection-prone code at analysis time.
 `LiteralString` is a type that can only be satisfied by actual string literals or concatenations of
 literals — not by dynamically constructed strings. This allows static checkers to reject code like
 `safe_query(conn, f"SELECT * FROM {user_input}")` where the function signature requires
@@ -1319,6 +1331,7 @@ literals — not by dynamically constructed strings. This allows static checkers
 relying solely on runtime sanitization.
 
 **Q13: How do you type a function that accepts either `str` or `bytes` and returns the same type?**
+**Short:** A constrained TypeVar like AnyStr forces a function's return type to match whichever of str or bytes it received.
 Use a constrained TypeVar: `AnyStr = TypeVar("AnyStr", str, bytes)`. This is different from
 `str | bytes` as a return type — with `str | bytes`, a function accepting `str` could be declared
 as returning `bytes`. With `AnyStr`, mypy enforces that the return type matches the input type:
@@ -1326,6 +1339,7 @@ as returning `bytes`. With `AnyStr`, mypy enforces that the return type matches 
 `bytes`.
 
 **Q14: What is `Self` [3.11] and when does it replace a TypeVar?**
+**Short:** Self refers to the current class including subclasses, replacing the manual bound TypeVar builder pattern needed before 3.11.
 `Self` refers to the type of the current class in a method signature, including subclasses. Before
 3.11, fluent builder patterns required `SelfT = TypeVar("SelfT", bound="Builder")` and using
 `SelfT` as both the parameter type of `cls` and the return type. `Self` makes this implicit —
@@ -1334,6 +1348,7 @@ subclass. This is important for inheritance: if `SubBuilder(Builder)` inherits `
 type is `SubBuilder`, not `Builder`.
 
 **Q15: How does variance interact with `Callable` types?**
+**Short:** Callable types are contravariant in their parameters and covariant in their return type, matching Liskov substitution.
 `Callable[[Param], Return]` is contravariant in its parameter types and covariant in its return
 type, matching Liskov Substitution Principle. A `Callable[[Animal], str]` is a subtype of
 `Callable[[Dog], str]` — a function that handles any Animal can certainly handle a Dog (more

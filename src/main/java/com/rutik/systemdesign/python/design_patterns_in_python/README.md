@@ -960,51 +960,67 @@ Adding a Repository, Factory, and Observer for a script that reads a CSV and wri
 ## 12. Interview Questions with Answers
 
 **Q1: Why is a Python module the preferred Singleton implementation over the classic `_instance` class variable pattern?**
+**Short:** A module is imported once and cached in `sys.modules`, giving free thread-safe Singleton semantics.
 A module is initialized exactly once by the import machinery and cached in `sys.modules`; subsequent imports return the same module object. The classic `_instance` pattern requires explicit locking to be thread-safe, adding boilerplate that the import system already handles for free.
 
 **Q2: When would you choose the Borg pattern over the module singleton?**
+**Short:** Borg shares state via `__dict__` across instances while keeping `isinstance` checks working per instance.
 Borg is useful when external code passes your class to APIs that call the constructor directly (e.g., plugin systems, ORM metaclasses). All constructed instances share `__dict__`, so they behave as one, but type checks like `isinstance` still pass for each. If you control all call sites, prefer the module singleton.
 
 **Q3: How does Python's callable protocol eliminate the need for a Strategy interface class?**
+**Short:** Any Python callable already satisfies Strategy's contract, so no interface class is required.
 Any Python callable — a function, a lambda, a class with `__call__`, a `functools.partial` — satisfies `Callable[[InputType], OutputType]`. The Strategy pattern's only requirement is that behavior is swappable; Python's type system expresses this directly without a marker interface or abstract base class.
 
 **Q4: Why should `WeakSet` be used for Observer listener registries?**
+**Short:** `WeakSet` listener registries let subscribers be garbage-collected instead of leaking memory.
 If the event bus holds a strong reference to each listener, listener objects will not be garbage-collected even after the subscriber (the object owning the listener method) goes out of scope. This leaks memory proportional to the number of transient subscribers. `WeakSet` holds a weak reference so the GC can reclaim the listener when the subscriber is no longer referenced by anything else.
 
 **Q5: What is the difference between the Python `@decorator` syntax and the GoF Decorator pattern?**
+**Short:** Python's `@` decorator syntax and the GoF Decorator pattern are the same idea at different levels.
 They are the same pattern at different abstraction levels. GoF Decorator wraps an object to add behavior while preserving the interface. Python's `@` syntax wraps a callable (function or class) to add behavior while preserving the callable contract. `functools.lru_cache` is the clearest example: it wraps a function, intercepts calls, and adds caching — pure GoF Decorator, zero classes required.
 
 **Q6: How does the Factory Registry pattern keep code open for extension and closed for modification?**
+**Short:** A Factory Registry uses `@register` to add types via dict lookup, needing no dispatch-block edits.
 New product types register themselves via the `@register("name")` decorator at module load time. The `factory(name)` function does a dict lookup — it never needs to change when a new type is added. The `if kind == "A"` dispatch block that requires editing for each new type is replaced by a one-line registration at the point of definition.
 
 **Q7: What is the Template Method pattern and when should you prefer composition over it?**
+**Short:** Prefer composition over Template Method when the algorithm sequence itself must vary.
 Template Method defines a fixed algorithm skeleton in a base class, with abstract hook methods that subclasses override. Prefer composition when: (a) the algorithm sequence itself can vary (not just the steps), (b) the subclass would only override one method (a callable parameter is simpler), or (c) you want to compose multiple behaviors (a single-inheritance chain cannot compose two independent transforms).
 
 **Q8: How does the Repository pattern integrate with FastAPI's dependency injection?**
+**Short:** Repository as a `Protocol` plugs into FastAPI's `Depends()` for swappable, testable implementations.
 Define the repository as a `typing.Protocol`. Write concrete implementations (`SQLAlchemyRepo`, `InMemoryRepo`). Write a provider function (`get_user_repo`) that returns the appropriate implementation — swappable by environment. Declare the repo as a route parameter with `Depends(get_user_repo)`. FastAPI resolves and caches it per request. Tests override the provider with `app.dependency_overrides[get_user_repo] = lambda: InMemoryRepo()`.
 
 **Q9: What makes the Command pattern useful for undo/redo, and how does FastAPI BackgroundTasks relate to it?**
+**Short:** Command wraps a call as an object with `execute()`/`undo()`, enabling history-based undo/redo.
 Command encapsulates a call as a first-class object with `execute()` and `undo()`. Storing a history deque of executed commands makes undo/redo a matter of popping and calling `undo()` or re-executing. FastAPI's `BackgroundTasks` is a simplified Command queue: tasks are callables queued during request handling and fired after the response — the pattern without explicit undo.
 
 **Q10: How do you prevent the "lambda lost in WeakSet" bug?**
+**Short:** An inline lambda has no strong reference, so a `WeakSet` collects it immediately unless named.
 Lambdas defined inline have no name binding holding a strong reference — the `WeakSet` is the only reference, so the lambda is collected immediately. Always assign lambdas or use named functions when subscribing to a `WeakSet`-based bus. If you need a quick inline handler, assign it to a local variable with `handler = lambda ...: ...; bus.subscribe("event", handler)` and hold `handler` for as long as the subscription should live.
 
 **Q11: What Python anti-pattern does deep inheritance chains represent, and how do you refactor it?**
+**Short:** Deep inheritance chains encode behavior as class taxonomy; refactor into composable callables instead.
 Deep inheritance chains encode behavior as a taxonomy of classes rather than as composable behaviors. The symptom is `ChildClass(Parent3(Parent2(Parent1(Base))))` where each level adds one small behavior. Refactor by extracting each behavior as a standalone callable or wrapper (`with_logging(fn)`, `with_retry(fn)`) and composing them explicitly. `typing.Protocol` defines the interface without requiring any inheritance.
 
 **Q12: How does the `@register` decorator pattern differ from a plugin-based entry_points approach?**
+**Short:** `@register` needs the module imported first; `entry_points` discovers plugins across packages.
 The `@register` decorator requires the registering module to be imported before the factory is called — order of imports matters. Python packaging `entry_points` (via `importlib.metadata`) discovers plugins from installed packages without requiring explicit imports, making the registry extensible across package boundaries. Use `@register` for in-repo extensibility; `entry_points` for third-party plugin ecosystems.
 
 **Q13: When is a `typing.Protocol` preferable to an ABC for defining a pattern interface?**
+**Short:** `Protocol` gives structural typing without inheritance; ABC enforces the contract at instantiation.
 `Protocol` enables structural (duck-type) subtyping: a class satisfies the Protocol if it has the required methods, with no inheritance. Use `Protocol` when you cannot or should not modify the implementing class (third-party code, stdlib types). Use ABC when you want to enforce the contract at instantiation time (`@abstractmethod` raises `TypeError` if a subclass forgets to implement a method) or when you want to share default implementations across subclasses.
 
 **Q14: Why is the classic `if cls._instance is None: cls._instance = ...` singleton check not thread-safe even though CPython has a GIL?**
+**Short:** The GIL makes each check-then-set instruction atomic individually, not the pair, so Singleton races.
 The GIL makes each bytecode instruction atomic, but the None check and the instance assignment are two separate instructions separated by a thread-switch point. Thread A can evaluate `cls._instance is None` as `True`, then the interpreter switches to thread B before thread A executes the assignment; thread B also sees `None` and constructs its own instance, leaving two distinct objects alive. The switch can happen at the default switch interval (`sys.getswitchinterval()`, 5ms) or immediately if `__new__`/`__init__` performs any blocking call. Guard the check-and-set with a `threading.Lock`, as `SafeSingletonMeta` does, or avoid the race entirely with the module-level singleton pattern.
 
 **Q15: What is the Unit of Work pattern, and how does SQLAlchemy's `Session` implement it alongside a Repository?**
+**Short:** Unit of Work batches all changed objects and commits them together as one atomic operation.
 Unit of Work tracks every object changed during a business transaction and commits them together as one atomic database operation. SQLAlchemy's `Session` accumulates pending inserts, updates, and deletes in its identity map and flushes them as a single transaction on `session.commit()`, instead of each repository call issuing its own write. Pairing Unit of Work with Repository means `save()` only stages a change in the `Session`; the caller — typically a FastAPI dependency's `yield` teardown — decides when to commit or roll back. This lets one request modify several aggregates through several repositories and still get one atomic commit at the end.
 
 **Q16: How do you decide whether applying a design pattern is premature abstraction in a Python codebase?**
+**Short:** A pattern is premature abstraction when it adds indirection for variation that doesn't yet exist.
 A pattern is premature abstraction when it adds indirection to handle variation that does not yet exist and is not concretely planned for the next release. The case study's Pitfall 6 — wrapping a script that just reads a CSV and writes a report in a Repository, Factory, and Observer — adds three layers of indirection with no variation to justify any of them. A practical heuristic is the rule of three: introduce the pattern only after the same variation (a second payment provider, a second notification channel) has been written by hand at least twice. Reserve patterns for the parts of the system with a demonstrated or contractually required need to vary.
 
 ---

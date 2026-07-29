@@ -1122,6 +1122,7 @@ Prefer `weakref.finalize` over `__del__` to avoid complicating GC cycle resoluti
 ## 12. Interview Questions with Answers
 
 **Q1: What is the `PyObject` C struct and why does it matter for Python memory?**
+**Short:** Every Python object carries a 16-byte `PyObject` header of refcount plus type pointer.
 Every Python object begins with `ob_refcnt` (8 bytes, reference count) and `ob_type`
 (8 bytes, pointer to the type), for a minimum overhead of 16 bytes per object. Sequences
 add `ob_size` for 24 bytes minimum. Because even `int(0)` is a 28-byte heap allocation,
@@ -1130,6 +1131,7 @@ guidance: use `numpy` arrays or `array.array` for bulk numeric storage to avoid 
 PyObject overhead.
 
 **Q2: Why does `sys.getrefcount(x)` report one more than you expect, and when is the number meaningless?**
+**Short:** `sys.getrefcount()` reports one extra for its own argument reference and is meaningless for immortals.
 `getrefcount` receives `x` as a function argument, which creates a temporary reference in
 the call frame, so the reported count is always "true count + 1". Subtract 1 when
 interpreting it. The number is meaningless for immortal objects [3.12]: `None`, `True`,
@@ -1139,6 +1141,7 @@ billions means "immortal", not "leaked"; treat any refcount above a few thousand
 signal to go look at `gc.get_referrers()` instead.
 
 **Q3: What happens when `ob_refcnt` reaches zero?**
+**Short:** When `ob_refcnt` hits zero, `tp_dealloc` frees the object synchronously, with no GC pause.
 The type's `tp_dealloc` function is called synchronously, immediately freeing the object's
 memory back to the pool (or OS for large objects). There is no scheduling delay, no GC
 pause, and no background thread involved — deallocation is part of the `Py_DECREF` macro
@@ -1147,6 +1150,7 @@ synchronously on the decrementing thread, which can cause latency spikes if dest
 are slow.
 
 **Q4: What kinds of objects can form reference cycles and why can't refcounting handle them?**
+**Short:** Mutable containers referencing each other can form cycles that refcounting alone can't free.
 Any mutable container that can hold references to other objects — `list`, `dict`, `set`,
 and user-defined instances — can form cycles. In a cycle, each object's refcount is kept
 above zero by the other objects in the cycle, even when no external code references any of
@@ -1155,6 +1159,7 @@ a cycle. Practical guidance: avoid long-lived cycles in high-throughput services
 cyclic GC (keep it enabled) or restructure with weakrefs.
 
 **Q5: Describe the three generations of the CPython cyclic GC and their default thresholds.**
+**Short:** CPython's cyclic GC has three generations, promoting survivors and collecting gen0 most often.
 Gen0 is for newly allocated objects; it is collected when the difference between new
 allocations and deallocations exceeds 2000, the default returned by `gc.get_threshold()`.
 Survivors are promoted to Gen1, collected after 10 Gen0 collections. Gen1 survivors go to
@@ -1166,6 +1171,7 @@ efficient. Practical guidance: use `gc.freeze()` after module loading to pin lon
 objects into the permanent generation and exclude them from future scans.
 
 **Q6: Explain CPython's `pymalloc` allocator hierarchy: arenas, pools, and blocks.**
+**Short:** CPython's pymalloc allocates via 1 MiB arenas split into 16 KiB pools of fixed-size blocks.
 On 64-bit, arenas are 1 MiB regions obtained from the OS, each divided into 64 pools of
 16 KiB. Each pool serves blocks of exactly one size class (16, 32, 48, ... 512 bytes — 32
 classes at 16-byte alignment). Allocation is a pointer bump in the current pool's free-list
@@ -1176,6 +1182,7 @@ a whole 1 MiB arena; `python3 -c "import sys; sys._debugmallocstats()"` shows th
 arena and pool census.
 
 **Q7: What is object interning and which objects are interned by default in CPython?**
+**Short:** CPython interns small ints -5 to 256 and many identifier-like string literals by default.
 Interning means reusing a single canonical instance for all occurrences of a value instead
 of allocating separate objects. By default, CPython interns integers from -5 to 256 (as
 pre-allocated singletons) and many compile-time string literals that look like identifiers.
@@ -1187,6 +1194,7 @@ shared across pre-forked workers. Practical guidance: use `is None` for None che
 detail not guaranteed by the language spec.
 
 **Q7b: What are immortal objects and what problem do they solve?**
+**Short:** Immortal objects (PEP 683) carry a sentinel refcount that increment/decrement never change.
 Immortal objects (PEP 683, Python 3.12) are runtime-global objects given a sentinel
 reference count that increment and decrement refuse to modify, so they are never
 deallocated. The set covers `None`, `True`, `False`, `Ellipsis`, `NotImplemented`, every
@@ -1199,6 +1207,7 @@ contending on the hottest objects in the interpreter. Practical guidance: when
 looking for a leak there.
 
 **Q8: What is the difference between `sys.getsizeof()` and `__sizeof__()`?**
+**Short:** `sys.getsizeof()` adds GC header overhead on top of `__sizeof__()`'s raw object size.
 `__sizeof__()` returns the raw size of the object without GC bookkeeping overhead.
 `sys.getsizeof()` calls `__sizeof__()` and adds the 16-byte `PyGC_Head` on objects
 tracked by the cyclic GC. Both are shallow — they do not recurse into referenced objects.
@@ -1206,6 +1215,7 @@ Practical guidance: for accurate total memory, use `pympler.asizeof` or a recurs
 `deep_size()` function; never use `getsizeof` alone to size a nested data structure.
 
 **Q9: How does `tracemalloc` work and what are its limitations?**
+**Short:** `tracemalloc` hooks CPython's allocators to record allocation size and call-stack frames.
 `tracemalloc` installs hooks on CPython's raw, mem and object allocator domains to record
 each allocation's size and up to N frames of the call stack (configured by
 `tracemalloc.start(N)`). It can take snapshots and compute diffs to isolate allocations
@@ -1217,6 +1227,7 @@ baseline and a suspected leak window and read the `lineno` statistics; reach for
 when the suspect allocations are inside a C extension.
 
 **Q10: What is a weak reference and when should you use one instead of a strong reference?**
+**Short:** A weak reference doesn't increment refcount, letting the referent be collected when unreferenced.
 A `weakref.ref` stores a reference that does not increment the referent's refcount. If the
 referent has no remaining strong references, it is collected and the weak reference becomes
 `None`. Use weakrefs in caches (so cached objects can be collected when no one else holds
@@ -1228,6 +1239,7 @@ do NOT support weakrefs without subclassing). Practical guidance: use
 metadata attached to foreign objects.
 
 **Q11: What is `gc.freeze()` and when should you call it?**
+**Short:** `gc.freeze()` moves tracked objects into a permanent generation the GC never scans again.
 `gc.freeze()` moves every currently tracked object into a permanent generation that the GC
 never scans again. This is useful after full module initialization: all module-level
 objects (class definitions, constants, global dicts) will never be GC'd, so excluding them
@@ -1240,6 +1252,7 @@ request). Practical guidance: call `gc.freeze()` once, after imports and applica
 initialization, before serving traffic.
 
 **Q12: How does the GIL interact with reference counting?**
+**Short:** The GIL keeps `Py_INCREF`/`Py_DECREF` safe since those C integer operations aren't atomic.
 The Global Interpreter Lock ensures that only one thread executes Python bytecode at a
 time. Because `Py_INCREF` and `Py_DECREF` are not atomic — they are plain C integer
 operations — the GIL prevents two threads from corrupting an object's refcount
@@ -1254,6 +1267,7 @@ rely on refcount atomicity in C extensions that release the GIL; use
 `../the_gil_and_free_threading/README.md` for the free-threaded rules.
 
 **Q13: Why is Python's `int` not a C `int`, and what are the memory implications?**
+**Short:** Python's `int` is an arbitrary-precision `PyLongObject`, at least 28 bytes versus a 4-byte C int.
 Python's `int` is `PyLongObject`, an arbitrary-precision integer stored as an array of
 30-bit "digits" behind a 24-byte header (`PyObject` head plus the `lv_tag` word that packs
 digit count, sign and flags). Since 3.12 it is no longer a `PyVarObject` — there is no
@@ -1263,6 +1277,7 @@ A C `int` is 4 bytes, so this is a 7x overhead. Practical guidance: use
 avoid per-element `PyLongObject` overhead.
 
 **Q14: How can you detect that a finalizer (`__del__`) is preventing cycle collection?**
+**Short:** Since PEP 442, a `__del__` finalizer never blocks cycle collection in CPython.
 It almost certainly is not — since PEP 442 a `__del__` never blocks cycle collection, so
 this is usually the wrong hypothesis to chase. `gc.garbage` should be empty; the docs say
 the only remaining way to populate it is a C extension type with a non-`NULL` `tp_del` slot.
@@ -1275,6 +1290,7 @@ to find what holds a suspect alive. Practical guidance: prefer `weakref.finalize
 `__del__` so cleanup stays out of the cycle-breaking ordering constraint entirely.
 
 **Q15: What is the behavior of `del x` versus setting `x = None`?**
+**Short:** `del x` and `x = None` both decrement the refcount, but `del` also removes the name binding.
 `del x` removes the name binding from the current namespace and decrements the refcount
 of the bound object by 1. If the refcount reaches zero, the object is immediately freed.
 `x = None` rebinds the name to the `None` singleton and also decrements the original

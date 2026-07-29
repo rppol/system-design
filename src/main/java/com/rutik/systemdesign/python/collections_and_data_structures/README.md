@@ -1002,54 +1002,88 @@ def add_item(item: str, container: list[str] | None = None) -> list[str]:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the time complexity of `list.append()` and why is it amortized O(1) rather than O(1)?**
+**Short:** list.append() is amortized O(1) because CPython only occasionally reallocates and doubles capacity.
+
 `list.append()` is O(1) amortized because CPython occasionally performs an O(n) reallocation when the underlying array is full. The reallocation doubles (approximately) the allocated capacity, so the total cost of n appends is O(n), giving O(1) per append on average. CPython's `list_resize` computes `new_allocated = (newsize + (newsize >> 3) + 6) & ~3` — 12.5% headroom plus a flat 6 slots, rounded to a multiple of 4 — so the growth factor tends to 1.125 for large lists while the `+6` dominates for short ones. In practice you see reallocs at len 1, 5, 9, 17, 25, 33, 41, 53. Never use `list.insert(0, x)` in a loop — each insert is O(n) with no amortization.
 
 **Q2: How does Python 3.7+ guarantee dict insertion order, and does this affect performance?**
+**Short:** CPython's compact dict keeps a dense entries array in insertion order, guaranteed by spec since 3.7.
+
 CPython 3.6 introduced a compact dict representation using two parallel arrays: a sparse index array (maps hash slot to entry index) and a dense entries array (stores key, value, hash in insertion order). Insertion order follows the entries array, which is always appended to. Python 3.7 made this ordering part of the language specification. The performance impact is negligible — the index array lookup is O(1) and the extra memory per dict is fixed overhead. Compact dicts use 20–25% less memory than the old combined-table layout.
 
 **Q3: When should you use `deque` instead of `list` as a queue?**
+**Short:** deque.popleft() is O(1) while list.pop(0) is O(n) because it shifts every remaining element.
+
 Use `deque` whenever you remove elements from the front. `list.pop(0)` is O(n) because it shifts all remaining elements one position left in the underlying C array. `deque.popleft()` is O(1) because the deque is a doubly-linked structure of fixed blocks — removing from the front updates a pointer, not n elements. For BFS, task queues, and any FIFO pattern with frequent front removals, `deque` is the correct choice. Use `list` only for stacks (append + pop from the same end), where both operations are O(1).
 
 **Q4: What is the difference between `Counter` subtraction and regular dict subtraction?**
+**Short:** Counter subtraction keeps only positive counts and silently drops zero or negative results.
+
 `Counter` subtraction (`a - b`) keeps only positive counts and silently drops keys with zero or negative results. Regular dict has no subtraction operator. `Counter` also overloads `+` (union, keeps positives), `&` (intersection, takes min), and `|` (union, takes max). These make `Counter` a true multiset implementation. Note: `Counter.update()` adds counts; `Counter.subtract()` subtracts but keeps zero and negative counts (unlike the `-` operator which drops them).
 
 **Q5: Explain the gotcha with `defaultdict` and key existence checks.**
+**Short:** Accessing a missing key on a defaultdict creates it as a side effect via default_factory().
+
 Accessing `d[key]` on a `defaultdict` when `key` is missing triggers `default_factory()` and stores the result, creating the key as a side effect. This means `if d[key]` silently creates `key → default_value` in the dict even if your intent was a read-only existence check. Use `d.get(key)` (returns `None` without creating) or `key in d` for existence checks without side effects. This bug commonly appears in cache-hit detection or graph-membership tests where spurious empty entries corrupt the data structure's logical state.
 
 **Q6: What is `heapq.heapify()`'s time complexity and why is it O(n) rather than O(n log n)?**
+**Short:** heapify() is O(n) because it sifts down from the last non-leaf node instead of pushing one at a time.
+
 `heapify()` is O(n) because it uses a bottom-up algorithm: it starts at the last non-leaf node (`n//2 - 1`) and sifts down each node. Leaf nodes (half the tree) require no work. Non-leaf nodes at depth d from the bottom require at most d sifts. Summing across all levels, the total work is bounded by the sum of a geometric series: O(n). Calling `heappush()` n times would be O(n log n). The distinction matters when building a heap from a large existing collection — always use `heapify()`.
 
 **Q7: How does `frozenset` differ from `set`, and when would you use it as a dict key?**
+**Short:** frozenset is an immutable, hashable set usable as a dict key, unlike a regular mutable set.
+
 `frozenset` is an immutable, hashable version of `set`. Because it is immutable, Python can compute its hash once and cache it. Use `frozenset` as a dict key when your key represents a group of items where order does not matter — for example, caching results of a query over a set of user IDs: `cache[frozenset(user_ids)] = result`. You cannot add or remove elements from a `frozenset` after creation. `frozenset` supports all set read operations: `in`, `issubset`, `union`, `intersection`, but not `add`, `remove`, or `discard`.
 
 **Q8: What is the difference between `bisect_left` and `bisect_right`?**
+**Short:** bisect_left inserts before equal elements while bisect_right inserts after all equal elements.
+
 Both functions return an insertion index in a sorted list, but they differ in handling duplicates. `bisect_left(a, x)` returns the leftmost index where `x` can be inserted without violating sort order — equal elements are to the right of the insertion point. `bisect_right(a, x)` (also called `bisect`) returns the rightmost such index — equal elements are to the left. Use `bisect_left` when you want to find the first occurrence of `x`; use `bisect_right` when you want to insert after all existing equal elements. Example: `a = [1,2,2,3]`; `bisect_left(a,2)=1`, `bisect_right(a,2)=3`.
 
 **Q9: Describe the internal structure of a Python `set`. How does it handle collisions?**
+**Short:** Python's set uses an open-addressing hash table with perturbation-based probing to resolve collisions.
+
 `set` uses an open-addressing hash table identical in structure to `dict`, but stores only keys. Each slot in the table is either empty, a deleted tombstone, or a live entry. Collision resolution uses a perturbation-based probe sequence: `slot = (5*slot + 1 + perturb) & mask`, where `perturb` starts as the full hash value and is right-shifted by 5 each probe. This mixes high-order bits of the hash into the probe sequence, producing pseudo-random probing that avoids long chains. The table resizes (doubles) when load factor exceeds ~2/3.
 
 **Q10: When is `sorted()` + `list` better than `heapq` for top-K queries?**
+**Short:** heapq.nlargest is O(n log k) and beats sorted()'s O(n log n) when k is small relative to n.
+
 `heapq.nlargest(k, iterable)` is O(n log k); `sorted(iterable)[-k:]` is O(n log n). For small k relative to n (e.g., top 10 from 1 million), `heapq.nlargest` is significantly faster. For large k (e.g., top half of n), `sorted()` is faster because its constant factor is lower and the log n term becomes comparable to log k. CPython's `heapq.nlargest` implementation switches to `sorted()` automatically when k is large relative to n. For k=1, use `max()` — O(n) with minimal overhead.
 
 **Q11: What is `ChainMap` and how does it differ from merging dicts?**
+**Short:** ChainMap views multiple dicts without copying, while merging with | or {**d1,**d2} creates a new dict.
+
 `ChainMap` groups multiple dicts into a single view without copying data. Lookups search the maps in order and return the first hit. Writes go to the first (primary) map only. Merging with `{**d1, **d2}` or `d1 | d2` (Python 3.9+) creates a new dict — O(n) time and memory. `ChainMap(d1, d2)` is O(1) to create and O(k) per lookup where k is the number of maps. The primary use case is layered configuration: `ChainMap(cli_args, env_vars, config_file, defaults)` — each layer overrides the next without mutation.
 
 **Q12: How does `namedtuple` compare to `@dataclass` for lightweight records?**
+**Short:** namedtuple is an immutable, low-overhead tuple subclass, while dataclass is a mutable regular class.
+
 `namedtuple` generates an immutable tuple subclass — elements are stored in a C tuple (contiguous memory, no per-field overhead). Access by name is O(1) via index. `@dataclass` generates a regular Python class with instance `__dict__` — mutable by default, more overhead per instance. Use `namedtuple` when: immutability is required, you want tuple compatibility (unpacking, CSV row mapping), or memory is critical (millions of instances). Use `@dataclass` when: you need mutability, default values with complex expressions, `__post_init__`, validators, or inheritance. Python 3.10+ `@dataclass(slots=True)` closes much of the memory gap by using `__slots__` instead of `__dict__`.
 
 **Q13: Why does mutating a `dict` while iterating over it raise `RuntimeError`, and how do you fix it?**
+**Short:** Mutating a dict's size during iteration raises RuntimeError because the entries array shifts underfoot.
+
 CPython tracks a dict's size internally and raises `RuntimeError: dictionary changed size during iteration` the moment a key is added or removed mid-loop. The check exists because the iterator walks the compact entries array by position, and a resize during iteration would silently skip or repeat entries. Collect the keys to modify into a separate list first, then delete them in a second pass, or build a new dict with a comprehension that filters out the unwanted entries. Never call `del d[key]` or add a new key inside a `for key in d:` loop.
 
 **Q14: What is `PYTHONHASHSEED` and why does CPython randomize string hashing by default?**
+**Short:** PYTHONHASHSEED randomizes string hashing per process to prevent attacker-crafted hash-flooding collisions.
+
 `PYTHONHASHSEED` is an environment variable that seeds CPython's hash algorithm for `str`, `bytes`, and `datetime` keys, defaulting to a random value chosen once per process start. Randomizing the seed prevents an attacker who controls request keys — form field names, JSON keys — from crafting inputs that collide into the same bucket, a denial-of-service technique called hash flooding. Without randomization, thousands of colliding keys degrade a dict's O(1) average lookup toward the O(n) worst case shown in the module's `BadHash` example. Set `PYTHONHASHSEED=0` only for reproducible test runs or debugging output; never disable it in production.
 
 **Q15: Why is `list.sort()` described as O(n) for nearly-sorted input rather than always O(n log n)?**
+**Short:** Timsort finds existing ascending or descending runs, so nearly-sorted input sorts in close to O(n).
+
 `list.sort()` and `sorted()` use Timsort, a hybrid merge/insertion sort that first scans the input for existing ascending or descending "runs" and merges those runs instead of blindly dividing the array. When the input is already close to sorted, Timsort finds long runs and does close to O(n) work merging them; a fully random input has no long runs and Timsort falls back to its O(n log n) worst case. Timsort is also stable, so elements that compare equal keep their original relative order — the module's `records` example shows `alice` staying before `carol` at the same score. This stability guarantee is why chaining `sorted(data, key=...)` across multiple passes is safe for a multi-key sort.
 
 **Q: Why does `[[0] * 3] * 3` produce a grid whose rows all change together?**
+**Short:** Multiplying a list by an integer repeats references, so [[0]*3]*3 makes three aliases of one row.
+
 Because `*` on a list repeats references, not objects — all three "rows" are the same list. The inner `[0] * 3` is safe only because `int` is immutable, so its shared references can never be observed; the outer `* 3` is the bug, and `len({id(row) for row in grid})` returns 1 to prove it. Build the grid with `[[0] * 3 for _ in range(3)]`, which re-evaluates the inner expression on every iteration. The same one-level rule explains every shallow copy in the stdlib: a slice, `list(x)`, `dict(d)` and `copy.copy(x)` all duplicate the outer container while sharing whatever is nested inside, which is why `copy.deepcopy` exists — and why it is worth nothing when the elements are immutable.
 
 **Q16: How much memory does `array.array('d', data)` save over a `list` of the same floats, and why?**
+**Short:** array.array saves about 4.5x memory over a list of floats by storing raw doubles with no boxing.
+
 About 4.5x: roughly 8 MB versus roughly 36 MB for 1 million floats. The `array` stores raw 8-byte IEEE 754 doubles in a single contiguous C buffer with no per-element Python object, whereas the `list` pays about 8 MB of pointers plus about 28 MB of separately allocated boxed `float` objects. The savings come from eliminating "boxing" — a `list` element is a pointer to a heap-allocated `PyObject`, while an `array.array` element is the raw value packed inline. `array.array` only supports a single declared C type (`'i'` for int32, `'d'` for float64, etc.), so it cannot mix types the way a `list` can. Use `array.array` for large, single-typed numeric buffers, and reach for `numpy.ndarray` once you need vectorized math on top of that memory layout.
 
 ---

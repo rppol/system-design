@@ -903,51 +903,67 @@ messaging where JSON is too verbose.
 ## 12. Interview Questions with Answers
 
 **Q1: Why should you always specify `encoding="utf-8"` when opening text files in Python?**
+**Short:** Default file encoding varies by OS, so always hardcode `encoding="utf-8"` for portability.
 The default encoding is `locale.getpreferredencoding(False)`, which varies by OS (UTF-8 on Linux/macOS, CP1252 on many Windows systems). Omitting it makes your code behave differently across environments, silently corrupting any non-ASCII characters on Windows. Always hardcode `encoding="utf-8"` for portability.
 
 **Q2: What is the difference between `Path.rename()` and `Path.replace()`?**
+**Short:** `Path.replace()` atomically overwrites the destination on every platform; `rename()` may raise.
 `rename()` raises `FileExistsError` if the destination exists (on Windows; POSIX allows overwrite). `replace()` atomically overwrites the destination on all platforms. Use `replace()` for atomic file writes: write to a `.tmp` file, then `replace()` into the final path. This pattern prevents readers from observing a partially-written file.
 
 **Q3: Why is `pickle.loads(untrusted_bytes)` a critical security vulnerability?**
+**Short:** `pickle.loads()` on untrusted bytes can execute arbitrary code, enabling remote code execution.
 The `pickle` protocol can encode arbitrary Python opcodes, including calls to `os.system()`, `exec()`, or `subprocess.Popen()`. Deserializing attacker-controlled bytes runs those opcodes in the process — arbitrary remote code execution. Use `json` or `msgpack` for untrusted data, or verify a HMAC signature before loading pickle from a trusted cache.
 
 **Q4: How does `io.BytesIO` improve testability?**
+**Short:** `io.BytesIO` implements the file interface in memory, letting tests avoid real disk I/O.
 It implements the same `read()`, `write()`, `seek()`, and `tell()` interface as a real file object, but stores data in memory. Code that accepts a file-like object can be tested by passing a `BytesIO` with pre-loaded content, eliminating disk I/O from tests and making them faster and deterministic.
 
 **Q5: What does `newline=""` do in `open()`, and why does it matter for `csv`?**
+**Short:** `newline=""` disables newline translation so the `csv` module can handle line endings itself.
 Setting `newline=""` disables Python's universal newline translation, leaving the raw bytes (including `\r\n`) unchanged. The `csv` module expects to handle line endings itself. Without `newline=""`, on Windows Python translates `\r\n` to `\n` on read and adds an extra `\r` on write, producing double blank lines between rows in the output CSV.
 
 **Q6: Explain the difference between `f.flush()` and `os.fsync(f.fileno())`.**
+**Short:** `flush()` moves data to the OS buffer; `fsync()` commits it to physical storage for durability.
 `f.flush()` moves data from Python's user-space buffer to the OS kernel buffer. The data is now visible to other processes but still in volatile RAM. `os.fsync()` instructs the kernel to commit its buffer to physical storage, guaranteeing durability through a power loss. Use both when writing critical data (database write-ahead log, checksum file).
 
 **Q7: When would you use `struct` over `json` or `pickle`?**
+**Short:** `struct` suits binary wire protocols or high-frequency numeric data where JSON overhead is too costly.
 Use `struct` when implementing or parsing a binary wire protocol where byte layout is dictated externally (network protocol, binary file format), or when serializing high-frequency numeric data (sensor readings, financial tick data) where `json` overhead is unacceptable. `struct` produces the exact byte sequence you specify; `json` and `pickle` add framing overhead.
 
 **Q8: What is `struct.Struct`, and why is it preferable to repeated `struct.pack()` calls?**
+**Short:** `struct.Struct` pre-compiles a format string once, avoiding re-parsing on every pack or unpack.
 `struct.Struct(format)` pre-compiles the format string into a C-level object, avoiding re-parsing the format on every call. For hot paths that pack/unpack thousands of messages per second, this can reduce CPU time by 30-50%. Instantiate once at module level: `HEADER = struct.Struct(">IH")`.
 
 **Q9: How do you safely create a temp file that persists after the `with` block exits?**
+**Short:** `tempfile.NamedTemporaryFile(delete=False)` keeps the temp file alive after the `with` block exits.
 Use `tempfile.NamedTemporaryFile(delete=False)`. With `delete=True` (the default), the OS deletes the file when the CM exits. With `delete=False`, the file persists; you are responsible for calling `path.unlink()` in a `finally` block or background task. Always write to the temp file, close it, then pass its path to downstream code.
 
 **Q10: What is the difference between `path.glob("*.py")` and `path.rglob("**/*.py")`?**
+**Short:** `glob()` searches only the immediate directory; `rglob()` recurses through all subdirectories.
 `glob()` matches only in the immediate directory; `rglob()` is recursive, equivalent to `glob("**/*.py")`. `rglob` can be slow on large directory trees; prefer `glob` with an explicit depth when you know the structure.
 
 **Q11: How would you handle a JSON payload with `Decimal` values in a FastAPI endpoint?**
+**Short:** FastAPI's default JSON encoder can't serialize `Decimal`; use a custom encoder or `orjson`.
 FastAPI's default `JSONResponse` uses the stdlib `json` encoder, which raises `TypeError` for `Decimal`. Two options: (1) subclass `json.JSONEncoder` and pass `cls=MyEncoder` to `json.dumps()`; (2) use `orjson`, which serializes `Decimal` as a string by default. Always use `str` or `Decimal` representation in JSON — never convert to `float`, which loses precision for financial values.
 
 **Q12: Explain the `pathlib` `/` operator. What Python feature does it use?**
+**Short:** `pathlib.Path` overloads `__truediv__` so `/` joins path segments into a new `Path` object.
 `Path` overrides `__truediv__` (the `/` division operator) to return a new `Path` representing the concatenated path: `Path("/data") / "uploads" / "file.csv"` returns `Path("/data/uploads/file.csv")`. This uses Python's operator overloading mechanism. The result is always a `Path` object regardless of which side is a string, as long as the left operand is a `Path`.
 
 **Q13: What happens when you call `Path.rename()` across two different filesystems, and what is the fix?**
+**Short:** `Path.rename()` fails across filesystems; `shutil.move()` falls back to a non-atomic copy-then-delete.
 `Path.rename()` raises `OSError` when the source and destination are on different filesystems because a rename is only a metadata operation within one filesystem. `shutil.move()` detects this case and falls back to copying the file's bytes to the destination then deleting the source, which works across devices but is not atomic and costs O(file size) time instead of O(1). Use `Path.replace()` only when source and destination share a filesystem — same directory tree or mounted volume — and reach for `shutil.move()` whenever the destination might be a different mount, such as a separate Docker volume or network share.
 
 **Q14: What happens to an open file descriptor when an exception occurs between `open()` and a manual `close()` call, without a `with` block?**
+**Short:** Without a `with` block, a leaked file descriptor stays open until reference counting frees it.
 The file descriptor stays open until CPython's reference-counting garbage collector destroys the file object, which may not happen immediately. On PyPy or Jython, which do not rely on deterministic reference counting, the descriptor can stay open indefinitely until a full GC cycle runs. In a long-running FastAPI worker processing thousands of uploads this leaks descriptors until the process hits the OS `ulimit -n` ceiling (often 1024), and every later `open()` call fails with `OSError: Too many open files`. Always wrap `open()` in a `with` block so `__exit__` closes the descriptor deterministically on every exception path.
 
 **Q15: What does `csv.Sniffer().sniff()` do, and when should you use it instead of assuming a fixed dialect?**
+**Short:** `csv.Sniffer().sniff()` detects a file's delimiter and quoting style instead of assuming one.
 `csv.Sniffer().sniff(sample)` inspects a sample of file content and returns a `Dialect` object describing the delimiter, quote character, and line terminator it detected. Pass the detected dialect into `csv.DictReader(f, dialect=dialect)` so parsing matches the file's actual formatting instead of a hardcoded guess. Use it when ingesting CSV files from external partners or user uploads where the delimiter might be a comma, semicolon, or tab, and a wrong hardcoded assumption would silently misparse every row into one column. Always `f.seek(0)` after sniffing, since `sniff()` consumes the sample from the current file position.
 
 **Q16: How do you handle a file whose encoding is unknown, such as a CSV uploaded by an external partner?**
+**Short:** `charset_normalizer.detect()` statistically guesses an unknown file's encoding from raw bytes.
 Use `charset_normalizer.detect(raw_bytes)` (or the older `chardet` library) to statistically guess the encoding from the raw byte distribution before decoding. Read the file in binary mode first, run detection on a sample of the bytes, then decode with the returned encoding key. `charset-normalizer` is the modern, faster choice and is what `requests` uses internally as of version 2.26. Never guess `latin-1` as a fallback — it decodes every byte sequence without raising, silently turning a corrupted or misidentified file into garbage text instead of surfacing the real mismatch.
 
 ---

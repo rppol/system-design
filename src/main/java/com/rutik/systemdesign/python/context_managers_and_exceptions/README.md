@@ -793,36 +793,58 @@ except* TypeError as eg:
 ## 12. Interview Questions with Answers
 
 **Q1: What does `__exit__` returning `True` do, and when should you return `True`?**
+**Short:** Returning True from __exit__ suppresses the exception, so the with block exits as if nothing happened.
+
 Returning a truthy value from `__exit__` suppresses the exception — the `with` block exits cleanly as if no exception occurred. You should almost never return `True`. The only legitimate use is a CM specifically designed to swallow expected errors (e.g., `contextlib.suppress`). Returning `False` or `None` lets the exception propagate, which is the correct default.
 
 **Q2: Explain how `@contextlib.contextmanager` converts a generator into a CM.**
+**Short:** @contextmanager wraps a generator into a CM whose __enter__ runs it to yield and __exit__ resumes it.
+
 The decorator wraps the generator function so that calling it returns a `_GeneratorContextManager` object. `__enter__` calls `next()` on the generator to run it up to the `yield` and returns the yielded value. `__exit__` resumes the generator after the `yield`; if the block raised an exception, `throw()` is called on the generator so the `except` clause in the generator body can handle it. If the block was clean, the generator runs its `finally` block and `StopIteration` is raised, signalling normal exit.
 
 **Q3: Why must you wrap `yield` in a `try/finally` inside a `@contextmanager` function?**
+**Short:** Without try/finally around yield, an exception thrown into the generator skips the cleanup code after yield.
+
 Without `try/finally`, an exception in the `with` body causes `_GeneratorContextManager.__exit__` to call `generator.throw(exc)`, which re-raises inside the generator at the `yield` point. If there is no `except` or `finally` around the `yield`, the exception propagates out of the generator and `__exit__` re-raises it — the cleanup code below the `yield` is never reached. A `finally` block guarantees cleanup code runs regardless of whether an exception was thrown into the generator.
 
 **Q4: What is `ExitStack` and why is it safer than nested `with` statements when the number of resources is dynamic?**
+**Short:** ExitStack unwinds a dynamic stack of context managers in LIFO order, cleaning up partial failures automatically.
+
 `ExitStack` is a context manager that maintains a stack of other context managers and cleanup callbacks, unwinding them in LIFO order when it exits. When the number of resources is unknown at write time (e.g., `N` files from a list), you cannot write `N` nested `with` statements. `ExitStack` lets you `enter_context()` in a loop. If any later `enter_context()` call fails, already-entered managers are cleaned up automatically, preventing partial resource leaks.
 
 **Q5: What is the difference between `raise ValueError("msg") from original` and `raise ValueError("msg")`?**
+**Short:** raise X from Y sets __cause__ explicitly, while a bare raise inside except sets __context__ implicitly.
+
 `raise X from Y` sets `X.__cause__ = Y` and `X.__suppress_context__ = True`; the traceback display shows "The above exception was the direct cause of the following exception". Plain `raise X` inside an `except` block sets `X.__context__` to the active exception but leaves `__suppress_context__ = False`; the display shows "During handling of the above exception, another exception occurred". Use explicit chaining (`from`) when you deliberately wrap an error; implicit chaining is automatic but less clear about intent.
 
 **Q6: When and why would you use `raise X from None`?**
+**Short:** raise X from None suppresses the exception chain display, hiding internal implementation detail from callers.
+
 `raise X from None` sets `__cause__ = None` and `__suppress_context__ = True`, which suppresses the exception chain in the traceback display. Use it in library code when the internal implementation detail (e.g., a third-party SDK exception class name, an internal file path) would confuse your callers. The trade-off is that the original root cause is harder to find; only use this at stable API boundaries, and always log the original exception internally before suppressing the chain.
 
 **Q7: Why does `except Exception` not catch `KeyboardInterrupt` or `SystemExit`?**
+**Short:** KeyboardInterrupt and SystemExit inherit from BaseException, not Exception, so broad handlers never catch them.
+
 Both `KeyboardInterrupt` and `SystemExit` inherit directly from `BaseException`, not from `Exception`. Python's exception hierarchy was deliberately split so that signals and interpreter exit events cannot be accidentally swallowed by broad exception handlers in user code. To intercept them you must explicitly catch `BaseException`, `KeyboardInterrupt`, or `SystemExit` — which is only appropriate in top-level shutdown hooks.
 
 **Q8: Describe `ExceptionGroup` and `except*` [3.11]. When does `asyncio.TaskGroup` raise one?**
+**Short:** ExceptionGroup holds multiple child exceptions, and except* extracts only the ones matching a given type.
+
 `ExceptionGroup("label", [exc1, exc2])` is a container exception holding multiple child exceptions. `except* SomeType as eg` in a try block extracts only the children matching `SomeType` into `eg.exceptions`; unmatched children are re-raised as a new `ExceptionGroup`. `asyncio.TaskGroup` collects all task failures and raises a single `ExceptionGroup` at the end of the `async with` block so callers can handle different failure types independently. This is the canonical use case for `except*`.
 
 **Q9: How does FastAPI's `yield` dependency relate to async context managers?**
+**Short:** Starlette wraps each yield dependency in asynccontextmanager, scoping cleanup to the request lifetime.
+
 Starlette (FastAPI's ASGI foundation) wraps each `yield` dependency in `contextlib.asynccontextmanager` internally. Code before `yield` runs during request setup; code after `yield` (optionally in `try/finally`) runs during response teardown — after the route handler returns but before the response is fully flushed. This gives you deterministic resource cleanup that is scoped exactly to the HTTP request lifetime, with no risk of forgetting to release the resource.
 
 **Q10: What happens if `__exit__` itself raises an exception?**
+**Short:** If __exit__ raises, that new exception propagates and the original is preserved only as its __context__.
+
 The new exception becomes the one that propagates, and the original is attached to it as `__context__` rather than being destroyed. Python is raising inside an active exception handler, so implicit chaining applies: the traceback prints the original first, then "During handling of the above exception, another exception occurred", then the cleanup failure. What is lost is not the information but the *framing* — the exception your caller catches, matches on, and alerts on is `RuntimeError("rollback failed")`, not the `ValueError` that actually broke the request, so every `except ValueError:` upstream stops firing. The fix is to wrap cleanup logic in `__exit__` in its own `try/except`, log the secondary failure, and re-raise the original so the type your callers match on is preserved.
 
 **Q11: How do you use `contextlib.AsyncExitStack` in an async FastAPI lifespan to manage multiple async resources?**
+**Short:** AsyncExitStack tears down multiple async resources in LIFO order even if some teardowns raise.
+
 `AsyncExitStack` (Python 3.7+) is the async equivalent of `ExitStack`. In a `lifespan` function, you `await stack.enter_async_context(SomeAsyncCM())` for each async resource. The stack ensures all resources are torn down in LIFO order when the application shuts down, even if some teardowns raise. This pattern avoids deeply nested `async with` blocks.
 
 ```python
@@ -840,6 +862,8 @@ async def lifespan(app: FastAPI):
 ```
 
 **Q12: How would you implement a reentrant lock as a context manager in Python?**
+**Short:** threading.RLock is already reentrant, so wrapping it in a custom context manager adds nothing but overhead.
+
 You would not — `threading.RLock` already is one, and wrapping it adds nothing. `RLock` implements `__enter__`/`__exit__` directly and tracks owner thread plus recursion depth in C, so `with lock:` nested inside another `with lock:` on the same thread simply increments and decrements a counter. Writing a `ReentrantLock` class that delegates to an internal `RLock` produces a strictly worse object: one extra Python-level call on every acquire and release, and no added behaviour.
 
 The question is worth asking because it tests whether you know what "reentrant" costs. If you genuinely need to *observe* the depth — to assert an invariant, or to run a hook only at the outermost level — that is the case where a wrapper earns its place, and the counter must be per-thread:
@@ -872,15 +896,23 @@ class DepthTrackingLock:
 A plain instance attribute instead of `threading.local()` would be the bug here: two threads can each hold the lock at different times, and a shared counter would interleave their depths.
 
 **Q13: Why does mixing `except*` and plain `except` in the same `try` block raise a `SyntaxError`?**
+**Short:** Mixing except* and plain except in one try block is a SyntaxError because the two model different results.
+
 Because the two forms model fundamentally different results and Python refuses to guess which one a handler meant. A plain `except` catches one specific exception instance; `except*` catches a *subset* of an `ExceptionGroup` and leaves the unmatched remainder to propagate as a new group. Allowing both in one `try` would create ambiguity about whether a caught exception is a single object or a partitioned group. The fix is to convert the whole block to `except*` clauses once any handler in it needs to process `ExceptionGroup` members. This restriction is enforced at parse time, before the code ever runs, so it surfaces immediately in code review or CI rather than as a runtime surprise.
 
 **Q14: How does `contextlib.suppress(SomeError)` work internally, and how is it safer than a bare `except SomeError: pass`?**
+**Short:** contextlib.suppress returns True from __exit__ only when the raised exception matches a listed type.
+
 It is a context manager whose `__exit__` returns `True` only when the raised exception matches one of the types you listed, and `False` otherwise. That single returned bit is the whole implementation: truthy swallows the exception, falsy lets it propagate. A bare `except SomeError: pass` does the same thing syntactically, but `suppress` communicates intent explicitly at the point of use — a reviewer scanning `with suppress(FileNotFoundError): os.remove(path)` immediately knows which error is expected and why, without reading a comment. Because `suppress` only matches the exact types you list, an unrelated exception still propagates normally. Reserve `suppress` for genuinely expected, benign failures; anything else should be caught and logged.
 
 **Q15: What problem does `contextlib.nullcontext` solve, and when would you reach for it?**
+**Short:** nullcontext is a no-op context manager that lets a with statement apply a lock only conditionally.
+
 `contextlib.nullcontext` is a no-op context manager that lets you apply a context manager conditionally without writing an `if/else` branch around the `with` statement. A common case is an optional lock: `ctx = lock if needs_lock else contextlib.nullcontext()` followed by a single `with ctx:` block that works whether or not locking is actually needed. Without `nullcontext`, you would need to duplicate the entire block body inside both an `if needs_lock: with lock:` branch and an `else:` branch, doubling the code to maintain. `nullcontext` optionally accepts a value to return from `__enter__`, so it can also stand in for a CM whose `as` target is sometimes `None`.
 
 **Q16: In the case study's `managed_transaction`, why does the rollback logic catch `except BaseException` instead of `except Exception`?**
+**Short:** Catching BaseException in rollback logic ensures Ctrl-C and sys.exit() still roll back the transaction.
+
 So that Ctrl-C and `sys.exit()` still roll the transaction back. `KeyboardInterrupt` and `SystemExit` inherit directly from `BaseException`, so an `except Exception` clause never sees them and the rollback would be skipped. A database transaction left open when the process receives Ctrl-C or a graceful shutdown signal can hold locks or leave partial writes uncommitted, so the case study treats "the block did not finish cleanly" as more important than "what kind of exception ended it." This is one of the few legitimate uses of `except BaseException` — general-purpose code and HTTP middleware should still catch only `Exception` (see Q7) so signals and interpreter exit are not accidentally intercepted. The trade-off is scoped narrowly to the rollback path, which re-raises immediately after cleanup rather than swallowing the signal.
 
 ---

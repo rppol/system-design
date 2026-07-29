@@ -916,48 +916,63 @@ def thread_b() -> None:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the GIL and how does it affect threading vs multiprocessing?**
+**Short:** Threads still help I/O-bound work since the GIL releases during blocking calls, but only multiprocessing parallelizes CPU-bound work.
 The GIL (Global Interpreter Lock) is a mutex in CPython that allows only one thread to execute Python bytecode at a time. For I/O-bound work, threads still provide speedup because the GIL is released during blocking I/O system calls. For CPU-bound work, threads offer no parallelism — only multiprocessing bypasses the GIL by running separate interpreter instances in separate OS processes. If your profiling shows > 80% CPU time with < 20% I/O wait, choose `ProcessPoolExecutor`.
 
 **Q2: When should you use `ThreadPoolExecutor` over `ProcessPoolExecutor`?**
+**Short:** Use ThreadPoolExecutor for I/O-bound work and ProcessPoolExecutor for CPU-bound work, since only the latter bypasses the GIL.
 Use `ThreadPoolExecutor` for I/O-bound work (HTTP calls, database queries, file reads) where threads spend most of their time waiting on system calls and the GIL is released. Use `ProcessPoolExecutor` for CPU-bound work (image processing, compression, ML inference) where Python bytecode execution is the bottleneck. `ThreadPoolExecutor` starts in < 1 ms per task; `ProcessPoolExecutor` pays a ~100–300 ms spawn overhead but achieves true CPU parallelism.
 
 **Q3: What is a deadlock and how do you avoid it?**
+**Short:** A deadlock happens when threads wait on each other's locks in a cycle, and consistent lock ordering prevents it.
 A deadlock occurs when two or more threads are each waiting for a lock held by another, creating a circular dependency where none can proceed. To avoid deadlocks: (1) always acquire multiple locks in a consistent global order, (2) use `lock.acquire(timeout=...)` with retry logic, (3) use `threading.RLock` when the same thread needs to re-acquire a lock, and (4) prefer higher-level abstractions like `queue.Queue` that eliminate explicit lock management.
 
 **Q4: What is a race condition and how do you detect one?**
+**Short:** A race condition occurs when the result depends on unpredictable thread scheduling order, corrupting shared state.
 A race condition occurs when the outcome depends on the non-deterministic scheduling order of threads. Example: two threads read `x = 0`, both increment to `1`, both write `x = 1` — one increment is lost. Detection methods: (1) Python's `threading.settrace` or the `racedetector` mode in PyPy, (2) deliberately introduce `time.sleep(0)` in critical sections to increase scheduling probability, (3) use stress testing with `ThreadSanitizer` via CPython debug builds, (4) audit all shared mutable state access.
 
 **Q5: Why is `lambda` not picklable for `multiprocessing.Pool`?**
+**Short:** lambda has no importable qualified name, so pickle cannot serialize it for a multiprocessing.Pool worker to reconstruct.
 `pickle` serializes objects by reference — it stores the module path and qualified name of a callable, then reconstructs it in the worker process by importing that name. `lambda` functions are anonymous and have no qualified name in any module, so `pickle` cannot store a reference to them. Module-level named functions work because workers can `import module; getattr(module, "function_name")`. `functools.partial` wraps a picklable function with bound arguments and is itself picklable.
 
 **Q6: What is thread-local storage and when should you use it in FastAPI?**
+**Short:** threading.local gives each thread its own private copy of a variable, but it does not propagate across await boundaries.
 Thread-local storage (`threading.local()`) gives each thread its own independent copy of a variable — reads and writes in thread A do not affect thread B's view. Use it when: (1) synchronous FastAPI endpoints run in a thread pool and each request needs its own context (request ID, database session), (2) wrapping thread-unsafe libraries that have per-thread state (SQLAlchemy scoped sessions). For async FastAPI handlers, prefer `contextvars.ContextVar` instead — `threading.local` does not propagate across `await` boundaries.
 
 **Q7: How does `queue.Queue` achieve thread safety?**
+**Short:** queue.Queue wraps a deque with a Condition variable, so put and get block and notify safely without manual locking.
 `queue.Queue` internally uses a `collections.deque` protected by a `threading.Condition` (which wraps a `threading.Lock`). `put()` acquires the lock, appends to the deque, and calls `notify()` to wake a waiting consumer. `get()` acquires the lock, calls `wait()` if the deque is empty (atomically releasing the lock), and pops once notified. The `task_done()` / `join()` mechanism uses a separate `Condition` and a pending-tasks counter to block `join()` until all items are processed.
 
 **Q8: What is the difference between `Pool.map` and `Pool.imap`?**
+**Short:** Pool.map materializes the full result list upfront, while Pool.imap yields results lazily as an iterator instead.
 `Pool.map(fn, iterable)` converts the iterable to a list upfront, distributes chunks to workers, waits for all results, and returns a fully materialized list — suitable for small to medium datasets where all results fit in memory. `Pool.imap(fn, iterable, chunksize=1)` returns an iterator that yields results lazily as they complete, preserving order. `Pool.imap_unordered` yields results as soon as any worker finishes, ignoring order — fastest for heterogeneous task durations. For a 10 GB dataset, `imap` avoids loading 10 GB into memory simultaneously.
 
 **Q9: How does `multiprocessing.shared_memory` differ from `multiprocessing.Value`?**
+**Short:** multiprocessing.Value holds one typed primitive with a built-in lock, while shared_memory offers a raw arbitrary-size buffer.
 `multiprocessing.Value('i', 0)` provides a single typed C value (int, float, etc.) backed by shared memory, with a built-in `RLock` for safe concurrent access. It is limited to primitive types and fixed size. `multiprocessing.shared_memory.SharedMemory` creates a raw bytes buffer of arbitrary size in OS shared memory, accessible via `memoryview`. Combined with NumPy, it enables zero-copy sharing of large arrays — a 100 MB NumPy array takes ~0s to "pass" to a worker via shared memory vs ~0.5s via pickle. `SharedMemory` requires explicit `close()` and `unlink()` lifecycle management.
 
 **Q10: What is `concurrent.futures.as_completed` and when do you use it?**
+**Short:** as_completed yields futures in the order they finish, unlike executor.map which preserves the original submission order.
 `as_completed(futures)` returns an iterator that yields `Future` objects in the order they complete — not the order they were submitted. Use it when: (1) you want to process results as soon as they arrive (streaming dashboard), (2) tasks have variable duration and you don't want fast tasks to wait for slow ones, (3) you need early termination on first error. In contrast, `executor.map()` preserves submission order by buffering completed results until their turn.
 
 **Q11: How do you safely pass large NumPy arrays to worker processes?**
+**Short:** multiprocessing.shared_memory lets worker processes read a NumPy array with zero copying instead of pickling it.
 Option 1: `multiprocessing.shared_memory.SharedMemory` — write array into shared buffer once, pass only the `shm.name` string to workers, reconstruct with `np.ndarray(..., buffer=shm.buf)`. Zero-copy for reads; coordination needed for writes. Option 2: memory-mapped files (`np.memmap`) — workers open the same file path, OS page cache handles sharing. Good for read-only datasets. Option 3: pickle (default) — avoid for arrays > 1 MB due to ~0.5s/100 MB overhead. Rule of thumb: if worker startup time (0.1–0.3s) exceeds pickle time for your array size, SharedMemory is worth the complexity.
 
 **Q12: What happens if a worker process in `ProcessPoolExecutor` raises an exception?**
+**Short:** A worker exception is pickled back to the main process and re-raised when you call future.result() there.
 The exception is caught in the worker, pickled, and sent back to the main process. When you call `future.result()`, the exception is re-raised in the main thread. If the worker crashes hard (segfault, OOM kill), the future raises `concurrent.futures.process.BrokenProcessPool`. You should catch `Exception` from `future.result()` individually per future, and wrap the entire executor in a try/finally to ensure `executor.shutdown(wait=True)` is called (the context manager does this automatically).
 
 **Q13: How does `threading.Barrier` work and what is it useful for?**
+**Short:** threading.Barrier blocks exactly n threads until all of them arrive, then releases every one simultaneously.
 `threading.Barrier(n)` provides a synchronization point where exactly `n` threads must call `barrier.wait()` before any of them proceeds past it. Each call decrements an internal counter; when it reaches zero, all waiting threads are released simultaneously. Useful for: parallel test setup (all workers must finish initialization before any starts the actual load), phased parallel algorithms (all workers complete phase 1 before any starts phase 2), and tournament-style parallel benchmarks.
 
 **Q14: When would you choose `subprocess` over `multiprocessing`?**
+**Short:** Choose subprocess for running external non-Python binaries, and multiprocessing for parallelizing Python functions themselves.
 Choose `subprocess` when: (1) running external binaries that are not Python (ffmpeg, git, curl, pandoc), (2) the tool has its own memory management and you just need its output, (3) you need shell piping or redirection, (4) you want to run system commands for orchestration. Choose `multiprocessing` when: (1) running Python functions in parallel, (2) you need to pass Python objects (not just strings) efficiently, (3) you need shared memory or `Value`/`Array`. `subprocess` has lower overhead for invoking external tools and avoids the Python object serialization problem entirely.
 
 **Q15: How does the `multiprocessing` start method affect behavior on macOS and Windows?**
+**Short:** macOS switched its default multiprocessing start method from fork to the safer but slower spawn in Python 3.8.
 Python 3.8+ changed the default start method on macOS from `fork` to `spawn`. `fork` duplicates the parent process memory (cheap, copy-on-write) but can cause deadlocks in forked processes that inherited lock state from the parent — particularly with Objective-C frameworks on macOS. `spawn` starts a fresh Python interpreter and re-imports the main module (adds ~0.1–0.3s per worker but is safe). Windows only supports `spawn`. Use `if __name__ == "__main__":` guard on Windows/macOS to prevent recursive spawning. `forkserver` is a third option: one fork server holds a clean state and forks from it.
 
 ---

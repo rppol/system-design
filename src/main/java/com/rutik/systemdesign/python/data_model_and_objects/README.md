@@ -1011,51 +1011,67 @@ D2().setup()
 ## 12. Interview Questions with Answers
 
 **Q1: What is a data descriptor versus a non-data descriptor, and why does the distinction matter for attribute lookup?**
+**Short:** Data descriptors (with `__set__`/`__delete__`) override instance `__dict__`; non-data ones don't.
 A data descriptor defines both `__get__` and at least one of `__set__` or `__delete__`; a non-data descriptor defines only `__get__`. Data descriptors take priority over the instance `__dict__`, while non-data descriptors are shadowed by it. This distinction is why `property` (a data descriptor) prevents instance dictionary bypass but plain functions (non-data descriptors) can be overridden per-instance.
 
 **Q2: What happens to `__hash__` when you define `__eq__` on a class?**
+**Short:** Defining `__eq__` without `__hash__` sets `__hash__` to `None`, making instances unhashable.
 Python automatically sets `__hash__ = None` on the class, making instances unhashable. This enforces the contract that equal objects must have equal hashes. To keep instances hashable, you must explicitly define `__hash__` returning a value consistent with `__eq__`, typically `hash(tuple_of_fields_used_in_eq)`.
 
 **Q3: Why does `__repr__` use `repr()` on contained objects, but `__str__` uses `str()`?**
+**Short:** `__repr__` targets developers and is unambiguous; `__str__` targets end users and can omit detail.
 `__repr__` is for developer-facing output and should be unambiguous; when a container like `list` renders its elements, it calls `repr()` on each to get the unambiguous form. `__str__` is for end-user display and may omit type information. Implement `__repr__` on every class; `__str__` is optional and falls back to `__repr__` if absent.
 
 **Q4: Explain how `super()` works in Python's MRO and why you must use it in cooperative multiple inheritance.**
+**Short:** `super()` delegates to the next class in the instance's MRO, not necessarily the direct parent.
 `super()` returns a proxy that delegates method calls to the *next* class in the current instance's MRO, not necessarily the direct parent. In a diamond hierarchy `D(B, C)` with MRO `D → B → C → A`, `super()` in `B.method` calls `C.method`, not `A.method`. If `B` calls `A.method()` directly, `C.method` is skipped entirely. Every class must call `super()` to guarantee cooperative chaining where each class in the MRO runs exactly once.
 
 **Q5: How does `__slots__` reduce memory, and when does it fail to save memory?**
+**Short:** `__slots__` saves about 40 bytes per instance by replacing the values array with fixed slots.
 `__slots__` stores attributes in a fixed C-level array of slot pointers instead of the inline values array a plain instance uses, saving a flat ~40 bytes per instance. That is 96 bytes down to 56 for a three-attribute class on CPython 3.13, 64-bit. The win is much smaller than the pre-3.11 folklore because plain instances no longer eagerly allocate a `dict` either: their attributes live in a preheader values array with the key names shared once on the class. It does not merely fail when an ancestor lacks `__slots__` — it backfires, because the class loses the shared-keys fast path and still inherits a real `__dict__`, measuring around 400 bytes per instance against 88 for the plain equivalent. Practical guidance: put `__slots__` on every class in the MRO or on none, and measure in bulk with `tracemalloc`, never with `sys.getsizeof(obj.__dict__)`.
 
 **Q5b: Why is `sys.getsizeof(obj.__dict__)` the wrong way to measure an instance?**
+**Short:** `sys.getsizeof(obj.__dict__)` is wrong because reading `__dict__` creates the object it measures.
 It creates the very object it claims to measure. Since 3.11 a plain instance keeps its attributes in an inline values array and has no `dict`; reading `obj.__dict__` materialises one, adding about 64 bytes to that instance for good. The number it then reports also includes the shared key table that every instance of the class uses jointly, so it double-counts across the population. Practical guidance: allocate N instances, diff `tracemalloc.get_traced_memory()` around the loop, subtract the holding list, and divide by N.
 
 **Q6: What is the attribute lookup order in Python?**
+**Short:** Attribute lookup checks data descriptors, then instance `__dict__`, then class attributes, in order.
 For `obj.attr`: (1) check if `type(obj).__mro__` contains a data descriptor named `attr`; if yes, call its `__get__`. (2) Check `obj.__dict__` for `attr`; if found, return it. (3) Check `type(obj).__mro__` for a non-data descriptor or plain class attribute named `attr`; if found, call `__get__` or return the value. (4) Raise `AttributeError`. This four-step order is fixed and implemented in `object.__getattribute__`.
 
 **Q7: What does returning `NotImplemented` from `__add__` do, and how is it different from raising `NotImplementedError`?**
+**Short:** Returning `NotImplemented` lets Python try the reflected method; raising `NotImplementedError` aborts.
 Returning `NotImplemented` (a singleton, not an exception) tells Python that the current type cannot handle the operand, so Python should try the reflected method (`__radd__`) on the right-hand operand. Raising `NotImplementedError` is an unrecoverable exception that immediately propagates. Always return `NotImplemented` from numeric dunders for unsupported types; never raise `NotImplementedError`.
 
 **Q8: How does `__bool__` interact with `__len__` for truthiness testing?**
+**Short:** Truthiness checks `__bool__` first, then `__len__` (0 is falsy), else the object is always truthy.
 Python calls `__bool__` first; if absent, it calls `__len__` and treats 0 as falsy and non-zero as truthy; if neither is defined, the object is always truthy. A common bug is defining `__len__` on a container without `__bool__`, then seeing empty containers evaluate as falsy — usually correct, but if `__bool__` has different semantics (e.g., a matrix is never "empty"), you must define it explicitly.
 
 **Q9: Explain the `__set_name__` hook on descriptors.**
+**Short:** `__set_name__` lets a descriptor learn its own attribute name automatically at class creation.
 `__set_name__(self, owner, name)` [3.6] is called by `type.__new__` on each descriptor found in the class body, passing the class being created (`owner`) and the attribute name the descriptor is assigned to (`name`). This allows a descriptor to self-configure with its attribute name without requiring the programmer to pass it explicitly, eliminating the repetition of `width = Validator("width")`.
 
 **Q10: What is `total_ordering` and what is its performance cost?**
+**Short:** `functools.total_ordering` synthesizes comparisons but costs roughly 40-50ns more per call.
 `functools.total_ordering` is a class decorator that fills in missing rich comparison methods from `__eq__` and one ordering method. Each synthesized method costs roughly 40–50 ns extra per call — measured, a `<=` on a `total_ordering` class runs in about 80 ns against 33 ns hand-written — because it is a Python-level wrapper that calls your method and inspects the result for `NotImplemented`. The method you defined yourself is untouched and runs at full speed. For a sort over millions of objects, define all six explicitly, or pass `key=` to `sorted` so only the key's `<` is ever called.
 
 **Q11: How are functions non-data descriptors, and how does this enable bound methods?**
+**Short:** Functions are non-data descriptors whose `__get__` produces the bound method on instance access.
 A function object's class defines `__get__` but not `__set__` or `__delete__`. When you access `instance.method`, Python calls `function.__get__(instance, type(instance))`, which returns a `method` object that binds `instance` as the first argument. Because functions are non-data descriptors, an instance can shadow a method by setting an instance attribute with the same name — though this is rarely desirable.
 
 **Q12: When would you use `__init_subclass__` instead of a metaclass?**
+**Short:** Use `__init_subclass__` for subclass-creation hooks; use a metaclass to intercept `type.__new__` itself.
 `__init_subclass__` suffices when you need to run logic at subclass creation time without controlling the metaclass call chain or modifying `__new__` arguments. Use a metaclass when you need to intercept `type.__new__` itself — for example, to transform the class namespace before the class object is created (as Pydantic v2's `ModelMetaclass` does). `__init_subclass__` is simpler, composable via `super()`, and avoids metaclass conflicts.
 
 **Q13: What is the difference between `__getattr__` and `__getattribute__`?**
+**Short:** `__getattribute__` runs on every attribute access; `__getattr__` runs only after lookup fails.
 `__getattribute__` is called on *every* attribute access and is the entry point for the full lookup mechanism. Overriding it lets you intercept all attribute reads. `__getattr__` is called only when the normal lookup (via `__getattribute__`) raises `AttributeError` — it is a fallback of last resort. Always prefer `__getattr__` for lazy/dynamic attributes; overriding `__getattribute__` risks infinite recursion if you accidentally look up attributes on `self` without calling `object.__getattribute__`.
 
 **Q14: Can you add `__slots__` to a class that uses `@dataclass`?**
+**Short:** `@dataclass(slots=True)` adds `__slots__` but builds an entirely new class object to do it.
 Yes, with `@dataclass(slots=True)` [3.10], and it produces exactly the same layout as hand-written `__slots__` — 56 bytes per instance for three fields, against 96 without. Note that `slots=True` cannot mutate the class in place, so the decorator builds and returns a *new* class object; anything that captured the pre-decoration class (a `super()` `__class__` cell in a method defined before the decorator ran, or an already-registered reference) still points at the old one. Practical guidance: prefer `slots=True` over declaring `__slots__` by hand on a dataclass, because the hand-written form collides with class-level defaults — the default value is a class attribute and the slot descriptor of the same name shadows it, giving `ValueError: 'x' in __slots__ conflicts with class variable`.
 
 **Q15: What happens if you put a mutable default value as a `dataclass` field?**
+**Short:** `@dataclass` rejects mutable default field values, checking unhashability as a proxy for mutability.
 Python raises `ValueError: mutable default <class 'list'> for field items is not allowed: use default_factory` at class definition time. `@dataclass` uses **unhashability as a proxy for mutability**: the check is `f.default.__class__.__hash__ is None`, read from the class rather than the instance. That catches `list`, `dict` and `set`, and equally any of your own classes that set `__hash__ = None` or define `__eq__` without `__hash__`. Use `field(default_factory=list)` instead. The corollary is that a mutable type which is still hashable — a custom class with a default `__hash__` and mutable attributes — sails straight through the check and reintroduces the shared-default bug.
 
 ---
