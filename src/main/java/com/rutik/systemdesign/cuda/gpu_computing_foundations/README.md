@@ -141,11 +141,12 @@ would predict.
 |-------------|--------------------|-------------------|--------------------|
 | **PCIe Gen4 x16** | ~32 GB/s per direction (~64 GB/s bidirectional) | Consumer/entry server GPUs, host<->device transfer | Microsecond-scale round trip |
 | **PCIe Gen5 x16** | ~64 GB/s per direction (~128 GB/s bidirectional) | Latest data-center hosts (H100/B200 PCIe SKUs), host<->device transfer | Microsecond-scale round trip |
-| **NVLink (Hopper, 4th gen)** | ~900 GB/s aggregate per GPU | GPU<->GPU within a server (H100 NVSwitch pod) | Sub-microsecond, far higher bandwidth than PCIe |
-| **HBM3 (on-package, GPU<->its own memory)** | ~3 TB/s (H100 SXM) | GPU core <-> its own device memory | Not a host link at all — fastest tier in the whole picture |
+| **NVLink 4 (Hopper)** | 900 GB/s aggregate per GPU | GPU<->GPU within a server (H100 NVSwitch pod) | Sub-microsecond, far higher bandwidth than PCIe |
+| **NVLink 5 (Blackwell)** | 1,800 GB/s aggregate per GPU | GPU<->GPU inside a GB200 NVL72 rack domain | Same character as NVLink 4, double the bandwidth |
+| **HBM3 (on-package, GPU<->its own memory)** | 3.35 TB/s (H100 SXM5) | GPU core <-> its own device memory | Not a host link at all — fastest tier in the whole picture |
 
-The ordering that matters for the "should I offload this" decision: **on-device HBM (~3
-TB/s) >> NVLink GPU-to-GPU (~900 GB/s) >> PCIe host-to-device (~32-64 GB/s)**. Every hop away
+The ordering that matters for the "should I offload this" decision: **on-device HBM (3.35
+TB/s) >> NVLink GPU-to-GPU (900-1,800 GB/s) >> PCIe host-to-device (~32-64 GB/s)**. Every hop away
 from the GPU's own memory costs roughly an order of magnitude in bandwidth, which is exactly
 why the host/device transfer is the step to scrutinize first when a "GPU-accelerated"
 pipeline disappoints.
@@ -168,35 +169,44 @@ Deep pipeline, branch prediction,              each simple and slow alone.
 out-of-order execution, big caches             Minimal control logic per ALU,
 to minimize ONE thread's latency.              tiny cache per SM.
 
-Latency-vs-throughput scoreboard (single op vs 10,000 independent ops):
+Scoreboard for 10,000 independent FP32 ops, counting EXECUTION ONLY -- kernel
+launch and PCIe transfer are extra and are the subject of Sections 10 and 14:
 
                  Time to finish ONE op    Time to finish 10,000 INDEPENDENT ops
-CPU core         ~1 ns  (fast!)           ~10,000 ns  (serialized, one at a time)
-GPU (thousands   ~2-4 ns (slower per op,  ~10-30 ns   (thousands run concurrently,
-of ALUs)         no branch prediction)                latency hidden by warp swaps)
+CPU core         ~1 ns  (fast!)           ~200 ns  (AVX-512 packs 16 lanes per
+                                                   instruction at ~3 GHz, so
+                                                   ~625 vector instructions)
+Whole GPU        ~2-4 ns (slower per op,  ~1 ns    (16,896 FP32 lanes across
+(H100, 132 SMs)  no branch prediction)             132 SMs -- one cycle's worth)
 
-Crossover: a GPU loses on latency for a SINGLE operation, and wins by 100-1000x
-once the operation count is large enough to keep thousands of ALUs simultaneously busy.
+Crossover: a GPU loses on latency for a SINGLE operation and wins on throughput
+only once there is enough work to fill all 16,896 lanes -- AND only after the
+~5 us kernel-launch and transfer overhead is amortized, which at 10,000 ops it
+is emphatically not. Order-of-magnitude wins are real; they start in the millions.
 ```
 
-This is the entire argument for GPU computing in one picture: a CPU wins the single-operation
-column by being individually faster per instruction; a GPU wins the many-independent-operations
-column because raw ALU count and latency-hiding via warp scheduling dwarf any single-thread
-speed disadvantage. Every "should this run on the GPU" question reduces to "which column am I in."
+This is the entire argument for GPU computing in one picture, including the part usually left
+out. A CPU core is not scalar: with AVX-512 it retires 16 FP32 lanes per instruction, so the
+comparison is 16 CPU lanes against 16,896 GPU lanes, not 1 against 16,896. The GPU's edge on the
+right-hand column is roughly 200x of raw execution — genuinely large, but small enough that a
+few microseconds of launch overhead erases it entirely at this problem size. Every "should this
+run on the GPU" question reduces to "which column am I in, and is my column wide enough to pay
+for the trip."
 
-### CPU vs GPU — Time to Finish, Single Op vs 10,000 Ops
+### CPU vs GPU — Execution Time, Single Op vs 10,000 Ops
 
 ```mermaid
 xychart-beta
-    title "Time to finish: single op vs 10,000 independent ops (ns)"
+    title "Execution time only: single op vs 10,000 independent FP32 ops (ns)"
     x-axis ["CPU: 1 op", "GPU: 1 op", "CPU: 10K ops", "GPU: 10K ops"]
-    y-axis "Time (nanoseconds)" 0 --> 10000
-    bar [1, 3, 10000, 20]
+    y-axis "Time (nanoseconds)" 0 --> 200
+    bar [1, 3, 200, 1]
 ```
 
-Same scoreboard as the ASCII table above, plotted directly: a CPU wins the leftmost bar (fastest
-single op) but loses by roughly 500x on the rightmost pair, because the CPU serializes 10,000 ops
-while the GPU runs them concurrently and hides memory latency behind warp swaps.
+Same scoreboard as the ASCII table above, plotted directly: a CPU wins the leftmost pair (fastest
+single op) and loses the rightmost pair by roughly 200x, because a vectorized CPU core still has
+only 16 lanes while an H100 has 16,896. Note what the chart cannot show: the ~5 us launch overhead
+is 25x taller than the whole y-axis, which is why this particular workload still belongs on the CPU.
 
 ### Host -> Device -> Host Offload Flow
 
@@ -392,7 +402,8 @@ Warp 1:       -    LOAD [stalled.....]  ...
 Warp 2:       -     -   FMA   FMA   FMA  ...  (compute while warps 0/1 wait on memory)
 Warp 3:       -     -    -    LOAD [stalled...]
 
-SM issues ONE instruction per cycle from whichever warp is ready.
+Each of the SM's 4 warp schedulers issues one instruction per cycle from
+whichever of ITS resident warps is ready (4 per SM per cycle in total).
 As long as SOME warp is always ready, the ~400-800 cycle memory latency
 is fully hidden and the ALUs never sit idle.
 ```
@@ -489,12 +500,18 @@ transfer, not the kernel, dominates total time by two to three orders of magnitu
 ```
 Arithmetic Intensity (AI) = FLOPs performed / Bytes moved from memory
 
-Vector add (y = x + y):      AI = 1 FLOP / 8 bytes read+written  = 0.125 FLOPs/byte
+Vector add (y = x + y):      AI = 1 FLOP / 12 bytes (read x, read y, write y)
+                                = 0.083 FLOPs/byte
 Dense matmul (N x N x N):    AI = 2*N^3 FLOPs / (3*N^2*4 bytes)  ~ N/6 FLOPs/byte (grows with N)
 
 At N = 4096:  matmul AI ~ 683 FLOPs/byte  ->  deep in compute-bound territory
-Vector add:   AI = 0.125 FLOPs/byte       ->  deep in memory-bound / transfer-bound territory
+Vector add:   AI = 0.083 FLOPs/byte       ->  deep in memory-bound / transfer-bound territory
 ```
+
+Count every byte the kernel actually moves, including the write. A GPU has no
+write-combining trick that makes the store free — `y[i] = a*x[i] + y[i]` reads two
+4-byte operands and writes one, so the denominator is 12, not 8. Undercounting the
+store is the most common way an arithmetic-intensity estimate comes out optimistic.
 
 Low-AI, small kernels are exactly the workloads where PCIe transfer time swamps compute time
 and the GPU frequently loses to a well-vectorized CPU loop; high-AI kernels like GEMM are
@@ -522,10 +539,10 @@ Memory is the scarce resource on a GPU, not arithmetic — an H100 can issue vas
   1024        2.15   GF       12.0  MB             170.67
   4096      137.4    GF      192.0  MB             682.67
 
-  vector add (any N)                                  0.125   <- flat, never improves
+  vector add (any N)                                  0.083   <- flat, never improves
 ```
 
-FLOPs grow as `N^3` while bytes grow only as `N^2`, so every doubling of `N` doubles the arithmetic intensity: 4096 buys **682.67 FLOPs per byte, 5461x the intensity of vector add**. Vector add's `0.125` is a constant — no problem size rescues it, because every element is touched exactly once.
+FLOPs grow as `N^3` while bytes grow only as `N^2`, so every doubling of `N` doubles the arithmetic intensity: 4096 buys **682.67 FLOPs per byte, 8192x the intensity of vector add** (682.67 / 0.0833 = 2N, exactly). Vector add's `0.083` is a constant — no problem size rescues it, because every element is touched exactly once.
 
 **Why the ratio, and not either number alone.** A kernel doing 137 GFLOP sounds impressive until you learn it moved 192 MB to do it; a kernel moving 192 MB sounds wasteful until you learn it got 137 GFLOP out of them. Only the ratio tells you which hardware limit you are about to hit, and therefore which optimization is worth attempting — tiling and reuse for a low-AI kernel, better instruction mix or Tensor Cores for a high-AI one. Optimize the wrong side and the profiler shows no change at all.
 
@@ -536,9 +553,11 @@ FLOPs grow as `N^3` while bytes grow only as `N^2`, so every doubling of `N` dou
 - **Deep learning training** — matrix multiplies and convolutions have arithmetic intensity
   in the hundreds of FLOPs/byte, making them the textbook case for GPU acceleration; an
   8xH100 node trains models that would take months on CPU in days.
-- **Scientific simulation (molecular dynamics, CFD)** — codes like GROMACS and OpenFOAM
-  offload the dense force/flux computation kernels (high AI) to GPUs while keeping I/O and
-  setup on the CPU, often achieving 10-50x speedups over CPU-only runs.
+- **Scientific simulation (molecular dynamics, CFD)** — codes like GROMACS and LAMMPS
+  offload the dense force/nonbonded kernels (high AI) to GPUs while keeping I/O, domain
+  decomposition and setup on the CPU. Reported speedups vary widely with the system and the
+  CPU baseline being compared against, so treat any single multiplier as workload-specific
+  rather than a property of the hardware.
 - **Video encoding/decoding and image processing** — per-pixel, embarrassingly parallel
   operations (color conversion, filters, resizing) are a natural SIMT fit; NVIDIA's NVENC/NVDEC
   are dedicated ASIC blocks that exploit the same parallel-throughput principle even more
@@ -572,8 +591,8 @@ FLOPs grow as `N^3` while bytes grow only as `N^2`, so every doubling of `N` dou
 |--------------|-----------|------------------|
 | PCIe Gen4 x16 | ~32 GB/s per direction | Standard host<->device transfer on most servers |
 | PCIe Gen5 x16 | ~64 GB/s per direction | Newer data-center hosts; still an order of magnitude below NVLink |
-| NVLink (Hopper) | ~900 GB/s aggregate | Multi-GPU, in-server GPU<->GPU (see [multi_gpu_programming_and_nccl](../multi_gpu_programming_and_nccl/)) |
-| On-device HBM3 | ~3 TB/s | GPU core <-> its own memory — the number every kernel is actually optimized against |
+| NVLink 4 / 5 | 900 GB/s (Hopper) / 1,800 GB/s (Blackwell) aggregate | Multi-GPU, in-server GPU<->GPU (see [multi_gpu_programming_and_nccl](../multi_gpu_programming_and_nccl/)) |
+| On-device HBM3 | 3.35 TB/s (H100 SXM5) | GPU core <-> its own memory — the number every kernel is actually optimized against |
 
 ---
 
@@ -650,8 +669,9 @@ the CPU regardless of how far the workload got.
 
 ### Do NOT use a GPU when
 
-- The **serial fraction dominates** (Amdahl's Law) — a pipeline that is 80% inherently
-  sequential caps out at a 5x speedup no matter how many GPUs you add; profile before porting.
+- The **serial fraction dominates** (Amdahl's Law) — a pipeline that is 20% inherently
+  sequential caps out at `1 / 0.2` = 5x no matter how many GPUs you add, and one that is 80%
+  sequential caps out at `1 / 0.8` = 1.25x; profile the serial fraction before porting.
 - The workload is **small enough that PCIe transfer time exceeds compute time** — a few
   thousand elements processed once is nearly always faster kept on the CPU.
 - The task has **heavy branching that differs per element** — divergent per-thread control
@@ -777,8 +797,8 @@ speed. Batch the work into fewer, larger launches, or use CUDA graphs (see
 **Q: What is arithmetic intensity, and why does it decide whether a kernel is worth offloading?**
 Arithmetic intensity is FLOPs performed per byte moved from memory, and it decides whether a
 kernel is compute-bound or memory/transfer-bound. Dense matrix multiply reaches hundreds of
-FLOPs/byte and is a textbook GPU win; a single elementwise vector add sits around 0.125
-FLOPs/byte and is dominated by transfer cost instead.
+FLOPs/byte and is a textbook GPU win; a single elementwise vector add sits around 0.083
+FLOPs/byte (1 FLOP per 12 bytes moved) and is dominated by transfer cost instead.
 
 **Q: What is the difference between throughput and latency, and which does a GPU optimize for?**
 Latency is the time to finish one unit of work; throughput is total units of work finished per
@@ -808,15 +828,15 @@ results back, and frees device memory — five steps CUDA C++ exposes directly v
 array construction and `.get()`.
 
 **Q: How much faster is on-device HBM than the PCIe link to the host, and why does that matter?**
-On-device HBM3 delivers roughly 3 TB/s on an H100, versus roughly 32-64 GB/s per direction over
-PCIe Gen4/5 — a 50-100x gap. This gap is why the general strategy for any multi-kernel pipeline
+On-device HBM3 delivers 3.35 TB/s on an H100 SXM5, versus roughly 32-64 GB/s per direction over
+PCIe Gen4/5 — a 52-105x gap. This gap is why the general strategy for any multi-kernel pipeline
 is to move data to the device once and keep it resident across as many kernel launches as
 possible.
 
 **Q: When would NVLink matter instead of PCIe, and how much faster is it?**
 NVLink matters
 specifically for GPU-to-GPU communication within a multi-GPU server, such as all-reduce during
-distributed training. It delivers roughly 900 GB/s aggregate bandwidth on Hopper versus PCIe's
+distributed training. It delivers 900 GB/s aggregate bandwidth on Hopper and 1,800 GB/s on Blackwell, versus PCIe's
 32-64 GB/s for host-to-device transfer — over an order of magnitude more bandwidth, but only
 for the GPU-to-GPU case.
 
@@ -872,7 +892,7 @@ explored fully in
    [memory_management_and_data_transfer](../memory_management_and_data_transfer/).
 7. **Prefer NVLink-connected multi-GPU topologies over PCIe-only ones** for workloads that
    require frequent GPU-to-GPU communication (distributed training all-reduce), since the
-   bandwidth difference (~900 GB/s vs ~32-64 GB/s) directly bounds collective-communication time.
+   bandwidth difference (900-1,800 GB/s vs 32-64 GB/s) directly bounds collective-communication time.
 
 ---
 
@@ -911,8 +931,8 @@ flowchart LR
 ```
 
 **Arithmetic intensity check**: 4,000 FLOPs / 16,384 bytes moved (8 KB in + 8 KB out) = 0.24
-FLOPs/byte — deep in memory/transfer-bound territory, essentially identical to the vector-add
-case in §6.
+FLOPs/byte — deep in memory/transfer-bound territory, the same order of magnitude as the
+vector-add case in §6 (0.083).
 
 **BROKEN -> FIX, with measured numbers:**
 

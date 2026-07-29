@@ -24,7 +24,7 @@ This module builds the mental map: what each space is for, who can see it (threa
 
 - **Scope, lifetime, and physical location are three separate axes.** A variable's scope (thread/block/device) tells you *who can see it*; its lifetime tells you *how long it exists*; its physical placement (register file / on-chip SRAM / off-chip DRAM) tells you *how fast it is*. Global and local memory share the same physical DRAM but have opposite scope — this is the trap the module keeps returning to.
 - **Latency grows by roughly an order of magnitude at each level.** Register (~1 cycle) -> shared/L1 (~20-30 cycles) -> L2 (~200 cycles) -> global/HBM (~400-800 cycles). Each level down is roughly 10-20x slower than the level above it, which is why an algorithm's job is to push reuse as far up the hierarchy as possible.
-- **The register file and shared memory are finite, on-chip, and shared across all resident threads/blocks on an SM.** 64K 32-bit registers (256 KB) and up to 48-228 KB of configurable shared memory/L1 per SM (generation-dependent) must be divided among every thread and block scheduled on that SM simultaneously — over-using either caps occupancy (see `../occupancy_and_launch_configuration/`).
+- **The register file and shared memory are finite, on-chip, and shared across all resident threads/blocks on an SM.** 64K 32-bit registers (256 KB) and a configurable shared-memory carveout that tops out at 64 KB (compute capability 7.5), 100 KB (8.6/8.9/12.x), 164 KB (A100, 8.0) or 228 KB (H100 and B200, 9.0/10.0) must be divided among every thread and block scheduled on that SM simultaneously — over-using either caps occupancy (see `../occupancy_and_launch_configuration/`).
 - **Global memory is the only space with real capacity (GBs) but the worst latency.** It backs the vast majority of an application's data and is only fast in aggregate when accessed in a *coalesced* pattern (`../memory_coalescing_and_access_patterns/`) — 32 threads touching one contiguous 128-byte-aligned region service in a single transaction; scattered access issues many.
 - **Constant and texture memory trade generality for a specialized fast path.** Both are read-only from the kernel's perspective, both are backed by dedicated on-chip caches (64 KB working set for constant), and both are only fast when their specific access pattern is honored — uniform broadcast for constant, 2D spatial locality for texture.
 - **Unified Virtual Addressing (UVA) gives every space a single address space, not a single speed.** Since CUDA 4.0, host and device pointers (and, within the device, global/shared/local) live in one virtual address range, so a generic pointer can be dereferenced correctly regardless of which space it targets — the driver resolves it at the ISA level. UVA is a *programming convenience* (you can pass one pointer type everywhere, `cudaMemcpyDefault` infers direction); it does **not** unify latency or bandwidth, and it must not be confused with Unified *Memory* (`cudaMallocManaged`), which is a separate migrating-page abstraction covered in `../memory_management_and_data_transfer/`.
@@ -123,7 +123,7 @@ and degrades toward global-memory latency.
 
 ### 4.6 Texture Memory
 
-Accessed via texture objects/references, a read-only cache path tuned for 2D/3D spatial locality (image/stencil workloads) with built-in hardware interpolation, address-clamping, and normalized coordinates. Its cache is optimized for accesses that are near each other in 2D space rather than linear address order — a transposed or diagonal-scan access pattern that would thrash the L1/L2 cache for a plain global read can still hit well in texture cache.
+Accessed via a `cudaTextureObject_t` (the legacy texture-*reference* API was deprecated and its headers removed in CUDA 13.0), a read-only cache path tuned for 2D/3D spatial locality (image/stencil workloads) with built-in hardware interpolation, address-clamping, and normalized coordinates. Its cache is optimized for accesses that are near each other in 2D space rather than linear address order — a transposed or diagonal-scan access pattern that would thrash the L1/L2 cache for a plain global read can still hit well in texture cache.
 
 ### 4.7 The Read-Only Data Cache Path (`__restrict__` + `const`)
 
@@ -184,7 +184,7 @@ local for what's left unqualified).
                                 +-----------------------+
                               +---------------------------+
                               | SHARED MEMORY / L1 CACHE  |  ~20-30 cycles
-                              | 48-228 KB/SM (config,     |  scope: block
+                              | 64-228 KB/SM by gen,      |  scope: block
                               | split w/ L1), on-chip SRAM|  lifetime: block (dies at retire)
                               +---------------------------+
                             +-------------------------------+
@@ -212,8 +212,8 @@ local for what's left unqualified).
    Bandwidth widens going down the ladder even as per-access latency grows: registers
    deliver the highest *aggregate* bandwidth per SM (every ALU reads its own operand
    every cycle), shared memory sustains ~19 TB/s device-wide (32 banks/SM in parallel), L2
-   sustains multi-TB/s device-wide, and HBM3 delivers ~3 TB/s (H100) -- enormous in
-   absolute terms, but that ~3 TB/s is divided across every SM issuing requests at once.
+   sustains multi-TB/s device-wide, and HBM3 delivers 3.35 TB/s (H100 SXM5) -- enormous
+   in absolute terms, but that figure is split across every SM issuing requests at once.
 ```
 
 The pyramid captures the rule that drives every optimization in Phase 3: an access one level up is roughly 10-20x cheaper than the level below it, so the entire performance-engineering discipline is "promote reused data as far up this ladder as the algorithm allows, and make every trip down the ladder as wide (coalesced) as possible."
@@ -237,7 +237,7 @@ independently.
 | `128 B/cycle` | One SM's peak shared-memory rate, `32 banks x 4 bytes`, when there are no conflicts |
 | SM clock | ~1.41 GHz on an A100 — the cycles-per-second that turns bytes/cycle into bytes/second |
 | `108` | SMs on an A100; the multiplier that makes the aggregate figure large |
-| `~3 TB/s` | HBM3 peak on an H100 — one shared pool, divided across every SM issuing at once |
+| `3.35 TB/s` | HBM3 peak on an H100 SXM5 — one shared pool, divided across every SM issuing at once |
 
 **Walk one example.** Build the ~19 TB/s shared-memory figure from the bank structure up,
 on an A100:
@@ -282,8 +282,8 @@ reused data even one level up the ladder is almost always worth the engineering 
 | Local | (spilled by compiler; runtime-indexed arrays) | Thread | Thread (kernel invocation) | Yes — via L1/L2 like global | Overflow from registers; large per-thread arrays; struct spills |
 | Shared | `__shared__` | Block | Block (kernel invocation) | On-chip SRAM itself (no further cache) | Tiling, inter-thread communication within a block, reduction scratch |
 | Global | (plain pointer, `cudaMalloc`) | Device (+ host) | Application (until `cudaFree`) | Yes — L1 + L2 | Primary input/output arrays, the bulk of a kernel's data |
-| Constant | `__constant__` | Device (read-only in kernel) | Application (until reset) | Yes — dedicated 64 KB constant cache | Kernel-wide parameters, filter coefficients, lookup tables read by every thread identically |
-| Texture | Texture object/reference | Device (read-only in kernel) | Application (bound to underlying allocation) | Yes — dedicated 2D-locality texture cache | Image processing, stencils, interpolation, spatially-local read patterns |
+| Constant | `__constant__` | Device (read-only in kernel) | Application (until reset) | Yes — dedicated constant cache; the 64 KB is the address-space limit, not the cache size | Kernel-wide parameters, filter coefficients, lookup tables read by every thread identically |
+| Texture | `cudaTextureObject_t` | Device (read-only in kernel) | Application (bound to underlying allocation) | Yes — dedicated 2D-locality texture cache | Image processing, stencils, interpolation, spatially-local read patterns |
 
 ### Scope Nesting (thread -> block -> device)
 
@@ -528,10 +528,12 @@ tiled_sum((a.size // 256,), (256,), (a, c, a.size))
 
 ### 6.4 Volatile, Cache-Line Granularity, and the L1/L2 Path
 
-Global-memory transactions move in fixed-size chunks, not individual bytes: an L1 cache
-line is 128 bytes and an L2 sector is 32 bytes, which is exactly why a coalesced warp
-access (32 threads x 4 bytes = 128 bytes) maps perfectly onto one L1 line — the full
-mechanics of exploiting this are in `../memory_coalescing_and_access_patterns/`.
+Global-memory transactions move in fixed-size chunks, not individual bytes. A warp's
+request is coalesced into as many **32-byte transactions** as are needed to cover the
+addresses it touched; four such sectors make up one 128-byte L1 cache line, which is
+exactly why a coalesced warp access (32 threads x 4 bytes = 128 bytes) maps perfectly onto
+one line and costs four sectors — the full mechanics of exploiting this are in
+`../memory_coalescing_and_access_patterns/`.
 
 **Put simply.** "The hardware never fetches less than a cache line, so the only question a
 memory access really asks is: of the bytes I am forced to drag across the bus, how many
@@ -540,10 +542,10 @@ did I actually want?" Efficiency here is a ratio of useful bytes to fetched byte
 
 | Symbol | What it is |
 |--------|------------|
-| `128 bytes` | L1 cache-line size — the minimum unit that crosses into L1, always |
-| `32 bytes` | L2 sector size — the minimum unit L2 fetches from HBM; four sectors fill one line |
-| `32 threads x 4 bytes` | One warp reading consecutive `float`s = exactly 128 bytes |
-| Transaction | One line-sized trip; the thing you are counting when you count memory cost |
+| `128 bytes` | L1 cache-line size — four 32-byte sectors, filled independently |
+| `32 bytes` | Sector size, and the ACTUAL transaction granularity — the unit you count |
+| `32 threads x 4 bytes` | One warp reading consecutive `float`s = exactly 128 bytes = 4 sectors |
+| Transaction | One 32-byte trip; the thing you are counting when you count memory cost |
 | Efficiency | Bytes the kernel used, divided by bytes the hardware actually moved |
 
 **Walk one example.** One warp, one `float` per thread, two access patterns:
@@ -551,22 +553,24 @@ did I actually want?" Efficiency here is a ratio of useful bytes to fetched byte
 ```
   COALESCED    a[threadIdx.x]        -- 32 consecutive floats
     bytes wanted   = 32 threads x 4 bytes    =   128 bytes
-    lines touched  = 128 / 128               =     1 transaction
-    bytes moved    =                             128 bytes
+    sectors touched= 128 / 32                =     4 sectors (one 128 B line)
+    bytes moved    = 4 sectors x 32 bytes    =   128 bytes
     efficiency     = 128 / 128               =   100%
 
   STRIDED      a[threadIdx.x * 32]   -- every 32nd float, 128 bytes apart
     bytes wanted   = 32 threads x 4 bytes    =   128 bytes
-    lines touched  = 32 (each lane lands on a different 128-byte line)
-    bytes moved    = 32 lines x 128 bytes    = 4,096 bytes
-    efficiency     = 128 / 4,096             =  3.1%
+    sectors touched= 32 (each lane lands in a different 32-byte sector)
+    bytes moved    = 32 sectors x 32 bytes   = 1,024 bytes
+    efficiency     = 128 / 1,024             =  12.5%
 ```
 
 Both patterns read the same 128 useful bytes and both look like one line of C++, but the
-strided one drags 4,096 bytes across the bus and throws 97% of them away — a 32x bandwidth
-penalty for an index expression. This is also why the L2 sector is worth knowing
-separately: a warp touching only 32 of a line's 128 bytes still costs one full L2 sector
-per touched region, so partial-line access degrades in 32-byte steps rather than smoothly.
+strided one drags 1,024 bytes across the bus and throws 87.5% of them away — an 8x
+bandwidth penalty for an index expression. Count in **32-byte sectors, not 128-byte
+lines**: the hardware coalesces a warp's request into as many 32-byte transactions as are
+needed to cover the addresses it touched, and 32 lanes scattered across 32 sectors is the
+documented worst case. Assuming 128-byte granularity would predict a 32x penalty here,
+four times worse than what actually happens.
 
 ```mermaid
 flowchart LR
@@ -687,10 +691,10 @@ Since CUDA 4.0 (all GPUs used in this section support it), host memory and every
 |-------|---------|---------------------------|------------|----------|-----------|
 | Register | ~1 cycle | 64K x 32-bit (256 KB) shared across resident threads | R/W | Hot scalars, loop-carried accumulators | Anything runtime-indexed or too large — silently spills |
 | Local | ~400-800 cycles (global latency) | Bounded only by global memory capacity | R/W | Unavoidable per-thread overflow | Anything you *thought* was fast because it's "local" |
-| Shared | ~20-30 cycles | Up to 48-228 KB (config, split with L1; generation-dependent) | R/W | Block-wide reuse, tiling, reductions | Data needed across blocks; oversized use caps occupancy |
+| Shared | ~20-30 cycles | 64 KB (7.5) / 100 KB (8.6, 8.9, 12.x) / 164 KB (A100) / 228 KB (H100, B200) per SM, carved out of the unified L1/shared SRAM | R/W | Block-wide reuse, tiling, reductions | Data needed across blocks; oversized use caps occupancy |
 | Global | ~400-800 cycles (L1/L2 can shave this on reuse) | GBs (device DRAM) | R/W | Bulk application data | Repeated re-reads without caching/tiling |
 | Constant | ~1-30 cycles on broadcast hit, else serializes | 64 KB working set | Read-only in kernel | Uniform parameters read identically by every thread | Data that varies per-thread (divergent reads serialize) |
-| Texture | Cache-hit latency near shared/L1 for spatially local reads | Backed by device memory, cache is a few KB-MB | Read-only in kernel (classic API) | 2D/3D spatially local reads, interpolation | Linear/sequential access with no spatial locality (no benefit over a coalesced global read) |
+| Texture | Cache-hit latency near shared/L1 for spatially local reads | Backed by device memory, cache is a few KB-MB | Read-only in kernel | 2D/3D spatially local reads, interpolation | Linear/sequential access with no spatial locality (no benefit over a coalesced global read) |
 
 ```mermaid
 quadrantChart
@@ -837,7 +841,7 @@ atomics is what keeps it from being the full product.
 
 - **Assuming `__constant__` is a general-purpose fast read cache.** It is only fast on a uniform broadcast; per-thread-varying constant reads serialize and can be *slower* than a plain coalesced global read plus L1/L2 caching.
 - **Forgetting `__syncthreads()` after staging into shared memory.** Without it, a fast thread can read a shared-memory slot before a slower thread in the same block has written it — a data race that is *not* caught by default builds; use `compute-sanitizer racecheck` (`../debugging_correctness_and_numerics/`).
-- **Over-sizing a shared-memory tile "to be safe."** A tile that consumes most of the 48-228 KB/SM budget leaves room for only one resident block, killing the extra-block-level latency hiding that occupancy depends on.
+- **Over-sizing a shared-memory tile "to be safe."** A tile that consumes most of the SM's shared-memory carveout (100 KB on an L40S, 164 KB on an A100, 228 KB on an H100) leaves room for only one resident block, killing the extra-block-level latency hiding that occupancy depends on.
 - **Treating Unified Memory (`cudaMallocManaged`) as equivalent to Unified Virtual Addressing.** UVA is a static addressing scheme available on every allocation; Unified Memory is a page-migrating abstraction with real first-touch and page-fault costs — conflating them leads to surprising latency on first access. Full treatment in `../memory_management_and_data_transfer/`.
 - **Passing overlapping pointers marked `__restrict__`.** This is undefined behavior, not a compile error — a silent correctness bug that only appears as wrong numerical output, not a crash.
 
@@ -887,7 +891,7 @@ No — UVA is a static addressing scheme (since CUDA 4.0) that puts host and dev
 64K 32-bit registers per SM (256 KB) is the number, and it matters because that budget is divided across every thread resident on the SM at once. A kernel using more registers per thread reduces how many threads (and warps) can be resident simultaneously, directly capping occupancy — the register side of the occupancy tradeoff covered fully in `../occupancy_and_launch_configuration/`.
 
 **Q: How much shared memory is available per SM, and is it a fixed, separate pool from L1?**
-Up to 48-228 KB per SM depending on generation, and on most architectures it is not a separate pool from L1 but a configurable split of the same on-chip SRAM. `cudaFuncAttributePreferredSharedMemoryCarveout` lets a kernel request more of one or the other, but a large shared-memory carveout for one kernel reduces the L1 available to it and to co-resident kernels.
+It ranges from 64 KB per SM on compute capability 7.5 to 228 KB on H100 (9.0) and B200 (10.0), with A100 (8.0) at 164 KB and the consumer/inference parts (8.6, 8.9, 12.x) at 100-128 KB. It is not a separate pool from L1 but a configurable split of the same on-chip SRAM. `cudaFuncAttributePreferredSharedMemoryCarveout` lets a kernel request more of one or the other, but a large shared-memory carveout for one kernel reduces the L1 available to it and to co-resident kernels.
 
 **Q: Why is a constant-memory read only fast when every thread in the warp reads the same address?**
 The constant cache's hardware fast path is a single broadcast fetch that serves all 32 warp lanes in one cycle-equivalent access, but only when every lane requests the same address. If lanes diverge to different addresses, the accesses serialize one at a time, degrading toward the latency of an uncached global read — which is why constant memory fits kernel-wide parameters, not per-thread-varying data.
@@ -896,7 +900,7 @@ The constant cache's hardware fast path is a single broadcast fetch that serves 
 Texture memory's cache is tuned for 2D/3D spatial locality with hardware interpolation and boundary handling, which benefits image/stencil lookups that a linear scan cannot capture. `const __restrict__` gives the same general read-only caching benefit for ordinary linear access patterns without the API overhead of a texture object — reserve texture objects for when spatial-locality or interpolation features are actually needed.
 
 **Q: Why does over-sized shared-memory usage hurt performance even though shared memory itself is fast?**
-Shared memory is a fixed per-SM budget (up to 48-228 KB) shared across every block resident on that SM at once. A kernel requesting a large tile per block can leave room for only one resident block, collapsing the extra-block-level parallelism the scheduler needs to hide remaining memory latency — fast-per-access does not mean free-in-aggregate.
+Shared memory is a fixed per-SM budget (164 KB on an A100, 228 KB on an H100) shared across every block resident on that SM at once. A kernel requesting a large tile per block can leave room for only one resident block, collapsing the extra-block-level parallelism the scheduler needs to hide remaining memory latency — fast-per-access does not mean free-in-aggregate.
 
 **Q: How does a global-memory pointer differ physically from a local-memory pointer, given both hit the same DRAM?**
 They don't differ physically — both route through the same off-chip HBM and the same L1/L2 caching path. The difference is purely in scope: a global pointer's address range is visible to every thread across every block, while a local-memory range is private per thread — precisely why "local" is a scope word, not a speed word.
@@ -905,7 +909,7 @@ They don't differ physically — both route through the same off-chip HBM and th
 In a tiled matrix multiply, the initial load of an operand tile must come from global memory because that is where the full matrices live. Once the tile is staged into `__shared__` memory, every subsequent reuse by other threads in the block reads shared memory instead, turning N global reads per element into one global read shared across the whole tile.
 
 **Q: What is the cached-vs-uncached distinction between the six memory spaces?**
-Registers are the fastest tier and are not "cached" in the traditional sense — they are the storage itself. Shared memory is on-chip SRAM with no further cache beneath it, global and local memory are backed by the L1/L2 hardware caches, constant memory has its own dedicated 64 KB cache, and texture memory has its own cache tuned for spatial locality — knowing which cache backs a space explains why Nsight Compute hit-rate metrics differ per space.
+Registers are the fastest tier and are not "cached" in the traditional sense — they are the storage itself. Shared memory is on-chip SRAM with no further cache beneath it, global and local memory are backed by the L1/L2 hardware caches, constant memory has its own dedicated constant cache backing a 64 KB address space, and texture memory has its own cache tuned for spatial locality — knowing which cache backs a space explains why Nsight Compute hit-rate metrics differ per space.
 
 **Q: Why might `nvcc --ptxas-options=-v` be the first tool to reach for when a kernel is unexpectedly slow?**
 It prints the exact register count and any spilled local-memory bytes per thread at compile time — the cheapest way to catch a register spill before a full profiling session. A nonzero "spill stores/loads" count in that output is a direct signal that a variable meant for registers is paying global-memory latency instead.
@@ -913,8 +917,11 @@ It prints the exact register count and any spilled local-memory bytes per thread
 **Q: What does the `volatile` qualifier do to a device pointer, and when would you actually need it?**
 It forces every read and write to go to memory rather than letting the compiler reuse a previously loaded register value. This matters when another thread or the host may change the value between your reads, such as a spin-wait flag another block sets — most kernels never need it because CUDA's default single-thread caching assumptions already hold for data no other thread concurrently modifies.
 
-**Q: How does global-memory transaction granularity (the 128-byte L1 line / 32-byte L2 sector) connect to why coalescing matters?**
-A warp's 32 threads each requesting 4 contiguous bytes sums to exactly 128 bytes, matching one L1 cache line, so a fully coalesced access is serviced in a single transaction. A strided or scattered pattern spans multiple lines per warp, issuing several partial transactions that waste the excess bytes each one fetches — the full coalescing optimization discipline is in `../memory_coalescing_and_access_patterns/`.
+**Q: How does global-memory transaction granularity connect to why coalescing matters?**
+The hardware coalesces a warp's request into as many 32-byte transactions as are needed to cover the addresses it touched, so the unit to count is the 32-byte sector, not the 128-byte L1 line. A warp reading 32 consecutive `float`s wants 128 bytes and pays 4 sectors — 100% efficiency. At the documented worst case, 32 lanes land in 32 different sectors, moving 1,024 bytes to deliver 128 useful ones: 12.5% efficiency, an 8x penalty. Counting in 128-byte lines instead would wrongly predict 32x; the full coalescing discipline is in `../memory_coalescing_and_access_patterns/`.
+
+**Q: If a fix removes 8 out of 9 global loads, why might the kernel not get 9x faster?**
+Because a load-count reduction is an upper bound on the speedup, not a prediction of it. Only the loads that were actually missing in cache cost real time; redundant neighbour reads in a stencil or a small working set are usually L1 hits, so eliminating them buys back LSU issue slots and L1 bandwidth rather than HBM bandwidth. When measured speedup lands far below the traffic ratio, the kernel was never HBM-bound — and when it lands close to it, the redundant loads really were reaching DRAM. Comparing the two numbers is how you confirm the diagnosis instead of assuming it.
 
 **Q: Why can shared memory still be slow even though its raw latency (~20-30 cycles) is an order of magnitude better than global memory?**
 Because shared memory is organized into 32 banks, and when multiple threads in a warp hit different addresses in the *same* bank, those accesses serialize instead of completing in parallel. A bank conflict can erase most of the latency advantage shared memory otherwise provides — the full bank layout, conflict patterns, and padding fix are covered in `../shared_memory_and_bank_conflicts/`.
@@ -935,115 +942,139 @@ Because shared memory is organized into 32 banks, and when multiple threads in a
 
 ## 14. Case Study
 
-**Scenario**: A team ships a 1D stencil kernel (`out[i] = a[i-1] + a[i] + a[i+1]`) that profiles at 620 GB/s effective bandwidth on an A100 (HBM peak ~2 TB/s) — badly underperforming despite a memory-bound access pattern that is already fully coalesced. Nsight Compute's Source Counters view shows zero spill traffic, ruling out register pressure, but the L1/TEX hit rate is unexpectedly high for a supposedly streaming kernel, and the achieved warp instruction throughput is far below the memory-bound roofline ceiling for this arithmetic intensity (full roofline method: `../case_studies/cross_cutting/roofline_and_arithmetic_intensity.md` — not yet built; interim reference `../memory_coalescing_and_access_patterns/`).
+**Scenario**: A team ships a 9-point 1D finite-difference stencil
+(`out[i] = sum of a[i-4 .. i+4]`, an 8th-order derivative kernel) that profiles at
+620 GB/s effective bandwidth on an A100 80 GB (HBM2e peak 2.04 TB/s) — badly
+underperforming despite an access pattern that is already fully coalesced. Nsight
+Compute's Source Counters view shows zero spill traffic, ruling out register pressure, but
+the L1/TEX hit rate is very high for a supposedly streaming kernel and the LSU (load/store
+unit) pipe is close to saturated — the classic signature of a kernel limited by the sheer
+number of load *instructions* it issues rather than by HBM bandwidth (full roofline method:
+`../case_studies/cross_cutting/roofline_and_arithmetic_intensity.md`).
 
-**Diagram — per-thread redundant global traffic before the fix:**
+**Diagram — per-thread redundant loads before the fix:**
 
 ```
-   Thread i reads a[i-1], a[i], a[i+1] directly from GLOBAL MEMORY (~400-800 cyc each)
-   Thread i+1 reads a[i], a[i+1], a[i+2]  -- a[i] and a[i+1] are re-fetched from GLOBAL
-   Thread i+2 reads a[i+1], a[i+2], a[i+3] -- a[i+1], a[i+2] re-fetched again
+   Thread i   issues 9 global loads: a[i-4] .. a[i+4]      (~400-800 cyc on a miss)
+   Thread i+1 issues 9 global loads: a[i-3] .. a[i+5]      -- 8 of them overlap thread i
+   Thread i+2 issues 9 global loads: a[i-2] .. a[i+6]      -- 8 overlap thread i+1
 
-   Element a[i+1] is independently re-read from GLOBAL MEMORY by THREE different
-   threads (i, i+1, i+2) instead of being loaded once and reused -- every element in
-   the interior of the array is read 3x from the ~400-800 cycle tier.
+   Element a[i] is named by NINE different threads (i-4 .. i+4). Those nine loads
+   mostly HIT in L1, so HBM traffic is not 9x -- but nine load INSTRUCTIONS are
+   still issued, nine times the LSU pipe pressure of loading it once.
 ```
 
 **BROKEN kernel — no aliasing hint, no reuse across threads:**
 
 ```cpp
+#define RADIUS 4
 __global__ void stencil1d_broken(const float* a, float* out, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i > 0 && i < n - 1) {
-        out[i] = a[i - 1] + a[i] + a[i + 1];   // three independent global reads;
-                                                 // no __restrict__, no shared-memory reuse
-    }
+    if (i >= RADIUS && i < n - RADIUS) {
+        float acc = 0.0f;
+#pragma unroll
+        for (int k = -RADIUS; k <= RADIUS; ++k) acc += a[i + k];   // 9 global loads,
+        out[i] = acc;                                              // no __restrict__,
+    }                                                              // no shared reuse
 }
 ```
 
-Without `__restrict__`, the compiler cannot prove `a` and `out` don't alias, so it re-derives each of the three loads conservatively; without shared memory, every thread independently re-fetches neighbor elements that adjacent threads already fetched, tripling effective global-memory traffic for the interior of the array.
+Without `__restrict__` the compiler cannot prove `a` and `out` do not alias, so it may not
+hoist or merge the nine loads; and without shared memory every thread independently issues
+loads for neighbours the adjacent threads have already fetched.
 
 **FIX — `const __restrict__` plus a shared-memory halo tile:**
 
 ```cpp
 #define TILE 256
+#define RADIUS 4
 __global__ void stencil1d_fixed(const float* __restrict__ a,
                                  float* __restrict__ out, int n) {
-    __shared__ float s_a[TILE + 2];   // +2 for a one-element halo on each side
+    __shared__ float s_a[TILE + 2 * RADIUS];   // halo of RADIUS on each side
 
     int gi = blockIdx.x * TILE + threadIdx.x;
-    int li = threadIdx.x + 1;          // shift by 1 to leave room for the left halo
+    int li = threadIdx.x + RADIUS;             // shift to leave room for the left halo
 
-    if (gi < n) s_a[li] = a[gi];                       // main body: one global read/thread
-    if (threadIdx.x == 0 && gi > 0)      s_a[0]        = a[gi - 1];   // left halo
-    if (threadIdx.x == TILE - 1 && gi < n - 1) s_a[TILE + 1] = a[gi + 1]; // right halo
+    if (gi < n) s_a[li] = a[gi];                                   // body: 1 load/thread
+    if (threadIdx.x < RADIUS) {                                    // first RADIUS threads
+        if (gi >= RADIUS)      s_a[li - RADIUS]  = a[gi - RADIUS]; // load both halos
+        if (gi + TILE < n)     s_a[li + TILE]    = a[gi + TILE];
+    }
     __syncthreads();
 
-    if (gi > 0 && gi < n - 1)
-        out[gi] = s_a[li - 1] + s_a[li] + s_a[li + 1];  // all three reads now hit
-                                                          // SHARED memory (~20-30 cyc)
+    if (gi >= RADIUS && gi < n - RADIUS) {
+        float acc = 0.0f;
+#pragma unroll
+        for (int k = -RADIUS; k <= RADIUS; ++k) acc += s_a[li + k];  // all 9 reads now
+        out[gi] = acc;                                              // hit SHARED memory
+    }
 }
 ```
 
-Each element is now read from global memory exactly once per tile (plus two halo reads at tile boundaries), and the three-term sum reads shared memory instead of re-issuing global loads — the fix converts a load pattern paying ~400-800 cycles three times per interior element into one global load plus three ~20-30 cycle shared-memory reads.
+Each element is now loaded from global memory once per tile plus `2 * RADIUS` halo loads,
+and the nine-term sum reads on-chip shared memory instead of re-issuing global loads.
 
-**Metrics (A100, representative)**:
+**Metrics (A100 80 GB, illustrative figures for this scenario — not a published
+benchmark)**:
 
 | Metric | Broken | Fixed |
 |--------|--------|-------|
-| Effective bandwidth | ~620 GB/s | ~1,850 GB/s |
-| Global-memory transactions/element (interior) | ~3x | ~1x (+ halo overhead) |
+| Global load instructions/element (interior) | 9 | ~1.03 (1 + halo amortized) |
+| Effective bandwidth | ~620 GB/s | ~1,480 GB/s |
 | L1/TEX hit rate | Misleadingly elevated (redundant re-fetches hitting cache) | Low (traffic already minimized before reaching cache) |
-| % of HBM peak (~2 TB/s) | ~31% | ~92% |
+| % of HBM peak (2.04 TB/s) | ~30% | ~73% |
 
-**In plain terms.** "Three global reads per output element became one, and the measured
-bandwidth went up by almost exactly three — the profiler is confirming the arithmetic, not
-revealing something new." When a memory-bound kernel's speedup matches its traffic
-reduction to within a few percent, you have proven the diagnosis was correct.
+**In plain terms.** "The load count fell by 8.7x and the kernel got 2.4x faster — the gap
+between those two numbers is the part L1 was already handling for free." A traffic count is
+an upper bound on the win, never a prediction of it.
 
 | Symbol | What it is |
 |--------|------------|
+| `RADIUS` | 4 — how far the stencil reaches on each side; the kernel reads `2*RADIUS + 1` = 9 points |
 | `TILE` | 256 — elements one block stages into shared memory before computing |
-| `TILE + 2` | 258 — the tile plus a one-element halo on each side, so edge threads find neighbors |
-| Halo | The 2 extra elements a tile must read because the stencil reaches outside its own range |
+| `TILE + 2*RADIUS` | 264 — the tile plus a 4-element halo on each side, so edge threads find neighbours |
+| Halo | The `2*RADIUS` = 8 extra elements a tile must read because the stencil reaches outside its own range |
 | Effective bandwidth | Useful bytes delivered per second, as measured by Nsight Compute |
-| `~2 TB/s` | A100 HBM peak — the ceiling the `% of peak` column is measured against |
+| `2.04 TB/s` | A100 80 GB HBM2e peak — the ceiling the `% of peak` column is measured against |
 
-**Walk one example.** Count global reads per tile, then check the count against the
-measured bandwidth:
+**Walk one example.** Count global loads per tile, then check the count against the
+measured speedup:
 
 ```
-  BROKEN   every thread reads its own 3 neighbors
-    global reads per tile   = 256 threads x 3 reads      = 768 reads
+  BROKEN   every thread issues its own 9 loads
+    global loads per tile   = 256 threads x 9 loads      = 2,304 loads
 
-  FIXED    one body read per thread, plus the halo
-    body reads              = 256 threads x 1 read       = 256 reads
-    halo reads              = 1 left + 1 right           =   2 reads
-    global reads per tile   = 256 + 2                    = 258 reads
+  FIXED    one body load per thread, plus the halo
+    body loads              = 256 threads x 1 load       =   256 loads
+    halo loads              = 4 left + 4 right           =     8 loads
+    global loads per tile   = 256 + 8                    =   264 loads
 
-  traffic reduction         = 768 / 258                  = 2.98x
-  shared-memory cost        = 258 floats x 4 bytes       = 1,032 bytes per block
+  load reduction            = 2,304 / 264                =  8.73x   <- UPPER BOUND
+  shared-memory cost        = 264 floats x 4 bytes       = 1,056 bytes per block
 
   CHECK against the profiler
-    measured speedup        = 1,850 GB/s / 620 GB/s      = 2.98x
-    predicted from traffic  =                              2.98x   <- they agree
-    % of HBM peak, broken   = 620 / 2,000                =   31%
-    % of HBM peak, fixed    = 1,850 / 2,000              =   92%
+    measured speedup        = 1,480 GB/s / 620 GB/s      =  2.39x
+    predicted from loads    =                               8.73x
+    -> measured is 27% of predicted; the rest was already free in L1
+    % of HBM peak, broken   = 620 / 2,040                =    30%
+    % of HBM peak, fixed    = 1,480 / 2,040              =    73%
 ```
 
-The agreement to two decimal places is the point. A memory-bound kernel's runtime is its
-byte count divided by achievable bandwidth, so removing 2/3 of the bytes must buy ~3x — if
-the profiler had reported 1.4x instead, the traffic model would be wrong and something else
-(occupancy, launch overhead, a serializing atomic) would be the real bottleneck. Note the
-halo is nearly free here: 2 extra reads on 256 is 0.8% overhead, which is why `TILE` wants
-to be large — but only until the 1,032-byte shared allocation starts capping resident
-blocks, which is exactly the tension discussion question 3 raises.
+The gap between 8.73x and 2.39x is the whole lesson, and it is the number most write-ups
+quietly omit. A load-count reduction only converts into a speedup for the loads that were
+actually *missing* in cache; the redundant neighbour reads here were mostly L1 hits, so
+eliminating them buys back LSU issue slots and L1 bandwidth, not HBM bandwidth. That also
+explains why this fix would be nearly worthless at `RADIUS = 1`: three overlapping unit-stride
+loads sit inside one or two cache lines, L1 serves them at near-shared-memory cost, and the
+`__syncthreads()` plus the extra shared-memory store the tiled version adds can cost more
+than the two loads it removes. Shared-memory tiling for stencils earns its place as the
+radius (or the dimensionality) grows, not automatically.
 
 **Discussion Questions**:
-1. Why did the L1/TEX hit rate look "healthy" in the broken version even though the kernel was inefficient? (Because the redundant re-reads of already-cached neighbor elements were hitting L1 — a high hit rate on wasted traffic still shows as a high hit rate; hit rate alone doesn't tell you whether the traffic was necessary.)
-2. What would change about the halo-loading logic if `TILE` were not a compile-time constant? (Halo indices would need runtime bounds checks instead of the `threadIdx.x == 0` / `threadIdx.x == TILE - 1` compile-time-foldable comparisons, and the shared-memory array would need dynamic allocation — see `extern __shared__` in `../shared_memory_and_bank_conflicts/`.)
-3. At what stencil radius would the halo overhead start to dominate the shared-memory savings, and how would you re-tune `TILE` in response? (As radius grows relative to `TILE`, the fixed halo cost amortizes over fewer interior elements per tile; widening `TILE` reduces halo overhead as a fraction of the tile but raises per-block shared-memory usage — re-check against the occupancy calculator in `../occupancy_and_launch_configuration/` before committing to a larger tile.)
-4. Would routing the read through `const __restrict__` alone (without the shared-memory tile) have captured most of the win here? (Partially — it would let the compiler keep each thread's own three loads in registers across the one expression, and route them through the read-only cache, but it does nothing to eliminate the cross-thread redundancy of neighboring threads re-fetching the same element; the shared-memory halo tile is what removes the 3x redundant traffic.)
+1. Why did the L1/TEX hit rate look "healthy" in the broken version even though the kernel was inefficient? (Because the redundant re-reads of already-cached neighbour elements were hitting L1 — a high hit rate on wasted traffic still shows as a high hit rate; hit rate alone doesn't tell you whether the traffic was necessary.)
+2. The load count predicted 8.73x and the kernel delivered 2.39x. What would it have meant if the kernel had delivered 8.5x instead — and what would it have meant if it delivered 1.05x? (8.5x would mean nearly every redundant load was missing all the way to HBM, i.e. the array was far too large for L1/L2 reuse across a tile. 1.05x would mean the kernel was never load-bound at all and the real bottleneck is elsewhere — occupancy, launch overhead, or the arithmetic itself.)
+3. At what stencil radius would the halo overhead start to dominate the shared-memory savings, and how would you re-tune `TILE` in response? (As `RADIUS` grows relative to `TILE`, the `2*RADIUS` halo cost amortizes over fewer interior elements; widening `TILE` reduces halo overhead as a fraction of the tile but raises the per-block shared-memory footprint — re-check against the occupancy calculator in `../occupancy_and_launch_configuration/` before committing to a larger tile.)
+4. Would routing the read through `const __restrict__` alone (without the shared-memory tile) have captured most of the win here? (Partially — it would let the compiler keep overlapping loads in registers within one thread's expression and route them through the read-only cache, but it does nothing about the cross-thread redundancy of neighbouring threads re-issuing loads for the same element; the shared-memory halo tile is what removes that.)
 
 ---
 

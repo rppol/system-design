@@ -105,13 +105,15 @@ capabilities a kernel author must know about:
 | Turing | T4, RTX 20xx | 7.5 | 2nd-gen Tensor Cores (INT8/INT4); improved unified memory |
 | Ampere | A100, RTX 30xx | 8.0 / 8.6 | 3rd-gen Tensor Cores + TF32 + BF16; async copy (`cp.async`) global→shared without a register round-trip; ~40 MB L2; MIG |
 | Ada Lovelace | L4, L40S, RTX 40xx | 8.9 | 4th-gen Tensor Cores + FP8; large L2 |
-| Hopper | H100, H200 | 9.0 | 4th-gen Tensor Cores + FP8; Tensor Memory Accelerator (TMA); thread-block clusters; distributed shared memory across a cluster; ~40 MB L2 |
-| Blackwell | B100/B200, GB200 | 10.0 | 5th-gen Tensor Cores + FP4/FP6; 2nd-gen Transformer Engine; larger NVLink domains |
+| Hopper | H100, H200 | 9.0 | 4th-gen Tensor Cores + FP8; Tensor Memory Accelerator (TMA); thread-block clusters; distributed shared memory across a cluster; 50 MB L2; 228 KB shared memory/SM |
+| Blackwell | B100/B200, GB200 | 10.0 (B300/GB300 = 10.3; RTX 50 = 12.0) | 5th-gen Tensor Cores + FP4/FP6 and dedicated Tensor Memory (`tcgen05`); 2nd-gen Transformer Engine; larger NVLink domains |
 
 Constants worth memorizing (used throughout this section): **warp = 32 threads**; the
-register file is **64K 32-bit registers per SM (256 KB)**; max **1024 threads/block**;
-max **2048 resident threads/SM**; **L2 ~40 MB on Ampere/Hopper**; **HBM3 ~3 TB/s**
-(H100); **H100 has 132 SMs**.
+register file is **64K 32-bit registers per SM (256 KB)** on every architecture from
+Volta onward, with a hard **255 registers/thread** ceiling; max **1024 threads/block**;
+max **2048 resident threads/SM on the data-center parts** (compute capability 8.0, 9.0,
+10.x) but only **1536** on the consumer/inference parts (8.6, 8.9, 12.x); **L2 40 MB on
+A100, 50 MB on H100**; **HBM3 ~3.35 TB/s** (H100 SXM5); **H100 SXM5 has 132 SMs**.
 
 The table above compresses seven years of hardware evolution; laid out as a timeline
 the cadence — and the fact that every generation is additive on top of the last — is
@@ -173,9 +175,9 @@ simultaneously — see the worked math in §6:
 
 | Resource | Hard limit (typical modern GPU) | What consumes it |
 |----------|----------------------------------|-------------------|
-| Register file | 65,536 32-bit registers/SM | Local variables, loop counters, unrolled code, intermediate values |
-| Shared memory | up to 228 KB configurable pool/SM (Ampere/Hopper) | `__shared__` arrays, tile buffers for GEMM/reduction |
-| Thread/block count | 2048 resident threads/SM, 1024 threads/block, ~32 resident blocks/SM | Grid/block launch configuration |
+| Register file | 65,536 32-bit registers/SM (all of which one block may claim; 255/thread max) | Local variables, loop counters, unrolled code, intermediate values |
+| Shared memory | configurable carveout of the unified L1/shared pool: 164 KB/SM on A100 (8.0), 228 KB/SM on H100 (9.0) and B200 (10.0) | `__shared__` arrays, tile buffers for GEMM/reduction |
+| Thread/block count | 2048 resident threads/SM and 32 resident blocks/SM on 8.0/9.0/10.0 (1536 threads and 16-24 blocks on 8.6/8.9/12.x), 1024 threads/block everywhere | Grid/block launch configuration |
 
 ---
 
@@ -201,22 +203,26 @@ Streaming Multiprocessor (SM) -- H100-class, 4 processing partitions
 +------------------------------------------------------------------+
 | Partition 3   (identical layout to Partition 0)                  |
 +------------------------------------------------------------------+
-| Shared Memory / L1 Data Cache -- up to 228 KB unified pool/SM,   |
-| split configurably (e.g. more shared mem, less L1, or vice versa)|
+| Unified L1 / Shared Memory -- 256 KB pool/SM, of which up to     |
+| 228 KB is carved out as shared memory, the rest served as L1     |
 +------------------------------------------------------------------+
                                |
                                v
-              L2 Cache (~40 MB, shared across all 132 SMs)
+              L2 Cache (50 MB, shared across all 132 SMs)
                                |
                                v
-                  HBM3 Global Memory (80 GB, ~3 TB/s)
+                HBM3 Global Memory (80 GB, ~3.35 TB/s)
 ```
 
 Each of the 4 partitions is a self-contained SIMT engine: its own warp scheduler picks
 one ready warp per cycle and dispatches one instruction to its 32 CUDA-core lanes. The
 register file is split evenly across partitions (16,384 registers each = 65,536/SM
-total), so a kernel's register usage is checked against the *per-partition* slice, not
-just the SM-wide total. Shared memory and L1 are the only resources pooled at the
+total), and a warp draws its registers from the slice of the partition it was assigned
+to — which is never the binding limit in practice, because the 255-register-per-thread
+ceiling caps one warp at 255 x 32 = 8,160 registers, half a slice. The SM-wide 64K
+figure is the number that matters: CUDA permits a *single* thread block to claim all
+65,536 registers, so the occupancy math in §6 is checked against the SM total, not
+against a 16,384 sub-budget. Shared memory and L1 are the only resources pooled at the
 full-SM level rather than per-partition.
 
 ### SM Dispatch Path — One Partition, One Cycle
@@ -263,7 +269,7 @@ flowchart TD
 
     REG["Registers\n~1 cycle, per-thread private\n65,536 x 32-bit / SM"]
     SH["Shared Memory / L1\n~20-30 cycles\nup to 228 KB / SM, 32 banks"]
-    L2C["L2 Cache\n~200 cycles\n~40 MB, shared by all SMs"]
+    L2C["L2 Cache\n~200 cycles\n50 MB on H100, shared by all SMs"]
     HBM["HBM3 Global Memory\n~400-800 cycles\n80 GB @ ~3 TB/s"]
 
     REG --> SH --> L2C --> HBM
@@ -306,8 +312,8 @@ tiling is profitable rather than a wash.
 |--------|------------|
 | Registers | ~1 cycle, 65,536 x 32-bit per SM = 256 KB, private to one thread |
 | Shared / L1 | ~20-30 cycles, up to 228 KB per SM, addressable by every thread in a block |
-| L2 | ~200 cycles, ~40 MB, shared by all 132 SMs — the last stop before leaving the die |
-| HBM3 | ~400-800 cycles, 80 GB at ~3 TB/s — off-chip, and the only tier that survives |
+| L2 | ~200 cycles, 50 MB on H100, shared by all 132 SMs — the last stop before leaving the die |
+| HBM3 | ~400-800 cycles, 80 GB at ~3.35 TB/s — off-chip, and the only tier that survives |
 | Latency ratio | How much slower the next tier is, per access |
 | Capacity ratio | How much more data the next tier holds |
 
@@ -317,8 +323,8 @@ tiling is profitable rather than a wash.
   step                 latency ratio              capacity ratio
   ----                 -------------              --------------
   reg   -> shared        30 /   1 =  30x          228 KB /  256 KB =  0.9x
-  shared -> L2          200 /  30 = 6.7x           40 MB /  228 KB =  180x
-  L2    -> HBM3         800 / 200 =   4x           80 GB /   40 MB = 2048x
+  shared -> L2          200 /  30 = 6.7x           50 MB /  228 KB =  225x
+  L2    -> HBM3         800 / 200 =   4x           80 GB /   50 MB = 1638x
 
   full drop reg -> HBM3  800 / 1  = 800x
 ```
@@ -328,7 +334,7 @@ at the shared-memory row — it costs 30x more than a register while holding sli
 data than the register file. Shared memory is not a capacity tier at all; it is a
 *sharing* tier, and its only justification is that a value one thread loads can be read by
 the other 1,023 threads in the block instead of each fetching it from HBM at 800 cycles.
-The 180x and 2048x capacity jumps further down are what force tiling to exist: the data
+The 225x and 1638x capacity jumps further down are what force tiling to exist: the data
 genuinely does not fit any higher, so the job is to make each byte that crosses the
 800-cycle boundary get reused as many times as possible before it is evicted.
 
@@ -382,7 +388,9 @@ print(f"{props.name}: {props.multi_processor_count} SMs, "
 
 ### The Occupancy Math — Three Independent Ceilings
 
-Occupancy is `resident_threads / max_threads_per_sm` (2048 on modern architectures).
+Occupancy is `resident_threads / max_threads_per_sm` (2048 on the data-center parts —
+compute capability 8.0, 9.0, 10.x — and 1536 on 8.6, 8.9 and 12.x, so query it rather
+than assuming it).
 Three resources independently cap `resident_threads`, and the *smallest* wins:
 
 ```
@@ -403,10 +411,10 @@ why tuning the resource that is *not* currently smallest changes nothing at all.
 |--------|------------|
 | `regs_per_sm` | Total 32-bit registers the SM physically owns — 65,536 on every modern NVIDIA GPU |
 | `regs_per_thread` | What `ptxas` decided this kernel needs per thread; read it off `nvcc --ptxas-options=-v` |
-| `smem_per_sm` | The SM's configurable shared-memory pool — up to 228 KB on Ampere/Hopper |
-| `smem_per_block` | Bytes of `__shared__` one block reserves; reserved for the block's whole lifetime |
-| `max_blocks_per_sm` | Hard hardware cap on resident blocks, ~32, independent of how small they are |
-| `max_threads_per_sm` | Hard hardware cap on resident threads, 2048 — the denominator of "occupancy" |
+| `smem_per_sm` | The SM's configurable shared-memory carveout — 164 KB on A100 (8.0), 228 KB on H100 (9.0) and B200 (10.0) |
+| `smem_per_block` | Bytes of shared memory one block reserves; reserved for the block's whole lifetime. Anything over 48 KB must be *dynamic* and opted into with `cudaFuncAttributeMaxDynamicSharedMemorySize` |
+| `max_blocks_per_sm` | Hard hardware cap on resident blocks — 32 on 8.0/9.0/10.0, 16-24 on 8.6/8.9/12.x — independent of how small they are |
+| `max_threads_per_sm` | Hard hardware cap on resident threads, 2048 on 8.0/9.0/10.x — the denominator of "occupancy" |
 | `//` | Integer division. It *floors*, and that flooring is where occupancy silently disappears |
 | `min(...)` | The binding constraint. Only the smallest of the four numbers ever matters |
 
@@ -474,12 +482,14 @@ the thread/block-count ceiling would have allowed the launch.
 |-------------------|--------------------------------------|-----------|
 | 32 | 65,536 / 32 = 2048 | 100% |
 | 64 | 65,536 / 64 = 1024 | 50% |
-| 96 | 65,536 / 96 = 682 → rounds down to 0 full blocks of 1024 | 0% (block cannot be scheduled at all) |
+| 96 | 65,536 / 96 = 682 → rounds down to 0 full blocks of 1024 | n/a — the launch is rejected with `cudaErrorLaunchOutOfResources` |
 
 The last row is the trap: at 96 registers/thread, one block of 1024 threads needs
 1024 × 96 = 98,304 registers — more than the entire 65,536-register SM budget — so the
 block cannot be made resident in that configuration at all, regardless of how many SMs
-the GPU has. See §10 for the broken-launch version of exactly this.
+the GPU has. The hardware does not degrade gracefully here: `cudaLaunchKernel` returns
+`cudaErrorLaunchOutOfResources` ("too many resources requested for launch") and the
+kernel never executes. See §10 for the broken-launch version of exactly this.
 
 The same math, reimplemented in Python so you can plug in a kernel's reported register
 usage (from `nvcc --ptxas-options=-v` or Nsight Compute) and sweep block sizes:
@@ -604,14 +614,13 @@ each warp is what turns candidates into covered cycles.
 
 ## 7. Real-World Examples
 
-- **NVIDIA H100 (Hopper, SXM5)**: 132 SMs, 80 GB HBM3 at ~3 TB/s, ~50 MB L2 (this
-  section rounds to the ~40 MB figure used as the cross-generation Ampere/Hopper
-  constant) — the default target for LLM training and inference fleets; see
+- **NVIDIA H100 (Hopper, SXM5)**: 132 SMs, 80 GB HBM3 at ~3.35 TB/s, 50 MB L2, 228 KB
+  shared memory per SM — the default target for LLM training and inference fleets; see
   [`../../ml/gpu_and_hardware_optimization/`](../../ml/gpu_and_hardware_optimization/)
   for training-time use of this hardware.
-- **NVIDIA A100 (Ampere, SXM4)**: 108 SMs, 40/80 GB HBM2e, ~40 MB L2, the generation
-  that introduced `cp.async` and MIG (Multi-Instance GPU) partitioning — still the most
-  widely deployed data-center GPU in cloud fleets as of 2026.
+- **NVIDIA A100 (Ampere, SXM4)**: 108 SMs, 40/80 GB HBM2e, 40 MB L2, 164 KB shared
+  memory per SM — the generation that introduced `cp.async` and MIG (Multi-Instance
+  GPU) partitioning, and still widely rented in cloud fleets alongside newer parts.
 - **NVIDIA V100 (Volta)**: 80 SMs, the generation that introduced independent thread
   scheduling and 1st-gen Tensor Cores — the architecture most CUDA occupancy folklore
   ("aim for 32 registers/thread") was originally tuned against.
@@ -676,10 +685,13 @@ each warp is what turns candidates into covered cycles.
    }
    heavy_kernel<<<grid, 1024>>>(out, in, n);
    // 1024 threads x 96 regs = 98,304 registers > 65,536 regs/SM
-   // -> the block cannot be made resident at all in this configuration; ptxas either
-   //    spills the excess to slow local memory (silently, no compile error) or the
-   //    launch achieves far below the intended occupancy. Nsight Compute shows
-   //    "0% achieved occupancy" or heavy "local memory spill" traffic, not a crash.
+   // -> Register counts are fixed at compile time, and with no __launch_bounds__ ptxas
+   //    had no block size to budget against, so it allocated 96. The launch is then
+   //    rejected outright: cudaLaunchKernel returns cudaErrorLaunchOutOfResources,
+   //    "too many resources requested for launch", and the kernel never runs. Because
+   //    launches are asynchronous, the error surfaces only at the next
+   //    cudaGetLastError()/cudaDeviceSynchronize() -- which is why it reads as a wrong
+   //    result rather than a launch failure when return codes go unchecked.
    ```
 
    ```cpp
@@ -688,12 +700,15 @@ each warp is what turns candidates into covered cycles.
    // -> 65,536 / 2048 = 32 registers/thread ceiling.
    __global__ void __launch_bounds__(1024, 2) heavy_kernel(float* out, const float* in, int n) {
        // __launch_bounds__(maxThreadsPerBlock=1024, minBlocksPerMultiprocessor=2)
-       // instructs ptxas to keep register usage <= 32/thread, spilling less-critical
-       // locals to shared memory or restructuring the unroll instead of registers
+       // instructs ptxas to keep register usage <= 32/thread. Per the CUDA guide this
+       // "usually results in increased local memory usage and/or a higher number of
+       // instructions" -- spilled registers go to LOCAL memory (backed by device
+       // memory, cached in L1/L2), never to shared memory.
        // ... same computation, compiler now register-constrained ...
    }
    heavy_kernel<<<grid, 1024>>>(out, in, n);
-   // Achieved occupancy rises from ~0-25% (spill-bound) to 100% (2048 resident threads)
+   // The launch now succeeds, at 100% theoretical occupancy (2048 resident threads).
+   // Whether that is faster depends on how much the forced spilling costs -- measure.
    ```
 
    **Stated plainly.** "Registers are not requested per block, they are requested per
@@ -717,7 +732,7 @@ each warp is what turns candidates into covered cycles.
        registers requested = 1,024 threads x 96 regs = 98,304 registers
        registers available =                            65,536 registers
        shortfall           = 98,304 - 65,536         =  32,768 registers
-       -> not one block fits; ptxas spills to local memory, silently, no compile error
+       -> not one block fits; the launch returns cudaErrorLaunchOutOfResources
 
      FIX: __launch_bounds__(1024, 2)
        threads demanded    = 2 blocks x 1,024        =   2,048 threads
@@ -726,12 +741,16 @@ each warp is what turns candidates into covered cycles.
        -> 2,048 resident threads / 2,048 cap         =    100% occupancy
    ```
 
-   The trap is that the broken version does not fail loudly. Asking for 32,768 more
-   registers than exist is a *compile-time* impossibility, yet the compiler resolves it by
-   spilling rather than erroring — so the kernel launches, produces correct results, and
-   quietly does its "register" traffic at HBM latency. The only signals are
-   `nvcc --ptxas-options=-v` reporting spill stores/loads and Nsight Compute showing local
-   memory traffic on a kernel that has no `__shared__` and no explicit local arrays.
+   The trap is *where* the failure lands. Asking for 32,768 more registers than exist is
+   not a compile error — `nvcc` compiles the kernel happily, because without
+   `__launch_bounds__` it was never told what block size the kernel would be launched
+   with. The mismatch is only discovered at launch, and because kernel launches are
+   asynchronous the returned error is easy to swallow: the symptom an unchecked codebase
+   sees is an output buffer that still holds its pre-launch contents, not an exception.
+   `nvcc --ptxas-options=-v` printing 96 registers next to a 1024-thread launch config is
+   the compile-time signal; a `CUDA_CHECK` wrapper around `cudaGetLastError()` is the
+   runtime one. NVIDIA's own guidance is to always state
+   `__launch_bounds__(maxThreadsPerBlock)` precisely to keep this from being possible.
 
 2. **Confusing "SM count" with "core count" in marketing material.** A GPU spec sheet's
    "10,000 CUDA cores" is `SM_count x cores_per_SM` — an H100's 132 SMs x 128 FP32
@@ -774,11 +793,19 @@ each warp is what turns candidates into covered cycles.
    T4s — always branch on the *runtime-queried* `cudaDeviceProp.major/minor`, or ship
    a fat binary with `-gencode` for every target `sm_XX`.
 
-4. **Ignoring the shared-memory ceiling and getting a launch failure, not a slowdown.**
-   Requesting more dynamic shared memory per block than the SM's configurable pool
-   (`cudaFuncAttributePreferredSharedMemoryCarveout`) returns `cudaErrorInvalidValue` at
-   launch time — a very different failure mode from the silent register-spill case
-   above, and one that is easy to miss if `cudaGetLastError()` is not checked.
+4. **Assuming a `__shared__` array can be as large as the SM's shared-memory pool.**
+   Static shared memory is capped at **48 KB per block on every architecture**, no
+   matter that H100 offers a 228 KB pool. A `__shared__ float tile[16384]` (64 KB) is a
+   `ptxas` error, not a runtime one. To go above 48 KB the allocation must be *dynamic*
+   (`extern __shared__`, size passed as the third launch argument) **and** explicitly
+   opted into with `cudaFuncSetAttribute(kernel,
+   cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`; the request must also stay
+   within the device's `cudaDevAttrMaxSharedMemoryPerBlockOptin` (227 KB on H100, 163 KB
+   on A100), or the launch returns `cudaErrorInvalidValue`. Separately,
+   `cudaFuncAttributePreferredSharedMemoryCarveout` only expresses a *preference* for how
+   the 256 KB unified pool splits between shared memory and L1 — it is a hint the driver
+   may override, and it never raises the per-block ceiling. See §14 for a case study
+   where confusing the two attributes cost a 2x occupancy loss.
 
 5. **Assuming Tensor Cores engage automatically for any matmul-shaped kernel.** Tensor
    Cores only activate for specific tile shapes, alignments, and supported precisions
@@ -808,111 +835,136 @@ each warp is what turns candidates into covered cycles.
 ## 12. Interview Questions with Answers
 
 **Q: Why does increasing block size sometimes make a kernel slower instead of faster?**
-A larger block can push a kernel past one of the three occupancy ceilings — usually the
-register-file budget — causing the compiler to spill registers to slow local memory or
-the block to fail to fit at all, both of which lower effective throughput even though
-the block "looks" more parallel on paper.
+A larger block can push a kernel past one of the three occupancy ceilings, usually the
+register-file budget. When it does, the compiler either spills registers to slow local
+memory or the launch is rejected outright with `cudaErrorLaunchOutOfResources` — both
+strictly worse than the smaller block, even though the bigger one "looks" more parallel
+on paper.
 
 **Q: What actually caps the number of resident warps on an SM?**
-The minimum of three independent budgets: the register file (65,536 32-bit
-registers/SM), the shared-memory pool (up to 228 KB/SM), and a hard thread/block count
-cap (2048 resident threads/SM, 1024 threads/block) — whichever ceiling is lowest for a
-given kernel and block size determines occupancy.
+Whichever of three independent budgets runs out first: the register file, the
+shared-memory carveout, or a hard thread/block count cap. Concretely on an H100 those are
+65,536 32-bit registers/SM, a carveout of up to 228 KB out of the 256 KB unified
+L1/shared pool, and 2048 resident threads / 32 resident blocks / 1024 threads-per-block.
+The numbers move by compute capability — the consumer and inference parts (8.6, 8.9,
+12.x) cap at 1536 resident threads and 100-128 KB of shared memory — so query them rather
+than memorizing one GPU's.
 
 **Q: Is higher occupancy always better performance?**
-No — occupancy is a latency-hiding *capacity*, not a throughput measure, and many
-kernels peak at 50-60% occupancy because pushing higher forces register spills or
-smaller per-thread working sets that hurt instruction-level parallelism more than the
-extra warps help hide latency.
+No — occupancy is a latency-hiding *capacity*, not a throughput measure. Many kernels
+peak at 50-60% occupancy, because pushing higher forces register spills or shrinks the
+per-thread working set, and the lost instruction-level parallelism costs more than the
+extra resident warps recover.
 
 **Q: What is the difference between "resident" and "active" warps on an SM?**
 A resident warp has its registers and shared memory reserved on the SM for its block's
-entire lifetime, while an active (or "selected") warp is the one specific warp a
-partition's scheduler is issuing an instruction to in the current cycle — an SM can
-have 16 resident warps per partition but issues from only one of them per cycle.
+whole lifetime; an active or "selected" warp is the one a partition's scheduler is
+issuing an instruction to this cycle. An SM at 100%
+occupancy holds 16 resident warps per partition but issues from exactly one of them per
+cycle — the other 15 exist purely so the scheduler has something to run when the current
+one stalls.
 
-**Q: Why can a kernel using 1024 threads/block with 96 registers/thread fail to reach any
-occupancy at all?**
-Because 1024 threads × 96 registers = 98,304 registers exceeds the entire 65,536-register
-SM budget, so a single block of that shape cannot be made resident under any
-configuration — the fix is capping registers/thread (via `__launch_bounds__` or reduced
-unrolling) or shrinking the block size, not adding more SMs or a faster GPU.
+**Q: What happens when a kernel using 96 registers/thread is launched with 1024 threads
+per block?**
+The launch is rejected: `cudaLaunchKernel` returns `cudaErrorLaunchOutOfResources`, "too
+many resources requested for launch". 1024 threads x 96 registers = 98,304 registers
+exceeds the SM's entire 65,536-register file, so no block of that shape can be made
+resident under any configuration. Register counts are fixed at compile time, so the
+compiler cannot rescue this at launch — and because launches are asynchronous, the error
+surfaces only at the next `cudaGetLastError()`. The fixes are `__launch_bounds__`, a
+smaller block, or less unrolling; a bigger GPU does not help.
 
 **Q: What does "independent thread scheduling," introduced in Volta, actually change?**
-Before Volta, a diverged warp executed both branch paths serially with a single shared
-program counter, reconverging only at an implicit point after the branch; Volta gives
-each thread its own program counter and call stack so diverged threads can interleave
-progress and reconverge at a point the compiler chooses, but this also means
-warp-synchronous idioms that relied on implicit lockstep now require an explicit
-`__syncwarp()` to be correct.
+Volta gave every thread its own program counter and call stack, so threads in a diverged
+warp can interleave forward progress instead of running the branch paths strictly
+serially. Before Volta a diverged warp shared one program counter and reconverged at an
+implicit point after the branch. The practical consequence is that warp-synchronous
+idioms which relied on implicit lockstep are now incorrect and require an explicit
+`__syncwarp()`.
 
 **Q: Why does querying `cudaDeviceProp` at runtime matter instead of hardcoding numbers
 from a spec sheet?**
-Because the same compiled binary is routinely deployed across a fleet mixing GPU
-generations (e.g., A100s and H100s in the same cluster), and each generation has a
-different SM count, register-file size, and L2 capacity — a kernel or launch
-configuration tuned against one generation's numbers can silently under- or
-over-provision resources on another.
+Because one binary routinely runs across a fleet mixing GPU generations, and almost every
+number differs between them. An A100 and an H100 differ in SM count (108 vs 132),
+shared-memory pool (164 vs 228 KB) and L2 size (40 vs 50 MB) while sharing the same
+65,536-register file — so a launch configuration tuned against one generation's constants
+silently under- or over-provisions on the other.
 
 **Q: What is the relationship between SM count and "CUDA core count" on a spec sheet?**
-Total CUDA cores = SM count × cores per SM (e.g., H100: 132 SMs × 128 FP32 cores/SM =
-16,896), but those cores execute in lockstep groups of 32 within a warp, not as
-independent scalar processors, so core count alone does not predict performance on
-divergent or latency-bound code the way SM count and per-SM occupancy do.
+Total CUDA cores = SM count x cores per SM, so an H100's 132 SMs x 128 FP32 cores gives
+the advertised 16,896. Those cores are lanes, not instruction streams: they execute in
+lockstep groups of 32, so the number of genuinely independent instructions in flight is
+16,896 / 32 = 528, which is also 132 SMs x 4 processing partitions. Core count therefore
+does not predict performance on divergent or latency-bound code the way SM count and
+per-SM occupancy do.
 
 **Q: What changed structurally in the SM between Volta and Hopper?**
-Both keep the same 4-processing-partition layout with per-partition warp schedulers and
-register-file slices, but Hopper adds the Tensor Memory Accelerator (a dedicated engine
-for bulk async tile copies as a single instruction) and thread-block clusters, which let
-blocks on different SMs share a "distributed shared memory" region — extending the
-locality unit from one SM to a cluster of SMs.
+Both keep the same four-processing-partition layout, each partition with its own warp
+scheduler, dispatch unit and register-file slice. Hopper adds the Tensor Memory
+Accelerator, a dedicated engine that performs a bulk async tile copy as a single
+instruction rather than one `cp.async` per thread, and thread-block clusters, which let
+blocks resident on different SMs address each other's shared memory as "distributed
+shared memory" — extending the locality unit from one SM to a cluster of SMs.
 
 **Q: What is `cp.async`, and what problem did it solve that earlier generations lacked?**
-`cp.async` (Ampere+) issues an asynchronous copy from global memory directly into shared
-memory without routing the data through a register first, freeing register capacity
-that the pre-Ampere global→register→shared copy path consumed and letting the copy
-overlap with unrelated compute on the same warp.
+`cp.async` (Ampere and later) copies from global memory straight into shared memory
+without routing the data through a register first. The pre-Ampere global -> register ->
+shared path burned registers purely as a staging buffer, competing with the compute the
+kernel actually needed them for, and it serialized the copy against that compute.
+`cp.async` frees those registers and lets the copy overlap with unrelated work on the
+same warp, which is what makes deep software pipelining of a GEMM tile loop practical.
 
-**Q: Why is a GPU's L2 cache size (~40 MB on Ampere/Hopper) relevant to kernel design, not
-just an implementation detail?**
-An L2 that size is large enough to fully cache moderate-sized reused structures (e.g.
-attention score matrices at common sequence lengths), so a kernel that re-reads the same
-global-memory region across multiple thread blocks can get an implicit speedup from L2
-residency even without explicit shared-memory tiling — but relying on this implicitly is
-fragile since L2 is shared and evicted by every other concurrently running kernel.
+**Q: Why is a GPU's L2 cache size (40 MB on A100, 50 MB on H100) relevant to kernel
+design rather than just an implementation detail?**
+An L2 that large can hold an entire reused structure, so blocks that re-read the same
+global-memory region hit in L2 instead of HBM. That is an implicit speedup a kernel gets
+without any explicit shared-memory tiling — for example an attention score matrix at
+moderate sequence lengths. Relying on it is fragile, though: L2 is shared by every
+concurrently running kernel on the device, so the residency you measured in isolation can
+vanish under a co-tenant.
 
 **Q: When do Tensor Cores actually engage inside an SM, and what happens if they don't?**
-Tensor Cores engage only for matrix-multiply-shaped operations at supported precisions
-(FP16/BF16/TF32/FP8/INT8) with compatible tile dimensions, invoked via `mma`/WMMA
-intrinsics or automatically inside a library call; a kernel that performs the same
-arithmetic as ordinary scalar FP32 instructions on the regular CUDA cores runs at a
-fraction of the Tensor Core throughput with no compiler warning that it missed the fast
-path.
+Only for matrix-multiply-shaped operations at supported precisions (FP16, BF16, TF32,
+FP8, INT8) with compatible tile shapes and alignment, issued via `mma`/WMMA intrinsics or
+inside a library call. A hand-written FP32 loop that "looks like a matmul" runs on the
+ordinary FP32 CUDA cores at a fraction of Tensor Core throughput, and nothing warns you —
+there is no compiler diagnostic for missing the fast path, only a profile that shows
+Tensor Core utilization near zero.
 
 **Q: What is a thread-block cluster (Hopper), and why would a kernel author use one?**
-A thread-block cluster is a group of thread blocks, potentially resident on different
-SMs, that the hardware guarantees are scheduled together and that can address each
-other's shared memory as "distributed shared memory" — it extends cooperative-tiling
-patterns (previously limited to one SM's shared memory) across multiple SMs without
-routing through the slower L2/HBM path.
+A thread-block cluster is a group of thread blocks the hardware guarantees are scheduled
+together, potentially on different SMs, and that can address each other's shared memory
+directly. NVIDIA calls that region distributed shared memory. It extends cooperative
+tiling patterns that were previously confined to one SM's shared memory across several
+SMs, without paying the L2 or HBM round trip that block-to-block communication otherwise
+requires.
 
 **Q: Why does the register-limited occupancy ceiling favor exactly 32 registers/thread as
 a rule of thumb on modern GPUs?**
-Because `max_threads_per_sm / regs_per_sm` = 2048 / 65,536 = 32 — at exactly 32
-registers/thread, the register-file ceiling and the thread-count ceiling coincide, so
-32 registers/thread is the largest per-thread register budget that still permits 100%
-theoretical occupancy on a GPU with these two constants.
+Because `regs_per_sm / max_threads_per_sm` = 65,536 / 2,048 = 32. At exactly 32
+registers/thread the register-file ceiling and the resident-thread ceiling coincide, so
+32 is the largest per-thread register budget that still permits 100% theoretical
+occupancy on a GPU with those two constants. Note the rule is derived, not fundamental:
+on a part capped at 1536 resident threads (compute capability 8.6, 8.9, 12.x) the same
+division gives 42 registers/thread instead.
 
 **Q: What is the difference between shared memory and L1 cache on modern NVIDIA SMs, and
 why are they unified into one physical pool?**
-Shared memory is explicitly managed by the kernel (`__shared__` arrays the programmer
-addresses directly), while L1 is a hardware-managed cache for ordinary global-memory
-loads; NVIDIA unifies their backing SRAM into one configurable pool per SM (up to 228
-KB) so a kernel that needs more explicit tile space can carve out more shared memory at
-the cost of L1 hit rate, and vice versa for a kernel dominated by irregular global
-accesses.
+Shared memory is explicitly managed by the kernel, while L1 is a hardware-managed cache
+for ordinary global-memory loads. NVIDIA backs both with the same SRAM — 256 KB per SM on
+H100 — and lets a *carveout* decide the split, so a tiling kernel can claim up to 228 KB
+as shared memory while a kernel dominated by irregular global access leaves that capacity
+to L1. The split is a per-kernel preference expressed through
+`cudaFuncAttributePreferredSharedMemoryCarveout`, not a compile-time property.
 
----
+**Q: How much shared memory can a single block actually allocate?**
+Static `__shared__` arrays are capped at 48 KB per block on every architecture, whatever
+the SM's pool size. Going above that requires a *dynamic* allocation (`extern __shared__`
+with the size passed as the third launch argument) plus an explicit opt-in via
+`cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`, and
+the total must stay within `cudaDevAttrMaxSharedMemoryPerBlockOptin` — 227 KB on H100,
+163 KB on A100. Skipping the opt-in gives `cudaErrorInvalidValue` at launch; writing the
+64 KB array statically instead does not even compile.
 
 ## 13. Best Practices
 
@@ -952,44 +1004,52 @@ near-linear speedup from 80 SMs to 132 SMs (1.65x) plus the faster clock and HBM
 bandwidth. Measured speedup on H100 is only 1.1x — far below the naive SM-count-ratio
 expectation.
 
-**Diagnosis**: Nsight Compute reports "Achieved Occupancy: 24.8%" on H100 versus 74.6%
-on V100 for the same kernel and block size (256 threads/block). The compiled kernel
-(unchanged source, recompiled with `-gencode arch=compute_90,code=sm_90`) reports 100
-registers/thread via `nvcc --ptxas-options=-v` on both targets — but the *effect* of
-that register count differs by generation because H100 and V100 both expose 65,536
-registers/SM, so the register math is identical; the real culprit turns out to be a
-`__shared__` tile the kernel allocates at 64 KB/block. V100's shared-memory pool per SM
-tops out lower than the block-count math assumes on H100's larger configurable pool,
-and the launch never called `cudaFuncAttributePreferredSharedMemoryCarveout`, so the
-runtime defaulted to a conservative shared-memory carveout on H100 that capped resident
-blocks to 1 per SM instead of the 3 the full pool would allow.
+**Diagnosis**: Nsight Compute reports "Achieved Occupancy: 12.3%" on H100 — the kernel
+never got faster per SM, so the port collected only the SM-count and clock gains that
+survive at one-eighth occupancy. The compiled kernel (unchanged source, recompiled with
+`-gencode arch=compute_90,code=sm_90`) reports 100 registers/thread via
+`nvcc --ptxas-options=-v`, and since H100 and V100 both expose 65,536 registers/SM the
+team checked that ceiling, found 25%, and stopped looking. The binding ceiling was the
+other one: the kernel reserves a 64 KB shared-memory tile per block, and the launch
+never expressed a carveout preference, so the driver was free to configure the SM's
+256 KB unified L1/shared pool with only the 64 KB carveout the request strictly needed —
+one block per SM, when the full 228 KB carveout would have held three.
 
 ```cpp
-// BROKEN: kernel relies on the CUDA runtime's default shared-memory/L1 carveout,
-// which is a conservative default (frequently 50/50) rather than the maximum
-// available shared-memory pool on the target architecture.
+// BROKEN: two defects. (1) A 64 KB static __shared__ array does not compile at all --
+// static shared memory is capped at 48 KB per block on every architecture. (2) Even
+// once made dynamic, the launch expresses no carveout preference, so the driver may
+// configure the smallest shared-memory carveout that satisfies the request.
 __global__ void fused_bias_activation(float* out, const float* in, const float* bias, int n) {
-    __shared__ float tile[16384];  // 64 KB tile: 16384 floats x 4 bytes
+    __shared__ float tile[16384];  // 64 KB: ptxas error "uses too much shared data"
     // ... load tile, apply bias + activation, write out ...
 }
 fused_bias_activation<<<grid, 256>>>(out, in, bias, n);
-// On H100 with the default carveout, only ~1 block/SM fits in the shared-memory
-// portion of the pool -> 256 resident threads/SM out of a possible 2048 -> 12.5%
-// occupancy ceiling from shared memory alone, far below the register ceiling's
-// theoretical 2048/(100 regs -> floor at 65536/100=655 -> 2 blocks*256=512) 25%.
+// With a 64 KB carveout only 1 block/SM fits -> 256 resident threads out of 2048
+// -> a 12.5% shared-memory ceiling, half the register ceiling the team did check
+// (65,536 / 100 = 655 threads -> 2 blocks x 256 = 512 -> 25%).
 ```
 
 ```cpp
-// FIX: explicitly request the maximum shared-memory carveout for this kernel so the
-// full configurable pool (not the default 50/50 split) is available to shared memory,
-// letting more blocks with 64 KB tiles become resident simultaneously.
-cudaFuncSetAttribute(fused_bias_activation,
-                      cudaFuncAttributePreferredSharedMemoryCarveout,
-                      cudaSharedmemCarveoutMaxShared);
-fused_bias_activation<<<grid, 256>>>(out, in, bias, n);
-// Achieved occupancy on H100 rises from 24.8% to 68.3% (Nsight Compute); end-to-end
-// kernel speedup versus V100 improves from 1.1x to 1.7x, now consistent with the
-// SM-count/clock/bandwidth ratio the team originally expected.
+// FIX: make the tile dynamic and opt in above 48 KB, then ask for the maximum
+// shared-memory carveout so the full 228 KB pool -- not the 64 KB minimum the request
+// alone implies -- backs shared memory and three blocks can be resident at once.
+__global__ void fused_bias_activation(float* out, const float* in, const float* bias, int n) {
+    extern __shared__ float tile[];   // size supplied at launch
+    // ... load tile, apply bias + activation, write out ...
+}
+
+constexpr size_t kTileBytes = 64 * 1024;
+CUDA_CHECK(cudaFuncSetAttribute(fused_bias_activation,
+                                cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                kTileBytes));                       // mandatory > 48 KB
+CUDA_CHECK(cudaFuncSetAttribute(fused_bias_activation,
+                                cudaFuncAttributePreferredSharedMemoryCarveout,
+                                cudaSharedmemCarveoutMaxShared));   // hint: favour SMEM
+fused_bias_activation<<<grid, 256, kTileBytes>>>(out, in, bias, n);
+// Shared-memory ceiling rises from 1 block/SM to 3 (228 KB / 64 KB), i.e. 12.5% -> 37.5%
+// -- at which point the 25% REGISTER ceiling becomes binding. Achieved occupancy goes
+// 12.3% -> 24.5%, and going further now means cutting registers, not shared memory.
 ```
 
 **What the formula is telling you.** "Two ceilings were computed from the same launch, one
@@ -1022,19 +1082,29 @@ cared about the ceiling they checked.
     -> occupancy ceiling  = 512 / 2,048              =  25.0%
 
   binding ceiling = min(12.5%, 25.0%) = 12.5%   <- shared memory, not registers
+
+  after the fix (carveout = cudaSharedmemCarveoutMaxShared)
+    blocks affordable     = 228 KB / 64 KB           =     3 blocks
+    resident threads      = 3 blocks x 256           =   768 threads
+    -> shared ceiling     = 768 / 2,048              =  37.5%
+    binding ceiling = min(37.5%, 25.0%) = 25.0%   <- registers now bind
 ```
 
 The register ceiling was never the problem, which is why the source looked fine: 100
-registers/thread is unremarkable and identical on both fleets. The shared-memory ceiling
-moved because the *carveout default* moved between generations while the kernel's 64 KB
-demand stayed fixed — a hardware-policy change the source code cannot show you. Reading
-occupancy off the source means computing all three ceilings; reading it off Nsight Compute
-means the hardware computes them for you.
+registers/thread is unremarkable and identical on both fleets. What the source also could
+not show is the *carveout* — the split of the 256 KB unified pool between shared memory
+and L1 is chosen by the driver at launch, and nothing in the kernel text says whether it
+will be 64 KB or 228 KB. Reading occupancy off the source means computing all three
+ceilings and guessing at a runtime policy; reading it off Nsight Compute means the
+hardware computes them for you. Note also that the fix does not end the tuning: it hands
+the binding constraint to registers, which is the next thing to attack.
 
-**Metrics after the fix**: Nsight Compute "Achieved Occupancy" 24.8% → 68.3%; DRAM
-throughput 41% → 79% of peak; end-to-end kernel latency 1.1x → 1.7x faster than the
-V100 baseline, now tracking the expected SM-count/HBM-bandwidth ratio between the two
-generations.
+**Metrics after the fix** (this scenario's illustrative figures): Nsight Compute
+"Achieved Occupancy" 12.3% → 24.5%, tracking the 12.5% → 25.0% theoretical ceiling; DRAM
+throughput 41% → 63% of peak; end-to-end kernel latency 1.1x → 1.5x faster than the V100
+baseline. It does not reach the 1.65x SM-count ratio, because at 25% occupancy the kernel
+is still register-limited — the remaining gap is a register-pressure problem, not a
+shared-memory one.
 
 **Discussion Questions**:
 1. Why did the register-file math (100 registers/thread) look "fine" on paper while the
