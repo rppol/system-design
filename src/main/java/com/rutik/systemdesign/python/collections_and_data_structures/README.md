@@ -643,6 +643,11 @@ def shortest_path(
 | `set` | ~25 bytes per element | Keys only |
 | `deque` | 8 bytes + block overhead (~64 ptr/block) | Block allocation |
 
+```
+shallow size = list header + N x 8 bytes (pointer)
+deep size    = shallow size + (uncached elements) x object overhead
+```
+
 **Stated plainly.** "A list of a million integers is not a million integers — it is a million *pointers*, plus a million separately allocated integer objects sitting somewhere else on the heap."
 
 The `+ object overhead` in the first row is the entire story, and it is the term `sys.getsizeof` on the list will never show you.

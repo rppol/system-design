@@ -477,6 +477,11 @@ Each microservice configures `http.oauth2ResourceServer(oauth2 -> oauth2.jwt(...
 | 12 (recommended) | ~300ms | Production recommendation |
 | 14 | ~1200ms | High-security (consider Argon2) |
 
+```
+rounds         = 2^cost
+relative work  = 2^cost_a / 2^cost_b     <- work ratio between two cost factors
+```
+
 **What the formula is telling you.** "The cost factor is an exponent, not a dial — each `+1` doubles the work, so the small-looking step from 10 to 12 makes an attacker's password-cracking rig four times slower."
 
 The number in `BCryptPasswordEncoder(12)` is `log2` of the iteration count. Reading it as a linear 1-to-14 scale is the standard misinterpretation, and it makes the security difference between 10 and 12 look trivial when it is 4x.

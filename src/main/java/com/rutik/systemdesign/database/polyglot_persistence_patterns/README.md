@@ -20,6 +20,11 @@ Polyglot persistence is like a professional kitchen: different tools for differe
 
 **Eventual consistency window**: Any derived read model is eventually consistent with the source of truth. The replication lag (milliseconds to seconds via CDC) is the consistency window. Applications must tolerate this window or design around it.
 
+```
+deficit = arrival rate - drain rate   <- positive means the backlog is growing right now
+lag     = backlog / drain rate        <- seconds of staleness a reader actually experiences
+```
+
 **What this actually says.** "Lag is not a property of the pipeline — it is the backlog
 divided by how fast the consumer drains, and a backlog only exists because arrivals briefly
 outran drain capacity."

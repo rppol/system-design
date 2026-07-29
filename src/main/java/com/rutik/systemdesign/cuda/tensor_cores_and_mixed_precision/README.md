@@ -225,6 +225,13 @@ range during backward).
 
 The two formats with 8 exponent bits (TF32, BF16, FP32) share FP32's dynamic range and therefore never need loss scaling; FP16's 5 exponent bits are the entire reason mixed-precision training needed a scaling trick before BF16 hardware existed.
 
+```
+value              = (-1)^s x 2^(stored_e - bias) x 1.m   <- sign, then scale, then the fraction
+bias               = 2^(e-1) - 1                     <- offset so the exponent can go negative
+smallest normal    = 2^(1 - bias)                    <- underflow floor before subnormal, then 0
+relative precision = 2^-(m+1)                        <- worst-case rounding error, as a fraction
+```
+
 **Read it like this.** Every row of that table is one sentence: "spend a fixed bit budget, `1 sign + e exponent + m mantissa`, and whatever you give the exponent field buys *range* while whatever you give the mantissa field buys *precision*." Two formats with the same total width are two different answers to how that budget is split.
 
 | Symbol | What it is |
@@ -688,6 +695,13 @@ Both gates are silent AND conditions — there is no third branch that raises a 
 | FP8 (Tensor Core) | ~2000 | ~59x |
 
 This is the concrete basis for the "FP64 vs FP16" gap engineers quote informally — an H100 running dense FP16 GEMMs through its Tensor Cores has roughly 15x the throughput of the same GPU running the identical operation in FP64 on ordinary CUDA cores, before sparsity is even considered. HPC/scientific-computing workloads that must stay in FP64 for correctness (climate modeling, certain linear-solver-heavy simulations) are the primary reason the FP64 Tensor Core path exists at all — it recovers roughly 2x over the CUDA-core FP64 rate without leaving double precision.
+
+```
+ratio = peak TFLOP/s (precision) / peak TFLOP/s (baseline)
+
+  baseline = FP64 CUDA core, ~34   <- this table's ratio column
+        or  FP64 Tensor Core, ~67  <- the other valid reading, ~2x the CUDA-core rate
+```
 
 **Stated plainly.** The right-hand column is one division: "how many times the FP64 CUDA-core rate is this precision's peak?" The trap is that the phrase "the FP64 rate" names two different numbers on an H100 — 34 TFLOP/s on ordinary CUDA cores, 67 TFLOP/s through the FP64 Tensor Core path — and every headline multiplier changes by 2x depending on which one you meant.
 

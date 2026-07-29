@@ -33,6 +33,12 @@ Result: ~1.37 bits per timestamp (vs 64 bits raw) for typical metrics
 Gorilla paper: 12x compression on real Facebook production metrics
 ```
 
+```
+Meaningful bits         = 64 bits - Leading zeros        <- what survives after common bits cancel
+stored bits (XOR != 0)  = 2 + 5 + 6 + Meaningful bits    <- control + leading-count + length + payload
+stored bits (XOR == 0)  = 1                              <- exact repeat, just the control bit
+```
+
 **What this actually says.** "1.37 bits per value" reads: "consecutive readings of the same physical
 quantity are nearly identical, so XOR cancels almost every bit, and only the handful of surviving
 bits need storing." The compression is not generic — it is a bet on *physical continuity*, which is

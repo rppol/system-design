@@ -122,6 +122,12 @@ A ruthless cut to what a **senior Python interview** actually probes, anchored o
 
 ### Decoding the path arithmetic
 
+```
+Deferred        = Full Path - Interview Path        <- 21 - 13 = 8 modules
+reduction       = Deferred / Full Path              <- 8 / 21 = 38.1%
+coverage        = Interview Path / Full Path        <- 13 / 21 = 61.9%
+```
+
 **What it means.** "The interview path is not a different curriculum — it is the same ordered list with 8 of its 21 entries removed, which is why the subset must stay in the full path's order."
 
 This section has no formulas to speak of; the only arithmetic worth stating explicitly is how the two paths relate, because that relationship is a maintenance constraint, not just a description.

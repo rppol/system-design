@@ -461,6 +461,12 @@ PGO feeds a *recorded* execution profile back into the AOT compiler — the clos
 | Runtime bytecode generation (CGLIB, raw ASM, agents) | Fully supported | Not supported at all — no JIT, no runtime classloader to hand new bytecode to |
 | Observability | Mature: JFR, async-profiler, full `jstack`/`jmap` tooling | Improving but narrower — a subset of JFR events via `--enable-monitoring` |
 
+```
+native RSS   = JVM RSS / RSS ratio (3-5x smaller)
+deficit time = process lifetime x (100% - throughput ratio)   <- 70-90% of warmed JVM peak
+total memory = replica count x RSS per replica
+```
+
 **Read it like this.** "Every row here is a ratio against the JVM baseline, and two of them point in opposite directions — so the decision is whether the startup and memory ratios, multiplied by how often you pay them, outweigh the throughput ratio multiplied by how long you run."
 
 Spelling out the opposing signs is the point. Two rows favour native by a large factor and one penalizes it by a small one, and which dominates is decided by process lifetime, not by which factor is bigger.

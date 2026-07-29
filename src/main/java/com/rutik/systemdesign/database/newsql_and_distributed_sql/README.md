@@ -395,6 +395,12 @@ SELECT /*+ READ_FROM_STORAGE(tiflash[orders]) */ ...
 
 **Underestimating cross-region latency**: A team running Spanner multi-region expects it to feel like a local database. Cross-region commits are 100–200ms. A checkout flow with 5 serialized distributed writes becomes a 500ms–1s operation. Fix: batch writes, reduce cross-region transaction frequency with locality tables.
 
+```
+Total = W x L                  <- serialized writes, each one waits for the last to finish
+Total = L                      <- same W writes batched into one transaction
+throughput ceiling = 1000 / L  <- max sequential commits/second on one logical chain
+```
+
 **Read it like this.** "Serialized round trips multiply; parallel ones do not." Request
 latency is `writes x per-commit latency` only when each write must finish before the next
 begins — which is exactly what an ORM doing five sequential `save()` calls produces, and

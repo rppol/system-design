@@ -539,6 +539,12 @@ A payments microservice runs on Spring Boot 3.2 / Java 17 across a Kubernetes cl
 - A downstream payment gateway whose outages must be visible without taking the whole pod down
 - A Resilience4j circuit breaker whose state must be inspectable in production
 
+```
+per-pod rate = lambda / N
+L            = lambda x W          <- Little's Law, requests in flight fleet-wide
+per-pod L    = L / N
+```
+
 **What this actually says.** "Forty pods, twelve thousand requests a second, and a quarter-second tail budget are not three separate facts — multiply and divide them and you get the per-pod concurrency the JVM must sustain, which is what actually sizes the thread pool and the connection pool."
 
 Fleet-level numbers mean nothing to a single pod. The two derived figures below are what you tune against.

@@ -676,6 +676,11 @@ Citus VSchema:
   Colocation group: orders, order_items, invoices, payments all on same worker for same tenant_id
 ```
 
+```
+Nodes per tier = ceil(tenants in tier / Tenants per node)
+Skew factor    = busiest node write rate / cluster mean
+```
+
 **The idea behind it.** "Give each tier of tenant however many nodes its traffic needs — not however many its headcount suggests — and let the node count fall out of the arithmetic." Directory sharding exists precisely so the mapping can be uneven on purpose; hash sharding would spread 5000 tenants evenly and then let the 10 whales melt whichever 10 shards they landed on.
 
 | Symbol | What it is |

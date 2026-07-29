@@ -499,6 +499,12 @@ Stream.of("hello world", "foo bar")
 - Collection is a `LinkedList` or custom iterator (poor splitting)
 - Thread-local state is assumed (e.g., MDC logging context, `SecurityContextHolder`)
 
+```
+N x Q  vs  threshold      <- total work in the pipeline, compared to ~10,000 work units
+N x Q < threshold  -> sequential
+N x Q >= threshold -> parallelStream() worth considering
+```
+
 **What this actually says.** "Going parallel is worth it only when the total work in the pipeline clears the fork/join setup cost — and total work is element count times per-element cost, so a small collection of expensive operations qualifies just as well as a huge collection of cheap ones."
 
 The 10,000-element rule of thumb above is really the N x Q heuristic with Q assumed to be 1. Stating both factors explicitly is what stops you from parallelising a million trivial `filter`s and refusing to parallelise a thousand expensive ones.

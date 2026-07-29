@@ -22,6 +22,11 @@ Timeline: Virtual threads GA in Java 21 (JEP 444). `StructuredTaskScope` preview
 
 **Key insight:** Platform threads cost ~1 MB of OS stack + OS context-switch overhead. Virtual threads cost ~few KB of heap (growable stack) + JVM context-switch (continuation save/restore). A service that would max out at 200 concurrent platform threads can run 100,000+ virtual threads at similar peak memory.
 
+```
+threads that fit = memory budget / stack size per thread
+ratio             = threads that fit (virtual) / threads that fit (platform)
+```
+
 **In plain terms.** "Concurrency in Java has always been rationed by stack memory, not by CPU — so shrinking the per-task stack from a megabyte to a few kilobytes raises the ceiling by the same factor, roughly 256x, without changing a line of your logic."
 
 That framing explains why virtual threads need no new programming model. Nothing about the

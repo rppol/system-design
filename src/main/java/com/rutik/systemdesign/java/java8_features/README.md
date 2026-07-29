@@ -470,6 +470,10 @@ A variable captured by a lambda must be effectively final — either explicitly 
 
 **Scenario.** A user-profile service ingests **10M profile records/day** (~115 records/sec sustained, ~2,000/sec peak during nightly batch). The legacy enrichment job is a 200-line imperative ETL: nested `for` loops, manual null checks at every level (`profile -> address -> city -> zipCode`), and a hand-rolled `HashMap` grouping by country. It throws ~4,000 `NullPointerException`s/day (profiles with partial addresses) which abort whole batches, forcing reruns. The rewrite to Java 8 (LTS) Streams + Optional eliminates the NPEs and cuts the code to ~40 lines.
 
+```
+Sustained rate = 10M/day / 86,400    <- seconds in a day, converts a daily figure to a rate
+```
+
 **What this actually says.** "Ten million records a day is a small number pretending to be a big one — spread across 86,400 seconds it is 115 records/sec, so nothing here is throughput-bound; the failure rate is what makes it a problem."
 
 Converting a daily volume to a per-second rate before designing anything is the habit worth taking from this. It tells you immediately that stream overhead is irrelevant at this scale, and redirects the whole rewrite toward correctness — which is exactly where the payoff turned out to be.

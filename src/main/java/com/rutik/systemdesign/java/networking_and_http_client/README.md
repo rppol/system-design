@@ -447,6 +447,11 @@ A team created `new HttpClient.newHttpClient()` for every outbound request. `Htt
 ### War Story 3: Blocking inside a NIO event loop
 A developer added a database call inside the `isReadable()` handler of a Selector event loop to validate an incoming request. One slow DB query blocked the thread for 500ms — during which NO other connections could be served. For 100ms per query average, the server maxed out at 2 requests/second per selector thread. **Fix**: Hand off work to a separate thread pool immediately; only do minimal parsing in the event loop.
 
+```
+throughput ceiling = 1 / t_handler
+worst-case wait     = N_channels x t_handler
+```
+
 **Read it like this.** "A Selector event loop is a single server in a queue, so its
 throughput is just one divided by however long the slowest handler holds it — a blocking
 call inside the loop turns thousands of connections into one serial queue."

@@ -60,6 +60,11 @@ Availability (A)------Partition Tolerance (P)
 
 **Real production scenario**: A Cassandra cluster with RF=3 and CL=QUORUM experiences a network partition. Two nodes are on one side, one on the other. QUORUM requires 2/3 responses. The minority side (1 node) cannot serve QUORUM reads/writes — it sacrifices availability for consistency at QUORUM. Switch to CL=ONE and you get AP behavior with potential stale reads.
 
+```
+QUORUM  = floor(RF / 2) + 1      <- minimum replicas that must answer a QUORUM request
+overlap = W + R > RF             <- true means the read set must intersect the write set
+```
+
 **Stated plainly.** "Consistency is not a property of the database — it is an overlap test between how many replicas you write to and how many you read from." If those two sets are guaranteed to share at least one node, a read cannot miss the latest write; if they are not, it can.
 
 | Symbol | What it is |

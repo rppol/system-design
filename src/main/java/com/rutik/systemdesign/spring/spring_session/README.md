@@ -424,6 +424,11 @@ A mobile backend uses `HeaderHttpSessionIdResolver.xAuthToken()`. The app receiv
 | Logout-everywhere | Built-in via principal index | Hard; requires server-side tracking |
 | Read cost per request | One store round-trip (~0.5–1ms) | Local signature verify (~0.1ms) |
 
+```
+bytes/sec = payload size x requests/sec
+ratio     = larger payload (or cost) / smaller payload (or cost)
+```
+
 **The idea behind it.** "Stateful sessions move the cost from the wire to the request path; stateless JWTs move it from the request path to the wire. You are choosing which resource to spend, and the exchange rate is roughly ten-to-one on latency against fifty-to-one on bytes."
 
 Both rows of this table describe the same request, just measured differently. Multiplying each by your request rate is what turns a preference into a decision.

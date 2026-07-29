@@ -567,6 +567,12 @@ matcher = pattern.matcher(new InterruptibleCharSequence(userInput));
 | Memory | Small compiled graph | Can build a large DFA for big alternations |
 | Use when | Trusted patterns needing rich features | Untrusted patterns / DoS-sensitive paths |
 
+```
+backtracking NFA attempts = 2^n         <- n = input length in characters
+DFA / RE2 transitions     = n           <- one pass, linear
+speedup                   = 2^(n-1) / n
+```
+
 **Put simply.** "The first row of this table is not a 2x or 10x difference —
 O(2ⁿ) versus O(n) means the gap itself grows with every character, so at any
 input length worth attacking the two engines are not on the same scale."

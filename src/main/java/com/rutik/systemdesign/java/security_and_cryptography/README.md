@@ -569,6 +569,10 @@ try (SSLSocket s = (SSLSocket) sf.createSocket("api.example.com", 443)) {
 | Verify speed | **Fast** | Slower than RSA verify |
 | Use when | Interop with RSA-only peers | New systems, mobile, TLS default |
 
+```
+work = 2^(security level)     <- attacker's cost in operations, e.g. 2^128 = 3.40e38
+```
+
 **In plain terms.** "Key size and security level are two different numbers, and the conversion rate between them is wildly different for RSA than for elliptic curves — a 3072-bit RSA key and a 256-bit EC key buy exactly the same 128 bits of security, at 12x the storage."
 
 The gap exists because the best attack on RSA (the number field sieve, sub-exponential) is far better than the best attack on EC (Pollard's rho, fully exponential). RSA has to be enormous to stay ahead of a much stronger attack.

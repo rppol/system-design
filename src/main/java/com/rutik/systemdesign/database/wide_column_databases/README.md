@@ -293,6 +293,12 @@ TWCS (Time Window Compaction Strategy):
   Use:  time-series, IoT, event logs with TTL
 ```
 
+```
+disk write (bytes)    = logical write (bytes) x Write amplification
+disk occupied (bytes) = live data (bytes) x Space amplification
+Lk                    = 10^k x L1              <- Level multiplier, fan-out of 10 between levels
+```
+
 **Read it like this.** "Write amplification 10-30x" means: for every 1 byte your application writes,
 the disk physically writes 10 to 30 bytes, because compaction keeps rewriting the same row as it
 migrates down the levels. "Space amplification 2x" means the opposite resource: the disk holds twice
@@ -556,6 +562,11 @@ A chat application stores all messages in `(conversation_id)` partition. After 3
 
 **Pitfall 2: Tombstone explosion from time-series deletions**
 An IoT platform sends DELETE for each sensor reading older than 30 days (instead of using TTL). 10M deletes/day → 300M tombstones/month. Read latency degrades from 2ms to 2 seconds as reads scan tombstones. Fix: switch to `INSERT INTO ... USING TTL 2592000` (30 days in seconds). Use TWCS compaction — entire SSTables expire and are dropped without tombstone scanning.
+
+```
+tombstones per period  = Delete rate x period length
+permanently resident   = Delete rate x gc_grace_seconds (in days)   <- undroppable no matter what
+```
 
 **What the formula is telling you.** "300M tombstones/month" is just `delete rate x retention`, and
 the retention is not yours to choose — `gc_grace_seconds` pins it. The formula says: "a DELETE in

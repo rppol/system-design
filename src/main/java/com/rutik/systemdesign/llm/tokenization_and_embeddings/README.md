@@ -323,6 +323,10 @@ Implication: An LLM with 4K context window can process:
   ~1500 Python lines of code
 ```
 
+```
+L = W x fertility     <- token count billed/limited on, from human-visible word count
+```
+
 **What the formula is telling you.** "Fertility is how many tokens it costs to say one word. The merge table was trained mostly on English, so English words got merged into single tokens and everyone else pays by the syllable."
 
 This is the cost gotcha that surprises teams at launch: the *same sentence*, translated, is a different-sized bill and a different-sized context. Pricing is per token, not per meaning, so a tokenizer trained on an English-skewed corpus is a permanent tax on every other language.

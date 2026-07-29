@@ -504,6 +504,12 @@ Block:
   - When freed: returned to the pool's free-list (NOT to the OS)
 ```
 
+```
+pools per arena = arena size / pool size
+size classes    = max size class / step size
+blocks per pool = (pool size - pool header) / size class
+```
+
 **The idea behind it.** "Buy memory from the OS in big slabs and hand it out in fixed-size slots — but you can only give a slab back when every single slot in it is free."
 
 The three-level nesting is not the interesting part. The *release condition* is: freeing is per-block, but returning is per-arena, and those two granularities are 8,000x apart.

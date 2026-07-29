@@ -553,6 +553,11 @@ A Redis instance stores Python pickle objects averaging 5MB each (session data).
 **Pitfall 2: Hot key in Redis Cluster**
 A Redis Cluster with 6 shards. One product (viral product ID 42) receives 500K GETs/second — all on the same slot (same Redis node). That node: 100% CPU, 200ms latency. Other nodes: idle. Fix: (1) Local in-process cache (Caffeine/Guava) for ultra-hot keys — reads never hit Redis. (2) Read from replicas: `replica-serve-stale-data yes` + client routing to replicas for read-only queries. (3) Key sharding: `GET product:42:shard:{random 0-9}` — 10 copies across different slots, read a random copy.
 
+```
+per-copy QPS    = hot-key QPS / c              <- c = number of duplicate keys written
+overload factor = per-copy QPS / node budget   <- >1x means that node is over capacity
+```
+
 **Put simply.** Key sharding says: "one key can only ever live on one node, so if the traffic won't
 fit on one node, make more keys." Sharding the cluster does nothing here — the load is concentrated
 by the *key*, not by the key count, and every extra shard you add just gives you another idle node.

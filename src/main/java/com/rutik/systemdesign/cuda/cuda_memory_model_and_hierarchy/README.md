@@ -56,6 +56,11 @@ The main device DRAM (HBM on data-center GPUs), allocated on the host with `cuda
 
 Declared with `__constant__` at file scope, a 64 KB read-only region backed by a dedicated per-SM constant cache. Its fast path is a **broadcast**: when every thread in a warp reads the *same* address, the cache serves all 32 lanes in one cycle-equivalent access. Divergent addresses within a warp serialize, degrading toward global-memory latency — constant memory is a specialized tool for kernel-wide parameters (transformation matrices, filter coefficients), not general read-only data.
 
+```
+fetches issued per access = Unique addresses in the warp    <- 1 (broadcast) .. 32 (worst case)
+cost relative to broadcast = fetches issued / 1
+```
+
 **The idea behind it.** "Constant memory has exactly one fast case — all 32 lanes want the
 same address — and its performance falls off a cliff in proportion to how many *distinct*
 addresses the warp asks for." It is not a cache with a hit rate; it is a broadcast network
@@ -212,6 +217,12 @@ local for what's left unqualified).
 ```
 
 The pyramid captures the rule that drives every optimization in Phase 3: an access one level up is roughly 10-20x cheaper than the level below it, so the entire performance-engineering discipline is "promote reused data as far up this ladder as the algorithm allows, and make every trip down the ladder as wide (coalesced) as possible."
+
+```
+per-SM peak (bytes/cycle) = banks x bytes per bank      <- 32 x 4 bytes = 128 B/cycle
+per-SM bandwidth          = per-SM peak x SM clock       <- bytes/cycle x cycles/s
+device bandwidth          = per-SM bandwidth x SM count  <- aggregate across the whole GPU
+```
 
 **What it means.** "Bandwidth and latency move in opposite directions down this ladder, and
 the shared-memory bandwidth figure is a whole-device number built out of very modest

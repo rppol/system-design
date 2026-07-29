@@ -377,6 +377,10 @@ TOAST overhead:
 
 Performance pitfall: `SELECT *` on a table with large JSONB columns reads all TOAST values. `SELECT id, status` does not.
 
+```
+~2 KB threshold = 8 KB page / 4    <- one quarter of a page; the point TOAST engages
+```
+
 **Put simply.** "Anything wider than a quarter of a page gets shipped off to a side table, so a fat column costs you nothing until a query actually asks for it." The threshold is not a tuning knob you pick — it falls out of PostgreSQL's requirement that at least four rows fit on every 8 KB page.
 
 | Symbol | What it is |
