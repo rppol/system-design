@@ -883,6 +883,8 @@ async def send_confirmation_email(ctx: object) -> None:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between logs, metrics, and traces? When does each answer a different question?**
+**Short:** Logs explain what happened, metrics show how often and how fast, traces show where latency came from.
+
 Logs answer "what happened and why", metrics answer "how often and how fast", and traces answer
 "where did the latency come from". Logs are discrete timestamped events ("payment failed for order
 42"). Metrics are aggregated numbers over time (request rate, p99 latency). Traces are causal chains
@@ -890,6 +892,8 @@ across components. In practice: you alert on metrics, investigate with traces, a
 logs — always linking all three via a shared correlation ID.
 
 **Q2: Why is `print()` wrong in production and what should replace it?**
+**Short:** print() bypasses the logging hierarchy and produces unstructured, unfilterable output.
+
 `print()` bypasses the Python logging hierarchy, cannot be filtered by level, has no structured
 fields, is not thread-safe by default, and its output cannot be dynamically silenced or redirected
 without monkey-patching. Replace it with `logging.getLogger(__name__)` at minimum, or `structlog`
@@ -897,6 +901,8 @@ for structured JSON output. Structured logs are queryable in aggregators like Lo
 plain `print` output is a string that requires regex parsing.
 
 **Q3: What is a ContextVar and why is it preferred over a global variable for request-scoped state?**
+**Short:** ContextVar gives each asyncio Task its own copy, so concurrent requests never overwrite each other's state.
+
 `contextvars.ContextVar` stores a value per-execution-context. In asyncio, each `asyncio.Task` has
 its own context copy, so two concurrent requests cannot overwrite each other's `request_id` stored in
 a ContextVar. A module-level global variable has one value shared across all concurrent requests —
@@ -905,6 +911,8 @@ correct primitive for request-scoped data in async Python.
 
 **Q4: What is the difference between a liveness probe and a readiness probe? What happens if you
 conflate them?**
+**Short:** A liveness probe restarts a crashed process; a readiness probe removes an unready pod from the load balancer.
+
 A liveness probe answers "is the process deadlocked or crashed?" — failure triggers a pod restart.
 A readiness probe answers "are external dependencies ready?" — failure removes the pod from the
 load-balancer without restarting it. Conflating them by putting a database check in `/health` causes
@@ -914,6 +922,8 @@ the outage. The correct split: `/health` returns 200 if the process is alive (ze
 `/ready` returns 503 until all dependencies respond.
 
 **Q5: Why can you not use user_id or order_id as a Prometheus label?**
+**Short:** A high-cardinality label like user_id creates one time-series per unique value, exhausting Prometheus memory.
+
 Prometheus stores every unique label combination as a separate in-memory time-series. With 1 million
 users, the label `user_id` creates 1 million time-series for a single counter. At ~256 bytes per
 series, that is 256 MB for one metric. Prometheus is designed for low-cardinality labels (method,
@@ -921,6 +931,8 @@ status class, endpoint) with at most a few hundred unique values. High-cardinali
 in logs (queryable by field) and traces (span attributes have no cardinality limit).
 
 **Q6: Describe the W3C TraceContext header format and why it matters.**
+**Short:** The traceparent header propagates trace context across services so spans join into one distributed trace.
+
 The `traceparent` header format is `{version}-{trace_id}-{parent_span_id}-{trace_flags}`, for
 example `00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01`. It provides a vendor-neutral
 standard for propagating trace context across HTTP service boundaries. When every service in your
@@ -929,6 +941,8 @@ trace regardless of which tracing backend each service uses. Without it, traces 
 boundaries and you cannot see cross-service latency.
 
 **Q7: What is tail-based sampling and when is it better than head-based sampling?**
+**Short:** Tail-based sampling waits for a trace to finish so it can keep every error or slow trace, not a random sample.
+
 Head-based sampling makes the keep/drop decision at trace ingestion (before the trace completes) — it
 is fast but cannot preferentially keep slow or erroneous traces. Tail-based sampling buffers all
 spans for a trace until the trace completes, then applies rules: keep all traces with errors, keep
@@ -937,6 +951,8 @@ signals at a fraction of the storage cost. The downside: the tail-based collecto
 in-flight spans in memory, requiring more collector resources.
 
 **Q8: How does `prometheus-fastapi-instrumentator` work and what does it instrument automatically?**
+**Short:** prometheus-fastapi-instrumentator auto-tracks request count, duration, and payload size via middleware.
+
 It wraps the FastAPI/Starlette ASGI application as a middleware and hooks into the request/response
 lifecycle. On each request it records start time; on each response it computes duration and increments
 `http_requests_total` (labels: method, handler, status) and observes `http_request_duration_seconds`
@@ -946,6 +962,8 @@ exposes a `/metrics` endpoint that Prometheus scrapes. It does not instrument ba
 calls, or database queries — those require OTel auto-instrumentation or manual instrumentation.
 
 **Q9: What is the `BatchSpanProcessor` and when would you use `SimpleSpanProcessor` instead?**
+**Short:** BatchSpanProcessor exports spans asynchronously in batches, keeping exporter latency off the request path.
+
 `BatchSpanProcessor` queues spans in memory and flushes them to the exporter in batches on a
 background thread — default batch size 512, flush interval 5 s. This minimises the latency impact of
 exporting on the request path. `SimpleSpanProcessor` exports each span synchronously before returning
@@ -953,6 +971,8 @@ exporting on the request path. `SimpleSpanProcessor` exports each span synchrono
 or testing where you want immediate span visibility. In production, always use `BatchSpanProcessor`.
 
 **Q10: How do you propagate OpenTelemetry trace context into a Celery or asyncio background task?**
+**Short:** Capture the OTel context before spawning a background task and reattach it inside the task itself.
+
 The OTel context is stored per-`asyncio.Task` via ContextVar. When you spawn a background task (via
 `asyncio.create_task`, `BackgroundTasks`, or Celery), the new execution context does not automatically
 inherit the parent's OTel context. The fix is to capture the context with `otel_context.get_current()`
@@ -961,6 +981,8 @@ the start of the task — followed by `otel_context.detach(token)` in a `finally
 OpenTelemetry provides a `CeleryInstrumentor` that handles propagation via task headers.
 
 **Q11: What alerting thresholds are industry-standard for a web API?**
+**Short:** A 5xx rate above 1% or p99 latency above 500ms over 5 minutes are typical SRE alert thresholds.
+
 SRE teams commonly use: 5xx error rate > 1% over 5 minutes as a page-level alert; p99 latency >
 500 ms over 5 minutes as a warn-level alert; p99 latency > 2 s over 2 minutes as a page-level alert.
 Availability SLO of 99.9% (43 min downtime/month) is typical for non-critical APIs; 99.95% for
@@ -968,6 +990,8 @@ customer-facing paths. These are Prometheus recording rules evaluated by Alertma
 `for: 5m` clause to prevent noise from transient spikes.
 
 **Q12: How do you prevent the `/metrics` endpoint from being publicly accessible?**
+**Short:** Serve /metrics on a separate, non-public port or restrict it to the Prometheus scraper's IP range.
+
 Bind `/metrics` to a port the public ingress does not route to, so it is reachable only from inside
 the cluster. Three common approaches: (1) serve `/metrics` on a separate port (e.g., 9090) that is
 not exposed via the public load-balancer ingress; (2) add an IP allowlist middleware that only
@@ -977,15 +1001,23 @@ and a separate `Service` of type `ClusterIP`. FastAPI supports multiple ASGI app
 `prometheus_client.start_http_server(port=9090)` call.
 
 **Q13: What does a `startupProbe` do that `livenessProbe` and `readinessProbe` do not, and when do you need one?**
+**Short:** startupProbe suspends liveness checks during a slow boot so the app isn't killed before it finishes starting.
+
 A `startupProbe` gives a slow-starting app an extended boot budget during which Kubernetes suspends `livenessProbe` checks entirely. That protects a pod still loading a large model, warming a cache, or running migrations from being killed and restarted before it ever finishes starting. Once the `startupProbe` succeeds a single time, Kubernetes stops running it and hands control over to the regular `livenessProbe` for the rest of the pod's life. Without a `startupProbe`, a tight `livenessProbe` timing tuned for steady-state operation would repeatedly kill a pod that legitimately needs 60+ seconds to boot, creating a crash-restart loop that never lets the app finish starting. Configure `failureThreshold × periodSeconds` on the `startupProbe` to comfortably exceed your worst observed cold-start time.
 
 **Q14: The case study uses `tenant_id` (about 200 values) as a Prometheus label — why is this acceptable when `user_id` (millions of values) is forbidden?**
+**Short:** tenant_id is safe as a label because its few hundred values keep cardinality small and bounded.
+
 Because cardinality cost scales with the number of *unique label value combinations*, and 200 tenants multiply a metric by only 200. That is a bounded, small, and predictable memory cost, unlike `user_id` with potentially millions of distinct values growing unboundedly over time. The general rule from Q5 still applies: keep only low-cardinality dimensions as metric labels. The distinction is that "low cardinality" is a threshold, not a ban on all identifiers — a label with a few hundred realistic, roughly-fixed values (tenant, region, environment, payment method) is a normal and useful metric dimension, while one with millions of ever-growing values is not. When in doubt, estimate the maximum realistic cardinality before adding any identifier as a label, and put anything that could grow unbounded into logs or trace attributes instead.
 
 **Q15: Why should you add a Prometheus histogram bucket that matches your SLO exactly, rather than relying on the default buckets?**
+**Short:** An explicit bucket boundary at the SLO value lets compliance queries be exact instead of interpolated.
+
 Because the client library's default buckets almost certainly have no boundary at your SLO value. `prometheus_client`'s `DEFAULT_BUCKETS` run `0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, +Inf` — with no boundary at 200 ms, any query computing "fraction of requests meeting the SLO" must linearly interpolate between the two buckets that straddle it, introducing approximation error into a number that should be exact. Adding an explicit bucket at, say, `0.2` for a 200ms SLO means `histogram_quantile` and simple bucket-ratio queries can report the SLO compliance percentage precisely, because a real bucket boundary exists exactly where the business requirement is defined. This costs a small amount of extra memory per histogram — one more bucket per label combination — but is worth it for any latency metric that feeds an SLO dashboard or alert. Define your histogram's `buckets=[...]` list explicitly rather than accepting the client library's default whenever the metric backs an SLO.
 
 **Q16: What is a Prometheus recording rule, and why does the module recommend one for `rate(http_requests_total[5m])`?**
+**Short:** A recording rule pre-computes an expensive query once so dashboards and alerts reuse the cached result.
+
 A recording rule pre-computes a PromQL expression on a schedule and stores the result as a new time series. Dashboards and alerts then query the cheap pre-computed series instead of re-running the original aggregation every time a panel refreshes. `rate(http_requests_total[5m])` computed across 50 label combinations on every 15-second dashboard refresh means Prometheus repeats that aggregation constantly across every viewer and every panel; a recording rule named `job:http_requests_total:rate5m` runs the computation once on Prometheus's own evaluation interval and everyone reads the cached result. This matters most for expressions used in multiple dashboards or in alerting rules, where redundant computation directly increases Prometheus server load. Reach for a recording rule once you notice the same non-trivial `rate()`/`histogram_quantile()` expression appearing in more than one place.
 
 ---

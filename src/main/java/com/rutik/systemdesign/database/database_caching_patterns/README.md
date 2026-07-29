@@ -721,33 +721,53 @@ Request A's read started first but is slow; Request B's update-and-delete comple
 ## 12. Interview Questions with Answers
 
 **Q: What is a cache stampede and how do you prevent it?**
+**Short:** A cache stampede is a thundering herd hitting the database when a popular key expires; a mutex lock or TTL jitter prevents it.
+
 A cache stampede (thundering herd) occurs when a popular cache entry expires and many concurrent requests simultaneously miss the cache, all query the database at once. With 10K requests/second hitting the database instead of 100 (normal non-cached load), the database saturates. Prevention strategies: (1) Mutex lock: only one request queries the database when a key is missing; others wait and retry. (2) Background refresh: detect entries nearing expiration and refresh before they expire, serving stale data to current requests. (3) TTL jitter: add random variance to TTL so bulk-loaded entries don't all expire at the same time. (4) Local L1 cache: a short-TTL in-process cache means cache misses are rare even when Redis is unavailable.
 
 **Q: When would you use write-behind caching and what are the durability risks?**
+**Short:** Write-behind risks losing every write since the last async flush if Redis crashes, so it must never hold financial or inventory data.
+
 Write-behind (write-back) caches writes in Redis and asynchronously persists them to the database. Use it when write throughput far exceeds database capacity and the data can tolerate loss — view counts, like counts, non-financial analytics counters. The durability risk: if Redis crashes before the async persist completes, all unsynced writes are lost. For a 30-second flush interval, up to 30 seconds of data is at risk. Never use write-behind for financial transactions, inventory counts that affect checkout, or any data where loss causes business or compliance issues.
 
 **Q: How do you invalidate cache entries in a microservices architecture where multiple services write to the same data?**
+**Short:** Event-driven invalidation over a message bus gives the most accurate cross-service cache invalidation among the available options.
+
 Options: (1) Event-driven invalidation: the service that owns the data publishes a change event to a message bus (Kafka); all services with cached copies subscribe and invalidate. (2) CDC-based invalidation: Debezium tails the database WAL, detects row changes, publishes invalidation events to Kafka; a cache invalidation service consumes events and deletes keys. (3) TTL-only: accept bounded staleness (e.g., 60-second TTL) and rely on TTL expiration. (4) Version-based keys: the DB version column is part of the cache key; old versions expire naturally. Event-driven is most accurate but requires reliable message delivery and idempotent consumers. TTL-only is simplest and handles most cases.
 
 **Q: Explain the difference between cache-aside and read-through caching.**
+**Short:** Cache-aside has the application manage cache population explicitly, while read-through delegates that job to the cache layer itself.
+
 Cache-aside: the application manages the cache explicitly. On a read miss, the application queries the database, then populates the cache. On a write, the application updates the database and optionally invalidates/updates the cache. The cache is populated on demand. Read-through: the cache layer transparently queries the database on a miss, returning the result and caching it. The application interacts only with the cache interface. Difference: cache-aside gives the application full control (useful for complex caching logic or non-standard data types); read-through is simpler for the application (implemented by frameworks like Spring Cache, Caffeine LoadingCache) but requires the cache layer to know how to query the database.
 
 **Q: What is the hot key problem in Redis and how do you solve it?**
+**Short:** A hot Redis key overwhelms one node regardless of cluster size; a local L1 cache or key sharding across shards fixes it.
+
 A hot key is a single Redis key receiving more traffic than a single Redis node can handle (typically > 100K ops/second). Since Redis keys are pinned to specific nodes in a cluster, one node becomes a CPU bottleneck regardless of cluster size. Solutions: (1) Local in-process cache (Caffeine with 100–500ms TTL): application checks in-process cache before Redis; reduces Redis access rate by 99% for hot keys. (2) Key sharding: replicate the hot key across N Redis keys (e.g., trending:1 through trending:10), read from a randomly chosen shard, write to all. (3) Read from Redis replicas: use `ReadFrom.REPLICA_PREFERRED` to distribute reads across primary and replicas. (4) Use Redis Cluster's read-from-replica mode.
 
 **Q: How does the write-through pattern ensure cache consistency?**
+**Short:** Write-through updates the database and cache synchronously on every write, guaranteeing freshness at the cost of slower writes.
+
 Write-through updates both the database and the cache synchronously during each write, ensuring the cache always reflects the current database state for any key that was previously cached. If the write to the database succeeds but the cache update fails, the cache entry should be explicitly deleted (fallback) to prevent stale data. The benefit: any key in the cache is guaranteed to be current as of the last write. The cost: every write pays the latency of updating both the database and cache; writes are slower than pure cache-aside (which only writes to the database). Most appropriate when cache misses are expensive and reads far outnumber writes.
 
 **Q: How do you handle cache warming after a Redis restart?**
+**Short:** Cache warming after a restart can rely on Redis persistence, a pre-warming script, or gradual lazy fill-in from normal traffic.
+
 Strategies: (1) Lazy warming: let the cache fill naturally from cache misses. Use a circuit breaker on the database to shed load while the cache warms. (2) Pre-warming script: before cutting traffic over, run a script that reads frequently accessed keys from the database and populates the cache. Identify hot keys from historical access logs. (3) Redis persistence: configure RDB or AOF so Redis restores its state from disk on restart — no warming needed for data that was cached before shutdown. (4) Blue-green cache: maintain a second Redis instance, gradually shift traffic while the new instance warms from the primary's replication stream. (5) Staggered deployment: deploy to a subset of servers, let them warm the cache, then expand.
 
 **Q: What metrics indicate caching is working and when it is degrading?**
+**Short:** A cache hit rate falling below roughly 90% is the primary sign of trouble, alongside rising evictions and memory pressure.
+
 Primary metric: cache hit rate = hits / (hits + misses). Target: ≥ 95% for frequently accessed data. Alert if it drops below 90%. Secondary metrics: (1) Cache eviction rate — high evictions (from Redis INFO: evicted_keys) indicate cache is undersized. (2) Average cache miss latency — a spike indicates the database is slow on cache misses. (3) Key TTL distribution — if most keys have very short TTL, they expire before being accessed, contributing to low hit rate. (4) Memory usage vs maxmemory — if approaching 90%, add capacity or reduce TTL. (5) Per-key access frequency (`redis-cli --hotkeys`, which requires an LFU `maxmemory-policy`) — identify hot keys for dedicated treatment.
 
 **Q: What is the stale-while-revalidate CDN pattern?**
+**Short:** stale-while-revalidate lets a CDN serve an expired copy instantly while refreshing it in the background, avoiding a latency spike.
+
 `stale-while-revalidate` is a Cache-Control directive telling the CDN to serve the expired copy immediately and fetch a fresh one in the background. The current request never waits on the origin; the next one gets the refreshed copy. This eliminates the latency spike that occurs when an entry expires and the CDN must wait for the origin server to respond before serving the request. The syntax: `Cache-Control: max-age=3600, stale-while-revalidate=60` means: fresh for 1 hour; after expiry, serve stale for up to 60 more seconds while revalidating. The user always gets a fast response; the stale-serving window is bounded to 60 seconds.
 
 **Q: How does Spring Cache abstraction simplify caching?**
+**Short:** Spring Cache's AOP annotations add declarative caching to methods, but it lacks stampede prevention and per-entry TTL control.
+
 Spring Cache (`@Cacheable`, `@CachePut`, `@CacheEvict`) provides declarative caching as an AOP-based abstraction. Annotate methods; Spring intercepts calls, checks the cache, and either returns cached results or calls the method and caches the result. The backing store (Redis, Caffeine, EhCache) is swappable via `CacheManager` configuration.
 
 ```java
@@ -769,6 +789,8 @@ public Product createProduct(CreateProductRequest req) {
 Limitation: Spring Cache does not handle distributed stampede prevention, TTL per-entry, or cache-aside logic for complex multi-key operations.
 
 **Q: What is the N+1 caching problem and how do you fix it?**
+**Short:** The N+1 caching problem is fixed by replacing N separate lookups with one MGET plus a single batched database query for the misses.
+
 The N+1 caching problem occurs when an application fetches N entity IDs and then makes N individual cache lookups (one per ID). With 100 entities, this is 100 separate Redis round trips (N×RTT). Fix: use `MGET` (Redis multi-get) to fetch all N keys in a single round trip. The cache miss handling: for missing keys, query the database in a single `WHERE id IN (...)` query (not N individual queries). Then populate all N missing keys with a pipeline of SET commands.
 
 ```java
@@ -810,9 +832,13 @@ public List<User> getUsers(List<Long> userIds) {
 ```
 
 **Q: How do you prevent cache-related security issues (cache poisoning)?**
+**Short:** Cache poisoning is prevented by never caching per-user responses under a shared key and sanitizing user input used in cache keys.
+
 Cache poisoning: a malicious user causes an incorrect response to be cached and served to other users. Prevention: (1) Never cache responses that vary per-user or include authorization — use `Cache-Control: private` or `Vary: Authorization`. (2) Validate all cache keys: if the cache key contains user input, sanitize it to prevent key collision between users. (3) Use separate cache namespaces per tenant in multi-tenant systems: key prefix = `tenant:{tenant_id}:user:{user_id}`. (4) For CDN: validate `X-Forwarded-Host` and `X-Forwarded-For` headers before using them in cache keys — these can be spoofed to poison other users' caches.
 
 **Q: How does two-level caching (L1 + L2) work?**
+**Short:** A local L1 cache answers most reads in sub-microsecond time, falling through to a shared L2 cache and only then to the database.
+
 L1 (local in-process cache, e.g., Caffeine) is checked first. L2 (shared distributed cache, e.g., Redis) is checked on L1 miss. Database is queried only on L2 miss.
 
 ```mermaid
@@ -844,15 +870,23 @@ L1 is an in-process hash lookup and returns in well under a microsecond — thre
 L1 caches ultra-hot data locally, reducing Redis network traffic by 90%+ for the hottest keys. Tradeoff: L1 entries on different application instances may be stale relative to each other for up to the L1 TTL. On L2 invalidation (explicit delete), L1 entries continue serving stale data until their own TTL expires. Acceptable for configuration data and slowly changing reference data; not acceptable for user-facing profile data that must reflect writes quickly.
 
 **Q: What causes the cache invalidation race condition where a stale read repopulates the cache after a delete?**
+**Short:** A slow read that outlasts a concurrent write can repopulate the cache with stale data right after the write's own delete.
+
 A slow read that started before a write can finish after the write's cache delete, so it repopulates the cache with the old value and leaves it stale until the next TTL expiry. Request A begins reading the database while it's still slow to respond; meanwhile Request B updates the database and deletes the cache key; Request A's read then finally completes and writes the pre-update value back into what is now an empty cache slot, and nothing triggers another invalidation until TTL. Fix: use `SET NX` so the repopulating write only succeeds if the key is still absent, or use version-based keys so a stale write targets a version that's already obsolete and never gets read back.
 
 **Q: In cache-aside, should you delete the cache key before or after the database write?**
+**Short:** The cache key should be deleted after the database write, never before, since deleting first widens the stale-read window.
+
 Delete after the database write, never before, because the write is the event that makes the cached value wrong. Deleting first invalidates a value that is still correct and leaves a window in which a concurrent reader misses, reads the pre-update row, and re-caches it — stale until TTL. Deleting after narrows the exposure to one residual race: a read whose database query started before the write can still finish after the delete and repopulate with the old value. Close that with a delayed second delete ("double delete") sized to the longest plausible read-plus-repopulate, plus replication lag if the read path uses a replica; enqueue the second delete durably rather than sleeping in the request thread, so a crash between the two deletes cannot strand the stale entry. Version-based cache keys avoid the whole ordering question, because a stale writer populates a key nobody will look up again.
 
 **Q: What is write-around caching and when should you use it?**
+**Short:** Write-around sends writes straight to the database and skips the cache, trading a first-read miss for never caching unread data.
+
 Write-around sends writes straight to the database and bypasses the cache entirely, so a key is only populated later by a normal read (cache-aside style) rather than at write time. This differs from write-through, which populates the cache immediately on every write — write-around deliberately avoids caching data that may never be read again, which suits write-heavy, rarely-re-read data such as bulk imports, audit logs, or write-once event records. The tradeoff is that the very first read after a write is always a cache miss, a cold read that pays full database latency, which makes write-around a poor fit for data that's read immediately after being written. Use write-around for write-heavy data with low read-after-write likelihood, and pair it with cache-aside to handle the read path.
 
 **Q: What is negative caching and why does it need a shorter TTL than a normal cache entry?**
+**Short:** Negative caching stores lookup misses to stop repeated retries hitting the database, but needs a far shorter TTL than positive entries.
+
 Negative caching stores the fact that a lookup found nothing — a `null` or a sentinel value for a missing user ID or a 404 response — so repeated requests for that same absent key stop reaching the database. Without it, a client retrying a bad ID, or an attacker enumerating IDs that don't exist, sends every single request straight through to the database because a cache-aside layer only populates on a hit; caching the miss itself closes that gap. The catch is that negative entries need a much shorter TTL than positive ones — 30-60 seconds rather than the 10+ minutes typical for real data — because the underlying row can be created moments later, and a long-lived negative entry would then mask genuinely new data as still-missing. Apply negative caching to any high-cardinality lookup key exposed to retries or scans, and keep its TTL an order of magnitude shorter than the positive-entry TTL for the same cache.
 
 ---

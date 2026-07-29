@@ -900,60 +900,79 @@ Returning 401 (Unauthenticated) when the user is authenticated but lacks permiss
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between authentication and authorization?**
+**Short:** Authentication verifies who you are; authorization checks what the authenticated identity is allowed to do.
 Authentication answers "who are you?" — it verifies identity by validating a credential (password, token, certificate). Authorization answers "what can you do?" — it checks whether the authenticated principal has permission to perform a specific action. In FastAPI, `get_current_user` handles authentication; scope checks or role checks handle authorization. Never conflate them in a single dependency.
 
 **Q2: Why use JWTs instead of opaque tokens?**
+**Short:** JWTs are self-contained so verification needs no database round trip, unlike opaque tokens which require a store lookup.
 JWTs are self-contained: the payload carries the user ID, expiry, and scopes, so the verifier needs only the public key or shared secret — no database round-trip per request. Opaque tokens require a lookup against a token store on every request. JWTs are preferred for stateless microservices and high-throughput APIs. The trade-off is revocation: you cannot revoke a JWT without a blocklist, whereas opaque tokens can simply be deleted from the store.
 
 **Q3: What claims should a production access token always include?**
+**Short:** A production access token should always carry sub, exp, iat, and jti, and never embed passwords or raw PII.
 At minimum: `sub` (subject, the user identifier), `exp` (expiry as Unix timestamp), `iat` (issued-at, for detecting replayed tokens), and `jti` (unique token ID, for blacklisting). Optionally `scopes` (a list of granted permissions). Never embed passwords, raw emails, or other PII — JWT payloads are base64-encoded but not encrypted, visible to anyone who intercepts the token.
 
 **Q4: Why is OWASP's bcrypt floor of work factor 10 a floor rather than a target?**
+**Short:** The cost-10 floor is a minimum that must be re-tuned upward as CPUs get faster, not a target to stop at.
 Because the cost factor is an exponent that must be re-tuned as CPUs get faster, and 10 is only the point below which bcrypt stops being defensible. Measured on a current server core, cost 10 is roughly 60 ms per verification while cost 12 is roughly 200–250 ms — so the same "minimum" that cost real time in 2015 is now cheap for an attacker. OWASP's rule is to raise the factor until verification latency reaches the highest budget your login path can absorb; Python's `bcrypt` already defaults `gensalt()` to 12. Even so, bcrypt is CPU-hard only, so a well-funded attacker parallelises it across GPUs; argon2id is memory-hard as well and is the primary OWASP recommendation for new systems, at m=19456 KiB, t=2, p=1 or above.
 
 **Q5: Explain refresh token rotation and why it detects token theft.**
+**Short:** Refresh token rotation invalidates the old token on each use, so a stolen token's reuse creates a detectable mismatch.
 On each use of a refresh token, the server deletes the old token and issues a new one. If an attacker steals the refresh token and uses it first, the server invalidates it. When the legitimate client later presents the (now invalid) token, the mismatch signals a potential theft — the server should revoke the entire token family (all refresh tokens for that user). This is the "refresh token rotation with reuse detection" pattern. Without rotation, a stolen refresh token grants indefinite access.
 
 **Q6: What is the `alg: none` JWT attack and how does PyJWT 2.x prevent it?**
+**Short:** PyJWT 2.x blocks the alg:none attack by requiring an explicit algorithms allowlist and rejecting mismatched algorithms.
 An attacker strips the JWT signature, sets `"alg": "none"` in the header, and sends it. JWT libraries that do not enforce an algorithm allowlist may accept the unsigned token as valid. PyJWT 2.x closes this two ways: omitting `algorithms` raises `DecodeError` ("It is required that you pass in a value for the 'algorithms' argument"), and presenting an `alg: none` token against `algorithms=["HS256"]` raises `InvalidAlgorithmError`. Always pass `algorithms=["HS256"]` (or `["RS256"]` for asymmetric). Never pass `algorithms=jwt.algorithms.get_default_algorithms()` unless you fully understand what it includes.
 
 **Q7: When should you use RS256 instead of HS256?**
+**Short:** Use RS256 when multiple services must verify tokens without holding the signing secret, and HS256 only within a single trusted service.
 Use RS256 when multiple independent services need to verify tokens, or when tokens are consumed by third parties. With RS256, the private key stays on the auth server; services fetch the public key from a JWKS endpoint. A compromised microservice cannot forge tokens because it only has the public key. Use HS256 for single-service applications where the secret can be kept on one server. Never share HS256 secrets across untrusted boundaries.
 
 **Q8: What is `SecurityScopes` and why use it over a plain `Depends`?**
+**Short:** SecurityScopes lets one get_current_user dependency enforce different per-route scopes and emit correct WWW-Authenticate headers.
 `SecurityScopes` is a FastAPI-specific class injected into dependencies declared via `Security()`. It carries the list of scopes required by the current route, allowing a single `get_current_user` function to handle different permission requirements across routes without duplicating the function. It also generates correct `WWW-Authenticate` response headers listing required scopes, which is part of the RFC 6750 Bearer token spec. A plain `Depends` cannot carry this route-specific scope metadata.
 
 **Q9: How would you implement explicit logout for a JWT-based API?**
+**Short:** Explicit JWT logout blacklists the token's jti in Redis with a TTL matching its remaining expiry.
 Add a `jti` (JWT ID) claim — a UUID — to every issued access token. On logout, compute the remaining TTL from the `exp` claim and store the `jti` in Redis with that TTL as the key expiry. On every authenticated request, check whether the `jti` exists in the Redis blacklist before completing auth. The Redis key auto-expires when the token would have expired naturally, so the blocklist does not grow unboundedly. Logout also revokes the refresh token by deleting it from the refresh token store.
 
 **Q10: What is the difference between `OAuth2PasswordBearer` and `HTTPBearer`?**
+**Short:** OAuth2PasswordBearer renders an interactive login form in /docs, while HTTPBearer just extracts a raw bearer token.
 Both extract a Bearer token from the `Authorization` header. `OAuth2PasswordBearer` declares an OAuth2 password flow in the OpenAPI spec, which renders a username/password form in `/docs`. `HTTPBearer` is a simpler scheme that just extracts the token and declares a generic HTTP Bearer scheme in OpenAPI — it shows a raw token field in `/docs`. Use `OAuth2PasswordBearer` when you want the interactive `/docs` login form. Use `HTTPBearer` for API key or custom token schemes where the token acquisition flow is external.
 
 **Q11: How do you store API keys securely?**
+**Short:** Store only a SHA-256 hash of an API key and compare incoming keys with a constant-time comparison.
 Never store the raw API key. On issuance, return the raw key to the user once (it will not be shown again — like GitHub personal access tokens). Immediately compute and store `SHA-256(raw_key)`. On each request, compute `SHA-256(incoming_key)` and compare against stored hashes. Use a constant-time comparison (`hmac.compare_digest`) to prevent timing attacks. For rotation: issue a new key, allow a grace period where both are valid, then revoke the old one.
 
 **Q12: Explain the CSRF risk with cookie-based auth and how to mitigate it.**
+**Short:** Cookie-based auth is vulnerable to CSRF because browsers auto-attach cookies; mitigate with SameSite cookies or a double-submit token.
 When using `HttpOnly` cookies for session IDs or refresh tokens, the browser automatically attaches the cookie to same-origin and cross-origin requests. A malicious site can craft a form that submits to your API — the browser includes the cookie, so the request appears authenticated. Mitigation: set `SameSite=Strict` (or `Lax` for OAuth flows requiring redirects). For APIs consumed by SPAs on different origins, use the double-submit cookie pattern: the server sets a non-HttpOnly CSRF token cookie; the client reads it via JavaScript and sends it in a header; the server validates header matches cookie. CSRF does not apply to JWT-in-Authorization-header flows because browsers do not auto-attach custom headers.
 
 **Q13: What is PKCE and when is it required?**
+**Short:** PKCE prevents authorization-code interception for public clients that can't hold a secret, and is mandatory for SPAs and mobile apps.
 PKCE (Proof Key for Code Exchange, RFC 7636) prevents authorization code interception attacks in public clients (SPAs, mobile apps) that cannot safely store a client secret. The client generates a random `code_verifier`, computes `code_challenge = SHA-256(code_verifier)`, and sends the challenge with the authorization request. When exchanging the code for tokens, the client sends the raw `code_verifier`; the server verifies the hash matches. An attacker who intercepts the code cannot exchange it without the verifier. PKCE is mandatory for SPAs and mobile apps per OAuth 2.1 draft.
 
 **Q14: How does OIDC differ from plain OAuth2?**
+**Short:** OAuth2 issues access tokens for API authorization, while OIDC adds an id_token carrying verified user identity claims.
 OAuth2 is an authorization framework — it issues access tokens that say "you may call this API." It does not define how to get user identity. OIDC (OpenID Connect) is a thin identity layer on top of OAuth2: the token response includes an `id_token` (JWT) containing user claims (`sub`, `email`, `name`, `picture`). Your app verifies the `id_token` signature using the provider's public key from its JWKS endpoint. OIDC also standardizes the discovery endpoint (`/.well-known/openid-configuration`) so you can fetch all configuration automatically.
 
 **Q15: Why should you use `SecretStr` from pydantic for secrets?**
+**Short:** SecretStr masks a secret's value in str() and repr(), preventing accidental exposure in logs or serialized output.
 `SecretStr` stores the underlying string value but masks it in both `str()` (which returns `**********`) and `repr()` (which returns `SecretStr('**********')`). This means that if a `Settings` object is accidentally logged, printed in a traceback, or serialized to JSON, the secret value is never exposed. The raw value is only accessible via `.get_secret_value()`, which forces an explicit intent to use the secret. This provides a thin but effective defence-in-depth layer against accidental secret leakage in logs.
 
 **Q16: What are the security implications of long-lived JWTs?**
+**Short:** Long-lived JWTs widen a stolen token's exposure window; short-lived tokens with refresh rotation limit it to minutes.
 A stolen JWT with a 24-hour or 7-day expiry gives an attacker a large window of access. If you use short-lived access tokens (15 min) with refresh token rotation, the maximum exposure window for a stolen access token is 15 minutes. The attacker cannot silently extend access via the refresh endpoint because they do not have the refresh token (or if they do, rotation detects reuse). Long-lived JWTs are never appropriate for user-facing APIs. Use them only for inter-service calls where the services are in the same trust boundary.
 
 **Q17: How do you migrate a password store from bcrypt to argon2id without logging anyone out?**
+**Short:** Migrate hashes on successful login by calling verify_and_update and persisting the returned rehash whenever it is not None.
 Rehash on successful login, using a hasher list whose first entry is the new algorithm. In `pwdlib`, construct `PasswordHash((Argon2Hasher(), BcryptHasher()))` — the first hasher is the one used for new hashes, and the rest are kept only so old hashes still verify. Then call `verify_and_update(plain, stored)` instead of `verify()`: it returns a `(valid, new_hash)` tuple where `new_hash` is a fresh argon2id hash when the stored one used a legacy hasher, and `None` when the stored hash is already current. Persist `new_hash` whenever it is not `None`, and the store converts itself one login at a time. Note the split: `verify()` returns a plain bool, so a migration that calls it will silently never upgrade anything.
 
 **Q18: How do you prevent JWT secret leakage via error messages?**
+**Short:** Keep JWT error responses generic and log detailed decode failure reasons only server-side, never in the response body.
 Never include token decoding details in HTTP error responses. The response body should be generic (`"detail": "Could not validate credentials"`) regardless of whether the failure was an expired token, wrong signature, or missing claim. Detailed JWT errors belong in server-side structured logs at DEBUG level — and even then, log the failure reason (e.g., `"jwt_error": "ExpiredSignatureError"`) without logging the raw token. Include a correlation ID in the response so operators can trace the specific request in logs if needed.
 
 **Q19: What is token family tracking and why does it matter for refresh tokens?**
+**Short:** Token family tracking revokes every refresh token from a login session at once when reuse of any one of them is detected.
 Token family tracking groups all refresh tokens issued in a single login session under a family ID. When a refresh token is presented that has already been used (indicating potential theft), the server invalidates the entire family — all refresh tokens from that login session. Without family tracking, an attacker who steals a refresh token can keep rotating it independently of the legitimate client. With family tracking, the first detected reuse triggers a full session revocation, forcing the legitimate user to log in again. Implement by storing a `family_id` with each refresh token in Redis and using a Lua script to atomically check-and-revoke.
 
 ---

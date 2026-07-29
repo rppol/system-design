@@ -1029,6 +1029,8 @@ async def lifespan(app: FastAPI):
 ## 12. Interview Questions with Answers
 
 **Q1: Why is creating `httpx.AsyncClient()` inside a route handler a production bug, even if it seems to work in tests?**
+**Short:** It creates a fresh, cold connection pool per request, causing handshake overhead and FD exhaustion.
+
 Each instantiation creates a new connection pool with zero pre-warmed connections. At 100 rps,
 every request incurs a full TCP + TLS handshake (~5-20ms) instead of reusing a keep-alive
 connection (~0.1ms). At 200 rps the file descriptor limit (1024 by default) is exhausted —
@@ -1036,6 +1038,8 @@ connection (~0.1ms). At 200 rps the file descriptor limit (1024 by default) is e
 creating one shared client in the FastAPI `lifespan` context manager.
 
 **Q2: What are the four timeout types in `httpx.Timeout` and what does each guard against?**
+**Short:** httpx.Timeout has connect, read, write, and pool timeouts, each guarding a different wait.
+
 `connect` (default 5s) guards the TCP handshake and TLS negotiation. `read` (default 5s) guards
 the time waiting for the server to send a response body. `write` guards the time sending the
 request body (important for large uploads). `pool` guards the time waiting to acquire a free
@@ -1043,6 +1047,8 @@ connection from the pool when all `max_connections` slots are occupied. Omitting
 indefinite blocking when the pool is saturated.
 
 **Q3: What is the difference between `max_connections` and `max_keepalive_connections` in `httpx.Limits`?**
+**Short:** max_connections caps total open sockets; max_keepalive_connections caps idle sockets kept for reuse.
+
 `max_connections` is the hard cap on total open sockets to all hosts combined. `max_keepalive_connections`
 is the number of idle (keep-alive) connections held in the pool waiting for reuse. Once a request
 completes, the socket is returned to the keep-alive pool up to this limit; excess sockets are closed.
@@ -1050,6 +1056,8 @@ Setting `max_keepalive_connections=20` with `max_connections=100` means up to 10
 requests but only 20 idle sockets held open between requests.
 
 **Q4: Which HTTP status codes should trigger a retry and which should not?**
+**Short:** Retry on 500, 502, 503, 504, connection errors, and 429; never retry other 4xx client errors.
+
 Retry on: 500 (internal server error — transient), 502 (bad gateway — upstream restarting),
 503 (service unavailable — overloaded or deploying), 504 (gateway timeout — upstream slow),
 connection errors (`ConnectError`, `ReadTimeout`), and 429 (rate limited — but honour
@@ -1058,6 +1066,8 @@ connection errors (`ConnectError`, `ReadTimeout`), and 429 (rate limited — but
 that will not succeed on retry.
 
 **Q5: Explain the three states of a circuit breaker and the transition conditions.**
+**Short:** A circuit breaker cycles through CLOSED, OPEN, and HALF-OPEN states based on failure thresholds.
+
 CLOSED (normal operation): all calls pass through, failures are counted. If failures reach the
 threshold (e.g., 5 in a row), transition to OPEN. OPEN (fail fast): all calls are rejected
 immediately without touching the downstream. After `recovery_timeout` seconds, transition to
@@ -1067,6 +1077,8 @@ that OPEN protects your service's coroutine pool from being consumed by requests
 time out.
 
 **Q6: How do you handle `Retry-After` headers for 429 responses in an async retry loop?**
+**Short:** Parse Retry-After as seconds or an HTTP-date, cap the wait, then sleep before retrying on 429.
+
 Read `response.headers.get("Retry-After")`. The value is either a number of seconds
 (`"120"`) or an HTTP-date string. Parse it, compute the sleep duration (cap it to your maximum
 wait, e.g., 300s), and `await asyncio.sleep(duration)` before retrying. If the header is absent,
@@ -1074,6 +1086,8 @@ fall back to your standard exponential backoff. Do not retry more than 2-3 times
 `Retry-After` specifies 3600s, fail the request rather than blocking a coroutine for an hour.
 
 **Q7: What is full jitter and why is it preferred over a plain exponential backoff?**
+**Short:** Full jitter randomizes each retry delay within the backoff window to avoid thundering-herd spikes.
+
 Plain exponential backoff: `sleep(2 ** attempt)`. All clients that fail at the same instant
 retry at the same intervals, creating a synchronised retry wave that may overwhelm a partially
 recovered downstream (thundering herd). Full jitter: `sleep(random.uniform(0, min(cap, 2 ** attempt)))`.
@@ -1082,6 +1096,8 @@ At 1000 clients retrying attempt=3 (cap=8s), plain backoff generates a spike at 
 spreads those 1000 retries uniformly across [0, 8s].
 
 **Q8: How do you test retry logic and timeout handling without a real server?**
+**Short:** Use respx or httpx.MockTransport to simulate failures and successes without any real network I/O.
+
 Use `respx` for `httpx`. With `respx.mock` as a context manager, register routes with
 `respx.get(url).mock(side_effect=[httpx.ConnectError(), httpx.Response(200)])` to simulate
 a failure on attempt 1 and success on attempt 2. Verify that the retry function called the URL
@@ -1090,6 +1106,8 @@ exactly twice and returned the correct response. For timeout simulation, use
 This approach tests retry, backoff calculation, and circuit breaker state without any I/O.
 
 **Q9: Why must HMAC webhook verification use `hmac.compare_digest` instead of `==`?**
+**Short:** hmac.compare_digest runs in constant time, preventing timing attacks that plain == comparison allows.
+
 String comparison with `==` in Python is short-circuit: it returns `False` as soon as the first
 mismatching byte is found. The time taken is proportional to the length of the common prefix.
 An attacker can measure response latency to determine how many leading bytes of their forged
@@ -1098,6 +1116,8 @@ signature match the expected value, enabling a timing attack to reconstruct the 
 mismatch occurs, preventing timing side-channel attacks.
 
 **Q10: When would you choose aiohttp over httpx for a new service?**
+**Short:** Choose aiohttp over httpx once profiling shows it is the bottleneck above 200 concurrent connections.
+
 Choose `aiohttp` when profiling shows HTTP client throughput is the bottleneck at >200 concurrent
 outbound connections per process. `aiohttp` has ~10-15% lower per-request overhead because it
 avoids `httpx`'s HTTP/2 negotiation path and has a more direct integration with the event loop's
@@ -1107,6 +1127,8 @@ outbound calls), `httpx` is preferable because of its sync+async API parity, HTT
 and first-class FastAPI/Starlette integration.
 
 **Q11: How does HTTP/2 multiplexing change connection pool sizing compared to HTTP/1.1?**
+**Short:** HTTP/2 multiplexes many streams per connection, letting max_connections shrink for equal concurrency.
+
 HTTP/1.1 supports one in-flight request per connection; to achieve 100 concurrent requests you
 need 100 connections. HTTP/2 multiplexes many streams over a single TCP connection; one connection
 can carry hundreds of concurrent requests. With `httpx` and HTTP/2 enabled, you can reduce
@@ -1116,6 +1138,8 @@ event on that single connection stalls all multiplexed streams simultaneously (h
 at the TCP layer, which HTTP/3/QUIC addresses with per-stream loss recovery).
 
 **Q12: What is the risk of calling `asyncio.create_task` inside a webhook handler and how do you mitigate it?**
+**Short:** An untracked create_task can silently swallow exceptions and vanish if the process shuts down mid-run.
+
 `asyncio.create_task` schedules background work but does not track the task. If the task raises
 an unhandled exception, it is silently discarded unless a `done_callback` or `asyncio.gather`
 captures it. The task also disappears if the process shuts down mid-execution. Mitigations: (1)
@@ -1125,6 +1149,8 @@ persistent queue (Redis, Kafka) and process with a worker that acknowledges only
 This survives process restarts.
 
 **Q13: Why does `httpx.Auth` require both a sync `auth_flow` and an `async_auth_flow` generator method?**
+**Short:** async_auth_flow is the only place an async token refresh can legally await inside httpx's Auth flow.
+
 httpx's sync `auth_flow` cannot express an async token refresh: an `await` there is a
 `SyntaxError`, not a silently-skipped no-op, since Python forbids `await` in a non-async
 generator. `httpx.AsyncClient` and the sync `httpx.Client` share the same `Auth`
@@ -1137,6 +1163,8 @@ explicitly whenever the client is async and the token refresh itself is a networ
 that needs to be awaited.
 
 **Q14: Why does the webhook fix reject events whose timestamp is more than 300 seconds old, even though the HMAC signature is valid?**
+**Short:** A timestamp window stops an attacker from replaying a captured, still-validly-signed webhook forever.
+
 A valid signature alone only proves the payload was not tampered with, not that it is being seen
 for the first time. An attacker who captures one legitimate webhook request can replay the exact
 same bytes indefinitely, and since the signature was computed over that unchanged payload it still
@@ -1145,6 +1173,8 @@ anything outside a 300-second window means a captured request becomes unusable a
 bounding the attacker's replay window without requiring server-side request-id tracking.
 
 **Q15: Why does creating `aiohttp.ClientSession()` at module import time raise `RuntimeError: no running event loop`?**
+**Short:** ClientSession binds to the running event loop at construction, and no loop exists yet at import time.
+
 `aiohttp.ClientSession` binds internal resources to the currently running asyncio event loop at
 construction time, and no event loop exists yet during module import. Uvicorn only starts the
 event loop once the ASGI server begins running the application, which happens after all modules
@@ -1152,6 +1182,8 @@ have already been imported. Create the session inside the `lifespan` context man
 event loop is guaranteed to be running, and store it on `app.state` for handlers to reuse.
 
 **Q16: When does `tenacity` provide a clearer win over a hand-rolled retry loop?**
+**Short:** Tenacity pays off once several call sites need the same declarative, composable retry policy.
+
 `tenacity` earns its dependency once retry policy needs to be composed declaratively across
 several call sites rather than duplicated by hand in each one. Its `@retry(stop=..., wait=...)`
 decorator combines stop conditions, wait strategies, and exception filters in one line, exposes

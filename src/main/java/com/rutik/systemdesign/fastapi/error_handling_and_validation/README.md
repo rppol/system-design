@@ -963,6 +963,7 @@ status.HTTP_503_SERVICE_UNAVAILABLE   # 503
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `HTTPException` and a custom domain exception in FastAPI?**
+**Short:** HTTPException converts directly to a response, while a custom domain exception needs a registered handler to translate it at the boundary.
 `HTTPException` is a subclass of Starlette's `HTTPException` that FastAPI's built-in handler
 converts directly to an HTTP response, carrying `status_code`, `detail`, and `headers`. A custom domain exception is
 a plain Python `Exception` subclass with no HTTP knowledge; you register an `@app.exception_handler`
@@ -971,6 +972,7 @@ thin route handlers; use custom exceptions when you have a service layer that mu
 without HTTP.
 
 **Q2: In what order does Starlette execute exception handlers?**
+**Short:** Starlette dispatches exception handlers by walking the raised exception's MRO, not by the order handlers were registered.
 Starlette resolves handlers by walking the MRO of the raised exception class, not by
 registration order. If `UserNotFoundError` subclasses `AppError` and both have registered
 handlers, the `UserNotFoundError` handler fires because it appears first in the MRO — whichever
@@ -979,6 +981,7 @@ registration order matters only when you register two handlers for the *same* ty
 last `add_exception_handler` call overwrites the previous one.
 
 **Q3: What does a Pydantic v2 `RequestValidationError` look like and how do you reshape it?**
+**Short:** Each RequestValidationError entry carries type, loc, msg, input, and ctx, with Pydantic's url field already stripped by FastAPI.
 Each error in `exc.errors()` is a dict with `type`, `loc` (a path tuple starting with `"body"`,
 `"query"`, etc.), `msg`, `input`, and — for constrained types — `ctx`; FastAPI strips Pydantic's
 `url` by calling `errors(include_url=False)`. Override the handler with
@@ -987,6 +990,7 @@ want, and return a `JSONResponse` with your own envelope. Always keep `loc` info
 know which field failed.
 
 **Q4: What is RFC 9457 and when should you use it?**
+**Short:** RFC 9457 Problem Details defines a standard JSON error shape with type, title, status, detail, and instance fields.
 RFC 9457, Problem Details for HTTP APIs, is the current standard JSON shape for HTTP error
 bodies. It defines five members, all optional: `type` (URI reference
 identifying the problem type, defaulting to `about:blank`), `title` (short summary), `status`
@@ -997,6 +1001,7 @@ client SDKs — can parse errors without custom documentation. Serve it with
 `Content-Type: application/problem+json`.
 
 **Q5: Why is it an anti-pattern to raise `HTTPException` inside a service class?**
+**Short:** Raising HTTPException inside a service class couples it to HTTP, making it untestable and unreusable outside an ASGI app.
 The service layer becomes coupled to HTTP semantics: it can no longer be instantiated and called
 in a unit test without a running ASGI app. It cannot be reused in CLI commands, Celery tasks, or
 WebSocket handlers that may have different error-mapping requirements. The fix is to raise typed
@@ -1004,6 +1009,7 @@ domain exceptions in the service and register exception handlers on the `FastAPI
 them to HTTP responses at the boundary.
 
 **Q6: How do middleware and exception handlers interact in Starlette?**
+**Short:** Exception handlers sit inside the router and convert exceptions to responses before middleware ever sees them.
 Exception handlers are registered inside the router (inner ASGI app). Middleware wraps the router.
 If an exception handler converts an exception to a `JSONResponse`, the middleware sees a normal
 response and does not see the exception. If all exception handlers re-raise or no handler matches,
@@ -1012,6 +1018,7 @@ response and does not see the exception. If all exception handlers re-raise or n
 unhandled exceptions — which is why you must log inside it.
 
 **Q7: What is the difference between `@field_validator` and `@model_validator` in Pydantic v2?**
+**Short:** field_validator checks one field in isolation, while model_validator(mode="after") runs on the full parsed model for cross-field rules.
 `@field_validator` validates a single field in isolation; it receives only that field's value.
 `@model_validator(mode="after")` validates after all fields are parsed, receiving the entire model
 instance — use it for cross-field constraints (e.g. `end_date > start_date`). Field validators
@@ -1019,6 +1026,7 @@ run first; if multiple fields fail, all errors are collected before model valida
 `@model_validator(mode="before")` receives the raw input dict before any field parsing.
 
 **Q8: When does FastAPI return 422 vs 400?**
+**Short:** FastAPI returns 422 automatically for Pydantic validation failures, while 400 must be raised explicitly for semantic errors.
 FastAPI returns 422 Unprocessable Entity automatically when Pydantic fails to parse or validate
 the request (missing fields, wrong types, constraint violations). 400 Bad Request must be raised
 explicitly with `HTTPException(status_code=400, ...)` or your own domain exception; it is
@@ -1026,12 +1034,14 @@ appropriate for semantic errors that Pydantic cannot catch — for example, a di
 syntactically valid but has already been used.
 
 **Q9: How do you add a custom header to all error responses?**
+**Short:** Add a custom header to an error response by passing headers directly to JSONResponse inside the exception handler.
 In your exception handler, pass `headers` to `JSONResponse`:
 `JSONResponse(status_code=404, content={...}, headers={"X-Request-ID": request.state.request_id})`.
 For global headers across all errors, use middleware that intercepts the response and adds headers,
 or override each handler.
 
 **Q10: How do you document error responses in FastAPI's OpenAPI schema?**
+**Short:** Document error responses by declaring them in the responses argument of the path operation decorator, each with a Pydantic model.
 Declare them in the `responses` argument of the path operation decorator.
 ```python
 @router.get(
@@ -1046,6 +1056,7 @@ FastAPI merges these with the auto-generated 200/422 entries. `model` must be a 
 so FastAPI can generate the JSON schema for the response body.
 
 **Q11: How do you test exception handlers in FastAPI?**
+**Short:** Test exception handlers by asserting both the TestClient response's status code and its error body shape.
 Drive the app with `TestClient` and assert on both `response.status_code` and the error body.
 ```python
 from fastapi.testclient import TestClient
@@ -1060,6 +1071,7 @@ To test service-layer errors independently, unit-test the service with `pytest.r
 This is only possible if the service does not raise `HTTPException`.
 
 **Q12: What happens if you raise a `pydantic.ValidationError` (not `RequestValidationError`) inside a route handler?**
+**Short:** A raw pydantic.ValidationError raised inside a handler isn't caught by FastAPI's 422 handler and becomes an unhandled 500.
 `pydantic.ValidationError` is not the same class as `fastapi.exceptions.RequestValidationError`.
 If raised inside a route handler (e.g., when manually constructing a Pydantic model for a
 response), it will not be caught by FastAPI's default 422 handler and will propagate as an
@@ -1068,15 +1080,19 @@ and convert it to an `HTTPException`, or register a separate
 `@app.exception_handler(pydantic.ValidationError)` handler.
 
 **Q13: What is the difference between returning `502 Bad Gateway` and `503 Service Unavailable` for a downstream failure?**
+**Short:** 502 means a downstream response was reached but unusable, while 503 means the service deliberately rejected the request due to capacity.
 `502 Bad Gateway` means your service reached the downstream dependency but received an invalid or unusable response from it — a malformed body, a connection reset mid-response, or an unexpected protocol error. `503 Service Unavailable` means your service determined the downstream dependency (or your own service) is currently overloaded or intentionally not ready to handle the request, such as a circuit breaker that is open or a connection pool that is exhausted. Choosing correctly matters for client retry logic: `503` conventionally pairs with a `Retry-After` header telling the client when to try again, while `502` signals a protocol-level problem that a naive retry might repeat immediately. Raise `HTTPException(status_code=502, ...)` when a call to an upstream service fails or returns garbage, and `503` when you deliberately reject the request due to your own capacity limits.
 
 **Q14: In the multi-tenant case study, why does `QuotaExceededError` get its own exception handler when the generic `AppError` handler would already catch it via MRO?**
+**Short:** QuotaExceededError needs its own handler so it can attach a Retry-After header, something the generic AppError shape can't express.
 Because a 429 needs a `Retry-After` header that the generic handler cannot produce. `QuotaExceededError` inherits from `AppError`, so without a dedicated handler Starlette's MRO-based dispatch routes it to the generic `AppError` handler, which yields a correct status code and envelope but no `Retry-After`. Registering a separate `@app.exception_handler(QuotaExceededError)` lets that specific handler read `exc.retry_after_seconds` and attach `headers={"Retry-After": ...}` to the response, something the generic handler's uniform shape cannot express without special-casing every subclass. This illustrates the general rule from Q2: register the base class handler for the common case, and add subclass-specific handlers only when a particular error type needs response shaping the generic handler cannot provide. The base `AppError` handler still exists as a safety net for any future subclass that does not need special treatment.
 
 **Q15: Which field of a Pydantic v2 validation error should you strip before returning it to API clients, and why?**
+**Short:** Strip the input field, since a missing top-level field's error echoes the entire submitted request body back to the client.
 Strip `input` — it echoes the client's own submitted value straight back into the response body. For a `missing` error on a top-level field there is no single failing value to point at, so `input` is set to the *entire* object that was submitted; a rejected signup therefore returns the plaintext password in a 422, and that body is then captured by every access log, error tracker and APM that records response payloads. Section 6.4 shows the fix: filter `{k: v for k, v in err.items() if k != "input"}` inside the `RequestValidationError` handler, keeping `type`, `loc`, `msg` and `ctx` — the fields a client actually needs to fix its request. Note that Pydantic's `url` field is *already* gone by this point: FastAPI builds `RequestValidationError` from `exc.errors(include_url=False)`, so there is nothing left to strip there.
 
 **Q16: Why is `HTTPException(detail=str(db_exc))` dangerous, and what should replace it?**
+**Short:** HTTPException(detail=str(db_exc)) leaks internal details like SQL or hostnames; return a generic message and log the full error server-side.
 It leaks internal implementation detail to API clients: SQL fragments, stack trace text, internal hostnames, or file paths. `str(db_exc)` on a database driver exception often includes exactly that information by design, for the benefit of a developer reading server logs, not an external caller. The fix is to return a generic, stable message in the client-facing `detail` (or your error envelope's `message` field) while logging the full exception server-side with `exc_info=True`, where only your own team can see it. This split — generic message to the client, full detail to the logs — is the same principle behind the case study's `backstop_handler`, which always responds with "An unexpected error occurred" regardless of what actually broke. Treat every 5xx exception message as a potential information-disclosure vector before it ever reaches `JSONResponse`.
 
 ---

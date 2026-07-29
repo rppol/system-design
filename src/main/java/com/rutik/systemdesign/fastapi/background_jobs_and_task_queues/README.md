@@ -927,6 +927,7 @@ Slack notification.
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `BackgroundTasks` and a durable task queue like Celery or ARQ?**
+**Short:** BackgroundTasks runs in-process with no persistence, so a worker restart silently drops queued work a durable broker would keep.
 `BackgroundTasks` runs after the response in the same process with no persistence — a worker
 restart silently drops any queued tasks. Durable queues (Celery, ARQ) persist the task
 message in an external broker (Redis, RabbitMQ); workers in separate processes consume
@@ -934,6 +935,7 @@ independently, so crashes do not lose work. Use `BackgroundTasks` only for truly
 non-critical fire-and-forget work where occasional drops are explicitly acceptable.
 
 **Q2: What is at-least-once delivery and why does it require idempotent tasks?**
+**Short:** At-least-once delivery can redeliver a task more than once, so tasks must be idempotent to avoid duplicate side effects.
 At-least-once delivery means the broker guarantees a task message will be delivered to a
 worker *at least* once, but may deliver it multiple times on retry after a crash or timeout.
 If a task is not idempotent — meaning running it twice produces a different outcome than
@@ -942,6 +944,7 @@ Idempotency (using a stable key such as `order-{order_id}` to detect and skip du
 execution) is the application-level complement to at-least-once delivery.
 
 **Q3: How does `task_acks_late=True` improve Celery durability?**
+**Short:** task_acks_late=True delays the broker ack until the handler succeeds, so a crash mid-task re-queues the work instead of losing it.
 By default Celery acknowledges (removes) the task message from the broker before executing
 the task handler. If the worker is killed mid-execution (SIGKILL from OOM killer, deploy),
 the message is already gone. With `task_acks_late=True`, Celery acks only after the handler
@@ -950,6 +953,7 @@ by a crash is re-queued. The trade-off is that tasks may run twice if the handle
 but the ack message is lost, reinforcing the need for idempotency.
 
 **Q4: What is a dead-letter queue and when should you use one?**
+**Short:** A dead-letter queue holds messages that exhausted retries, keeping poison messages from blocking the main queue indefinitely.
 A dead-letter queue (DLQ) is a special queue that receives messages that have been
 rejected or have exhausted all retries. It prevents poison messages from blocking the main
 queue indefinitely and provides a recoverable holding area for investigation. Configure
@@ -958,6 +962,7 @@ depth with an alert on `LLEN dlq:notifications > 10`. Without a DLQ, failed task
 retry forever (starving other work) or disappear silently.
 
 **Q5: How do you implement exponential backoff with jitter in Celery?**
+**Short:** Exponential backoff with jitter spaces out retries and randomizes the delay to prevent a thundering herd on the downstream service.
 Inside the task handler, catch the retryable exception and call `self.retry(exc=exc,
 countdown=...)` where `countdown = (2 ** self.request.retries) * base_delay +
 random.uniform(-jitter, jitter)`. The `self.request.retries` counter is 0 on the first
@@ -966,6 +971,7 @@ a batch of tasks that all fail simultaneously all retry at the same instant, ove
 the downstream service again.
 
 **Q6: Why is ARQ a better fit for FastAPI than Celery for I/O-bound tasks?**
+**Short:** ARQ's async event loop handles many concurrent I/O-bound tasks per worker far more cheaply than Celery's one-process-per-slot model.
 ARQ workers are native `asyncio` event loops. Each worker can run up to `max_jobs=50`
 concurrent coroutines without threads, matching FastAPI's async model exactly. A single
 ARQ worker handles 50 concurrent HTTP-call tasks with the overhead of one OS thread.
@@ -974,6 +980,7 @@ tasks would require 50 processes (~50MB each = 2.5GB RAM). For CPU-bound tasks t
 calculus reverses: Celery prefork gives true parallelism; ARQ's event loop is single-core.
 
 **Q7: What is the Redis `SET NX EX` pattern and how does it provide idempotency?**
+**Short:** SET NX EX atomically checks and marks an idempotency key in one step, preventing a TOCTOU race between concurrent requests.
 `SET key value NX EX seconds` is an atomic Redis command: set the key only if it does
 not exist (`NX`), with a TTL of `seconds` (`EX`). Used as an idempotency check before
 enqueuing a job: if `SET NX` returns `nil`, the key already exists, meaning a job with
@@ -983,6 +990,7 @@ from growing unbounded. The atomicity of the command prevents TOCTOU races where
 concurrent requests both check-and-set simultaneously.
 
 **Q8: Explain Celery Canvas — what are chain, group, and chord used for?**
+**Short:** Canvas chains run tasks sequentially, groups run them in parallel, and chords run a callback once a parallel group completes.
 Canvas is Celery's workflow composition API. A `chain(a.s(), b.s())` runs tasks
 sequentially, passing the result of `a` as the first argument to `b`. A `group(a.s(),
 b.s(), c.s())` runs tasks in parallel and returns a list of results. A `chord(group,
@@ -992,6 +1000,7 @@ dependent multi-step pipelines, groups for independent parallel work, and chords
 map-reduce patterns (e.g., generate 10 report sections in parallel, then assemble them).
 
 **Q9: What is the worker prefetch multiplier and why should it be set to 1 for long tasks?**
+**Short:** Setting worker_prefetch_multiplier to 1 stops a worker hoarding several tasks behind one long-running task, enabling fair distribution.
 The prefetch multiplier controls how many unacknowledged tasks each worker process fetches
 from the broker at once. The default is 4 (fetch 4 tasks per concurrent slot). If one
 task takes 10 minutes and another takes 1 second, a worker might hold 3 fast tasks idle
@@ -1001,6 +1010,7 @@ enabling fair distribution across workers. For homogeneous short tasks, a higher
 improves throughput by reducing broker round-trips.
 
 **Q10: How do you monitor a Celery task queue in production?**
+**Short:** Production Celery monitoring combines Flower for live worker state, Prometheus metrics for alerting, and a DLQ depth alert.
 Three layers: (1) **Flower** — the official Celery web monitor, shows active workers,
 task rates, success/failure counts, and lets you revoke tasks. Run as a separate process
 `celery -A tasks flower --port=5555`. (2) **Prometheus metrics** via `celery-prometheus-
@@ -1009,6 +1019,7 @@ for alerting. (3) **DLQ depth alert** — monitor the DLQ Redis key length; aler
 dlq:notifications > 0` for more than 5 minutes, indicating tasks are failing persistently.
 
 **Q11: What is the Outbox Pattern and when is it needed with task queues?**
+**Short:** The Outbox Pattern writes the event in the same database transaction as the business row, guaranteeing delivery even after a crash.
 The Outbox Pattern solves the dual-write problem: you cannot atomically write to a database
 and enqueue a message to Redis in a single transaction. If you write the DB row and then
 crash before enqueueing, the event is lost. The outbox approach: write both the DB row
@@ -1019,6 +1030,7 @@ and the enqueue call. Use it for payment events, user lifecycle events, or anyth
 the database state and the queue must stay consistent.
 
 **Q12: How do you gracefully shut down a Celery or ARQ worker during a deployment?**
+**Short:** Send SIGTERM so in-flight tasks finish before exit, never SIGKILL, which can leave a task half-processed.
 Send `SIGTERM` (not `SIGKILL`). Celery workers catch `SIGTERM`, stop fetching new tasks,
 and wait for current tasks to complete (up to `--time-limit` seconds) before exiting.
 ARQ workers behave similarly — the event loop processes its current job batch and exits.
@@ -1028,6 +1040,7 @@ pod is killed. Never send `SIGKILL` to workers directly — it bypasses graceful
 and can leave tasks in an inconsistent state (partially processed, already acked).
 
 **Q13: What is the difference between at-most-once, at-least-once, and exactly-once task delivery?**
+**Short:** True exactly-once delivery is impossible without distributed transactions, so production systems approximate it as idempotent at-least-once.
 At-most-once runs a task zero or one times by acking before processing, so a crash silently
 drops it; at-least-once runs it one or more times by acking after processing, so a crash
 causes a retry that may duplicate work. True exactly-once delivery is impossible without
@@ -1036,6 +1049,7 @@ systems approximate it as idempotent at-least-once — accept the possibility of
 make replays a no-op with an idempotency key.
 
 **Q14: Why does blocking CPU work inside an ARQ task handler stall unrelated jobs on the same worker?**
+**Short:** A synchronous CPU-bound call inside an ARQ handler blocks the single event loop, freezing every other coroutine on that worker.
 An ARQ worker runs one `asyncio` event loop, so a synchronous CPU-bound call like PIL image
 resizing blocks that loop for its entire duration, freezing every other concurrent coroutine
 on the same worker process. A 50-200ms thumbnail resize means every other job assigned to that
@@ -1043,6 +1057,7 @@ worker's 50-coroutine capacity stalls for the same 50-200ms window. Offload CPU-
 a `ProcessPoolExecutor` via `loop.run_in_executor` so the event loop stays free to service I/O.
 
 **Q15: Why does ARQ ship built-in cron scheduling while Celery requires a separate Beat process?**
+**Short:** ARQ's cron runs as just another coroutine in the worker process, while Celery needs a separate Beat process as a single point of failure.
 ARQ's worker already runs a single async event loop, so its cron scheduler is just another
 coroutine registered inside the same process with no extra moving parts. Celery's prefork
 worker model has no natural place for a scheduler loop, so Celery Beat runs as an independent
@@ -1051,6 +1066,7 @@ The tradeoff is operational: Celery Beat is a single point of failure that must 
 running and deduplicated across replicas, while ARQ cron scales with the worker fleet automatically.
 
 **Q16: How do you choose a task result backend — Redis, PostgreSQL, RPC, or none?**
+**Short:** Choosing a result backend trades speed for durability: Redis writes fast but expires on TTL, PostgreSQL persists but costs more per write.
 Pick the backend based on how long the result must survive and who needs to read it. Redis
 gives sub-millisecond result writes but expires results on a TTL, so it suits short-lived
 polling from the same request cycle. PostgreSQL costs roughly 5ms per write but persists

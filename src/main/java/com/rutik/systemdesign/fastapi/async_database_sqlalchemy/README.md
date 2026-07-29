@@ -796,38 +796,47 @@ async def safe_concurrent_reads(ids: list[int]) -> list[User | None]:
 ## 12. Interview Questions with Answers
 
 **Q1: Why does accessing a lazy relationship in async SQLAlchemy raise `MissingGreenlet` instead of just blocking?**
+**Short:** Lazy loading needs a greenlet context to run synchronous I/O, which pure asyncio code never provides.
 
 SQLAlchemy's lazy loader is implemented using greenlets — lightweight coroutines provided by the `greenlet` library — to issue synchronous SQL from within async execution contexts. When there is no active greenlet context (which is the case in native async code that runs on Python's `asyncio` event loop), the lazy loader cannot execute and raises `MissingGreenlet`. The root cause is that implicit I/O requires a synchronous execution context, which does not exist in a pure asyncio coroutine. Fix: always declare relationship loading strategies (`selectinload`, `joinedload`) in the query before execution.
 
 **Q2: What is the difference between `selectinload` and `joinedload`, and when do you choose each?**
+**Short:** Use joinedload for to-one relationships and selectinload for to-many relationships, to avoid cartesian-product row inflation.
 
 `selectinload` issues a second `SELECT ... WHERE id IN (...)` query after loading the parent objects. `joinedload` issues a single `LEFT OUTER JOIN` query. Use `joinedload` for many-to-one (or one-to-one) relationships where there is at most one related object per parent row — a join does not multiply rows. Use `selectinload` for one-to-many and many-to-many relationships where a join would produce a cartesian product, inflating result set size and wasting bandwidth. Practical rule: if loading 100 users each with 50 posts, a join returns 5,000 rows; selectinload returns 100 + 100 = 200 rows in two queries.
 
 **Q3: Why must `expire_on_commit=False` be set for async sessions?**
+**Short:** expire_on_commit=False stops post-commit attribute expiry, since async code cannot implicitly re-fetch a value without an await.
 
 After `session.commit()`, SQLAlchemy by default marks all loaded ORM attributes as "expired". In synchronous code, accessing an expired attribute transparently issues a new `SELECT` to refresh the value. In async code, this implicit reload has no `await` and raises `MissingGreenlet`. With `expire_on_commit=False`, attributes retain their in-memory values post-commit and no implicit reload is attempted. The tradeoff is that if another process modifies the same row after your commit, you will read stale data — acceptable for request-response cycles where the session closes immediately after the commit.
 
 **Q4: How do you configure connection pool size for an async SQLAlchemy engine in a multi-worker FastAPI deployment?**
+**Short:** Total connections equal (pool_size + max_overflow) times num_workers, and that product must stay under the database's max_connections.
 
 The formula is: total connections = `(pool_size + max_overflow) × num_workers`. With `pool_size=5`, `max_overflow=10`, and 4 workers, the maximum is 60 connections. PostgreSQL's default `max_connections` is 100; subtract 10 for admin and monitoring, leaving 90 usable connections for the application. For 4 workers: `(pool_size + max_overflow) × 4 ≤ 90` → `pool_size + max_overflow ≤ 22` → `pool_size=5, max_overflow=10` is safe with two workers of headroom. For high-concurrency deployments, add PgBouncer in transaction mode to multiplex more application connections onto fewer server connections.
 
 **Q5: What does `pool_pre_ping=True` do and when should you enable it?**
+**Short:** pool_pre_ping issues a lightweight SELECT 1 at checkout to discard stale connections before they raise OperationalError.
 
 `pool_pre_ping=True` causes SQLAlchemy to issue a lightweight `SELECT 1` query each time a connection is checked out from the pool. If the query fails (because the server restarted, the TCP connection was silently dropped, or a firewall timeout closed the connection), the driver discards that connection and checks out a fresh one. It prevents `OperationalError: server closed the connection unexpectedly` errors that occur when stale connections are used. Enable it for any production deployment where the database or network may close idle connections. The cost is one extra round-trip per checkout, typically under 1 ms on a local network.
 
 **Q6: How does `pool_recycle` differ from `pool_pre_ping`?**
+**Short:** pool_recycle closes connections older than N seconds, while pool_pre_ping validates connections at checkout regardless of age.
 
 `pool_recycle=N` closes and recreates connections that have been open for more than N seconds, preventing issues with MySQL's `wait_timeout` (default 8 hours) or PostgreSQL idle connection limits. `pool_pre_ping=True` validates connections at checkout time regardless of age. They solve different problems: `pool_recycle` handles maximum connection lifetime; `pool_pre_ping` handles connections that died unexpectedly between uses. Use both together in production: `pool_recycle=1800` (30 minutes) with `pool_pre_ping=True`.
 
 **Q7: How do you perform Alembic migrations with an async engine?**
+**Short:** Bridge Alembic's synchronous migration runner through connection.run_sync inside an async database connection.
 
 Alembic's migration runner is synchronous. The bridge is `connection.run_sync(do_run_migrations)`, which executes the migration function synchronously within an async database connection. In `alembic/env.py`, replace `engine_from_config` with `async_engine_from_config`, open an async connection with `async with connectable.connect() as connection`, and call `await connection.run_sync(do_run_migrations)`. Use `asyncio.run(run_migrations_online())` at the bottom of `env.py` to drive the async function from Alembic's synchronous context.
 
 **Q8: What is the difference between `session.flush()` and `session.commit()`?**
+**Short:** flush() sends pending SQL within the current transaction so later queries see it, while commit() finalizes it for other connections.
 
 `flush()` sends pending SQL statements (INSERTs, UPDATEs, DELETEs) to the database within the current transaction, making changes visible to subsequent queries in the same session. The transaction is not committed; changes are invisible to other connections. `commit()` finalizes the transaction, making changes visible to all connections. Use `flush()` to obtain a database-assigned primary key (e.g., `user.id`) before committing, or to enforce constraints before a larger operation. In async code, both are awaited: `await session.flush()`, `await session.commit()`.
 
 **Q9: How do you implement an upsert (insert-or-update) with async SQLAlchemy on PostgreSQL?**
+**Short:** Use insert().on_conflict_do_update() and reference stmt.excluded to read the values proposed for insertion.
 
 Use the PostgreSQL dialect's `insert().on_conflict_do_update()`, binding the statement to a name first so you can reference its `.excluded` pseudo-table. `excluded` is an attribute of the *statement object*, not of the `insert` function, so the two-step form below is required.
 
@@ -845,6 +854,7 @@ await session.execute(stmt)
 `stmt.excluded` refers to the row that was proposed for insertion. This compiles to `INSERT ... ON CONFLICT (email) DO UPDATE SET name = excluded.name`.
 
 **Q10: How do you detect N+1 queries in a SQLAlchemy application?**
+**Short:** Detect N+1 queries by counting SQL statements per request, via echo=True in development or a before_cursor_execute listener in tests.
 
 Set `echo=True` on the engine during development so every SQL statement is logged to stdout. Count how many `SELECT` statements are emitted per request — if a request that loads 50 users emits 51 queries, you have N+1. To assert this in tests rather than eyeball it, attach a counting listener to the engine's `before_cursor_execute` event and assert the count:
 
@@ -864,10 +874,12 @@ assert len(stmts) == 2      # parent query + one selectinload batch
 The same listener, incrementing a Prometheus counter instead of a list, gives continuous per-request query-count monitoring in production.
 
 **Q11: Can you use `AsyncSession` inside a Celery task?**
+**Short:** AsyncSession only works in a Celery task via asyncio.run() per call, which is less efficient than sync SQLAlchemy or an async-native queue.
 
 Celery tasks are synchronous by default and run in a thread pool, not an asyncio event loop. Running async code in a Celery task requires `asyncio.run(my_async_function())` inside the task, which creates a new event loop per task call. This works but is inefficient. Better alternatives: (1) use sync SQLAlchemy in Celery tasks, (2) use `celery[gevent]` or `celery[eventlet]` for async workers, or (3) migrate background tasks to `ARQ` or `Dramatiq` which have native async support.
 
 **Q12: What is the transaction isolation level for `AsyncSession` by default, and how do you change it?**
+**Short:** AsyncSession defaults to the driver's isolation level, READ COMMITTED for PostgreSQL over asyncpg, overridable per connection or engine.
 
 The default isolation level is determined by the database driver and server configuration. For PostgreSQL via asyncpg, the default is `READ COMMITTED`. To change isolation for a specific transaction:
 
@@ -882,6 +894,7 @@ async with engine.connect() as conn:
 For the entire engine: `create_async_engine(url, isolation_level="REPEATABLE READ")`.
 
 **Q13: How do you test FastAPI routes that use async SQLAlchemy sessions?**
+**Short:** Override the session dependency with a rollback-per-test fixture and drive requests through ASGITransport.
 
 Use `dependency_overrides` to inject a test session that is rolled back after each test. Drive the app with `httpx.AsyncClient` over an `ASGITransport` — the old `AsyncClient(app=...)` shortcut was removed in httpx 0.28 and now raises `TypeError`.
 
@@ -916,10 +929,12 @@ async def client(async_session: AsyncSession):
 ```
 
 **Q14: What happens when you call `session.execute()` without an active transaction in SQLAlchemy 2.0?**
+**Short:** AsyncSession auto-begins a transaction on the first query, but still requires an explicit commit or rollback afterward.
 
 In SQLAlchemy 2.0, `AsyncSession` uses "autobegin" behavior: the first DML or `execute()` call automatically begins a transaction. There is no need to explicitly call `session.begin()` before the first query. However, you must explicitly call `await session.commit()` or `await session.rollback()` when done — there is no autocommit. If you discard the session without committing, the transaction is rolled back when the session is closed.
 
 **Q15: How do you handle database connection errors and retry logic with async SQLAlchemy?**
+**Short:** Retry OperationalError failures with tenacity, rolling back the failed transaction before each retry attempt.
 
 SQLAlchemy raises `sqlalchemy.exc.OperationalError` (subclass of `DBAPIError`) for connection-level failures. Implement retry at the service layer using `tenacity`:
 
@@ -941,6 +956,7 @@ async def resilient_query(session: AsyncSession, user_id: int) -> User | None:
 Note: do not retry within a failed transaction — roll back first, then retry. The `yield` dependency pattern handles this by rolling back on exception before the session is closed.
 
 **Q16: What is the `lazy="raise"` relationship strategy and when should you use it?**
+**Short:** lazy="raise" fails immediately on an un-eager-loaded relationship, forcing explicit query options instead of silent N+1 queries.
 
 `lazy="raise"` configures a relationship so that accessing it without eager loading raises `InvalidRequestError` immediately, with the message `'User.posts' is not available due to lazy='raise'`. This is used as a defensive default in large teams: setting `lazy="raise"` on all relationships forces developers to explicitly list every relationship they need in query options, preventing accidental N+1 queries from being silently introduced. Use it in production code where strict access patterns are required; revert to `lazy="select"` in data exploration or admin tools where flexibility is more important.
 

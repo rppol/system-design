@@ -1004,6 +1004,7 @@ async def get_user(user_id: int) -> dict:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the thundering herd problem in caching, and how do you prevent it in Redis?**
+**Short:** A thundering herd hits when a popular key expires and all requests recompute at once; a Redis SET NX EX lock lets only the first recompute.
 When a popular cache key expires, all concurrent requests simultaneously detect a miss and
 attempt to recompute the value, overwhelming the database. Prevent it with a Redis mutex:
 `SET lock:<key> 1 NX EX 5` — the first caller acquires the lock atomically; others either
@@ -1012,6 +1013,7 @@ stale value ("soft TTL") is often better than making all callers wait, because i
 availability without adding lock wait time.
 
 **Q2: Why can't you use `functools.lru_cache` on an `async def` function?**
+**Short:** lru_cache caches the coroutine object itself from an async def, not its result, so replays raise a reused-coroutine error.
 `lru_cache` stores whatever the decorated callable returns. An `async def` function returns a
 coroutine object, not the result. The first call caches the coroutine; the second call returns
 the same exhausted coroutine object, which raises `RuntimeError: cannot reuse already awaited
@@ -1020,6 +1022,7 @@ or use `aiocache`/`cashews` which are async-native.
 
 **Q3: In a Gunicorn + Uvicorn deployment with 4 worker processes, why is in-process caching
 often insufficient for invalidation?**
+**Short:** Each Gunicorn worker has its own memory, so invalidating one process's cache leaves the others serving stale data until TTL expiry.
 Each worker process has an independent memory space. When user data changes (e.g., profile
 update), you can invalidate the cache entry in the process that handled the write, but the
 other three processes still hold the stale entry until their TTL expires. For data that
@@ -1028,6 +1031,7 @@ all workers. In-process caches are still useful as an L1 layer in front of Redis
 high-frequency reads where per-process staleness of a few seconds is acceptable.
 
 **Q4: What is the difference between `Cache-Control: max-age` and `s-maxage`?**
+**Short:** max-age sets freshness for every cache including the browser, while s-maxage overrides it only for shared caches like CDNs.
 `max-age` sets the freshness lifetime for all caches, including the browser. `s-maxage`
 overrides `max-age` for shared caches only (CDNs, reverse proxies) while leaving the browser
 behavior unchanged. Use `Cache-Control: max-age=300, s-maxage=60` when you want the browser
@@ -1035,6 +1039,7 @@ to cache for 5 minutes but the CDN edge to refresh every 60 seconds — useful f
 CDN purge scripts control but browsers should cache longer.
 
 **Q5: How does `ETag` reduce bandwidth even when `max-age` has expired?**
+**Short:** A conditional GET matched by ETag returns 304 Not Modified with no body, saving bandwidth even after max-age has expired.
 When `max-age` expires the browser sends a conditional `GET` with `If-None-Match: "<etag>"`.
 The server computes the current ETag; if it matches, it returns `304 Not Modified` with no
 body. The browser uses its cached copy. This saves the response body transfer (potentially
@@ -1042,6 +1047,7 @@ hundreds of KB) even though the cache is technically "expired". Round-trip still
 bandwidth and server serialization cost are eliminated.
 
 **Q6: How do you design a cache key that is both collision-free and invalidation-friendly?**
+**Short:** A hierarchical key like version:entity:id:sub-resource enables both targeted deletion and mass invalidation via a version bump.
 Use a hierarchical namespace: `{version}:{entity}:{id}:{sub-resource}`. Example:
 `v1:user:42:profile`. The version prefix allows a "schema invalidation" by bumping `v1` to
 `v2` — new writes go to `v2:*`, old `v1:*` keys expire naturally. The entity and sub-resource
@@ -1049,6 +1055,7 @@ segments allow targeted invalidation: delete `v1:user:42:*` to invalidate all ca
 user 42 using Redis `SCAN` + `DEL`, or use a tagging system like `cashews`.
 
 **Q7: What is the write-behind (write-back) cache pattern and when is it dangerous?**
+**Short:** Write-behind writes to cache first and flushes to the database asynchronously, risking data loss if the cache crashes before flushing.
 Write-behind writes to the cache immediately and flushes to the database asynchronously via a
 background job. Write latency to the client is minimized because the DB round trip is removed
 from the critical path. It is dangerous because if the cache crashes before the flush, writes
@@ -1057,6 +1064,7 @@ since the last flush are lost. It is appropriate only for data where some loss i
 guarantees (Redis with `appendfsync always`).
 
 **Q8: How does `orjson` improve FastAPI performance, and when does it not help?**
+**Short:** orjson serializes 3-5x faster than stdlib json via Rust, but only helps when serialization, not database I/O, is the actual bottleneck.
 `orjson` serializes Python objects to JSON 3-5x faster than stdlib `json` because it is
 implemented in Rust. It natively handles `datetime`, `UUID`, and `dataclass` without custom
 encoders. Set `default_response_class=ORJSONResponse` on the `FastAPI` constructor to apply
@@ -1064,6 +1072,7 @@ globally. It does not help when the bottleneck is database I/O or network transf
 serialization — profile first with `py-spy` to confirm serialization is the actual hot path.
 
 **Q9: What is probabilistic early expiration (XFetch) and how does it differ from a mutex?**
+**Short:** XFetch recomputes a key probabilistically before expiry, with the odds rising toward certainty near expiration, so a stampede never forms.
 XFetch recomputes a key probabilistically *before* it expires, so the herd never forms.
 Each reader evaluates `now - delta × beta × log(random()) >= expiry` and recomputes if it holds,
 where `delta` is the **measured time the last recomputation took** (stored alongside the value),
@@ -1090,6 +1099,7 @@ as the remaining TTL shrinks, spreading recomputation across many requests, whil
 spike this module's stampede scenario protects against.*
 
 **Q10: How do you size a Redis connection pool for a FastAPI application?**
+**Short:** Size a Redis pool as workers times max simultaneous Redis ops per worker, then add roughly 20% headroom.
 The formula is: `max_connections ≥ num_workers × max_simultaneous_redis_ops_per_worker`.
 For 4 Uvicorn workers each handling 200 concurrent requests, where 10% of requests touch
 Redis: `4 × 200 × 0.1 = 80` minimum connections. Add 20% headroom: pool of 100. Monitor
@@ -1099,6 +1109,7 @@ scale the pool or add Redis replicas for read traffic. Setting `max_connections`
 
 **Q11: When should you use `response_model_exclude_unset=True` at the router level vs
 `model.model_dump(exclude_unset=True)` at the handler level?**
+**Short:** Use the route-level exclude_unset flag when the model maps directly to the response, and handler-level model_dump for merging PATCH updates.
 Use the route-level flag when the response model maps directly to what you return, and the
 handler-level call when you need to shape the dict yourself. `response_model_exclude_unset=True`
 on the route decorator (`@app.get(..., response_model_exclude_unset=True)`) applies
@@ -1110,6 +1121,7 @@ handler-level `model_dump` for PATCH endpoints that merge partial updates before
 
 **Q12: How do you implement cache invalidation on write without a dedicated invalidation
 service?**
+**Short:** Delete the cache key right after a successful write, or bump the key's version prefix to mass-invalidate without a slow SCAN.
 In the same DB transaction (or immediately after a successful write), issue `await r.delete(key)`.
 This removes the stale cache entry; the next read will miss and repopulate. For complex
 invalidation (e.g., "invalidate all keys for user 42"), use a Redis key tag scheme: prefix all
@@ -1120,15 +1132,19 @@ this can be slow — prefer key-tagging libraries (`cashews`, custom sets of tag
 production-grade selective invalidation.
 
 **Q13: Why does using one global `asyncio.Lock` for all cache misses hurt concurrency, and what is the fix?**
+**Short:** A single global lock serializes every cache miss regardless of key; a per-key lock instead lets unrelated misses run concurrently.
 A single global lock serializes every cache-miss code path regardless of which key is being fetched. That means a miss on `item_id=1` blocks a completely unrelated miss on `item_id=999`, even though the two lookups share no state and could safely run in parallel. Under high concurrency this collapses what should be N independent DB fetches into one queue, defeating the purpose of caching during the exact traffic spike when caching matters most. The fix is a per-key lock — typically `defaultdict(asyncio.Lock)` keyed by the cache key — so only requests racing for the *same* key contend with each other, while misses on different keys proceed concurrently. The remaining cost is that the lock dictionary itself grows unboundedly unless you periodically clean up locks that no coroutine is waiting on.
 
 **Q14: How does a Redis pipeline reduce the cost of fetching 100 keys, and what is the mechanism?**
+**Short:** A Redis pipeline batches many commands into one network round trip, turning 100 sequential GETs into roughly one 0.5ms batch.
 A pipeline batches multiple Redis commands into a single network round trip instead of sending each command and waiting for its reply before sending the next. That cuts 100 sequential `GET` calls at roughly 0.3ms each (about 30ms total) down to roughly 0.5ms for the whole batch. The client buffers all queued commands locally, sends them to Redis in one TCP write, and Redis processes them back-to-back before returning all results together — `async with r.pipeline(transaction=False) as pipe: ...; results = await pipe.execute()`. Setting `transaction=False` skips Redis's `MULTI`/`EXEC` wrapping when you only need batching, not atomicity, across the commands. Use a pipeline whenever a single request needs to read or write more than a handful of independent keys.
 
 **Q15: `cachetools.TTLCache` supports both a size bound and a TTL — so why does the module still wrap it in an `asyncio.Lock`?**
+**Short:** TTLCache isn't async-safe on its own, so a double-checked asyncio.Lock stops concurrent coroutines from both missing and re-fetching.
 `cachetools.TTLCache` is not thread-safe or async-safe on its own, so concurrent reads and writes from multiple coroutines can race on the cache's internal eviction bookkeeping. The module's own type table marks it "Thread-Safe: No" and "Async-Safe: Manual" for exactly this reason. Wrapping access in `asyncio.Lock` with the double-checked pattern — check the cache, acquire the lock, check again, then populate — prevents two coroutines from both missing the cache and both fetching from the database simultaneously for the same key. The second check inside the lock is essential: without it, every coroutine that queued up waiting for the lock would still re-fetch from the DB once it finally acquires the lock, recreating the exact stampede the lock was meant to prevent. `asyncio.Lock` is correct here (not `threading.Lock`) because FastAPI's single-threaded event loop needs a lock that yields control while waiting rather than blocking the whole loop.
 
 **Q16: In the multi-tier case study, why is the in-process L1 TTL set to 10 seconds while the Redis L2 TTL is 300 seconds?**
+**Short:** L1's TTL is shorter than L2's because L1's per-worker invalidation is the weaker guarantee of the two cache layers.
 The two TTLs serve different failure domains, and L1's is short because its invalidation is the weaker of the two. L1 is per-worker-process memory, so a short TTL bounds how long any single worker can serve stale data after an `invalidate_product()` call that only clears that one worker's L1 and the shared Redis key — the other workers' L1 entries simply expire naturally within the 10-second window. L2 (Redis) is shared across all workers and is explicitly invalidated on every write via `r.delete(redis_key)`, so its 300-second TTL only matters as a safety net for writes that bypass the invalidation path, not as the primary consistency mechanism. Making L1 TTL shorter than L2 TTL is a deliberate design rule: the layer with the weakest invalidation guarantee gets the shortest expiry. In the measured results, this combination pushed DB CPU from 100% down to 7% while keeping worst-case staleness bounded to single-digit seconds.
 
 ---

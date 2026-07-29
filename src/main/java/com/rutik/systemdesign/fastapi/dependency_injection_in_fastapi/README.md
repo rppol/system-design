@@ -1015,48 +1015,63 @@ Cross-reference: Compare with Spring's `@Autowired` and `@Bean` scopes in [`../.
 ## 12. Interview Questions with Answers
 
 **Q1: How does FastAPI resolve dependencies at runtime?**
+**Short:** FastAPI builds the dependency graph once at startup via reflection, then resolves it per request in topological order with caching.
 FastAPI builds a `Dependant` graph at startup by recursively inspecting `Depends()` markers using `inspect.signature()` and `typing.get_type_hints()`. At request time, `solve_dependencies()` does a depth-first traversal of this pre-built graph, executing each node in topological order. Results are cached in a per-request dict keyed by callable identity so each dependency runs at most once per request. This means the reflection cost is paid at startup, not on every request.
 
 **Q2: What is a yield dependency and when does teardown run?**
+**Short:** A yield dependency's teardown runs after the response has been sent, drained in LIFO order from a per-request cleanup stack.
 A yield dependency is a generator function (sync or async) that performs setup before `yield`, produces the injected value at `yield`, and performs teardown after `yield` (typically in a `finally` block). Teardown runs after the HTTP response has been sent to the client — not before. FastAPI collects all yield dependency generators on a cleanup stack and drains it in LIFO order once the response is committed. This means teardown cannot modify the response, but it is guaranteed to run even if the handler raised an exception.
 
 **Q3: What is the difference between `Depends(fn)` and `Depends(fn, use_cache=False)`?**
+**Short:** Depends(fn) caches its result per request by default; use_cache=False forces a fresh call every time it appears.
 By default, `Depends(fn)` caches the result of `fn` for the lifetime of the request. All sub-dependencies and the main handler that reference the same callable receive the same object. `Depends(fn, use_cache=False)` bypasses this cache and calls `fn` fresh every time it appears in the dependency graph for that request. Use `use_cache=False` for dependencies whose result must be unique per call site — nonces, timestamps, or idempotency-key generators. Use the default caching for DB sessions, auth tokens, and any resource that should be shared within a request.
 
 **Q4: How do you inject a DB session per request and ensure cleanup?**
+**Short:** Inject a per-request DB session with a yield dependency that closes it in a finally block after the handler runs.
 Use a `yield` dependency: create a `SessionLocal()` in the setup phase, `yield` it to the handler, and call `db.close()` in a `finally` block after the `yield`. This guarantees the session is closed after every request, regardless of whether the handler succeeds or raises. Rollback on exception should also be added before re-raising so the connection returns to the pool in a clean state. Register with `Depends(get_db)` on any route that needs DB access.
 
 **Q5: How do class-based dependencies work?**
+**Short:** A class-based dependency has its __init__ parameters resolved like a function's before FastAPI instantiates and injects it.
 When you write `param: MyClass = Depends()` (or `Depends(MyClass)`), FastAPI treats the class itself as the callable. It inspects `MyClass.__init__` for parameters, resolves them the same way as a function's parameters (including nested `Depends()` in `__init__`), then instantiates the class. The instance is injected into the route handler. Class-based dependencies are ideal for grouping related query parameters (pagination, filters) or for callable classes that need to hold configuration injected at init time.
 
 **Q6: How does `dependency_overrides` work in testing?**
+**Short:** dependency_overrides is a plain dict swapping a dependency callable for a replacement, with no monkeypatching needed.
 `app.dependency_overrides` is a plain dict mapping a callable to a replacement callable. When FastAPI resolves `Depends(original_fn)` and finds `original_fn` in `dependency_overrides`, it calls the replacement instead. This requires no monkey-patching of modules or mocking frameworks. The override must be reset to `{}` after each test to prevent state leakage. The standard pattern is a pytest `yield` fixture that sets the override, yields the `TestClient`, then clears the dict in the fixture's teardown.
 
 **Q7: How do you add authentication to all routes in a router without repeating it per endpoint?**
+**Short:** Passing dependencies=[Depends(auth_dep)] to APIRouter runs that check before every route it registers, with no per-endpoint repetition.
 Pass `dependencies=[Depends(auth_dep)]` to `APIRouter(...)`. Every route registered on that router will execute `auth_dep` before the handler, as if it had been declared on each endpoint individually. The dependency can raise `HTTPException` to abort the request. Router-level dependencies do not need to return a value that the handler consumes; they are commonly used for side-effectful checks like auth, rate limiting, or IP allowlisting.
 
 **Q8: What is the teardown order when multiple yield dependencies are active in a single request?**
+**Short:** Multiple yield dependencies tear down in LIFO order, mirroring the nesting semantics of Python's contextlib.ExitStack.
 Teardown executes in LIFO (last-in, first-out) order, mirroring the nesting semantics of Python's `contextlib.ExitStack`. If route handler declares `a = Depends(dep_a)` followed by `b = Depends(dep_b)`, setup runs: `dep_a` then `dep_b`. Teardown runs: `dep_b` first, then `dep_a`. This is important for resource dependencies — if `dep_b` holds a lock that `dep_a`'s teardown needs, the LIFO order ensures `dep_b` releases the lock before `dep_a` attempts to use it.
 
 **Q9: How does `Security()` differ from `Depends()`?**
+**Short:** Security() is Depends() plus an OAuth2 scopes list that populates the OpenAPI schema's security requirements.
 `Security()` is a subclass of `Depends()` that accepts an additional `scopes` keyword argument (a list of OAuth2 scope strings). At runtime, FastAPI injects a `SecurityScopes` object as a special parameter to the security dependency function, carrying the scopes declared at the call site. This populates the OpenAPI schema with the correct security requirements for each endpoint. Functionally, `Security()` behaves identically to `Depends()` — if you do not need scopes to appear in generated docs, using `Depends()` for auth functions is fine.
 
 **Q10: How do you handle exceptions in a yield dependency's teardown?**
+**Short:** A teardown exception can mask the original handler exception, so catch and log it in finally rather than re-raising.
 Exceptions raised in the `finally` block of a yield dependency propagate and can mask the original exception from the handler. Best practice: catch and log in `finally`, never re-raise unless you intend to replace the original error. For DB sessions, swallow all teardown errors after logging since the session close may fail if the connection is already broken. Use `contextlib.suppress` or explicit try/except inside `finally` for robust teardown.
 
 **Q11: What is the difference between `Depends` and the `lifespan` context manager?**
+**Short:** Depends() creates a resource per request while lifespan creates one singleton for the whole application process.
 `Depends()` creates a new resource instance per request (or per invocation if `use_cache=False`), while `lifespan` creates a resource once for the lifetime of the application process. Use `lifespan` for expensive singleton resources: DB engine, connection pool, ML model, HTTP client session. Use `Depends()` for per-request resources: individual DB sessions checked out from the pool, per-request tokens, and context objects derived from the incoming request.
 
 **Q12: Can a dependency raise an `HTTPException`? What happens?**
+**Short:** An HTTPException raised in a dependency short-circuits resolution, so the route handler never runs at all.
 Yes. An `HTTPException` raised inside a dependency short-circuits the resolution chain. FastAPI's exception handlers catch it, and the route handler never executes. This is the standard pattern for auth guards: `get_current_user` raises `401` if the token is missing or invalid, and the protected handler is never called. Every yield dependency that already reached its `yield` still tears down in LIFO order — after the 401 response has been sent, since request-scoped teardown always trails the response.
 
 **Q13: How do you share a single DB connection across nested dependencies?**
+**Short:** Nested dependencies that all call Depends(get_db) receive the same cached Session, giving one shared transaction per request.
 By default, FastAPI caches the result of each dependency callable once per request. If `get_db` is declared at the innermost level and multiple sub-dependencies all declare `Depends(get_db)`, they all receive the same `Session` object. This is the correct behavior — one transaction per request, shared across all data-access operations. No additional coordination is needed as long as all dependencies reference the same callable object.
 
 **Q14: What happens if you declare a sync `yield` dependency but the route is async?**
+**Short:** FastAPI runs sync dependencies in a thread pool and async dependencies on the event loop, mixing both freely in one graph.
 FastAPI runs sync dependencies in a thread pool executor (using `anyio.to_thread.run_sync`) and async dependencies on the event loop. You can freely mix sync and async dependencies in the same DAG. FastAPI handles the thread-pool/event-loop boundary transparently. The one constraint: a sync dependency cannot `await` — it must be either fully sync or fully async.
 
 **Q15: How do you implement a per-request request ID for tracing?**
+**Short:** A request ID dependency reads the inbound X-Request-ID header and falls back to a freshly generated UUID when it's absent.
 Declare a dependency that takes `Request`, reads the inbound `X-Request-ID` header, and falls back to a fresh UUID when the header is absent.
 ```python
 import uuid
@@ -1075,9 +1090,11 @@ def get_data(
 `Request` and `Response` are special FastAPI parameters that do not require `Depends()` wrapping — they are injected automatically when declared in a handler or dependency signature.
 
 **Q16: How do you test a route that has a router-level dependency?**
+**Short:** Router-level dependencies are overridden with dependency_overrides exactly like per-endpoint ones, with no separate mechanism.
 Router-level dependencies are attached to the `APIRouter` and appear in the route's dependency list the same way per-endpoint dependencies do. `dependency_overrides` applies to them identically: `app.dependency_overrides[router_dep_fn] = mock_fn`. There is no separate mechanism needed for router vs endpoint dependencies.
 
 **Q17: How do you inject settings from environment variables exactly once?**
+**Short:** Putting lru_cache on the settings factory makes Depends(get_settings) construct the Settings object only once per process.
 Put `functools.lru_cache` on the settings factory and inject the factory with `Depends`.
 ```python
 from functools import lru_cache
@@ -1100,6 +1117,7 @@ def health(settings: Settings = Depends(get_settings)) -> dict:
 `lru_cache` ensures the `Settings` object is constructed once per process. `Depends(get_settings)` is still per-request in theory but the `lru_cache` short-circuits the actual `Settings()` constructor call.
 
 **Q18: How would you implement a dependency that conditionally skips expensive work?**
+**Short:** Branch on injected settings inside the dependency so the expensive path is configuration-gated while both branches return the same type.
 Branch on injected settings inside the dependency so the expensive path is configuration-gated, and return the same type either way.
 ```python
 from fastapi import Header

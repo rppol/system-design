@@ -892,51 +892,83 @@ readinessProbe:
 ## 12. Interview Questions with Answers
 
 **Q1: Why should you NOT run Gunicorn inside a Kubernetes pod?**
+**Short:** Kubernetes can't see individual Gunicorn workers, so HPA and probes operate on inaccurate pod-level signals.
+
 Kubernetes cannot see individual Gunicorn worker processes — it only sees the pod IP. This means HPA scales based on the total pod CPU (which is the sum of all worker CPUs), not per-worker load, making scaling decisions inaccurate. Additionally, readiness and liveness probes hit whichever worker happens to respond, not a reliable single process. In K8s, use one Uvicorn process per pod and let the Deployment replica count plus HPA replace Gunicorn's role.
 
 **Q2: What is the worker count formula for an I/O-bound FastAPI service, and why?**
+**Short:** Use 2 times CPU count plus 1 workers for I/O-bound FastAPI services to keep CPUs busy while others wait.
+
 `2 * CPU_count + 1`. The constant 2 accounts for the fact that I/O-bound workers spend most of their time waiting on network/DB — two workers per CPU core keep the CPU busy while others wait. The +1 covers scheduling jitter. For a 4-core machine: 9 workers. For CPU-bound work (image encoding, crypto): use `CPU_count` because adding more workers than cores causes context-switch overhead with no throughput gain.
 
 **Q3: What does `preload_app=True` do in Gunicorn, and what is its risk?**
+**Short:** preload_app shares copy-on-write memory across workers but risks sharing file descriptors opened before fork.
+
 `preload_app=True` loads the FastAPI application module in the Gunicorn master process before forking workers. Each worker inherits a copy-on-write snapshot, saving ~50-100MB per worker. The risk: any file descriptor (DB connection, socket, file handle) opened at module level before the fork is shared across all workers after the fork. Multiple workers writing to the same socket corrupts data. Mitigation: always open DB connections, Redis clients, and similar resources inside `lifespan`, which runs after forking in each worker's own event loop.
 
 **Q4: Describe the graceful shutdown sequence when Kubernetes sends SIGTERM to a Uvicorn pod.**
+**Short:** Graceful shutdown drains via preStop, stops new connections, finishes in-flight requests, then exits.
+
 (1) `preStop` hook runs (e.g., `sleep 5`) to let the load balancer drain connections. (2) Kubernetes sends SIGTERM to the pod. (3) Uvicorn stops accepting new connections. (4) In-flight requests continue to process up to Uvicorn's `--timeout-graceful-shutdown`, which is unbounded unless you set it — 30s is the usual choice. (5) FastAPI `lifespan` shutdown block executes: closes DB pool, flushes metrics, cleans up resources. (6) Process exits 0. The `terminationGracePeriodSeconds` on the pod must be greater than `preStop` duration + the drain timeout or Kubernetes sends SIGKILL prematurely.
 
 **Q5: What is the difference between `readinessProbe`, `livenessProbe`, and `startupProbe`?**
+**Short:** livenessProbe restarts dead processes, readinessProbe gates traffic, and startupProbe delays both during boot.
+
 `livenessProbe` asks "is this process alive and not deadlocked?" — failure triggers a pod restart. `readinessProbe` asks "is this app ready to serve traffic?" — failure removes the pod from the Service endpoint list without restarting it. `startupProbe` grants the application an extended startup budget before liveness begins checking; it prevents liveness from killing a slow-starting pod (e.g., one that loads a large ML model at startup). Once `startupProbe` succeeds, it stops running and liveness takes over.
 
 **Q6: How does `maxSurge=1, maxUnavailable=0` achieve zero-downtime rolling updates?**
+**Short:** maxUnavailable=0 with maxSurge=1 replaces pods one at a time only after the new pod is ready.
+
 `maxUnavailable=0` means Kubernetes will never terminate an old pod until its replacement is fully ready (passes readinessProbe). `maxSurge=1` allows one extra pod to exist during the rollout (temporarily running `replicas + 1` pods). The sequence: start new pod → wait for readiness → terminate one old pod → repeat. This ensures at least `replicas` pods are serving traffic at all times. The trade-off is a slightly slower rollout and one extra pod's worth of resources during the transition.
 
 **Q7: What throughput improvement does uvloop provide, and how do you enable it?**
+**Short:** uvloop roughly doubles or quadruples asyncio throughput on I/O-heavy workloads versus the default loop.
+
 `uvloop` replaces the asyncio loop with a libuv-backed one; its README claims "uvloop makes asyncio 2-4x faster" on I/O-heavy workloads. In the illustrative §6.3 benchmark: ~28k req/s with the default asyncio event loop vs ~65k req/s with uvloop on a 4-core machine. Enable it with `pip install uvicorn[standard]`, which includes uvloop and httptools; Uvicorn auto-selects uvloop when available. For bare Python scripts: `asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())`. Limitation: uvloop does not support Windows.
 
 **Q8: What is the purpose of a multi-stage Dockerfile for a Python service?**
+**Short:** A multi-stage Dockerfile strips build tools from the runtime image, shrinking size and attack surface.
+
 A multi-stage Dockerfile separates build-time dependencies (compilers, pip, uv, dev tools) from the runtime image. Stage 1 installs all dependencies and compiles any C extensions. Stage 2 starts from a fresh slim base image and copies only the virtual environment and application source. Result: runtime image contains no build tools, reducing attack surface and image size (typically 180MB vs 900MB). Smaller images reduce K8s pod scheduling time during scale-out events.
 
 **Q9: Why should the container run as a non-root user?**
+**Short:** Running as non-root limits an attacker's blast radius if code execution is achieved inside the container.
+
 If an attacker achieves code execution inside the container, a root container maps to UID 0 on the host kernel, enabling potential container escape via kernel vulnerabilities. A non-root user (UID 1001) limits the blast radius: the attacker has no write access to system directories, cannot bind ports below 1024 (bind to 8000+), and cannot escalate privileges. Kubernetes `securityContext.runAsNonRoot: true` enforces this at the cluster level as a defense-in-depth measure.
 
 **Q10: When should you choose blue-green deployment over a rolling update?**
+**Short:** Choose blue-green when old and new versions cannot coexist or instant rollback is required.
+
 Choose blue-green when the two versions cannot coexist, or when you need rollback to be a single instant switch. Three concrete triggers: (1) your DB migration is destructive (column drop, type change) and you cannot run both old and new code against the same schema simultaneously; (2) you need instant rollback capability (LB switch is sub-second vs minutes for rolling); (3) your integration tests must run against a fully deployed environment before any user traffic is cut over. The cost is 2x infrastructure during the transition window. Rolling updates are preferable when schema changes are additive and infrastructure cost matters.
 
 **Q11: How does HPA scale based on a custom RPS metric instead of CPU?**
+**Short:** The Prometheus adapter exposes a custom metric like RPS that HPA can scale on instead of CPU.
+
 Install the Prometheus adapter (`k8s-prometheus-adapter`), which queries Prometheus for a metric like `http_requests_per_second` scraped from your pods' `/metrics` endpoint. Configure the adapter to expose this as an `apiserver` custom metrics API. The HPA manifest references it under `metrics[].type: Pods` with `averageValue: "200"` — meaning scale up when average RPS per pod exceeds 200. This is more accurate than CPU for I/O-bound services where a DB slow query can spike RPS without increasing CPU.
 
 **Q12: What is the `--workers 1` flag for in a K8s Uvicorn command, and what happens if you omit it?**
+**Short:** --workers 1 keeps one process per pod so HPA and probes see accurate per-pod signals.
+
 `--workers 1` instructs Uvicorn to run exactly one worker process per pod. If omitted, Uvicorn defaults to 1 worker, so the effect is the same — but the flag is explicit documentation of intent. If you pass `--workers 4`, Uvicorn forks 4 processes, recreating the double-supervision anti-pattern: K8s sees one pod IP but 4 processes serve traffic, HPA cannot measure individual worker load, and probes become unreliable. In K8s, keep `--workers 1` and control parallelism through replica count.
 
 **Q13: How do ConfigMaps and Secrets differ in Kubernetes, and how do you inject them into FastAPI?**
+**Short:** ConfigMaps hold non-sensitive config while Secrets hold sensitive data, both injected as environment variables.
+
 `ConfigMap` stores non-sensitive key-value pairs (feature flags, log levels, service URLs). `Secret` stores sensitive data (DB passwords, API keys) encoded as base64 and optionally encrypted at rest with KMS. Both are injected into pods via `envFrom` (all keys as env vars) or `env[].valueFrom` (individual keys). In FastAPI, `pydantic-settings` reads env vars with `BaseSettings`, providing type validation and `.env` file fallback for local development. The app code never references ConfigMap or Secret names — it reads from environment variables, keeping it portable. See `../configuration_and_settings_management/README.md` for the full `BaseSettings` pattern.
 
 **Q14: Why does a `livenessProbe` with `timeoutSeconds: 1` and `failureThreshold: 1` risk killing healthy pods under load?**
+**Short:** A 1-second liveness timeout with failureThreshold 1 kills healthy pods during ordinary transient load spikes.
+
 A 1-second timeout paired with a single-failure threshold treats any transient delay — a CPU spike, a GC pause, a burst of concurrent requests — identically to a genuinely deadlocked process. Any health-check response that misses that single 1-second window triggers an immediate pod restart, even though the application was about to recover on its own. Under real production load — the exact moment you most need pods to stay up — this aggressive configuration causes cascading restarts: a busy pod gets killed, its traffic shifts to the remaining pods, they get busier, and they start failing their own liveness checks too. The fix is a more lenient liveness probe (`timeoutSeconds: 5`, `failureThreshold: 3`, meaning 30 seconds of sustained unresponsiveness before a restart) paired with a stricter, faster-to-react `readinessProbe` that pulls an overloaded pod out of the load balancer without killing it outright. Reserve tight thresholds for readiness, where the failure mode is "stop sending traffic," not liveness, where the failure mode is "destroy the process."
 
 **Q15: In the ML inference case study, why does calling `_model.predict(arr)` directly inside an `async def` route handler stall the event loop, and what fixes it?**
+**Short:** A synchronous predict() call blocks the event loop; asyncio.to_thread offloads it to a worker thread.
+
 `predict()` is synchronous and CPU-bound, so it runs on the very thread that hosts the asyncio event loop and blocks every other coroutine for its full duration. Each call freezes that thread for roughly 5ms — no other requests served, no health-probe handlers, no telemetry flush — and at 100 concurrent requests those blocks stack up to roughly 500ms of total event-loop stall. The fix is `await asyncio.to_thread(_model.predict, arr)`, which hands the blocking call to Python's default thread pool executor and immediately frees the event loop to keep processing other coroutines while `predict()` runs in the background thread. This is the same class of bug as any synchronous DB driver call or `time.sleep()` inside an `async def` route — one blocking call silently negates the concurrency benefit of the entire async model. Profile with `py-spy` to catch this pattern before it reaches production, since it produces no error, only mysteriously rising p99 latency under load.
 
 **Q16: How do you correctly size `terminationGracePeriodSeconds`, and what happens if it is set too low?**
+**Short:** Size terminationGracePeriodSeconds as preStop delay plus drain timeout, or Kubernetes SIGKILLs mid-request.
+
 Size it as `preStop` sleep + graceful HTTP drain timeout + a small safety margin, never by feel. For example, a 5-second `preStop` sleep plus a 30-second drain needs at least 40 seconds. If the value is set too low, Kubernetes sends SIGKILL the instant the grace period expires regardless of whether requests are still in flight, hard-killing the process mid-request and dropping any connection that had not yet completed — the exact outcome graceful shutdown was meant to prevent. Kubernetes' shutdown sequence is fixed: SIGTERM first, then a wait of exactly `terminationGracePeriodSeconds`, then SIGKILL if the process has not exited on its own. Always compute this value explicitly from your own `preStop` and drain settings rather than trusting Kubernetes' 30-second default, which may not match your application's actual drain time.
 
 ---

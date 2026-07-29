@@ -1034,6 +1034,7 @@ list mutated in a route handler is shared across all concurrent requests. Use a 
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between WSGI and ASGI?**
+**Short:** ASGI's coroutine interface lets one thread handle thousands of concurrent connections, unlike WSGI's thread-per-request model.
 WSGI is a synchronous interface: `app(environ, start_response)` is a regular Python callable
 that blocks the server thread until the response is ready. ASGI is an asynchronous interface:
 `await app(scope, receive, send)` is a coroutine that yields control back to the event loop
@@ -1042,6 +1043,7 @@ thousands of concurrent connections on a single thread. ASGI also supports WebSo
 Server-Sent Events natively; WSGI does not.
 
 **Q2: What are the three arguments in the ASGI 3 callable signature, and what does each carry?**
+**Short:** ASGI 3 carries a connection-describing scope dict, an async receive callable for input, and an async send callable for output.
 `scope` is a plain `dict` describing the connection — type (`http`, `websocket`, `lifespan`),
 method, path, headers, and query string. `receive` is an async callable that returns the next
 incoming event (request body chunk or WebSocket message) as a `dict`. `send` is an async
@@ -1050,6 +1052,7 @@ then `http.response.body` with the body bytes). The application awaits `receive`
 and awaits `send` for each piece of output.
 
 **Q3: What is Starlette and how does FastAPI relate to it?**
+**Short:** FastAPI subclasses Starlette's application and router, adding Pydantic validation, dependency injection, and OpenAPI generation.
 Starlette is a lightweight ASGI framework providing routing, middleware, request/response
 abstractions, sessions, background tasks, and test client. `FastAPI` is a subclass of
 Starlette's `Starlette` application and `fastapi.APIRouter` subclasses Starlette's `Router`,
@@ -1059,6 +1062,7 @@ subclasses. You can add Starlette middleware directly to a FastAPI app, and a Fa
 can return any Starlette `Response` subclass.
 
 **Q4: Why use `lifespan` instead of `on_startup` / `on_shutdown`?**
+**Short:** lifespan replaces on_startup/on_shutdown with a yield-based structure that guarantees cleanup and shares state via app.state.
 The `lifespan` context manager landed in FastAPI 0.93 and `FastAPI.on_event` now carries an
 explicit `@deprecated` marker. It solves two problems the old API could not: (1) it provides a `yield`-based
 structure so resources created in startup are automatically closed in shutdown even if an
@@ -1067,6 +1071,7 @@ exception occurs; (2) the `dict` yielded from the context manager is injected in
 for module-level globals. The old handlers could not share state with routes without globals.
 
 **Q5: What happens when FastAPI receives a request for `/items/abc` with a route defined as `@app.get("/items/{item_id}")` where `item_id: int`?**
+**Short:** A path parameter that fails int coercion raises RequestValidationError, returning 422 without the route handler ever running.
 FastAPI resolves the path parameter at startup, noting that `item_id` maps to `int`. At
 request time, Pydantic v2 attempts to coerce the string `"abc"` to `int`. Coercion fails;
 FastAPI raises `RequestValidationError`, which is caught by the built-in exception handler
@@ -1075,6 +1080,7 @@ exact field, location (`path`), and message (`Input should be a valid integer`).
 handler function is never called.
 
 **Q6: How does FastAPI filter extra fields when `response_model` is set?**
+**Short:** response_model filters output by re-validating it into the declared model, silently dropping any field not declared there.
 FastAPI passes the route handler's return value to `response_model.model_validate(return_value)`,
 producing a Pydantic instance containing only the fields declared in `response_model`. It then
 calls `.model_dump()` and serializes the resulting dict to JSON. Any field present in the
@@ -1082,6 +1088,7 @@ handler's return value but absent from `response_model` is silently dropped. Thi
 behaviour; in v1 the method was `.dict()`.
 
 **Q7: When should you use `def` versus `async def` for a route handler in FastAPI?**
+**Short:** Use async def for handlers awaiting async I/O, and plain def for blocking calls, which FastAPI offloads to a thread pool.
 Use `async def` when the handler calls other `async` functions — awaiting an async DB driver,
 making async HTTP calls with `httpx`, or reading from a Redis async client. FastAPI runs `async
 def` handlers directly on the event loop. Use `def` when calling a synchronous library that
@@ -1090,6 +1097,7 @@ cannot be made async — synchronous ORM calls, CPU-intensive work, legacy SDKs.
 blockage. Never call a blocking function directly inside `async def`.
 
 **Q8: What does `response_class=HTMLResponse` do on a route decorator?**
+**Short:** response_class=HTMLResponse wraps the handler's return value in an HTML response instead of the default JSON one.
 It tells FastAPI to wrap the handler's return value in an `HTMLResponse` instead of the
 default `JSONResponse`. This sets `Content-Type: text/html; charset=utf-8`. It also updates
 the OpenAPI schema to show `text/html` as the response media type. The handler can return
@@ -1097,6 +1105,7 @@ a plain `str` and FastAPI will wrap it; or it can return an `HTMLResponse` insta
 for full control over status code and headers.
 
 **Q9: How does Uvicorn handle concurrent requests without multiple threads?**
+**Short:** Uvicorn handles concurrency on one thread by suspending a coroutine at each await and resuming the next ready one.
 Uvicorn runs Python's `asyncio` event loop in a single thread. When an `await` expression
 suspends a coroutine (waiting for a socket read, a DB query, or an external HTTP response),
 the event loop picks up the next ready coroutine from its queue and resumes it. This
@@ -1106,6 +1115,7 @@ non-blocking I/O via `select`/`epoll`/`kqueue`; asyncio wraps these in awaitable
 `Future` objects.
 
 **Q10: Where does FastAPI generate the OpenAPI schema and how is it customised?**
+**Short:** FastAPI builds the OpenAPI schema in memory at startup by inspecting every registered route, serving it at /openapi.json.
 FastAPI builds the OpenAPI 3.1.0 schema object in memory at startup by inspecting every
 registered route. Each route contributes its path, method, path/query parameters, request
 body (inferred from the first Pydantic parameter), `response_model`, status codes, and tags.
@@ -1117,6 +1127,7 @@ and ReDoc at `GET /redoc`. Customisation points include: `title`, `version`, `de
 examples=[...])` on Pydantic model fields.
 
 **Q11: What is `StreamingResponse` used for and how does it work under ASGI?**
+**Short:** StreamingResponse sends response body chunks incrementally by iterating a generator and calling ASGI send for each piece.
 `StreamingResponse` wraps an async generator (or sync generator run in a thread) that
 yields `bytes` or `str` chunks. When FastAPI serializes a `StreamingResponse`, it calls
 `send({"type": "http.response.start", ...})` once, then iterates the generator, calling
@@ -1126,6 +1137,7 @@ client receives chunks incrementally. This is the mechanism behind Server-Sent E
 large file downloads, and real-time LLM token streaming.
 
 **Q12: How does Starlette middleware interact with FastAPI routes?**
+**Short:** Starlette middleware wraps the app in reverse order of addition, each layer able to inspect or short-circuit the scope/receive/send triple.
 Each middleware is an ASGI callable added via `app.add_middleware(SomeMiddleware, **kwargs)`.
 FastAPI wraps the middleware around the application in reverse order of addition — last added
 is outermost. The middleware receives the same `(scope, receive, send)` triple. It can read
@@ -1135,6 +1147,7 @@ calling the inner app. This mechanism is identical to how Django middleware work
 but purely async.
 
 **Q13: What is `root_path` in the ASGI scope and when does it matter?**
+**Short:** root_path tells FastAPI the URL prefix a reverse proxy strips, keeping generated OpenAPI paths matched to the public URL.
 `root_path` is the URL prefix that the reverse proxy strips before forwarding to Uvicorn.
 If Nginx is configured to proxy `https://api.example.com/v1/` to `http://localhost:8000/`,
 the `root_path` is `/v1`. Without it, FastAPI generates OpenAPI paths starting at `/`, and
@@ -1144,6 +1157,7 @@ flag. Alternatively, configure the proxy to pass the `X-Forwarded-Prefix` header
 Starlette's `ProxyHeadersMiddleware`.
 
 **Q14: How are path parameters differentiated from query parameters in a FastAPI route signature?**
+**Short:** FastAPI classifies a parameter as a path parameter only if its name appears as a placeholder in the route's path string.
 FastAPI determines the source of each parameter at startup. A parameter is a path parameter
 if its name appears as a `{placeholder}` in the path string of the route decorator. Every
 other parameter becomes a query parameter (if it has no default or a non-`Body` default) or
@@ -1153,6 +1167,7 @@ is purely positional: changing `@app.get("/items/{item_id}")` to `@app.get("/ite
 function body.
 
 **Q15: What is the difference between `FileResponse` and `StreamingResponse` for serving large files?**
+**Short:** FileResponse streams a file from disk more memory-efficiently than StreamingResponse, which suits dynamically generated content instead.
 `FileResponse` takes a path on disk; `StreamingResponse` takes a generator you write.
 `FileResponse` streams the file with `anyio.open_file`, so the disk reads happen on a worker
 thread instead of the event loop, and it emits the ASGI `http.response.pathsend` event
@@ -1165,6 +1180,7 @@ dynamically generated content (S3 proxy streaming, LLM token output, live sensor
 use `StreamingResponse`.
 
 **Q16: Why is `--workers 1` the recommended default for Uvicorn, and when should you increase it?**
+**Short:** A single Uvicorn worker handles I/O-bound load efficiently on one event loop; extra workers help only when the bottleneck is CPU.
 A single Uvicorn worker runs one asyncio event loop and handles thousands of concurrent
 I/O-bound requests efficiently. Adding workers spawns new OS processes, each with its own
 event loop and memory copy of the application — including ML models, DB connection pools,

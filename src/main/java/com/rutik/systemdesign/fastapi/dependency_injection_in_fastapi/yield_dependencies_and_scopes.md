@@ -973,24 +973,31 @@ app.dependency_overrides[get_db] = override_db
 ## 12. Interview Questions with Answers
 
 **Q: What is a `yield` dependency in FastAPI and how does it differ from a plain `Depends`?**
+**Short:** A yield dependency runs teardown code after the response is sent; a plain Depends callable has no teardown phase at all.
 A `yield` dependency is a generator function used with `Depends`; code before `yield` runs during setup and code after `yield` runs during teardown after the response is sent. A plain `Depends` callable just returns a value with no teardown phase. Use `yield` whenever the resource requires cleanup — DB sessions, file handles, HTTP clients.
 
 **Q: How does FastAPI guarantee teardown even when the route handler raises an exception?**
+**Short:** FastAPI drives teardown via generator.throw() into a finally block, guaranteeing cleanup runs even after a handler exception.
 FastAPI wraps the generator in an `asynccontextmanager` equivalent and drives teardown in a `finally` block. If the handler raises, FastAPI calls `generator.throw(exc)` which resumes execution inside the generator's `except`/`finally` block. The teardown code always runs as long as it is inside `finally:`.
 
 **Q: What happens if you raise an exception inside the teardown of a yield dependency?**
+**Short:** Raising in teardown reshapes the response only on the error path; on the success path the response is already sent and it just errors.
 It depends on whether the response has already gone out. On the error path — teardown reached because the handler raised — raising a new exception (typically an `HTTPException`) replaces the original and shapes the response, which is the documented way to translate a driver error into a 409. On the success path, however, the response was already sent before request-scoped teardown ran, so there is nothing left to change: Starlette raises `RuntimeError: Caught handled exception, but response already started.` and the client keeps the 200 it already received. Keep success-path teardown non-raising; log instead.
 
 **Q: Explain the caching behavior of yield dependencies. When is a dependency called more than once?**
+**Short:** FastAPI caches a dependency's result per request keyed by the callable, so multiple references share one instance.
 FastAPI caches the result of each dependency callable keyed by the function object within a single request. If three route parameters all declare `Depends(get_db)`, `get_db()` is called once; all three receive the same session. To force a new instance, pass `use_cache=False` to the second `Depends` call.
 
 **Q: What is the teardown order for nested yield dependencies?**
+**Short:** Nested yield dependencies tear down LIFO, innermost first and outermost last, reversing their setup order.
 LIFO — innermost first, outermost last. FastAPI builds a DAG at startup. At teardown, it tears down leaves before roots. If A depends on B which depends on C, teardown order is C → B → A.
 
 **Q: Why should connection pools live in `lifespan` rather than in a yield dependency?**
+**Short:** A pool created inside a yield dependency rebuilds itself on every request, adding hundreds of milliseconds of setup cost.
 Yield dependencies are request-scoped. Placing a pool in a yield dep recreates it on every request — an asyncpg pool takes ~500ms to create and opens 5–20 TCP connections. Under load this exhausts OS file descriptors and adds hundreds of milliseconds to request latency. `lifespan` creates the pool once at startup and shares it across all requests.
 
 **Q: How do you test a route that uses a yield dependency?**
+**Short:** Override the yield dependency in app.dependency_overrides with a matching generator, then clear the override afterward.
 Use `app.dependency_overrides` to replace the original callable with a test generator. The override must also be a generator function if teardown assertions matter. Clean up with `app.dependency_overrides.clear()` in a pytest fixture teardown.
 
 ```python
@@ -1009,21 +1016,27 @@ def client(app: FastAPI, db_session: AsyncSession):
 ```
 
 **Q: Can a yield dependency be synchronous? What are the implications?**
+**Short:** A synchronous yield dependency works but its blocking I/O stalls the event loop, so async generators are preferred for async apps.
 Yes. A sync generator function (`def get_db(): yield session`) works with FastAPI. FastAPI wraps it in a `contextmanager` instead of `asynccontextmanager`. The limitation is that blocking I/O in the sync generator (e.g., opening a psycopg2 connection) blocks the event loop. For async apps, prefer async generator functions.
 
 **Q: What is `use_cache=False` and when would you use it?**
+**Short:** use_cache=False bypasses the per-request cache so a route can obtain two genuinely independent instances of a dependency.
 `use_cache=False` passed to `Depends` tells FastAPI to bypass the per-request cache and call the dependency function again, creating a fresh instance. Use it when a route genuinely needs two independent instances — e.g., a transfer endpoint that requires two separate DB sessions for debit and credit operations so each can commit or roll back independently.
 
 **Q: How does exception propagation differ between a handler raise and a dependency raise?**
+**Short:** A handler exception resumes the generator via throw() and runs teardown, while a pre-yield dependency exception skips teardown entirely.
 If the route handler raises, FastAPI calls `throw(exc)` on the generator — the exception enters the generator's `except` block and `finally` block. If the dependency itself raises before `yield` (during setup), the exception propagates immediately without yielding — no teardown phase runs because the generator never reached the `yield` point.
 
 **Q: How does FastAPI detect whether a dependency function is a generator?**
+**Short:** FastAPI detects generator dependencies once at startup via inspect.isgeneratorfunction, never re-checking per request.
 At app startup, FastAPI inspects each dependency using `inspect.isgeneratorfunction()` and `inspect.isasyncgenfunction()`. For class-based dependencies, it checks the `__call__` method. This inspection happens once at import/startup; at request time FastAPI follows a pre-computed execution plan.
 
 **Q: What are the performance characteristics of yield dependencies?**
+**Short:** An async yield dependency adds only single-digit microseconds of framework overhead, while a sync one costs roughly 25 times more.
 An async yield dependency costs single-digit microseconds of framework overhead — around 0.006 ms per distinct dependency, measured as the slope between 4- and 20-dependency trees. A sync one costs roughly 0.16 ms, about 25x more, because both halves of the generator are dispatched onto the anyio thread pool. Caching makes repeated references to the same dep essentially free (a dict lookup). For async deps the dominant cost is always the I/O inside them (acquiring a pooled DB connection: ~0.1–1 ms), not FastAPI's wrapping.
 
 **Q: Can you use a yield dependency to manage a distributed lock?**
+**Short:** A yield dependency can safely manage a distributed lock by acquiring before yield and releasing in finally, so it never outlives the request.
 Yes, and it is a clean pattern: acquire before `yield`, release in `finally`, so the lock cannot outlive the request even when the handler raises.
 
 ```python
@@ -1045,9 +1058,11 @@ async def acquire_lock(
 Teardown is guaranteed even if the handler raises, which prevents lock leaks.
 
 **Q: Why can't you share a yield dependency instance between requests?**
+**Short:** A yield dependency instance is bound to one request's resolution context, so sharing it across requests would corrupt concurrent state.
 The instance is bound to the request's dependency resolution context. FastAPI creates a fresh dependency graph per request. Sharing instances across requests would introduce concurrency hazards — two concurrent requests modifying the same SQLAlchemy session would corrupt internal state. App-scoped shared state must be thread/async-safe and belongs in `lifespan` or module-level singletons.
 
 **Q: What happens if a yield dependency yields more than once?**
+**Short:** A dependency that yields twice fails the request with a 500 at teardown, not at setup, when FastAPI's wrapper resumes it a second time.
 The request fails with a 500 at teardown, not at setup. FastAPI advances the generator once to get the injected value and runs the handler with it; at teardown the `contextmanager` wrapper advances it again expecting `StopIteration`, gets a second value instead, and raises `RuntimeError: generator didn't stop`. The mirror case, returning without ever yielding, raises `RuntimeError: generator didn't yield` before the handler runs. Always `yield` exactly once.
 
 ---

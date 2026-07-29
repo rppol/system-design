@@ -713,36 +713,58 @@ async def db_session(engine): ...      # fresh session, rolled back per test
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `TestClient` and `httpx.AsyncClient` for FastAPI tests?**
+**Short:** TestClient runs synchronously and flushes BackgroundTasks immediately, while AsyncClient must be awaited.
+
 `TestClient` is synchronous — it wraps the ASGI app via `anyio.from_thread.run_sync` and allows `def` test functions. `httpx.AsyncClient` is asynchronous — it must be `await`-ed and is used inside `async def` test functions with `pytest-asyncio`. `TestClient` flushes `BackgroundTasks` synchronously before returning; `AsyncClient` does not. Use `TestClient` for simplicity; use `AsyncClient` when fixtures or assertions require `await`.
 
 **Q2: Why must TestClient be used as a context manager when the app uses lifespan?**
+**Short:** Only entering TestClient as a context manager triggers the app's lifespan startup and shutdown hooks.
+
 FastAPI's lifespan function runs startup logic inside `__aenter__` and shutdown logic inside `__aexit__`. Constructing `TestClient(app)` directly does not call `__aenter__`, so startup never runs — any state set in `lifespan` (e.g., `app.state.db`) is missing. Using `with TestClient(app) as c:` triggers the lifespan on entry and shuts it down on exit, matching production behaviour exactly.
 
 **Q3: How does `app.dependency_overrides` work and why is it better than `monkeypatch`?**
+**Short:** dependency_overrides substitutes at the FastAPI dependency-resolution level, surviving refactors monkeypatch can't.
+
 `dependency_overrides` is a dict on the `FastAPI` instance mapping a dependency callable to a replacement callable. Before each request, FastAPI resolves the dependency graph and substitutes any callable found in `dependency_overrides`. It is better than `monkeypatch` because it operates at the contract level (the function signature FastAPI resolves) rather than the module level (a name in a namespace). The override survives refactors that rename or move the implementation but keep the same dependency function.
 
 **Q4: Explain the transaction rollback strategy for test database isolation.**
+**Short:** Each test runs inside a savepoint that gets rolled back afterward, leaving no rows persisted to disk.
+
 Each test acquires a database connection, begins an outer transaction, then begins a `SAVEPOINT` (`BEGIN NESTED`). The test body — including all ORM flushes and even explicit `commit()` calls on the test session — executes within this savepoint. After the test, the fixture rolls back the outer connection, discarding all changes. No rows persist to disk; the schema remains intact. This avoids table truncation or re-migration and keeps each test under 5 ms of overhead.
 
 **Q5: Why set `expire_on_commit=False` on the test AsyncSession?**
+**Short:** expire_on_commit=False keeps attributes readable after commit, avoiding DetachedInstanceError once the session closes.
+
 By default, SQLAlchemy expires all ORM instance attributes after a `commit()`, forcing a new `SELECT` on next access. In tests, the session is rolled back after the test — the connection is gone — so any lazy-load attempt on an expired attribute raises `DetachedInstanceError`. Setting `expire_on_commit=False` keeps attribute values in memory, safe to access after commit within the test.
 
 **Q6: How do you test an endpoint that sends an email as a BackgroundTask?**
+**Short:** Mock the email function and assert it was called, since TestClient runs BackgroundTasks synchronously.
+
 Patch the email function with `unittest.mock.AsyncMock` (for async functions) or `MagicMock` (for sync), then call the endpoint via `TestClient`. Because `TestClient` executes `BackgroundTasks` synchronously before returning the response object, you can call `mock_email.assert_called_once_with(expected_args)` immediately after the response.
 
 **Q7: How would you test a WebSocket endpoint with TestClient?**
+**Short:** Use client.websocket_connect() as a context manager to send and receive messages over the test WebSocket.
+
 Use `client.websocket_connect("/ws/path")` as a context manager. Inside the block, call `ws.send_text()` / `ws.send_json()` to send messages and `ws.receive_text()` / `ws.receive_json()` to read responses. `TestClient` handles the HTTP upgrade handshake internally. Exit the context manager to close the connection and trigger any server-side disconnect handlers.
 
 **Q8: What is `asyncio_mode = "auto"` and when is it needed?**
+**Short:** asyncio_mode="auto" auto-marks every async test and fixture for asyncio execution without manual decorators.
+
 `asyncio_mode = "auto"` is a `pytest-asyncio` configuration option (set in `pyproject.toml` or `pytest.ini`) that automatically marks every `async def test_*` function and every `async def` fixture for asyncio execution without requiring `@pytest.mark.asyncio` on each one. It is needed whenever tests or fixtures are `async def` — which is the common case in FastAPI applications using async database sessions.
 
 **Q9: How do you mock outbound HTTP calls made by your FastAPI routes?**
+**Short:** respx intercepts httpx at the transport level, letting tests mock outbound calls without patching globals.
+
 Use the `respx` library, which intercepts `httpx` transport at the session level without patching globals. Decorate the test with `@respx.mock` and configure routes with `respx.get(url).mock(return_value=httpx.Response(200, json={...}))`. Any `httpx` call matching the pattern returns the mocked response; unmatched calls raise `respx.MockNotFoundError`, preventing accidental real network calls.
 
 **Q10: What is the danger of using `scope="session"` for `db_session` fixtures?**
+**Short:** A session-scoped db_session fixture lets state leak between tests, breaking isolation and test order independence.
+
 A session-scoped database session persists across the entire test run. Tests that insert rows accumulate state — test B sees rows created by test A, and tests that create the same primary key twice get `IntegrityError`. Test order becomes significant, and tests are no longer independent. The engine can be session-scoped (expensive setup once), but the session itself must be function-scoped with the rollback strategy to ensure isolation.
 
 **Q11: How do you override a setting (from pydantic-settings) in a FastAPI test?**
+**Short:** Override the get_settings dependency in a test to substitute test values without touching environment variables.
+
 Define a `get_settings` dependency in the app that returns the `Settings` object, then override it in tests:
 
 ```python
@@ -760,18 +782,28 @@ def client_with_test_settings(db_session):
 This avoids environment variable manipulation and keeps settings immutable within the test.
 
 **Q12: How do you measure test coverage and what should you target?**
+**Short:** Run pytest --cov and target 80-90% line coverage, prioritizing route handlers and error paths over generated code.
+
 Run `pytest --cov=app --cov-report=term-missing --cov-fail-under=80`. Target 80–90 % line coverage for the `app/` package. Prioritise covering: route handlers (all status codes), dependency functions (`get_db`, `get_current_user`), error paths (`HTTPException` branches), and Pydantic validation rejections. Do not chase 100 % — generated code (Pydantic model fields, SQLAlchemy columns), migration scripts, and `__main__` blocks add noise without value.
 
 **Q13: How do you handle `pytest-xdist` parallel execution with the rollback strategy?**
+**Short:** Each pytest-xdist worker gets its own connection and savepoint, so parallel workers never interfere with each other.
+
 Each worker process gets its own database connection and its own savepoint. Because the rollback strategy never commits to shared tables, workers do not interfere. The only risk is if two workers use a sequence that generates the same primary key — avoid hard-coded IDs in factories; use `db.flush()` to let the sequence assign PKs. For the SQLite in-memory engine use `StaticPool` with a single connection; for PostgreSQL use a per-worker schema prefix or a separate test database per worker (`--dist=loadscope` with schema isolation).
 
 **Q14: What breaks when a `dependency_overrides` entry is set in a fixture but never cleared in teardown?**
+**Short:** An uncleared dependency_overrides entry silently leaks into later tests sharing the same FastAPI app instance.
+
 An uncleared override stays on the shared `FastAPI` app object after the test that set it finishes, so any later test that builds a fresh `TestClient` from the same `app` instance unknowingly inherits it. A second test with no `client` fixture at all can end up hitting the first test's already-closed `db_session`, producing a confusing `DetachedInstanceError` that has nothing to do with the second test's own code. Always pair `app.dependency_overrides[dep] = ...` with `app.dependency_overrides.clear()` in a `yield`-based fixture's teardown so cleanup runs even when the test raises.
 
 **Q15: Why does the SQLite in-memory engine fixture pass `poolclass=StaticPool` instead of using the default connection pool?**
+**Short:** StaticPool forces every checkout to reuse one connection, keeping an in-memory SQLite schema visible across sessions.
+
 `sqlite+aiosqlite:///:memory:` opens a brand-new, empty database on every new connection, so SQLAlchemy's default pool would hand different async tasks completely separate, unrelated databases. `StaticPool` forces every checkout to reuse the exact same underlying connection for the lifetime of the engine, so the tables created once at fixture setup remain visible to every session used across the test. Always pair an in-memory SQLite engine with `StaticPool` and `connect_args={"check_same_thread": False}` to keep the schema and data consistent across async test code.
 
 **Q16: How would you use `freezegun` to test that an expired JWT is correctly rejected?**
+**Short:** freezegun freezes the clock so a JWT's expiry boundary can be tested deterministically without sleeping.
+
 Wrap the token-creation and the request-under-test in separate `freeze_time` contexts so the clock the application reads is deterministic rather than depending on real wall-clock timing. Create the token while frozen at a known issue time, then re-enter `with freeze_time(issue_time + timedelta(minutes=31)):` around the request call for a token whose `exp` claim was set to a 30-minute lifetime, forcing the expiry check to evaluate against a time strictly past the boundary. This avoids the flakiness of `time.sleep(1860)` and makes the boundary condition (`now == exp` vs `now > exp`) exactly reproducible on every CI run.
 
 ---

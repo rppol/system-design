@@ -675,42 +675,68 @@ MULTI/EXEC queues commands but doesn't execute them until EXEC — you cannot re
 ## 12. Interview Questions with Answers
 
 **Q: Why is Redlock considered unsafe and what's the alternative?**
+**Short:** Redlock is unsafe because a paused process can hold an expired lock while another client acquires it; fencing tokens fix this safely.
+
 Redlock acquires locks across N independent Redis instances. Martin Kleppmann identified a fundamental issue: between acquiring the lock and using it, a process can experience a GC pause or system clock jump. If the pause exceeds the lock TTL, the lock expires on Redis — but the process believes it still holds the lock. Two processes can simultaneously believe they hold the lock. This is possible even with N=5 instances because the guarantee is based on time, and time can be non-monotonic in real systems. Safe alternative: fencing tokens — the lock server returns a monotonically increasing token with each lock grant. The protected resource rejects any operation with a token lower than the highest seen. This works even if two clients simultaneously believe they hold the lock, because only the higher-token request succeeds.
 
 **Q: How does Redis AOF fsync=everysec differ from fsync=always in durability guarantees?**
+**Short:** fsync=always guarantees zero data loss per write at high latency cost, while fsync=everysec risks up to one second of writes on power loss.
+
 `fsync=always`: after every write command, Redis calls fsync() — the OS guarantees the data is on durable storage. Zero data loss on any crash. Slowest: one fsync per write = 1-10ms per operation on HDD, limiting throughput to ~1000 writes/second on HDD (higher on NVMe). `fsync=everysec`: Redis accumulates writes in the OS page cache, then fsyncs once per second in a background thread. If the Redis process crashes: zero data loss (last second of data is in OS cache). If the entire machine loses power: up to 1 second of writes are lost. Throughput: near-native (hundreds of thousands of operations per second). Most production deployments use `everysec` — the 1-second window is acceptable for most non-financial use cases, and the throughput improvement is significant.
 
 **Q: Walk me through how Redis Cluster routes a key to the correct node.**
+**Short:** Redis Cluster routes each key by hashing it into one of 16384 slots, and a client follows a MOVED redirect when that slot's owner changes.
+
 (1) Client library (or the user) computes the slot: `CRC16(key) % 16384`. Key tags (`{tag}`) hash only the tag portion. (2) The client maintains a slot-to-node mapping (downloaded from cluster on connection). (3) Client connects directly to the node owning that slot and sends the command. (4) If the slot has moved (resharding), the node responds with `MOVED <slot> <ip:port>`. (5) Client updates its slot map and retries on the correct node. (6) During live slot migration: `ASK` redirect is temporary (ask this once, don't update map). Client sends `ASKING` before the command on the destination node. Operations requiring keys on multiple slots (MGET, transactions): all keys must be in the same slot — use key tags `{user:42}session` and `{user:42}cart` to force same slot.
 
 **Q: What are the internal encodings for a Redis Sorted Set and why are two structures maintained?**
+**Short:** Small Redis sorted sets use a compact listpack, while large ones maintain both a skiplist for ranges and a hashtable for O(1) score lookups.
+
 Small sorted sets (≤128 members, ≤64 bytes each): listpack — a compact sequential byte array. Linear scan for all operations, but cache-friendly and very memory-efficient. Large sorted sets: dual structure — a skiplist for ordered operations and a hashtable for member lookups. Skiplist: O(log n) for ZADD, ZRANGE (by index, BYSCORE or BYLEX) and ZRANK — range queries navigate through level pointers. Hashtable: O(1) for ZSCORE (member → score lookup) and ZADD update (find existing score to remove from skiplist). Two structures because: range queries need ordering (skiplist), but score lookups by member name need O(1) (hashtable). Maintaining both doubles memory overhead vs a single structure but provides O(log n) for ranges and O(1) for point lookups simultaneously.
 
 **Q: Explain RDB snapshotting using fork and copy-on-write, and what the pause cost is.**
+**Short:** RDB snapshotting forks a child process that shares memory via copy-on-write, so the fork pause scales with page table size, not dataset size.
+
 `BGSAVE` (or triggered by `save` configuration): Redis calls `fork()`. The kernel creates a child process that shares all memory pages with the parent — no immediate copy. The child writes the snapshot to a `.rdb` file while the parent continues serving requests. Copy-on-Write (CoW): when the parent modifies a page (e.g., updating a key), the kernel copies that page for the child before the parent modifies it. The child sees the original. Cost: (1) Fork itself: proportional to the page table size, not the data size — a 24GB instance needs a 48MB page table (24GB / 4KB pages x 8 bytes per entry) and that is what gets copied. Redis publishes measured fork times of roughly 9-13ms per GB on physical hardware and modern HVM EC2, about 23ms/GB on KVM, and 240-420ms per GB on older Xen VMs. So a 10GB dataset is a ~100ms pause on decent hardware and multiple seconds on old Xen — check `latest_fork_usec` in `INFO` rather than assuming. (2) Memory: in the worst case (all pages modified during fork), total memory temporarily doubles. (3) I/O: child writes entire dataset to disk — throughput impact during snapshot.
 
 **Q: How does Redis handle pub/sub and what are its limitations vs Streams?**
+**Short:** Redis Pub/Sub is fire-and-forget with no persistence or acknowledgment, while Streams add a persistent log, consumer groups, and backpressure.
+
 Pub/Sub: PUBLISH channel message sends to all SUBSCRIBE'd clients. Fire-and-forget: no persistence, no history. If no client is subscribed, the message is dropped. If a subscribed client disconnects, it misses all messages while disconnected. Use case: real-time notifications where some message loss is acceptable (chat, dashboards). Limitations vs Streams: (1) No persistence — messages lost if no subscriber is connected. (2) No consumer groups — each subscriber receives all messages (broadcast). (3) No acknowledgment — cannot track if a message was processed. (4) No backpressure — fast publisher overwhelms slow subscriber. Redis Streams solve all four limitations: persistent log, consumer groups (each consumer in group gets different messages), acknowledgment (XACK), and backpressure (consumer group tracking pending messages).
 
 **Q: What is the hot key problem in Redis Cluster and how do you handle it?**
+**Short:** A hot key in Redis Cluster overwhelms its single owning shard, so mitigation relies on local caching, replica reads, or key duplication across slots.
+
 In Redis Cluster, each slot is owned by one primary shard. A "hot key" — a key accessed by thousands of requests per second — sends all traffic to one shard, saturating it while others are idle. Redis is single-threaded for commands: one shard can handle ~100K-500K simple ops/second. A viral product key receiving 1M GETs/second from 100 application servers would saturate that shard. Solutions: (1) Local in-process cache: use Caffeine/Guava with a short TTL (1-5s) in the application. Hot key GETs hit local cache, not Redis. Best for read-only data with acceptable staleness. (2) Read from replicas: configure client to route GET commands to replicas for hot keys. (3) Key duplication with random suffix: `product:42:replica:{0..9}` — 10 copies across different slots, read a random one. Write all copies on update. (4) Add a Redis shard specifically for hot keys.
 
 **Q: How does Redis actually expire keys, and why do replicas not do it themselves?**
+**Short:** Redis expires keys both lazily on access and via an active sampling cycle, and only the primary issues the DEL that replicas apply.
+
 Redis expires keys two ways: passively, when a client touches a key that is past its deadline, and actively, via a cycle that runs 10 times a second and samples 20 volatile keys per pass. The active cycle is adaptive — if more than 25% of the sampled keys were already expired it repeats immediately — so in the steady state it reclaims only around 200 keys per second and the lazy path does most of the work. That adaptivity is also the trap: a bulk load that gives a million keys the same TTL makes them all come due in the same second, the sample stays above 25%, and the cycle loops on the single command thread, which is the memory-side argument for TTL jitter. Two consequences follow. Memory is not released at the deadline, so `used_memory` can exceed what the TTLs imply and eviction can start on keys that are logically already dead. And TTLs are absolute Unix timestamps whose clock keeps running while Redis is down, so restoring an RDB onto a host with a skewed clock can expire the entire dataset on load. Replicas never expire keys on their own: the primary synthesizes an explicit `DEL` into the replication stream and the AOF, centralizing expiry so nodes cannot diverge — a replica keeps the dead key, and its memory, until that `DEL` arrives, and only begins expiring independently once promoted.
 
 **Q: What happens when Redis memory reaches maxmemory and eviction policy is allkeys-lru?**
+**Short:** When maxmemory is hit under allkeys-lru, Redis samples a small pool of keys and evicts the approximate least-recently-used one before each write.
+
 When `maxmemory` is reached and a new write operation would exceed it, Redis runs the eviction process before executing the write. With `allkeys-lru`: Redis samples a pool of keys (default 5 samples via `maxmemory-samples=5`), tracks the approximate LRU order, and evicts the least recently used key from the sample. After eviction, the write proceeds. This is approximate LRU (not exact) — Redis uses a clock-hand approach to avoid maintaining a full LRU list. Impact: eviction adds ~0.1-1ms per write when memory is full. If eviction rate is very high (nearly all writes require eviction), Redis throughput degrades. Monitor with `INFO stats` → `evicted_keys` counter. If evicting > 1000/second, increase maxmemory or reduce value sizes.
 
 **Q: What is Redis pipelining and how does it improve throughput?**
+**Short:** Pipelining batches many commands into one network round trip, multiplying throughput roughly by the number of commands batched per RTT.
+
 Normal Redis: each command = one network round trip (RTT). At 1ms RTT, max throughput = 1000 commands/second per connection. Pipelining: batch N commands in one TCP write, read all N responses in one TCP read — one RTT for N commands. Example: `SET key1 val1; SET key2 val2; GET key1` — pipelined as one write, responses batched. Throughput increase: proportional to RTT and N. At 1ms RTT and N=100: 100,000 commands/second vs 1,000. Important: pipelining is NOT atomic (other clients can interleave). For atomicity + pipelining: use MULTI/EXEC (atomic but no conditional logic) or Lua scripting (atomic + conditional). Best practice for batch operations: use pipelining for cache warming, bulk inserts, batch reads where atomicity is not needed.
 
 **Q: Explain Redis Streams and how they compare to Kafka for event processing.**
+**Short:** Redis Streams give sub-millisecond, memory-bound event logs for a single team, while Kafka offers disk-persisted, high-retention, multi-consumer scale.
+
 Redis Streams: an append-only log per key. Producers: `XADD stream-key * field value` — auto-ID based on timestamp-sequence. Consumer groups: multiple consumers in a group each get different messages, tracked by last-consumed ID. XACK removes from pending. XPENDING shows unacknowledged messages. Comparison to Kafka: Redis Streams are simpler (in-memory, no broker fleet), support sub-millisecond latency, but have limited retention (capped by memory). Kafka: disk-persisted, petabyte-scale retention, consumer offset managed by consumer (not server). Use Redis Streams when: low latency required, small-to-medium throughput (< 1M events/second), same team owns producer and consumer. Use Kafka when: high durability, high throughput, long retention, multiple independent consumer teams, complex consumer topologies.
 
 **Q: What is the ziplist/listpack and why does it matter for Redis memory?**
+**Short:** Listpack stores small Redis collections as a compact contiguous byte array, using far less memory than a hashtable until a size threshold is crossed.
+
 Listpack is the compact sequential byte encoding Redis uses for small hashes, sets, sorted sets, and list nodes. Stores entries consecutively in memory with no pointer overhead — entries can be as small as 11 bytes total for an integer vs 40+ bytes in a hashtable node. For a hash with 50 fields (≤64 bytes each), listpack uses ~3KB; a hashtable for the same data uses ~12KB — 4x more memory. The encoding automatically upgrades to hashtable/skiplist when the threshold is exceeded. This makes Redis efficient for many small objects: a session object with 10 string fields stays in listpack, dramatically reducing memory for high-cardinality session stores. Tuning: `hash-max-listpack-entries 512, hash-max-listpack-value 64` — reduce thresholds if memory is tight, increase if encoding transitions are frequent and data is just over threshold.
 
 **Q: How do you implement a distributed rate limiter using Redis?**
+**Short:** A Redis rate limiter uses an atomic Lua script or sorted set so the increment-and-check for a fixed or sliding window never races.
+
 Fixed window with atomic counter:
 ```lua
 -- Lua script (atomic). KEYS[1] is the FULLY-FORMED bucket key, built by the
@@ -738,15 +764,23 @@ EXPIRE rate:user:42 <window_seconds>
 Token bucket: more complex — the read-refill-write cycle has to be one atomic step, so it belongs in a Lua script (or `SET key value GET` if all you need is read-and-replace). The script reads current tokens, computes refill based on time elapsed, checks if the request can proceed, and writes the new state atomically.
 
 **Q: What is the difference between Redis Sentinel and Redis Cluster?**
+**Short:** Redis Sentinel provides HA failover for a single unsharded dataset, while Redis Cluster adds horizontal scaling across multiple sharded primaries.
+
 Redis Sentinel: HA solution for a single-primary/multi-replica setup. Sentinel processes (minimum 3) monitor the primary; if a majority agrees it's down, they promote a replica to primary. No horizontal scale — all data on one shard. Use for: datasets that fit on one server, simple HA, maximum key compatibility. Redis Cluster: horizontal scaling — data split across multiple shards (each a primary + replicas). Provides both HA (replica promotion) and scale. Limitations: multi-key operations require all keys on same slot (use key tags), no databases 1-15 (only db0), some commands not supported in cluster mode. Use for: datasets exceeding single-server capacity, write throughput beyond single-server limits.
 
 **Q: How do you monitor Redis for production issues?**
+**Short:** Production Redis monitoring tracks memory usage and fragmentation, eviction and hit-rate counters, replication lag, and slow-command logs.
+
 Key metrics: `INFO memory` → `used_memory` (current usage), `mem_fragmentation_ratio` (> 1.5 indicates fragmentation — consider MEMORY PURGE or restart), `maxmemory` vs `used_memory`. `INFO stats` → `evicted_keys` (should be 0 or very low), `keyspace_hits/misses` (hit rate = hits/(hits+misses), target > 99%), `total_commands_processed`. `INFO replication` → `master_repl_offset` vs replica's `slave_repl_offset` — difference = replication lag in bytes. `INFO clients` → `connected_clients`, `blocked_clients`. `SLOWLOG GET 10` → commands that took > `slowlog-log-slower-than` microseconds. `LATENCY HISTORY event` → latency spikes for fork, AOF, networking events.
 
 **Q: Why is the KEYS command dangerous to run against a production Redis instance?**
+**Short:** KEYS scans the entire keyspace on Redis's single thread and blocks every other client until it finishes, so SCAN should be used instead.
+
 KEYS scans the entire keyspace in O(N) time on Redis's single command-processing thread, so it blocks every other client for as long as the scan takes. Against a 10-million-key instance, `KEYS user:*` can block Redis for 100ms or more, and because Redis processes commands on a single thread, every other request queues up behind that one scan for its full duration. There is no partial-progress option with KEYS — it either completes and returns everything or blocks until it does. Use `SCAN 0 MATCH user:* COUNT 100` instead, which iterates the keyspace incrementally and yields control between batches so it never blocks the event loop; reserve KEYS for local development against small datasets only.
 
 **Q: Why can't you read a value inside a MULTI/EXEC block and use it to compute the value you write?**
+**Short:** MULTI queues commands without executing them, so a GET inside the block can't be read by application code before EXEC runs the whole batch.
+
 MULTI queues every command without executing it, so a GET inside the block returns nothing to application code until EXEC runs the whole batch atomically afterward. A sequence like `MULTI; GET balance; SET balance <computed_from_get>; EXEC` cannot work as written, because the SET's value has to be computed in application code before EXEC ever runs, but the GET's result isn't available until EXEC has already completed. This trips up engineers who assume MULTI/EXEC behaves like a database transaction that lets you read-then-decide mid-block, when it actually just batches pre-determined commands for atomic execution. Use a Lua script, which can read and write within a single atomic server-side execution, or WATCH-based optimistic locking — read first, then MULTI/EXEC the write, retrying if WATCH detects a concurrent change.
 
 ---

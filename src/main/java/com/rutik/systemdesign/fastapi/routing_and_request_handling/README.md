@@ -933,6 +933,8 @@ async def webhook(request: Request) -> dict:
 ## 12. Interview Questions with Answers
 
 **Q1: How does FastAPI determine which function argument gets its value from which HTTP parameter source?**
+**Short:** FastAPI infers each parameter's source from the function signature once at startup, not per request.
+
 FastAPI inspects the function signature at startup using Python's `inspect.signature`. Arguments
 whose names appear in the path template (e.g., `{user_id}`) are path parameters. Arguments with
 a Pydantic `BaseModel` type are treated as JSON body. All others are query parameters by default.
@@ -941,6 +943,8 @@ The key practical point is that FastAPI resolves this once at startup, not on ev
 the per-request cost is just extraction and validation — not reflection.
 
 **Q2: What is the difference between setting a dependency in `APIRouter(dependencies=[...])` vs in each handler's signature?**
+**Short:** Router-level dependencies run for side effects only, while handler-level ones inject their return value.
+
 Router-level dependencies run for every route in that router but are not injected into the handler
 as arguments — they are evaluated purely for side effects (auth check, rate limit, logging).
 Handler-level dependencies are injected as arguments and their return value is available inside
@@ -948,6 +952,8 @@ the handler. Use router-level for cross-cutting concerns; handler-level when the
 return value is needed. You can mix both: router-level auth + handler-level database session.
 
 **Q3: Why does `response_model` matter for security?**
+**Short:** response_model strips any field not declared on it, preventing accidental leakage of internal data.
+
 `response_model` instructs FastAPI to serialise the return value through that Pydantic model,
 which means only fields declared on the model are included in the response. If a handler returns
 a SQLAlchemy `User` ORM object that has a `password_hash` field and the `response_model=UserOut`
@@ -955,6 +961,8 @@ does not include `password_hash`, it is stripped automatically. Without `respons
 fields of the returned object are serialised, potentially leaking internal data.
 
 **Q4: What happens when you define a sync `def` route in FastAPI?**
+**Short:** FastAPI runs sync def routes in a thread pool executor so they don't block the event loop.
+
 FastAPI detects synchronous functions at startup and wraps them using
 `asyncio.get_event_loop().run_in_executor(None, ...)` (Starlette's `run_in_threadpool`). The
 route runs in the default `ThreadPoolExecutor` — by default up to `min(32, os.cpu_count() + 4)`
@@ -962,6 +970,8 @@ threads. This means sync routes can make blocking calls safely without stalling 
 but they do consume thread pool capacity. Uvicorn's default is 40 worker threads for sync routes.
 
 **Q5: How does `BackgroundTasks` differ from `asyncio.create_task`?**
+**Short:** BackgroundTasks runs after the response is sent, while create_task starts immediately on the event loop.
+
 `BackgroundTasks` (Starlette) queues callables that Starlette runs after the HTTP response is
 fully sent. It integrates with the ASGI lifecycle — cleanup dependencies (yield deps) are torn
 down only after background tasks complete. `asyncio.create_task` schedules a coroutine
@@ -971,6 +981,8 @@ For fire-and-forget coroutines that start immediately, use `create_task`. For du
 use Celery or ARQ.
 
 **Q6: What is the route ordering rule in FastAPI and why does it exist?**
+**Short:** FastAPI matches routes in registration order, so specific paths must be registered before parameterized ones.
+
 FastAPI inherits Starlette's router which matches routes in registration order — first match wins.
 If you register `GET /users/{user_id}` before `GET /users/me`, the string "me" matches
 `{user_id}` as a path parameter and `get_me()` is never called. The fix is to always register
@@ -978,24 +990,32 @@ specific (non-parameterised) routes before parameterised ones with overlapping p
 a static router — there is no specificity scoring unlike some other frameworks.
 
 **Q7: How do you return a 201 status code for a `POST` endpoint?**
+**Short:** Set status_code=201 in the route decorator, or override it dynamically via the injected Response object.
+
 Set `status_code=201` in the decorator: `@app.post("/users", status_code=201)`. This is the
 default HTTP status for that endpoint. You can still override it dynamically by returning a
 `Response` subclass with an explicit `status_code` argument. If you need to return a different
 status on some code paths, inject `Response` as a parameter and set `response.status_code`.
 
 **Q8: What is `include_in_schema=False` used for and when would you set it?**
+**Short:** include_in_schema=False hides a working route from the OpenAPI docs without disabling it.
+
 `include_in_schema=False` prevents the route from appearing in the OpenAPI JSON and the Swagger
 UI. Use it for: internal health-check endpoints that should not be documented publicly, debug or
 introspection endpoints, and endpoints that internal load balancers call but external clients
 should not know about. The route still functions — it just does not appear in `/openapi.json`.
 
 **Q9: How do you accept a list of query parameters (e.g., `?tags=a&tags=b`)?**
+**Short:** Declare the parameter as list[str] with Query() so FastAPI collects every repeated query value.
+
 Declare the parameter as `list[str]` with a `Query` annotation:
 `tags: Annotated[list[str], Query()] = []`. FastAPI collects all values for the `tags` key
 from the query string and coerces them into a list. Without `Query()`, FastAPI would not know
 to collect multiple values and would only capture the first occurrence.
 
 **Q10: How do you handle file uploads in FastAPI?**
+**Short:** UploadFile combined with File() spools large uploads to disk while keeping small ones in memory.
+
 Use `UploadFile` as the parameter type, combined with `File()`:
 `file: Annotated[UploadFile, File()]`. `UploadFile` wraps a `SpooledTemporaryFile` — small
 files are kept in memory (default threshold 1 MB), larger files are spooled to disk. Read the
@@ -1005,6 +1025,8 @@ mix a Pydantic body model with `File()`/`Form()` in the same handler — use `Fo
 field individually.
 
 **Q11: What is the purpose of `Annotated` in parameter declarations?**
+**Short:** Annotated separates a parameter's base type from FastAPI's validation and source metadata.
+
 `Annotated[T, metadata]` ([3.9]) separates the base type from validation metadata. FastAPI reads
 the metadata argument (`Path(...)`, `Query(...)`, etc.) to determine: the parameter source,
 validation constraints (`ge`, `le`, `min_length`, `regex`), aliases, deprecation flags, and
@@ -1013,6 +1035,8 @@ as `int` by mypy/pyright. This keeps type annotations valid for static analysis 
 FastAPI rich runtime metadata.
 
 **Q12: How do you customise the `operationId` in the OpenAPI schema?**
+**Short:** Pass operation_id to the route decorator to control the generated client SDK method name.
+
 Pass `operation_id="my_custom_id"` to the decorator: `@app.get("/users", operation_id="listUsers")`.
 By default FastAPI generates the operation ID from the function name and HTTP method, which
 produces IDs like `get_user_users__user_id__get`. Custom operation IDs matter when generating
@@ -1020,6 +1044,8 @@ client SDKs — the operation ID becomes the generated method name. Many teams s
 `generate_unique_id_function` on the `FastAPI` instance to control the naming strategy globally.
 
 **Q13: When would you use `StreamingResponse` vs returning a Pydantic model?**
+**Short:** Use StreamingResponse for incrementally generated or oversized bodies that can't fit in memory at once.
+
 Use `StreamingResponse` when the response body is generated incrementally (database cursor,
 file read, LLM token stream) or when the full content would be too large to hold in memory
 simultaneously. A 1 GB CSV file exported row by row via an async generator uses constant
@@ -1028,6 +1054,8 @@ to serialise. `StreamingResponse` cannot use `response_model` — serialisation 
 responsibility inside the generator.
 
 **Q14: How does FastAPI handle the conversion of header names?**
+**Short:** Header() automatically converts a parameter's underscores to hyphens when looking up the HTTP header.
+
 HTTP headers use hyphen-separated names (`X-Request-Id`), but Python identifiers use underscores.
 `Header()` automatically converts underscores in the parameter name to hyphens when looking up
 the header. So `x_request_id: Annotated[str | None, Header()] = None` looks up `X-Request-Id`
@@ -1035,6 +1063,8 @@ in the request headers. You can disable this with `convert_underscores=False` in
 This is a common source of `None` bugs when developers forget the conversion rule.
 
 **Q15: What happens when an `APIRouter` prefix and a route path both declare a path parameter with the same name?**
+**Short:** FastAPI raises a startup error when a router prefix and route path reuse the same path parameter name.
+
 FastAPI raises a startup error because the resolved path would contain the same parameter name
 twice, and it cannot determine which occurrence should populate the handler's argument. A router
 mounted with `prefix="/orgs/{org_id}"` combined with a route decorated `@router.get("/members/{org_id}")`
@@ -1042,6 +1072,8 @@ resolves to `/orgs/{org_id}/members/{org_id}`, an ambiguous duplicate. Give the 
 distinct parameter name, such as `{member_id}`, so both values are extractable independently.
 
 **Q16: What is the difference between returning `RedirectResponse(url=..., status_code=301)` and the default `307`?**
+**Short:** 307 preserves the original method and body on redirect, making it safer than 301 after POST or PUT.
+
 `301 Moved Permanently` tells clients and caches the resource has moved for good, so browsers and
 CDNs may cache the redirect and, historically, some clients silently rewrite a `POST` into a `GET`
 on the follow-up request. `307 Temporary Redirect` (Starlette's default) explicitly preserves the

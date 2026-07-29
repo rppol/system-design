@@ -550,51 +550,83 @@ The 40x is the visible failure; the 195 GB is why raising `max_connections` is n
 ## 12. Interview Questions with Answers
 
 **Q: When is denormalization the right call?**
+**Short:** Denormalize only after measuring a specific join as the bottleneck on a read-heavy, single-writer path.
+
 Denormalization is right when: (1) You've measured that a specific join is the bottleneck (EXPLAIN ANALYZE shows expensive nested loops or hash joins on hot queries). (2) The data is read far more often than written (product catalog: read 10,000 times per write). (3) The denormalized copy is maintained by exactly one service/code path (no risk of partial updates). (4) The performance gain is significant (10x+ query speedup) and cannot be achieved by indexing. Wrong reasons: "joins might be slow someday," premature optimization before measuring, or convenience.
 
 **Q: How do you model bi-temporal data and why would you need it?**
+**Short:** Bi-temporal modeling tracks both when a fact was true and when the database recorded it.
+
 Bi-temporal data tracks two independent time dimensions: valid time (when the fact was true in the real world) and transaction time (when the database recorded it). Needed when: correcting historical data retroactively — if a salary raise was backdated to January but recorded in March, you need to capture both the valid date (January) and the recording date (March). Schema: `valid_from DATE, valid_to DATE, recorded_from TIMESTAMPTZ, recorded_to TIMESTAMPTZ`. Queries like "what did we know in March about the January state" require checking both time ranges simultaneously. PostgreSQL 18 enforces the valid-time half in the database: a range column can carry `PRIMARY KEY (employee_id, valid_range WITHOUT OVERLAPS)` so two rows for the same employee cannot claim overlapping validity, and `FOREIGN KEY (...) PERIOD valid_range` checks that a reference is covered for its whole span.
 
 **Q: What are the tradeoffs of schema-per-tenant vs shared schema in a SaaS product?**
+**Short:** Shared schema with row-level security suits most tenants; schema-per-tenant fits large enterprise isolation needs.
+
 Schema-per-tenant: each tenant has a separate PostgreSQL schema (`search_path` isolation). Advantages: complete data isolation (no cross-tenant query risk), simple tenant deletion (DROP SCHEMA), per-tenant indexes. Disadvantages: connection pool complexity (different schemas need different connections), PostgreSQL handles 10,000+ schemas but planning overhead grows, cross-tenant reporting requires UNION ALL. Shared schema with tenant_id: simpler connections, but cross-tenant data risk if WHERE tenant_id is forgotten. Mitigate with RLS. Cross-tenant reports are single queries. Tenant deletion requires DELETE WHERE tenant_id=X (risk of missing tables). Recommendation: shared schema + RLS for < 10,000 tenants. Schema-per-tenant for large enterprise tenants with strict isolation requirements.
 
 **Q: Explain why EAV is an anti-pattern and what you'd use instead.**
+**Short:** EAV loses type safety and constraints, forcing slow multi-join queries instead of typed columns or JSONB.
+
 EAV stores attributes as rows (product_id, attr_name, attr_value). Problems: (1) Type safety lost — all values are TEXT, requiring casts. (2) Multi-attribute queries require multiple self-joins (one per attribute), which are slow even with indexes. (3) Constraints (NOT NULL, foreign keys, CHECK) cannot be applied per attribute. (4) Aggregations (SUM, AVG on numeric attributes) require CAST and filtering. (5) Schema changes (add attribute) require documentation rather than column metadata. Alternative: JSONB for flexible attributes (GIN index supports containment queries), generated/computed columns for commonly queried JSONB fields, or a proper table for known attributes with a JSONB catch-all.
 
 **Q: What is the difference between TIMESTAMPTZ and TIMESTAMP in PostgreSQL and which should you use?**
+**Short:** TIMESTAMPTZ stores UTC and converts correctly across timezones; TIMESTAMP stores an ambiguous literal.
+
 TIMESTAMPTZ (timestamp with time zone): stores the moment in UTC internally. Displays in the session's configured timezone (via `SET TimeZone`). When you insert '2024-01-15 10:00 PST', it's stored as '2024-01-15 18:00 UTC'. All arithmetic and comparisons are timezone-correct. TIMESTAMP (without timezone): stores exactly what you put in — no timezone conversion. If you insert '2024-01-15 10:00' from Tokyo and retrieve from New York, you get the same string '2024-01-15 10:00' — ambiguous. Always use TIMESTAMPTZ for application data — it prevents timezone bugs when application servers are in different regions or when daylight saving time changes occur.
 
 **Q: How do you implement a "soft delete" pattern safely with unique constraints?**
+**Short:** Enforce soft-delete uniqueness with a partial unique index scoped to WHERE deleted_at IS NULL.
+
 Standard soft delete adds a `deleted_at TIMESTAMPTZ` column (NULL = active, non-NULL = deleted). Problem: `UNIQUE (email)` prevents re-registration with a deleted user's email. Fix: replace the standard unique constraint with a partial unique index: `CREATE UNIQUE INDEX ON users (email) WHERE deleted_at IS NULL`. This enforces uniqueness only among non-deleted rows. Similarly, add partial indexes for all frequently-queried "active-only" patterns: `CREATE INDEX ON orders (customer_id) WHERE deleted_at IS NULL` (avoids scanning deleted orders). Consider a database view `active_users` that always filters `deleted_at IS NULL` to avoid forgetting the filter.
 
 **Q: What is the difference between CHAR(n), VARCHAR(n), and TEXT in PostgreSQL performance?**
+**Short:** VARCHAR and TEXT perform identically in PostgreSQL; CHAR(n) wastes space by padding with spaces.
+
 In PostgreSQL, CHAR(n), VARCHAR(n), and TEXT are all stored with the same mechanism (varlena header + data). There is no performance difference between VARCHAR and TEXT — they use the same storage. CHAR(n) pads shorter strings with spaces, which wastes storage and causes equality comparison surprises ('abc' = 'abc   '). The n in VARCHAR(n) only enforces a maximum length (good for business constraints like email VARCHAR(254)). Use TEXT when no maximum length makes business sense. Use VARCHAR(n) when there's a meaningful limit to enforce (phone number, country code). Never use CHAR(n) except for fixed-width legacy protocol fields.
 
 **Q: How would you design the schema for a multi-currency financial application?**
+**Short:** Store money as BIGINT minor units per currency, never FLOAT, with the currency code alongside the amount.
+
 Store all amounts in the smallest unit of the currency (cents for USD, pence for GBP, yen for JPY — yen has no decimal). Never use FLOAT/DOUBLE — use BIGINT for amounts in minor units. Store the currency code alongside the amount: `amount_minor_units BIGINT NOT NULL, currency_code CHAR(3) NOT NULL REFERENCES currencies(code)`. The currencies table defines the minor unit exponent (USD: 2 = divide by 100, JPY: 0 = no division). For exchange rates: store as NUMERIC(20,10) (high precision rational), with a timestamp and source. For display, convert in the application, never in the database. For accounting: double-entry bookkeeping — every debit has a corresponding credit, sum of all entries = 0 at all times (enforced by application or trigger).
 
 **Q: What are the pros and cons of using JSONB columns for product attributes?**
+**Short:** JSONB skips schema migrations for flexible attributes but loses per-attribute constraints and fast typed aggregation.
+
 Pros: (1) No schema migration needed to add a new attribute. (2) GIN index supports containment and existence queries efficiently. (3) Attributes can vary per product category without sparse columns. (4) Can query nested structures (`data->'dimensions'->>'height'`). (5) Works well for user-defined custom fields. Cons: (1) No column-level constraints (NOT NULL, CHECK, foreign key) per attribute — must enforce in application. (2) Aggregations on JSONB values require CAST and are slower than typed columns. (3) A GIN index over a whole JSONB document indexes every key and value in it, so it is typically far larger and slower to update than a B-tree on one extracted column; `jsonb_path_ops` shrinks it at the cost of supporting only containment. (4) Query syntax is more complex than `WHERE attribute = value`. (5) Cannot easily add a standard B+tree index on a JSONB path (can use generated columns). Best practice: known, frequently-queried attributes as typed columns; flexible/custom attributes in JSONB.
 
 **Q: When would you use a materialized view vs a regular view?**
+**Short:** Materialized views precompute and cache expensive queries; regular views recompute live on every access.
+
 Regular view: logical alias for a query, always recomputed on access. Performs well when the underlying tables have good indexes and the view adds just filtering or simple joining. Zero storage overhead. Materialized view: pre-computed and stored. Fast reads regardless of underlying query complexity. Must be refreshed to see new data. Use when: the underlying query is expensive (large aggregations, complex joins across many tables) and results don't need to be real-time. `REFRESH MATERIALIZED VIEW CONCURRENTLY` (with a unique index) allows refreshing without locking reads. Use regular views for simple transformations; use materialized views for expensive aggregations that can tolerate staleness.
 
 **Q: How do you handle schema changes (adding columns, changing types) in a multi-tenant shared schema?**
+**Short:** Adding a column with a non-volatile default is instant metadata; a volatile default rewrites the whole table.
+
 Add columns: PostgreSQL stores a non-volatile DEFAULT in the catalog rather than rewriting the heap, so `ALTER TABLE orders ADD COLUMN priority INTEGER NOT NULL DEFAULT 0` returns in milliseconds on a table of any size. The deciding property is the default's *volatility*, not the column's nullability — a nullable `DEFAULT 7` is equally instant, while `DEFAULT random()` or `DEFAULT now()` must materialise a distinct value per row and rewrites the whole table. Change column type: requires table rewrite unless it's a compatible upcast (e.g., VARCHAR(50) → VARCHAR(100) is instant metadata change, while narrowing to VARCHAR(60) rewrites). For incompatible type changes, use the expand-contract pattern. Drop columns: mark as unused in application first (deploy code that ignores column), then drop in a later release. This ensures rollback safety — you can revert the code without schema incompatibility.
 
 **Q: What is the purpose of CHECK constraints and when do you use them vs application-level validation?**
+**Short:** CHECK constraints enforce invariants at the database level that application code alone could bypass.
+
 CHECK constraints are database-level validation that cannot be bypassed (unlike application code which can have bugs or be bypassed by direct DB access). Use for: invariants that must always hold regardless of what code path writes the data: `CHECK (price > 0)`, `CHECK (quantity >= 0)`, `CHECK (status IN ('pending', 'active', 'cancelled'))`, `CHECK (end_date > start_date)`. Application-level validation: use for user-friendly error messages, complex business rules involving multiple tables, or async validation. The combination: validate in application for UX, enforce in database for correctness. Never rely solely on application-level validation for data integrity — direct DB writes, scripts, and bugs can bypass it.
 
 **Q: How do you design a schema for hierarchical data (e.g., organizational chart, category tree)?**
+**Short:** Adjacency lists, closure tables, materialized paths, and nested sets trade read speed against write cost differently.
+
 Multiple patterns: (1) Adjacency list: `parent_id BIGINT REFERENCES table(id)`. Simple, supports unlimited depth, but recursive queries (WITH RECURSIVE CTE) are needed for tree traversal. (2) Closure table: separate `ancestors(ancestor_id, descendant_id, depth)` table — fast queries for "all descendants" (`WHERE ancestor_id = X`), expensive insert/update (must update closure table). (3) Materialized path: `path TEXT` column (e.g., '/1/4/7/') — fast subtree queries (`WHERE path LIKE '/1/4/%'`), path updates cascade. (4) Nested sets: `lft` and `rgt` integers encoding DFS order — extremely fast reads, slow writes (must update all rgt/lft values on insert). PostgreSQL `ltree` extension: native hierarchical labels (`category_path LTREE`) with optimized operators and indexes.
 
 **Q: What is normalization vs denormalization and how do you decide the right balance?**
+**Short:** Start normalized for consistency, then denormalize only where a measured join is the proven bottleneck.
+
 Normalization (3NF) eliminates redundancy by splitting data into separate tables with foreign keys. Ensures data consistency (one update, one place), enables flexible queries via joins, and reduces storage. Denormalization reintroduces redundancy for read performance: duplicating a frequently-read column avoids a join. Decision: start normalized, measure actual query performance in production with production data volume. If a specific join is measured to be the bottleneck (EXPLAIN ANALYZE shows expensive join on hot path) AND the data is read far more often than written, consider denormalization. Always maintain the normalized source of truth — denormalized copies are projections maintained by triggers or application logic.
 
 **Q: Why must foreign key columns be indexed even though the database doesn't require it?**
+**Short:** PostgreSQL never auto-indexes a foreign key column, so an unindexed one forces a full scan on every parent delete.
+
 In PostgreSQL, declaring a foreign key does not index the referencing column, so every parent DELETE forces a full scan of the child table to verify no rows still reference it. Deleting one customer row means the database must confirm no orders point at it — with no index on `orders.customer_id`, that check scans the entire orders table, and the same scan runs on any UPDATE of the parent key. The primary key side of the relationship is indexed automatically, which is exactly why engineers assume the referencing side is too. InnoDB is the counter-example that makes the rule easy to misremember: it *requires* an index on the referencing column and creates one for you if absent, so a developer moving from MySQL to PostgreSQL inherits the scan without ever having written the index themselves. Create an index on every foreign key column as part of the same migration that adds the constraint, so the referential-integrity check on parent deletes is an index lookup instead of a full scan.
 
 **Q: What is the difference between JSON and JSONB in PostgreSQL, and when would you choose each?**
+**Short:** JSONB parses once into binary for fast indexed queries; JSON re-parses raw text on every access.
+
 JSON stores the raw text and re-parses it on every query, while JSONB stores a parsed binary representation that queries faster and supports GIN indexing. JSON validates syntax on insert but otherwise keeps the document byte-for-byte — preserving key order, whitespace, and duplicate keys — at the cost of a full re-parse each time a query touches the column. JSONB parses once at write time into a binary form, making containment queries like `attributes @> '{"color": "red"}'` fast and indexable, though it stores slightly larger and normalizes away key ordering and duplicates. The only reasons to prefer JSON are needing an exact byte-preserved document (audit payloads verified by signature) or preserving duplicate keys, both rare. Default to JSONB for any column you will ever query into, and add a GIN index once containment or existence queries appear on the hot path.
 
 ---

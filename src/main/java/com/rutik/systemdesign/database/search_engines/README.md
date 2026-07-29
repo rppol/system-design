@@ -693,51 +693,83 @@ An application indexed a document, then immediately queried for it — returned 
 ## 12. Interview Questions with Answers
 
 **Q: How does BM25 scoring work and when would you customize it?**
+**Short:** BM25 combines term rarity, saturating term frequency, and field length normalization into a relevance score.
+
 BM25 scores a document based on: (1) IDF (Inverse Document Frequency): rare terms across the corpus score higher — "database" in a corpus mostly about cooking is more distinctive than in a database technology corpus. (2) TF (Term Frequency) with saturation: more occurrences raise the score but with diminishing returns (controlled by k1=1.2). (3) Field length normalization (controlled by b=0.75): shorter documents get a boost for the same term frequency as longer documents. Customization scenarios: product title search — disable length normalization (b=0) since all titles are short; product catalog where recency matters — add a `function_score` to boost recent products; domain-specific vocabulary — add synonym expansion or custom analyzers before indexing.
 
 **Q: What is the deep pagination problem in Elasticsearch and how do you solve it?**
+**Short:** search_after cursor pagination replaces from+size, which loads every skipped document into coordinator memory.
+
 Deep pagination with `from + size`: the coordinating node requests `from + size` results from all shards, merges them, and returns the requested page. At offset 100,000 with 10 shards: each shard returns 100,010 documents → 1,000,100 documents loaded in coordinator memory to return 10. Memory exhaustion and extreme latency at deep offsets. max_result_window defaults to 10,000 — attempts beyond this fail. Solutions: (1) `search_after` with a sort key (preferred): cursor-based pagination — include the sort values of the last returned document as the `search_after` parameter. O(log n) per page, no memory accumulation. (2) Point-in-time (PIT) + `search_after`: consistent snapshot for pagination — new documents don't appear mid-pagination. (3) Scroll API: deprecated but still used for data export scenarios (millions of documents).
 
 **Q: How do you change a field mapping without downtime using aliases?**
+**Short:** Reindex into a new index with the corrected mapping, then atomically swap the alias to point at it.
+
 Elasticsearch field mappings are immutable for most type changes. Zero-downtime approach: (1) Create a new index with the correct mapping. (2) Use the Reindex API to copy data from old to new index (can take hours for large indexes — run in background). (3) While reindexing, index new documents to both old and new indexes (dual-write). (4) After reindex is complete, perform an atomic alias swap: `POST /_aliases` with one action removing the alias from the old index and adding it to the new index simultaneously. (5) Delete the old index. The alias (not the versioned index name) should be used by all application code — this enables seamless index version changes.
 
 **Q: What is a Lucene segment and why does force merge improve search performance?**
+**Short:** Force merge collapses many small immutable Lucene segments into one, cutting per-segment search overhead.
+
 A Lucene segment is an immutable mini-index: a set of files containing the inverted index, stored fields, doc values, and bloom filters for one "snapshot" of data. Each Elasticsearch refresh (default 1 second) creates a new segment. Over time: hundreds of small segments. Search: each segment must be searched separately, results merged → O(segments) overhead. Force merge (`POST /index/_forcemerge?max_num_segments=1`): merges all segments into one. After: search scans one segment = maximum efficiency. Only applies to read-only indexes (warm/cold tier) — writing to a force-merged index immediately creates new segments.
 
 **Q: Explain the near-real-time (NRT) search mechanism in Elasticsearch.**
+**Short:** Refresh makes new documents searchable roughly every second; flush later fsyncs segments to disk for durability.
+
 NRT involves two operations: refresh and flush. Refresh (default every 1 second): Lucene "opens" a new segment reader on any new segments that have been written to the in-memory buffer. After refresh, new documents are searchable. Refresh does NOT fsync to disk — the data exists in Lucene's buffer and OS page cache. Flush (default every 30 seconds or when translog reaches 512MB): fsyncs the translog and Lucene segments to disk, clears the translog. After flush, data survives a process crash. Translog: all operations since the last flush are in the translog. On crash recovery: Elasticsearch replays the translog to reconstruct any unflushed operations.
 
 **Q: How do Elasticsearch aggregations differ from SQL GROUP BY?**
+**Short:** Elasticsearch aggregations are often approximate on high-cardinality fields, unlike SQL's exact GROUP BY.
+
 Elasticsearch aggregations are approximate for high-cardinality fields by default: the `terms` aggregation uses a distributed approximate count (each shard returns its top-N, coordinator merges), which can miss low-frequency terms that appear across many shards. SQL GROUP BY is exact. Elasticsearch `cardinality` aggregation uses HyperLogLog (~3-5% error). SQL `COUNT(DISTINCT)` is exact but slow. Elasticsearch aggregations run on doc values (columnar on-disk format) — very efficient for analytics. SQL aggregations use B+tree index or sequential scan. For aggregations requiring exact counts on high-cardinality fields, Elasticsearch's `shard_size` parameter increases per-shard candidate set at cost of memory and latency.
 
 **Q: What is the difference between match and term queries in Elasticsearch?**
+**Short:** term matches exact unanalyzed values; match applies the indexing analyzer for full-text relevance scoring.
+
 `term` query: exact match, no analysis applied. Used for keyword fields, IDs, booleans. `{"term": {"status": "published"}}` matches documents where status field is exactly "published". `match` query: full-text match, applies the same analyzer used during indexing (tokenization, lowercasing, stemming). `{"match": {"title": "Database Indexing"}}` → analyzed to ["database", "index"] → matches documents containing either term. Use `term` for keyword fields (status, category, user_id) in filter context (fast, cached). Use `match` for text fields (title, description, body) in query context (relevance scored). Common mistake: using `match` on a keyword field (lowercase conversion may miss exact case) or `term` on a text field (searching for unstemmed form that doesn't exist in the inverted index).
 
 **Q: What is index lifecycle management (ILM) and how does it reduce costs?**
+**Short:** ILM automatically moves aging indices from expensive hot storage down to cheaper warm, cold, and frozen tiers.
+
 ILM automates the movement of indices through phases based on age, size, or document count. Hot phase: active writes on NVMe SSDs (most expensive). Warm phase: after rollover (e.g., after index reaches 50GB or 7 days): move to HDD-backed nodes, force merge to 1 segment (reduce overhead), possibly shrink shard count. Cold phase: after 30 days: reduce replicas to 0 (or 1), move to cheaper storage. Frozen phase: move index to object storage (S3/GCS), load segments on demand. Delete phase: after 90 days, delete the index. Cost savings example: hot data at $500/TB-month, cold data at $50/TB-month, frozen at $5/TB-month — ILM automatically moves data to cheaper tiers as it ages.
 
 **Q: How does Elasticsearch handle cluster state and shard allocation?**
+**Short:** The elected master node owns cluster state and decides shard placement based on capacity and balance.
+
 Cluster state: maintained by the elected master node and replicated to all nodes. Contains: index metadata (mappings, settings), shard routing table (which shard lives on which node). On any cluster change (new index, failed node, shard move): master serializes the change and broadcasts updated cluster state to all nodes. Shard allocation: the master decides which nodes host which shards based on: node capacity, shard count balance, allocation filtering rules, zone awareness settings. Default: shards distributed evenly across all nodes. Zone-aware allocation: replicas placed on different availability zones. `index.routing.allocation.require.zone=us-east-1a` pins an index to specific nodes. Unassigned shards (cluster status YELLOW or RED): can indicate disk full, node offline, or insufficient nodes for the replica count.
 
 **Q: What are doc values and why do they matter for aggregations?**
+**Short:** Doc values store field values in a columnar on-disk format, making aggregations fast without loading heap.
+
 Doc values are a columnar on-disk format for field values — all values for field "price" stored sequentially, then all values for "status", etc. This contrasts with the row-oriented stored fields (all fields for document 1, then document 2). For aggregations (`terms`, `avg`, `max`): the aggregation engine reads all values for a specific field in sorted order — doc values enable this with sequential disk reads. Without doc values (fielddata in heap, the old approach): field values must be loaded into heap memory from inverted index — slow and causes OOM on large datasets. Doc values are enabled by default for all non-text fields. Text fields use `fielddata: true` (heap-based, expensive) — avoid; use a `.keyword` sub-field instead for aggregations.
 
 **Q: How do you diagnose why a search query is slow in Elasticsearch?**
+**Short:** Use the Profile API, _explain, hot threads, and slow logs to find which phase or shard is slow.
+
 Tools: (1) Profile API: `GET /index/_search { "profile": true, "query": {...} }` — shows time spent in each phase of each shard's query execution (match, score, fetch). (2) `_explain` API: `GET /index/_explain/doc_id { "query": {...} }` — shows why a document matched (or didn't) and how its score was computed. (3) Hot threads API: `GET /_nodes/hot_threads` — shows which threads are consuming CPU across the cluster. (4) Slow log: set `index.search.slowlog.threshold.query.warn: 1s` in index settings — logs all queries taking > 1s. Common causes: missing filter context (scoring when not needed), large `terms` filter (hundreds of values), scripted scoring (Painless scripts per-document), deep pagination, aggregation on high-cardinality field.
 
 **Q: What is the difference between a nested object and a flattened object in Elasticsearch?**
+**Short:** Nested mappings preserve field relationships in array objects by storing each object as its own hidden document.
+
 Standard object mapping: sub-document fields are flattened into the parent document's index. `{"author": {"name": "Alice", "city": "NYC"}}` → indexed as `author.name=Alice, author.city=NYC`. Problem: array of objects loses the relationship between fields of the same object: `authors: [{"name":"Alice","city":"NYC"}, {"name":"Bob","city":"LA"}]` → can incorrectly match a query for `author.name=Alice AND author.city=LA`. Nested mapping: each nested object stored as a separate hidden Lucene document, preserving field relationships. Queries use `nested` query type. Tradeoff: nested documents increase index size and query complexity. Flattened field type (ES 7.3+): stores all subfields in a single field, supports `term` and `range` queries, but not aggregations per subfield — useful for dynamic/unknown object structures.
 
 **Q: How do you scale Elasticsearch horizontally and what are the limits?**
+**Short:** Scaling adds data nodes and rebalances shards, but a shard count fixed at index creation caps growth without reindexing.
+
 Horizontal scaling: add data nodes. Elasticsearch automatically rebalances shards across new nodes. Index shards are fixed at creation — to scale beyond the original shard count requires reindexing to a new index with more shards. Scaling limits: Elasticsearch cluster health degrades with too many shards — each shard has JVM heap overhead (~few KB for small segments, but shard metadata in cluster state). Recommendation: max 20 shards per GB of heap; a 64GB heap node can handle ~1280 shards. More nodes allow more shards but each additional shard adds coordination overhead. For very large-scale, cross-cluster search (CCS) federation across multiple clusters provides isolation and avoids single-cluster shard count limits.
 
 **Q: How do you determine the right number of primary shards for a new index, and why does over-sharding hurt?**
+**Short:** Size shards to 10-50GB each for the expected mature data volume, since the shard count is fixed until a full reindex.
+
 The sizing rule is `number_of_shards = ceil(total_size_GB / target_shard_size_GB)`, using the recommended 10-50GB target shard size, so a 500MB dataset needs 1-2 shards, not 50. Each shard carries fixed overhead regardless of how much data it actually holds — a dedicated search thread, cluster-state metadata tracked by the master node, and file handles — so 50 shards on a 500MB dataset means each shard averages 10MB, far below the useful minimum, paying coordination overhead with no compensating benefit. Because the primary shard count is fixed at index creation and cannot be changed without a full reindex into a new index, undersizing is nearly as costly as oversizing: too few shards limits parallelism and caps how large the index can grow before individual shards get unwieldy. Monitor actual shard sizes with `_cat/indices?v&h=index,segments.count,store.size` after data has accumulated, and alert well before crossing 1,000 shards per node, since that is the point cluster stability visibly degrades. Size shards for the data volume you expect at maturity, not the volume at index creation time, since resizing later requires a reindex.
 
 **Q: What is the difference between query context and filter context, and why should non-scoring predicates use filter?**
+**Short:** Filter context predicates skip scoring and are cacheable, making them faster than the same predicate in query context.
+
 Query context (`must`/`should`) computes a BM25 relevance score for every matching document, while filter context (`filter`/`must_not`) only answers yes-or-no with no score computed at all. Because filter-context results are cacheable — Elasticsearch can reuse the bitset of matching documents across repeated queries with the same filter — a term or range filter in filter context is both faster on first execution and faster on repeat execution, whereas the same predicate in query context recomputes scoring every time. This module's own benchmark shows the effect directly: moving date-range and status filters from `must` into `filter` context produced a 40% query speedup with no change to relevance ranking, since those predicates were never meant to affect the score in the first place. The rule of thumb is that only text predicates whose relevance genuinely matters for ranking, like title and description matches, belong in query context; everything else — status flags, category IDs, date ranges, boolean toggles — belongs in filter context by default. Push every non-relevance predicate into filter context first, and only move something to query context if it genuinely needs to influence the score.
 
 **Q: How do you optimize Elasticsearch for high-throughput bulk indexing?**
+**Short:** Disable refresh and replicas during a bulk load, then restore both afterward, for roughly a 10x throughput gain.
+
 Setting `refresh_interval: -1` before a bulk load stops Elasticsearch from creating a new searchable segment every second, a change worth roughly a 10x throughput gain on its own. Reset it back to the normal `1s` once the load completes, since leaving it disabled means new documents stay invisible to search indefinitely. Temporarily set `number_of_replicas: 0` during the load so each document is written once instead of also being copied synchronously to replica shards, then restore the replica count afterward to regain normal HA and read-scale characteristics. Use the `_bulk` API with a batch size tuned to the cluster, typically 5-15MB per request or a few thousand documents, rather than individual index requests that each pay network round-trip and per-request overhead. Skip force-merge during the load itself, since running it concurrently with active writes cancels its own benefit, and only force-merge after the load completes and the index moves to a read-only warm or cold tier.
 
 ---

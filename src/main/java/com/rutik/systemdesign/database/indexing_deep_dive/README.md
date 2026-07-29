@@ -760,27 +760,43 @@ A covering index was added expecting Index Only Scans. EXPLAIN showed `Heap Fetc
 ## 12. Interview Questions with Answers
 
 **Q: How do you choose the column order in a composite index?**
+**Short:** Composite index columns should order equality predicates first and range predicates last, since a range stops the index from narrowing further columns.
+
 Put equality-filtered columns first, range-filtered columns last. Within equality columns, put higher-cardinality columns first for broader initial filtering. Reason: a B+tree composite index (a, b, c) first sorts by a, then b within equal a values, then c. If a has an equality predicate, the index efficiently narrows to all rows with that a value, then continues the scan with b and c. A range on a (like `a > 5`) stops the index from being useful for b and c — the planner must check all values of a > 5 and cannot use b/c predicates efficiently.
 
 **Q: When would you use a partial index?**
+**Short:** A partial index covers only rows matching a fixed low-selectivity condition, staying smaller and cheaper to maintain than indexing the whole column.
+
 Use a partial index when a consistent, low-selectivity condition appears in many queries. Example: `WHERE status = 'active'` when 95% of users are active. A full index on `status` is nearly useless (low cardinality). A partial index `CREATE INDEX ON users (email) WHERE status = 'active'` covers only the 5% inactive records or the 95% active — whichever is queried. Another classic: unique email only among non-deleted users: `UNIQUE INDEX ... WHERE deleted_at IS NULL`. Partial indexes are smaller, faster to maintain, and fit more easily in the buffer pool.
 
 **Q: What is index bloat and how do you detect and fix it in production?**
+**Short:** Index bloat from accumulated dead entries is fixed with REINDEX CONCURRENTLY, which rebuilds the index without blocking reads or writes.
+
 Index bloat occurs when dead index entries (from deleted or updated rows) accumulate faster than they are reclaimed. Symptoms: index size growing without data growth, slow index scans. Detection: `SELECT indexname, pg_size_pretty(pg_relation_size(indexrelid)) FROM pg_stat_user_indexes ORDER BY 2 DESC;` and `pgstattuple(indexname).dead_tuple_percent`. Fix: `REINDEX INDEX CONCURRENTLY idx_name` — rebuilds the index from scratch without blocking reads or writes (requires PostgreSQL 12+). Schedule this during low-traffic periods and monitor disk space (temporary extra space needed during rebuild).
 
 **Q: Explain why covering indexes eliminate heap fetches.**
+**Short:** A covering index stores every needed column in its leaf nodes, letting an index-only scan skip the random-I/O heap fetch entirely.
+
 The database heap (data file) stores full rows. An index stores only the indexed columns plus a row pointer (ctid in PostgreSQL). A standard index scan: traverse index to find matching row pointers → follow each pointer to the heap to fetch remaining columns. This requires random I/O for each row. A covering index includes all columns needed by the query in the index's leaf nodes. The database never needs to visit the heap — all data is available in the index. This eliminates random I/O and is often 5-10x faster for large result sets. Detect via EXPLAIN: "Index Only Scan" vs "Index Scan."
 
 **Q: How does the query planner decide between a sequential scan and an index scan?**
+**Short:** The planner picks a sequential scan over an index scan when index selectivity is low, since sequential I/O beats the random I/O of many heap fetches.
+
 The cost-based optimizer (CBO) estimates: (1) Index scan cost = index traversal cost + heap fetch cost (random_page_cost × estimated rows). (2) Sequential scan cost = seq_page_cost × total pages. If index selectivity is low (query returns 20%+ of rows), sequential scan is often cheaper because sequential I/O is faster than random I/O (by ~4x on HDD, ~1.5x on SSD). Settings: `random_page_cost` defaults to 4.0 (HDD assumption); for SSD, set to 1.1-1.5. `effective_cache_size` tells the planner how much data fits in OS cache — affects whether "random" I/Os are truly random or cached.
 
 **Q: What are GIN indexes and when do you choose them over B+tree?**
+**Short:** GIN indexes invert value-to-row mappings for containment queries like JSONB or arrays, while B+tree suits scalar equality and range lookups.
+
 GIN (Generalized Inverted Index) is an inverted index: it maps each element value to the set of rows containing it. Use GIN when: (1) JSONB containment queries (`WHERE data @> '{"type": "click"}'`), (2) Array containment (`WHERE tags @> '{postgres, index}'`), (3) Full-text search with `tsvector`. With the default `jsonb_ops` operator class GIN indexes every key and value, so on wide JSONB it can rival or exceed the table's own size; `jsonb_path_ops` is far smaller but supports only `@>` and `jsonpath` matching. Insert and update are slow either way (posting lists must be updated for every element). Use B+tree when: single scalar value equality/range queries. Use GIN when: containment, overlap, or element-existence queries on multi-valued columns.
 
 **Q: What is a BRIN index and what are its limitations?**
+**Short:** A BRIN index only helps when column values correlate with physical row order, making it ideal for append-only timestamps but useless for random IDs.
+
 BRIN (Block Range Index) stores min/max values per range of 128 consecutive table pages. It's tiny (1/1000th of a B+tree) and has very low maintenance cost. Query: if the query range overlaps the BRIN min/max for a block range, read that block range; otherwise skip it. Limitation: only useful if data values are correlated with physical storage order. An append-only `created_at` column is perfect — new rows have newer timestamps and are physically at the end. A `user_id` column in a randomly-ordered table is useless for BRIN — every block range has min and max spanning the entire domain, so BRIN cannot skip any blocks.
 
 **Q: How do you find and remove unused indexes in production?**
+**Short:** Unused indexes are found via idx_scan = 0 in pg_stat_user_indexes after a stats reset and a representative traffic window, then dropped concurrently.
+
 ```sql
 SELECT schemaname, tablename, indexname, idx_scan
 FROM pg_stat_user_indexes
@@ -790,36 +806,58 @@ ORDER BY pg_relation_size(indexrelid) DESC;
 `idx_scan = 0` since last stats reset means the index was never used. Verify: reset stats with `SELECT pg_stat_reset()`, wait 1-2 weeks to accumulate representative traffic. Indexes still at idx_scan=0 are candidates for removal. Test removal safely: use MySQL's INVISIBLE INDEX feature or PostgreSQL's `pg_hint_plan` to disable index use and measure query performance. Drop with `DROP INDEX CONCURRENTLY idx_name` to avoid locking.
 
 **Q: Explain the prefix matching rule for composite indexes in MySQL.**
+**Short:** MySQL can only use a composite index for a left-to-right prefix of its columns, and stops using it for navigation once a range condition is hit.
+
 A composite index (a, b, c) can be used for queries that reference a prefix of the columns in order: just (a), (a, b), or (a, b, c). If a query omits a leading column (queries only on b or c), MySQL cannot use the index at all. The exception: if the leading column has an equality condition, subsequent columns can have range conditions — but once a range is hit, further columns are not usable for index navigation (though they may be used for in-index filtering). Example: `WHERE a = 1 AND b > 5 AND c = 3` — the index is used for a (equality) and b (range) but c is not used for index navigation (though it can be evaluated in the leaf nodes).
 
 **Q: What is an expression index and when does the planner use it?**
+**Short:** An expression index only helps a query that uses the exact same expression text, such as lower(email), not an equivalent-looking one.
+
 An expression index stores the result of an expression over one or more columns. The planner uses it only when the query contains the exact same expression. Example: `CREATE INDEX ON users (lower(email))` — used by `WHERE lower(email) = 'alice@example.com'` but NOT by `WHERE email = 'Alice@example.com'`. Common uses: case-insensitive string matching, extracting date parts (`EXTRACT(year FROM ts)`), computed business logic (`(price * quantity)`). Important: the query must use the same expression text; even equivalent expressions with different function calls may not match.
 
 **Q: How do you add an index to a 500M-row production table without causing downtime?**
+**Short:** CREATE INDEX CONCURRENTLY builds an index in multiple passes so a large production table keeps serving reads and writes throughout.
+
 Use `CREATE INDEX CONCURRENTLY idx_name ON table (col)`. This builds the index in three phases: (1) Initial scan of table — marks new inserts as needing index entries. (2) Second scan — catches changes made during first scan. (3) Third pass — cleanup. Throughout, reads and writes to the table continue normally. Downsides: (1) It does more total work than a plain build and takes significantly longer — two full table scans instead of one, plus a wait for every transaction that predates each phase. (2) Requires more disk I/O. (3) If it fails midway, leaves an INVALID index — must drop and restart. Monitor progress via `pg_stat_progress_create_index` (PostgreSQL 12+).
 
 **Q: What is the visibility map and why does it matter for index-only scans?**
+**Short:** PostgreSQL's visibility map lets an index-only scan skip the heap when a page's bit confirms every row on it is visible to all transactions.
+
 PostgreSQL maintains a visibility map (VM): 2 bits per heap page. Bit 1: "all tuples visible to all transactions" (set by VACUUM). Bit 2: "all tuples frozen" (for very old data). During an index-only scan, for each row found in the index, PostgreSQL checks the VM for that row's page. If the bit is set (all tuples visible), it can return the index data directly without visiting the heap. If the bit is not set, it must visit the heap to check MVCC visibility (defeating the purpose of the index-only scan). Ensure autovacuum is keeping up — check `pg_stat_user_tables.n_dead_tup` and `last_autovacuum`.
 
 **Q: What is a HOT update in PostgreSQL and how can adding one index destroy it?**
+**Short:** A HOT update writes a new row version with zero index changes, but indexing any column the update touches destroys that zero-index-write path.
+
 A HOT (Heap-Only Tuple) update writes a new row version with zero index writes, and it applies whenever the update touches no indexed column and the new version fits on the same heap page. The index entry keeps pointing at the original item identifier, which becomes a redirect into a HOT chain, so on a table with 8 indexes a HOT update costs 1 structure write instead of 9. HOT chains are also pruned during ordinary page access, including plain SELECTs, so the row's own churn does not have to wait for VACUUM. The destruction is easy: index one frequently-updated column — `last_seen_at`, `view_count`, a progress counter — and every update to that column is now non-HOT for the entire table, so the real cost of that index is not an incremental percentage on the write path but the loss of the zero-index-write path altogether. Keep `fillfactor` at 70-90 on update-heavy tables so the same-page condition keeps holding, and measure the outcome with `n_tup_hot_upd` against `n_tup_upd` in `pg_stat_user_tables` rather than assuming HOT is happening. A ratio near zero on a write-heavy table almost always means an index is sitting on a churning column.
 
 **Q: What is fill factor for a B+tree index and when should you change it?**
+**Short:** Lowering an index's fill factor leaves free space per page so inserts near existing keys don't immediately trigger page splits.
+
 Fill factor (0-100, default 90 for indexes) specifies what percentage of each index page is filled during initial build. Leaving 10% free space means new inserts into existing pages don't immediately cause page splits. When to lower it: (1) Sequential inserts near existing keys (middle-of-range updates, backfills), (2) Tables with heavy UPDATE patterns that change indexed columns. When to raise it: (3) Insert-only tables where inserts are always at the end (like append-only logs with timestamp primary key) — 100% fill factor maximizes storage efficiency. Example: `CREATE INDEX ON orders (customer_id) WITH (fillfactor=70)` for a table with frequent customer_id-range updates.
 
 **Q: How does a GIN index handle updates and why is fastupdate important?**
+**Short:** GIN's fastupdate batches new entries into a pending list instead of the main structure, trading slower reads for much faster bursty inserts.
+
 GIN index updates are expensive: each row that changes must update the posting list for every element it contains. For a JSONB document with 50 keys, an INSERT requires 50 GIN posting list updates — serialized writes on a shared data structure. `fastupdate=on` (default): new entries go to an unsorted pending list rather than directly into the GIN structure. The list is merged into the main structure when it exceeds `gin_pending_list_limit` (default 4MB) — flushed by whichever backend trips the limit, or by autovacuum — rather than by a dedicated background process. This batches the expensive sorting/merging. Downside: reads must check both the main GIN and the pending list. For read-heavy workloads with bursts of GIN inserts, fastupdate reduces write latency significantly.
 
 **Q: How do you handle an index on a UUID v4 primary key that causes cache thrashing?**
+**Short:** Random UUID v4 keys scatter inserts across the whole B+tree, causing constant cache misses that a time-ordered UUID v7 or ULID avoids.
+
 UUID v4 is random — inserts go to random B+tree leaf pages, causing constant cache misses (each insert fetches a different page). At scale, the index cannot fit in the buffer pool, so every insert causes a disk read. Solutions: (1) Use a time-ordered identifier — UUID v7 or ULID — so new inserts land at the end of the index and only the last few pages need to be in cache. PostgreSQL 18 ships `uuidv7()` natively (alongside the explicit `uuidv4()` alias), so this no longer needs an extension. (2) Use a sequence or BIGSERIAL primary key for internal use, expose UUID externally. (3) Use hash partitioning on UUID — each partition's index is smaller and can fit in cache. (4) Increase `shared_buffers` / buffer pool so the index fits — only viable for small tables.
 
 **Q: What is the difference between REINDEX and REINDEX CONCURRENTLY?**
+**Short:** Plain REINDEX locks the table exclusively for the whole rebuild, while REINDEX CONCURRENTLY takes longer but keeps reads and writes flowing.
+
 `REINDEX INDEX idx_name`: Acquires an ACCESS EXCLUSIVE lock on the table for the entire duration of the index rebuild. All reads and writes to the table are blocked. Fast but causes downtime. `REINDEX INDEX CONCURRENTLY idx_name` (PostgreSQL 12+): Uses the same algorithm as `CREATE INDEX CONCURRENTLY` — multiple passes, no exclusive lock, reads and writes continue. Takes significantly longer and requires temporary extra disk space (old + new index exist simultaneously). If REINDEX CONCURRENTLY fails, leaves an INVALID index — drop it and retry. Use CONCURRENTLY in production; use regular REINDEX only during maintenance windows.
 
 **Q: Explain how a B+tree index supports ORDER BY without a sort step.**
+**Short:** A B+tree's leaf pages are already stored in sorted order, so scanning them satisfies ORDER BY without a separate sort step.
+
 B+tree leaf nodes are physically ordered by the indexed column(s) and linked in a doubly-linked list. A query `ORDER BY last_name` traverses the leaf pages in order, fetching rows already sorted. EXPLAIN shows "Index Scan" with no "Sort" node. This also enables "merge join" when joining two tables on their indexed columns — both index scans produce sorted output that can be merged in O(n+m). Descending ORDER BY: B+trees support backward traversal of the leaf list. `CREATE INDEX ON t (col DESC)` or the planner traverses an ascending index backward — both work but explicit DESC index can improve performance for mixed ASC/DESC compound sorts.
 
 **Q: When would you recommend multiple single-column indexes vs one composite index?**
+**Short:** A single composite index outperforms multiple single-column indexes for a fixed, frequent query pattern, while separate indexes suit unpredictable column combinations.
+
 Multiple single-column indexes: the planner can combine them via "bitmap index scan" (OR two index results, intersect AND results). Useful when: queries use different combinations of columns unpredictably, or you need to OR conditions. One composite index: more efficient for queries that always use all (or prefix of) columns together. The composite index eliminates multiple index lookups and bitmap operations. Rule of thumb: if a specific query pattern runs millions of times per day, a targeted composite index outperforms multiple single-column indexes. For exploratory or infrequent queries, single-column indexes with bitmap scan are sufficient.
 
 ---

@@ -917,6 +917,8 @@ class BodyLoggingMiddleware(BaseHTTPMiddleware):
 ## 12. Interview Questions with Answers
 
 **Q1: What is the execution order of middleware in FastAPI when you call `add_middleware` three times?**
+**Short:** The last middleware added wraps outermost and runs first on the request, last on the response.
+
 The last middleware added is the outermost layer and executes first on the request. If you call
 `add_middleware(A)`, `add_middleware(B)`, `add_middleware(C)`, the effective wrap is `C(B(A(app)))`.
 On a request: C runs first, then B, then A, then the router. On a response: A processes first,
@@ -924,6 +926,8 @@ then B, then C. The mnemonic is a stack — last in, first out on the request si
 the `add_middleware` call order carefully when debugging middleware interactions.
 
 **Q2: Why does `BaseHTTPMiddleware` break streaming responses, and what is the fix?**
+**Short:** BaseHTTPMiddleware buffers the entire response body before returning, breaking streaming responses.
+
 `BaseHTTPMiddleware.dispatch()` calls `call_next(request)` which returns only after all response
 chunks have been collected — the framework buffers the entire body before returning a `Response`
 object. For `StreamingResponse` or SSE, this means the client waits until the generator is
@@ -932,12 +936,16 @@ intercepts the `send` callable directly — it fires once per chunk and passes e
 immediately without buffering.
 
 **Q3: How do you pass data from middleware to a route handler?**
+**Short:** Attach data to request.state in middleware, then read it in the handler via request.state.
+
 Attach data to `request.state` in middleware (e.g., `request.state.user_id = decoded_jwt["sub"]`).
 The route handler reads it via `request: Request` parameter as `request.state.user_id`. Starlette's
 `State` is a simple attribute bag scoped to the request lifetime. Avoid thread-locals or module-level
 globals — they break under async concurrency and multiple worker processes.
 
 **Q4: What is the difference between `@app.exception_handler` and a try/except in middleware?**
+**Short:** Middleware's try/except can catch exceptions that escape every @app.exception_handler registration.
+
 `@app.exception_handler` hooks into Starlette's exception handling chain, which runs inside the
 routing layer after middleware. It only catches exceptions raised by route handlers and inner
 exception handlers. Middleware wraps the entire routing layer, so a try/except in middleware can
@@ -946,6 +954,8 @@ other middleware layers below it. For a global last-resort 500 handler, use midd
 semantics tied to specific routes, use `@app.exception_handler`.
 
 **Q5: Why was `@app.on_event("startup")` deprecated in favor of `lifespan`?**
+**Short:** lifespan uses asynccontextmanager's try/finally to guarantee cleanup always runs, unlike on_event.
+
 Three reasons: (1) `on_event` splits startup and shutdown into separate functions, making it easy
 to forget cleanup if startup raises partway through; (2) exceptions in `on_event("startup")`
 were silently swallowed in some Uvicorn/pytest combinations; (3) `lifespan` uses the standard
@@ -954,6 +964,8 @@ lifespan spec also defines a standard protocol that servers implement, making `l
 portable than framework-specific event hooks.
 
 **Q6: How do you initialize a database connection pool at startup and make it available to all route handlers?**
+**Short:** Create the pool before yield in lifespan and store it on app.state for handlers to reuse.
+
 Use the `lifespan` context manager: create the pool before `yield` and assign it to `app.state.db`.
 Route handlers access it via `request.app.state.db`. Alternatively, define a dependency
 `async def get_db(request: Request)` that returns `request.app.state.db` — this makes the pool
@@ -961,6 +973,8 @@ injectable through the standard `Depends()` mechanism, which is easier to mock i
 `dependency_overrides`.
 
 **Q7: What does `allow_credentials=True` in CORSMiddleware do, and why can it not be combined with `allow_origins=["*"]`?**
+**Short:** Browsers forbid a wildcard Allow-Origin whenever Access-Control-Allow-Credentials is true.
+
 `allow_credentials=True` causes CORSMiddleware to add `Access-Control-Allow-Credentials: true`
 to responses, which instructs browsers to include cookies and Authorization headers in
 cross-origin requests. The CORS specification forbids the wildcard `"*"` value for
@@ -970,6 +984,8 @@ credential theft by malicious origins. Always specify an explicit origin list wh
 `allow_credentials=True`.
 
 **Q8: What is the overhead of `BaseHTTPMiddleware` compared to pure ASGI middleware?**
+**Short:** BaseHTTPMiddleware adds roughly 20-30 microseconds per request versus 1-2 for pure ASGI middleware.
+
 `BaseHTTPMiddleware` wraps the `receive` and `send` callables twice — once internally to collect
 the response body and once to present a `Response` object to `dispatch()`. This adds approximately
 20-30 µs of overhead per request on fast paths. For a service handling 10,000 req/s, that is
@@ -978,6 +994,8 @@ The difference is rarely the bottleneck (database queries dominate at 1-50 ms), 
 high-frequency internal services where P99 latency targets are tight.
 
 **Q9: How do you write middleware that correctly handles both HTTP and WebSocket connections?**
+**Short:** Check scope["type"] at the top of middleware to branch HTTP, WebSocket, and lifespan handling.
+
 Check `scope["type"]` at the start of `__call__`. For `"http"` connections, apply HTTP-specific
 logic. For `"websocket"` connections, either pass through unchanged (`await self.app(scope, receive, send)`)
 or apply WebSocket-specific logic. Always handle the `"lifespan"` type as a pass-through —
@@ -985,6 +1003,8 @@ failing to do so prevents the lifespan startup/shutdown protocol from running.
 `BaseHTTPMiddleware` handles this automatically; pure ASGI middleware requires explicit type checking.
 
 **Q10: How do you test a FastAPI application that uses `lifespan` for startup?**
+**Short:** Enter httpx.AsyncClient as an async context manager to trigger lifespan startup and shutdown.
+
 Use Starlette's `TestClient` or `httpx.AsyncClient` as an async context manager:
 `async with AsyncClient(app=app, base_url="http://test") as client:` — entering the context
 triggers lifespan startup; exiting triggers shutdown. For `pytest-asyncio`, use the
@@ -992,6 +1012,8 @@ triggers lifespan startup; exiting triggers shutdown. For `pytest-asyncio`, use 
 initialized app across all tests in a module, avoiding repeated startup/shutdown overhead.
 
 **Q11: What is `Request.state` and what is its scope?**
+**Short:** Request.state is a per-request attribute bag created fresh each request and never shared.
+
 `Request.state` is a `starlette.datastructures.State` instance — a simple object that accepts
 arbitrary attribute assignments (`request.state.foo = "bar"`). It is created fresh for each
 request and destroyed when the request completes. It is not shared between requests, not thread-safe
@@ -1000,6 +1022,8 @@ lifecycle. Use it to pass middleware-set values (correlation IDs, authenticated 
 route handlers without function-signature coupling.
 
 **Q12: When should you use `BackgroundTasks` in a route handler vs a dedicated task queue?**
+**Short:** BackgroundTasks runs in-process after the response; use a real task queue for slow or critical work.
+
 `BackgroundTasks` runs the task in the same Uvicorn worker process after the response is sent,
 blocking that worker for the duration of the background work. It is appropriate for fast, non-critical
 tasks: sending a confirmation email (50-200 ms), writing an audit log entry, or invalidating a
@@ -1010,6 +1034,8 @@ anti-pattern — middleware's `call_next` must complete before the response is s
 registered there block the response.
 
 **Q13: Why does reading `request.body()` inside `BaseHTTPMiddleware.dispatch()` cause the route handler to receive an empty body?**
+**Short:** Reading request.body() in middleware drains the one-shot receive stream, leaving nothing for the handler.
+
 `request.body()` consumes the ASGI `receive` stream, which is a one-shot async generator that
 cannot be rewound. Once middleware awaits it to inspect or log the bytes, the underlying
 `receive` callable has nothing left to yield, so the route handler's own `await request.body()`
@@ -1017,6 +1043,8 @@ call returns empty. The fix is to cache the bytes and monkey-patch `request._rec
 callable that replays the cached body, letting downstream code read the same content again.
 
 **Q14: What does `GZipMiddleware`'s `minimum_size` threshold control, and why should it be skipped for SSE and WebSocket routes?**
+**Short:** minimum_size skips compressing small bodies, and GZip should be disabled for SSE and WebSocket routes.
+
 `minimum_size` sets the smallest response body, in bytes, that `GZipMiddleware` will compress.
 Bodies below the threshold (default 500 bytes) pass through uncompressed because the compression
 overhead outweighs the savings on small payloads, while a JSON response over 1 KB typically saves
@@ -1025,6 +1053,8 @@ protocols stream events incrementally and gzip's block-based compression would b
 delivery, defeating the purpose of a live stream.
 
 **Q15: What does `TrustedHostMiddleware` protect against, and what happens on a `Host` header mismatch?**
+**Short:** TrustedHostMiddleware rejects requests with an unrecognized Host header, blocking header injection.
+
 `TrustedHostMiddleware` validates the incoming `Host` header against an explicit allowlist and
 rejects any request whose header does not match. This prevents HTTP Host header injection attacks
 that exploit apps generating absolute URLs — password reset links, redirect targets — from the
@@ -1033,6 +1063,8 @@ route handler or middleware below it in the stack. Always configure an explicit 
 list in production rather than the permissive `["*"]` default.
 
 **Q16: What should happen if the code before `yield` in a `lifespan` context manager raises an exception?**
+**Short:** An exception before yield in lifespan aborts startup entirely, so the server never accepts traffic.
+
 The exception propagates out of the `lifespan` context manager and Uvicorn aborts startup
 entirely — the ASGI server never begins accepting connections and the process exits with a
 non-zero code. This is the intended fail-fast behavior: a service that cannot reach its

@@ -877,6 +877,7 @@ change via `404` or `410`.
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between 401 and 403?**
+**Short:** 401 means no valid credentials were sent; 403 means the credentials are valid but access is denied.
 401 means the request lacks valid authentication credentials — the server does not know who
 you are. 403 means the server knows who you are but you do not have permission to access
 the resource. Return 401 when the `Authorization` header is missing or invalid; return 403
@@ -884,6 +885,7 @@ when the token is valid but the user lacks the required role. Mixing them leaks 
 about whether a resource exists.
 
 **Q2: Why is cursor pagination better than offset pagination for large, live datasets?**
+**Short:** Cursor pagination binds to the last-seen row via a keyset condition, so concurrent inserts can't shift results the way OFFSET does.
 Offset pagination uses `OFFSET n` which is recomputed on each query. If rows are inserted
 between page 1 and page 2, the offset shifts rows, causing duplicates or gaps. Cursor
 pagination uses a keyset condition (`WHERE (ts, id) < (cursor_ts, cursor_id)`) bound to
@@ -892,12 +894,14 @@ on Postgres requires scanning and discarding 50,000 rows; keyset pagination uses
 directly, keeping query latency constant regardless of depth.
 
 **Q3: What makes a composite `(created_at, id)` cursor more reliable than a single `created_at` cursor?**
+**Short:** Adding id as a tiebreaker to created_at keeps the cursor stable when multiple rows share the same timestamp.
 `created_at` timestamps are not unique — under load, multiple rows can share the same
 millisecond. Using `id` (a sequence-generated integer) as a tiebreaker ensures the condition
 `(created_at = ts AND id < last_id) OR (created_at < ts)` uniquely identifies a stable
 position in the result set, even across ties.
 
 **Q4: How do you implement idempotency for a POST endpoint that creates a payment?**
+**Short:** Cache an Idempotency-Key header with Redis SET NX EX so only the first of two concurrent retries executes the payment.
 Accept an `Idempotency-Key` header from the client. On first receipt, attempt to `SET
 idempotency:<key> NX EX 86400` in Redis before executing the mutation. If the `SET` returns
 `nil` (key exists), return the cached response. If `SET` succeeds, proceed, persist the
@@ -906,6 +910,7 @@ parallel retries arrive simultaneously — both see the key at the same time, bu
 atomic so only one proceeds. TTL of 24 hours matches Stripe's and Shopify's standard.
 
 **Q5: What are the trade-offs between URL path versioning and `Accept` header versioning?**
+**Short:** URL path versioning is simpler and CDN-cacheable, while header versioning keeps one canonical URL but is harder to route.
 URL path versioning (`/v1/`) is visible in logs, browser-friendly, cacheable by CDN per
 path prefix, and simple to route at the gateway layer. Its downside is that it technically
 violates REST — the same resource lives at two different URLs. Header versioning keeps a
@@ -915,6 +920,7 @@ is invisible in browser address bars, and harder to route in gateways. For publi
 outweighs REST purity.
 
 **Q6: What is the sliding window rate limiting algorithm and why does it outperform fixed window?**
+**Short:** Sliding window tracks per-user request timestamps in Redis, avoiding the boundary burst that lets fixed windows double the allowed rate.
 A fixed window counts requests in a fixed calendar interval (e.g., 09:00:00–09:01:00). A
 request burst at 09:00:59 and another at 09:01:01 consumes two full windows back-to-back,
 effectively doubling the allowed rate at the boundary. Sliding window maintains a per-user
@@ -923,6 +929,7 @@ each request. It eliminates the boundary burst at the cost of O(log N) Redis ope
 request and O(N) memory per user, where N is the request count in the window.
 
 **Q7: How does FastAPI's `deprecated=True` in a path operation affect clients?**
+**Short:** deprecated=True only flags the OpenAPI spec and Swagger UI as deprecated; it does not change the response or block the call.
 FastAPI marks the operation in the generated OpenAPI spec with `"deprecated": true`. Swagger
 UI renders the endpoint with a strikethrough label. SDK generators (like `openapi-python-client`)
 typically add a deprecation warning to the generated method's docstring. The response itself
@@ -931,6 +938,7 @@ also add a `Deprecated: true` and `Sunset` response header via a middleware or i
 
 **Q8: How would you prevent a client from calling a POST /orders endpoint twice and charging
 a user twice?**
+**Short:** An Idempotency-Key header cached in Redis with SET NX EX returns the original response instead of re-running the charge.
 Require an `Idempotency-Key` UUID header. Store it in Redis with `SET NX EX 86400` before
 touching the database. If the key already exists, return the original response (from cache)
 without re-running the mutation. If the key does not exist, set it as a placeholder, process
@@ -940,6 +948,7 @@ for that intent.
 
 **Q9: Your API has 10 replicas. A user has a rate limit of 100 req/min. With in-process
 rate limiting, what actually happens?**
+**Short:** In-process rate limiting on 10 replicas multiplies a 100 req/min limit into an effective 1,000 req/min.
 Each replica maintains its own counter. The user can send 100 requests to each replica,
 making the effective limit 1,000 req/min — 10× the intended limit. The fix is to push all
 counter state to a shared Redis instance (`slowapi` with `storage_uri="redis://..."` or
@@ -949,6 +958,7 @@ local refill approximation, syncing to Redis every 100ms instead of per-request.
 
 **Q10: What HTTP status code should you return when a client submits a duplicate order
 (same external order reference already exists)?**
+**Short:** Return 409 Conflict along with the existing resource, since the request is valid, the resource exists, and the server is not at fault.
 `409 Conflict`. The request was valid (400 is wrong — nothing is malformed), the resource
 exists (`201` would be wrong), and the server is not to blame (`500` is wrong). Return the
 existing resource in the response body alongside the `409` so the client does not need a
@@ -956,6 +966,7 @@ second round trip to fetch it.
 
 **Q11: How would you design a REST API for a resource that has a many-to-many relationship,
 such as users and teams?**
+**Short:** Model the many-to-many relationship as a sub-resource, such as POST /teams/42/members, rather than deep nesting.
 Model the relationship as a sub-resource: `POST /teams/42/members` to add a user to a team,
 `DELETE /teams/42/members/7` to remove them. Avoid deep nesting beyond two levels. For
 queries that cross both sides (`"all teams for user 7"`), use a query param on the collection:
@@ -963,6 +974,7 @@ queries that cross both sides (`"all teams for user 7"`), use a query param on t
 as a first-class resource: `POST /memberships`, `GET /memberships/{id}`.
 
 **Q12: When should you return `204 No Content` versus `200 OK`?**
+**Short:** Return 204 when an operation succeeds with nothing to return, and 200 only when the response includes a body.
 Return `204` when the operation succeeded and there is genuinely nothing to return: `DELETE`
 of a resource, `PUT` when you do not want to return the updated body, acknowledgement of a
 webhook. Return `200` when you return a body — the updated resource after `PUT/PATCH`,
@@ -971,6 +983,7 @@ Never return `200` with an empty body — that confuses clients that buffer the 
 JSON.
 
 **Q13: What is the practical difference between PUT and PATCH, and which one is naturally idempotent?**
+**Short:** PUT is inherently idempotent because it replaces the whole resource; PATCH is idempotent only if it uses set operations.
 PUT replaces the entire resource with the request body while PATCH updates only the fields provided.
 PUT is naturally idempotent because sending the same full representation twice produces the same
 end state. PATCH is idempotent only if the handler uses set operations rather than increments — a
@@ -978,6 +991,7 @@ body like `{"status": "active"}` is safe to retry, but `{"views_delta": 1}` is n
 PATCH fields are safe for clients to retry blindly.
 
 **Q14: How does the token bucket rate-limiting algorithm allow bursts while still enforcing an average rate?**
+**Short:** Token bucket lets clients spend up to the full bucket capacity in a single burst while tokens still refill at a fixed average rate.
 A token bucket refills at a fixed rate and lets a client spend up to the full bucket capacity in
 a single burst. Tokens accumulate at the configured rate (e.g., 60 tokens/minute = 1 token/second)
 up to a maximum capacity; each request consumes one token, and requests are rejected once the
@@ -986,6 +1000,7 @@ allows more than the per-window count regardless of spacing. Reach for token buc
 bursts are acceptable but the long-run average must stay bounded, such as third-party API quotas.
 
 **Q15: Why does the cursor pagination handler fetch `limit + 1` rows instead of exactly `limit`?**
+**Short:** Fetching one extra row lets the server detect whether a next page exists without running a separate COUNT query.
 Fetching one extra row lets the server detect whether a next page exists without running a
 separate `COUNT` query. If the query returns `limit + 1` rows, the server strips the last one and
 uses it only to confirm `has_more` and build the next cursor; if it returns `limit` or fewer rows,
@@ -994,6 +1009,7 @@ cost on every page. This is why the v2 `/posts` handler queries `.limit(limit + 
 `posts[:limit]` before returning the response.
 
 **Q16: How does validating the `sort` query parameter with a Pydantic `Enum` prevent SQL injection in an `ORDER BY` clause?**
+**Short:** Restricting sort to a Pydantic Enum rejects any value that isn't an allowed column name before it ever reaches SQL.
 Restricting `sort` to a Pydantic `Enum` of allowed column names rejects any value that is not an
 exact enum member before it reaches SQL. Building `ORDER BY {sort}` by string-formatting a raw
 client-supplied column name lets an attacker inject arbitrary SQL through a crafted identifier.

@@ -464,24 +464,38 @@ acceptable — the same tension the caching module frames as TTL versus stalenes
 ## 12. Interview Questions with Answers
 
 **Q: When is an in-memory database preferable to a disk-backed one?**
+**Short:** In-memory databases fit workloads needing sub-millisecond latency where the working set fits entirely in RAM, such as sessions or leaderboards.
+
 Choose in-memory when sub-millisecond latency is required and the working dataset fits in RAM. Specific cases: session state where every request requires a lookup and the data is ephemeral; rate limiters where latency matters more than durability; leaderboards using sorted sets with microsecond rank lookups; distributed locks where lock acquisition must complete before a network timeout. Do not use in-memory as the primary store for financial records or any data where loss on restart is unacceptable unless you configure durable persistence (AOF fsync=always).
 
 **Q: How does VoltDB guarantee ACID without disk writes on the critical path?**
+**Short:** VoltDB gets ACID durability from synchronous K-safety replication to other nodes, keeping disk command logging off the commit critical path.
+
 VoltDB uses partitioned execution with a single thread per partition, eliminating locking overhead. Each stored procedure executes as an atomic unit on its target partition(s). Durability comes from synchronous K-safety replication: before returning success to the client, VoltDB ensures the transaction is committed on K+1 nodes. A node failure does not lose committed data because at least one replica has the committed state. Command logging writes to disk asynchronously after the replication acknowledgment, so the disk I/O is off the critical path.
 
 **Q: What happens when a Redis node runs out of memory with the noeviction policy?**
+**Short:** With noeviction, Redis rejects writes with an OOM error once memory is full while reads keep working normally.
+
 Redis returns an error for write commands (`OOM command not allowed when used memory > 'maxmemory'`). Read commands still succeed. The application receives errors that it must handle, typically by returning an error to the user or falling back to the database. In production this causes cascading failures if the application does not handle Redis write errors gracefully. The correct response: monitor Redis memory, alert at 80% capacity, and use an eviction policy (allkeys-lru or allkeys-lfu) for cache workloads.
 
 **Q: What is the difference between Redis RDB and AOF persistence and when would you use each?**
+**Short:** RDB takes periodic binary snapshots with low overhead but can lose minutes of data, while AOF replays every write for stronger durability at higher I/O cost.
+
 RDB creates point-in-time snapshots by forking the process and writing a compact binary dump to disk. It has low I/O overhead during operation but the potential to lose minutes of data (between snapshots). AOF logs every write command; on restart Redis replays the AOF to reconstruct state. `fsync=always` gives durability similar to a traditional database but halves throughput; `fsync=everysec` risks 1 second of data loss. Use RDB for caches where some data loss is acceptable and fast restarts are needed. Use AOF `fsync=everysec` for session stores. Use both (hybrid mode) for primary data stores requiring fast restart and minimal data loss.
 
 **Q: How does Redis Sorted Set support a leaderboard with 10 million users?**
+**Short:** A Redis Sorted Set backed by a skip list gives O(log N) rank and range queries, handling a 10-million-user leaderboard in about 2GB of RAM.
+
 A Redis Sorted Set stores members with a floating-point score, backed by a skip list for O(log N) rank operations. `ZADD leaderboard score user_id` adds or updates a user's score. `ZRANK leaderboard user_id` returns the user's rank (0-indexed) in O(log N). `ZREVRANGE leaderboard 0 9` retrieves the top 10 in O(log N + 10). Memory usage: ~200 bytes per entry (skip list overhead), so 10M users ≈ 2GB RAM. This is a well-known Redis use case that handles 10M entries with sub-millisecond operations.
 
 **Q: What is the Redis fork pause and how do you mitigate it?**
+**Short:** Redis's fork for RDB or AOF rewrite pauses the process for roughly 1ms per GB of used memory while the page table is copied.
+
 When Redis creates an RDB snapshot or begins AOF rewrite, it calls `fork()` to create a child process. The fork itself is instantaneous (copy-on-write pages), but copying the page table takes ~1ms per GB of used memory. A 20GB Redis instance pauses ~20ms during fork. Mitigation: use jemalloc allocator (Redis default, reduces page table fragmentation), disable transparent huge pages (`echo never > /sys/kernel/mm/transparent_hugepage/enabled`), schedule snapshots on a replica not the primary, and monitor `latest_fork_usec` in Redis INFO.
 
 **Q: How do you implement a distributed rate limiter with Redis?**
+**Short:** A distributed rate limiter uses an atomic Lua script combining INCR and EXPIRE so the check-and-increment never races across clients.
+
 Use an atomic Lua script or a single Redis command to ensure the check-and-increment is atomic:
 ```lua
 -- Lua script: rate limit to N requests per window_seconds
@@ -500,30 +514,48 @@ return 1  -- allowed
 This script executes atomically (Redis single-threaded commands). The key is scoped per user/IP/API-key per time window. For sliding window, use a Sorted Set (score = timestamp, trim expired entries with `ZREMRANGEBYSCORE`).
 
 **Q: What is Apache Ignite's near cache and when is it useful?**
+**Short:** Apache Ignite's near cache is a local L1 cache that serves hot entries from an application node without a network round trip to the cluster.
+
 A near cache is a local in-process cache on each application node that stores frequently accessed entries from the distributed Ignite cluster. When a node requests a cached entry, Ignite first checks the near cache (L1), then the distributed cluster (L2). Near cache reduces network round trips for hot data to zero. It is useful when a small subset of data is accessed by nearly every application node (e.g., product catalog, configuration). The risk: near cache invalidation lag — when the primary copy updates, near caches become stale for up to the configured invalidation window. Not suitable for data requiring strict consistency.
 
 **Q: How does Aerospike achieve high throughput with datasets larger than RAM?**
+**Short:** Aerospike keeps indexes in DRAM and values on NVMe SSD, giving sub-millisecond reads on datasets far larger than available RAM.
+
 Aerospike uses a hybrid memory model: all indexes are kept in DRAM (for sub-millisecond index lookup), while values are stored on NVMe SSDs with direct device access (bypassing the OS page cache and filesystem). A read requires one DRAM index lookup followed by one direct NVMe read. Since NVMe latency is ~0.1ms (vs ~5ms for HDD or ~0.5ms for Redis network round trip), Aerospike achieves ~0.5ms reads for datasets many times larger than available RAM. This makes it suitable for ML feature stores and ad-tech where dataset size exceeds RAM but sub-millisecond latency is still required.
 
 **Q: What is the difference between Redis MULTI/EXEC transactions and Lua scripts?**
+**Short:** MULTI/EXEC atomically batches commands with no branching or rollback, while Lua scripts execute conditional logic as one atomic operation.
+
 `MULTI/EXEC` queues commands and executes them atomically (no other client commands interleave), but it does NOT support conditional logic — you cannot inspect a value and branch within a MULTI/EXEC block. If a queued command fails, other commands still execute (no rollback). Lua scripts (`EVAL`) execute as a single atomic operation with full Lua programming capability: conditionals, loops, variable reads. Scripts can read a value and branch on it atomically. Use MULTI/EXEC for simple batched writes; use Lua for conditional operations (check-then-set, rate limiting, inventory decrement with floor check).
 
 **Q: How do you choose between allkeys-lru and volatile-ttl eviction, and what failure mode does each have?**
+**Short:** volatile-ttl only evicts keys with a TTL set, so untagged keys silently behave like noeviction, while allkeys-lru can evict durable data mixed into a cache instance.
+
 Use allkeys-lru when every key is expendable cache data, and a volatile-* policy such as volatile-ttl only when the evictable keys reliably carry TTLs. The volatile-ttl trap: those policies can only evict keys that have a TTL set — if writers forget to set TTLs, the eligible pool is empty and Redis behaves exactly like noeviction, returning OOM errors on writes even though "an eviction policy is configured." The allkeys-lru trap is the mirror image: in an instance that mixes cache entries with durable-intent data (sessions, locks, counters), LRU will happily evict the durable keys once memory fills. Keep cache and persistent data in separate Redis instances, prefer allkeys-lfu for skewed cache access patterns, and audit that TTLs are actually being set before trusting any volatile-* policy.
 
 **Q: Why does VoltDB run each partition on a single thread, and what does that cost?**
+**Short:** Running one thread per partition removes all locking on VoltDB's single-partition transactions, but multi-partition transactions pay a two-phase-commit coordinator cost.
+
 One thread per partition means no locks, latches, or data races are ever possible on that partition's data, so single-partition transactions complete in roughly 100-300 microseconds. Each stored procedure is routed to the partition owning its data and runs there serially to completion — the atomicity comes from the execution model itself rather than from lock managers or MVCC bookkeeping. The cost is multi-partition transactions: they need a coordinator and two-phase commit at 1-5ms latency, and they block every partition involved, so a schema where each transaction touches a global row (like a total_orders counter on partition 0) collapses throughput. Design the schema so the dominant transactions are single-partition — shard counters per partition and aggregate at read time.
 
 **Q: What does enabling native persistence change about Apache Ignite's role in an architecture?**
+**Short:** Enabling Apache Ignite's native persistence turns it into a durable system of record that survives restarts and can exceed cluster RAM.
+
 With native persistence enabled, Ignite becomes a durable system of record: the full dataset lives on disk and RAM serves as a hot-data layer over it. Without it, Ignite is a pure in-memory grid — a restart loses everything, and the source of truth must be an external database wired in via read-through/write-through. Enabling it changes three things: data survives cluster restarts without a full reload from the external store; the dataset can exceed total cluster RAM because cold entries are read from disk on demand; and restart warm-up happens lazily as pages are touched rather than requiring an explicit bulk load. Decide the mode up front — bolting durability onto a grid that was designed as a cache-in-front-of-RDBMS reshapes both capacity planning and recovery procedures.
 
 **Q: Compare lazy, bulk (eager), and replay strategies for warming a cache after restart.**
+**Short:** Lazy cache warming risks a database-crushing stampede on cold start, so replay-based warming from a snapshot is usually the safest restart strategy.
+
 Lazy warming fills the cache from misses, eager warming bulk-loads data before taking traffic, and replay warming restores state from a snapshot or a replayed traffic log. Lazy is simplest but the cold window is dangerous: hit rate starts near zero, so the backing database absorbs nearly the full read load — a stampede risk at production traffic. Eager warming avoids that but delays startup, causes a memory spike, and needs a heuristic for which keys deserve pre-loading. Replay approaches are often best: Redis restores an RDB snapshot in minutes (about 2 minutes for 5M sorted-set entries), and blue-green replica warming serves traffic from the old instance while the new one fills. Never cut a high-traffic cache over cold — combine snapshot restore with a pre-warming job and shift traffic gradually.
 
 **Q: What does the Redis mem_fragmentation_ratio measure, and when is it a problem?**
+**Short:** Redis mem_fragmentation_ratio above about 1.5 signals wasted allocator memory, while a ratio under 1.0 means Redis pages are being swapped to disk.
+
 mem_fragmentation_ratio in INFO memory is RSS divided by used_memory: sustained values above ~1.5 mean the allocator is holding memory Redis is not using, while below 1.0 means the OS has swapped Redis pages to disk. Fragmentation accumulates in workloads with widely varying value sizes and heavy delete/overwrite churn — freed allocations leave holes that new, differently-sized allocations cannot reuse. jemalloc (the default allocator) limits this with size-class arenas, and `activedefrag yes` lets Redis compact memory online at a small CPU cost; the blunt fix is a restart during low traffic. A ratio under 1.0 is the real emergency: swapping turns microsecond operations into disk-latency operations. Alert on the ratio alongside used_memory, not on RSS alone.
 
 **Q: Why is Memcached multi-threaded while Redis keeps command execution on one thread?**
+**Short:** Memcached shards its simple get/set model across threads, while Redis stays single-threaded so its richer data structures need no locking.
+
 Memcached's flat get/set model shards cleanly across threads with a simple item lock, while Redis keeps commands on a single thread so its rich data structures need no locking and every command is naturally atomic. Multi-threading Redis's sorted sets, streams, and Lua scripting would require fine-grained locks that reintroduce contention and destroy the single-threaded atomicity guarantees that patterns like INCR-based rate limiting rely on. Redis 6+ compromises: socket reads and writes move to I/O threads, but execution stays serialized; scale beyond one core comes from Redis Cluster sharding rather than intra-instance parallelism (Dragonfly and KeyDB relax exactly this design point). Choose per workload: rich data structures and persistence favor Redis, while a pure string cache needing maximum per-node throughput on many cores favors Memcached.
 
 ---

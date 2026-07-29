@@ -816,45 +816,73 @@ async def sync_from_upstream(order_id: str):
 ## 12. Interview Questions with Answers
 
 **Q1: What is BOLA and why is it the most common API vulnerability?**
+**Short:** BOLA happens when an API lets any authenticated user access an object by ID without an ownership check.
+
 BOLA (Broken Object Level Authorization) occurs when an API allows a user to access any resource by ID without verifying ownership. It is the most common vulnerability because authentication (checking identity) is often correctly implemented while authorization (checking ownership of the specific object) is forgotten at the route level. Middleware cannot perform this check because it runs before the object is fetched. Every route that fetches a resource by user-controlled ID must explicitly verify `resource.owner_id == current_user.id`.
 
 **Q2: Why should you return HTTP 403 (not 404) when an authenticated user requests a resource they don't own?**
+**Short:** Return 403 for an existing unauthorized resource and 404 for a nonexistent one, to avoid leaking existence.
+
 Returning 404 leaks the existence of the resource: an attacker who receives a different error code for "exists but not mine" versus "does not exist" can enumerate all resource IDs in the system. The correct pattern is: return 404 when the object does not exist for any caller; return 403 when it exists but the caller is unauthorized. This is the principle of not leaking more information than necessary.
 
 **Q3: What is BOPLA and how does `response_model` in FastAPI prevent it?**
+**Short:** A dedicated response_model strips fields a caller shouldn't see or write, preventing BOPLA leaks.
+
 BOPLA (Broken Object Property Level Authorization) occurs when a user can read or write fields they should not access — for example, reading another user's `stripe_customer_id` or writing to `is_admin`. Declaring a dedicated `ResponseSchema` (for GET) and `UpdateSchema` (for PATCH/PUT) with only the permitted fields, then using `response_model=ResponseSchema` in the route decorator, ensures Pydantic strips unauthorized fields at serialization time. The ORM model may contain 30 fields; the response model exposes 8.
 
 **Q4: How do you prevent SSRF in a FastAPI service that accepts webhook URLs from users?**
+**Short:** Validate webhook URLs against an allowlist and reject private IP ranges before fetching them.
+
 Validate the URL before fetching: (1) allow only HTTPS scheme, (2) check the hostname against a domain allowlist, (3) resolve the hostname and reject private IP ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`). Use `httpx.AsyncClient(timeout=5.0, follow_redirects=False)` to avoid redirect-based SSRF bypasses. The most dangerous case is `169.254.169.254` (AWS IMDSv1) which returns cloud instance credentials.
 
 **Q5: What is the security risk of `pickle.loads()` on user-supplied data, and what is the safe alternative?**
+**Short:** pickle.loads() on untrusted data can execute arbitrary code; use JSON or Pydantic validation instead.
+
 `pickle` deserialization executes arbitrary Python code embedded in the byte stream via `__reduce__`. A crafted pickle payload can execute any system command with the application's privileges. The safe alternative is JSON (`json.loads()`), which has no code execution semantics, or Pydantic model validation which enforces schema and type safety on top of JSON. Never deserialize untrusted data with `pickle`, `marshal`, or `yaml.load()` (unsafe loader).
 
 **Q6: How should you configure CORS in a production FastAPI application?**
+**Short:** Set allow_origins to an explicit trusted list in production, never a wildcard combined with credentials.
+
 Set `allow_origins` to an explicit list of permitted origins from configuration (e.g., `["https://app.example.com"]`), never `["*"]`. Set `allow_methods` and `allow_headers` explicitly. The combination of `allow_origins=["*"]` and `allow_credentials=True` is rejected by browsers but signals a configuration error. Credentials (cookies, Authorization header) should only cross origins when the origin is explicitly trusted.
 
 **Q7: How does `SecretStr` from Pydantic protect secrets, and what is the safe way to access the underlying value?**
+**Short:** SecretStr masks its value in repr and logs, requiring get_secret_value() to access the real secret.
+
 `SecretStr` stores the value internally but renders as `"**********"` in `__repr__`, `__str__`, and JSON serialization. This prevents accidental logging of database passwords and API keys when printing settings objects or serializing config to JSON. Access the raw value only at the point of use with `.get_secret_value()`, not at import time or in a module-level variable.
 
 **Q8: Why can't rate limiting be implemented purely in application middleware for high-traffic services?**
+**Short:** Per-process rate limiting fails under multiple workers; use a shared store like Redis for atomic counters.
+
 Application-level middleware runs in a single process. Under multiple Uvicorn workers or horizontal pod scaling, each instance has its own counter. An attacker can bypass per-process rate limits by distributing requests across instances. Production rate limiting requires a shared external store — typically Redis with atomic `INCR`/`EXPIRE` or a token-bucket LUA script — so all instances share the same counter for a given IP or account.
 
 **Q9: What is the difference between authentication and authorization, and why does FastAPI's dependency injection system make authorization easier to implement correctly?**
+**Short:** Authentication verifies who the caller is, while authorization checks what that caller is allowed to do.
+
 Authentication establishes who the caller is (verifies the JWT signature and returns the User object). Authorization determines what that caller may do (checks ownership, role, or scope for the specific operation). FastAPI dependencies compose: `current_user = Depends(get_current_user)` handles authentication once; `Depends(require_role("admin"))` handles role authorization; the ownership check inside the route handler handles object-level authorization. Each layer is independently testable and reusable via `dependency_overrides`.
 
 **Q10: How do you handle SQL injection in SQLAlchemy async ORM vs raw SQL?**
+**Short:** ORM queries are always parameterized, but interpolating strings into text() reopens SQL injection.
+
 SQLAlchemy ORM queries (`.where(User.name == value)`) are always parameterized — the value is never interpolated into the SQL string. For raw SQL, use `text()` with bound parameters: `text("SELECT * FROM users WHERE name = :name")` executed with `{"name": value}`. The dangerous anti-pattern is `text(f"SELECT ... WHERE name = '{user_input}'")` — string interpolation into `text()` bypasses parameterization. The `LIKE`/`ILIKE` pattern uses `.ilike(f"%{value}%")` on the ORM column, which parameterizes the entire pattern string.
 
 **Q11: How would you remove Swagger UI in production without breaking the OpenAPI spec generation?**
+**Short:** Pass docs_url=None and redoc_url=None to disable the UI while keeping the OpenAPI spec endpoint active.
+
 Pass `docs_url=None, redoc_url=None` to the `FastAPI()` constructor. This disables the `/docs` and `/redoc` HTML UIs while leaving the `/openapi.json` spec endpoint active. If the spec endpoint must also be restricted, additionally pass `openapi_url=None` or protect it with an `HTTPBasic` dependency. Internal developer portals can mount Swagger UI on a separate path behind VPN or authentication.
 
 **Q12: What tools belong in a Python security CI pipeline and what does each check?**
+**Short:** bandit checks code patterns, pip-audit checks dependency CVEs, and detect-secrets blocks committed secrets.
+
 `bandit` performs static analysis for common Python security issues (hardcoded passwords, `subprocess` shell injection, `pickle.loads`, `eval`, weak cryptography) and runs in under 10 seconds on most codebases. `pip-audit` compares installed packages against the OSV and PyPI Advisory databases and blocks deploys on HIGH/CRITICAL CVEs. `detect-secrets` runs as a pre-commit hook to prevent committing API keys, passwords, and tokens. Together these three cover the supply chain (pip-audit), code patterns (bandit), and accidental secret commits (detect-secrets).
 
 **Q13: What is improper inventory management (OWASP API9) and how do versioned APIRouters address it?**
+**Short:** Versioned APIRouters with deprecation headers prevent forgotten old API versions from staying reachable.
+
 Improper inventory management means old, forgotten, or shadow API endpoints remain accessible after newer versions ship. Attackers probe `/v1/`, `/v0/`, `/internal/`, `/debug/` paths. The FastAPI fix is explicit `APIRouter` versioning with a deprecation lifecycle: add a `Deprecated: true` header and `Sunset: <date>` header to v1 routes when v2 ships, and remove them on the sunset date. CI can count public routes via `app.routes` and alert on unexpected additions.
 
 **Q14: What is the difference between Broken Function Level Authorization (BFLA) and BOLA?**
+**Short:** BFLA checks whether a role can perform an operation at all, while BOLA checks ownership of a specific object.
+
 BFLA is a missing check on which *operations* a caller's role permits, while BOLA is a missing
 check on which *specific object instance* a caller owns. A user can pass BOLA's ownership check
 yet still lack the role to call a privileged operation like `DELETE /users/{id}`; the
@@ -864,6 +892,8 @@ Apply BFLA role checks and BOLA ownership checks together — an admin-only dele
 needs a tenant check if admins are themselves scoped per tenant.
 
 **Q15: Why enforce a request body size limit before the handler runs, and what status code should the rejection return?**
+**Short:** A size-limit check before call_next rejects oversized bodies with 413 without ever buffering them.
+
 An unbounded request body lets a single client exhaust server memory or disk by streaming a
 multi-gigabyte payload into a handler that buffers it. This is a denial-of-service vector
 distinct from rate limiting because a single request is enough; the `RequestSizeLimitMiddleware`
@@ -873,6 +903,8 @@ middleware layer, before any parsing or database interaction, so an oversized re
 a header inspection.
 
 **Q16: Why does using UUIDv7 instead of sequential integer IDs in API paths raise the bar against enumeration attacks?**
+**Short:** UUIDv7 IDs are unpredictable enough to block enumeration attacks that sequential integer IDs invite.
+
 A sequential integer ID lets an attacker increment `/invoices/1001` to `/invoices/1002` and
 iterate the entire dataset even when authorization checks exist, turning one successful bypass
 into a scriptable full-table walk. UUIDv7 values are 128 bits and time-ordered but not

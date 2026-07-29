@@ -923,6 +923,8 @@ async def secure_ws(websocket: WebSocket) -> None:
 ## 12. Interview Questions with Answers
 
 **Q1: What happens at the protocol level when a browser opens a WebSocket connection?**
+**Short:** A WebSocket handshake is an HTTP GET with an Upgrade header answered by a 101 Switching Protocols response.
+
 The browser sends an HTTP/1.1 GET with `Upgrade: websocket`, `Connection: Upgrade`,
 `Sec-WebSocket-Key: <base64-nonce>`, and `Sec-WebSocket-Version: 13`. The server replies
 `101 Switching Protocols` with `Sec-WebSocket-Accept: <SHA1 of key + GUID>`. After the
@@ -931,6 +933,8 @@ WebSockets cannot be initiated from a plain HTTP/2 stream (though HTTP/2 WebSock
 8441 exist but are rarely deployed in Python stacks as of 2024).
 
 **Q2: Why does an in-process ConnectionManager fail in a horizontally scaled deployment?**
+**Short:** An in-process ConnectionManager only reaches connections on its own pod, missing clients on other pods.
+
 Each pod holds its own list of WebSocket objects in local heap memory. When a message is
 published — say, a chat message — the pod that receives it broadcasts only to connections on
 that pod. Connections on other pods receive nothing. Fix: use a shared message bus (Redis
@@ -938,6 +942,8 @@ pub/sub is the canonical choice). Every pod subscribes to relevant channels; any
 publish; Redis delivers to all subscribers; each pod then pushes to its local connections.
 
 **Q3: How do you authenticate a WebSocket connection in FastAPI?**
+**Short:** Send the JWT as the first message after connecting rather than in the URL, keeping tokens out of access logs.
+
 Two approaches: (a) JWT in query parameter — simplest but leaks the token into server access
 logs. Decoded before `websocket.accept()` is called; close with code 4001 if invalid. (b) JWT
 as first message — accept the connection first, `await receive_json()` with a timeout (5 s),
@@ -946,6 +952,8 @@ preferred for production. The browser `WebSocket` API does not support custom he
 the Authorization header approach used in REST APIs is not available.
 
 **Q4: What is the difference between SSE and WebSocket, and when would you choose SSE?**
+**Short:** SSE is unidirectional and auto-reconnecting over plain HTTP; WebSocket is bidirectional and needs Upgrade support.
+
 SSE is unidirectional (server→client only) over HTTP, auto-reconnects, and works through any
 HTTP proxy. WebSocket is bidirectional, binary-capable, uses a custom framing protocol, and
 requires proxy support for the Upgrade handshake. Choose SSE for notification feeds, LLM
@@ -953,6 +961,8 @@ token streaming, and live dashboards where the client only needs to receive. Cho
 for chat, gaming, and collaborative editing where the client sends messages frequently.
 
 **Q5: What is the StreamingResponse and how does it differ from a normal JSON response?**
+**Short:** StreamingResponse writes each chunk as it is yielded instead of buffering the entire response body first.
+
 A normal FastAPI JSON response serializes the entire Pydantic model to bytes and sends it in
 one HTTP response body. `StreamingResponse` accepts an async generator; it writes each chunk
 to the socket as it is yielded, without buffering the full body. This is essential when the
@@ -961,6 +971,8 @@ byte matters (streaming the first token of an LLM reply in ~100 ms instead of wa
 for the full completion).
 
 **Q6: How would you implement backpressure for a slow WebSocket consumer?**
+**Short:** A bounded asyncio.Queue between producer and sender applies backpressure instead of blocking the event loop.
+
 Wrap the WebSocket in a `BufferedWebSocket` with a bounded `asyncio.Queue(maxsize=N)`. A
 dedicated sender task reads from the queue and calls `ws.send_text()`. The producer calls
 `queue.put_nowait()`; if `QueueFull` is raised, the producer applies backpressure —
@@ -969,6 +981,8 @@ Without this, `send_text()` will internally block waiting for the kernel TCP sen
 drain, which stalls the event loop task for that connection.
 
 **Q7: How do you detect and handle stale/zombie WebSocket connections?**
+**Short:** An application-level ping/pong heartbeat is the most reliable way to detect a dead WebSocket connection.
+
 Three approaches: (a) Application-level heartbeat — server sends `{"type": "ping"}` every
 30 seconds; client replies `{"type": "pong"}`; no pong in 60 seconds → disconnect.
 (b) WebSocket protocol ping/pong frames — Starlette does not expose these directly; requires
@@ -977,6 +991,8 @@ exception, remove connection from the manager, cancel the handler task. The hear
 is the most reliable and portable.
 
 **Q8: What nginx configuration is required for SSE to work through a reverse proxy?**
+**Short:** Disable nginx's proxy_buffering, or a buffered SSE stream appears frozen until the response ends.
+
 Nginx buffers proxy responses by default. An SSE stream will appear frozen to the client
 until the response ends, at which point all events arrive simultaneously. Fix: `proxy_buffering
 off` in the nginx location block, and set `X-Accel-Buffering: no` in the response headers.
@@ -984,6 +1000,8 @@ Similarly, Cloudflare's default buffering must be disabled (set `Buffering: no` 
 response). Not setting this is the most common SSE production bug.
 
 **Q9: How does the `sse-starlette` library improve on raw StreamingResponse for SSE?**
+**Short:** sse-starlette's EventSourceResponse auto-sets SSE headers and formats events, removing manual boilerplate.
+
 `EventSourceResponse` from `sse-starlette` automatically sets `Content-Type: text/event-stream`,
 `Cache-Control: no-cache`, `X-Accel-Buffering: no`, and the `retry:` field for client
 reconnection. It handles dict-format events (`{"data": ..., "event": ..., "id": ...}`) and
@@ -992,6 +1010,8 @@ of every event as `data: ...\n\n`, handling the ID and event fields, and setting
 manually — error-prone boilerplate that `sse-starlette` eliminates.
 
 **Q10: What happens when a WebSocket client disconnects unexpectedly (network drop, browser close)?**
+**Short:** An unexpected disconnect raises WebSocketDisconnect on the next receive call, so wrap it in try/except.
+
 Starlette detects the broken connection when it tries to read the next frame from the socket.
 The next call to `receive_text()` / `receive_json()` raises `WebSocketDisconnect`. If the
 handler is currently awaiting, it raises immediately. If the handler is executing synchronous
@@ -1001,6 +1021,8 @@ and clean up in a `finally` block.
 
 **Q11: How would you implement a chat room where messages sent to a room are received by all
 members, even if they are connected to different pods?**
+**Short:** Redis pub/sub with one channel per room lets every pod broadcast to its own local connections for that room.
+
 Use Redis pub/sub with one channel per room (e.g., `chat:room:{room_id}`). When a user sends
 a message, the receiving pod publishes it to that channel with `redis.publish(channel, msg)`.
 All pods (including the one that published) subscribe to the channel via a long-running
@@ -1009,6 +1031,8 @@ its local `ConnectionManager` for that room and calls `send_text()` on each WebS
 This scales horizontally without sticky sessions.
 
 **Q12: What are the HTTP/2 implications for SSE scalability?**
+**Short:** HTTP/2 multiplexes many SSE streams over one connection, removing the browser's 6-connections-per-domain cap.
+
 HTTP/1.1 browsers cap concurrent connections per domain at 6. Since each SSE stream holds
 one connection, a single user opening 7 SSE streams on the same domain will queue the 7th.
 HTTP/2 multiplexes all streams over one TCP connection, removing this limit entirely.
@@ -1016,6 +1040,8 @@ Uvicorn supports HTTP/2 via the `h2` library (`uvicorn --http h2`). When SSE run
 HTTP/2, hundreds of SSE streams share a single TCP connection with no browser-side throttling.
 
 **Q13: When would you choose Kafka over Redis pub/sub for WebSocket fan-out, given Redis is faster?**
+**Short:** Choose Kafka over Redis pub/sub only when reconnecting clients must replay messages missed while disconnected.
+
 Choose Kafka when a reconnecting client must receive messages it missed while disconnected. Redis
 pub/sub is fire-and-forget with no persistence and simply drops any message published while no
 subscriber was listening, whereas it delivers in sub-millisecond latency versus Kafka's 5-20ms
@@ -1025,6 +1051,8 @@ needs a durable, replayable event log, such as an audit trail or a client that m
 an offset after reconnecting.
 
 **Q14: Why does 200ms of synchronous CPU work inside one WebSocket handler stall every other WebSocket connection on that worker?**
+**Short:** Blocking CPU work on the event loop freezes every other WebSocket connection sharing that worker process.
+
 A FastAPI worker runs a single `asyncio` event loop, and a blocking call like
 `heavy_cpu_computation()` occupies that loop's one thread for its entire duration with no
 opportunity for other coroutines to run. Every other WebSocket connection assigned to that same
@@ -1034,6 +1062,8 @@ scheduled. Offload CPU-bound work with `await asyncio.to_thread(heavy_cpu_comput
 the event loop stays free to service every other connection concurrently.
 
 **Q15: Why does SSE support automatic client-side reconnection while WebSocket does not?**
+**Short:** The browser's EventSource API auto-reconnects using the retry field, while WebSocket has no built-in retry.
+
 The browser's native `EventSource` API is specified to reconnect automatically after a dropped
 connection, waiting the milliseconds given by the stream's `retry:` field before retrying, with
 no application code required. The browser `WebSocket` API has no equivalent built-in retry logic;
@@ -1043,6 +1073,8 @@ prefer SSE for one-way feeds where the extra reconnect-handling code WebSocket r
 benefit.
 
 **Q16: Why does streaming LLM tokens with `StreamingResponse` reduce perceived latency even though total generation time is unchanged?**
+**Short:** Streaming cuts time-to-first-byte, not total generation time, which is what makes a UI feel more responsive.
+
 `StreamingResponse` writes each yielded chunk to the socket immediately instead of buffering the
 full body, so the client sees the first token roughly 100ms after the request rather than
 waiting for the entire completion. Total wall-clock time to the last token is the same

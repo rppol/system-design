@@ -850,48 +850,78 @@ d = e.model_dump(mode="json")   # {"ts": "2024-01-15T12:00:00", "name": "deploy"
 ## 12. Interview Questions with Answers
 
 **Q: What is `pydantic-core` and what problem does it solve?**
+**Short:** pydantic-core is a Rust extension that replaces Python's per-field validation loop with compiled native code.
+
 `pydantic-core` is a Rust extension (compiled via PyO3) that implements Pydantic v2's validation and serialization engine. It solves the performance bottleneck of v1, where validation was a recursive Python function call per field per request. By moving the inner loop to compiled Rust, v2 measured 2.7x faster than v1.10 on a flat 3-field model and ~13x faster on a collection-heavy one (CPython 3.13, timeit). The schema is compiled once at class definition time; subsequent validations are FFI calls into the Rust engine with no Python interpreter involvement per field.
 
 **Q: What is a CoreSchema and when is it built?**
+**Short:** CoreSchema is a type-tree description built once at class definition time, then compiled into a Rust validator.
+
 `CoreSchema` is a Python `TypedDict` that describes a type tree — it is the intermediate representation between your Python type annotations and the Rust validator. It is built by `ModelMetaclass.__new__` at class definition time (i.e., when Python executes the `class` statement), not at validation time. Once built, it is passed to `pydantic_core.SchemaValidator`, which compiles it into a Rust object stored as `__pydantic_validator__` on the class.
 
 **Q: Why is `model_validate_json(raw_bytes)` faster than `model_validate(json.loads(raw_bytes))`?**
+**Short:** model_validate_json uses a Rust JSON parser and skips the intermediate Python dict allocation entirely.
+
 Two reasons: (1) `model_validate_json` uses pydantic-core's built-in Rust JSON parser, **jiter**, instead of CPython's `json.loads`. (2) The parsed values are never materialised as a Python `dict` — they flow directly from the JSON token stream into the Rust field validators and then into the model instance. The two-step path allocates a Python `dict` and then copies every value through the FFI boundary a second time. The speedup is approximately 2x for large payloads and 30–40% for small ones.
 
 **Q: When should you use `model_construct()` and what are the risks?**
+**Short:** model_construct() skips validation entirely and can silently store invalid data, so use it only for trusted input.
+
 Use `model_construct()` only for data you already own and have validated, or to build an instance that must skip its own validators. Reach for it for its semantics, not its speed: it bypasses the Rust validator and assigns attributes in Python, which on pydantic 2.13.4 measures *slower* than `model_validate` on ordinary models (1.01 us vs 0.54 us on a 3-field model). The risk is silent data corruption: `model_construct(count=-5)` on a model with `Annotated[int, Field(gt=0)]` will store `-5` without raising any error. Never use it for external input.
 
 **Q: What is a discriminated union and why does it matter for performance?**
+**Short:** A discriminated union's literal tag lets Rust jump to the right branch in O(1) instead of trying every branch.
+
 A discriminated (tagged) union specifies a literal-typed field (`Literal["click"]`, `Literal["purchase"]`, etc.) as a discriminator. The Rust `TaggedUnionValidator` reads that one field and performs an O(1) hash-map lookup to the correct sub-validator. An untagged union under Pydantic's default **smart** mode evaluates every branch and picks the best match — O(n) in the number of branches, and the cost does not depend on where the matching branch sits. Measured with ten-field branches, the discriminated form is ~1.2x faster at two branches, ~4.7x at ten, and ~9.2x at twenty.
 
 **Q: What does `TypeAdapter` do and when do you prefer it over `BaseModel`?**
+**Short:** TypeAdapter compiles a Rust validator for any type expression without requiring a full BaseModel subclass.
+
 `TypeAdapter` wraps the CoreSchema compiler and Rust validator for any type expression — not just `BaseModel` subclasses. Use it for validating `list[T]`, `dict[str, T]`, or `Annotated` types at application boundaries. It avoids the overhead of defining a wrapper `BaseModel` and is slightly lighter in memory. Always create `TypeAdapter` instances at module level — construction triggers schema compilation (tens of microseconds for simple types, more for wide or deeply nested ones); reuse pays validation cost only.
 
 **Q: How do `@field_validator` and `Annotated[T, Field(...)]` differ in performance?**
+**Short:** Field constraints run entirely in Rust, while field_validator crosses into Python once per validation call.
+
 `Field(gt=0, lt=100)` constraints are compiled into the Rust `SchemaValidator` — they execute entirely in Rust with no Python round-trip. `@field_validator` decorates a Python callable; the Rust engine calls back into Python (acquiring the GIL) once per decorated field per validation call. For hot-path models validated millions of times, moving structural constraints from `@field_validator` to `Annotated` types with `Field` eliminates the Python FFI round-trips and is measurably faster. Reserve `@field_validator` for business logic that cannot be expressed as a declarable constraint.
 
 **Q: What is `defer_build=True` and when should you use it?**
+**Short:** defer_build=True delays schema compilation until first use, trading faster import for a slower first call.
+
 `defer_build=True` in `ConfigDict` delays CoreSchema compilation and Rust validator construction until the model is first used. This reduces import time for applications with many models where only a subset is used on any given code path (e.g., Lambda functions, microservices with shared model libraries). The tradeoff is that the first validation call for a deferred model pays the compilation cost — measured ~0.3 ms for a 50-field flat model, more for wide or deeply nested ones. After the first call, the compiled validator is cached and reused normally. Call `Model.model_rebuild()` explicitly if you need to ensure compilation completes before the first request arrives.
 
 **Q: How does `model_dump_json()` differ from `json.dumps(model.model_dump())`?**
+**Short:** model_dump_json() serializes entirely in Rust with no intermediate Python dict, making it measurably faster.
+
 `model_dump_json()` produces a JSON `str` entirely in Rust — no Python dict is allocated, and types like `datetime`, `UUID`, and `Decimal` are serialized by the Rust engine directly. `json.dumps(model.model_dump())` first materialises a Python dict (one allocation per model), then calls CPython's JSON encoder, which will raise `TypeError` for non-JSON-serializable types like `datetime`. `model_dump_json()` measured ~2.4x faster on a 4-field model and ~2.8x on a 30-field one (CPython 3.13, pydantic 2.13.4), and it handles special types correctly without manual `default` handlers.
 
 **Q: How does `revalidate_instances` affect performance and when is it necessary?**
+**Short:** revalidate_instances="always" forces a full re-validation pass for nested models bypassing normal validation.
+
 By default (`revalidate_instances="never"`), if you pass a `BaseModel` instance where a `BaseModel` type is expected, Pydantic trusts it and stores the same object without re-validating. This is correct for internal data flow where you control the source. Set `revalidate_instances="always"` when models travel through adapters that may bypass validation (ORM row constructors, `model_construct` calls, YAML loaders that assign attributes directly). The setting goes on the model being revalidated — declaring it on the containing model has no effect, a mistake that fails silently. The cost is one full Rust validation pass per nested model on every outer model creation, so measure before enabling on hot paths.
 
 **Q: What happens at import time when you define a Pydantic model?**
+**Short:** Defining a model triggers ModelMetaclass to build a CoreSchema and compile Rust validator and serializer objects.
+
 Python executes the `class` statement, which invokes `ModelMetaclass.__new__`. This method: (1) collects all annotations via `__annotations__`, (2) resolves forward references if possible, (3) constructs a `CoreSchema` dict describing the full type tree, (4) calls `pydantic_core.SchemaValidator(schema)` to compile the Rust validator, (5) calls `pydantic_core.SchemaSerializer(schema)` to compile the Rust serializer, and (6) stores both objects as `__pydantic_validator__` and `__pydantic_serializer__` on the class. Import time is O(model complexity). Measured on CPython 3.13 / pydantic 2.13.4, a flat 10-field model costs ~0.2 ms, a flat 50-field model ~0.7 ms, and a 50-field model whose every field is a nested sub-model ~1.0 ms.
 
 **Q: How does `model_validator(mode="wrap")` interact with the CoreSchema validator?**
+**Short:** A wrap validator calls a handler that runs the full Rust validation pass, then can modify its result.
+
 `mode="wrap"` gives the Python callable a `handler` argument, which is a callable that invokes the compiled Rust validator. The wrap validator runs in Python, calls `handler(data)` to run the full Rust validation pass, then can modify or replace the result. This means every validation call for the model pays one Python function call overhead plus the Rust validation cost. Use `mode="wrap"` for cross-cutting concerns like audit logging or caching of validation results — not for constraints that can be expressed in CoreSchema directly.
 
 **Q: Why does creating `TypeAdapter` inside a hot loop cause performance problems?**
+**Short:** Constructing a TypeAdapter inside a hot loop repeatedly pays schema-compilation cost that reuse would avoid.
+
 `TypeAdapter.__init__` triggers CoreSchema construction and Rust `SchemaValidator` compilation. Measured on CPython 3.13 / pydantic 2.13.4 this is ~21 us for `TypeAdapter(list[int])` and ~30 us for a list of a 5-field nested model, rising with type width and depth. At 1 000 calls/s that is ~21 ms of pure overhead per second — small in isolation, but it is work with no result, it scales with the type, and it multiplies if you build the adapter per item instead of per batch. The fix is to construct `TypeAdapter` once at module level and reuse it, since the compiled `SchemaValidator` is thread-safe and can be used concurrently without locking.
 
 **Q: What is the memory overhead of a Pydantic v2 BaseModel instance versus a dataclass?**
+**Short:** A BaseModel instance uses roughly ten times the memory of a plain dataclass, mostly from tracking set fields.
+
 A `BaseModel` instance with 10 `int` fields measures ~1 130 bytes by RSS delta, against ~144 for a stdlib `@dataclass` and ~96 for `@dataclass(slots=True)`. That is roughly an order of magnitude, not the modest premium people expect. The bulk of it is `__pydantic_fields_set__`, a real Python `set` of the explicitly-provided field names, which costs 728 bytes by itself at 10 entries; the instance `__dict__` adds ~272 and the object header ~72. `model_construct()` builds the same set and does not help. For high-throughput pipelines creating millions of short-lived instances, keep the retention window short first, and only then reach for `TypeAdapter` over raw dicts or a slotted dataclass if you never need model methods.
 
 **Q: How does `model_validate` handle ORM objects (from_attributes=True)?**
+**Short:** from_attributes=True lets model_validate read fields via getattr instead of requiring dict-style input.
+
 With `from_attributes=True` in `ConfigDict`, `model_validate` accepts objects that expose values as attributes (e.g., SQLAlchemy `Row` objects) instead of requiring a `dict`. The Rust validator calls `getattr(obj, field_name)` for each field — these are Python attribute access calls, one per field, crossing the FFI boundary. This is somewhat slower than dict-based validation because dict lookups are pure C operations while `getattr` may invoke descriptors, lazy loading, or `__getattr__`. For SQLAlchemy models, ensure all fields are eagerly loaded before passing to `model_validate` to avoid N+1 lazy-load penalties inside the Rust validator.
 
 ---
