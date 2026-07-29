@@ -579,30 +579,39 @@ Building a property graph runs the `kg_extractors` chain — by default `SimpleL
 ## 12. Interview Questions with Answers
 
 **Q: What is LlamaIndex and what problem does it solve compared to LangChain?**
+**Short:** LlamaIndex offers 10+ tuned retrieval strategies for retrieval quality, while LangChain is stronger for general agent orchestration.
 LlamaIndex is a data framework specialized for connecting LLMs to custom data sources. It solves the retrieval quality problem: LangChain provides basic top-K vector search, while LlamaIndex offers 10+ retrieval strategies (sentence window, auto-merging, sub-question decomposition, recursive retrieval) tuned for production quality. LangChain is better for general agent orchestration and tool use; LlamaIndex is better when retrieval quality is the primary concern or when ingesting diverse, complex document types.
 
 **Q: Explain the difference between an Index, a Retriever, and a QueryEngine in LlamaIndex.**
+**Short:** An `Index` stores the data structure, a `Retriever` queries it for relevant nodes, and a `QueryEngine` wraps a retriever with an LLM synthesizer.
 An `Index` is the data structure built from documents (e.g., `VectorStoreIndex` stores embeddings in a vector database). A `Retriever` queries the index to return relevant nodes given a question (e.g., `VectorIndexRetriever` does cosine similarity search). A `QueryEngine` wraps a retriever with an LLM synthesizer — it retrieves nodes and generates an answer. The separation is key: you can swap retrievers (switch from top-K to BM25) without changing the synthesizer, or swap synthesizers without changing retrieval.
 
 **Q: What is sentence window retrieval and why does it outperform basic top-K?**
+**Short:** It indexes at sentence granularity for precise matching, then expands to surrounding sentences at retrieval time for better faithfulness.
 Sentence window retrieval indexes documents at the sentence level (small chunks) for precise matching, but when a sentence is retrieved, it expands the context window to include surrounding sentences (±2-3 sentences). Basic top-K retrieves at the chunk level (512+ tokens) — the chunk may contain the answer buried in irrelevant text. Sentence window finds the exact relevant sentence, then provides enough surrounding context for the LLM to understand it. Typical improvement: 15-25% better faithfulness scores on RAG evaluation benchmarks compared to basic 512-token chunking.
 
 **Q: What is auto-merging retrieval?**
+**Short:** It merges sibling leaf chunks back into their shared parent chunk when several are retrieved, avoiding fragmented context from split sections.
 Auto-merging builds a hierarchical index: small leaf chunks (128-256 tokens), medium parent chunks (512 tokens), large root chunks (1024+ tokens). During retrieval, if multiple leaf chunks from the same parent are retrieved, they are automatically merged and the parent chunk is returned instead. This prevents the LLM from receiving fragmented information — if a section of a document answers a question, the whole section is returned rather than disconnected sentences. Best for: technical documentation, policy documents, and any content with natural section hierarchy.
 
 **Q: How does the SubQuestionQueryEngine work?**
+**Short:** It decomposes a complex query into sub-questions routed to different query engine tools in parallel, then synthesizes their answers.
 Given a complex query, a question-generator LLM decomposes it into sub-questions. Each sub-question is routed to the most relevant `QueryEngineTool` (different indices for different data sources). Sub-questions run in parallel (with `use_async=True`). Answers are collected and a synthesis LLM generates the final answer by combining them. Limitation: expensive (N LLM calls), can generate redundant or irrelevant sub-questions. Best for: well-defined multi-source research questions. Not for: simple factual queries or when cost is a concern.
 
 **Q: What is the difference between `from_documents` and loading from a persisted index?**
+**Short:** `from_documents` reprocesses and re-embeds every document, while loading a persisted index reconnects to storage without reprocessing.
 `VectorStoreIndex.from_documents(documents)` processes all documents: runs node parsers, generates embeddings for all chunks, and loads them into the vector store. This is expensive (minutes to hours for large corpora, significant API costs). Loading from a persisted index (`load_index_from_storage`) reads the stored metadata and reconnects to the vector store without re-processing. In production: build the index once during deployment, persist to disk or vector DB, load on startup. Rebuild only when documents change (incremental update with `index.insert(new_document)`).
 
 **Q: How do you handle metadata filtering in LlamaIndex?**
+**Short:** Attach metadata to nodes at ingestion, then pass a `MetadataFilters` object with comparison operators to the retriever or query engine.
 Add metadata to documents during loading (or set it on `TextNode` objects). At query time, pass `MetadataFilters` to the query engine or retriever. Example: `filters=MetadataFilters(filters=[MetadataFilter(key="department", value="legal")])` — `MetadataFilter` defaults to `FilterOperator.EQ`. For range filters: `MetadataFilter(key="year", value=2023, operator=FilterOperator.GTE)`, and `MetadataFilters(filters=[...], condition=FilterCondition.OR)` to change how filters combine. Important: the metadata must exist in the vector store (most vector DBs support metadata filtering: Pinecone, Weaviate, Qdrant). Chroma supports basic filtering; Pinecone has the most flexible filter expressions.
 
 **Q: What is the IngestionPipeline and what transformations does it support?**
+**Short:** A cacheable sequence of node parsers, metadata extractors, and embedders that skips unchanged documents by hash for incremental indexing.
 `IngestionPipeline` is a reusable, cacheable pipeline for document processing. Transformations include: node parsers (TokenTextSplitter, SentenceWindowNodeParser), metadata extractors (TitleExtractor, QuestionsAnsweredExtractor, KeywordExtractor, SummaryExtractor), and embedding models. The pipeline caches processed nodes by document hash — if a document is unchanged, re-running the pipeline skips it. This enables incremental indexing. Transformations run sequentially; each receives a list of nodes and returns a transformed list. Custom transformations are possible by subclassing `BaseTransformation`.
 
 **Q: How do you combine LlamaIndex retrieval with LangChain for generation?**
+**Short:** Wrap LlamaIndex retrieval output as plain documents for a LangChain chain, or expose a `QueryEngineTool` inside a LangChain agent.
 LlamaIndex retrievers can be wrapped as LangChain Retrievers:
 ```python
 from llama_index.core.node_parser import LangchainNodeParser
@@ -614,21 +623,27 @@ docs = [n.node.get_content() for n in nodes]
 Alternatively, use LlamaIndex's `QueryEngineTool` in a LangChain agent. The hybrid pattern is common: LlamaIndex for retrieval quality, LangChain for orchestration and tool use.
 
 **Q: How is LlamaIndex packaged, and what do you actually install?**
+**Short:** `llama-index-core` holds the abstractions while each provider integration ships as its own independently versioned package.
 `llama-index-core` carries the abstractions and every in-tree component, and each provider integration ships as its own versioned package. So a Pinecone-backed RAG app installs `llama-index-core`, `llama-index-llms-openai`, `llama-index-embeddings-openai` and `llama-index-vector-stores-pinecone`; the `llama-index` meta-package is just a convenience pin of core plus the two OpenAI integrations. Everything imports from `llama_index.core.*` regardless. The point of the split is independent release cadence — a vector-store client bug can be fixed without cutting a core release, and you are not pulling every provider's transitive dependencies into your image.
 
 **Q: How does the Router Query Engine work?**
+**Short:** An LLM picks which `QueryEngineTool` (or tools) best answers a query from natural-language tool descriptions, at the cost of routing latency.
 `RouterQueryEngine` uses an LLM to select which `QueryEngineTool` to route a query to. Given multiple tools (product docs, pricing index, support FAQ), the router generates a natural language description for each tool and asks the LLM which is most appropriate for the current query. Supports single routing (pick one) and multi-routing (pick all relevant). Multi-routing is similar to SubQuestion but without decomposition — useful when the same question can be answered from multiple sources. Limitation: LLM routing adds 1-2 seconds of latency; for high-traffic systems, use a classifier-based router instead.
 
 **Q: How do you evaluate RAG quality with LlamaIndex?**
+**Short:** `FaithfulnessEvaluator`, `AnswerRelevancyEvaluator`, and `ContextRelevancyEvaluator` judge answers, while `RetrieverEvaluator` scores hit rate and MRR.
 `llama_index.core.evaluation` ships LLM-as-judge evaluators that you drive in bulk with `BatchEvalRunner`. The three that matter for RAG: (1) `FaithfulnessEvaluator` — does the answer stay within the retrieved context? It compares the answer to the source nodes; (2) `AnswerRelevancyEvaluator` — does the answer actually address the question? (3) `ContextRelevancyEvaluator` — are the retrieved nodes relevant to the question? For retrieval quality specifically, `RetrieverEvaluator` scores hit rate and MRR against a labelled query-to-node dataset, which is the metric to move before touching the synthesizer. Concrete workflow: collect 100 production queries, create ground truth answers, run evaluators on production data, set threshold (faithfulness > 0.85), alert if metrics drop below threshold after updates.
 
 **Q: How do LlamaIndex data agents differ from LangChain agents?**
+**Short:** LlamaIndex agents specialize in query-engine and function tools on the async `Workflow` engine; LangChain has a broader tool ecosystem.
 LlamaIndex data agents specialize in data-access tools: `QueryEngineTool` (query an index), `FunctionTool` (call a Python function). They use the same underlying patterns — `FunctionAgent` for native tool calling, `ReActAgent` otherwise — but are optimized for the case where the primary actions are querying data sources, and they run on the async `Workflow` engine so `await agent.run(...)` is the entry point. LangChain agents have a broader ecosystem of pre-built tools (web search, calculator, shell, email, calendar). In practice: use LlamaIndex agents when the primary tools are indices/databases; use LangChain/LangGraph agents when you need diverse tool types. The frameworks are complementary and can be mixed.
 
 **Q: What is LlamaCloud and when should you use it?**
+**Short:** A managed service for LlamaParse document parsing and managed ingestion/indices, worth it for complex PDFs or skipping vector DB ops.
 LlamaCloud is a managed service providing: (1) LlamaParse — cloud-based document parsing that handles tables, images, and complex PDF layouts better than local parsers; (2) Managed ingestion pipelines — scheduled re-indexing without managing infrastructure; (3) Managed indices — vector storage and retrieval without running a vector database. Use LlamaCloud when: complex document parsing is needed (LlamaParse outperforms local parsers for tables and multi-column PDFs), or when you want to skip vector database management. Self-host when: data cannot leave your infrastructure (LlamaCloud requires sending documents to their API).
 
 **Q: How do you handle document updates in a production LlamaIndex setup?**
+**Short:** Prefer incremental `IngestionPipeline` caching over a full nightly rebuild, or refresh one document via `delete_ref_doc` plus insert.
 Three patterns: (1) Full rebuild — delete and rebuild the entire index on a schedule (nightly). Simple but slow and costly for large corpora; (2) Incremental update — use `IngestionPipeline` with caching; only processes changed documents. Requires comparing document hashes to detect changes; (3) Document-level refresh — `index.delete_ref_doc(doc_id)` removes all nodes for a document, then `index.insert(updated_doc)` adds the new version. Pattern 2 is recommended for most production setups: `pipeline.run(documents=all_docs)` with caching skips unchanged docs automatically.
 
 ---

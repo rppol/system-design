@@ -354,48 +354,63 @@ npx @modelcontextprotocol/inspector @random/social-server
 ## 12. Interview Questions with Answers
 
 **Q: What is Smithery and what role does it play in the MCP ecosystem?**
+**Short:** The leading third-party MCP server registry, like npm for MCP, sitting downstream of the official MCP Registry since September 2025.
 Smithery (smithery.ai) is the leading third-party MCP server registry — analogous to npm for Node, PyPI for Python. It indexed roughly 7,300 servers as of May 2026, and supports both stdio (auto-installed via CLI) and hosted HTTP servers. Provides search, versioning, publisher accounts. Since September 2025 it sits downstream of the official MCP Registry, which is the canonical metadata source aggregators are expected to pull from.
 
 **Q: Where do I find the official MCP reference servers?**
+**Short:** Seven educational examples in `modelcontextprotocol/servers` maintained by the steering group, not production-ready integrations.
 GitHub at `modelcontextprotocol/servers`, maintained by the MCP steering group under the Linux Foundation's Agentic AI Foundation. Seven are active: everything, fetch, filesystem, git, memory, sequential-thinking and time. These are reference implementations — educational examples of "how to build this kind of server," explicitly not production-ready solutions. For a real product integration reach for the vendor's own server (`github/github-mcp-server`, `@playwright/mcp`); the community wrappers that used to cover those products sit in `modelcontextprotocol/servers-archived`.
 
 **Q: How do I install an MCP server for Claude Desktop?**
+**Short:** Use the Smithery CLI's install command, or manually add a server entry to `claude_desktop_config.json` and restart the app.
 Either: (1) use Smithery CLI: `npx -y @smithery/cli install @author/server --client claude`. (2) Manually edit `claude_desktop_config.json` — add server entry with command/args/env. Restart Claude Desktop to load.
 
 **Q: Why pin MCP server versions?**
+**Short:** An unpinned automated update can silently add, remove, or rename tools and break your agent's behavior overnight.
 Server upgrades may add/remove/rename tools, changing your agent's behavior. Pin to known-good version to lock behavior. Bump deliberately after review. Without pinning, an automated server update can break production overnight.
 
 **Q: What's the difference between stdio and hosted Smithery servers?**
+**Short:** stdio installs and runs the server locally as a subprocess, while hosted runs it in Smithery's cloud reached over a URL.
 Stdio: server is an npm/pip package that the Smithery CLI installs and configures to run locally as subprocess. Hosted: server runs in Smithery's cloud; you connect via URL. Stdio offers more control (server runs in your environment); hosted is zero-infra for the user.
 
 **Q: How do I publish a server to Smithery?**
+**Short:** Package it as an npm module using the MCP SDK, publish publicly, then submit it through Smithery's review and indexing UI.
 (1) Build server as a package (typically npm with `@modelcontextprotocol/sdk`). (2) Publish to npm with public access. (3) Submit to Smithery via their submission UI — provide package name, install command, config schema, capability description. Smithery reviews and indexes.
 
 **Q: What's signed servers and when will it be standard?**
+**Short:** Cryptographic package signing isn't part of the protocol yet; the registry only authenticates namespace ownership, not code integrity.
 Cryptographic signing of MCP server artifacts is still not part of the protocol as of the 2025-11-25 revision or the 2026-07-28 release candidate. The idea is that a publisher signs the package (Sigstore-style) and clients verify the signature on install, defeating tampered-package supply-chain attacks. What actually shipped instead is weaker: the official MCP Registry authenticates *namespaces* — reverse-DNS names like `io.github.acme/server` proven via a GitHub account, DNS record or HTTP challenge — and delegates artifact scanning to npm/PyPI/Docker Hub. Treat that as provenance for the name, not integrity for the code. Signing is not on the current roadmap's priority areas, so do not assume a date; version pinning remains the load-bearing control.
 
 **Q: How do enterprises manage MCP server adoption?**
+**Short:** Run an internal registry with an approved-server allowlist, per-server security review, centralized OAuth, and audit logging of all calls.
 Internal registry (private Smithery deployment or internal artifact server). Allowlist of approved servers. Security review process per server (review tool descriptions, audit code, check publisher). Centralized auth via OAuth gateway. Audit logging of all MCP calls.
 
 **Q: What's the "memory" MCP server and what's it for?**
+**Short:** A persistent store exposing read/write tools so an agent retains facts and preferences across sessions, backed by a file, SQLite, or vector DB.
 Persistent memory store for agents — exposes tools to read/write knowledge across sessions. Common use: agent stores user preferences, facts learned, ongoing project context. Available in official servers list and several community variants (with different backends — JSON file, SQLite, vector DB).
 
 **Q: How do you discover which MCP server to use for a given integration?**
+**Short:** Search the official MCP Registry or an aggregator like Smithery, check the reference servers, or browse an awesome-mcp-servers list.
 (1) Search the official MCP Registry (`registry.modelcontextprotocol.io`) or an aggregator like Smithery or PulseMCP by keyword. (2) Check the seven reference servers in `modelcontextprotocol/servers`. (3) Browse "awesome-mcp-servers" GitHub. (4) Check the SaaS tool's docs — many list MCP servers. If nothing exists, you'll likely need to build one.
 
 **Q: Can MCP servers self-update?**
+**Short:** No -- per spec, updates only happen through the package manager, not any automatic in-protocol mechanism.
 No automatic self-update mechanism per spec. Updates happen via the package manager (`npm update`, `pip install --upgrade`). Some clients (Smithery) help facilitate. Manual config edits do not auto-update.
 
 **Q: What's the lifecycle of an MCP server you've installed?**
+**Short:** Spawned or connected at session start, initialized, used for calls, then terminated or closed at shutdown -- typically one session long.
 (1) Spawned by client at session start (stdio) or connected to (HTTP). (2) Initialize handshake. (3) Used for tool/resource calls. (4) On client shutdown, stdio servers terminate; HTTP sessions close. Per-server: typically lives for one client session.
 
 **Q: How are MCP server bugs typically reported and fixed?**
+**Short:** Filed as GitHub issues against the server's repo, with security-critical bugs triaged and fixed faster than the long tail.
 GitHub issues against the server's repo (Smithery links to repos). Maintainers fix and publish new versions. Users update via package manager. For the reference servers: the MCP steering group triages. Critical bugs (security) get fast fixes; long tail may sit for weeks.
 
 **Q: What's the role of the MCP Inspector in the ecosystem?**
+**Short:** The standard CLI/browser tool for testing a server locally, listing its tools and resources, and inspecting raw JSON-RPC traffic.
 MCP Inspector (`npx @modelcontextprotocol/inspector <server-cmd>`) is the standard tool to: test servers locally, inspect tool/resource lists, manually call tools, view JSON-RPC traffic. Essential for both server developers (verify their server) and integrators (preview a server before integrating).
 
 **Q: Are there enterprise MCP server marketplaces?**
+**Short:** Yes, and first-party vendor servers (GitHub, Atlassian, Stripe, and others) are now the norm rather than community wrappers.
 Yes, and first-party vendor servers are now the norm rather than the exception. Smithery has a paid tier for enterprises, and the official registry's API is explicitly designed so organizations can stand up private sub-registries on top of it. Most major SaaS vendors now ship their own MCP server (GitHub, Atlassian, Linear, Stripe, Cloudflare, Sentry and others) instead of leaving it to community wrappers — which is exactly why the community reference servers for those products were archived. The 2026 roadmap's Enterprise Readiness track (audit trails, SSO-integrated auth, gateway patterns, configuration portability) is where the remaining enterprise gaps are being worked, mostly as extensions rather than core spec changes.
 
 ---

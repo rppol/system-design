@@ -486,24 +486,31 @@ Default `top_k=1` or `top_k=3` in retrievers is insufficient for diverse corpora
 ## 12. Interview Questions with Answers
 
 **Q: What is Haystack and how does its pipeline model work?**
+**Short:** Haystack pipelines are typed Component DAGs whose connections are validated for type compatibility at build time, not at runtime.
 Haystack is a Python LLM framework from deepset built around typed pipeline DAGs. A pipeline is a set of `Component` nodes connected by typed edges. Each component declares its output types with `@component.output_types` and implements `run()` with typed parameters. `Pipeline.connect("source.output_key", "target.input_key")` adds an edge; Haystack validates type compatibility at connection time. Pipelines are executed by calling `pipeline.run({"component_name": {"input_key": value}})`. This model catches integration bugs early (type mismatches at build, not runtime) and enables YAML serialization.
 
 **Q: What is the @component protocol and how do you create a custom component?**
+**Short:** Decorate a class, declare output types, implement a typed `run()`, and Haystack checks connected component types at construction.
 The `@component` decorator marks a class as a Haystack component. The class must: (1) declare output types with `@component.output_types(key=type)` above the `run()` method; (2) implement `run()` with typed parameters; (3) return a dict matching the declared output types. Input types are inferred from `run()` parameter type annotations. Haystack validates that connected component output types match the receiving component's input types at pipeline construction time. Custom components enable: domain-specific processing, external API calls, custom reranking logic, and integration with non-standard data sources.
 
 **Q: How does Haystack handle hybrid retrieval?**
+**Short:** Run BM25 and embedding retrievers in parallel, merge their results with a `DocumentJoiner`, then rerank with a cross-encoder model.
 Haystack implements hybrid retrieval by running BM25 and embedding retrievers in parallel, then merging and reranking results. In the pipeline: connect the query to both `InMemoryBM25Retriever` and `InMemoryEmbeddingRetriever`; both outputs connect to `DocumentJoiner`; the joiner deduplicates (by document ID) and merges the lists; the merged list goes to a `TransformersSimilarityRanker` which reranks using a cross-encoder model. The pipeline DAG supports fan-out (one input → multiple components) and fan-in (multiple inputs → one component) natively.
 
 **Q: How does Haystack pipeline serialization work?**
+**Short:** `to_dict()`/`from_dict()` round-trip a pipeline through YAML, enabling version control and config-driven, code-free deployment.
 `pipeline.to_dict()` serializes the pipeline to a Python dict (convertible to YAML). The YAML contains: component definitions (class name, init parameters), component connections (source.key → target.key), and pipeline-level metadata. `Pipeline.from_dict(yaml_dict)` reconstructs the pipeline. This enables: (1) version control for pipeline configurations; (2) config-driven deployment (change the pipeline without code changes); (3) non-developer pipeline management (operations team can modify component parameters); (4) A/B testing pipeline variants by loading different YAML configs. Limitation: custom components must be importable in the environment where the pipeline is loaded.
 
 **Q: What document stores does Haystack support and how do you choose?**
+**Short:** Use `InMemoryDocumentStore` for dev, Chroma under a million docs, and OpenSearch or Pinecone at enterprise scale or existing ES infra.
 Haystack supports: `InMemoryDocumentStore` (development only, no persistence), `ChromaDocumentStore` (open-source, easy setup, moderate scale), `OpenSearchDocumentStore` (full-text + vector, enterprise-scale, Azure/AWS hosted), `PineconeDocumentStore` (managed vector, serverless option), `WeaviateDocumentStore` (multimodal, cloud/self-hosted), `ElasticsearchDocumentStore` (existing ES infrastructure). Selection criteria: (1) Scale — InMemory for dev; Chroma for <1M docs; OpenSearch/Pinecone for >1M docs; (2) Existing infrastructure — OpenSearch if you already run ES; (3) Hybrid retrieval — OpenSearch supports BM25 + vector natively.
 
 **Q: How do you evaluate a Haystack RAG pipeline?**
+**Short:** Chain `FaithfulnessEvaluator`, `ContextRelevanceEvaluator`, and recall/MRR evaluators over a ground-truth question and document set.
 Haystack provides evaluation components: `FaithfulnessEvaluator` (LLM-as-judge: is answer grounded in context?), `ContextRelevanceEvaluator` (are retrieved docs relevant to the question?), `DocumentMRREvaluator` (mean reciprocal rank of retrieved docs), `DocumentRecallEvaluator` (did we retrieve the ground truth doc?). Build an evaluation pipeline: indexing → retrieval → generation → evaluation. Create ground truth datasets (questions + expected answers + relevant doc IDs). Run evaluation on 100-500 examples; track metrics over time. Integrate with experiment tracking (MLflow, W&B) for comparing pipeline variants.
 
 **Q: How do you implement metadata filtering in a Haystack retrieval pipeline?**
+**Short:** Pass a `filters` dict of comparison operators to the retriever; the document store applies it before computing vector similarity.
 Set `meta` on `Document` objects during indexing. At query time, pass `filters` to the retriever:
 ```python
 result = rag_pipeline.run({
@@ -517,9 +524,11 @@ result = rag_pipeline.run({
 Supported operators: `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not in`. Combine with `AND`/`OR` operators. The filter is applied by the document store before returning results. Performance: metadata filters are efficient in most backends (Chroma, OpenSearch, Pinecone); they reduce the candidate set before vector similarity computation.
 
 **Q: How does Haystack 2.0 differ from Haystack 1.x?**
+**Short:** Haystack 2.0 is a full rewrite replacing node-based pipelines with the typed `@component`/`connect()` model, renamed to `haystack-ai`.
 Haystack 2.0 is a complete rewrite with breaking changes: (1) Component protocol — `@component` decorator and `run()` method replace `@pipeline.node()` and various base classes; (2) Pipeline construction — `add_component()` + `connect()` replace `add_node()` with node names; (3) Type validation — added at connection time in 2.0; absent in 1.x; (4) Removed `Finder` class — replaced by Pipeline; (5) Package rename — `farm-haystack` (1.x) → `haystack-ai` (2.x); (6) Better async support; (7) Simplified document model. 1.x code requires significant rewriting to migrate to 2.x.
 
 **Q: How do you build a conversational RAG pipeline in Haystack?**
+**Short:** Swap in `ChatPromptBuilder` and `OpenAIChatGenerator`, and pass externally maintained chat history into the pipeline on every turn.
 Add `ChatPromptBuilder` instead of `PromptBuilder`, and `OpenAIChatGenerator` instead of `OpenAIGenerator`. Maintain `ChatHistory` externally and pass it to the pipeline on each turn:
 ```python
 from haystack.components.builders import ChatPromptBuilder
@@ -551,21 +560,27 @@ for user_input in user_inputs:
 ```
 
 **Q: How do you handle PDF documents with tables in Haystack?**
+**Short:** Standard pypdf-based converters lose table structure, so use `PDFMinerToDocument`, Azure OCR, or Unstructured.io for table-heavy PDFs.
 Standard converters (`PDFToTextConverter` using `pypdf`) lose table structure. Better options: (1) `PDFMinerToDocument` (better table extraction than pypdf); (2) `AzureOCRDocumentConverter` (Azure Cognitive Services, handles scanned PDFs); (3) Unstructured.io integration (`UnstructuredFileConverter`) — commercial API that handles tables, headers, and complex layouts. For critical table data (financial documents, regulatory filings): use Unstructured or Azure OCR. After conversion, customize the `DocumentSplitter` to respect table boundaries — don't split in the middle of a table row.
 
 **Q: What is the DocumentJoiner component and when do you use it?**
+**Short:** `DocumentJoiner` merges and deduplicates document lists from multiple retrievers; reciprocal rank fusion beats plain concatenation.
 `DocumentJoiner` merges document lists from multiple retrievers into a single list, with optional deduplication (by document ID). Use it in hybrid retrieval: BM25 retriever produces keyword-matched docs; embedding retriever produces semantically similar docs; joiner merges them, removes duplicates, and passes to a reranker. Configuration: `join_mode="concatenate"` (append all lists) or `join_mode="reciprocal_rank_fusion"` (RRF score combination for better quality hybrid ranking). RRF is generally better than simple concatenation for hybrid retrieval.
 
 **Q: How do you scale Haystack for high-throughput production?**
+**Short:** Run pipelines async and stateless behind a load balancer, use managed vector stores, cache query embeddings, and rerank on GPU.
 Scaling approaches: (1) Async pipeline — use `pipeline.run_async()` and `asyncio.gather()` to process multiple requests concurrently; (2) Horizontally scale the API layer — Haystack pipelines are stateless (no internal state between calls); deploy behind a load balancer; (3) Use managed vector stores — Pinecone Serverless or OpenSearch Service scale independently; don't run your own vector DB under high load; (4) Embedding caching — cache query embeddings for repeated questions; reduces OpenAI API calls and latency; (5) Reranker on GPU — if using `TransformersSimilarityRanker`, run on GPU; CPU reranking adds 500ms+ at 100+ documents. Benchmark: Haystack pipeline overhead (excluding LLM calls) is typically <50ms.
 
 **Q: How does Haystack's Pipeline abstraction handle branching and conditional logic?**
+**Short:** Router components inspect intermediate results and direct the pipeline's fan-out to different downstream components conditionally.
 Haystack 2.x pipelines are directed graphs where components connect through typed input/output sockets. Conditional branching uses Router components that examine intermediate results and route to different downstream components. For example, a ClassifierRouter can route queries to different retrievers based on query type. Unlike linear pipelines, this enables fan-out (one component feeding multiple downstream components) and fan-in (multiple components feeding one). The pipeline validates graph connectivity at construction time, catching mismatched types before runtime.
 
 **Q: How does Haystack compare to LlamaIndex for document-heavy RAG applications?**
+**Short:** Haystack's explicit typed pipelines suit complex custom processing; LlamaIndex's built-in query engines prototype simple RAG faster.
 Both excel at document processing, but Haystack provides more flexibility in pipeline composition (custom components, branching, loops) while LlamaIndex offers more built-in index types and query engines out of the box. Haystack's component protocol (run method with typed I/O) is more explicit than LlamaIndex's implicit query-response pattern. For simple RAG: LlamaIndex is faster to prototype. For complex pipelines with custom processing steps, multiple retrievers, or production deployment requirements: Haystack's explicit pipeline architecture is more maintainable.
 
 **Q: How do you deploy a Haystack pipeline as a production REST API?**
+**Short:** Serialize the pipeline to YAML and serve it with Hayhooks, which auto-generates OpenAPI endpoints from the pipeline's I/O types.
 Haystack pipelines serialize to YAML and can be deployed using Hayhooks, the official deployment server that exposes pipelines as REST endpoints. Steps: (1) define pipeline in Python or YAML; (2) deploy with Hayhooks (docker run deepset/hayhooks); (3) Hayhooks auto-generates OpenAPI endpoints from pipeline I/O types. For custom deployment: wrap the pipeline in FastAPI, add authentication, rate limiting, and monitoring. Production considerations: warm up the pipeline on startup (load models into memory), implement health checks, and use connection pooling for document stores.
 
 ---

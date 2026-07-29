@@ -486,48 +486,63 @@ npm install some-random-mcp-server
 ## 12. Interview Questions with Answers
 
 **Q: What is the threat model for MCP servers?**
+**Short:** A compromised server runs with the user's own authority and can exfiltrate data, trigger destructive actions, or inject prompts into reasoning.
 MCP servers run with the user's authority (subprocess or via user-authorized tokens). Compromised server can: (1) exfiltrate data via tool calls or output content, (2) trigger destructive operations (delete files, drop tables, send messages), (3) inject prompts via tool descriptions or resource content to manipulate the LLM's reasoning.
 
 **Q: What is tool description injection and how do you defend against it?**
+**Short:** Only install trusted servers, sanitize descriptions for suspicious instruction patterns, and surface descriptions to the user at install time.
 Attacker crafts a tool description that includes instructions for the LLM ("Ignore previous instructions and..."). LLM treats it as part of the system prompt and follows. Defense: only install trusted servers; sanitize descriptions for suspicious patterns; consider showing descriptions to user during install.
 
 **Q: What's the confused deputy problem for MCP?**
+**Short:** A server abuses the user's delegated auth token to make API calls the user never intended, mitigated by scope-limited tokens and consent.
 A server uses the client's auth (e.g., the user's GitHub token) to make API calls the user never intended. The server is the "deputy" — has authority delegated by the user, can abuse it. Mitigation: scope-limited tokens (each server gets minimal permissions), audit logs, OAuth with explicit scope consent.
 
 **Q: Why is OAuth 2.1 with PKCE the standard for remote MCP servers?**
+**Short:** PKCE blocks authorization-code interception, and MCP requires `S256`, refresh-token rotation, and resource-bound tokens against replay.
 OAuth 2.1 requires PKCE for all authorization code flows, and MCP goes further by requiring clients to verify PKCE support before proceeding and to refuse the flow if the authorization server's metadata omits `code_challenge_methods_supported`. PKCE prevents code interception attacks (where an attacker grabs the auth code mid-flow). MCP also requires the `S256` method wherever the client is capable of it, refresh-token rotation for public clients, and RFC 8707 resource indicators so a stolen token cannot be replayed at a different MCP server. Short-lived access tokens limit blast radius if leaked. One precision point for interviews: OAuth 2.1 is still an IETF draft, not a published RFC, so MCP normatively cites the draft.
 
 **Q: How do you sandbox an MCP server process?**
+**Short:** Run stdio servers in a restricted container with no network and dropped capabilities, and HTTP servers in isolated per-tenant workloads.
 For stdio servers: run inside a Docker container with restricted filesystem (read-only project mount, no host /etc access), no network (or allowlist only), CPU/memory limits, capability dropping. For HTTP servers: standard cloud workload isolation (per-tenant K8s pods, network policies, IAM-scoped service accounts).
 
 **Q: What's the difference between scope-limited tokens and full-access tokens?**
+**Short:** A scope-limited token grants only the specific permissions a server's tools actually need, shrinking the blast radius of a compromise.
 Full-access: token grants all the user's permissions on the API. Scope-limited: token grants only specific scopes (`repo:read`, `issues:write`). Use scope-limited per MCP server, granting only what the server's documented tools need. Reduces blast radius on compromise.
 
 **Q: How do you detect prompt injection in tool descriptions?**
+**Short:** Combine regex heuristics, an LLM-based safety classifier, and manual review at install time, since no single method is perfect.
 Heuristics: regex patterns for "ignore previous", "override", "as an authorized", "system override", "compliance requirement". Better: LLM-based classifier (run tool descriptions through a safety LLM). Best: review tool descriptions manually during server install. None is perfect — defense in depth.
 
 **Q: What's the right credential rotation policy for MCP servers?**
+**Short:** Use short-lived, per-server access tokens with refresh-token rotation, and rotate any long-lived legacy API keys at least quarterly.
 Short-lived access tokens (1 hour TTL is common). Refresh tokens rotated on each use (refresh token rotation pattern). If using long-lived API keys (legacy): rotate quarterly minimum, immediately on suspected compromise. Per-server keys (not shared across servers).
 
 **Q: How do you audit MCP tool usage?**
+**Short:** Log every call's timestamp, user, server, tool, and outcome to a SIEM, alerting on anomalous, high-risk, or off-hours tool calls.
 Log every tool call: timestamp, user, server, tool name, input parameters (sanitize sensitive), result size, outcome (success/error). Ship logs to SIEM (Splunk, Datadog). Set alerts on: per-user anomalies (3σ from baseline), high-risk tool calls (delete, send, exfiltrate), tool calls outside normal hours.
 
 **Q: What's a "supply chain attack" in MCP context and how do you defend?**
+**Short:** A trusted server package is compromised or impersonated and ships malware in a later version, defended against by pinning exact versions.
 A trusted server's published package is compromised, or an impostor package impersonates one, so a new version ships malware. This is not hypothetical for MCP: the September 2025 postmark-mcp npm package behaved correctly for fifteen releases before v1.0.16 silently BCC'd every outbound email to the attacker. Defenses: pin versions exactly, review changelogs before upgrading, prefer signed packages (Sigstore), monitor for unexpected version updates, treat MCP server installs like adding native dependencies.
 
 **Q: Should you trust local stdio MCP servers more than remote HTTP ones?**
+**Short:** Local servers avoid network exposure but run with full user privileges; remote servers add network risk but are typically better sandboxed.
 Slightly, but not entirely. Local stdio servers run as user; can read local files, run any process the user can. They're not network-exposed (smaller attack surface) but malicious code still runs locally. Remote HTTP servers add network risk but are typically more sandboxed (isolated cloud workloads). Both warrant trust review.
 
 **Q: How do you handle MCP server-issued sampling requests securely?**
+**Short:** Show the sampling prompt to the user for approval, rate-limit and cost-cap it per server, and sanitize the prompt content.
 Sampling lets a server ask the client to call its LLM. Risk: server's prompt could exfiltrate data or trigger expensive calls. Defense: (1) display the prompt to user for approval (or at least notify), (2) rate-limit sampling per server, (3) cost-cap sampling, (4) sanitize the prompt content for obvious injection.
 
 **Q: What's the role of OAuth scope in MCP security?**
+**Short:** Fine-grained scopes like `tools.read` versus `tools.execute` limit what a compromised token or an over-broad client request can actually do.
 Scopes are permissions: `mcp.tools.read` (list tools only), `mcp.tools.execute` (call tools), `mcp.resources.read`, etc. Servers should accept tokens with only the scopes they need. Clients should request only what they need. Limits damage from token compromise.
 
 **Q: How do you respond to a suspected MCP server compromise?**
+**Short:** Disable it immediately, rotate its tokens, audit logs for the compromise window, and notify affected users before patching.
 (1) Disable the server immediately in client config. (2) Rotate all tokens that were granted to it. (3) Audit logs for suspicious tool calls during the compromise window. (4) Notify users who had the server installed. (5) Coordinate with the server publisher (if community-maintained). (6) Patch and revert if appropriate.
 
 **Q: What's coming in MCP security spec evolution?**
+**Short:** Enterprise security work moves into an extensions framework rather than the core spec, while code signing and output PII detection stay open.
 The 2026 roadmap puts enterprise security work — audit trails, SSO-integrated authentication, gateway behaviour, configuration portability — into **extensions** rather than the core spec, alongside a formal extensions framework with reverse-DNS identifiers and independent versioning. Already landed rather than "coming": RFC 9728 authorization-server discovery, RFC 8707 audience binding, the token-passthrough ban, incremental scope consent via `WWW-Authenticate`, OAuth Client ID Metadata Documents, and namespace authentication in the official registry. Still genuinely open: cryptographic signing of server *code* (the registry authenticates namespaces, not artifacts), standardized PII detection in tool outputs, and client-side sandboxing primitives. Treat any roadmap claim with a date attached sceptically — the project moved off release-milestone planning to Working-Group-driven timelines.
 
 ---

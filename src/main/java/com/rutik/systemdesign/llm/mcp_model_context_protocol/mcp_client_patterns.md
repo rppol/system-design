@@ -466,54 +466,71 @@ except (asyncio.TimeoutError, ConnectionError):
 ## 12. Interview Questions with Answers
 
 **Q: Why does an MCP client need to call `initialize` first?**
+**Short:** It negotiates protocol version and capabilities, and calling an undeclared capability's method afterward is a protocol violation.
 The initialize handshake negotiates the protocol version and both sides' capabilities, and the spec says neither side SHOULD send anything but `ping` (plus `logging` from the server) before it completes. Both sides learn what the other supports — does the client offer sampling, roots, elicitation? does the server offer tools, resources, prompts, and do its lists emit `listChanged`? Calling a method whose capability was never declared is a protocol violation, not just bad manners. On HTTP the handshake also fixes the value you must send in the `MCP-Protocol-Version` header on every later request.
 
 **Q: How do you avoid tool name collisions across multiple MCP servers?**
+**Short:** Prefix each tool with its server's logical name, like `github_create_issue`, and route calls by parsing that prefix.
 Prefix each tool name with the server's logical name: `github_create_issue` from GitHub server, `gitlab_create_issue` from GitLab server. Routes calls by parsing the prefix. Standard pattern in Claude Desktop, Cursor.
 
 **Q: When should the client re-list tools?**
+**Short:** Cache the list once at session start and refresh only when the server sends a `tools/list_changed` notification.
 Once at session start (cache the list). Refresh when the server sends `notifications/tools/list_changed`. Some servers add tools dynamically (e.g., a database server adds a tool per available stored procedure).
 
 **Q: Where does a `list_changed` notification actually arrive in the client?**
+**Short:** It lands in the session's `message_handler` callback, not as a return value, so an unset handler leaves your cached list silently stale.
 In the session's `message_handler` callback — no return value from `call_tool()` or `list_tools()` ever tells you the catalogue moved. That is why "refresh on `notifications/tools/list_changed`" is a wiring task and not a policy: if you never pass a `message_handler`, the notification is delivered to a no-op default and your cached tool list silently ages out. The visible symptom is a server that added a tool at runtime — a database server exposing one tool per stored procedure is the classic case — staying invisible to the model until the next client restart, which reads like "the model refuses to use the new tool." Practical guidance: clear the cached catalogue in the handler and re-list lazily on the next request, rather than re-listing inside the notification path.
 
 **Q: What happens if you omit `elicitation_callback` when constructing a `ClientSession`?**
+**Short:** The client simply declares no elicitation capability at initialize, so the server silently takes its no-input fallback path instead.
 The client declares no `elicitation` capability at initialize, so a spec-compliant server never sends `elicitation/create` and nothing anywhere reports an error. The Python SDK infers the declared client capabilities from which callbacks you actually passed — `sampling_callback`, `elicitation_callback` and `list_roots_callback` each switch their capability on — so a missing callback is indistinguishable from a deliberate "we do not support this." The failure is silent on both sides: the server takes the capability-gated branch and returns something like "the user did not supply a value," and the client never sees a request to log. Practical guidance: register all three callbacks up front even if two of them return a decline, so a capability gap is a visible decline rather than an absence.
 
 **Q: What's sampling and how does the client handle it?**
+**Short:** A server-initiated request for the client to run an LLM call on its behalf, letting the server use AI without bundling its own model access.
 Sampling lets a server request the client to make an LLM call on its behalf. The server sends `sampling/createMessage` with a prompt; the client calls its LLM; returns the result to the server. Useful when the server needs AI capability without bundling its own model access.
 
 **Q: How do clients handle long-running server operations?**
+**Short:** The server either returns a task ID with a status-polling tool, or streams progress notifications during the call.
 Per spec, tool calls should return within a reasonable timeout. For long ops, two patterns: (1) server returns a task_id quickly + provides a polling tool to check status; (2) server supports progress notifications during the call.
 
 **Q: What's the right timeout for tool calls?**
+**Short:** The spec sets no number but requires you pick one explicitly, keep a hard cap regardless of progress resets, and cancel on giving up.
 The TypeScript SDK defaults to 60s, but the Python SDK ships no default at all, so set one explicitly. The spec sets no number, it only requires that you set one. For known long operations, increase, or use the experimental Tasks utility added in 2025-11-25. For interactive UIs, 5-10s with progress indication is common. Always keep a hard cap even when progress notifications reset the clock, so a misbehaving server cannot hang you forever, and send `notifications/cancelled` when you give up.
 
 **Q: How do you handle a server that crashes?**
+**Short:** Detect it via a timeout or connection error, restart or reconnect, re-initialize, and back off to avoid a restart loop.
 Detect via timeout or connection error on call. Restart the server subprocess (for stdio) or reconnect (for HTTP). Re-initialize. Optionally re-list tools (the new server instance may have different version). Implement backoff to avoid restart loops.
 
 **Q: Can one client connect to both stdio and HTTP servers?**
+**Short:** Yes -- both use the same `ClientSession` API after connecting, so a client can mix local stdio and remote HTTP servers freely.
 Yes — different connection methods, same `ClientSession` API afterward. Common in production: local filesystem servers via stdio + remote SaaS servers via HTTP, all managed by one client.
 
 **Q: How does Claude Desktop discover servers to load?**
+**Short:** It reads `claude_desktop_config.json` for a list of servers with their launch command, args, and environment, spawning each at startup.
 Reads `claude_desktop_config.json` (path varies by OS — `~/Library/Application Support/Claude/` on macOS). The config lists servers with command/args/env. Claude Desktop spawns each at startup.
 
 **Q: What auth methods do MCP clients support?**
+**Short:** stdio servers take credentials from the launch environment; HTTP servers use OAuth 2.1 with mandatory PKCE and resource-bound tokens.
 For stdio: the server takes credentials from the environment (e.g. env vars passed at launch) — the authorization spec explicitly does not apply to stdio. For HTTP: OAuth 2.1 with mandatory PKCE (`S256`) for user-authorized servers, with the authorization server discovered from RFC 9728 protected-resource metadata, and an RFC 8707 `resource` parameter so the token is bound to that one MCP server. Custom: server-specific auth via headers on the HTTP transport.
 
 **Q: How do you debug MCP client issues?**
+**Short:** Verify the server in isolation with MCP Inspector, enable your own client's logging, and inspect raw JSON-RPC traffic with a proxy.
 (1) Use MCP Inspector to verify the server works in isolation. (2) Turn on debug logging in your own client — there is no MCP-wide log-level environment variable; the SDKs log through the host language's standard logging facility (Python `logging`, and stderr is explicitly allowed for stdio server logs). (3) Inspect JSON-RPC traffic with a proxy or stdio interceptor. (4) Try Claude Desktop as a reference client — if it works there but not in your client, the bug is yours.
 
 **Q: Should the client validate tool args before calling?**
+**Short:** Optionally -- client-side validation against the tool's `inputSchema` catches errors earlier and gives clearer LLM feedback.
 Optionally — the server should validate too. Client-side validation (against the tool's `inputSchema`) catches errors earlier, gives better LLM feedback. Frameworks like Pydantic-AI do this automatically.
 
 **Q: Can clients run servers as untrusted code?**
+**Short:** stdio servers run as a subprocess inside your own trust boundary; HTTP servers are isolated but their descriptions must still be trusted.
 For stdio, the server runs as a subprocess in your trust boundary — treat carefully. For HTTP (remote servers), the server is fully isolated but you must trust their tool descriptions (could contain prompt injection). Production: only install servers from trusted sources.
 
 **Q: How do you scale a client connecting to many servers?**
+**Short:** Use async I/O to multiplex lightweight sessions and lazy-connect servers only when their first tool is actually called.
 Use async I/O so connections multiplex; each session is lightweight. For 50+ servers, lazy-connect (only when first tool from that server is called). Monitor per-server health; isolate failures.
 
 **Q: What happens if a tool result is too large?**
+**Short:** The spec sets no limit, so clients should truncate before passing to the LLM or use a `resource_link` fetched only on demand.
 The MCP spec sets no size limit, so you get whatever the transport supports (HTTP: typically multi-MB; stdio: limited by pipe buffer). But large results bloat LLM context. Clients should truncate before passing to the LLM (50KB is a common in-house cap, not a standard) or have the server return a `resource_link` content block so the payload is fetched only on demand.
 
 ---

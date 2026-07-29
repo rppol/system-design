@@ -519,45 +519,59 @@ DSPy modules have `self.predict`, `self.generate`, etc. These accumulate history
 ## 12. Interview Questions with Answers
 
 **Q: What is DSPy and how does it differ from prompt engineering?**
+**Short:** DSPy optimizes prompts algorithmically against a metric on training data, treating them as hyperparameters instead of hand-crafted text.
 DSPy is a framework for algorithmically optimizing LLM programs. Traditional prompt engineering: a human writes prompt text, tests manually, and tweaks wording. DSPy: define the task as a `Signature` (input fields → output fields), provide training examples, define a metric, and run an optimizer. The optimizer searches the space of prompts, few-shot examples, and instructions to maximize the metric. Key difference: DSPy treats prompts as hyperparameters to be optimized, not text to be crafted. The output is a compiled program with specific prompts that have been validated to maximize the metric on training data.
 
 **Q: What is a DSPy Signature?**
+**Short:** A `Signature` is a declarative input-fields-to-output-fields spec that states what you want, not how to phrase the prompt.
 A `Signature` is a declarative specification of a task: input fields and output fields with names, types, and optional descriptions. Example: `"context: str, question: str -> answer: str"` or as a class with docstring. The signature says *what* you want, not *how* to phrase the prompt. DSPy modules (Predict, ChainOfThought) use the signature to auto-generate prompts. The docstring of the signature class becomes the task instruction. Optimization changes the instruction text while preserving the signature structure.
 
 **Q: What is the difference between Predict, ChainOfThought, and ReAct?**
+**Short:** `Predict` answers directly, `ChainOfThought` adds a reasoning field before the answer, and `ReAct` loops thought/action/observation for tools.
 `Predict` makes a single LLM call with the signature, returning output fields directly. `ChainOfThought` adds an implicit "reasoning" field before the output — the model thinks out loud before answering, improving accuracy on complex tasks. `ReAct` implements the Thought/Action/Observation loop for tool-calling agents: the model thinks, calls a tool, observes the result, thinks again, until it generates a final answer. All three are `dspy.Module` subclasses with the same interface; swap them to change the reasoning pattern without changing the rest of the program.
 
 **Q: What are DSPy optimizers and which ones should you use when?**
+**Short:** `BootstrapFewShot` cheaply selects few-shot examples, its random-search variant improves on that, and `MIPRO` also optimizes the instructions.
 Optimizers (called Teleprompters) search for the best prompts for your program. `BootstrapFewShot`: generates few-shot examples from training data by running the program on training examples and selecting the correct ones; fast and cheap, good starting point, needs 20-50 examples. `BootstrapFewShotWithRandomSearch`: adds random search over which examples to include; better quality, needs 50-200 examples. `MIPRO`/`MIPROv2`: Bayesian optimization over both instructions and few-shot examples; highest quality, needs 100-500 examples, most expensive. Recommendation: start with `BootstrapFewShot`, upgrade to `MIPRO` for production-critical tasks.
 
 **Q: What makes a good DSPy metric?**
+**Short:** A good metric is a deterministic Python function scoring what actually matters for the task, cheap enough to run hundreds of times.
 A good metric: (1) is a Python function taking `(example, prediction)` and returning a float or bool; (2) captures what actually matters for your task (not proxies); (3) is deterministic for reproducible optimization; (4) scales efficiently (called hundreds of times during optimization). For classification: exact match or F1. For generation: ROUGE, BERTScore, or LLM-as-judge. For RAG: faithfulness (is the answer grounded in context?). Bad metrics: length-based metrics (optimizer generates verbose outputs), format-checking only (misses semantic quality). The metric is the most important design decision in DSPy.
 
 **Q: How does DSPy compilation work and what does the compiled output look like?**
+**Short:** Compilation searches training data for the best prompt configuration and saves a JSON of few-shot examples and instructions to load at runtime.
 Compilation runs the optimizer against training data. The optimizer executes the program on training examples, evaluates the metric, and searches for the best prompt configuration. The compiled output is a JSON file containing: few-shot examples for each `Predict`/`ChainOfThought` module, optimized instruction strings (for MIPRO), and module parameters. Loading the compiled JSON injects these into the program's modules, so at runtime, the LLM receives the optimized few-shot examples and instructions. Compilation happens once offline; the JSON file is committed to version control and loaded in production.
 
 **Q: How do you make a DSPy program production-ready?**
+**Short:** Compile offline to JSON, load it at startup, wrap LLM calls in error handling, and log predictions in production to catch drift.
 Four steps: (1) Compile offline with your optimizer and save to JSON — never compile at runtime; (2) Load compiled state at application startup: `program.load("compiled.json")`; (3) Add error handling around LLM calls — DSPy modules can raise exceptions on timeout/API errors; wrap with try/except and fallback logic; (4) Monitor with traces — DSPy integrates with MLflow; log every prediction with input, output, and metric score in production to detect drift. Additionally: version your compiled JSON files alongside your code; re-run optimization whenever your training data or LLM changes.
 
 **Q: What are DSPy assertions and when do you use them?**
+**Short:** `dspy.Assert` forces a retry with feedback on a constraint violation, while `dspy.Suggest` only warns without retrying the call.
 Assertions enforce constraints on module outputs. `dspy.Assert(condition, message)` is a hard constraint: if violated, the module retries the LLM call with the error message appended as feedback (up to `max_backtracks` times). `dspy.Suggest(condition, message)` is a soft constraint: suggests without failing. Use assertions for: output format requirements (JSON must be valid), length constraints, required field presence. Do not overuse: each failed assertion = additional LLM call; with `max_backtracks=3`, a module may make 4 LLM calls on bad outputs. Assertions are powerful for catching model failures during optimization — they reveal how often the model violates constraints.
 
 **Q: How does DSPy handle multi-step pipelines where one module's output feeds another?**
+**Short:** Modules are composed inside `forward()`, passing `Prediction` objects between them while DSPy traces the full execution automatically.
 Compose modules in a `dspy.Module.forward()` method. Each module call returns a `dspy.Prediction` object with fields matching the signature output fields. Pass these as arguments to the next module. DSPy traces the execution automatically, recording which modules were called and with what inputs/outputs. During optimization, the optimizer can bootstrap few-shot examples for each module independently, understanding the full execution trace. Key: use `dspy.context` for shared state across steps if needed, though passing explicit arguments is preferred for clarity.
 
 **Q: How do you debug a DSPy program that is producing poor results?**
+**Short:** Check the metric and training data quality, inspect the actual generated prompt, and strip the program down to a single module.
 Debugging approach: (1) Check the metric — is it measuring the right thing? Run the metric manually on 5 examples; (2) Inspect the generated prompt — `print(dspy.settings.lm.history[-1])` shows the last prompt sent; does it look reasonable? (3) Check training data quality — are examples clean, diverse, and correctly labeled? (4) Reduce to a single Predict — strip down the program to one module and verify it works; add complexity back incrementally; (5) Try `ChainOfThought` instead of `Predict` — adding reasoning often reveals where the model goes wrong; (6) Use `dspy.inspect_history(n=3)` to see recent LLM calls with inputs and outputs.
 
 **Q: When should you use DSPy vs fine-tuning?**
+**Short:** Pick DSPy for 50-500 examples and fast iteration; pick fine-tuning for 1000+ examples where per-call cost and latency matter most.
 Use DSPy when: you have 50-500 examples (not enough for fine-tuning), you need quick iteration, you want to switch models without retraining, or your task is compositional (multi-step pipeline where different components need different behaviors). Use fine-tuning when: you have 1000+ examples, you need maximum task-specific performance, latency/cost per call matters (fine-tuned smaller models are cheaper than GPT-4 with DSPy prompts), or you need to encode specialized domain knowledge that is not in the base model. DSPy and fine-tuning are complementary: DSPy can generate training data for fine-tuning, and fine-tuned models can be used within DSPy programs.
 
 **Q: How does MIPRO differ from BootstrapFewShot?**
+**Short:** `BootstrapFewShot` only searches which few-shot examples to include; `MIPRO` also Bayesian-optimizes the instruction text itself.
 `BootstrapFewShot` searches only in the space of which few-shot examples to include in the prompt; the instruction text (from the Signature docstring) stays fixed. `MIPRO` (Multi-prompt Instruction Proposal Optimizer) uses Bayesian optimization to search over both the instruction text and the few-shot examples simultaneously. MIPRO proposes new instruction variants using an LLM ("propose N alternative instruction phrasings"), evaluates them on the devset, and uses Bayesian optimization to focus on promising regions of the instruction space. MIPRO finds instructions that capture task nuances that developers might not think to write — like specifying date formats, handling edge cases, or stating confidence requirements.
 
 **Q: What is the runtime overhead of a compiled DSPy program?**
+**Short:** Runtime overhead is negligible: a compiled module still makes exactly one LLM call, with prompts baked in as plain string constants.
 Compiled DSPy programs have minimal runtime overhead. After compilation, a `Predict` module makes exactly one LLM call per forward pass, same as a direct API call. The overhead is: signature formatting (microseconds), prompt template rendering (microseconds), and output parsing (microseconds). The optimization phase is expensive (minutes to hours) but happens offline. At runtime, a compiled `ChainOfThought` program makes 1 LLM call and is effectively identical to a well-crafted direct API call. No DSPy-specific overhead at inference time — the compiled prompts and few-shot examples are just string constants prepended to the LLM input.
 
 **Q: How do you handle DSPy programs that need access to external tools or APIs?**
+**Short:** Wrap deterministic API calls inside a custom module's `forward()`; only the LLM-calling modules inside it get optimized by DSPy.
 Use `dspy.ReAct` for tool-calling agents, or build a custom module that calls external APIs in `forward()`. For `ReAct`: define tools as Python functions with docstrings; `dspy.ReAct(signature, tools=[tool1, tool2], max_iters=5)`. For custom API calls within a module:
 ```python
 class CustomModule(dspy.Module):
@@ -573,6 +587,7 @@ class CustomModule(dspy.Module):
 External calls are not optimized by DSPy — only the LLM-calling modules are. This is intentional: DSPy optimizes the LLM interface, not the data fetching logic.
 
 **Q: What are the alternatives to DSPy and when would you choose them?**
+**Short:** Tools like Promptfoo or LangSmith's prompt hub manage prompts manually, without DSPy's algorithmic, multi-module optimization.
 Alternatives: (1) Promptfoo / PromptLayer — prompt testing frameworks; easier to adopt but no algorithmic optimization; (2) LangSmith prompt hub — manual prompt management and A/B testing; (3) PromptBreeder (research paper) — evolutionary approach to prompt optimization; (4) OPRO (Google) — uses LLM to optimize prompts iteratively; simpler but less principled than MIPRO. Choose DSPy over alternatives when: you want to treat the program as a whole (multi-step), you need composition of optimizable modules, or you want the compiler abstraction (rerun for different models). Choose alternatives when: simple single-prompt optimization, team isn't familiar with DSPy's paradigm, or you need UI-based prompt management.
 
 ---

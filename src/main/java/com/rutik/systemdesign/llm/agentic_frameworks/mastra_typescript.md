@@ -332,54 +332,71 @@ const step = createStep({
 ## 12. Interview Questions with Answers
 
 **Q: What's the difference between a Mastra Agent and a Mastra Workflow?**
+**Short:** An Agent lets the LLM decide which tools to call and when to stop; a Workflow is a deterministic DAG of predefined steps.
 An Agent is LLM-driven — the model decides which tools to call and when to stop. A Workflow is a deterministic DAG of steps — you define the structure, and steps can be deterministic functions or LLM calls. Use Agents for open-ended tasks; Workflows for predictable business processes.
 
 **Q: Why TypeScript-first matters for agent frameworks?**
+**Short:** Shared Zod schemas keep LLM outputs, tool params, and frontend types in sync, preventing schema drift across the stack.
 Type safety prevents schema drift between LLM outputs, tool params, and downstream consumers. In full-stack JS apps, sharing types between agent code and frontend (via shared Zod schemas) eliminates a whole class of integration bugs.
 
 **Q: How does Mastra handle deployment to edge runtimes?**
+**Short:** Mastra avoids Node-specific APIs by default and ships adapters for Vercel Edge, Cloudflare Workers, and Lambda Edge.
 Edge-friendly by default — avoids Node-specific APIs in core. Provides adapters for Vercel Edge, Cloudflare Workers, AWS Lambda Edge. Limitations: some tool implementations may use Node APIs (fs, child_process); those need alternatives or Node-runtime deployment.
 
 **Q: What happens when a step's output fails its Zod outputSchema validation at runtime, and why is `z.any()` dangerous?**
+**Short:** A schema mismatch fails the run at that exact step; `z.any()` disables validation and lets malformed data flow on unnoticed.
 Zod validates every step's output against its `outputSchema` when the step returns; a mismatch fails the workflow run at that step with a descriptive validation error, giving you the exact field and step id. With `z.any()` schemas, validation is disabled — malformed data flows into downstream steps and fails later (or worse, silently produces wrong output), and TypeScript inference degrades to `any` so the compiler cannot catch the drift either. Always write tight schemas; the definition-time and runtime checks are the framework's main correctness guarantee.
 
 **Q: How is memory implemented?**
+**Short:** The `Memory` class combines verbatim recent messages with top-K semantic recall over a vector store, persisted per session by `threadId`.
 The `Memory` class wraps a vector store (LibSQL with native vector ops, or Postgres pgvector). Configurable retrieval: last N messages verbatim + top-K semantic recall. Embeddings via the model's embedding API or a dedicated embedder. Memory persists across agent calls within a session (`threadId`).
 
 **Q: What's the Workflow execution model?**
+**Short:** `.then()` sequences steps, `.parallel()` runs steps concurrently, `.branch()` conditionally selects a path, and `.until()` loops.
 Steps execute in order defined by `.then()` calls. Parallel steps via `.parallel([step1, step2])` run concurrently. Branching via `.branch(condition, [step1], [step2])`. Loops via `.until(condition, [stepN])`. Each step's output is typed and validated; mismatches fail at workflow definition time.
 
 **Q: How do outputs from `.parallel()` steps reach the next step?**
+**Short:** The following step receives an object keyed by each parallel step's id, and a key mismatch in its `inputSchema` fails at definition time.
 The step after `.parallel([stepA, stepB])` receives an object keyed by step id — in the PR-review example, the compose step's `inputSchema` declares `{ security: {...}, style: {...} }` and reads `inputData.security.issues` and `inputData.style.issues`. Both parallel branches must complete before the join step runs; if either fails, the workflow run fails. Declare the join step's inputSchema to mirror the parallel step ids exactly — a key mismatch fails at workflow definition time, which is far cheaper than a production error.
 
 **Q: How do you stream agent output?**
+**Short:** `agent.stream()` gives a `textStream` for text, `.objectStream` for structured output, and `.fullStream` for every tool and text event.
 `const stream = await agent.stream(input);` returns a `StreamResult` with `textStream` async iterable. For structured output, `.objectStream`. For tool calls, `.fullStream` emits all events (tool_call, tool_result, text, etc).
 
 **Q: What's the voice agent story?**
+**Short:** A `VoiceAgent` pairs input/output voice models, most maturely via the OpenAI Realtime API, handling turn detection and barge-in.
 `VoiceAgent` with input + output `VoiceModel`. OpenAI Realtime API integration most mature. Handles WebRTC/WebSocket audio streaming, turn detection, barge-in. Limitation: requires server-sent events or WebSocket from server to client; not pure-edge yet.
 
 **Q: How does Mastra integrate with MCP?**
+**Short:** `MastraMCPClient` spawns an MCP server, lists its tools, and exposes them directly as Mastra tools in an agent's tool list.
 `MastraMCPClient({ command, args })` spawns an MCP server (e.g., a Python or Node MCP server), lists its tools, exposes them as Mastra tools. Use in Agent.tools list. Cleanup via `await client.close()` when done.
 
 **Q: What about evals?**
+**Short:** Built-in metric functions score model output against expectations and run as suites via the CLI or CI, less mature than LangSmith.
 Built-in eval primitives: define metrics as functions taking model output + expected, return scores. Combine into eval suites; run with `mastra dev` (CLI) or as part of CI. Less mature than LangSmith but built-in to the framework.
 
 **Q: Can Mastra workflows be durable / resumable?**
+**Short:** Not natively yet -- state persists to memory by default, so production durability still needs an external system like Temporal.
 Currently limited durability — workflows persist state to memory by default. For production durability, integrate with external systems (Inngest, Temporal) as you would with any framework. Native durability is a roadmap item.
 
 **Q: Cost overhead vs direct API calls?**
+**Short:** Minimal -- Mastra is a thin layer over the AI SDK provider clients with no hidden extra LLM calls beyond features you opt into.
 Minimal — Mastra is a thin layer over `@ai-sdk/*` provider clients. No additional LLM calls except where you use built-in features (memory retrieval uses embeddings; evals run model calls). Net cost ~equal to direct.
 
 **Q: How do you debug a failing workflow?**
+**Short:** `mastra dev` shows step-by-step run state, inputs, outputs, timing, and Zod validation errors in a local UI.
 Mastra CLI `mastra dev` provides a UI showing workflow runs, step states, inputs, outputs, errors. Logs each step's execution time and Zod validation results. For production, integrate OpenTelemetry exporter.
 
 **Q: What's the MCP client experience like?**
+**Short:** Connecting to a stdio or HTTP MCP server surfaces its tools with TypeScript autocomplete when the server provides typed schemas.
 Smooth. Connect to stdio or HTTP MCP server; tools appear in autocomplete via TypeScript types (when MCP server provides typed schemas). Use Anthropic's, your own custom, or community MCP servers.
 
 **Q: Compared to LangChain JS, what does Mastra do better?**
+**Short:** Mastra adds native workflows, memory, voice, and an eval harness, while LangChain JS has broader model and tool integrations.
 Workflows (LangChain JS lacks LangGraph-equivalent), built-in memory abstraction with first-class vector stores, voice support, eval harness, deployment-focused CLI. LangChain JS has more model/tool integrations. See [LangChain & LCEL](langchain_and_lcel.md) for the LangChain-side comparison.
 
 **Q: How do you run a long multi-step workflow on an edge runtime with execution-time limits?**
+**Short:** Keep only the request-facing agent call on the edge and offload the multi-step workflow to a Node runtime or durable executor.
 You mostly shouldn't — edge runtimes cap execution (Cloudflare Workers allows ~10ms CPU on the free tier and ~30s on paid; wall-clock waiting on LLM I/O doesn't count against CPU but request duration limits still apply), so a workflow with several sequential LLM steps can exceed the budget. Patterns that work: keep only the request-facing agent call on the edge and enqueue the heavy workflow to a Node runtime or a durable executor (Inngest, Temporal); or split the workflow so each edge invocation runs one step and persists state between invocations. Measure your worst-case step chain on the target platform before committing to edge deployment.
 
 ---

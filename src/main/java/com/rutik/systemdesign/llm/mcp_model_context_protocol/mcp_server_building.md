@@ -489,54 +489,71 @@ is withholding the information that determines whether the retry succeeds.
 ## 12. Interview Questions with Answers
 
 **Q: What are the MCP primitives and how do they differ?**
+**Short:** Servers expose Resources (readable data), Tools (callable actions), and Prompts (templates); clients expose Sampling, Roots, and Elicitation.
 Servers offer three — Resources (URI-addressable read-only data such as files and records), Tools (callable functions with potential side effects), and Prompts (reusable templates clients can invoke). Clients offer three back to servers: Sampling (the server asks the client to run an LLM call on its behalf), Roots (the server asks which URI or filesystem boundaries it may operate in), and Elicitation (the server asks the user for extra input mid-task). Resources are for "show me X"; Tools are for "do X". A common mistake is calling Sampling a fourth *server* primitive — it runs the other way, and the server may only use it if the client declared the capability at initialize.
 
 **Q: What's the difference between FastMCP and the bare Python SDK?**
+**Short:** FastMCP offers a decorator-based, FastAPI-like ergonomics layer, while the bare SDK gives direct handler access at the cost of more code.
 FastMCP is a higher-level wrapper using decorators (`@mcp.tool()`, `@mcp.resource()`) — closer to FastAPI ergonomics. Bare SDK gives you direct access to request handlers (more code, more control). FastMCP is recommended for most server implementations.
 
 **Q: How does capability negotiation work at initialize?**
+**Short:** Client and server exchange their supported features, and list-changed notifications only fire if the recipient declared support for them.
 Client sends `initialize` with protocolVersion and its capabilities (e.g., sampling support). Server responds with its capabilities (resources/tools/prompts available). Both parties know what the other supports. Notifications about list changes (e.g., `notifications/tools/list_changed`) are only sent if the recipient supports them.
 
 **Q: Why use stdio vs HTTP transport?**
+**Short:** stdio is the simplest, most secure choice for a locally spawned server; Streamable HTTP is required for remote or multi-client deployments.
 Stdio: client launches server as subprocess; communicates via stdin/stdout. Simplest, most secure (no network), good for local tools — the spec says clients should support stdio whenever possible. HTTP (Streamable HTTP): server runs as an HTTP service on a single MCP endpoint that serves both POST and GET; multiple clients can connect. Required for remote/cloud servers. Choose based on deployment model.
 
 **Q: What's the right way to describe a tool?**
+**Short:** State what it does, when the LLM should call it, and what it returns, since a vague description causes missed or wrong tool calls.
 Description should answer: what does this tool do? When should the LLM use it? What does it return? Include example use cases. The LLM reads the description to decide when to call — vague descriptions cause missed or wrong calls. Augment with type hints + Pydantic Field descriptions for parameters.
 
 **Q: How do you handle errors in tools?**
+**Short:** Return the failure as the tool's result text with enough context to retry or explain, rather than raising a protocol-level exception.
 Return the error as the tool's result text (so the LLM sees and can react), not as a protocol-level exception. Include enough context for the LLM to either retry with different arguments or report failure to the user. Example: "Query failed: column 'usr_id' not found. Available columns: id, user_id, name."
 
 **Q: What's the role of the MCP Inspector?**
+**Short:** A browser-based UI for launching a server, calling its tools, inspecting resources, and viewing raw JSON-RPC traffic during development.
 Inspector is a browser-based testing UI: launches your server, lets you call tools, inspect resources, view raw JSON-RPC traffic. Essential for development — much faster than testing through a real LLM client.
 
 **Q: How do you secure an MCP server?**
+**Short:** stdio servers rely on the launching user's privileges; HTTP servers need OAuth with PKCE, Origin validation, and audience-bound tokens.
 For stdio servers: rely on subprocess privileges (the server runs as the user that launched it) and take credentials from the environment — the authorization spec explicitly does not apply to stdio. For HTTP servers: authenticate clients (OAuth 2.1 with mandatory PKCE `S256` per the current spec, or API keys/mTLS), validate the `Origin` header, and validate that every access token was issued for *this* server (RFC 8707 audience binding) rather than passing it through. Validate all tool inputs. Never trust tool descriptions or annotations from untrusted servers (prompt injection risk) — the full threat model is in [MCP Security](mcp_security.md).
 
 **Q: Can MCP servers have state across calls?**
+**Short:** Yes -- a server is a long-running process, though HTTP servers with multiple instances need shared external storage instead of in-memory state.
 Yes — server is a long-running process; you can hold state in memory or external storage. Example: cache database connections, maintain session tokens. Be careful with state in HTTP servers if you have multiple instances (use Redis/external store).
 
 **Q: How do you handle long-running operations?**
+**Short:** Return a task ID immediately with a status-polling tool, or use progress notifications, ideally standardized through the Tasks utility.
 Per MCP spec, senders should set request timeouts and cancel with a `notifications/cancelled` when they lapse, so tools should return within a reasonable window. For longer operations (>30s): (1) submit the operation and return a task_id immediately; (2) provide a separate tool to poll status; (3) send progress notifications, which may reset the caller's timeout clock. The 2025-11-25 revision adds an experimental **Tasks** utility that standardizes exactly this — a tool declares `execution.taskSupport`, and the client polls for the deferred result instead of you inventing your own task_id convention.
 
 **Q: What's prompt sampling and when do servers use it?**
+**Short:** It lets a server ask the client to run an LLM call on its behalf, so the server can use AI capability without bundling its own API keys.
 Sampling lets the server ask the client to make an LLM call on its behalf. Example: a Git MCP server might ask the client's LLM to summarize a diff (using the client's model + auth). Lets servers use AI capabilities without bundling their own API keys.
 
 **Q: When may a server call `roots/list` or `elicitation/create`?**
+**Short:** Only allowed if the client declared that capability at initialize, otherwise the call fails with a method-or-params error.
 Only when the client declared that capability at initialize — otherwise `roots/list` returns `-32601` Method not found. The same gate is per-mode for elicitation: a client that declared only `form` answers a `mode: "url"` request with `-32602` Invalid params. Roots come back as `{uri, name}` records whose `uri` MUST be a `file://` URI, and if the client declared `roots.listChanged` you cache the list and refresh on `notifications/roots/list_changed` rather than re-listing on every tool call. Practical guidance: treat both as optional enrichment — a server that hard-depends on roots or elicitation simply does not work in Claude Desktop-class clients that have not shipped the capability.
 
 **Q: Why must a server never request an API key through form-mode elicitation?**
+**Short:** Form data flows back into the LLM's context, so the spec forbids secrets there and requires out-of-band URL mode instead.
 Because form-mode data passes back through the MCP client and into the LLM's context, so the spec forbids secrets there and mandates URL mode instead. Form mode is for benign structured input — a target environment, a ticket id, a date — and its schema is restricted to a flat object of primitives precisely because clients must be able to render it as a simple form. URL mode sends the user out of band to a page the server controls; the client sees only the URL, shows the full host for consent, and must not pre-fetch it. Practical guidance: if the value would be damaging in a log line, it belongs in URL mode, and the server must verify the user who opens the URL is the same user the elicitation was created for.
 
 **Q: How do you version an MCP server?**
+**Short:** Use semantic versioning with major bumps for breaking tool schema or behavior changes, and prefer additive optional fields otherwise.
 Semantic versioning. Breaking changes to tool schemas or behavior require major version bumps. Communicate version in server metadata. Clients should pin versions for stability. Use additive changes (new optional fields) where possible.
 
 **Q: How does an MCP server expose static documentation?**
+**Short:** As Prompts if templated, or as Resources with URIs like `doc://api/users`, so clients can list and read them for background knowledge.
 As Prompts (if templated) or Resources (if static). Example: docs as `doc://api/users` resources, each returning Markdown. Or as a single resource at `doc://overview` returning a table of contents. Clients can list/read these to give the LLM background knowledge.
 
 **Q: Can MCP servers call other MCP servers?**
+**Short:** Not natively in the protocol, though a server's own tool implementation can act as an MCP client to another server if needed.
 The MCP protocol is client-server; servers don't call other servers natively. But a server's tool implementation could itself be an MCP client to another server — chaining is possible at the implementation level. This is uncommon; usually one client orchestrates multiple servers.
 
 **Q: How do you handle file uploads/downloads through MCP?**
+**Short:** Use base64-encoded content for small binaries, and prefer fetchable URIs like pre-signed S3 links for large files instead of streaming JSON-RPC.
 MCP supports binary content via base64-encoded resources or tool results. For large files, prefer URIs that the client can fetch directly (e.g., S3 pre-signed URLs returned by a tool). Avoid streaming gigabytes through JSON-RPC.
 
 ---

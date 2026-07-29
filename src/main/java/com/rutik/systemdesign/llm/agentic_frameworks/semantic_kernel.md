@@ -563,24 +563,31 @@ over-decomposed plan; you have to not generate it.
 ## 12. Interview Questions with Answers
 
 **Q: What is Semantic Kernel and how does it differ from LangChain?**
+**Short:** SK is Microsoft's enterprise SDK with first-class C# support and plugin/filter/audit infrastructure; LangChain leads on Python agent patterns.
 Semantic Kernel is Microsoft's enterprise-grade AI SDK supporting C#, Python, and Java, designed around enterprise patterns: dependency injection, plugin management, audit filters, and Azure integrations. LangChain is Python-first with a larger open-source ecosystem but fewer enterprise-specific features. Key differences: SK has first-class C# support (critical for .NET enterprises), native OpenAPI plugin import, Kernel filters for audit trails, and tighter Azure integration. LangChain has more community integrations, better agent patterns (LCEL, LangGraph), and a larger Python community. Choose SK for enterprise .NET/Azure deployments; LangChain for Python-first or complex agent patterns.
 
 **Q: What is a plugin in Semantic Kernel?**
+**Short:** A collection of semantic (prompt-template) and native (code) functions representing one capability, analogous to LangChain tools.
 A plugin is a collection of functions (semantic and native) that represent a capability. Semantic functions are prompt templates stored as text files with variable substitution. Native functions are C#/Python/Java methods decorated to be SK-callable. A `WeatherPlugin` might have a native function `GetTemperature(city)` (calls weather API) and a semantic function `DescribeWeather` (generates natural language description from temperature data). Plugins are the unit of capability in SK — analogous to tools in LangChain or skills in Copilot.
 
 **Q: What is a Kernel filter and why is it important for enterprise deployments?**
+**Short:** Middleware intercepting function calls before and after execution, used for audit logging, PII detection, rate limiting, and cost tracking.
 Kernel filters are middleware that intercepts function invocations (pre and post). They receive the `FunctionInvocationContext` with: function name, input arguments, and (after execution) the result. Enterprise use cases: (1) Audit logging — log every AI call with user identity, inputs, outputs, latency, and cost; (2) PII detection — scan inputs for sensitive data before sending to LLM; (3) Rate limiting — enforce per-user or per-tenant usage limits; (4) Cost tracking — accumulate token usage per department or project; (5) A/B testing — route % of calls to different prompt variants. Filters are the enterprise audit trail mechanism that compliance teams require.
 
 **Q: What is the difference between SequentialPlanner and FunctionCallingStepwisePlanner?**
+**Short:** `SequentialPlanner` plans the whole sequence upfront and risks hallucinated steps; the stepwise planner decides one call at a time.
 `SequentialPlanner` generates a complete step-by-step plan upfront (as XML/JSON) using the LLM, then executes each step. It requires the LLM to see all available functions and plan the entire sequence before executing anything — prone to planning hallucinations on complex tasks. `FunctionCallingStepwisePlanner` uses native LLM function calling to decide each step dynamically: after each step, the LLM sees the result and decides the next function to call. More adaptive but more expensive (one LLM call per step). Use `SequentialPlanner` when the task structure is known; use `FunctionCallingStepwisePlanner` when the task requires adaptive reasoning.
 
 **Q: How do you import a REST API as a Semantic Kernel plugin?**
+**Short:** `OpenApiKernelPluginFactory` turns an OpenAPI spec into one SK function per endpoint without any hand-written wrapper code.
 Use `OpenApiKernelPluginFactory.create_kernel_plugin_from_openapi()` with the path to an OpenAPI YAML/JSON spec. SK parses the spec, creates one SK function per API endpoint (named by `operationId`), and registers the plugin with the Kernel. The functions accept the endpoint's parameters as SK arguments. Authentication is configured via `execution_parameters`. This pattern enables any REST API to become an AI-callable plugin without writing wrapper code — a significant productivity gain for enterprise integrations with existing APIs.
 
 **Q: How does Semantic Kernel's memory system work?**
+**Short:** It embeds and stores text for nearest-neighbor search across pluggable backends, simpler than LlamaIndex's advanced retrieval strategies.
 Semantic Memory stores text and vector embeddings for semantic search. Add memories: `kernel.memory.save_information(collection="knowledge_base", id="doc1", text="...")` — this embeds the text and stores it. Query memories: `results = await kernel.memory.search("knowledge_base", "what is the return policy?", limit=3)` — embeds the query, retrieves nearest neighbors. Memory backends: `VolatileMemoryStore` (in-memory, dev only), `AzureAISearchMemoryStore` (production Azure), `ChromaMemoryStore`, `SqliteMemoryStore`. The memory system is simpler than LlamaIndex's advanced RAG — sufficient for most enterprise Q&A but lacks advanced retrieval strategies.
 
 **Q: How does multi-model support work in Semantic Kernel?**
+**Short:** Register multiple AI services under distinct service IDs so functions and planners can route cheap or expensive models by task.
 Register multiple AI services with different `service_id`s:
 ```python
 kernel.add_service(OpenAIChatCompletion(service_id="gpt-4o", ...))
@@ -589,27 +596,35 @@ kernel.add_service(OpenAIChatCompletion(service_id="gpt-4o-mini", ...))
 Semantic functions specify which service to use in `config.json` or execution settings. Planners default to a designated "planner model." Use cheap models for classification and routing; expensive models for complex reasoning. Multi-model support enables: cost optimization (GPT-4o-mini for simple tasks), fallback (if primary fails, use secondary), and model routing by capability.
 
 **Q: How do you build a multi-tenant AI application with Semantic Kernel?**
+**Short:** Isolate tenants via per-tenant Kernel instances, tenant-tagged `KernelArguments`, or tenant-prefixed memory collections enforced by filters.
 Multi-tenancy in SK: (1) Per-tenant Kernel instances — create a `Kernel` per tenant with tenant-specific plugins, API keys, and settings; this provides strong isolation but higher memory usage; (2) Shared Kernel with per-request context — use `KernelArguments` to pass tenant ID; Kernel filters route to tenant-specific configurations; (3) Per-tenant memory collections — prefix memory collection names with tenant ID; ensures data isolation. Kernel filters are critical for multi-tenancy: enforce that tenant A cannot access tenant B's data, log all cross-tenant operations, and implement tenant-level rate limits.
 
 **Q: What is the Copilot Stack and where does Semantic Kernel fit?**
+**Short:** Microsoft's AI application architecture, where Semantic Kernel sits in the orchestration layer between foundation models and Copilot extensions.
 The Copilot Stack is Microsoft's architecture for building AI-powered applications within the Microsoft ecosystem. Layers: Foundation Models (Azure OpenAI, GPT-4o), AI Orchestration (Semantic Kernel), Copilot Extensions (plugins), and Copilot Experience (M365, GitHub, Bing). SK sits in the AI Orchestration layer — it connects foundation models to application logic through plugins and planners. Building on SK means your application can potentially integrate with M365 Copilot as a plugin, though this requires additional Copilot Studio configuration.
 
 **Q: How do you test a Semantic Kernel application?**
+**Short:** Unit test native functions as plain code, mock the chat completion service for semantic functions, and integration-test with a cheap model.
 Testing approach: (1) Unit test native plugins as plain C#/Python functions — no SK dependency; (2) Unit test semantic functions by mocking the `IChatCompletionService` in C# or patching the OpenAI client in Python; (3) Integration test with a cheap model (GPT-4o-mini) and `max_tokens=200` to keep tests fast and cheap; (4) Planner testing: provide a mock function catalog and verify the planner generates the expected plan structure. In C#: use `IKernelBuilder` with test doubles. Key: test the logic of what SK should do, not SK's internal behavior.
 
 **Q: How does SK's C# SDK differ from the Python SDK?**
+**Short:** The C# SDK is more mature with .NET DI and reflection-based plugin loading, while the Python SDK is newer but conceptually consistent.
 C# SDK: mature (longer development), uses .NET DI for configuration, async/await first-class, strong typing throughout. Python SDK: more recent, fewer features, but growing. Key differences: C# has `IKernelBuilder` for DI setup; Python uses `sk.Kernel()` directly. C# has `[KernelFunction]` attribute for native functions; Python uses `@kernel_function` decorator. C# plugin loading uses reflection; Python uses direct class registration. For enterprise .NET shops: C# is recommended. For ML-heavy Python teams: Python SDK. The APIs are designed to be conceptually consistent across languages — knowledge transfers.
 
 **Q: What are the main limitations of Semantic Kernel for building agents?**
+**Short:** It lacks a built-in state machine, checkpointing, and reliable multi-step planning compared to LangGraph's agent orchestration.
 SK's agent capabilities lag behind LangGraph: (1) No built-in state machine — SK's planners don't support complex conditional branching or loops; (2) No checkpointing — long-running agent tasks cannot be paused and resumed; (3) Limited streaming of intermediate agent steps to UI; (4) Planner reliability — for complex multi-step plans, the LLM-generated plan often has errors; (5) No native multi-agent coordination beyond basic GroupChat patterns. For complex agentic tasks: combine SK's plugin/filter infrastructure with a custom state machine or use LangGraph. SK's strength is in the integration and enterprise patterns, not agent orchestration.
 
 **Q: How do you handle multi-language support in SK responses?**
+**Short:** A system-message instruction is simplest but least reliable; post-processing translation after an English response is most reliable but costlier.
 Three approaches: (1) System message: "Always respond in {{$language}}" injected via `ChatHistory.AddSystemMessage()` — simplest, but model may ignore for complex technical content; (2) Semantic function with language variable: `"Respond in {{$language}}: {{$question}}"` — explicit, usually reliable with GPT-4; (3) Post-processing translation: generate response in English, then invoke a translation semantic function; most reliable for accuracy but doubles LLM calls. For enterprise multi-lingual deployments: approach 3 with caching (cache translations for repeated phrases) balances reliability and cost.
 
 **Q: How does Semantic Kernel's plugin architecture differ from LangChain's tool abstraction?**
+**Short:** SK plugins are strongly typed annotated classes with compile-time safety, while LangChain tools are more flexible decorated Python functions.
 Semantic Kernel plugins are strongly typed classes with annotated methods (KernelFunction attribute), providing compile-time type safety and IDE support — particularly advantageous in C# and Java enterprise environments. LangChain tools are Python functions wrapped with decorators, offering more flexibility but less type safety. SK's approach enables automatic function signature extraction for the model's function calling schema. Choose SK for enterprise .NET/Java projects where type safety and existing SDK integration matter; choose LangChain for Python-first rapid prototyping.
 
 **Q: How do you implement multi-step planning with Semantic Kernel's Planner?**
+**Short:** It generates a function-call sequence from a goal and available plugins, and quality degrades sharply past around 50 exposed functions.
 SK's planner takes a user goal and available plugins, then generates a plan (sequence of function calls) to achieve it. The Handlebars planner generates a Handlebars template with function calls; the Stepwise planner executes functions iteratively with ReAct-style reasoning. Key configuration: limit the number of available functions presented to the planner (exposing 50+ functions degrades plan quality), set max iterations (default 10), and implement plan validation before execution. The planner works best with well-described function parameters and clear function names.
 
 ---

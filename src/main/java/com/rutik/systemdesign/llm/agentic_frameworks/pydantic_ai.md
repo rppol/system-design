@@ -309,54 +309,71 @@ class OrderResult(BaseModel):
 ## 12. Interview Questions with Answers
 
 **Q: What is `Agent[Deps, Result]` and why is it generic?**
+**Short:** It statically types the injected dependency object and the expected output schema, catching mismatches with mypy/pyright.
 It's a typed generic where Deps is your dependency type (injected at runtime) and Result is the expected output schema. The generic parameters enable static type checking — `agent.run(..., deps=...)` requires deps matches Deps, and `result.data` is typed as Result. Catches mismatches at dev time via mypy/pyright.
 
 **Q: How does dependency injection work in PydanticAI?**
+**Short:** Pass a typed deps object to `agent.run(deps=...)`, and tools with `RunContext[Deps]` receive it via `ctx.deps` instead of globals.
 You define a dataclass or BaseModel for your dependencies. Pass them to `agent.run(query, deps=MyDeps(...))`. Tools annotated with `RunContext[MyDeps]` as their first parameter receive `ctx.deps` containing the injected object. Replaces global state with explicit, testable dependencies.
 
 **Q: How does a tool signal that the model should retry with different arguments, without crashing the run?**
+**Short:** Raise `ModelRetry("explanation")` so the model sees the message and retries with corrected arguments; a plain exception aborts the run.
 Raise `ModelRetry("explanation")` from inside the tool. PydanticAI catches it, sends the message back to the model as the tool response, and re-invokes the model so it can correct its arguments (counted against the retry limit). This is the idiomatic path for recoverable cases like "order not found — check the order_id format": returning a bare error dict the model may ignore is weaker, and raising a plain exception aborts the entire run. Reserve normal exceptions for genuine infrastructure failures; use `ModelRetry` for anything the model can fix by calling differently.
 
 **Q: What's the difference between `@agent.tool` and `@agent.tool_plain`?**
+**Short:** `@agent.tool` requires `RunContext[Deps]` as its first parameter for deps access, while `@agent.tool_plain` is a dependency-free function.
 `@agent.tool` requires `RunContext[Deps]` as first parameter — for tools that need deps access. `@agent.tool_plain` is for tools without deps (purely functional). Schema generated identically; only the function signature differs.
 
 **Q: How is structured output enforced?**
+**Short:** `result_type` registers the schema as a required final-result tool or prompt instructions, validated by Pydantic with up to three retries.
 At Agent creation, `result_type=MyPydanticModel`. On providers with tool calling, the schema is registered as a special final-result tool the model must call to finish the run; on providers without it, the JSON schema is injected as prompt instructions. After the LLM call, output is validated by Pydantic. If invalid, the framework auto-retries (up to 3 times) feeding the validation error back to the model.
 
 **Q: Can you use PydanticAI with non-OpenAI providers?**
+**Short:** Yes -- PydanticAI supports OpenAI, Anthropic, Google, Groq, Mistral, and Cohere via swappable model classes.
 Yes — supports OpenAI, Anthropic, Google, Groq, Mistral, Cohere via model classes (`OpenAIModel`, `AnthropicModel`, etc). Swap one line to switch providers. Native features like prompt caching are provider-specific.
 
 **Q: How do you test PydanticAI agents?**
+**Short:** Override the model with `TestModel` or `FunctionModel` inside `agent.override()` and inject mock dependencies via `deps=`.
 Override the model with `TestModel` (canned responses) or `FunctionModel` (custom logic). Pattern: `with agent.override(model=test_model): result = await agent.run(...)`. Mock dependencies are passed via `deps=MockDeps(...)`. Use pytest-anyio for async test execution.
 
 **Q: What is `result.new_messages()` and when do you use it?**
+**Short:** It returns the messages from a run so they can be passed as `message_history` to continue a stateless agent's conversation.
 After `result = await agent.run(...)`, `result.new_messages()` returns the conversation messages from that run. Pass into the next call's `message_history` parameter to continue a multi-turn conversation. PydanticAI is stateless — you manage history explicitly.
 
 **Q: How does streaming work for structured outputs?**
+**Short:** `stream_structured()` yields progressively validated partial Pydantic objects as the model's tokens arrive.
 `async with agent.run_stream(...) as result:` then `async for partial in result.stream_structured(debounce_by=0.1):` — yields partially-validated Pydantic objects as the model streams tokens. Useful for UI rendering of structured data progressively.
 
 **Q: What's the role of Logfire?**
+**Short:** Pydantic's observability platform that visualizes the OpenTelemetry traces PydanticAI emits, including tool calls and validation errors.
 Logfire is Pydantic's observability platform. PydanticAI emits OpenTelemetry-compatible traces; Logfire visualizes them: full agent execution tree, model calls, tool calls, validation errors, latency. Optional but recommended for production debugging.
 
 **Q: How does PydanticAI compare to Instructor?**
+**Short:** Instructor extracts typed output from a single call; PydanticAI is a full multi-turn agent framework with tools and dependency injection.
 [Instructor](structured_outputs_and_instructor.md) focuses on extracting structured outputs from a single LLM call (good for data extraction). PydanticAI is a full agent framework — multi-turn loops, tools, dependency injection, eval harness. Use Instructor when you need typed extraction; PydanticAI when you need typed agents.
 
 **Q: What's the cost of running PydanticAI agents?**
+**Short:** Essentially zero overhead beyond the provider call, aside from millisecond-scale validation and occasional retry calls on bad output.
 Zero overhead at API level (calls underlying provider directly). Adds: Pydantic validation (~ms-scale), retry on schema mismatch (extra LLM call when triggered). Net cost matches direct API for typical workloads; can be slightly higher when retries occur due to bad output.
 
 **Q: Can PydanticAI agents have subagents?**
+**Short:** Define a separate typed Agent and wrap it as a tool the parent agent calls, injecting its typed result back as a tool response.
 Yes — define a separate Agent[OtherDeps, OtherResult] and wrap it as a tool that the parent agent can call. The subagent runs its own loop and returns a typed result that gets injected back as a tool result.
 
 **Q: How are tool descriptions generated?**
+**Short:** Auto-generated from the function's docstring and type hints, enriched by Pydantic `Field(description=...)` on parameters.
 Auto-generated from the function's docstring + Python type hints. The docstring becomes the tool description (visible to LLM); parameter types + descriptions form the JSON schema. Add Pydantic `Field(description=...)` for richer parameter documentation.
 
 **Q: How do dynamic system prompts work?**
+**Short:** An `@agent.system_prompt`-decorated function runs per call with `RunContext[Deps]` and appends per-request content after the static prompt.
 Decorate a function with `@agent.system_prompt`; it runs at the start of each `agent.run()` and receives `RunContext[Deps]`, so the prompt can include per-request data (user name, current date, entitlements) pulled from deps. Static system prompts (the `system_prompt=` constructor argument) are fixed at agent creation; dynamic ones are evaluated per run and appended after them. Keep the large stable portion static (prompt-cache friendly) and only the genuinely per-request lines dynamic.
 
 **Q: How do you stop an agent from looping forever or blowing the token budget?**
+**Short:** Pass `usage_limits` with a request or token cap to `agent.run()`, which raises once the run's tracked usage exceeds it.
 Pass usage limits to the run: `agent.run(..., usage_limits=UsageLimits(request_limit=5, total_tokens_limit=20_000))`. The framework tracks per-run usage across the internal loop and raises a usage-limit exception when a cap is hit; `result.usage()` reports request and token counts after a run for cost logging. Set a `request_limit` on every production agent — a mis-specified tool that keeps triggering `ModelRetry` is otherwise an unbounded cost loop.
 
 **Q: What's the max retry count for structured output validation?**
+**Short:** 3 by default, configurable via `Agent(retries=N)`, raising `UnexpectedModelBehavior` once exhausted.
 Default 3. Configurable via `Agent(retries=N)`. On each retry, the validation error is fed back to the model with instruction to fix. After max retries, raises `UnexpectedModelBehavior` exception.
 
 ---

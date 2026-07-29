@@ -290,48 +290,63 @@ def lookup_customer(customer_id: str) -> dict:
 ## 12. Interview Questions with Answers
 
 **Q: What is the core idea behind CodeAgent vs ToolCallingAgent?**
+**Short:** CodeAgent has the LLM write Python code as its action, chaining multiple tool calls per response, unlike one-call-at-a-time ToolCallingAgent.
 CodeAgent lets the LLM write actual Python code as actions (with tools available as functions); ToolCallingAgent uses traditional JSON tool calls. CodeAgent reduces total LLM calls per task because one code response can chain multiple tool calls, loops, and computations.
 
 **Q: Why does CodeAgent perform better on benchmarks like GAIA?**
+**Short:** Code-as-action matches the model's native training distribution far better than JSON tool-call sequences, boosting GAIA success significantly.
 LLMs were trained on far more Python code than on JSON tool-call sequences. Code-as-action aligns the agent's action format with the model's native distribution, improving task success ~15 percentage points on GAIA Level 1 compared to ToolCallingAgent at similar model sizes.
 
 **Q: What sandboxing options does smolagents support?**
+**Short:** `LocalPythonExecutor` is a lightweight in-process AST filter, while `E2BExecutor` runs code in an isolated cloud microVM for real security.
 Two: (1) `LocalPythonExecutor` — an AST-based sandbox running in-process with import controls; lighter weight but bypassable. (2) `E2BExecutor` — cloud microVM (Firecracker); proper isolation. Production CodeAgent should use E2B; LocalPythonExecutor is OK for trusted environments.
 
 **Q: Why isn't `additional_authorized_imports` alone enough to make LocalPythonExecutor safe for untrusted users?**
+**Short:** It only blocks import statements, not attribute access to already-loaded objects, so untrusted code still needs VM isolation like E2B.
 Because the whitelist only restricts `import` statements — LocalPythonExecutor is an in-process AST-level filter, not an isolation boundary, and clever attribute access through already-available objects can reach the filesystem or interpreter internals without importing anything new. The war story in this file is the canonical failure: a multi-tenant SaaS on `executor_type="local"` let one user's agent read /etc/* despite import controls. Treat the whitelist as defense-in-depth for trusted environments; for untrusted input the boundary must be a VM (E2B), not the Python interpreter.
 
 **Q: How does a CodeAgent know it is finished, and what goes wrong if the model never calls `final_answer`?**
+**Short:** The run ends only when generated code calls `final_answer`, so a model that never calls it burns steps until `max_steps` is hit.
 The run terminates when the generated code calls the special `final_answer(value)` tool — that value becomes the result of `run()`. If the model keeps producing exploratory code without calling it, the loop burns one full LLM call per step until `max_steps` is hit, so a generous cap (say 50) turns a confused model into a cost leak rather than a quick failure. Keep `max_steps` at 10-20 and log per-step code and output so you can see exactly where the model stalled.
 
 **Q: How are tools defined?**
+**Short:** Decorate a Python function with `@tool`; its type hints and Google-style docstring become the JSON schema and parameter descriptions.
 Decorate a Python function with `@tool`. The function signature with type hints becomes the JSON schema. The docstring becomes the tool description. Tools can be plain or class-based. Args section in docstring (Google style) parsed for individual parameter descriptions.
 
 **Q: Can smolagents work with non-HF models?**
+**Short:** Yes -- `LiteLLMModel` proxies to any provider via LiteLLM, alongside native classes for direct OpenAI access.
 Yes — `LiteLLMModel` proxies to any provider (OpenAI, Anthropic, Google, etc) via LiteLLM. Native classes also exist for OpenAI direct. Default examples use HfApiModel for HuggingFace Hub models.
 
 **Q: How does smolagents integrate with MCP?**
+**Short:** `ToolCollection.from_mcp()` connects to an MCP server and exposes its tools as Python callables inside a context manager.
 `ToolCollection.from_mcp(server_config)` connects to an MCP server, lists its tools, and exposes them as Python callables. Use `with ToolCollection(...) as tc:` context manager to ensure server cleanup.
 
 **Q: What's the difference between `max_steps` and `additional_authorized_imports`?**
+**Short:** `max_steps` caps agent iterations, while `additional_authorized_imports` whitelists which modules the generated code may import.
 `max_steps` caps the number of agent iterations (LLM calls). `additional_authorized_imports` is a whitelist for LocalPythonExecutor — specifies which Python modules the agent's code can import. Default whitelist is minimal (built-ins only).
 
 **Q: Can a smolagent itself manage other agents?**
+**Short:** `ManagedAgent` wraps a specialist agent as a callable tool that an orchestrator CodeAgent can invoke like any other tool.
 Yes — `ManagedAgent` wraps an agent as a tool that another agent can call. Pattern: define specialist agents (search, analysis), wrap with `ManagedAgent`, give to an orchestrator CodeAgent as tools.
 
 **Q: Do variables persist between code steps in a CodeAgent run?**
+**Short:** Yes -- the executor's Python namespace stays alive within one run, so large objects stay in the sandbox instead of entering the prompt.
 Yes — the executor keeps the Python namespace alive across steps within a single `run()`, so a DataFrame loaded in step 1 is still in scope in step 3 without re-loading. This is a key efficiency win over ToolCallingAgent, where every intermediate value must round-trip through the context window as text (a 50,000-row DataFrame stays in the sandbox; only the `print()` output enters the prompt). State is discarded between separate `run()` calls, so long-lived sessions need external persistence (files, a database) rather than relying on executor memory.
 
 **Q: How do you debug CodeAgent failures?**
+**Short:** Inspect the logged generated code and execution output per step, watching for whitelist violations and bad argument types.
 Smolagents logs every generated code block and execution output. Print these traces; for production, integrate with OpenTelemetry. Common failures: code with syntax errors (model retries automatically), imports not in whitelist, tools called with wrong argument types.
 
 **Q: What's the cost overhead vs direct API?**
+**Short:** Minimal -- the code-as-action format adds little prompt overhead and often needs fewer LLM calls than ToolCallingAgent.
 Minimal — smolagents adds <1KB of system prompt tokens explaining the code-as-action format. Net cost is typically lower than ToolCallingAgent because fewer LLM calls per task. Sandbox cost (E2B at $0.10/hr) added if using cloud executor.
 
 **Q: How do you handle very large tool sets in smolagents?**
+**Short:** Smolagents has no built-in tool retrieval, so apply tool RAG or classifier routing at the application layer before invoking it.
 Same patterns as elsewhere (see [Tool Selection at Scale](../agents_and_tool_use/tool_selection_at_scale.md)): tool RAG (retrieve relevant tools per query), hierarchical menus, classifier routing. Smolagents doesn't have built-in tool retrieval; implement at the application layer before agent invocation.
 
 **Q: Is smolagents production-ready?**
+**Short:** Yes for narrow, properly sandboxed tasks, though it still lacks built-in tracing and durable execution for high-throughput use.
 Yes for narrow tasks with proper sandboxing. The minimalist code base is auditable. Lacks some production niceties (built-in tracing, durable execution). For high-throughput production, often combined with Temporal or custom orchestration.
 
 ---

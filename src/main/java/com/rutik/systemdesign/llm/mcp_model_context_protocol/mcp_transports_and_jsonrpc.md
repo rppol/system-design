@@ -534,51 +534,67 @@ logging.basicConfig(stream=sys.stderr)  # NOT sys.stdout!
 ## 12. Interview Questions with Answers
 
 **Q: What's the difference between a request and a notification in JSON-RPC?**
+**Short:** A request carries an id and expects a matching response; a notification has no id and gets no response at all.
 Requests have an `id` field; the receiver MUST send a response with the same id. Notifications have no `id`; no response expected. The MCP `notifications/initialized` message is a notification (no id, no response). Mixing them up causes deadlocks (one party waits forever).
 
 **Q: Why does MCP use JSON-RPC 2.0 specifically?**
+**Short:** It is mature, simple, and language-agnostic with minimal machinery, though MCP drops batch arrays and forbids null ids from the base spec.
 JSON-RPC 2.0 is mature (spec dated 2010), simple, language-agnostic, and models requests, responses and notifications with almost no machinery. Alternatives (gRPC, custom protocols) would add weight without benefit, and JSON is human-readable for debugging. MCP adopts the message model but not the whole spec — it has no batch arrays, forbids a `null` id, and requires ids to be unique per requestor within a session.
 
 **Q: When should you use stdio vs HTTP transport?**
+**Short:** stdio suits fast, single-user local tools; Streamable HTTP trades 10-50ms of round-trip latency for shared, multi-tenant scale.
 Stdio for local tools (filesystem, local DB) — fastest, most secure, single-user per server. HTTP (Streamable HTTP) for shared cloud services, multi-tenant, requires network — adds 10-50ms RTT but enables scale.
 
 **Q: How does a Streamable HTTP server decide between a JSON response and an SSE stream?**
+**Short:** The server picks per request, so every client POST must accept both content types since the form isn't known until headers arrive.
 The server chooses per request: it may answer a POSTed JSON-RPC request with `Content-Type: application/json` (one object) or with `text/event-stream` (an SSE stream), and the client MUST support both. That is why every client POST must carry `Accept: application/json, text/event-stream` — you cannot know which form is coming until the response headers arrive, so the HTTP call has to be made in streaming mode. A POSTed notification or response is different: it gets HTTP 202 Accepted with no body. A separate client GET on the same endpoint opens a server-to-client SSE stream for server-initiated requests and notifications, or returns 405 if the server offers none.
 
 **Q: What's the role of the `MCP-Session-Id` header?**
+**Short:** It lets a stateful Streamable HTTP server route requests to the right session, echoed by the client until it's torn down or expires.
 For stateful sessions over Streamable HTTP. The server may return `MCP-Session-Id` on the response carrying `InitializeResult`; if it does, the client MUST echo it on every subsequent request. It lets the server route requests to the right session state (e.g., conversation memory). Two related rules: a server that has expired the session answers with HTTP 404, and the client must then re-initialize without a session id; and a client leaving for good should send an HTTP DELETE with the header. Note that the 2026-07-28 release candidate removes this header along with the protocol-level session.
 
 **Q: How does the ping keepalive work?**
+**Short:** Either side sends a ping and expects a prompt empty result back, with no fixed interval mandated, letting the sender detect a stale connection.
 Either party sends a `ping` request and the other MUST reply promptly with an empty `result: {}` — there is no `pong` method, the reply is just an ordinary empty JSON-RPC response. A missed reply lets the sender treat the connection as stale and reconnect. The spec sets no default interval: it says the frequency should be configurable and that excessive pinging should be avoided, so any "every 30s" figure is an implementation choice, not a protocol rule. Most SDKs handle this automatically; it only matters when you implement the transport yourself.
 
 **Q: What does the initialize handshake negotiate?**
+**Short:** Protocol version and each side's optional capabilities, agreed once and then sent as an HTTP header on every later request.
 Protocol version and capabilities: the client proposes the newest version it supports, the server replies with that version or the newest one it supports instead, and each side lists its optional features. The client declares `roots`, `sampling`, `elicitation` and `tasks`; the server declares `prompts`, `resources`, `tools`, `logging`, `completions` and `tasks`, with sub-flags such as `listChanged` and `subscribe`. If the client cannot accept the version the server named, it should disconnect. Over HTTP, the agreed version must then be sent as an `MCP-Protocol-Version` header on every later request. The 2026-07-28 release candidate removes this handshake entirely, carrying client info and version in per-request `_meta` and headers instead.
 
 **Q: What does the 2026-07-28 revision change about the connection lifecycle?**
+**Short:** It removes the `initialize` handshake and session entirely, making every request self-contained so a server can sit behind a plain load balancer.
 It deletes the lifecycle — the `initialize` handshake and the protocol-level session both go away and every request becomes self-contained. Protocol version, client info and capabilities move into `_meta` on each request (`io.modelcontextprotocol/clientInfo`) alongside required `MCP-Protocol-Version` and `Mcp-Method` headers, and `Mcp-Session-Id` disappears with the session it identified. The operational payoff is that a remote server that previously needed sticky sessions, a shared session store and body inspection at the gateway can sit behind an ordinary round-robin load balancer. Mid-request questions are handled by Multi Round-Trip Requests instead of a held-open SSE stream: the server returns an `InputRequiredResult` carrying `inputRequests` and an opaque `requestState`, and the client re-issues the original call with `inputResponses` and that state echoed back. Practical guidance: migrate clients first — a 2026-07-28 client falls back to the `initialize` handshake against a 2025-11-25 server, so servers are not forced to move on day one.
 
 **Q: What's the typical latency for each transport?**
+**Short:** stdio is near-free at 1-2ms, local Streamable HTTP adds 5-10ms, and cross-internet Streamable HTTP runs 30-100ms of round-trip.
 Stdio: 1-2ms per message (in-process pipe + JSON parse). Streamable HTTP local: ~5-10ms (loopback + HTTP overhead). Streamable HTTP across internet: 30-100ms (network RTT + TLS + HTTP). Stdio is essentially free latency-wise.
 
 **Q: Can you batch JSON-RPC requests in MCP?**
+**Short:** Not allowed -- the Streamable HTTP body must be exactly one message, unlike plain JSON-RPC's optional batch arrays.
 No — the Streamable HTTP body MUST be exactly one request, notification, or response, so a batch array is an invalid MCP message. Plain JSON-RPC 2.0 does allow a client to send an array of requests and get an array of responses; MCP deliberately does not, because batching complicates id correlation, makes the SSE-upgrade decision ambiguous, and collides with the `202 Accepted` rule for notifications. The cost is a one-off saving at startup, where `tools/list`, `resources/list` and `prompts/list` would otherwise share a round-trip; recover it by issuing those independent calls concurrently on the already-open connection rather than serially. This is a common interview trap — candidates cite batching as a live MCP optimization when the wire contract has never permitted it in a current revision.
 
 **Q: What happens if the same id is used twice in JSON-RPC?**
+**Short:** Forbidden by MCP, since a repeated id within a session risks the second response overwriting or misrouting the first.
 MCP forbids it: a request id MUST NOT have been used before by the same requestor in that session. MCP also tightens base JSON-RPC by disallowing a `null` id and requiring a string or integer. In practice a reused id means the response for the second request may overwrite the first, or be misrouted. Use a monotonically increasing counter for ids.
 
 **Q: Can the server send requests to the client?**
+**Short:** Yes -- communication is bidirectional, with `sampling/createMessage` as the main case of the server asking the client to call its own LLM.
 Yes — bidirectional. The main use case is `sampling/createMessage` (server asks client to call its LLM). Notifications can also flow both ways. JSON-RPC supports this naturally; clients must be prepared to receive and handle.
 
 **Q: Why must stdio MCP servers log to stderr only?**
+**Short:** Stdout carries the JSON-RPC channel, so any non-JSON text written there breaks the client's parser.
 Stdout is the JSON-RPC channel; any non-JSON output breaks the parser. Stderr is for diagnostics/logs and is read separately (or not at all) by the client. All MCP SDK implementations set up logging to stderr by default; custom implementations must do the same.
 
 **Q: How does graceful shutdown work?**
+**Short:** MCP defines no shutdown message at all, so termination is signaled purely by closing the transport, with SIGTERM/SIGKILL as the stdio fallback.
 MCP defines no shutdown or exit message — termination is signalled entirely by the transport, unlike LSP where `shutdown`/`exit` are real requests. For stdio the client closes the server's stdin, waits for the process to exit, then sends SIGTERM and finally SIGKILL if it does not. For HTTP the client closes the connection, and if the server issued an `MCP-Session-Id` it should also send an HTTP DELETE to the MCP endpoint with that header (the server may answer 405 if it does not allow client-initiated session termination). Servers therefore cannot rely on a farewell message and need idle timeouts to reclaim state.
 
 **Q: What error codes does JSON-RPC define?**
+**Short:** The standard -32700 to -32603 range plus MCP's own -32002 for resource-not-found, while tool execution failures skip error codes entirely.
 -32700 Parse error, -32600 Invalid Request, -32601 Method not found, -32602 Invalid params, -32603 Internal error, and -32000 to -32099 for application-defined server errors. On top of these MCP defines -32002 for "Resource not found". Note that tool *execution* failures do not use error codes at all: they come back as a normal result with `isError: true` so the model can self-correct.
 
 **Q: How do you debug JSON-RPC traffic?**
+**Short:** Use MCP Inspector interactively, log timestamped messages in your own client, or intercept the pipe or HTTP layer with a proxy tool.
 (1) MCP Inspector for interactive debugging. (2) Log all messages with timestamps in your client. (3) For stdio: intercept the pipes with a logging proxy. (4) For HTTP: standard HTTP debugging (Charles Proxy, mitmproxy, browser network tab).
 
 ---
