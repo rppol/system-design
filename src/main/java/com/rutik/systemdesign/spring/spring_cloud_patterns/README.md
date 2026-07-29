@@ -6,14 +6,14 @@
 
 Spring Cloud provides a curated suite of tools for building distributed systems on top of Spring Boot. Where a monolith handles cross-cutting concerns (routing, fault tolerance, load balancing, observability) inside a single process, microservices must handle them at the network layer. Spring Cloud externalizes these concerns into composable, declaratively configured components.
 
-This module covers the five pillars of production Spring Cloud deployments:
+This module covers the six pillars of production Spring Cloud deployments:
 
-1. **Spring Cloud Gateway** — reactive API gateway; edge routing, filtering, rate limiting.
+1. **Spring Cloud Gateway** — API gateway; edge routing, filtering, rate limiting. Ships in two flavours: `gateway-server-webflux` (reactive, Netty) and `gateway-server-webmvc` (blocking, ideal with virtual threads).
 2. **Resilience4j** — fault tolerance library; circuit breaker, retry, rate limiter, bulkhead.
-3. **Spring Cloud LoadBalancer** — client-side load balancing; replaces Netflix Ribbon.
+3. **Spring Cloud LoadBalancer** — client-side load balancing.
 4. **OpenFeign** — declarative HTTP client; integrates with LoadBalancer and Resilience4j.
 5. **Service Discovery (Eureka)** — peer-to-peer service registry; self-registration, heartbeat, eviction.
-6. **Micrometer Tracing** — distributed tracing; replaces Spring Cloud Sleuth; exports to Zipkin/Jaeger.
+6. **Micrometer Tracing** — vendor-neutral distributed tracing facade; bridges to Brave/Zipkin or OpenTelemetry.
 
 Together these components implement the patterns described in microservices literature (API Gateway, Circuit Breaker, Service Registry) using Spring-idiomatic configuration.
 
@@ -56,7 +56,7 @@ Key insight: reactive programming (WebFlux/Project Reactor) is not optional for 
 | Method | `Method=GET,POST` | Route by HTTP method |
 | Header | `Header=X-Request-Id, \d+` | Route if header matches regex |
 | Query | `Query=version, v2` | Route if query param matches |
-| Weight | `Weight=group1, 8` | Weighted routing for canary deploys (80/20) |
+| Weight | `Weight=group1, 8` | Canary routing; weights are relative and normalised across the group, so 8 alongside a 2 means 80/20 |
 
 ### Spring Cloud Gateway Filter Types
 
@@ -219,34 +219,37 @@ flowchart TD
 
 ```yaml
 # application.yml
-spring:
-  cloud:
-    gateway:
-      routes:
-        - id: order-service-route
-          uri: lb://order-service         # lb:// triggers LoadBalancer resolution
-          predicates:
-            - Path=/api/orders/**
-          filters:
-            - StripPrefix=1               # /api/orders/123 -> /orders/123
-            - AddRequestHeader=X-Gateway-Source, spring-cloud-gateway
-            - name: CircuitBreaker
-              args:
-                name: orderServiceCB
-                fallbackUri: forward:/fallback/orders
-            - name: RequestRateLimiter
-              args:
-                redis-rate-limiter:
-                  replenishRate: 100      # tokens per second
-                  burstCapacity: 200      # max burst
-                  requestedTokens: 1
-                key-resolver: "#{@ipKeyResolver}"
+# NOTE the prefix: routes live under spring.cloud.gateway.server.webflux.*
+# (the WebMVC flavour uses spring.cloud.gateway.server.webmvc.*)
+spring.cloud.gateway.server.webflux:
+  httpclient:
+    connect-timeout: 2000               # ms
+    response-timeout: 5s                # hard cap; without it a route can hang forever
+  routes:
+    - id: order-service-route
+      uri: lb://order-service           # lb:// triggers LoadBalancer resolution
+      predicates:
+        - Path=/api/orders/**
+      filters:
+        - StripPrefix=1                 # /api/orders/123 -> /orders/123
+        - AddRequestHeader=X-Gateway-Source, spring-cloud-gateway
+        - name: CircuitBreaker
+          args:
+            name: orderServiceCB
+            fallbackUri: forward:/fallback/orders
+        - name: RequestRateLimiter
+          args:
+            redis-rate-limiter:
+              replenishRate: 100        # tokens per second
+              burstCapacity: 200        # max burst
+              requestedTokens: 1
+            key-resolver: "#{@ipKeyResolver}"
 
-        - id: canary-route
-          uri: lb://order-service-v2
-          predicates:
-            - Path=/api/orders/**
-            - Weight=canary-group, 10     # 10% of traffic to v2
+    - id: canary-route
+      uri: lb://order-service-v2
+      predicates:
+        - Path=/api/orders/**
+        - Weight=canary-group, 10       # 10% of traffic to v2
 ```
 
 ```java
@@ -369,7 +372,7 @@ Every one of these numbers is a rate over a *denominator*, and the denominator i
    5       fail       [F F S F F]              4        80%     YES -> 80 >= 50
                                                                  -> OPEN
 
-  5 failures were enough because 4 of the 5 were failures: 4 / 5 = 80% >= 50%.
+  5 calls were enough because 4 of those 5 failed: 4 / 5 = 80% >= 50%.
 ```
 
 Recovery, 60 s later:
@@ -405,8 +408,11 @@ public class OrderClient {
 
     private final RestClient restClient;
 
-    // Annotations compose left to right:
-    // Retry wraps RateLimiter wraps Bulkhead wraps CircuitBreaker wraps method
+    // Nesting is set by aspect ORDER, not by annotation position. Defaults (outermost first):
+    //   Retry ( CircuitBreaker ( RateLimiter ( TimeLimiter ( Bulkhead ( method ) ) ) ) )
+    // Consequence: a retry re-enters the circuit breaker, so retried failures are
+    // counted again in the breaker window and open it sooner than raw traffic would.
+    // Override with resilience4j.<pattern>.<pattern>-aspect-order if you need Retry inside.
     @CircuitBreaker(name = "orderServiceCB", fallbackMethod = "ordersFallback")
     @Retry(name = "orderServiceRetry")
     @Bulkhead(name = "orderServiceBH")
@@ -495,20 +501,21 @@ public class InventoryFeignConfig {
 ```
 
 ```yaml
-# Feign timeout and Resilience4j integration
+# Feign timeout and Resilience4j integration.
+# Everything lives under spring.cloud.openfeign.*; the old top-level feign.* prefix is gone.
 spring:
   cloud:
     openfeign:
       circuitbreaker:
-        enabled: true          # enables @CircuitBreaker annotation on Feign clients
-
-feign:
-  client:
-    config:
-      inventory-service:
-        connect-timeout: 2000  # ms
-        read-timeout: 5000     # ms
-        logger-level: BASIC    # NONE, BASIC, HEADERS, FULL
+        enabled: true          # off by default; wraps every Feign method in a circuit breaker
+      client:
+        config:
+          inventory-service:
+            connect-timeout: 2000  # ms
+            read-timeout: 5000     # ms
+            logger-level: BASIC    # NONE, BASIC, HEADERS, FULL
+          default:                 # applies to every client without a specific block
+            read-timeout: 3000
 ```
 
 ### Spring Cloud LoadBalancer
@@ -517,16 +524,18 @@ feign:
 spring:
   cloud:
     loadbalancer:
-      ribbon:
-        enabled: false        # Ribbon is removed; LoadBalancer is the replacement
-      configurations: default # default = RoundRobin; can be 'random'
+      # default | zone-preference | health-check | request-based-sticky-session |
+      # same-instance-preference | weighted | subset
+      configurations: zone-preference
       cache:
-        ttl: 35s              # cache service instance list; should be > Eureka heartbeat interval (30s)
+        ttl: 35s              # default; deliberately > the Eureka heartbeat interval (30s)
         capacity: 256
 ```
 
 ```java
-// Custom load balancing strategy — prefer instances in same availability zone
+// Custom load balancing strategy — prefer instances in the same availability zone.
+// The zone preference is a ServiceInstanceListSupplier, NOT a ReactorLoadBalancer:
+// it filters the candidate list, then the (unchanged) RoundRobin balancer picks from it.
 @Configuration
 @LoadBalancerClient(name = "order-service", configuration = ZoneAwareLoadBalancerConfig.class)
 public class LoadBalancerConfig {}
@@ -534,14 +543,12 @@ public class LoadBalancerConfig {}
 public class ZoneAwareLoadBalancerConfig {
 
     @Bean
-    public ReactorLoadBalancer<ServiceInstance> reactorServiceInstanceLoadBalancer(
-            Environment environment,
-            LoadBalancerClientFactory loadBalancerClientFactory) {
-        String name = environment.getProperty(LoadBalancerClientFactory.PROPERTY_NAME);
-        return new ZonePreferenceServiceInstanceListSupplier(
-            loadBalancerClientFactory.getLazyProvider(name, ServiceInstanceListSupplier.class),
-            environment
-        );
+    public ServiceInstanceListSupplier zonePreferenceSupplier(ConfigurableApplicationContext ctx) {
+        return ServiceInstanceListSupplier.builder()
+            .withDiscoveryClient()
+            .withCaching()          // must precede withZonePreference: cache the raw list
+            .withZonePreference()   // then filter by spring.cloud.loadbalancer.zone
+            .build(ctx);
     }
 }
 ```
@@ -664,9 +671,9 @@ public class OrderProcessingService {
 | Dimension | Resilience4j | Hystrix (Netflix, EOL) |
 |-----------|-------------|----------------------|
 | Threading model | Semaphore (default), thread pool optional | Thread pool per command |
-| Java 8+ | Yes, functional API | Partially |
-| Maintenance | Active | EOL as of 2018 |
-| Integration | Spring Boot 3, Micrometer | Spring Boot 2 only (via spring-cloud-netflix) |
+| API style | Functional decorators, composable independently | One monolithic `HystrixCommand` object |
+| Maintenance | Active | Maintenance-only since 2018 |
+| Integration | Current Spring Boot, Micrometer metrics | No Jakarta EE / Spring Boot 3+ path exists |
 
 ### Eureka vs Kubernetes Service Discovery
 
@@ -933,13 +940,14 @@ public class OrderService {
 
 | Tool | Role | Notes |
 |------|------|-------|
-| spring-cloud-starter-gateway | API Gateway (reactive, WebFlux/Netty) | Requires Spring WebFlux; not compatible with Spring MVC |
-| spring-cloud-starter-circuitbreaker-resilience4j | Circuit breaker, retry, rate limiter | Replaces spring-cloud-starter-netflix-hystrix |
+| spring-cloud-starter-gateway-server-webflux | API Gateway (reactive, Netty) | Routes under `spring.cloud.gateway.server.webflux.*` |
+| spring-cloud-starter-gateway-server-webmvc | API Gateway (blocking, Servlet) | Same filters on Spring MVC; pairs well with virtual threads |
+| spring-cloud-starter-circuitbreaker-resilience4j | Circuit breaker, retry, rate limiter | The `CircuitBreaker` gateway filter needs this on the classpath |
 | spring-cloud-starter-openfeign | Declarative HTTP client | Integrates with LoadBalancer and Resilience4j |
-| spring-cloud-starter-loadbalancer | Client-side load balancing | Replaces Netflix Ribbon |
+| spring-cloud-starter-loadbalancer | Client-side load balancing | Resolves `lb://` URIs from any `DiscoveryClient` |
 | spring-cloud-starter-netflix-eureka-server | Service registry server | AP system; peer-to-peer replication |
 | spring-cloud-starter-netflix-eureka-client | Service registry client | Self-registration, heartbeat |
-| micrometer-tracing-bridge-brave | Distributed tracing (Brave/B3) | Replaces spring-cloud-sleuth |
+| micrometer-tracing-bridge-brave | Distributed tracing (Brave/B3) | Zipkin-native propagation |
 | zipkin-reporter-brave | Zipkin span exporter | Async UDP/HTTP export |
 | micrometer-tracing-bridge-otel | OpenTelemetry bridge | Use for Jaeger/OTLP export |
 | Redis | Rate limiter backend for Gateway | `spring-boot-starter-data-redis-reactive` required |
@@ -959,10 +967,10 @@ A `GlobalFilter` applies to all routes defined in the gateway. It is implemented
 A Resilience4j circuit breaker has three states. CLOSED is the normal operating state: all calls proceed and results are measured against the sliding window. OPEN means the failure (or slow-call) rate has crossed the configured threshold: all calls fail immediately without reaching the downstream service, and the configured fallback is returned. After `waitDurationInOpenState` elapses, the circuit automatically transitions to HALF_OPEN. In HALF_OPEN, a limited number of test calls (`permittedNumberOfCallsInHalfOpenState`, e.g., 5) are allowed through. If the failure rate among test calls is below the threshold, the circuit closes; otherwise it returns to OPEN. HALF_OPEN implements the probe-and-recover pattern: it avoids thundering herd on a recovering service by limiting test traffic.
 
 **Q: How does Spring Cloud LoadBalancer work and what replaced Netflix Ribbon?**
-Spring Cloud LoadBalancer is the official replacement for Netflix Ribbon (removed in Spring Cloud 2020.0). When a `RestClient`, `WebClient`, or Feign client uses a `lb://service-name` URI, Spring Cloud LoadBalancer intercepts the request, queries the local service instance cache (populated from Eureka, Consul, or Kubernetes), selects an instance using the configured strategy (default: RoundRobin), and substitutes the real host/port. The instance list is cached locally and refreshed from the registry at a configurable interval (default 35 seconds). Custom strategies (zone-aware, response-time-weighted) are implemented by providing a custom `ReactorLoadBalancer<ServiceInstance>` bean.
+Spring Cloud LoadBalancer is the official replacement for Netflix Ribbon (removed in Spring Cloud 2020.0). When a `RestClient`, `WebClient`, or Feign client uses a `lb://service-name` URI, Spring Cloud LoadBalancer intercepts the request, queries the local service instance cache (populated from Eureka, Consul, or Kubernetes), selects an instance using the configured strategy (default: RoundRobin), and substitutes the real host/port. The instance list is cached locally with `spring.cloud.loadbalancer.cache.ttl`, default 35 seconds — deliberately longer than Eureka's 30-second heartbeat so a healthy instance is never briefly missing from the cache. Customisation has two distinct extension points, and picking the wrong one is the usual mistake: to change *which candidates are eligible* (zone preference, health checks, sticky sessions, subsetting) supply a `ServiceInstanceListSupplier` bean, normally via `ServiceInstanceListSupplier.builder()`; only to change *how one is chosen from the candidates* do you supply a `ReactorLoadBalancer<ServiceInstance>` bean. Several are also selectable without code through `spring.cloud.loadbalancer.configurations` (`default`, `zone-preference`, `health-check`, `weighted`, `subset`, and others).
 
 **Q: How do you configure OpenFeign to integrate with Resilience4j circuit breaker?**
-Set `spring.cloud.openfeign.circuitbreaker.enabled=true`. This wraps every `@FeignClient` method with a Resilience4j circuit breaker named by the pattern `<FeignClientName>#<methodName>(<paramTypes>)`. Override the default name by adding `@CircuitBreaker(name = "customName")` on the interface method. Provide a fallback by setting `fallback = FallbackClass.class` or `fallbackFactory = FallbackFactory.class` on the `@FeignClient` annotation. The fallback class must implement the Feign interface and be registered as a Spring bean. Timeouts are configured separately via `feign.client.config.<clientName>.connect-timeout` and `read-timeout`.
+Set `spring.cloud.openfeign.circuitbreaker.enabled=true` — it is false by default. This wraps every `@FeignClient` method in a circuit breaker whose id comes from `Feign.configKey(interfaceType, method)`, then strips every non-alphanumeric character because `spring.cloud.openfeign.circuitbreaker.alphanumeric-ids.enabled` defaults to true. So `InventoryClient#getInventory(String)` becomes the id `InventoryClientgetInventoryString`, and that — not the `@FeignClient` name — is what you must use as the `resilience4j.circuitbreaker.instances.<id>` key. Set `alphanumeric-ids.enabled=false` to get the punctuated form back. Provide a fallback with `fallback = FallbackClass.class` (or `fallbackFactory` when you need the causing `Throwable`); the fallback must implement the Feign interface and be a Spring bean. Timeouts are configured separately via `spring.cloud.openfeign.client.config.<clientName>.connect-timeout` and `read-timeout`.
 
 **Q: Why is Eureka described as an AP system in CAP theorem terms?**
 Eureka prioritizes Availability and Partition Tolerance over Consistency. Each Eureka server node maintains a full copy of the registry and replicates to peers. During a network partition, nodes do not stop serving registry data — they continue serving potentially stale information rather than refusing responses (which would sacrifice Availability). This is the correct trade-off for service discovery: a client that receives a stale (but mostly correct) registry and has a circuit breaker is more resilient than a client that gets no registry data at all. Eureka's self-preservation mode further reinforces the AP stance by refusing to evict instances when heartbeat loss exceeds a threshold, assuming a network issue rather than mass instance failure.
@@ -1061,7 +1069,7 @@ Netflix put Hystrix into maintenance-only mode in 2018, and Resilience4j replace
 9. Monitor circuit breaker state transitions as metrics. `resilience4j.circuitbreaker.state` exposed via Micrometer should trigger alerts when any circuit enters OPEN state.
 10. Use `@LoadBalancerClient` configuration to implement zone-aware routing in multi-AZ deployments. This reduces cross-AZ network costs and latency.
 11. In Kubernetes, consider replacing Eureka with Kubernetes service discovery (`spring-cloud-starter-kubernetes-discoveryclient`). The platform already maintains a service registry; running Eureka duplicates it.
-12. Configure Gateway route timeouts explicitly. Without a timeout on the `CircuitBreaker` filter's `httpStatusCodes` configuration, a Gateway route that never times out can hold connections open indefinitely.
+12. Configure Gateway route timeouts explicitly with `spring.cloud.gateway.server.webflux.httpclient.connect-timeout` and `response-timeout` (per-route override: the `response-timeout` route metadata key). Without a response timeout a route holds the connection open indefinitely, and no circuit breaker will help because the call never completes to be counted as a failure.
 13. Use structured logging with trace ID and span ID in every log line. Configure `logging.pattern.level` to include `%X{traceId}` and `%X{spanId}` so logs are correlated with traces in Kibana.
 
 ---
@@ -1078,37 +1086,35 @@ Netflix put Hystrix into maintenance-only mode in 2018, and Resilience4j replace
 
 Gateway routing and circuit breaker for the recommendation service:
 ```yaml
-spring:
-  cloud:
-    gateway:
-      routes:
-        - id: product-service
-          uri: lb://product-service
-          predicates:
-            - Path=/api/products/**
-          filters:
-            - StripPrefix=1
-            - name: CircuitBreaker
-              args:
-                name: productServiceCB
-                fallbackUri: forward:/fallback/products
-            - name: RequestRateLimiter
-              args:
-                redis-rate-limiter.replenishRate: 500
-                redis-rate-limiter.burstCapacity: 1000
-                key-resolver: "#{@userKeyResolver}"
+spring.cloud.gateway.server.webflux:
+  routes:
+    - id: product-service
+      uri: lb://product-service
+      predicates:
+        - Path=/api/products/**
+      filters:
+        - StripPrefix=1
+        - name: CircuitBreaker
+          args:
+            name: productServiceCB
+            fallbackUri: forward:/fallback/products
+        - name: RequestRateLimiter
+          args:
+            redis-rate-limiter.replenishRate: 500
+            redis-rate-limiter.burstCapacity: 1000
+            key-resolver: "#{@userKeyResolver}"
 
-        - id: recommendation-service
-          uri: lb://recommendation-service
-          predicates:
-            - Path=/api/recommendations/**
-          filters:
-            - StripPrefix=1
-            - name: CircuitBreaker
-              args:
-                name: recommendationServiceCB
-                fallbackUri: forward:/fallback/recommendations
-                statusCodes: 500, 503, 504
+    - id: recommendation-service
+      uri: lb://recommendation-service
+      predicates:
+        - Path=/api/recommendations/**
+      filters:
+        - StripPrefix=1
+        - name: CircuitBreaker
+          args:
+            name: recommendationServiceCB
+            fallbackUri: forward:/fallback/recommendations
+            statusCodes: 500, 503, 504
 
 resilience4j:
   circuitbreaker:
@@ -1116,7 +1122,7 @@ resilience4j:
       recommendationServiceCB:
         sliding-window-size: 20
         failure-rate-threshold: 40        # lower threshold: recommendations are non-critical
-        slow-call-rate-threshold: 60
+        slow-call-rate-threshold: 40      # 8 of 20 slow is already enough to trip
         slow-call-duration-threshold: 1500ms  # 1.5s is already too slow for recommendations
         wait-duration-in-open-state: 30s
         minimum-number-of-calls: 10
@@ -1147,7 +1153,7 @@ public class FallbackController {
 
 During a Black Friday sale event:
 - Recommendation service became slow (GC pressure, p99 latency: 8 seconds)
-- Gateway circuit breaker opened after 8 of 20 calls exceeded 1500ms (40% slow-call threshold)
+- Gateway circuit breaker opened once 8 of the last 20 calls exceeded 1500ms — 40%, exactly the configured `slow-call-rate-threshold`
 - All recommendation requests returned empty list from fallback in < 5ms
 - Product service and checkout service were completely unaffected (zero cascade)
 - Circuit entered HALF_OPEN after 30 seconds; recommendation service had recovered; circuit closed
@@ -1203,34 +1209,35 @@ flowchart TD
 **Gateway configuration — circuit breaker + rate limiter per route:**
 
 ```yaml
-# application.yml — Spring Cloud Gateway (Boot 3.2)
-spring:
-  cloud:
-    gateway:
-      routes:
-        - id: inventory-route
-          uri: lb://inventory-service        # Eureka service ID
-          predicates:
-            - Path=/api/inventory/**
-          filters:
-            - name: CircuitBreaker
-              args:
-                name: inventoryCircuitBreaker
-                fallbackUri: forward:/fallback/inventory
-            - name: RequestRateLimiter
-              args:
-                redis-rate-limiter.replenishRate: 500    # tokens/sec
-                redis-rate-limiter.burstCapacity: 1000
-                key-resolver: "#{@userKeyResolver}"
-            - name: Retry
-              args:
-                retries: 3
-                statuses: BAD_GATEWAY, SERVICE_UNAVAILABLE
-                backoff:
-                  firstBackoff: 50ms
-                  maxBackoff: 500ms
-                  factor: 2
-                  basedOnPreviousValue: false
+# application.yml — Spring Cloud Gateway server-webflux
+spring.cloud.gateway.server.webflux:
+  routes:
+    - id: inventory-route
+      uri: lb://inventory-service            # Eureka service ID
+      predicates:
+        - Path=/api/inventory/**
+      filters:
+        - name: CircuitBreaker
+          args:
+            name: inventoryCircuitBreaker
+            fallbackUri: forward:/fallback/inventory
+        - name: RequestRateLimiter
+          args:
+            redis-rate-limiter.replenishRate: 500    # tokens/sec
+            redis-rate-limiter.burstCapacity: 1000
+            key-resolver: "#{@userKeyResolver}"
+        - name: Retry
+          args:
+            retries: 3                       # RETRIES, not attempts: up to 4 calls total
+            methods: GET                     # this is also the default
+            statuses: BAD_GATEWAY, SERVICE_UNAVAILABLE
+            backoff:
+              firstBackoff: 50ms
+              maxBackoff: 500ms
+              factor: 2
+              basedOnPreviousValue: false
+            jitter:
+              randomFactor: 0.5              # the only jitter knob; backoff has none
 ```
 
 **Resilience4j circuit breaker configuration:**
@@ -1299,39 +1306,46 @@ class InventoryFallbackFactory implements FallbackFactory<InventoryClient> {
 **BROKEN→FIX: No circuit breaker — slow service cascades**
 
 ```java
-// BROKEN: direct Feign call with no resilience — 12s timeout accumulates
+// BROKEN: direct Feign call with no resilience and no timeout override
 @FeignClient(name = "inventory-service")
 public interface InventoryClient {
     @GetMapping("/inventory/{sku}")
     InventoryResponse getStock(@PathVariable String sku);
-    // No timeout → 12 default Ribbon timeout → 1667 RPS × 12s = 20k in-flight requests
-    // → thread pool exhaustion → entire gateway unresponsive
+    // Nothing caps the wait, so a hung inventory service parks the caller until the
+    // socket dies. By Little's Law, 1,667 RPS x a 12 s wait = ~20,000 requests in
+    // flight -> thread pool exhaustion -> the entire gateway goes unresponsive.
 }
 
-// FIX: Resilience4j CB + Feign timeout
-// 1. Set Feign read timeout to 500ms (fail fast)
-// 2. CB opens at 50% failure rate, serves fallback for 10s
-// 3. Result: slow inventory = degraded response, not outage
-feign:
-  client:
-    config:
-      inventory-service:
-        readTimeout: 500
-        connectTimeout: 200
+// FIX: Resilience4j CB + explicit Feign timeouts
+// 1. Read timeout 500ms so a slow call fails fast and gets COUNTED as a failure
+// 2. CB opens at 50% failure rate, serves the fallback for 10s
+// 3. Result: slow inventory = degraded response, not an outage
+spring:
+  cloud:
+    openfeign:
+      client:
+        config:
+          inventory-service:
+            read-timeout: 500
+            connect-timeout: 200
 ```
 
 **BROKEN→FIX: Retry amplifies load on unhealthy service**
 
 ```java
-// BROKEN: 3 retries with no backoff on a service that's down
-// 1667 RPS × 3 retries = 5001 RPS hitting already-overwhelmed service
+// BROKEN: 3 retries with no backoff on a service that's down.
+// `retries: 3` means 3 RETRIES on top of the original call -> 4 attempts each.
+// 1,667 RPS x 4 attempts = 6,668 RPS hitting an already-overwhelmed service.
 filters:
   - name: Retry
     args:
       retries: 3
-      # no backoff → all retries immediate → thundering herd
+      # no backoff -> all retries immediate -> thundering herd
 
-// FIX: exponential backoff with jitter
+// FIX: exponential backoff PLUS jitter. These are two separate config blocks --
+// basedOnPreviousValue only chooses how the exponential series is computed
+// (from the previous delay vs from firstBackoff x factor^n); it adds no randomness.
+// Jitter comes solely from jitter.randomFactor.
 filters:
   - name: Retry
     args:
@@ -1340,8 +1354,10 @@ filters:
         firstBackoff: 50ms
         maxBackoff: 500ms
         factor: 2
-        basedOnPreviousValue: false   # jitter via randomized base
-// Result: retry traffic spread over 50-500ms window; recoverable services recover
+        basedOnPreviousValue: false
+      jitter:
+        randomFactor: 0.5             # +/- 50% randomisation of each delay
+// Result: retry traffic spread over the 50-500ms window and de-synchronised.
 ```
 
 **Service discovery with Eureka — health check integration:**
@@ -1371,7 +1387,7 @@ public class InventoryServiceApplication {
 
 **What is the difference between a circuit breaker and a timeout, and why do you need both?** A timeout limits how long a single request waits before failing. A circuit breaker tracks the pattern of failures over a window: once the failure rate crosses a threshold, it opens and immediately rejects new requests without trying the downstream service. You need both: timeout prevents indefinite blocking per request; circuit breaker prevents the retry/timeout cost from accumulating across thousands of concurrent requests.
 
-**How does Spring Cloud Gateway differ from Zuul for reactive workloads?** Spring Cloud Gateway is built on Project Reactor and Netty — it's fully non-blocking. Zuul 1 uses a servlet model with one thread per connection; under high concurrency, thread exhaustion limits throughput. At 1,667 RPS, Gateway runs on ~8 event-loop threads vs. Zuul needing 1,667 threads for equivalent throughput. Use Gateway for new reactive stacks; Zuul only if maintaining legacy Zuul 1 deployments.
+**Gateway server-webflux or server-webmvc — how do you choose?** Both ship the same predicates and filters; they differ in the runtime underneath and in the property prefix (`spring.cloud.gateway.server.webflux.*` vs `...webmvc.*`). The WebFlux flavour runs on Netty with a handful of event-loop threads, so concurrency is bounded by memory rather than threads — but a single blocking call inside a filter stalls every request sharing that loop. The WebMVC flavour is thread-per-request on the Servlet stack; with virtual threads enabled its concurrency ceiling is comparable, and blocking JDBC or a blocking SDK inside a filter is simply allowed. Choose WebFlux when the team already writes reactive code and filters are pure; choose WebMVC when filters must call blocking libraries, which is the common case for JWT introspection or a JDBC-backed API key lookup.
 
 **What is the risk of retrying on non-idempotent operations?** Retrying a POST that creates an order can create duplicate orders. The Retry filter should only retry on safe HTTP methods (GET, HEAD) or explicitly idempotent operations guarded by an idempotency key. In the gateway, configure `methods: GET, HEAD` to restrict retries, or require upstream services to implement idempotent write APIs.
 

@@ -30,10 +30,12 @@ Think of Actuator as the diagnostic dashboard of a modern aircraft. The pilot (o
 
 ### Built-in Endpoints
 
+`health` is the **only** endpoint exposed over HTTP by default — `management.endpoints.web.exposure.include` defaults to `health`. Everything else needs explicit exposure, and `shutdown` additionally needs `management.endpoint.shutdown.access=unrestricted`.
+
 | Endpoint | Default | Description |
 |----------|---------|-------------|
 | `/actuator/health` | Exposed | Application health (UP/DOWN/OUT_OF_SERVICE/UNKNOWN) |
-| `/actuator/info` | Exposed | Arbitrary application info |
+| `/actuator/info` | Not exposed | Arbitrary application info |
 | `/actuator/metrics` | Not exposed | Micrometer metrics (requires explicit exposure) |
 | `/actuator/env` | Not exposed | `Environment` property sources |
 | `/actuator/beans` | Not exposed | All Spring beans and their dependencies |
@@ -41,8 +43,8 @@ Think of Actuator as the diagnostic dashboard of a modern aircraft. The pilot (o
 | `/actuator/loggers` | Not exposed | View and change log levels at runtime |
 | `/actuator/threaddump` | Not exposed | Thread dump (stack traces of all threads) |
 | `/actuator/heapdump` | Not exposed | Heap dump as HPROF file |
-| `/actuator/httptrace` | Not exposed | Recent HTTP request/response traces |
-| `/actuator/shutdown` | Disabled | Gracefully shut down application (requires enable) |
+| `/actuator/httpexchanges` | Not exposed | Last 100 HTTP exchanges (needs an `HttpExchangeRepository` bean) |
+| `/actuator/shutdown` | `access=none` | Gracefully shut down application |
 | `/actuator/startup` | Not exposed | ApplicationContext startup steps with timing |
 | `/actuator/scheduledtasks` | Not exposed | Scheduled tasks details |
 
@@ -50,12 +52,14 @@ Think of Actuator as the diagnostic dashboard of a modern aircraft. The pilot (o
 
 | Component | Indicator | Checks |
 |-----------|-----------|--------|
-| Database | `DataSourceHealthIndicator` | JDBC ping query |
-| Redis | `RedisHealthIndicator` | PING command |
-| Kafka | `KafkaHealthIndicator` | Admin client describe topics |
+| Database | `DataSourceHealthIndicator` | `Connection.isValid()`, or a configured validation query |
+| Redis | `DataRedisHealthIndicator` | `INFO` (`CLUSTER INFO` on a cluster connection) |
+| RabbitMQ | `RabbitHealthIndicator` | Opens a channel, reads the broker `version` property |
 | Disk space | `DiskSpaceHealthIndicator` | Free disk space threshold |
 | Liveness | `LivenessStateHealthIndicator` | Application is not in broken state |
 | Readiness | `ReadinessStateHealthIndicator` | Application is ready to serve traffic |
+
+Spring Boot ships no Kafka health indicator — for a Kafka dependency you write your own `HealthIndicator` over `AdminClient.describeCluster()`.
 
 ---
 
@@ -134,19 +138,19 @@ management.endpoints.web.exposure.exclude=heapdump,shutdown,env
 management.endpoint.health.show-details=when-authorized
 management.endpoint.health.show-components=always
 
-# Kubernetes probes
+# Kubernetes probes (on by default; set false to turn the groups off)
 management.endpoint.health.probes.enabled=true
 # Creates: /actuator/health/liveness and /actuator/health/readiness
 
 # Custom management port (separate from app port, not exposed by load balancer)
 management.server.port=8081
 
-# Enable shutdown endpoint (disabled by default)
-management.endpoint.shutdown.enabled=true
+# Permit the shutdown endpoint (access is none by default)
+management.endpoint.shutdown.access=unrestricted
 
 # Health group for Kubernetes readiness (all must be UP)
-management.endpoint.health.group.readiness.include=readiness,db,redis
-management.endpoint.health.group.liveness.include=liveness
+management.endpoint.health.group.readiness.include=readinessState,db,redis
+management.endpoint.health.group.liveness.include=livenessState
 ```
 
 ### Custom Health Indicator
@@ -361,7 +365,7 @@ Liveness failing → Kubernetes restarts the pod. Readiness failing → Kubernet
 
 **Enable and secure in production:**
 - `/actuator/health` — always; for load balancer and Kubernetes
-- `/actuator/metrics/actuator/prometheus` — for monitoring
+- `/actuator/metrics` and `/actuator/prometheus` — for monitoring
 - `/actuator/loggers` — for runtime debugging (secured)
 - `/actuator/info` — for deployment tracking
 
@@ -456,7 +460,7 @@ Timer.builder("http.requests")
 | `micrometer-core` | Metrics abstraction layer |
 | `micrometer-registry-prometheus` | Prometheus metrics format |
 | `micrometer-registry-datadog` | Datadog metrics push |
-| `micrometer-tracing` | Distributed tracing (replaces Sleuth in Boot 3.x) |
+| `micrometer-tracing` | Distributed tracing facade; bridged by `micrometer-tracing-bridge-otel` or `-brave` |
 | `HealthIndicator` | Interface for custom health checks |
 | `InfoContributor` | Interface for custom `/info` contributions |
 | `@Endpoint` | Annotation to define custom actuator endpoints |
@@ -478,19 +482,19 @@ Micrometer is a metrics instrumentation library that provides a vendor-neutral A
 Configure Spring Security to require authentication for `/actuator/**`, expose only safe endpoints, and use a separate management port. Set `management.endpoints.web.exposure.include=health,info,metrics` as a whitelist. Require `ACTUATOR_ADMIN` role for sensitive operations like `/actuator/loggers` and `/actuator/beans`. Use a separate management port (`management.server.port=8081`) not exposed by the load balancer. Never expose `/actuator/heapdump`, `/actuator/env`, or `/actuator/shutdown` without strong authentication and audit logging.
 
 **Q: What is the CompositeHealth structure in Actuator?**
-`CompositeHealth` aggregates the results of multiple `HealthIndicator` or `HealthContributor` beans. The overall status is determined by the worst status among all contributors: DOWN > OUT_OF_SERVICE > UNKNOWN > UP. Configure status order via `management.endpoint.health.status.order`. Individual components are shown under `components` key when `show-components=always`. Health groups allow separate health endpoints with different subsets of indicators — for example, a `readiness` group including only `db` and `redis` but not slow external APIs.
+`CompositeHealth` aggregates the results of multiple `HealthIndicator` or `HealthContributor` beans. The overall status is the worst status among all contributors, using the default severity order DOWN, OUT_OF_SERVICE, UP, UNKNOWN — so UNKNOWN is the *least* severe and never drags an otherwise-UP application down. Aggregation also **ignores any status not present in that order list**, so a custom `Health.status("DEGRADED")` is silently discarded unless you add it via `management.endpoint.health.status.order`. Individual components are shown under the `components` key when `show-components=always`. Health groups allow separate health endpoints with different subsets of indicators — for example, a `readiness` group including only `readinessState`, `db` and `redis` but not slow external APIs.
 
 **Q: How would you implement a custom Actuator endpoint?**
 Annotate a Spring bean with `@Endpoint(id="my-endpoint")`. Define `@ReadOperation` methods (HTTP GET, returns JSON-serializable objects), `@WriteOperation` methods (HTTP POST), and `@DeleteOperation` methods. Use `@Selector` parameter annotation for path variables (`/actuator/my-endpoint/{name}`). The endpoint is automatically accessible at `/actuator/my-endpoint`. Expose it via `management.endpoints.web.exposure.include=my-endpoint`. For web-specific operations, use `@WebEndpoint` (HTTP only) or `@JmxEndpoint` (JMX only) instead of `@Endpoint` (both).
 
 **Q: What does /actuator/startup show and how is it useful?**
-`/actuator/startup` shows a timeline of ApplicationContext startup steps with timing for each bean initialization. It requires a `BufferingApplicationStartup` configured on `SpringApplication`. This endpoint reveals which beans are slow to initialize (e.g., a `@PostConstruct` making HTTP calls) and their contribution to total startup time. Essential for diagnosing slow startup in Kubernetes environments where readiness probe timeout must be met. After analysis, the data should be cleared with a DELETE to `/actuator/startup` to free memory.
+`/actuator/startup` shows a timeline of ApplicationContext startup steps with timing for each bean initialization. It requires a `BufferingApplicationStartup` configured on `SpringApplication`. This endpoint reveals which beans are slow to initialize (e.g., a `@PostConstruct` making HTTP calls) and their contribution to total startup time. Essential for diagnosing slow startup in Kubernetes environments where readiness probe timeout must be met. `GET /actuator/startup` returns a non-destructive snapshot; `POST /actuator/startup` returns the timeline **and drains** the buffer, which is how you free the retained steps after analysis.
 
 **Q: What is the risk of exposing /actuator/heapdump?**
 A heap dump contains a full snapshot of the JVM heap including all object instances in memory. Sensitive data stored as Java objects — database passwords from `DataSource` configuration, JWT tokens from `SecurityContext`, user PII from cached entities — is captured in the dump. Anyone with access to `/actuator/heapdump` can download a HPROF file and use tools like Eclipse Memory Analyzer (MAT) to extract plaintext credentials. Always restrict this endpoint to authenticated operators via a separate management network. In production, prefer using `jmap` or `jcmd` from an operator console rather than exposing it via HTTP.
 
 **Q: How do you configure HikariCP pool metrics in Actuator?**
-HikariCP auto-registers metrics with Micrometer when `micrometer-core` is on the classpath and `metricRegistry` is configured. Spring Boot auto-configures this binding via `HikariDataSourceMetricsAutoConfiguration`. Metrics include: `hikaricp.connections.active` (connections in use), `hikaricp.connections.idle` (available connections), `hikaricp.connections.pending` (threads waiting for connection), `hikaricp.connections.timeout.total` (connection timeouts), and `hikaricp.connections.usage` (connection checkout duration timer). Pool saturation — `active` approaching `maximum-pool-size` — is the first signal of a database throughput problem.
+Spring Boot binds a `MicrometerMetricsTrackerFactory` onto the `HikariDataSource` automatically once a `MeterRegistry` bean exists. The auto-configuration class is `DataSourcePoolMetricsAutoConfiguration`, and it only attaches the tracker if the pool has no `metricRegistry` or `metricsTrackerFactory` of its own. Metrics include: `hikaricp.connections.active` (connections in use), `hikaricp.connections.idle` (available connections), `hikaricp.connections.pending` (threads waiting for a connection), `hikaricp.connections.timeout` (a counter of connection-acquisition timeouts), `hikaricp.connections.acquire` (a timer of how long callers waited for a connection), and `hikaricp.connections.usage` (a timer of how long a connection was held before being returned). Pool saturation — `active` approaching `maximum-pool-size` with `pending` above zero — is the first signal of a database throughput problem.
 
 **Q: How does /actuator/loggers work and why is it valuable in production?**
 `GET /actuator/loggers` returns all configured loggers and their current levels. `GET /actuator/loggers/{name}` shows the level for a specific logger. `POST /actuator/loggers/{name}` with body `{"configuredLevel": "DEBUG"}` changes the level at runtime without restart. This is invaluable during production incidents: switch a specific package to DEBUG to capture detailed trace without restarting (which would clear in-flight requests and change timing). Changes are in-memory only and reset on restart, so there is no permanent side effect. The endpoint should require authentication because excessive DEBUG logging can expose sensitive data.
@@ -499,16 +503,16 @@ HikariCP auto-registers metrics with Micrometer when `micrometer-core` is on the
 `/actuator/info` returns arbitrary application information as JSON. Populate it via: (1) `management.info.git.mode=full` — injects Git commit hash, branch, commit time from `git.properties` (generated by `git-commit-id-plugin`). (2) `management.info.build.enabled=true` — injects build version, artifact ID from `META-INF/build-info.properties` (generated by Spring Boot Maven/Gradle plugins). (3) Custom `InfoContributor` beans. In an automated pipeline, `/actuator/info` lets monitoring systems, deployment dashboards, and support staff verify exactly which commit hash and build version is running — critical for correlating a production incident with the deployment that caused it.
 
 **Q: How does Micrometer's `@Timed` annotation work and when should you use programmatic recording instead?**
-`@Timed("my.operation")` on a Spring bean method (or class, to instrument all methods) instruments it via AOP — a `Timer` is automatically started/stopped around the method invocation. Tags can be added via `extraTags` or a `TimedAspect` bean with custom `TagsProvider`. Use programmatic recording (`registry.timer("my.op", "tag", value).record(() -> doWork())`) when: you need dynamic tags derived from the method's arguments or return value (impossible with `@Timed`), you need to record partial durations inside a method, or you want to record custom outcomes (success vs failure as separate tag values). `@Timed` is convenient for coarse-grained external API latency; programmatic timers are necessary for internal business logic with rich context.
+`@Timed("my.operation")` on a Spring bean method (or class, to instrument all methods) instruments it via a `TimedAspect`, which starts and stops a `Timer` around the invocation. The aspect is only auto-configured when `management.observations.annotations.enabled=true` and AspectJ is on the classpath, so `@Timed` on a plain bean is a silent no-op until you set that property. Static tags come from `extraTags`; argument-derived tags come from `@MeterTag` on a parameter; a fully custom scheme means constructing `TimedAspect` yourself with a `Function<ProceedingJoinPoint, Iterable<Tag>>`. Use programmatic recording (`registry.timer("my.op", "tag", value).record(() -> doWork())`) when the tag depends on the return value, when you need partial durations inside a method, or when you want success and failure recorded as distinct tag values. `@Timed` is convenient for coarse-grained external API latency; programmatic timers are necessary for internal business logic with rich context.
 
-**Q: What is Micrometer Tracing and how does it integrate with Actuator in Spring Boot 3.x?**
-Micrometer Tracing (formerly Spring Cloud Sleuth) is a tracing facade over concrete implementations (Brave/Zipkin or OpenTelemetry). Spring Boot 3.x auto-configures tracing when `micrometer-tracing-bridge-otel` or `micrometer-tracing-bridge-brave` is on the classpath. It provides: (1) `Observation` API — a unified abstraction over metrics + tracing that records both a `Timer` and a distributed trace span in one call. (2) Auto-instrumentation — `@Observed` on beans, `RestClient`/`WebClient`/`RestTemplate` interceptors, Spring MVC/WebFlux server filters, Kafka listeners. (3) `TraceId`/`SpanId` injection into MDC for structured logging correlation. The `/actuator/health` endpoint propagates trace context when `management.tracing.sampling.probability=1.0`.
+**Q: What is Micrometer Tracing and how does it integrate with Actuator?**
+Micrometer Tracing is a vendor-neutral tracing facade over concrete implementations, either Brave/Zipkin or OpenTelemetry. Spring Boot auto-configures tracing when `micrometer-tracing-bridge-otel` or `micrometer-tracing-bridge-brave` is on the classpath; `spring-boot-starter-opentelemetry` pulls the OTel bridge, `micrometer-registry-otlp` and the OTLP exporter in one dependency. It provides: (1) `Observation` API — a unified abstraction over metrics + tracing that records both a `Timer` and a distributed trace span in one call. (2) Auto-instrumentation — `@Observed` on beans, `RestClient`/`WebClient`/`RestTemplate` interceptors, Spring MVC/WebFlux server filters, Kafka listeners. (3) `TraceId`/`SpanId` injection into MDC for structured logging correlation. The `/actuator/health` endpoint propagates trace context when `management.tracing.sampling.probability=1.0`.
 
 **Q: What is the difference between `HealthIndicator` and `HealthContributor`, and when do you use `CompositeHealthContributor`?**
 `HealthIndicator` is the simple interface: implement `health()` returning a `Health` object with status and optional details. Spring auto-discovers all `HealthIndicator` beans and aggregates them. `HealthContributor` is a marker interface for both `HealthIndicator` (leaf contributor, returns a health result directly) and `CompositeHealthContributor` (named group of sub-contributors). Use `CompositeHealthContributor` when you want to group multiple related checks under a named hierarchy: e.g., a `DatabaseHealthContributor` composed of separate `ReadReplicaHealthIndicator` and `PrimaryHealthIndicator`. Each sub-contributor gets its own named entry under `components` in the health response, giving fine-grained visibility into which specific component is unhealthy.
 
 **Q: How do you configure a management server on a different port and why is this the recommended production pattern?**
-Set `management.server.port=8081` (and optionally `management.server.address=127.0.0.1` to bind to localhost only). With a separate port: the load balancer / API gateway exposes only port 8080 (business traffic) to the internet; port 8081 is only reachable from within the cluster or through an internal VPN. This means `/actuator/heapdump`, `/actuator/env`, and `/actuator/beans` (which expose configuration, credentials, and class structure) are never reachable from outside the trust boundary. In Kubernetes, the liveness/readiness probes are configured to hit port 8081 directly on the pod IP — the probes bypass the service load balancer and check each pod individually.
+Set `management.server.port=8081` (and optionally `management.server.address=127.0.0.1` to bind to localhost only). With a separate port: the load balancer / API gateway exposes only port 8080 (business traffic) to the internet; port 8081 is only reachable from within the cluster or through an internal VPN. This means `/actuator/heapdump`, `/actuator/env`, and `/actuator/beans` (which expose configuration, credentials, and class structure) are never reachable from outside the trust boundary. In Kubernetes, the liveness/readiness probes are configured to hit port 8081 directly on the pod IP — the probes bypass the service load balancer and check each pod individually. If you would rather not open the management port to the kubelet at all, set `management.endpoint.health.probes.add-additional-paths=true`: the liveness and readiness groups then get a second mapping at `/livez` and `/readyz` on the **main** server port (8080), while every other actuator endpoint stays on 8081. Point the probes at those two paths and the management port never leaves the pod.
 
 ---
 
@@ -531,7 +535,7 @@ Set `management.server.port=8081` (and optionally `management.server.address=127
 
 ### Scenario: Observable Payment Microservice on Kubernetes
 
-A payments microservice runs on Spring Boot 3.2 / Java 17 across a Kubernetes cluster. Scale and topology:
+A payments microservice runs on Spring Boot 4.1 / Java 25 across a Kubernetes cluster. Scale and topology:
 
 - 40 pods, ~12,000 req/sec aggregate, p99 budget 250 ms
 - Liveness and readiness probes wired to Actuator health groups
@@ -695,6 +699,13 @@ management.endpoint.health.probes.enabled=true
 management.endpoint.health.group.readiness.include=readinessState,db,gateway
 management.endpoint.health.show-details=when_authorized
 management.endpoint.health.show-components=when_authorized
+
+# Without this, the aggregator FILTERS OUT the custom DEGRADED status entirely
+# and a degraded gateway aggregates as UP. Unmapped statuses answer 200, so
+# DEGRADED keeps the pod in rotation while staying visible in the payload.
+# Do NOT add status.http-mapping entries here: any entry REPLACES the default
+# map wholesale, and DOWN silently stops answering 503.
+management.endpoint.health.status.order=DOWN,OUT_OF_SERVICE,DEGRADED,UP,UNKNOWN
 ```
 
 ```yaml
@@ -764,7 +775,7 @@ scrape_interval: 15s          # then use rate(payments_total[1m]) in Grafana/ale
 
 **What is the difference between liveness and readiness probes, and how does Actuator support them?** Liveness answers "is the JVM healthy enough to keep running" — failing it restarts the pod; readiness answers "can it serve traffic right now" — failing it removes the pod from the Service endpoints without a restart. Actuator exposes `/actuator/health/liveness` and `/actuator/health/readiness` as health groups, and you compose business checks (db, caches, downstream gateway) into the readiness group so a not-yet-warm pod stays out of rotation.
 
-**How do you keep a transient downstream outage from restarting pods?** Put the downstream check in the readiness group, not liveness. A failing gateway flips readiness to OUT_OF_SERVICE, so Kubernetes stops routing traffic but leaves the pod running; when the gateway recovers the pod rejoins automatically. Tying it to liveness instead would restart healthy pods on every blip, amplifying the outage.
+**How do you keep a transient downstream outage from restarting pods?** Put the downstream check in the readiness group, not liveness. A failing gateway makes the readiness group aggregate DOWN, so `/actuator/health/readiness` answers 503 and Kubernetes stops routing traffic while leaving the pod running; when the gateway recovers the pod rejoins automatically. Tying it to liveness instead would restart healthy pods on every blip, amplifying the outage.
 
 **Why is `show-details=when_authorized` the right default?** The health endpoint's component details can include JDBC URLs, validation queries, disk paths, and downstream addresses. `when_authorized` returns only `{"status":"UP"}` to anonymous probes (enough for Kubernetes) while exposing the diagnostic detail to authenticated operators, closing an information-disclosure hole without losing observability.
 

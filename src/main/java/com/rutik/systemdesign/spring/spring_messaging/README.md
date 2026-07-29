@@ -220,9 +220,14 @@ public class KafkaProducerConfig {
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
         config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
-        // For exactly-once: enable idempotent producer
+        // Idempotent producer: dedupes broker-side retries. On since Kafka 3.0 --
+        // this line documents intent, it does not change the default.
         config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
-        config.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "tx-orders-");
+        // Do NOT put TRANSACTIONAL_ID_CONFIG here unless every send runs inside a
+        // transaction: DefaultKafkaProducerFactory picks it up as the transactionIdPrefix,
+        // and a plain kafkaTemplate.send() then throws
+        //   IllegalStateException: No transaction is in process
+        // See the Kafka Transactions section below for the transactional variant.
         return new DefaultKafkaProducerFactory<>(config);
     }
 
@@ -364,7 +369,7 @@ public class OrderConsumer {
     }
 
     @DltHandler
-    public void onDlt(OrderEvent event, @Header KafkaHeaders.RECEIVED_TOPIC String topic) {
+    public void onDlt(OrderEvent event, @Header(KafkaHeaders.RECEIVED_TOPIC) String topic) {
         log.error("Message arrived in DLT from topic {}: {}", topic, event);
         // alert, manual intervention, or store for replay
     }
@@ -376,6 +381,16 @@ public class OrderConsumer {
 ```java
 @Configuration
 public class KafkaTransactionConfig {
+
+    // The prefix is what makes the factory transactional. Spring appends a suffix per
+    // producer so concurrent producers do not fence each other off the same id.
+    @Bean
+    public ProducerFactory<String, OrderEvent> txProducerFactory(Map<String, Object> config) {
+        DefaultKafkaProducerFactory<String, OrderEvent> pf =
+            new DefaultKafkaProducerFactory<>(config);
+        pf.setTransactionIdPrefix("tx-orders-");
+        return pf;
+    }
 
     @Bean
     public KafkaTransactionManager<String, OrderEvent> kafkaTransactionManager(
@@ -535,6 +550,18 @@ public class NotificationService {
     }
 }
 ```
+
+**@Async on virtual threads.** Setting `spring.threads.virtual.enabled=true` changes what the
+auto-configured `applicationTaskExecutor` bean *is*: Spring Boot supplies a
+`SimpleAsyncTaskExecutor` that starts a fresh virtual thread per task instead of a
+`ThreadPoolTaskExecutor`. For blocking work — an SMTP call, a slow HTTP client — this removes
+the pool as a bottleneck entirely, since a parked virtual thread costs no OS thread. Two
+consequences to plan for. First, an executor that starts a thread per task has **no queue and no
+implicit backpressure**: if the downstream is slow, tasks pile up as live virtual threads and
+memory, not as a bounded queue. Cap it with `spring.task.execution.simple.concurrency-limit`,
+which the builder applies as a throttle. Second, `@Async("taskExecutor")` naming an explicit
+bean opts out of all of this and keeps using the platform pool you declared, so the switch is
+only automatic for `@Async` with no qualifier.
 
 ### WebSocket — STOMP
 
@@ -977,7 +1004,7 @@ In AUTO mode, Spring AMQP automatically acknowledges the message when the listen
 You expose standard Java functional beans and the binder wires them to destinations: Consumer<T> to consume, Supplier<T> to produce, Function<T,R> to do both. The binder discovers these beans and wires them to topics or queues based on the bean name and spring.cloud.stream.bindings configuration. The advantage is that the business logic is pure Java functions with no framework annotations — they are easily unit-testable without a Spring context. The binder handles serialization, error handling, and retry. The functional model also supports reactive types (Flux<T>, Mono<T>) for reactive stream processing.
 
 **Q: How does @Async work internally in Spring? What happens if @EnableAsync is missing?**
-@Async is implemented via Spring AOP. When @EnableAsync is present, Spring creates a proxy for every bean that has @Async methods. When the @Async method is called through the proxy, the proxy submits a Runnable to the configured TaskExecutor and returns immediately with a CompletableFuture (or void). The actual method executes in the executor thread. If @EnableAsync is missing, no proxy is created — the @Async annotation is silently ignored and the method executes synchronously in the caller's thread. There is no exception or warning. This is a common source of silent bugs in production.
+@Async is implemented via Spring AOP. When @EnableAsync is present, Spring creates a proxy for every bean that has @Async methods. When the @Async method is called through the proxy, the proxy submits a Runnable to the configured TaskExecutor and returns immediately with a CompletableFuture (or void). The actual method executes in the executor thread. Which executor that is depends on configuration: an unqualified @Async uses the auto-configured `applicationTaskExecutor`, which is a `ThreadPoolTaskExecutor` by default and a virtual-thread `SimpleAsyncTaskExecutor` when `spring.threads.virtual.enabled=true`; `@Async("beanName")` always uses the named bean. If @EnableAsync is missing, no proxy is created — the @Async annotation is silently ignored and the method executes synchronously in the caller's thread. There is no exception or warning. Note that Spring Boot's own auto-configuration does not switch @Async on for you, so a plain `@SpringBootApplication` with no `@EnableAsync` anywhere is exactly this silent-bug case.
 
 **Q: What is the SockJS fallback in Spring WebSocket, and when is it needed?**
 SockJS is a JavaScript library and protocol that provides a WebSocket-like API with automatic fallback to HTTP long-polling or HTTP streaming when WebSocket is unavailable. This is needed in corporate environments with proxies or firewalls that block WebSocket upgrades. When SockJS is configured via registry.addEndpoint("/ws").withSockJS(), the Spring backend supports multiple transports on the same endpoint: native WebSocket, XHR-streaming, and XHR-polling. The client SockJS library negotiates the best available transport. In production, prefer an external STOMP broker relay (RabbitMQ with STOMP plugin) over the in-memory SimpleBroker for persistence and horizontal scalability.
@@ -1029,7 +1056,7 @@ The DLQ is consumed by a separate listener for manual review or republish after 
 
 **RabbitMQ DLX on every queue**: Configure a DLX on every queue at creation time. A queue without a DLX silently discards rejected messages. DLX ensures every failed message is observable.
 
-**@Async thread pool sizing**: Name the pool, set a bounded queue size, and configure a rejected execution handler. The default SimpleAsyncTaskExecutor creates a new thread per invocation — this is not a pool and will exhaust threads under load.
+**@Async thread pool sizing**: Name the pool, set a bounded queue size, and configure a rejected execution handler. A bare `SimpleAsyncTaskExecutor` starts a new thread per invocation — that is not a pool, and on platform threads it will exhaust the machine under load. On virtual threads (`spring.threads.virtual.enabled=true`) the thread cost disappears but the missing backpressure does not, so still bound it with `spring.task.execution.simple.concurrency-limit`.
 
 **WebSocket: use external broker in production**: The in-memory SimpleBroker does not survive application restart and cannot be shared across multiple application instances. Use RabbitMQ with the STOMP plugin or ActiveMQ as the external broker relay.
 
@@ -1136,24 +1163,28 @@ This is Little's Law (`L = λ x W`) applied to a consumer group. Reporting 10,20
 | `λ` (lambda) | Arrival/completion rate — here **10,200 events/sec** sustained |
 | `W` | Time one event spends being processed — here **45 ms** p99 |
 | `L` | Events in flight simultaneously. `λ x W` |
-| `concurrency = 3` | Listener containers per pod, each owning a subset of partitions |
+| `concurrency = 24` | Listener threads in the group, one per partition of the 24-partition topic |
 
 **Walk one example.** Turn the two reported numbers into a concurrency requirement:
 
 ```
   L = lambda x W = 10,200 events/sec x 0.045 sec = 459 events in flight
 
-  Split across the 3 listener containers:
-    10,200 / 3 = 3,400 events/sec per container
-       459 / 3 =   153 events in flight per container
+  Split across the 24 listener threads (one per partition):
+    10,200 / 24 = 425 events/sec per thread
+       459 / 24 =  19.1 events in flight per thread
+
+  Sanity check the other way -- 19.1 in flight per thread at 45 ms each is
+    19.1 / 0.045 = 425 events/sec per thread, and 425 x 24 = 10,200.  Consistent.
 
   Partition floor: concurrency cannot exceed partition count, so
-    3 containers per pod  ->  topic needs at least 3 partitions to keep all 3 busy
+    concurrency = 24  ->  the topic must have at least 24 partitions.
+    Raise concurrency to 32 on this topic and 8 threads sit permanently idle.
 ```
 
 459 concurrent in-flight events is the number that sizes everything downstream — connection pools, the 8/32 notification pool, and the DB. It is also why the notification send was pushed to `@Async`: had it stayed inline at, say, 200 ms per email, `W` would jump from 45 ms to 245 ms and `L` from 459 to 2,499, a five-fold rise in required concurrency for the same 10,200 events/sec.
 
-**Why the partition count is a hard ceiling.** Kafka assigns each partition to exactly one consumer in a group, so `concurrency = 3` with only 2 partitions leaves one container permanently idle — it will never receive an assignment. Raising `concurrency` past the partition count buys nothing; the throughput ceiling is set at topic-creation time, which is why the Best Practices section says to pick 6-12 partitions up front rather than adding them later.
+**Why the partition count is a hard ceiling.** Kafka assigns each partition to exactly one consumer in a group, so any thread beyond the partition count is permanently idle — it will never receive an assignment. Raising `concurrency` past the partition count buys nothing; the throughput ceiling is set at topic-creation time, which is why the Best Practices section says to choose the partition count up front rather than adding partitions later.
 
 ### Pitfalls
 

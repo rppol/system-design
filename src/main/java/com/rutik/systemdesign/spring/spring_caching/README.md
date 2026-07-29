@@ -11,7 +11,7 @@ The four core annotations are:
 - `@CacheEvict` — removes one or all entries from a named cache
 - `@Caching` — groups multiple cache annotations on a single method
 
-`@EnableCaching` activates `CachingInterceptor` (an `AopInterceptor`) on the Spring application context, which wraps annotated beans in proxies.
+`@EnableCaching` registers `CacheInterceptor` (a `MethodInterceptor`) on the Spring application context, which wraps annotated beans in proxies.
 
 ---
 
@@ -56,7 +56,7 @@ The four core annotations are:
 
 **Write-through (`@CachePut`):** Every write updates both the DB and the cache atomically from the application's perspective. Ensures consistency at the cost of always executing the method.
 
-**Write-behind:** Not natively supported by Spring; requires a custom `CacheWriter` at the store level (Caffeine supports it).
+**Write-behind:** Not supported by Spring's abstraction, and not by Caffeine either — Caffeine 3 removed `CacheWriter`. You implement it yourself: write into `cache.asMap().compute(...)` and drain to the store from a `RemovalListener` or a scheduled batch flush.
 
 **Read-through:** The cache itself fetches from the source on a miss. Spring's abstraction does not natively implement this; the method body is the "read-through" loader.
 
@@ -138,9 +138,9 @@ flowchart LR
     classDef mathOp fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
     classDef frozen fill:#c678dd,stroke:#9b59b6,color:#fff
 
-    A["Java Object"] --> B["Jackson2JsonRedisSerializer\n(value)"]
-    B --> C["JSON payload:\ncom.example.Product::id-1-name-Laptop"]
-    C --> D["StringRedisSerializer (key):\nproducts::1"]
+    A["Java Object"] --> B["GenericJacksonJsonRedisSerializer\n(value)"]
+    B --> C["JSON payload with type hint:\n'@class' = com.example.Product,\n'id' = 1, 'name' = Laptop"]
+    C --> D["StringRedisSerializer (key):\ncacheName::key = products::1"]
     D --> E
 
     E@{ icon: "logos:redis", form: "square", label: "Redis SETEX<br/>products::1 600", pos: "b", h: 44 }
@@ -258,7 +258,7 @@ public class RedisCacheConfig {
                     .fromSerializer(new StringRedisSerializer()))
             .serializeValuesWith(
                 RedisSerializationContext.SerializationPair
-                    .fromSerializer(new GenericJackson2JsonRedisSerializer()))
+                    .fromSerializer(new GenericJacksonJsonRedisSerializer()))
             .disableCachingNullValues();  // prevents caching null; pairs with unless="#result==null"
 
         // Per-cache TTL overrides
@@ -322,7 +322,7 @@ Rarely changes. Use `ConcurrentMapCacheManager` with `@CacheEvict(allEntries=tru
 
 ### Distributed Microservices
 
-Multiple instances share a Redis cluster. Keys are namespaced by cache name. TTL-based expiry ensures eventual consistency. `sync=true` is not effective in distributed mode (it only blocks threads within a single JVM); a distributed lock (Redisson) is needed for true stampede protection across instances.
+Multiple instances share a Redis cluster. Keys are namespaced by cache name. TTL-based expiry ensures eventual consistency. `sync=true` does not coordinate across instances — `RedisCache.get(key, Callable)` delegates to the cache writer, and the default writer is non-locking, so every instance still loads independently. Build the manager with `RedisCacheManager.builder(RedisCacheWriter.lockingRedisCacheWriter(connectionFactory))` to get a cluster-wide `SET NX` lock, but note the lock key is per **cache**, not per key: while one instance rebuilds one entry, every other key in that cache blocks too. For a single hot key inside an otherwise busy cache, a per-key distributed lock (Redisson) remains the finer-grained tool.
 
 ---
 
@@ -335,11 +335,11 @@ Multiple instances share a Redis cluster. Keys are namespaced by cache name. TTL
 | Latency | ~0 (in-process) | ~0 (in-process) | 0.2–2ms (network) |
 | Capacity | JVM heap bounded | Configurable, bounded | GB–TB |
 | TTL | No | Yes | Yes |
-| Eviction | None | LRU/LFU/size/time | TTL only |
+| Eviction | None | LRU/LFU/size/time | TTL + server `maxmemory-policy` |
 | Distributed | No | No | Yes |
 | Serialization | None needed | None needed | Required |
 | Ops complexity | None | None | Redis cluster needed |
-| Stampede protection | sync=true (JVM) | sync=true (JVM) | Requires Redisson lock |
+| Stampede protection | sync=true (per key, JVM) | sync=true (per key, JVM) | `lockingRedisCacheWriter` (per cache, cluster-wide) |
 
 ### @Cacheable vs @CachePut
 
@@ -373,7 +373,7 @@ Multiple instances share a Redis cluster. Keys are namespaced by cache name. TTL
 
 - Data changes on every request or is user-specific and highly volatile.
 - Method has side effects that must execute on every call (use `@CachePut` or no caching).
-- You need transactional consistency between the cache and the database — Spring's cache abstraction is not transaction-aware by default. `@Transactional` + `@Cacheable` can cache uncommitted data.
+- You need transactional consistency between the cache and the database — Spring's cache abstraction is not transaction-aware by default, so `@Transactional` + `@Cacheable` can cache uncommitted data. `TransactionAwareCacheManagerProxy` closes that gap, at the cost of losing read-your-own-write inside the transaction.
 - The data is too large for the configured cache store (configure `maximumSize` on Caffeine to prevent OOM).
 - The method signature includes non-serializable parameters used as keys (breaks Redis serialization).
 
@@ -460,6 +460,10 @@ public Product findById(Long id) {
 public Optional<Product> findById(Long id) {
     return productRepository.findById(id);  // return Optional, never null
 }
+// This works because CacheAspectSupport UNWRAPS Optional on both sides: the value
+// stored is the bare Product (not an Optional), and #result in 'unless' is that
+// unwrapped value -- so an Optional.empty() return makes #result null and nothing
+// is cached. Redis therefore never sees an Optional and needs no extra Jackson module.
 ```
 
 ### Pitfall 4: @Cacheable and @Transactional — Caching Uncommitted Data
@@ -504,6 +508,19 @@ public User updateUser(User user) {
     // @CacheEvict with beforeInvocation=false runs after method, but still before commit
     // Use TransactionSynchronizationManager for post-commit eviction
 }
+
+// FIX 3: make the whole abstraction transaction-aware in one place, instead of
+// hand-writing a synchronization per method. TransactionAwareCacheManagerProxy
+// (spring-context-support) wraps each Cache so put(), evict() and clear() register
+// an afterCommit synchronization -- a rollback then leaves the cache untouched.
+@Bean
+public CacheManager cacheManager(RedisConnectionFactory cf) {
+    return new TransactionAwareCacheManagerProxy(RedisCacheManager.builder(cf).build());
+}
+// Two caveats. get() is NOT deferred, so a write is invisible to a later read in the
+// same transaction -- do not rely on read-your-own-write. And putIfAbsent(),
+// evictIfPresent() and invalidate() pass straight through undeferred, because each
+// must return a result the caller inspects immediately.
 ```
 
 ### Pitfall 5: Missing Key Collision Across Methods
@@ -556,8 +573,9 @@ public List<ProductDto> searchProducts(String query, int page, int size) {
 | Technology | Role | Version Notes |
 |---|---|---|
 | Spring Cache Abstraction | Core annotations + AOP interception | Spring 3.1+ |
-| `spring-boot-starter-cache` | Auto-configures `CacheManager` | Spring Boot 2.x / 3.x |
+| `spring-boot-starter-cache` | Auto-configures `CacheManager` | Backend chosen by classpath + `spring.cache.type` |
 | `spring-boot-starter-data-redis` | Auto-configures `RedisCacheManager` | Lettuce client by default |
+| `TransactionAwareCacheManagerProxy` | Defers cache writes to `afterCommit` | `spring-context-support` |
 | Caffeine | High-performance in-process cache | `com.github.ben-manes.caffeine:caffeine` |
 | `spring-boot-starter-cache` + Caffeine | Spring Boot auto-detects Caffeine if on classpath | |
 | Redisson | Distributed locks for stampede protection in Redis clusters | `redisson-spring-boot-starter` |
@@ -580,13 +598,13 @@ It imports `CachingConfigurationSelector`, which registers `BeanFactoryCacheOper
 Zero parameters produce `SimpleKey.EMPTY`. One parameter produces the parameter itself as the key. Multiple parameters produce a `SimpleKey` wrapping the parameter array. It relies on `equals` and `hashCode` of parameters — if the parameter does not override these (e.g., a mutable POJO), every call may appear as a cache miss. Always prefer SpEL expressions for complex types.
 
 **Q: What is a cache stampede and how does `sync=true` address it?**
-A cache stampede occurs when many threads simultaneously observe a cache miss and all call the underlying data source concurrently, multiplying load. `sync=true` on `@Cacheable` causes `CacheInterceptor` to use `Cache.get(key, Callable)`, which in Caffeine and ConcurrentMap serializes computation for the same key — only one thread calls the method, others wait. This is a JVM-local lock only; for distributed stampede protection across multiple instances, a distributed lock (Redisson) is required.
+A cache stampede occurs when many threads simultaneously observe a cache miss and all call the underlying data source concurrently, multiplying load. `sync=true` on `@Cacheable` causes `CacheInterceptor` to use `Cache.get(key, Callable)`, which in Caffeine and ConcurrentMap serializes computation for the same key — only one thread calls the method, others wait. `CacheAspectSupport` enforces four restrictions on it, each throwing at startup: the operation may name only one cache, it may not be combined with any other cache operation on the same method, only one `sync=true` operation is allowed, and `unless` is not supported. This is a JVM-local lock only; across instances, either build the manager on `RedisCacheWriter.lockingRedisCacheWriter(cf)` (a cluster-wide lock, but held per cache rather than per key) or take a per-key distributed lock with Redisson.
 
 **Q: Explain `condition` vs `unless` in `@Cacheable`.**
 `condition` is evaluated before the method executes using SpEL; if it returns false, caching is completely bypassed for this invocation (no lookup, no store). `unless` is evaluated after the method returns and can inspect `#result`; if it returns true, the result is not stored in the cache (but the method did execute). Use `condition` to skip caching for invalid inputs (e.g., `#id > 0`) and `unless` to skip caching null or empty results (e.g., `#result == null`).
 
 **Q: Why can `@Cacheable` and `@Transactional` interact badly?**
-Spring's cache abstraction is not transaction-aware by default. When both annotations are on the same method, `CacheInterceptor` populates the cache when the method returns, but the transaction may not have committed yet. If the transaction rolls back, the cache contains data that was never persisted to the database. The fix is to separate read (cacheable) from write (transactional) operations, or to use `TransactionSynchronizationManager.registerSynchronization()` to schedule cache population as an `afterCommit` callback.
+Spring's cache abstraction is not transaction-aware by default. When both annotations are on the same method, `CacheInterceptor` populates the cache when the method returns, but the transaction may not have committed yet. If the transaction rolls back, the cache contains data that was never persisted to the database. The fix is to separate read (cacheable) from write (transactional) operations, or to wrap the manager in `TransactionAwareCacheManagerProxy`, which makes every `put`, `evict` and `clear` register an `afterCommit` synchronization automatically — with the caveat that a write is then invisible to a read later in the same transaction.
 
 **Q: What is `@CacheEvict(beforeInvocation = true)` used for?**
 By default, eviction happens after the method returns successfully. If the method throws, the cache is not cleared. Setting `beforeInvocation = true` evicts the cache entry before the method runs, ensuring the entry is removed regardless of whether the method succeeds or throws. Use this when it is safer to serve a cache miss than to serve potentially stale data during a failed update.
@@ -622,7 +640,7 @@ RedisCacheManager cacheManager(RedisConnectionFactory cf) {
         .entryTtl(Duration.ofMinutes(30))
         .serializeValuesWith(
             RedisSerializationContext.SerializationPair
-                .fromSerializer(new GenericJackson2JsonRedisSerializer()));
+                .fromSerializer(new GenericJacksonJsonRedisSerializer()));
     Map<String, RedisCacheConfiguration> perCacheConfig = Map.of(
         "products",    defaults.entryTtl(Duration.ofHours(2)),
         "sessions",    defaults.entryTtl(Duration.ofMinutes(10)),
@@ -710,7 +728,7 @@ public class CacheConfig {
     RedisCacheManager cacheManager(RedisConnectionFactory cf) {
         RedisCacheConfiguration base = RedisCacheConfiguration.defaultCacheConfig()
             .serializeValuesWith(SerializationPair.fromSerializer(
-                new GenericJackson2JsonRedisSerializer()));
+                new GenericJacksonJsonRedisSerializer()));
         Map<String, RedisCacheConfiguration> perCache = Map.of(
             "catalog", base.entryTtl(Duration.ofHours(1)),
             "pricing", base.entryTtl(Duration.ofMinutes(5)));
@@ -724,12 +742,12 @@ public class CacheConfig {
 @Service
 public class ProductService {
 
-    @Cacheable(cacheNames = "catalog", key = "#id")     // SimpleKeyGenerator on (#id)
+    @Cacheable(cacheNames = "catalog", key = "#id")     // explicit SpEL key, not SimpleKeyGenerator
     public ProductView findById(long id) {
         return repo.findById(id).map(ProductView::from).orElseThrow();
     }
 
-    @CachePut(cacheNames = "catalog", key = "#result.id())")
+    @CachePut(cacheNames = "catalog", key = "#result.id()")
     public ProductView createProduct(NewProduct p) {     // populates cache with the new entry
         return ProductView.from(repo.save(p.toEntity()));
     }
@@ -784,7 +802,7 @@ Note what the table shows: at `ttlRemaining = 21 ms` nearly every roll qualifies
 
 ### Metrics
 
-- Hit rate: **98.5%** steady state; DB read load reduced **~50x**.
+- Hit rate: **98.5%** steady state; DB read load reduced **~65x** (25,000 req/sec down to the 1.5% that miss, roughly 375 req/sec).
 - `catalog` read: **0.6ms** from Redis vs **18ms** from DB.
 - Stampede on a viral product: DB QPS for that key capped at **~5/sec** instead of thousands.
 - Micrometer `cache.gets{cache=catalog,result=hit|miss}` exposes per-cache hit ratio.
@@ -915,10 +933,15 @@ public Product getProductWithEarlyExpiry(Long id) {
     return fresh;
 }
 
-// FIX 2: Caffeine's refreshAfterWrite — asynchronous refresh on first stale access
+// FIX 2: Caffeine's refreshAfterWrite — asynchronous refresh on first stale access.
+// refreshAfterWrite ONLY works on a LoadingCache, so setCacheLoader is mandatory,
+// and it must be set BEFORE setCaffeine: naming caches in the constructor makes the
+// manager build them eagerly inside setCaffeine, which throws
+//   IllegalStateException: refreshAfterWrite requires a LoadingCache
 @Bean
-public CacheManager cacheManager() {
+public CacheManager cacheManager(ProductRepository repo) {
     CaffeineCacheManager mgr = new CaffeineCacheManager("products");
+    mgr.setCacheLoader(key -> repo.findById((Long) key).orElse(null));  // first
     mgr.setCaffeine(Caffeine.newBuilder()
         .expireAfterWrite(10, MINUTES)
         .refreshAfterWrite(8, MINUTES)    // refresh async before expiry

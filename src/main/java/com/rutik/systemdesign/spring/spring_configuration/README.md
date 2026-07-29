@@ -127,9 +127,9 @@ flowchart TD
 
     App(["@SpringBootApplication"]) --> Selector["AutoConfigurationImportSelector"]
     Selector --> ForEach["for each AutoConfiguration class"]
-    ForEach --> Cond1["@ConditionalOnClass:\nis HikariCP on classpath?"]
-    Cond1 --> Cond2["@ConditionalOnMissingBean:\nis DataSource already defined?"]
-    Cond2 --> Cond3["@ConditionalOnProperty:\nis spring.datasource.url set?"]
+    ForEach --> Cond1["OnClassCondition (runs FIRST)\nis DataSource on classpath?"]
+    Cond1 --> Cond2["OnPropertyCondition\nis the feature toggled on?"]
+    Cond2 --> Cond3["OnBeanCondition (runs LAST)\nis a DataSource already defined?"]
     Cond3 --> AllTrue{"all conditions true?"}
     AllTrue -->|"yes"| Register(["register bean"])
     AllTrue -->|"no"| Skip(["skip"])
@@ -159,8 +159,7 @@ public class SecurityConfig {
     @Bean
     public AuthenticationManager authManager(UserDetailsService uds) {
         // passwordEncoder() goes through CGLIB proxy — returns the singleton bean
-        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
-        provider.setUserDetailsService(uds);
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider(uds);
         provider.setPasswordEncoder(passwordEncoder());  // same bean as above
         return new ProviderManager(provider);
     }
@@ -178,7 +177,7 @@ public class SecurityConfig {
     public AuthenticationManager authManager(UserDetailsService uds) {
         // passwordEncoder() is a plain Java call — creates a SECOND BCryptPasswordEncoder!
         // The AuthenticationManager uses a different instance than the registered bean
-        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider(uds);
         provider.setPasswordEncoder(passwordEncoder());  // NEW instance! Not the bean
         return new ProviderManager(provider);
     }
@@ -264,10 +263,14 @@ public class EmbeddedDataSourceConfig {
 // -Dspring.profiles.active=production (JVM arg)
 // SPRING_PROFILES_ACTIVE=production   (environment variable)
 
-// Profile inheritance
-# application.properties
-spring.profiles.active=production
-spring.profiles.include=metrics,security  # always include these alongside active profile
+// In application.properties:
+//   spring.profiles.active=production
+//   spring.profiles.include=metrics,security   unconditionally added to whatever is active
+//   spring.profiles.group.production=metrics,security,prod-db
+// Prefer profiles.group: it expands ONE name into several, so activating "production"
+// pulls the whole set in, whereas profiles.include is always on in every environment.
+// spring.profiles.active and .include are only honoured in non-profile-specific
+// documents -- setting them inside application-production.yml is a startup error.
 ```
 
 ### @PropertySource and @ConfigurationProperties
@@ -333,7 +336,7 @@ public class CriticalBeanPostProcessor implements BeanPostProcessor, PriorityOrd
 
 ## 7. Real-World Examples
 
-**Auto-configuration class:** Spring Boot's `DataSourceAutoConfiguration` uses `@ConditionalOnClass(DataSource.class)` (HikariCP on classpath), `@ConditionalOnMissingBean(DataSource.class)` (no user-defined DataSource), and `@ConditionalOnProperty("spring.datasource.url")` to conditionally create a `HikariDataSource`. This is why adding `spring-boot-starter-data-jpa` to `pom.xml` automatically provides a working DataSource.
+**Auto-configuration class:** Spring Boot's `DataSourceAutoConfiguration` is gated by `@ConditionalOnClass({DataSource.class, EmbeddedDatabaseType.class})`, then splits into two nested configurations, each carrying `@ConditionalOnMissingBean({DataSource.class, XADataSource.class})` so a user-defined bean wins. `PooledDataSourceConfiguration` matches when a pool implementation is on the classpath (or `spring.datasource.type` is set) and builds a `HikariDataSource`; `EmbeddedDatabaseConfiguration` matches only when no URL is set and no pool is available. This is why adding `spring-boot-starter-data-jpa` to `pom.xml` automatically provides a working DataSource.
 
 **Multi-environment data source:** `@Profile("production")` configures RDS PostgreSQL; `@Profile("test")` configures H2 in-memory. CI/CD sets `SPRING_PROFILES_ACTIVE=test`; Kubernetes deployment sets `SPRING_PROFILES_ACTIVE=production`. Zero code change for environment switching.
 
@@ -413,43 +416,56 @@ public class DatabaseConfig {
 }
 ```
 
-### Pitfall 2: @ConditionalOnMissingBean Ordering Issue
+### Pitfall 2: @ConditionalOnMissingBean in Ordinary Application Config
 
 ```java
-// BROKEN: order matters for @ConditionalOnMissingBean
-// If UserDataSource is processed before DefaultDataSource,
-// "no DataSource" condition is false, so UserDataSource registers.
-// But if DefaultDataSource is processed first, both might register.
-
-// Spring processes @Configuration classes in a specific order.
-// Use @AutoConfigureAfter / @AutoConfigureBefore in auto-configuration.
-// In user configuration, use @Order on @Configuration classes.
-
+// BROKEN: the condition "can only match the bean definitions that have been processed
+// by the application context so far" (its own javadoc). In a plain @Configuration class
+// there is no defined processing order relative to other user configurations, so whether
+// this bean appears depends on classpath/scan order -- it will pass locally and fail in
+// the packaged jar, or vice versa.
 @Configuration
 @ConditionalOnMissingBean(DataSource.class)
 public class DefaultDataSourceConfig {
     @Bean
     public DataSource dataSource() { return new H2DataSource(); }
 }
+
+// FIXED: @ConditionalOnMissingBean belongs on @AutoConfiguration classes, which ARE
+// ordered (deferred imports, processed after all user config, with after/before to
+// order them among themselves). In ordinary application config, express the choice as
+// a profile or a property instead -- both are evaluated from the Environment and are
+// therefore order-independent.
+@Configuration
+public class DefaultDataSourceConfig {
+    @Bean
+    @ConditionalOnProperty(name = "app.datasource.embedded", havingValue = "true")
+    public DataSource dataSource() { return new H2DataSource(); }
+}
 ```
 
-### Pitfall 3: @Profile Not Applied to @Bean Methods
+### Pitfall 3: Class-level and Method-level @Profile AND Together
 
 ```java
-// BROKEN: @Profile on @Bean method is ignored in some versions
+// BROKEN: reads as "in prod, or in eu" -- it is neither. @Profile is a @Conditional,
+// and conditions from the class and the method BOTH have to pass, so the bean exists
+// only when prod AND eu are simultaneously active. With SPRING_PROFILES_ACTIVE=prod
+// the bean is silently absent and injection fails with NoSuchBeanDefinitionException.
 @Configuration
-public class DataConfig {
+@Profile("prod")
+public class RegionConfig {
     @Bean
-    @Profile("test")  // This works correctly for @Bean methods in @Configuration
-    public DataSource testDataSource() { return new H2DataSource(); }
+    @Profile("eu")
+    public RegionClient client() { return new EuRegionClient(); }
 }
 
-// SAFER: Put @Profile on the @Configuration class itself
+// FIXED: express the whole condition in one place. A profile expression keeps it on
+// one annotation, and the OR form is spelled with '|' (AND is '&', negation is '!').
 @Configuration
-@Profile("test")
-public class TestDataConfig {
+public class RegionConfig {
     @Bean
-    public DataSource dataSource() { return new H2DataSource(); }
+    @Profile("prod & eu")            // or "prod | eu" if either should do
+    public RegionClient client() { return new EuRegionClient(); }
 }
 ```
 
@@ -477,7 +493,7 @@ public class TestDataConfig {
 `@Configuration` creates a CGLIB subclass (full mode) where calls to `@Bean` methods return the singleton from the container. `@Component` uses no proxy (lite mode) — calls to `@Bean` methods are plain Java method invocations that create new instances. The difference only matters when one `@Bean` method calls another within the same class. Always use `@Configuration` for configuration classes that define inter-dependent beans.
 
 **Q: What is the order of @Conditional evaluation?**
-`@Conditional` conditions are evaluated in the order they are declared on the class. Spring Boot's `@ConditionalOnClass` runs first (cheapest check — classpath scan), then `@ConditionalOnMissingBean` (requires partial context initialization), then `@ConditionalOnProperty`. If any condition fails, the class is skipped and no beans are registered. The `--debug` startup flag prints the `ConditionEvaluationReport` showing which conditions passed or failed.
+Declaration order is irrelevant — `ConditionEvaluator.collectConditions()` sorts the conditions with `AnnotationAwareOrderComparator` before running them, so the `@Order` on each `Condition` class decides. Spring Boot orders them cheapest-first: `OnClassCondition` at `HIGHEST_PRECEDENCE`, then `OnWebApplicationCondition`/`OnJavaCondition`/`OnResourceCondition` at `+20`, then `OnPropertyCondition` at `+40`, then `OnExpressionCondition`/`OnJndiCondition`, and finally `OnBeanCondition` at `LOWEST_PRECEDENCE`. Bean conditions run last on purpose: they are the only ones that need the bean definition registry to be populated, so putting them anywhere else would make them read a half-built picture. Evaluation short-circuits on the first failing condition, so a missing class costs nothing. The `--debug` startup flag prints the `ConditionEvaluationReport` showing which conditions passed or failed.
 
 **Q: How does @PropertySource differ from @ConfigurationProperties?**
 `@PropertySource` adds a `.properties` file to the Spring `Environment`, making its properties accessible via `@Value` and `Environment.getProperty()`. It does not bind properties to a Java object. `@ConfigurationProperties` takes a prefix and binds all matching properties from the `Environment` to a typed Java class with getters/setters. `@ConfigurationProperties` supports relaxed binding (camelCase, kebab-case, SCREAMING_SNAKE_CASE all map to the same property), JSR-303 validation, and IDE autocompletion. Prefer `@ConfigurationProperties` for any group of related properties.
@@ -492,10 +508,10 @@ public class TestDataConfig {
 `@Profile("name")` on a `@Configuration` class or `@Bean` method registers the bean only when the named profile is active. Activate via `spring.profiles.active` property (comma-separated for multiple), the `SPRING_PROFILES_ACTIVE` environment variable, or `SpringApplication.setAdditionalProfiles()` programmatically. `spring.profiles.include` always activates additional profiles regardless of the primary active profile. A bean with `@Profile("!production")` is active when production is NOT active.
 
 **Q: What is relaxed binding in @ConfigurationProperties?**
-Spring's `@ConfigurationProperties` accepts property names in any case format and maps them to Java field names: `app.max-connections`, `APP_MAX_CONNECTIONS`, `app.maxConnections`, and `app.max_connections` all bind to a Java field `maxConnections`. This allows properties defined by operations (OS environment variables in SCREAMING_SNAKE_CASE) to bind to Java convention (camelCase) without duplication. `@Value` does NOT support relaxed binding — it uses exact property name matching.
+Relaxed binding lets one Java field accept a property name written in any casing or separator convention. `app.max-connections`, `APP_MAX_CONNECTIONS`, `app.maxConnections` and `app.max_connections` all bind to a Java field `maxConnections`. This allows properties defined by operations (OS environment variables in SCREAMING_SNAKE_CASE) to bind to Java convention (camelCase) without duplication. `@Value` does NOT support relaxed binding — it uses exact property name matching.
 
 **Q: How do you exclude an auto-configuration class?**
-Two ways: `@SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})` as an annotation attribute, or `spring.autoconfigure.exclude=org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration` as a property. The annotation approach is compile-time safe (catches typos); the property approach is useful when you need runtime control or the class may not be on the classpath. Exclusion is necessary when you define your own DataSource bean but the auto-configuration would still try to create one.
+Two ways: the `exclude` attribute of `@SpringBootApplication`, or the `spring.autoconfigure.exclude` property. The annotation form takes a `Class<?>` — `@SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})`; the property form takes a fully-qualified name — `spring.autoconfigure.exclude=org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration`. The annotation approach is compile-time safe (catches typos); the property approach is useful when you need runtime control or the class may not be on the classpath. Exclusion is necessary when you define your own DataSource bean but the auto-configuration would still try to create one.
 
 **Q: What is @Order and when does it matter for @Configuration classes?**
 `@Order(n)` on `@Configuration` classes controls the order in which they are processed. Lower values are processed first. This affects which `@ConditionalOnMissingBean` evaluations see existing beans. More importantly, `@Order` on `BeanPostProcessor` beans controls the order they are applied to each bean. For `ApplicationListener` beans, it controls which listener handles events first. For `@Configuration` classes in user code, order matters when multiple classes provide the same bean type and conditional logic depends on processing order.
@@ -504,7 +520,7 @@ Two ways: `@SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})
 `@Configuration(proxyBeanMethods=false)` disables the CGLIB proxy for the configuration class (making it behave like lite mode). Use it when the `@Bean` methods in the class are never called from other `@Bean` methods in the same class (independent beans), to improve startup performance (CGLIB proxying adds overhead). Spring Boot's own auto-configuration classes use `proxyBeanMethods=false` for most configurations since they define independent beans. Use `proxyBeanMethods=true` (the default) whenever inter-`@Bean` method calls are needed.
 
 **Q: How would you write a custom Spring Boot starter?**
-Four steps: (1) Create a module with your auto-configuration class annotated with `@AutoConfiguration` (Boot 3.x) or `@Configuration` (Boot 2.x); (2) Use `@ConditionalOnClass`, `@ConditionalOnMissingBean`, `@ConditionalOnProperty` to make it conditional; (3) Add a file at `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports` (Boot 3.x) or `spring.factories` (Boot 2.x) with your auto-configuration class name; (4) Do NOT use `@ComponentScan` in the starter — let user applications scan their own packages. Include your auto-configure module as a dependency in the starter POM.
+Write an `@AutoConfiguration` class, guard it with conditions, list it in the imports file, and never component-scan from it. In detail: (1) Create a module with your auto-configuration class annotated with `@AutoConfiguration`; (2) Use `@ConditionalOnClass`, `@ConditionalOnMissingBean`, `@ConditionalOnProperty` to make it conditional; (3) List the class in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`, one fully-qualified name per line; (4) Do NOT use `@ComponentScan` in the starter — let user applications scan their own packages, and keep the auto-configuration class in a package no consumer scans. Include your auto-configure module as a dependency in the starter POM.
 
 **Q: What is the difference between @PropertySource and spring.config.import?**
 `@PropertySource` is a Java annotation that loads a `.properties` file into the Environment during the configuration class processing phase. It does not work with YAML files and processes at a fixed point in the config loading lifecycle. `spring.config.import` (Spring Boot 2.4+) is a property that loads additional config files or config tree directories, supports YAML, and participates fully in the config priority ordering. `spring.config.import=configserver:` is how Spring Cloud Config Server is imported in Boot 3.x, replacing the bootstrap context approach.
@@ -543,7 +559,7 @@ In lite mode, `dataSource()` creates a second `HikariDataSource` outside the con
 3. **Use `@ConditionalOnMissingBean` in library code** to allow user customization without exclusion.
 4. **Keep `@ComponentScan` narrow** — scan only the packages containing your application classes; broad scanning significantly slows startup.
 5. **Use `@Profile` for environment-specific beans** — avoid `if` statements checking environment in bean code.
-6. **Add `spring-context-indexer`** to compile-time dependencies for large codebases — eliminates runtime classpath scanning entirely.
+6. **Add `spring-context-indexer`** to compile-time dependencies for large codebases — it writes `META-INF/spring.components` at build time so `@ComponentScan` reads a list instead of walking the classpath. It only covers stereotype-annotated types in modules that were compiled with the processor; scanning still happens for any package the index does not cover, so a partially-indexed build gets partial benefit, not zero scanning.
 7. **Use `proxyBeanMethods=false`** on `@Configuration` classes where all `@Bean` methods are independent — reduces startup overhead.
 8. **Validate `@ConfigurationProperties` with `@Validated`** — catch misconfiguration at startup rather than during the first use of the property.
 9. **Use `@AutoConfigureAfter`/`@AutoConfigureBefore`** in auto-configuration to express ordering dependencies.
@@ -641,20 +657,24 @@ class DataSourceConfig {
 }
 ```
 
-**Pitfall 2 — `@Profile` on an inner `@Configuration` ignored when the outer class is already loaded.**
-```java
-// BROKEN: nested config's @Profile evaluated in the outer class's context;
-// if the outer @Configuration is registered, the inner beans load regardless of active profile
-@Configuration
-class Outer {
-    @Configuration @Profile("prod-eu")
-    static class Inner { @Bean EuClient client() { return new EuClient(); } }
-}
+**Pitfall 2 — activating a profile from inside a profile-specific file.**
+```yaml
+# BROKEN: application-prod-eu.yml trying to pull in the shared prod settings.
+# Startup fails outright: InvalidConfigDataPropertyException, "Property
+# 'spring.profiles.include' is invalid in a profile specific resource".
+# The same applies to spring.profiles.active and spring.profiles.default.
+spring:
+  profiles:
+    include: prod-common,metrics
 ```
-```java
-// FIXED: make profile-specific config a top-level class so the profile gate applies to the whole class
-@Configuration @Profile("prod-eu")
-class EuConfig { @Bean EuClient client() { return new EuClient(); } }
+```yaml
+# FIXED: declare the expansion once, in the non-profile-specific application.yml.
+# Activating prod-eu then activates prod-common and metrics with it.
+spring:
+  profiles:
+    group:
+      prod-eu: prod-common,metrics
+      prod-us: prod-common,metrics
 ```
 
 **Pitfall 3 — `@Value` resolved before its `PropertySource` is loaded.**
@@ -760,7 +780,7 @@ public PricingEngine legacyPricingEngine() { return new LegacyPricingEngine(); }
 
 **Additional interview Q&As:**
 
-**What is the difference between @Configuration full mode and lite mode?** A class annotated with `@Configuration` (full mode) is subclassed by CGLIB — inter-`@Bean` method calls are intercepted so that the container returns the same singleton instance each time. A `@Component` or `@Bean` class without `@Configuration` (lite mode) is not proxied — calling one `@Bean` method from another creates a new instance, bypassing the singleton guarantee. Always use `@Configuration` for beans with inter-dependencies; use lite mode (or `@Configuration(proxyBeanMethods = false)`) in Spring Boot 3 for performance when `@Bean` methods are independent.
+**What is the difference between @Configuration full mode and lite mode?** A class annotated with `@Configuration` (full mode) is subclassed by CGLIB — inter-`@Bean` method calls are intercepted so that the container returns the same singleton instance each time. A `@Component` or `@Bean` class without `@Configuration` (lite mode) is not proxied — calling one `@Bean` method from another creates a new instance, bypassing the singleton guarantee. Always use `@Configuration` for beans with inter-dependencies; use lite mode, or the explicit `@Configuration(proxyBeanMethods = false)`, for performance when the `@Bean` methods are independent.
 
 **When should you use @Import vs component scanning?** `@Import` explicitly imports a configuration class — useful for library starters, infrastructure configuration, or test configurations that must not be auto-detected. Component scanning (`@ComponentScan`) discovers all `@Component`-annotated classes in a package — useful for application beans but gives up explicit control. In library code (starters, framework modules), always use `@Import` to avoid polluting application scan paths.
 
