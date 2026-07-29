@@ -236,12 +236,14 @@ flowchart LR
 ```
 ZADD timeline:user123 1700000001000 tweet_abc
 ZADD timeline:user123 1700000002000 tweet_def
-ZREVRANGE timeline:user123 0 19  -- get latest 20 tweets
+ZRANGE timeline:user123 0 19 REV   -- latest 20 tweets
 ```
 
 - Store only last **800 tweet_ids** per user in Redis (trim with ZREMRANGEBYRANK)
-- Memory: 800 tweet_ids * 8 bytes * 300M users = **1.92 TB RAM** (use Redis Cluster)
 - Only maintain timelines for users active in last 7 days (lazy eviction)
+- Raw payload: 800 tweet_ids * 8 bytes * 300M users = **1.92 TB** of *identifier bytes*
+
+That 1.92 TB is the floor, not the estimate, and the gap is large enough to break a capacity plan. A sorted set of 800 members is far past `zset-max-listpack-entries` (default 128), so Redis stores it as a **skiplist plus a hash table**: every member costs a skiplist node, a dict entry, and an `sds` string for the member itself, on the order of **~100 bytes per member** rather than 8. Realistic footprint is therefore **~24 TB**, roughly 12x the raw-bytes figure — and it is why production designs at this scale don't store 800 loose members per user. The standard mitigations, in order of how much they buy: cap the cached window far below 800 for the long tail (most users never scroll past ~50), and store the timeline as a **single packed binary blob** of fixed-width IDs under one key instead of a sorted set, which gets you back near the raw-bytes figure at the cost of doing the ordering and trimming in application code.
 
 ### Cassandra (Persistent Timeline Storage)
 - For users whose Redis cache has expired or for historical scrolling
@@ -263,7 +265,11 @@ CREATE TABLE user_timeline (
 ### Tweet Storage
 
 ### Schema (Cassandra)
+
+Counters need **their own table**. Cassandra forbids mixing them with ordinary columns: "either all the columns of a table outside the `PRIMARY KEY` have the `counter` type, or none of them have it." A single `tweets` table carrying `content TEXT` alongside `like_count COUNTER` is not a style choice — it fails at `CREATE TABLE` time.
+
 ```sql
+-- Immutable tweet body. No counter columns here.
 CREATE TABLE tweets (
     tweet_id    BIGINT PRIMARY KEY,   -- Snowflake ID
     user_id     UUID,
@@ -271,11 +277,19 @@ CREATE TABLE tweets (
     media_url   TEXT,
     reply_to    BIGINT,               -- null if original tweet
     retweet_of  BIGINT,               -- null if original tweet
-    like_count  COUNTER,
-    retweet_count COUNTER,
     created_at  TIMESTAMP
 );
+
+-- Engagement counters, in a counter-only table keyed by the same tweet_id.
+-- One extra read per tweet on hydration, which the timeline cache absorbs.
+CREATE TABLE tweet_counters (
+    tweet_id      BIGINT PRIMARY KEY,
+    like_count    COUNTER,
+    retweet_count COUNTER
+);
 ```
+
+The split costs a second lookup on hydration, and it buys back the properties the mixed table silently gave up: the `tweets` row becomes genuinely immutable (write once, never update — ideal for a cache with an infinite TTL), while the volatile counters live where their very different access pattern belongs. Two other counter restrictions matter here: counters **cannot carry a TTL**, and counter updates are **not idempotent** — a timed-out `UPDATE ... SET like_count = like_count + 1` cannot be safely retried, which is why high-traffic like counts are usually absorbed by an approximate/aggregated counter path rather than one Cassandra increment per click.
 
 ### Why Cassandra for Tweets?
 - Write-heavy workload fits Cassandra's LSM-tree storage
@@ -328,7 +342,7 @@ followers:{user_id}  -> SET of user_ids following this user
 - Useful for "People You May Know" feature
 - Higher operational complexity
 
-**Recommendation**: Redis for hot graph data (fast fanout), backed by Cassandra/MySQL for persistence. For advanced social features (mutual friends, recommendations), use a graph DB or dedicated graph processing (Apache Giraph).
+**Recommendation**: Redis for hot graph data (fast fanout), backed by Cassandra/MySQL for persistence. For advanced social features (mutual friends, recommendations), use a graph DB's built-in algorithm library (e.g., Neo4j Graph Data Science) or batch graph processing on Spark GraphFrames.
 
 ---
 
@@ -506,7 +520,7 @@ flowchart LR
 ### CDN Strategy
 - Cache media at edge nodes close to users
 - Immutable content (once uploaded, media never changes) — set long TTL (1 year)
-- Use content-addressed URLs (hash of content = URL) to prevent cache poisoning
+- Use content-addressed URLs (hash of content = URL) so a given URL maps to exactly one immutable object — re-uploading produces a *new* URL rather than mutating an existing one, which is what makes the 1-year TTL safe (there is no stale-content window and no purge to coordinate across edges)
 
 ---
 
@@ -568,8 +582,8 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 - **Finagle** — Twitter's open-sourced RPC framework (Scala, built on Netty) handles inter-service communication across the hundreds of microservices in the fan-out and timeline-read paths.
 
 **Comparable systems for cross-reference:**
-- **Instagram** faces the same celebrity fan-out problem at similar scale and uses a comparable hybrid push/pull model with Cassandra for the social graph.
-- **LinkedIn's** feed (built on the open-sourced Venice + Voldemort key-value stores) precomputes feeds with a pull fallback for high-follower accounts — the same hybrid idea under a different name.
+- **Instagram** faces the same celebrity fan-out problem at similar scale, and splits its stores along the same seam this design does: sharded **PostgreSQL** holds the structured, strongly-consistent data including the follow graph, while **Cassandra** holds the high-volume eventually-consistent workloads (feeds, activity/notification inboxes). Note the direction — the graph is *not* in Cassandra; the fan-out *output* is.
+- **LinkedIn's** feed is served from **Venice**, its open-sourced derived-data platform, which precomputes and serves the offline-computed candidate sets behind the feed and other ranked surfaces. Venice replaced Voldemort, LinkedIn's earlier Dynamo-style store — all Voldemort read-only use cases were migrated by 2018 and Voldemort is no longer developed, so a design citing it today is citing a dead system.
 - **Facebook's** News Feed moved *away* from pure fan-out-on-write toward a primarily pull/rank-at-read-time model (TAO + aggregator services) as the graph grew — the opposite tradeoff from Twitter's hybrid. "It depends on your read/write ratio and follower-count distribution" is a legitimate, defensible interview answer.
 
 ---
@@ -594,8 +608,10 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 
 ### Multi-Region and Global Deployment
 
+> **Scope note**: everything in §8 describes an **illustrative reference deployment** for a system of this shape — a concrete set of regions, thresholds, TTLs, canary steps and deploy cadences chosen so the mechanics are checkable end to end. Twitter/X has never published its region topology, alerting thresholds, or deploy cadence, so do not read these as disclosed internals of any company. §6 is the section that cites what is actually public.
+
 **Active-Active Architecture**
-- Twitter operates primarily from **us-east-1** and **eu-west** (Dublin), with smaller PoPs in APAC.
+- Two primary regions — call them **us-east** and **eu-west** — plus smaller PoPs in APAC.
 - Both regions serve reads and writes; tweets replicate asynchronously.
 
 **GDPR Data Residency**
@@ -614,7 +630,7 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 
 **Cross-Region Failover**
 - Route 53 health checks every 10s; failover DNS TTL of 60s.
-- Full us-east-1 loss: traffic shifts to us-west and EU within 2-5 minutes.
+- Full us-east loss: traffic shifts to the remaining regions within 2-5 minutes.
 - Recent unreplicated tweets (~5 sec window) may be temporarily invisible until restored from snapshot.
 
 ### Deployment and Alerting
@@ -623,7 +639,7 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 
 | Metric | Threshold | Response |
 |---|---|---|
-| Tweet write p99 latency | > 500ms | Page on-call; check Manhattan + Snowflake |
+| Tweet write p99 latency | > 500ms | Page on-call; check the tweet store + ID generator |
 | Fan-out lag (write -> visible in followers' timelines) | > 30s | Check Kafka backlog, scale workers |
 | Home timeline read p99 | > 200ms | Redis health + Manhattan hydration latency |
 | Earlybird indexing lag | > 60s | Search shows stale results; scale indexers |
@@ -645,8 +661,8 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 
 **On-Call Runbook: Timeline Reads Returning Empty**
 1. Reproduce with a known test account.
-2. Check Redis cluster: `INFO replication` — is the user's shard healthy?
-3. If shard is down: failover to replica (usually automatic via Sentinel).
+2. Check Redis Cluster: `CLUSTER INFO` / `CLUSTER SHARDS` — which shard owns `timeline:{user_id}`'s hash slot, and is it healthy?
+3. If the shard's master is down: Redis Cluster promotes a replica on its own (no Sentinel — see War Story 1); confirm the promotion completed and that clients refreshed their slot map.
 4. If shard is empty (cache lost): trigger rebuild from Manhattan; user sees fallback timeline.
 5. Long-term: enable Redis AOF persistence to avoid full rebuilds.
 
@@ -658,7 +674,7 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 - Earlybird search would migrate to a distributed inverted-index store like Apache Pinot or ClickHouse for sub-second analytical queries.
 
 **Technical Debt**
-- **Legacy Rails monolith remnants**: some admin tooling and internal dashboards still hit a Rails app from 2010. Slow migration to Scala/JVM.
+- **Legacy monolith remnants**: in a system this old, admin tooling and internal dashboards are typically the last things off the original monolith, long after the serving path has been decomposed — a debt item that is invisible to users and therefore never prioritized.
 - **Manhattan's lack of secondary indexes**: forces denormalization everywhere; modern alternative would be FoundationDB or TiKV.
 - **Fan-out heuristic constants** (10K-follower threshold) are hand-tuned; an ML-based dynamic threshold per user behavior would improve efficiency.
 
@@ -671,6 +687,8 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 ---
 
 ## 9. Common Pitfalls & War Stories
+
+> **How to read these**: the five war stories below are **composite, illustrative incidents** — the failure mechanisms (shard-master loss, cold-cache fan-in amplification, celebrity hot partition, cross-DC partition, clock skew in a Snowflake generator) are real and recur in every large fan-out system, but the specific percentages, latencies, TTRs, and follower counts are constructed to make the mechanism concrete. Treat them as archetypes to reason from, not as citable public post-mortems of Twitter/X or any other named company.
 
 ### Pitfall Summary
 
@@ -687,15 +705,15 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 ### War Story 1: Timeline Redis Cluster Master Loss
 **Scenario**: A Redis master holding ~5% of users' precomputed home timelines crashes (process kill, hardware failure, OOM from a hot key).
 
-**Behavior**:
-- Sentinel detects master failure in 10–15 seconds (configurable failover-timeout).
-- A replica is promoted; client libraries (Jedis/Lettuce with Sentinel support) re-resolve the master endpoint.
+**Behavior**: note that this is **Redis Cluster**, which does its own failover — Sentinel is for non-clustered master/replica deployments and is not used with (and does not manage) a Redis Cluster. Reaching for Sentinel here is a common wrong answer:
+- The remaining masters mark the node failed once `cluster-node-timeout` elapses (default 15s) and a majority of masters agree, then a replica of that shard wins an election and is promoted.
+- Clients re-resolve on `MOVED`/`CLUSTERDOWN` — cluster-aware libraries (Lettuce, JedisCluster) refresh their slot map automatically; no separate Sentinel-discovery path exists.
 - Writes that hit the failed master in the gap window are buffered in the fan-out service's local in-memory queue with retry.
-- Stale reads possible during the 30s window: a user might miss a tweet posted right before failover.
+- Stale reads possible during the ~30s window: a user might miss a tweet posted right before failover.
 
 **TTR**: 30–45 seconds for full read/write recovery. Tweet itself is never lost (durable in Manhattan/MySQL); only the precomputed timeline index needs rebuild.
 
-**Mitigation at scale**: Sharded Redis with replication factor 2 (1 master + 2 replicas per shard); failover impacts only ~0.5% of users at any moment.
+**Mitigation at scale**: many small shards rather than a few large ones — with ~200 shards, one master loss affects ~0.5% of users instead of the 5% above — each with 2 replicas (3 copies total), so a single failure never leaves a shard replica-less mid-failover.
 
 ### War Story 2: Timeline Cache Cold Start (Thundering Herd)
 **Scenario**: Entire Redis tier restarted after a config change or OS patch. All ~300M home timeline caches are empty. Each user login triggers a full fan-out reconstruction.
@@ -703,8 +721,8 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 **Cost of rebuild per user**: Fetch latest 800 tweets from followees (avg 200 followees × 4 recent tweets each via Manhattan) → ~10ms per user.
 
 **Behavior without mitigation**:
-- 1M users/sec attempt to load home timelines.
-- Each triggers a Manhattan read storm: 1M × 200 = 200M reads/sec → 6× normal load → Manhattan latency explodes → cascading failure.
+- 1M users/sec attempt to load home timelines (§10's peak read rate).
+- Each triggers a Manhattan read storm: 1M × 200 = 200M reads/sec. Normal steady-state hydration load is 6M reads/sec (§10), so this is roughly **33× normal load** → Manhattan latency explodes → cascading failure. The multiplier is the whole point: a cold cache doesn't cost you the cache's own traffic, it costs you the *fan-in* the cache was built to eliminate (200 followee reads per timeline instead of 20 hydration reads).
 
 **Mitigation**:
 - **Warm-up procedure**: Pre-rebuild timelines for top 10% most-active users *before* restoring traffic (1 hour batch job using Hadoop/Spark).
@@ -752,17 +770,19 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 
 ## 10. Capacity Planning
 
+> **Basis note — read this before comparing any number here to §2.** This section sizes the **5x envelope**: 500M tweets/day, not §2's 100M. It also uses a larger per-tweet record — ~1KB, versus §2's ~500 bytes — because §2 counts only the core fields (text plus `user_id`/timestamps/counters) while the stored record here also carries the denormalized entity and index fields (mentions, hashtags, media refs, per-row overhead) that a wide-column row actually pays for. Every figure below is internally consistent on *that* basis. Where a §2 number is referenced directly it is labelled as such.
+
 ### Tweet Storage
-- **500M tweets/day** × 280 chars (~ 1KB after metadata: user_id, timestamp, mentions, hashtags, media refs) = **500 GB/day** raw.
+- **500M tweets/day** × ~1KB per stored record (§2's ~500-byte core fields plus denormalized mentions, hashtags, media refs and row overhead) = **500 GB/day** raw.
 - With RF=3 replication: **1.5 TB/day**.
 - Annual: 500 GB × 365 = **~180 TB/year** raw, **~540 TB/year** replicated.
 - 10-year retention: **~5.4 PB**.
 - Manhattan compression (LZ4 ~2×): **~2.7 PB** physical.
 
 ### Read Throughput
-- **300K reads/sec** average; 1M reads/sec peak.
-- Each timeline read = 1 Redis GET (3 ms p99) + 20 Manhattan reads for tweet content (hydration).
-- Redis fleet: 300K req/sec / 100K req/sec/node = **3 Redis nodes** for timeline indices, plus replicas → ~20 nodes for HA.
+- **300K home-timeline loads/sec** average; 1M/sec peak. This is deliberately *not* §2's 1.2M reads/sec — that figure is total API read QPS across every read surface (tweet detail, profiles, search, media, embeds). A home-timeline load is one specific, expensive request shape, and it is the only one that drives the fleet sizing below. Sanity check: 300K/sec × 86,400 ≈ 26B timeline loads/day, about 86 per DAU per day, which is the right order for a pull-to-refresh product.
+- Each timeline read = 1 Redis lookup (3 ms p99) + 20 Manhattan reads for tweet content (hydration).
+- Redis fleet: **memory-bound, not QPS-bound.** At 300K req/sec and ~100K req/sec/node, throughput alone would suggest 3 nodes — but 3 nodes cannot hold the data. Taking §4's packed-blob timeline representation (~1.9 TB resident) at 3 copies per shard and ~100 GB usable per node, that is **~60 nodes**, and the sorted-set representation would need an order of magnitude more (~24 TB resident). Size this fleet to hold the working set first, then confirm the resulting node count clears the QPS requirement — never the reverse.
 - Manhattan fleet: 300K × 20 = **6M reads/sec** hydration → ~200 Manhattan nodes.
 
 ### Fan-Out Cost
@@ -778,14 +798,14 @@ Twitter/X's actual production stack (from public engineering blog posts and conf
 - Earlybird hot tier holds 7 days of tweets in memory: 7 × 500GB = **3.5 TB RAM** spread across shards.
 
 ### Media Storage
-- 25% of tweets have media: 125M media uploads/day.
-- Avg size 500KB (mostly images, some video) = **62.5 TB/day** ingest.
-- Annual: ~23 PB; long-term archived to cold storage at ~$0.005/GB-month.
+- Same media mix as §2 (~10% of tweets carry an image at ~1 MB, ~2% a video at ~5 MB), applied to 500M tweets/day: 50M images + 10M videos = **60M media uploads/day**.
+- 50M × 1 MB + 10M × 5 MB = **100 TB/day** ingest (a ~1.7 MB blended average, not a 500 KB one — video is 2% of uploads but half the bytes, which is exactly why a single "average media size" is a misleading input).
+- Annual: **~36 PB**; long-term archived to cold storage at ~$0.005/GB-month.
 
 ### Cost Envelope
-- Manhattan (~200 nodes), Redis (~20), Earlybird (~50), fan-out workers (~120), GQL/REST API tier (~500), edge cache (~100) ≈ **~1000 nodes** at $25K/year fully loaded = **$25M/year compute**.
-- Bandwidth egress: ~3 PB/day client traffic at $0.01/GB blended (heavy CDN offload) = **~$110M/year**.
-- Media storage (hot + cold): ~$15M/year.
+- Manhattan (~200 nodes), Redis (~60), Earlybird (~50), fan-out workers (~120), GQL/REST API tier (~500), edge cache (~100) ≈ **~1,000 nodes** at $25K/year fully loaded = **~$25M/year compute**.
+- Bandwidth egress: ~3 PB/day client traffic at $0.01/GB blended (heavy CDN offload, committed-volume pricing) = 3,000,000 GB × $0.01 = **$30K/day ≈ ~$11M/year**. Sanity-check this one against the rate you assumed: at undiscounted list CDN pricing (~$0.085/GB) the same traffic is ~$93M/year, so the blended rate is doing almost all of the work in this line item — it is the single number most worth negotiating and least worth guessing.
+- Media storage (hot + cold): ~$15M/year at the ~36 PB/year ingest above.
 
 ---
 

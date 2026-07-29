@@ -340,9 +340,24 @@ public class LedgerService {
             throw new IllegalArgumentException("amount must be positive");
         }
 
-        // Debit the source account. Row lock acquired implicitly by the
-        // UPDATE; the WHERE clause makes "check balance" and "acquire lock
-        // and decrement" a SINGLE atomic statement.
+        // Acquire BOTH row locks in a fixed global order (lower account_id
+        // first) BEFORE touching either balance. Without this, transfer(A->B)
+        // locks A then B while a concurrent transfer(B->A) locks B then A, and
+        // the pair deadlocks. Ordering is the whole fix; see the note below.
+        for (long id : new long[]{ Math.min(fromAccount, toAccount),
+                                   Math.max(fromAccount, toAccount) }) {
+            Integer found = jdbc.query("""
+                SELECT 1 FROM accounts
+                WHERE account_id = ? AND currency = ? FOR UPDATE
+                """, rs -> rs.next() ? 1 : null, id, currency);
+            if (found == null) {
+                throw new NoSuchAccountException(id, currency);
+            }
+        }
+
+        // Debit the source account. The WHERE clause makes "check balance"
+        // and "decrement" a SINGLE atomic statement even though the row is
+        // already locked, so the guard cannot be skipped by a caller.
         int debited = jdbc.update("""
             UPDATE accounts
             SET balance_minor = balance_minor - ?, version = version + 1
@@ -350,8 +365,7 @@ public class LedgerService {
             """, amountMinor, fromAccount, currency, amountMinor);
 
         if (debited == 0) {
-            // Either insufficient funds, or the account/currency doesn't
-            // exist. Either way, ROLL BACK — no partial transfer.
+            // Insufficient funds. ROLL BACK — no partial transfer.
             throw new InsufficientFundsException(fromAccount, amountMinor, currency);
         }
 
@@ -359,11 +373,18 @@ public class LedgerService {
         // the non-negative CHECK above (it represents "money owed to us by the
         // PSP" and legitimately swings negative between capture and payout);
         // every other account type, PLATFORM_FEES included, must stay >= 0.
-        jdbc.update("""
+        int credited = jdbc.update("""
             UPDATE accounts
             SET balance_minor = balance_minor + ?, version = version + 1
             WHERE account_id = ? AND currency = ?
             """, amountMinor, toAccount, currency);
+
+        if (credited != 1) {
+            // A debit with no matching credit DESTROYS money and breaks the
+            // global sum-to-zero invariant (§8's P0). Never let this commit.
+            throw new IllegalStateException(
+                    "credit affected " + credited + " rows for account " + toAccount);
+        }
 
         // Write the matching debit/credit ledger entries. Both rows share
         // transaction_id and SUM TO ZERO -- this pair is the audit record.
@@ -382,7 +403,16 @@ public class LedgerService {
 }
 ```
 
-A note on lock ordering: when a transfer involves *two* row-level updates (debit + credit), always acquire locks in a **consistent global order** (e.g., always lock the lower `account_id` first) to avoid deadlocks between two concurrent transfers that touch the same pair of accounts in opposite directions. At 580 TPS peak with a small number of hot accounts (e.g., the platform's own fee-collection account is touched by *every* transaction), this is not a theoretical concern — it is the most common source of deadlock-retry storms in a ledger service.
+A note on lock ordering: because a transfer involves *two* row-level updates (debit + credit), the locks must be acquired in a **consistent global order** — which is why `transfer()` above takes both `FOR UPDATE` locks by ascending `account_id` *before* it touches either balance, rather than letting the debit and credit statements grab locks in caller-supplied order. Without that, `transfer(A -> B)` locks A then B while a concurrent `transfer(B -> A)` locks B then A, and the two deadlock; Postgres resolves it by killing one transaction, so the symptom is a burst of `deadlock detected` errors and retry storms rather than corruption. At 580 TPS peak with a small number of hot accounts (e.g., the platform's own fee-collection account is touched by *every* transaction), this is not a theoretical concern — it is the most common source of deadlock-retry storms in a ledger service.
+
+**Cross-currency transfers and the FX bridge** (the §1 multi-currency requirement): `transfer()` deliberately refuses to move money between two different currencies — every statement carries `AND currency = ?`, and there is no exchange rate anywhere in it. That is not an omission, it is the rule: **a single ledger entry pair never spans two currencies**, because a USD debit and a EUR credit cannot sum to zero and would break the global invariant (§8) by construction. A cross-currency payout (customer paid in USD, merchant settles in EUR) is therefore modelled as **two same-currency transfers bridged by a pair of FX position accounts**, one per currency, plus one entry that books the rounding residual:
+
+1. `transfer(txnA, MERCHANT_PAYABLE_USD -> FX_POSITION_USD, 10_000, "USD")` — the merchant's USD balance leaves the USD book. Balanced in USD.
+2. Capture the rate **once**, at execution, as an integer-safe scaled value (e.g., `rate_ppm = 921_450` for 0.92145 EUR per USD) and store it on the payout row. Never re-derive it later; a payout re-read a day after execution must reproduce the same numbers.
+3. Convert with integer arithmetic and an explicit rounding rule: `eurMinor = Math.floorDiv(usdMinor * rate_ppm, 1_000_000)` — floor, not round-half-up, so the platform can never credit a cent it does not hold. Here `10_000 * 921_450 / 1_000_000 = 9,214` EUR cents (the exact product is 9,214.50, and the half-cent is dropped).
+4. `transfer(txnB, FX_POSITION_EUR -> MERCHANT_PAYABLE_EUR, 9_214, "EUR")` — balanced in EUR.
+
+The two legs share a `payout_id` so the pair is auditable as one business event, but they are two independent, individually-balanced transactions. **The FX position accounts are where the platform's currency exposure becomes visible**: after the pair, `FX_POSITION_USD` is long $100 and `FX_POSITION_EUR` is short EUR 92.14, and treasury closes that position with a real market trade booked as its own ledger transaction (the "customer-facing transaction vs. treasury operation" separation §6 describes for Uber). The dropped half-cent is not silently lost either — it accumulates in `FX_POSITION_EUR` as a rounding residual and is swept periodically into an `FX_ROUNDING_GAIN` account, which is exactly why the ledger still sums to zero even though `10_000` USD-cents did not convert to a whole number of EUR-cents. Each currency's books balance independently; the reconciliation job (§4.5) therefore runs its sum-to-zero check **per currency**, never across the combined ledger.
 
 ### 4.3 Saga for the Multi-Step Charge Flow
 
@@ -478,9 +508,15 @@ public class OutboxRelay {
     private final KafkaTemplate<String, String> kafka;
 
     @Scheduled(fixedDelay = 100)  // ~10 polls/sec when not using CDC
+    @Transactional                // REQUIRED: FOR UPDATE SKIP LOCKED only
+                                  // holds a lock for the life of a transaction.
+                                  // In autocommit mode the lock is released the
+                                  // instant the SELECT returns, so two relay
+                                  // instances would both claim the same rows
+                                  // and publish every event twice per poll.
     public void relay() {
         List<OutboxRow> rows = jdbc.query("""
-            SELECT id, event_type, payload FROM outbox
+            SELECT id, aggregate_id, event_type, payload FROM outbox
             WHERE published_at IS NULL
             ORDER BY id LIMIT 100
             FOR UPDATE SKIP LOCKED
@@ -491,7 +527,8 @@ public class OutboxRelay {
                  .join();  // wait for broker ack before marking published
             jdbc.update("UPDATE outbox SET published_at = now() WHERE id = ?", row.id());
         }
-        // If the process crashes between kafka.send() and the UPDATE, the
+        // If the process crashes between kafka.send() and the COMMIT of this
+        // method's transaction, the "published_at" UPDATE rolls back and the
         // row is republished on restart -> consumers see the event TWICE.
         // This is why downstream consumers (Order Service, Notification
         // Service) MUST be idempotent on (aggregate_id, event_type) --
@@ -631,7 +668,7 @@ public class PspWebhookController {
 
 - **Stripe's `Idempotency-Key`**: Stripe's API documents this exact pattern from §4.1 — every `POST` request accepts an `Idempotency-Key` header (up to 255 characters; `GET`/`DELETE` are already idempotent and ignore it), Stripe saves the status code and body of the *first* request under that key and retains it for **at least 24 hours** (after which keys become eligible for automatic removal), and a repeated key within that window returns the *original* response — including `500`s — without re-executing the operation. Stripe explicitly recommends a V4 UUID (or another random string with enough entropy) generated *once per logical operation*, not per HTTP attempt — precisely the client-side contract described in §4.1. This is the most copy-pasted idempotency design in the industry and the reference point interviewers expect.
 
-- **Square's ledger-centric architecture ("Books")**: Square published its internal double-entry accounting service, [Books](https://developer.squareup.com/blog/books-an-immutable-double-entry-accounting-database-service/) (Square Developer Blog, 2019), as an **immutable** double-entry accounting database — built on Google Spanner for cross-shard ACID — that is the system of record for seller balances, fees, and payouts. Its stated design principles are the ones in §4.2: entries are never deleted or overwritten, corrections are new entries, and a balance is *derived* from the entries rather than stored as a mutable column. This mirrors §4.2's "balance is derived, ledger is truth" design exactly.
+- **Square's ledger-centric architecture ("Books")**: Square published its internal double-entry accounting service, [Books](https://developer.squareup.com/blog/books-an-immutable-double-entry-accounting-database-service/) (Square Developer Blog, October 2019), as an **immutable** double-entry accounting database — built on Google Cloud Spanner for cross-shard ACID — that is the system of record for seller balances, fees, and payouts. Its entry tables are strictly append-only ("there are no update statements for the tables presented on the diagram, only inserts"), corrections are new entries, and every transaction must balance to zero — exactly §4.2's ledger-is-truth rule. Note what Books does **not** do, because it is the more instructive half: it keeps a **mutable current-balance column** on the `books` table, updated on every operation, rather than deriving the balance by summing entries — precisely to avoid "an expensive group-by aggregate for each merchant" on the payout path. That is the same split §4.2's schema makes with `accounts.balance_minor`: the immutable entries are the source of truth, and the balance column is a materialized aggregate maintained in the *same* transaction as the entries, provably reconstructable from them but never re-derived on the hot path.
 
 - **Uber's multi-currency driver/rider payment platform**: Uber operates in 70+ countries with dozens of currencies and local payment methods (cash, cards, digital wallets, and region-specific rails like Paytm in India or Alipay in China). Uber's payments platform abstracts "charge the rider" and "pay the driver" behind a currency-aware ledger so that a trip priced in INR, paid by a rider's card in INR, and paid out to a driver's bank account in INR all settle through the same internal accounting primitives — while Uber's own corporate treasury operations (moving money between countries, FX conversion) happen as *separate*, clearly-labeled ledger transactions, never silently folded into a trip's transaction record. This separation — "the customer-facing transaction" vs. "the treasury/FX operations behind it" — is the multi-currency analog of §4.2's debit/credit separation.
 
@@ -664,7 +701,7 @@ public class PspWebhookController {
 | Payment success rate | `succeeded / (succeeded + failed)` over a rolling 5-min window | Drop > 5 percentage points from 7-day baseline -> page |
 | PSP p99 latency | Time from "send auth request" to "receive response" | > 2s sustained for 5 min -> warn; > 5s -> page (approaching client timeout) |
 | Reconciliation discrepancy count | Output of the nightly job (§4.5) | > 0 -> alert finance team same-day; > 10 or > $100 total -> page on-call |
-| Ledger global balance check | `SUM(debits) - SUM(credits)` across all `ledger_entries` | **Any non-zero value -> CRITICAL, page immediately** (§ below) |
+| Ledger global balance check | `SUM(debits) - SUM(credits)` over `ledger_entries`, **grouped by currency** (§4.2 — a cross-currency sum is meaningless) | **Any non-zero value -> CRITICAL, page immediately** (§ below) |
 | Outbox lag (unpublished rows, oldest age) | Health of the outbox relay (§4.4) | Oldest unpublished row > 60s old -> warn; > 5 min -> page |
 | Idempotency-key cache hit rate on retries | Are retries actually being deduped? | Sustained drop -> investigate Redis health (fail-open risk, §9) |
 | Webhook signature verification failure rate | Possible forged-webhook attack, or a rotated secret not yet propagated | > 1% of webhook requests -> page |

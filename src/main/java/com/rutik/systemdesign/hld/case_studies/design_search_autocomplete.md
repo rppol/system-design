@@ -53,12 +53,15 @@ This is the number that drives everything else in this design: **500K QPS at <10
   - **~50 bytes** for the node itself (character, child-pointer map/array, frequency counter, bookkeeping).
   - Plus a cached **top-10 completions list**, each entry ~20 bytes (a compact reference to a query string + a frequency score) -> **~200 bytes**.
   - **Total per node: ~250 bytes**.
-- 5M nodes (one per unique prefix/query path through the trie, conservatively treating each tracked query as roughly contributing one "interesting" node) * 250 bytes = **~1.25 GB**.
+- 5M nodes * 250 bytes = **~1.25 GB** for the **packed, serialized snapshot** — the artifact §4.3 actually builds and ships, where the structure is a compressed radix trie (edges carry whole substrings, so branch-node count is O(unique queries), not O(total prefix characters)) laid out in flat arrays.
+- **Be precise about what that 1.25GB is not.** §4.1's teaching implementation is an *uncompressed character* trie with a `HashMap<Character, TrieNode>` per node. Over 5M queries averaging ~15 characters, that structure has tens of millions of distinct prefix nodes, and each one carries a Java `HashMap` plus object headers — a naive object-graph build lands an order of magnitude above the packed figure. That is precisely why the pipeline (§4.3) **builds on a separate host and ships a packed snapshot** rather than shipping a live object graph: the packed form is what has to fit on every replica, and only it does so at ~1.25GB.
+
+Either way the architectural conclusion is unchanged, which is the point worth carrying into an interview: both figures sit far below the low-tens-of-GB replication ceiling §4.6 identifies, so full replication wins in both cases.
 
 > **This single number — ~1.25GB — is the architectural pivot of the whole design.** A data structure that's ~1.25GB:
 > - Fits comfortably in the RAM of a single commodity server (even a modest instance has 16-64GB RAM).
 > - Can be **fully replicated** on every read replica in the fleet, rather than sharded.
-> - Can be rebuilt from scratch and shipped to every replica every ~10 minutes without straining network bandwidth (1.25GB to, say, 25 replicas every 10 minutes = ~3.1GB/min aggregate transfer — trivial for a modern data center network).
+> - Can be rebuilt from scratch and shipped to every replica every ~10 minutes without straining network bandwidth (1.25GB to the ~35 replicas of §10, every 10 minutes = ~44GB/cycle, ~4.4GB/min aggregate transfer — trivial for a modern data center network).
 >
 > Compare this to a system where the index is, say, 5TB — there, replicating the full index everywhere would be absurd, and sharding by prefix range (with the attendant hot-shard problems discussed in §4.2 and §9 War Story 4) becomes unavoidable. The entire shape of this design follows from the index being small enough to replicate.
 
@@ -344,8 +347,8 @@ Given the ~1.25GB trie size from §2, the design choice is: **every Typeahead Se
 - Replica failure is trivial to handle: any healthy replica is a complete substitute for any other.
 
 **What it costs us:**
-- Every rebuild (§4.3) must push a new ~1.25GB snapshot to **every** replica, not just one shard's worth of replicas. At, say, 25 replicas (see §10), that's ~31GB of data movement every 10 minutes — easily handled by a modern data-center network (a single 10Gbps link moves 1.25GB in ~1 second), but it is a cost that scales linearly with replica count, which matters when planning for 10x growth.
-- Memory cost is "wasted" in the sense that 25 replicas each hold the same 1.25GB — but at ~1.25GB per node, this is a rounding error compared to the memory most services already allocate for connection pools, JIT-compiled code, JVM heap overhead, etc.
+- Every rebuild (§4.3) must push a new ~1.25GB snapshot to **every** replica, not just one shard's worth of replicas. At the ~35 replicas §10 sizes for peak, that's ~44GB of data movement every 10 minutes — easily handled by a modern data-center network (a single 10Gbps link moves 1.25GB in ~1 second), but it is a cost that scales linearly with replica count, which matters when planning for 10x growth.
+- Memory cost is "wasted" in the sense that 35 replicas each hold the same 1.25GB — but at ~1.25GB per node, this is a rounding error compared to the memory most services already allocate for connection pools, JIT-compiled code, JVM heap overhead, etc.
 
 **The alternative — sharding by prefix — and why it's worse here:**
 
@@ -467,6 +470,7 @@ Because the personal history list is small (10-20 entries per user) and the pref
 **The fix is scatter-gather**: broadcast every `getTopK(prefix)` request to *all* shards in parallel, let each shard return its own local top-K candidates for that prefix (computed via the same precomputed-trie mechanism from §4.1, just over its slice of the corpus), and merge the per-shard results into a single global top-K using a small bounded min-heap — structurally the same heap-eviction pattern as `TrieNode.offerCandidate` (§4.1), just applied across shard responses instead of across a single trie's children:
 
 ```java
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
 
@@ -503,6 +507,13 @@ public class ShardedAutocompleteClient {
             futures.add(executor.submit(() -> shard.getTopK(prefix, topK)));
         }
 
+        // ONE absolute deadline for the whole fan-out, not 30ms per future.
+        // Calling future.get(30, MILLISECONDS) in a loop restarts the clock on
+        // every iteration, so N slow shards cost N x 30ms of wall time -- at
+        // N=32 that is ~960ms, an order of magnitude past the <100ms p99
+        // budget the timeout exists to protect.
+        long deadlineNanos = System.nanoTime() + SHARD_BUDGET.toNanos();
+
         PriorityQueue<ScoredSuggestion> merged = new PriorityQueue<>(
                 Comparator.comparingLong(s -> s.frequency)
         );
@@ -511,7 +522,7 @@ public class ShardedAutocompleteClient {
             // A slow or failed shard contributes an empty list rather than
             // failing the whole request -- partial results beat none, per
             // the "must degrade gracefully" NFR in section 1.
-            for (ScoredSuggestion candidate : safeGet(future)) {
+            for (ScoredSuggestion candidate : safeGet(future, deadlineNanos)) {
                 if (merged.size() < topK) {
                     merged.offer(candidate);
                 } else if (merged.peek() != null
@@ -527,10 +538,19 @@ public class ShardedAutocompleteClient {
         return result;
     }
 
-    private List<ScoredSuggestion> safeGet(Future<List<ScoredSuggestion>> future) {
+    private static final Duration SHARD_BUDGET = Duration.ofMillis(30);
+
+    private List<ScoredSuggestion> safeGet(Future<List<ScoredSuggestion>> future,
+                                            long deadlineNanos) {
+        long remaining = deadlineNanos - System.nanoTime();
+        if (remaining <= 0) {
+            future.cancel(true);   // budget already spent -- don't wait at all
+            return Collections.emptyList();
+        }
         try {
-            return future.get(30, TimeUnit.MILLISECONDS);
+            return future.get(remaining, TimeUnit.NANOSECONDS);
         } catch (Exception timeoutOrError) {
+            future.cancel(true);
             return Collections.emptyList();
         }
     }
@@ -555,7 +575,7 @@ sequenceDiagram
     TS->>S1: getTopK(prefix)
     TS->>S2: getTopK(prefix)
     TS->>SN: getTopK(prefix)
-    Note over TS,SN: 30ms per-shard timeout
+    Note over TS,SN: one 30ms deadline for the<br/>whole fan-out, not per shard
     S1-->>TS: local top-K (or empty on timeout)
     S2-->>TS: local top-K (or empty on timeout)
     SN-->>TS: local top-K (or empty on timeout)
@@ -563,9 +583,9 @@ sequenceDiagram
     TS->>TS: return global top-K
 ```
 
-Every request broadcasts to all N shards in parallel; a shard that misses its 30ms budget contributes nothing rather than blocking the merge, and the surviving results are combined with the same bounded min-heap eviction pattern as `TrieNode.offerCandidate` (§4.1).
+Every request broadcasts to all N shards in parallel against a **single 30ms deadline shared by the whole fan-out**; any shard still outstanding when that deadline passes contributes nothing rather than blocking the merge, and the surviving results are combined with the same bounded min-heap eviction pattern as `TrieNode.offerCandidate` (§4.1). The shared deadline is the load-bearing detail: a per-shard 30ms timeout applied in a collection loop would let N slow shards cost N x 30ms of wall time, which is the timeout failing at exactly the moment it is needed.
 
-**What this costs, relative to §4.2's design**: (1) every request now fans out to N shards instead of hitting one replica — tail latency becomes `max()` over N parallel RPCs rather than a single in-process trie walk, which is why each per-shard call gets an aggressive 30ms timeout (well inside the <100ms p99 budget) and a missing/slow shard simply contributes nothing rather than blocking the merge; (2) the merge step itself is `O(N * topK log topK)` — for N=16-32 shards and topK=10, that's a few hundred heap operations per request, still cheap relative to the network round-trips; (3) operationally, this reintroduces a real shard count to manage (rebalancing, hot-shard monitoring) that §4.2 deliberately avoided. **The decision rule**: stay on §4.2's fully-replicated design as long as the trie fits comfortably in replica memory (low tens of GB is a reasonable practical ceiling); cross over to this scatter-gather design only when corpus growth genuinely forces it, since it trades a strictly simpler, lower-latency architecture for one that scales further.
+**What this costs, relative to §4.2's design**: (1) every request now fans out to N shards instead of hitting one replica — tail latency becomes `max()` over N parallel RPCs rather than a single in-process trie walk, which is why the fan-out runs against one aggressive 30ms deadline (well inside the <100ms p99 budget) and a missing/slow shard simply contributes nothing rather than blocking the merge; (2) the merge step itself is `O(N * topK log topK)` — for N=16-32 shards and topK=10, that's a few hundred heap operations per request, still cheap relative to the network round-trips; (3) operationally, this reintroduces a real shard count to manage (rebalancing, hot-shard monitoring) that §4.2 deliberately avoided. **The decision rule**: stay on §4.2's fully-replicated design as long as the trie fits comfortably in replica memory (low tens of GB is a reasonable practical ceiling); cross over to this scatter-gather design only when corpus growth genuinely forces it, since it trades a strictly simpler, lower-latency architecture for one that scales further.
 
 ```mermaid
 flowchart LR
@@ -770,7 +790,7 @@ public class SegmentingTokenizer implements LocaleTokenizer {
 
 ## 6. Real-World Implementations
 
-- **Google Search autocomplete**: Operates at a scale far beyond this design's baseline (Google handles on the order of tens of billions of searches per day globally, with autocomplete requests at a correspondingly higher multiple). Google's autocomplete is heavily **personalized** — incorporating a signed-in user's search history, location, and even time of day — and applies a **safe-search / content-policy filter** to the suggestion list *before* it's returned, specifically to avoid surfacing offensive, hateful, or otherwise policy-violating completions even if they are technically "popular" by raw query volume. This filtering step is a mandatory post-processing stage on top of whatever ranking produces the raw top-K (directly relevant to §11's question on filtering).
+- **Google Search autocomplete**: Operates at a scale far beyond this design's baseline — Google disclosed in 2024 that it handles **more than 5 trillion searches a year**, roughly **14 billion/day**, or about 14x the 1B/day baseline in §2, with autocomplete requests at a correspondingly higher multiple. Google's autocomplete is heavily **personalized** — incorporating a signed-in user's search history, location, and even time of day — and applies a **safe-search / content-policy filter** to the suggestion list *before* it's returned, specifically to avoid surfacing offensive, hateful, or otherwise policy-violating completions even if they are technically "popular" by raw query volume. This filtering step is a mandatory post-processing stage on top of whatever ranking produces the raw top-K (directly relevant to §11's question on filtering).
 - **Elasticsearch Completion Suggester**: A widely-used off-the-shelf alternative to a hand-rolled trie, built on a **Finite State Transducer (FST)** — a compressed, trie-like automaton that maps input strings (prefixes) to weighted outputs (suggestions) in a highly memory-efficient serialized form. An FST achieves much of what §4.1's `AutocompleteTrie` does (fast prefix-walk to a precomputed/weighted result set) but with significantly better memory density for large vocabularies, because shared suffixes across many entries are merged in the automaton rather than duplicated. The Completion Suggester is extremely popular for **e-commerce search bars** (product name/SKU autocomplete), where the corpus is the product catalog (often millions of SKUs with rich metadata) rather than a query log.
 - **Amazon's search bar**: A canonical example of **business-driven ranking** layered on top of pure popularity. Amazon's autocomplete doesn't just surface the most-searched-for completions — it weights suggestions toward products that are **currently in stock** (suggesting an out-of-stock item's exact query just to show "Currently unavailable" on the results page is a poor experience and a lost-sale signal) and toward **higher-margin or sponsored items** (autocomplete suggestions are themselves a monetizable surface, similar to sponsored search results). This illustrates that the "top-K by frequency" model in §4.1 is the *starting point*, not the end state — production ranking functions blend frequency with business signals (inventory, margin, promotions, personalization) in a weighted scoring function evaluated at trie-build time (so the *precomputed* top-K already reflects these business weights, keeping the online path just as fast).
 
@@ -790,7 +810,7 @@ public class SegmentingTokenizer implements LocaleTokenizer {
 | Query-log stream | Kafka | Durable, high-throughput, multi-consumer log — both the 10-minute aggregator and the 1-minute trending detector read from the same topic independently |
 | Offline aggregation / trie build | Spark or Flink | Batch (Spark) or streaming-batch-hybrid (Flink) processing of the query-log stream into per-prefix frequency counts, every ~10 minutes |
 | Trending detection | Flink (streaming) or a lightweight custom stream processor | ~1-minute sliding-window aggregation with baseline comparison; lower latency requirement than the full rebuild, so a leaner/faster pipeline than the Spark-based aggregator |
-| Snapshot distribution | Blob store (e.g., S3-compatible) + pull, or push-based fan-out | Distributing a ~1.25GB trie snapshot to ~25+ replicas every 10 minutes (§4.3, §10) |
+| Snapshot distribution | Blob store (e.g., S3-compatible) + pull, or push-based fan-out | Distributing a ~1.25GB trie snapshot to the ~35 replicas of §10 every 10 minutes (§4.3) |
 
 ---
 
@@ -838,6 +858,8 @@ public class SegmentingTokenizer implements LocaleTokenizer {
 ---
 
 ## 9. Common Pitfalls & War Stories
+
+> **How to read these**: the five war stories below are **composite, illustrative incidents** — the failure mechanisms (build-time memory doubling, rebuild-cadence staleness, synchronized cache expiry, first-letter shard skew, an uncooperative client) are real and recur across autocomplete systems, but the specific percentages, latencies, replica counts, and durations are constructed to make the mechanism concrete. Treat them as archetypes to reason from, not as citable public post-mortems of any named company.
 
 ### War Story 1: Trie Rebuild Memory Spike (Broken -> Fixed)
 
@@ -910,8 +932,8 @@ Building on §4.7's regional topology, the ~35-replica fleet is distributed acro
 | Region | Share of Peak Traffic | Replicas (of ~35) | Notes |
 |---|---|---|---|
 | us-east (aggregator region) | ~35% | ~12 | Receives new snapshots first (§4.3) — zero cross-region replication lag |
-| us-west | ~25% | ~9 | ~10-20ms additional snapshot-distribution lag vs. us-east |
-| eu-west | ~25% | ~9 | ~60-100ms transoceanic snapshot-distribution lag; local Trending Detector (§4.7) compensates for regional spikes despite the added base-trie staleness |
+| us-west | ~25% | ~9 | a few extra seconds of snapshot-distribution lag vs. us-east (~10-20ms of added RTT, but the lag that matters is transfer time for a 1.25GB payload, not RTT) |
+| eu-west | ~25% | ~9 | **tens of seconds** of transoceanic snapshot-distribution lag for the same 1.25GB payload (§4.7); local Trending Detector (§4.7) compensates for regional spikes despite the added base-trie staleness |
 | ap-south | ~15% | ~5 | Smallest regional pool — monitor closely for headroom during regional traffic-pattern shifts (e.g., a regional holiday) |
 
 **Cross-region snapshot distribution cost**: pushing a ~1.25GB snapshot to 3 remote regions every ~10 minutes adds roughly `3 * 1.25GB = 3.75GB` of inter-region egress per cycle, or **~540GB/day** — a real but modest line item next to the regional serving infrastructure itself, and the kind of "hidden cost of going global" detail that distinguishes a single-region answer from a multi-region one in an interview.

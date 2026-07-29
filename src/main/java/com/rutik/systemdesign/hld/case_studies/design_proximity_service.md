@@ -202,8 +202,10 @@ public class GeoRangeQuery {
         return result;
     }
 
-    /** Pick the coarsest precision whose cell size is still >= 2x the radius,
-     *  so the 9-cell block fully covers the search circle. */
+    /** Pick the FINEST precision whose cell size is still >= 2x the radius:
+     *  scan from coarse to fine, stop at the first precision that is too
+     *  small, and step back one. Cell >= 2r is what makes the 9-cell block
+     *  fully cover the search circle. */
     private int choosePrecision(double radiusMeters) {
         for (int precision = 1; precision <= 9; precision++) {
             if (CELL_SIZE_METERS[precision - 1] <= radiusMeters * 2) {
@@ -258,12 +260,16 @@ Redis stores geo-coordinates as a 52-bit interleaved geohash inside a sorted set
 GEOADD businesses -122.4194 37.7749 "biz:sf_cafe_1"
 GEOADD businesses -122.4180 37.7755 "biz:sf_cafe_2"
 
-# Find all businesses within 2km of a point, sorted by distance, max 50 results
-GEOSEARCH businesses FROMLONLAT -122.4190 37.7750 BYRADIUS 2 km ASC COUNT 50
+# Find all businesses within 2km of a point, sorted by distance, max 50 results.
+# WITHDIST is required to get the distances back -- without it the reply is a
+# flat array of member names only.
+GEOSEARCH businesses FROMLONLAT -122.4190 37.7750 BYRADIUS 2 km ASC COUNT 50 WITHDIST
 
-# Response includes distances:
-# 1) "biz:sf_cafe_1"  0.0623
-# 2) "biz:sf_cafe_2"  0.0891
+# Response, distances in the unit given above (km):
+# 1) 1) "biz:sf_cafe_1"
+#    2) "0.0369"
+# 2) 1) "biz:sf_cafe_2"
+#    2) "0.1042"
 ```
 
 **Strengths**: in-memory, sub-millisecond, trivially simple to operate, built-in radius and distance sorting. **Weaknesses**: no native support for filtering by category/price/rating/text — those filters require fetching candidate IDs from `GEOSEARCH` and then doing a second lookup (e.g., `HGETALL biz:sf_cafe_1`) per candidate to check attributes, which doesn't scale gracefully past a few hundred candidates. Redis GEO is best as **Phase 1 only**, or as the entire solution for a simple "nearby" feature with no filters (e.g., "find the 3 nearest warehouses" for logistics).
@@ -313,7 +319,7 @@ Elasticsearch documents include a `geo_point` field, and a single query combines
     { "_geo_distance": { "location": { "lat": 37.7750, "lon": -122.4190 }, "order": "asc", "unit": "km" } },
     "_score"
   ]
-)
+}
 ```
 
 **Strengths**: this is the *only* one of the three that natively combines geo-filtering, structured filters, full-text relevance, and custom ranking formulas (§4.3) in **one query** — exactly the "search businesses near me with filters and ranking" problem statement. Geo-sharding (documents bucketed by geohash precision into shards) keeps each shard's working set manageable even at 50M documents / 100GB (§2). **Weaknesses**: eventual consistency — a write isn't searchable until the next refresh interval (default ~1 second, often tuned to several seconds in high-write clusters for indexing throughput); not a system of record (Elasticsearch should sit alongside, not instead of, a primary datastore like PostgreSQL, §4.6); operationally heavier (cluster management, shard rebalancing, JVM heap tuning).
@@ -375,7 +381,7 @@ Despite B having a higher star rating *and* a sponsorship boost, A wins decisive
 
 A **fixed** geohash precision breaks down at both ends of the density spectrum:
 
-- **Dense urban core** (Manhattan, central Tokyo): at geohash precision 6 (~1.2km x 0.6km cells), a 9-cell block covers roughly 3.2km x 1.8km — in Manhattan that block can contain **tens of thousands** of businesses. Phase 2 (Elasticsearch) then has to filter/rank a candidate set that's 10-50x larger than the §2 estimate of ~1,000, increasing latency.
+- **Dense urban core** (Manhattan, central Tokyo): at geohash precision 6 (~1.2km x 0.6km cells), a 9-cell block covers roughly 3.6km x 1.8km — in Manhattan that block can contain **tens of thousands** of businesses. Phase 2 (Elasticsearch) then has to filter/rank a candidate set that's 10-50x larger than the §2 estimate of ~1,000, increasing latency.
 - **Sparse rural region** (rural Montana): the same precision-6 9-cell block might contain **zero or one** business, even though the user's requested radius (say 50km, reasonable for "nearest hardware store" in a rural area) would need a much coarser precision to find anything at all.
 
 The fix is **adaptive precision selection with candidate-count feedback**:
@@ -523,7 +529,7 @@ The **status table** (`StatusStore`) holding `business_id -> temporarily_closed 
 
 A listing update (new business, address change, category edit) must reach both the **Geo-Index** (§4.1, if coordinates changed) and the **Search/Attributes Index** (§4.2, for the new attribute values). Two ways to propagate:
 
-**Dual-write**: the Listing Service, after writing to the primary database, *also* directly calls `GEOADD`/`GEODEL` on Redis and issues an Elasticsearch index/update API call, all within the same request.
+**Dual-write**: the Listing Service, after writing to the primary database, *also* directly calls `GEOADD`/`ZREM` on Redis (a Redis geo index *is* a sorted set, so there is no `GEODEL` command — removal is `ZREM key member`) and issues an Elasticsearch index/update API call, all within the same request.
 
 **CDC (Change Data Capture)**: the Listing Service writes only to the primary database (e.g., PostgreSQL). A CDC connector (e.g., Debezium-style, reading the database's write-ahead log) or an **outbox table** pattern emits change events to Kafka, and separate consumers (`Geo-Index Updater`, `Search-Index Updater`) apply those events to Redis and Elasticsearch asynchronously.
 
@@ -559,6 +565,17 @@ public class ListingUpdateHandler {
 The **outbox pattern** (cross-ref [`../distributed_transactions/README.md`](../distributed_transactions/README.md)) is the key correctness mechanism: writing to the primary DB and enqueueing the propagation event happen in the **same transaction**, so there's no window where the DB commits but the event is lost (or vice versa) — a failure mode that plain dual-write is exposed to (if the Elasticsearch call fails after the DB write succeeds, the two stores silently diverge with no record that anything went wrong).
 
 Downstream, the **Geo-Index Updater** only acts when `coordinatesChanged` is true (the common case — category/price/hours edits don't move the business on the map): it issues `GEOADD` for the new coordinates and `ZREM` for the old geohash entry. The **Search-Index Updater** re-indexes the full document into Elasticsearch on every change, relying on Elasticsearch's near-real-time refresh (typically 1-5 seconds) for the update to become searchable. End-to-end, a listing edit becomes visible in search results within **low single-digit seconds to a couple of minutes** under load — well within the "minutes" freshness NFR from §1, and entirely decoupled from the tight "open now" path (§4.5), which deliberately bypasses this pipeline.
+
+**Deletes and permanent closures — the write path's hardest case** (the §1 create/update/**delete** requirement): a delete is not an update with fewer fields, and it is the one listing change that fails *silently and asymmetrically* if any consumer misses it. An update that doesn't propagate leaves a stale-but-present result; a delete that doesn't propagate leaves a **ghost listing** — a permanently-closed restaurant that keeps appearing in "open now" searches forever, generating exactly the wrongly-directed-customer harm of War Story 2 but with no TTL to eventually save you.
+
+The rules that make deletes safe:
+
+- **Soft-delete in the system of record, hard-delete in the indexes.** The Listing Service sets `deleted_at` on the Postgres row rather than issuing `DELETE` — the row must survive for audit, for undo (owners re-open), and because the outbox event's payload is built from it. The `ListingChangedEvent` carries a `deleted` flag; downstream, the Geo-Index Updater issues `ZREM businesses <business_id>` (not `GEODEL`, §4.6) and the Search-Index Updater issues an Elasticsearch delete-by-id. A soft-deleted business must be *absent* from both indexes, not merely flagged — a `deleted != true` filter on every query is one forgotten clause away from a ghost.
+- **Deletes must be idempotent and order-independent.** `ZREM` on a missing member and a delete-by-id for an absent document are both no-ops, so a redelivered delete is harmless. The dangerous ordering is the reverse: a delete event overtaken by a *stale in-flight update* for the same business resurrects it. Guard with a monotonic `version` on the listing, carried in the event and applied as Elasticsearch's `external` versioning (`?version=N&version_type=external`), so an out-of-order older write is rejected by the index rather than silently winning.
+- **Purge the caches, don't wait for TTL.** A delete invalidates both the Attributes Cache and the Status Cache via the same pub/sub channel as `onStatusToggle` (§4.5). Skipping this means the long-TTL Attributes Cache (hours) keeps serving the deleted business's document on any cache hit long after both indexes forgot it.
+- **"Permanently closed" is a delete; "temporarily closed" is not.** The fast path in §4.5 handles the temporary case and deliberately leaves the business in both indexes. Routing a permanent closure down the fast path instead is a common bug: the business keeps its geo-index entry and its search document, and simply reappears the moment the 45-second status entry expires.
+
+The reconciliation job in §8 ("geo-index / search-index drift") is the backstop: it samples the primary DB and asserts that every business with a non-null `deleted_at` is absent from *both* indexes, which is the only check that catches a delete event that was dropped rather than merely delayed.
 
 ### 4.7 Regional Sharding and Multi-Region Deployment
 
@@ -702,11 +719,11 @@ public class PersonalizationReRanker {
 
 ## 6. Real-World Implementations
 
-- **Yelp**: Yelp's search infrastructure is one of the most publicly documented examples of exactly this architecture — Elasticsearch indexes holding business documents with `geo_point` fields, combined with category/price/rating filters and a custom relevance-scoring pipeline (Yelp has written extensively about migrating from Solr to Elasticsearch and about their multi-signal ranking, which blends distance, rating, review recency, and personalization signals much like §4.3's formula).
-- **Google Places API**: exposes "Nearby Search" and "Text Search" endpoints that accept `(location, radius)` plus type/keyword filters, returning results ranked by a combination of "prominence" (Google's relevance/popularity signal) and distance — functionally the same two-input ranking tradeoff as §4.3, exposed as a public API product. The underlying index is part of the same S2-based geospatial infrastructure described in [Design Google Maps](./design_google_maps.md) §4.1/§4.4.
+- **Yelp**: the most publicly documented instance of exactly this architecture, and also the clearest cautionary tale about treating Elasticsearch as the permanent answer. Yelp moved core business search onto Elasticsearch in 2017 ([Moving Yelp's Core Business Search to Elasticsearch](https://engineeringblog.yelp.com/2017/06/moving-yelps-core-business-search-to-elasticsearch.html)), and — exactly as §4.7 argues — **geo-sharded the index**: a business is routed to a shard by its physical location, and a query is forwarded only to the geographic shard covering it, then broadcast to that shard's microshards. Distance is a scoring *subquery* that boosts nearer businesses rather than a hard filter, and ranking blends business features (reviews, hours, service areas) on top, which is §4.3's weighted-sum formula in production form. In 2021 Yelp then moved off Elasticsearch to [Nrtsearch](https://engineeringblog.yelp.com/2021/09/nrtsearch-yelps-fast-scalable-and-cost-effective-search-engine.html), its own Lucene-based gRPC search engine, for cost and scaling reasons — the two-phase geo-shard + filter + rank *shape* survived the engine swap untouched, which is the real lesson: the architecture in §4.1-§4.3 is the durable part; the engine underneath it is replaceable.
+- **Google Places API**: "Nearby Search (New)" and "Text Search (New)" accept `(location, radius)` plus type/keyword filters and expose the ranking choice directly as a `rankPreference` parameter — `POPULARITY` (the default) or `DISTANCE` for Nearby Search, `RELEVANCE` or `DISTANCE` for Text Search. That is §4.3's distance-vs-relevance tradeoff surfaced as a public API knob rather than hidden inside a weight vector. The underlying index is part of the same S2-based geospatial infrastructure described in [Design Google Maps](./design_google_maps.md) §4.1/§4.4.
 - **Foursquare / Swarm**: Foursquare pioneered large-scale venue check-in and "nearby venues" search at a time when geohash-based candidate retrieval plus a separate venue-attributes store was a novel architecture; their venue database (tens of millions of venues) and category taxonomy became an industry-referenced dataset for "what counts as a place" classification, directly informing the category-filter design in §1/§4.3.
 - **Uber Eats / DoorDash restaurant discovery**: both layer a proximity-search problem (restaurants within delivery range) on top of an *availability* constraint that changes much faster than restaurant attributes — "is this restaurant currently accepting orders" is functionally identical to this design's "open now" problem (§4.5), and both companies' discovery surfaces combine distance, rating, delivery-time estimates, and promoted placements into a ranking formula structurally similar to §4.3's.
-- **Redis GEO commands**: `GEOADD`/`GEOSEARCH`/`GEORADIUS` (used by [Design Uber](./design_uber.md) §4 for driver-location indexing) are widely adopted as the Phase 1 building block (§4.1/§4.2) across many smaller-scale "nearby" features — their ubiquity is precisely because Phase 1's job (cheap radius candidate retrieval) is a narrow, well-solved problem that doesn't require a bespoke implementation.
+- **Redis GEO commands**: `GEOADD`/`GEOSEARCH`/`GEOSEARCHSTORE` (used by [Design Uber](./design_uber.md) §4 for driver-location indexing) are widely adopted as the Phase 1 building block (§4.1/§4.2) across many smaller-scale "nearby" features — their ubiquity is precisely because Phase 1's job (cheap radius candidate retrieval) is a narrow, well-solved problem that doesn't require a bespoke implementation.
 
 ---
 
@@ -765,6 +782,8 @@ public class PersonalizationReRanker {
 
 ## 9. Common Pitfalls & War Stories
 
+> **How to read these**: the three war stories below are **composite, illustrative incidents** — the failure mechanisms are real and recur in every fixed-grid spatial index and every split-TTL cache, but the specific percentages, ticket volumes, shard counts, and durations are constructed to make the mechanism concrete. Treat them as archetypes to reason from, not as citable public post-mortems of any named company.
+
 ### War Story 1: A Geohash Cell Boundary Hides a Business From Its Own Neighbors — Broken, Then Fixed
 
 **Broken**: An early version of the Phase 1 geo-index (§4.1) queried only the **single geohash cell** containing the search point — "find businesses near `(lat, lng)`" was implemented as "find businesses whose geohash starts with the same N-character prefix as `(lat, lng)`'s geohash," with no neighbor expansion.
@@ -813,7 +832,8 @@ Sharding by `hash(business_id)` scatters every query's geographically-clustered 
 
 - ~100GB total index size (§2) — comfortably shardable across, say, **20 shards of ~5GB each**, with each shard further geo-bucketed so that a given shard predominantly serves queries for its geographic region (reduces cross-shard fan-out for most queries)
 - At 500K QPS peak (§2), and assuming each query touches 2-3 shards on average (the 9-cell candidate region may span shard boundaries near dense city centers): **~1-1.5M shard-queries/sec** cluster-wide
-- A well-tuned Elasticsearch shard handles on the order of **1,000-2,000 simple filtered queries/sec**; at the higher end (2,000/shard) and 1.5M shard-queries/sec, that's **~750 active shard-replicas** — with a typical replication factor of 2-3 for availability, this implies **20 primary shards x 3 replicas = 60 shard-instances**, distributed across roughly **15-20 nodes** (assuming each node hosts 3-4 shard-instances comfortably within its CPU/heap budget)
+- A well-tuned Elasticsearch shard handles on the order of **1,000-2,000 simple filtered queries/sec** (illustrative — benchmark it, don't assume it); at the higher end (2,000/shard) and 1.5M shard-queries/sec, that's **~750 active shard-replicas**. Note what this figure is *not*: it is not 20 primaries x 3 replicas = 60 copies. **This fleet is sized by QPS, not by data volume** — 750 copies of a ~5GB shard is only ~3.8TB spread across the cluster, so the whole 100GB index is replicated roughly 37 times over purely to buy read throughput. A "60 shard-instance" fleet sized from the index size alone would top out near 120K shard-queries/sec, about 8% of what peak demands, and would fall over at the first lunch-hour peak
+- Turning shard-replicas into hosts: at 4-8 shard-replicas per node before CPU (not heap, not disk, at this shard size) saturates, ~750 replicas is on the order of **95-190 nodes**. The wide range is the point — per-node shard density is the single biggest lever on cost here, and it is the one number that must come from a load test against the real query mix rather than from a rule of thumb
 - Regional sharding matters here: a global 500K QPS peak is not uniform — it follows the sun (lunch/dinner peaks roll across time zones), so the cluster is provisioned per-region with headroom for each region's local peak rather than as one undifferentiated global pool
 
 ### Candidate-Set Size vs. Precision Tuning
@@ -840,11 +860,11 @@ The adaptive selector (§4.4) targets the `MIN_CANDIDATES=20` to `MAX_CANDIDATES
 
 Mirroring the "follows the sun" observation in §10's Search Cluster sizing, traffic and business density both concentrate heavily by region — a flat per-region allocation would either starve dense metro regions or massively over-provision sparse ones. A three-tier model (the same tiering shape [Design Google Maps](./design_google_maps.md) §10 uses for its routing fleet, applied here to search shards):
 
-| Tier | Example Regions | Businesses (of 50M) | Share of Search QPS | Search Shards per Region | Cache Working-Set per Region |
+| Tier | Example Regions | Businesses (of 50M) | Share of Search QPS | Search shard-replicas (tier total, §10) | Cache Working-Set per Region |
 |---|---|---|---|---|---|
-| Tier 1 (dense metro) | NYC, London, Tokyo, São Paulo, Mumbai | ~30% (~15M) | ~55% (~275K QPS peak) | 4-6 primary shards x 3 replicas | ~3-5GB hot attributes cache |
-| Tier 2 (mid-size metro) | regional capitals, secondary cities | ~45% (~22.5M) | ~35% (~175K QPS peak) | 1-2 primary shards x 3 replicas | ~1-2GB |
-| Tier 3 (suburban / rural) | remaining coverage | ~25% (~12.5M) | ~10% (~50K QPS peak) | shared shards across multiple adjacent regions | <500MB, often cold |
+| Tier 1 (dense metro) | NYC, London, Tokyo, São Paulo, Mumbai | ~30% (~15M) | ~55% (~275K QPS peak) | ~410 (55% of ~750) | ~3-5GB hot attributes cache |
+| Tier 2 (mid-size metro) | regional capitals, secondary cities | ~45% (~22.5M) | ~35% (~175K QPS peak) | ~260 | ~1-2GB |
+| Tier 3 (suburban / rural) | remaining coverage | ~25% (~12.5M) | ~10% (~50K QPS peak) | ~75, shared across multiple adjacent regions | <500MB, often cold |
 
 Two consequences worth calling out for an interview:
 
@@ -856,7 +876,7 @@ Two consequences worth calling out for an interview:
 | Component | Sizing Basis | Estimated Footprint |
 |---|---|---|
 | Phase 1 geo-index (Redis) | 50M businesses x ~24 bytes | ~1.2GB, single instance + replicas |
-| Phase 2 search index (Elasticsearch) | 50M businesses x ~2KB, 20 shards x 3 replicas | ~100GB total, ~15-20 nodes |
+| Phase 2 search index (Elasticsearch) | 50M businesses x ~2KB across 20 primary shards; replica count set by QPS (~750 shard-replicas), not by size | ~100GB logical / ~3.8TB replicated, ~95-190 nodes |
 | Attributes Cache | Hot working-set of ~5-10M businesses x ~2KB | ~10-20GB |
 | Status Cache | ~2.5M businesses x ~50 bytes | ~125MB |
 | Status override store | ~2.5M entries, small KV table | Low single-digit GB |
