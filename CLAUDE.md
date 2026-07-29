@@ -284,6 +284,13 @@ not `✅`/`❌`); widest line ≤ 100 cols (prefer vertical stacking over wide
 side-by-side); caption every diagram with 1–2 sentences tying it to the insight and
 reuse numbers already in the surrounding text.
 
+**The no-tabs rule governs DIAGRAMS and prose, not data whose format requires a tab.**
+`database/sql_query_optimization/README.md` carries tab-delimited rows inside a
+`COPY ... FROM stdin` example because that is COPY's default text format — converting
+them to spaces would make the example wrong. A tab inside a code fence whose language
+genuinely uses tabs is content; the fence carries a note saying so. Check before
+"fixing" a tab; everywhere else it is still a defect.
+
 ---
 
 ## Mermaid Diagrams

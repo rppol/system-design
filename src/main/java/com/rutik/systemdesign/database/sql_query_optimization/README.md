@@ -486,6 +486,9 @@ INSERT INTO events (user_id, type) VALUES
     ...; -- up to a few thousand rows per statement
 
 -- COPY (PostgreSQL): fastest bulk load
+-- NOTE: the data rows below are TAB-delimited. That is COPY's default text
+-- format, not a formatting slip -- replacing the tabs with spaces makes the
+-- load fail or read the spaces as part of the value.
 COPY events (user_id, type) FROM stdin;
 1	click
 2	view
