@@ -750,9 +750,9 @@ A subtler decision, easy to miss until a multi-region deployment is already in f
 ### At-a-Glance Operational Dashboard
 
 ```
- +----------------------------------------------------------------+
+ +------------------------------------------------------------------+
  |  Fleet: id-generator (1,000 nodes)            Last updated: now  |
- +----------------------------------------------------------------+
+ +------------------------------------------------------------------+
  |  Worker-ID pool utilization     [###########.......]  812/1024   |
  |                                   (79.3% -- below 80% warn line) |
  |                                                                  |
@@ -760,13 +760,13 @@ A subtler decision, easy to miss until a multi-region deployment is already in f
  |  NTP drift, p99 across fleet     18 ppm        (warn > 100ppm)   |
  |                                                                  |
  |  Clock-backward events (24h)     0             (page on > 0)     |
- |  Sequence-exhaustion events (1h) 4  (node-37)  (investigate > few/sec) |
+ |  Sequence-exhaustion events (1h) 4 (node-37)   (check > few/s)   |
  |                                                                  |
- |  ZK session expiries (24h)       1  (node-512) (page if > 1/hr/node) |
- |  Ephemeral znode count            1,000        (matches live count -- OK) |
+ |  ZK session expiries (24h)       1 (node-512)  (page >1/hr/node) |
+ |  Ephemeral znode count           1,000         (= live count)    |
  |                                                                  |
- |  ID-service P50 / P99 (Model b)   0.6ms / 2.1ms (page if P99 > 5ms) |
- +----------------------------------------------------------------+
+ |  ID-service P50 / P99 (Model b)  0.6ms / 2.1ms (page P99 > 5ms)  |
+ +------------------------------------------------------------------+
 ```
 
 A dashboard like this is the first thing an on-call engineer should check when *any* downstream symptom (duplicate-key errors, write-latency spikes, "IDs out of order") is reported — most incidents in this design (§9) show up here first, often minutes before the downstream symptom is even noticed.
