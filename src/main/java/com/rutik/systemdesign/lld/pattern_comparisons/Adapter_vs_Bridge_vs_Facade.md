@@ -397,14 +397,17 @@ One `watchMovie("Inception")` call fans out to seven calls across four subsystem
 ## Interview Questions with Answers
 
 **Q: What is the difference between Adapter and Facade?**
+**Short:** Adapter translates one incompatible interface to match what a client expects, while Facade simplifies a whole subsystem.
 
 > Adapter converts the interface of a single object so it matches what the client expects — it's a translator between two incompatible interfaces. Facade provides a simplified, unified interface to a whole subsystem made of multiple objects — it's a simplification layer. Adapter is about interface compatibility; Facade is about reducing complexity.
 
 **Q: How does Bridge differ from Adapter?**
+**Short:** Bridge is designed upfront to prevent a class explosion, while Adapter is a retrofit applied after two interfaces already exist.
 
 > The fundamental difference is intent and timing. Adapter is a retrofit — you apply it when two things weren't originally designed to work together. Bridge is designed upfront when you anticipate two independent dimensions of variation (e.g., shapes and rendering strategies). Adapter solves a compatibility problem after the fact. Bridge prevents a class explosion problem before it occurs.
 
 **Q: Can Adapter and Facade be used together?**
+**Short:** Yes — a Facade commonly uses Adapter internally to integrate subsystems whose interfaces are incompatible.
 
 > Yes, commonly. A Facade might use Adapter internally to integrate third-party subsystems that have incompatible interfaces into the simplified facade interface.
 

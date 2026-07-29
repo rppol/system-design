@@ -303,30 +303,35 @@ Ask yourself:
 ## Interview Questions and Answers
 
 **Q: What is the Single Responsibility Principle?**
+**Short:** SRP states that a class should have only one reason to change, meaning it answers to a single actor or stakeholder.
 
 A: A class should have only one reason to change, meaning it should be responsible to a single actor or stakeholder. If two different teams' requirements can cause a class to change, it has multiple responsibilities and should be split.
 
 ---
 
 **Q: How is "one reason to change" different from "one method"?**
+**Short:** SRP is about whether multiple independent stakeholders drive changes to a class, not about how many methods it has.
 
 A: They are not the same. A class can have many methods — all of them contributing to one actor's concerns — and still comply with SRP. The question is not about method count but about whether multiple independent stakeholders drive changes to the class.
 
 ---
 
 **Q: Can you give an example of an SRP violation you have encountered?**
+**Short:** A UserService that bundles authentication, profiles, email, and persistence forces unrelated changes through the same class.
 
 A: A common real-world example is a `UserService` that handles authentication, profile management, email notifications, and database persistence. Changing the email template requires touching the same class as changing the login algorithm. Extracting `EmailNotificationService`, `UserRepository`, and `AuthService` gives each its own reason to change.
 
 ---
 
 **Q: Does SRP lead to too many small classes?**
+**Short:** Applied mechanically, yes — over-splitting into one-method classes causes class explosion, which is just as harmful.
 
 A: It can if applied mechanically. The goal is cohesion toward a single actor, not minimizing class size. A `PayCalculator` with five private helper methods all serving Finance is fine. Over-splitting into one-method classes is "class explosion" and is just as harmful. SRP is a judgment call guided by "who changes this, and for what reason?"
 
 ---
 
 **Q: How does SRP relate to the concept of cohesion?**
+**Short:** SRP is the formal articulation of high cohesion, anchoring a class's unified purpose to a specific real-world actor.
 
 A: SRP is the formal articulation of high cohesion. High cohesion means the methods and data of a class are strongly related and serve a unified purpose. SRP adds precision by anchoring that purpose to a real-world actor, making it actionable during design.
 

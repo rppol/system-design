@@ -572,54 +572,88 @@ Note that the cost is linear in `N` while the fix is constant, so this defect ge
 ## 14. Interview Questions with Answers
 
 **Q1: When would you choose NoSQL over SQL?**
+**Short:** NoSQL suits known, simple access patterns where horizontal write scalability outweighs query flexibility.
+
 A: Choose NoSQL when the access pattern is known and simple, and horizontal write scalability matters more than query flexibility. That covers key-value or range lookups, schema flexibility for evolving documents, and data models that naturally fit a non-relational structure (graphs, time-series, documents).
 
 **Q2: What is the N+1 query problem and how do you fix it?**
+**Short:** The N+1 query problem is one query per list item, fixed by a single JOIN or batch WHERE IN.
+
 A: Fetching a list of N entities, then making one additional query per entity. Fix: use a JOIN in a single query, or use an ORM eager-loading feature (`include`/`select_related`), or batch fetch with a WHERE id IN (...) clause.
 
 **Q3: Explain the difference between clustered and non-clustered indexes.**
+**Short:** A clustered index defines a table's on-disk row order; a non-clustered index stores pointers to those rows.
+
 A: A clustered index defines the physical order of rows on disk (there can only be one per table — in MySQL InnoDB, the primary key is always clustered). A non-clustered index is a separate structure that stores the indexed column(s) plus a pointer to the actual row. Clustered indexes make range scans on the primary key very fast.
 
 **Q4: What is a covering index?**
+**Short:** A covering index contains every column a query needs, letting the planner skip the table entirely.
+
 A: An index that contains all columns required to satisfy a query — the query planner never needs to access the actual table rows (index-only scan). Example: query `SELECT name FROM users WHERE email = ?` — an index on `(email, name)` covers it entirely.
 
 **Q5: What is database sharding and when would you use it?**
+**Short:** Database sharding horizontally partitions rows across nodes, used when one node can't handle the load.
+
 A: Horizontal partitioning of data across multiple database nodes, each holding a subset of rows. Use it when a single DB node cannot handle the write throughput or data volume. The shard key determines which node stores each row.
 
 **Q6: What is eventual consistency and when is it acceptable?**
+**Short:** Eventual consistency lets replicas converge over time and suits data where slight staleness is tolerable.
+
 A: A consistency model where, given no new updates, all replicas will converge to the same value over time. Acceptable when slight staleness is tolerable: social media likes/counts, product view counts, recommendation data. Not acceptable for: bank balances, inventory, authentication tokens.
 
 **Q7: How would you handle schema migrations on a live production database?**
+**Short:** Live schema migrations use expand-then-contract so old and new code both work against the schema at once.
+
 A: Use backward-compatible migrations in an expand-then-contract sequence, so old and new application code can both run against the schema at once. Concretely: add columns before removing them; version migrations with Flyway or Liquibase; use online schema change tools (pt-osc, gh-ost for MySQL; pg_repack for PostgreSQL) to avoid table locks; deploy application code that handles both old and new schema; then drop the old schema in a follow-up migration.
 
 **Q8: What are the tradeoffs of read replicas?**
+**Short:** Read replicas scale read throughput but introduce replication lag and complicate failover.
+
 A: Pros: Scale read throughput, geographic distribution, offload analytics. Cons: Replication lag causes stale reads, adds operational complexity, failover to replica requires application reconfiguration or use of a proxy (ProxySQL, RDS Proxy).
 
 **Q9: Explain the difference between optimistic and pessimistic locking.**
+**Short:** Pessimistic locking blocks concurrent readers/writers upfront; optimistic locking checks a version counter on write.
+
 A: Pessimistic locking: lock the row when reading, preventing concurrent modifications until the lock is released (`SELECT FOR UPDATE`). Suitable when conflicts are frequent. Optimistic locking: no lock on read; on write, verify a version counter hasn't changed — if it has, retry. Better for low-contention scenarios.
 
 **Q10: What is a write-ahead log (WAL)?**
+**Short:** A write-ahead log durably records changes before they're applied, enabling crash recovery and replication.
+
 A: A durability mechanism where changes are written to a sequential log (WAL) before being applied to data pages. On crash recovery, the WAL is replayed to restore committed transactions. It enables ACID durability and is the foundation of streaming replication in PostgreSQL.
 
 **Q11: How does Cassandra achieve high write throughput?**
+**Short:** Cassandra achieves high write throughput with LSM-trees: sequential memtable and commit-log writes flushed to SSTables.
+
 A: Cassandra uses LSM-trees (Log-Structured Merge trees). Writes go to an in-memory memtable + commit log (sequential disk write). Memtable is periodically flushed to immutable SSTable files on disk. SSTables are periodically compacted. Sequential writes are extremely fast; reads are more complex (merge multiple SSTables).
 
 **Q12: What is the difference between OLTP and OLAP databases?**
+**Short:** OLTP handles high-throughput normalized transactions; OLAP handles denormalized analytical aggregations.
+
 A: OLTP (Online Transaction Processing): high-throughput short transactions, normalized schemas, row-oriented storage, low latency. Examples: PostgreSQL, MySQL. OLAP (Online Analytical Processing): complex aggregations over large datasets, denormalized star/snowflake schemas, columnar storage, high throughput analytical queries. Examples: Redshift, BigQuery, ClickHouse.
 
 **Q13: When would you deliberately denormalize a schema, and what does it cost you?**
+**Short:** Denormalize when read latency matters more than write simplicity, accepting that updates must propagate to duplicates.
+
 A: Denormalize when read latency matters more than write simplicity, by storing a computed aggregate or duplicating data to avoid an expensive join. Section 5 frames the tradeoff directly: normalization eliminates redundancy and keeps updates cheap (change one row), while denormalization duplicates that data across rows or tables so a read never has to join, at the cost that every update must now propagate to every duplicate or risk inconsistency. A common middle ground is normalizing the write path (source of truth) while maintaining a denormalized read-optimized copy updated asynchronously — exactly what a cache-aside layer or a materialized view does. Denormalize only the specific fields a hot query path actually needs, not entire tables, so the blast radius of an inconsistency stays small.
 
 **Q14: Why doesn't a composite index on `(col_a, col_b)` speed up a query that filters only on `col_b`?**
+**Short:** A composite index on (col_a, col_b) cannot serve a col_b-only filter due to the leftmost-prefix rule.
+
 A: A composite B-tree index is physically sorted by the first column, then the second within each first-column value. This is the leftmost-prefix rule from Section 6: a query on `col_a` alone, or on `(col_a, col_b)` together, can use the index directly since both match a contiguous range of the sorted structure, but a query on `col_b` alone has to check every distinct `col_a` value's sub-range, which degrades toward a full index scan. If both single-column lookups are common, you generally need two separate indexes — one on `(col_a, col_b)` and one on `(col_b)` alone — rather than expecting one composite index to serve both directions. Always confirm with `EXPLAIN ANALYZE` (Section 6's Index Pitfalls) rather than assuming a composite index covers a query it doesn't.
 
 **Q15: Why would you vertically split a table into "hot" and "cold" columns instead of keeping everything in one row?**
+**Short:** Splitting hot and cold columns keeps frequently-accessed data small enough to stay resident in the buffer pool.
+
 A: Splitting keeps frequently-accessed columns small enough to stay resident in the buffer pool while large, rarely-read columns don't compete for that memory. The Vitess case study's Key Design Decision #4 does exactly this: `listings_hot` holds price, availability, title, and photo_url (queried on every search result), while `listings_cold` holds the full description, amenities JSON, and house rules (loaded only on the listing detail page) — keeping the hot table around 5GB, small enough to fit entirely in InnoDB's buffer pool so search queries hit memory instead of disk. This is a column-store technique retrofitted onto a row-oriented database: instead of fetching an entire wide row for a query that only needs four fields, you fetch only the table that has those four fields. Split along access-frequency lines, not along logical/entity lines — the goal is keeping the frequently-scanned working set small, not achieving a "clean" schema.
 
 **Q16: Why do monotonically increasing shard keys (like an auto-increment ID) create hot partitions?**
+**Short:** Monotonically increasing shard keys create hot partitions because every new row lands on the same shard.
+
 A: A key that always increases means every new row's key is greater than all previous keys, so every insert lands on the same shard. Section 12's pitfall #10 calls this out directly, and the Vitess case study hits a variant of it: a single property-management company's 12M listings all shared one `user_id`, so that shard's storage grew to 800GB (versus ~125GB for others) and its write throughput ran at 4x its peers. The fix in both cases is the same shape — choose a shard key with naturally distributed values (a hash of the ID, not the ID itself) or detect and manually split outlier keys, which the case study does by splitting the company into 50 regional sub-accounts. Always plot the expected key distribution before picking a shard key, since a key that looks fine at 1M rows can concentrate catastrophically at 100M.
 
 **Q17: Why enforce integrity with database constraints instead of validating in application code?**
+**Short:** Database constraints enforce integrity for every writer and catch races application-level checks miss.
+
 A: Because the database is the one component every writer has to pass through, and it is the only layer that sees concurrent transactions. Application-level validation is bypassed the moment a second service, a batch job, a data-fix script, or a `psql` session writes to the same table — and even within one service, two concurrent requests can both pass an "is this email taken?" check and both insert, because neither sees the other's uncommitted row; a `UNIQUE` constraint rejects the second one. Section 5's constraint table maps each guarantee to its enforcement cost: `NOT NULL` is nearly free, `UNIQUE` is an index (so it carries the write cost of §6), and a `FOREIGN KEY` on an unindexed child column turns every parent delete into a full scan, which is Common Pitfall #1. Two defaults regularly catch people out — `UNIQUE` permits unlimited NULL rows unless you write `UNIQUE NULLS NOT DISTINCT`, and a foreign key's default `ON DELETE` action is `NO ACTION` (block the delete), not `CASCADE`. Enforce every invariant you can in the schema, and accept that the ones you cannot (cross-shard references, NoSQL stores with no constraint layer) now need a reconciliation job instead.
 
 ---

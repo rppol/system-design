@@ -488,33 +488,53 @@ flowchart LR
 ### Common Questions
 
 **Q: What problem does Composite solve?**
+**Short:** Composite lets clients treat individual objects and compositions of objects uniformly, eliminating instanceof checks.
+
 A: Composite eliminates the need for clients to distinguish between leaf and composite nodes in a tree structure. Without it, client code is full of `instanceof` checks and duplicated recursive traversal logic. Composite makes individual objects and compositions of objects interchangeable through a common interface.
 
 **Q: What's the difference between transparency and safety in Composite?**
+**Short:** Transparency puts add/remove on the Component interface for uniformity; safety restricts them to Composite for type safety.
+
 A: In the transparency design, `add/remove/getChild` are declared on the Component interface — clients can treat everything uniformly but Leaf must implement these methods (usually throwing `UnsupportedOperationException`). In the safety design, these methods are only on Composite — no dummy implementations, but clients must downcast to use tree operations. Transparency is more uniform; safety is more type-safe.
 
 **Q: How does Composite work with the Visitor pattern?**
+**Short:** Composite defines the tree structure; Visitor adds new operations on it without modifying any node class.
+
 A: Composite defines the tree structure. Visitor separates operations on that tree from the node classes. You add a new operation by writing a new Visitor rather than modifying every node class. The Composite tree calls `visitor.visit(this)` on each node; the Visitor implements different logic for each node type.
 
 **Q: Give a real-world example of the Composite pattern.**
+**Short:** Swing's Component/Container hierarchy is Composite, with JPanel acting as composite and JButton behaving as a leaf.
+
 A: The Swing GUI framework plays every Composite role: `java.awt.Component` is the Component role (an abstract class, not an interface), and `java.awt.Container` is the Composite that holds child Components. `JPanel` and `JFrame` are the composites you actually nest; `JButton`, `JLabel`, `JTextField` behave as leaves in practice. One caveat worth stating in an interview: because `javax.swing.JComponent` extends `Container`, every Swing widget is *technically* a container that could hold children — Swing chose full transparency, so "leaf" here is a usage convention, not a type distinction. You can call `getPreferredSize()` on a `JPanel` and its layout manager recursively asks all children for their sizes — without knowing whether it is talking to a leaf-style widget or another nested container.
 
 **Q: What are the risks of circular references in Composite?**
+**Short:** A composite that accidentally contains itself causes infinite recursion during any tree traversal.
+
 A: If a composite is accidentally added as a child of itself (directly or indirectly), any traversal becomes infinite recursion. Prevention strategies include: maintaining parent references and checking for cycles on `add()`, or making composites immutable after construction.
 
 **Q: How does Composite differ from Decorator, given both involve recursive wrapping?**
+**Short:** Composite models a part-whole tree with many children; Decorator wraps exactly one component to add behavior.
+
 A: Composite models a part-whole tree where a node can have zero, one, or many children of the same `Component` type, and operations are defined to aggregate results from those children — the focus is the tree structure. Decorator wraps exactly one component to layer additional behavior onto it, with no notion of "multiple children" or hierarchy — the focus is behavior augmentation. A practical tell: if removing a node should also remove everything beneath it in a meaningful tree (a folder and its files), that's Composite; if "removing" a wrapper should just unwrap to reveal the single object underneath (stripping a `BufferedInputStream` to get the raw `FileInputStream`), that's Decorator. The two are sometimes combined — e.g., a composite tree whose individual nodes are themselves decorated — but conflating them in an interview answer (calling Decorator "a composite with one child") is a common mistake to avoid.
 
 **Q: How do you avoid stack overflow when running recursive operations on very deep Composite trees?**
+**Short:** Deep recursive tree operations can overflow the stack; convert them to an iterative traversal using an explicit Deque.
+
 A: The naive recursive implementation of `getSize()`, `render()`, or any tree-wide operation calls itself once per level of depth, so a tree thousands of levels deep can exhaust the JVM's default thread stack (platform-dependent; commonly around 512KB-1MB on 64-bit HotSpot, and settable with `-Xss`) and throw `StackOverflowError`. The fix is to convert the recursion to an explicit iterative traversal using an auxiliary `Deque` as a stack (or `Queue` for BFS), pushing children onto it instead of making nested calls — this trades stack frames for heap-allocated collection entries, which scale far beyond the default stack size. Another option is increasing the thread's stack size via `-Xss` or the `Thread(ThreadGroup, Runnable, String, long stackSize)` constructor, but that is a band-aid that doesn't bound memory usage. In practice, most real-world composite trees (file systems, UI trees, org charts) are shallow enough (tens of levels) that recursion is fine — but flag the iterative alternative if the interviewer probes "what if the tree is 10,000 levels deep."
 
 **Q: How would you implement and use Composite for a file system, concretely?**
+**Short:** A FileSystemNode interface with File as Leaf and Directory as Composite lets getSize() recurse uniformly over the tree.
+
 A: Define a `FileSystemNode` interface with methods like `getSize()` and `print(String indent)`. `File` (Leaf) implements `getSize()` by returning its own byte count and `print()` by printing its name. `Directory` (Composite) holds a `List<FileSystemNode>` of children; its `getSize()` sums `child.getSize()` over all children (recursively triggering the same logic on sub-directories), and its `print()` prints its own name then calls `print(indent + "  ")` on each child. The client computing total disk usage calls `root.getSize()` once and never needs to know whether `root` is a single file or a deeply nested directory tree — that uniform-interface property is the entire payoff. This is also the most commonly asked "implement Composite live" interview prompt, so being able to write this `File`/`Directory`/`FileSystemNode` trio from memory, including the constructor and `add()` method on `Directory`, is high-value preparation.
 
 **Q: Can you cache or memoize aggregate results (like `getSize()`) in a Composite tree, and what's the catch?**
+**Short:** Yes, but caching getSize() requires invalidating the cache up every ancestor whenever any descendant changes.
+
 A: Yes — a `Directory` can cache its computed total size in a field and return the cached value on subsequent calls, which turns an O(n) recursive walk into O(1) for repeated queries. The catch is cache invalidation: any mutation anywhere in the subtree (adding/removing/resizing a file at any depth) must invalidate the cached size not just on the immediate parent but on every ancestor up to the root, which requires each node to hold a parent reference and propagate an "invalidate" call upward on every structural change. This is a classic correctness-vs-performance tradeoff — the bug pattern to watch for is updating a deeply nested file's size and forgetting that three levels of ancestor directories now have stale cached totals. The practical guidance is to only add caching once profiling shows the recursive walk is a real bottleneck, and to centralize invalidation logic (e.g., in a single `markDirty()` method called from every mutating operation) rather than scattering manual cache-clears.
 
 **Q: If you need to add a brand-new operation to every node type in a Composite tree, what are your options and tradeoffs?**
+**Short:** Add a method to Component and every subclass, or use Visitor to add operations without touching the node classes.
+
 A: Option one is adding a new abstract method to the `Component` interface and implementing it in every `Leaf` and `Composite` subclass — simple, but it means every future operation requires touching every node class, violating Open/Closed. Option two is the Visitor pattern: define a `Visitor` interface with a `visit` method per concrete node type, give `Component` an `accept(Visitor)` method that each node implements by calling back `visitor.visitFile(this)` / `visitor.visitDirectory(this)`, and then new operations are added as new `Visitor` implementations with zero changes to the node classes. The Visitor approach has its own tradeoff — adding a new node *type* (not operation) now requires updating every existing Visitor implementation, so it inverts which axis is "open" for extension. The practical guidance: if new operations are added frequently but the set of node types is stable (typical for file systems — File and Directory rarely gain siblings), prefer Visitor; if new node types are added frequently but operations are stable, prefer the direct-method approach.
 
 ### What Interviewers Look For

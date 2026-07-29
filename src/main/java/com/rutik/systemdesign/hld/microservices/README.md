@@ -1147,54 +1147,88 @@ Notice that the latency number and the saturation number come from the same mult
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between microservices and SOA?**
+**Short:** SOA uses a heavyweight ESB and shared databases; microservices use lightweight protocols and database-per-service.
+
 SOA uses a heavyweight Enterprise Service Bus (ESB) for communication, large coarse-grained services, and typically shared databases. Microservices use lightweight protocols (REST, gRPC, events), small single-purpose services, and database-per-service. Microservices are often considered a refinement of SOA principles.
 
 **Q2: How do you handle distributed transactions across multiple microservices?**
+**Short:** Use the Saga pattern of local transactions with compensations instead of two-phase commit.
+
 Use the Saga pattern instead of 2-Phase Commit. A saga is a sequence of local transactions with compensating transactions on failure. Use orchestration (central coordinator) for complex flows or choreography (event-driven) for simpler ones.
 
 **Q3: What is the circuit breaker pattern and why is it needed?**
+**Short:** A circuit breaker fast-fails requests to an unhealthy service instead of letting them queue and cascade.
+
 A circuit breaker prevents a failing service from receiving requests when it is unhealthy, returning a fallback immediately instead. States: Closed (normal), Open (fast-fail), Half-Open (probe). Without it, slow downstream services cause thread pool exhaustion and cascading failure.
 
 **Q4: How would you implement service discovery in a Kubernetes environment?**
+**Short:** Kubernetes Services get a stable DNS name and kube-proxy routes to healthy pods, with no external registry needed.
+
 Kubernetes provides built-in DNS-based service discovery. Each Service resource gets a stable DNS name (`service-name.namespace.svc.cluster.local`). kube-proxy routes traffic to healthy pods. No external registry needed.
 
 **Q5: What is the database-per-service pattern and what are its tradeoffs?**
+**Short:** Each service owns its database exclusively, trading cross-service joins for independent scaling and schema evolution.
+
 Each service owns its own database; no other service accesses it directly. Benefit: independent scaling, schema evolution, technology choice. Cost: no cross-service JOINs; need API composition or read models (CQRS) for multi-service queries.
 
 **Q6: How would you design an API gateway?**
+**Short:** An API gateway centralizes SSL termination, authentication, rate limiting, and path-based routing at one entry point.
+
 The API gateway is the single entry point handling SSL termination, authentication (validate JWT), rate limiting (token bucket/sliding window), routing (path-based to services), and optional request aggregation. Use Kong, AWS API Gateway, or Envoy as the implementation.
 
 **Q7: What is a service mesh and when would you use it?**
+**Short:** A service mesh manages service-to-service traffic via sidecar proxies, justified once a system has 20+ services.
+
 A service mesh (Istio/Envoy) manages service-to-service communication as infrastructure via sidecar proxies. Use it when you need: mutual TLS for all service traffic, fine-grained traffic policies (canary, retries, timeouts), and consistent observability without changing application code. Justified at 20+ services.
 
 **Q8: How does distributed tracing work?**
+**Short:** A trace ID propagates through every service call, and spans are stitched together by a tracing backend like Jaeger.
+
 A unique trace ID is generated at the API gateway and propagated as a header through all service calls. Each service creates a span (start time, end time, service name, tags) and reports it to a tracing backend (Jaeger, Zipkin). The backend stitches spans by trace ID into a request timeline.
 
 **Q9: What is the Strangler Fig pattern?**
+**Short:** The Strangler Fig pattern migrates a monolith by routing traffic to new services incrementally until nothing old remains.
+
 A migration pattern where new functionality is built as separate services while the monolith remains. An API gateway or proxy routes requests to either the monolith or new services based on path. Over time, more traffic moves to new services until the monolith is replaced (strangled).
 
 **Q10: How do you handle authentication and authorization in microservices?**
+**Short:** A centralized identity provider issues JWTs that the gateway validates and downstream services trust via claims.
+
 Use a centralized Identity Provider (Auth0, Keycloak, AWS Cognito). The API gateway validates JWT tokens on every request. Downstream services trust the gateway and read claims from the token. For service-to-service auth, use mutual TLS (service mesh) or service account tokens.
 
 **Q11: What is the Bulkhead pattern?**
+**Short:** The bulkhead pattern isolates a separate resource pool per dependency so one slow dependency can't starve the others.
+
 Isolate resources (thread pools, connection pools) per external dependency. If Service A calls both Service B and Service C, use separate thread pools for each. A slowdown in Service B cannot exhaust threads needed for Service C calls.
 
 **Q12: When should you NOT migrate to microservices?**
+**Short:** Avoid microservices for small teams, early-stage products, missing DevOps infrastructure, or tight latency budgets.
+
 When the team is small (< 8 engineers), the product is in early-stage with changing requirements, there is no DevOps infrastructure (CI/CD, K8s, observability), or latency budgets are tight. The complexity tax of distributed systems is only justified when the pain of the monolith exceeds it.
 
 **Q13: Why does a retry storm make an outage worse instead of fixing it, and what breaks the cycle?**
+**Short:** Synchronous retries without backoff multiply load on a recovering service and can restart the outage.
+
 Immediate synchronous retries multiply load on a service at exactly the moment it's least able to handle it, turning a brief blip into a sustained outage. War Story 1 shows the anatomy: a payment service had a 30-second downstream timeout, every caller retried three times with no backoff, and the retries landed just as the service was recovering — 4x load at the worst moment knocked it over again, repeating for 25 minutes. The fix is two mechanisms working together: exponential backoff with jitter (`base * 2^attempt + random(0, base)`) spreads retries out in time so they don't arrive as a synchronized wave, and a circuit breaker stops retrying entirely once the error rate crosses a threshold (50% over a 10-second window in the war story), giving the downstream room to recover. Never ship a retry loop without both backoff-with-jitter and a breaker — retries alone convert other services' failures into your own.
 
 **Q14: A service loops over 50 orders calling the Product service once per order — why does this pass staging and fail production?**
+**Short:** Calling another service inside a loop scales badly with data volume and saturates the callee's pool under real traffic.
+
 The N+1 network pattern's cost scales with data volume and concurrency, both of which staging lacks. War Story 3 has the numbers: with 5 orders and 1 user in staging the pattern was invisible, but in production 50 sequential HTTP calls at ~15ms each added 750ms to p50 latency, and thousands of concurrent users saturated the Product service's connection pool so badly that unrelated requests started queueing. The fix is a batch endpoint (`POST /products/batch {ids: [...]}`) plus a caller change to collect all IDs first and make one call — the same cure as the database N+1 problem, but the per-call cost is a full network round trip instead of a local query. Audit any code path that calls another service inside a loop, and load-test with production-shaped data volumes, since this class of bug is structurally invisible at small scale.
 
 **Q15: Why did Netflix build Eureka as an AP system instead of using ZooKeeper for service discovery?**
+**Short:** Netflix chose an AP registry so a discovery outage never becomes a platform-wide outage, unlike ZooKeeper's CP model.
+
 ZooKeeper prioritizes consistency over availability, so losing its quorum makes it unavailable — and a discovery outage cascades to every service that needs to find its dependencies. Netflix's case study spells out the reasoning: DNS was too slow (30s+ TTLs to propagate dead hosts), and a CP coordinator like ZooKeeper turns a discovery-layer partition into a whole-platform outage. Eureka instead chooses availability: clients cache the registry locally and can keep calling known-good instances even when Eureka itself is partitioned, matching Netflix's "stay up at all costs" philosophy — a mildly stale instance list is strictly better than no instance list. When choosing discovery infrastructure, ask what happens to running services when the registry is down; for discovery, stale-but-available almost always beats consistent-but-unavailable.
 
 **Q16: A single API request chains 8 sequential service calls, each 50ms at p99 — what's the latency cost and how do you cut it?**
+**Short:** Sequential service calls sum their latencies, so parallelizing independent calls and caching slow data cuts the total.
+
 Sequential chaining sums every hop's latency, so the chain's p99 approaches 8 x 50ms = 400ms or worse — Netflix measured 1200ms for exactly this shape. Its fourth migration pitfall traced the chain User → Auth → Profile → Recs → Catalog → Pricing → DRM → Logging. The fix decomposed the chain along dependency lines: calls that don't depend on each other run in parallel (`CompletableFuture.allOf`), non-critical work like logging moves off the request path entirely via Kafka, frequently-needed context like auth and profile is pre-fetched once into the request, and slowly-changing data like pricing is cached. This is the "chatty synchronous chains" pitfall from the module's pitfall table, and it's also why the When-NOT-to-Use section lists tight latency budgets as a reason to avoid microservices — every extracted service adds a network hop that an in-process call didn't have. Draw the dependency graph of a request's downstream calls before writing the handler; only genuinely sequential dependencies should ever be awaited in sequence.
 
 **Q17: During a rolling deploy, old and new versions of a service run at the same time — how do you stop that from breaking consumers?**
+**Short:** Expand-migrate-contract schema changes and contract testing prevent old and new service versions from breaking each other.
+
 Make every schema change additive and ship it as three separate deploys — expand, migrate, contract — so no single release ever removes something a live consumer still reads. In the expand step you add the new field beside the old one and write both; in migrate you move every consumer onto the new field; only in contract do you stop writing and then delete the old one. Enforce it mechanically rather than by review: a schema registry rejects an incompatible event schema at publish time (Confluent's default `BACKWARD` mode allows adding or removing optional fields and forbids adding a required one, and requires you to upgrade consumers before producers), and consumer-driven contract testing does the same for synchronous APIs — Pact replays each consumer's recorded expectations against the provider's CI, and `can-i-deploy` blocks the release until a successful verification exists against every version already live in the target environment. §10's War Story 2 is the failure mode when neither gate exists: a `order_total` -> `total_amount` rename that produced no errors at all, just six hours of `null` revenue in three downstream systems.
 
 ---

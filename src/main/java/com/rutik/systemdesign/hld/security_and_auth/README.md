@@ -656,66 +656,82 @@ A database connection string, including a plaintext password, was committed to a
 ## 12. Interview Questions with Answers
 
 **Q1: What's the difference between authentication and authorization, and why does conflating them cause bugs?**
+**Short:** Authentication verifies identity once at login; authorization checks permission for every action on every request.
 
 A: Authentication verifies *identity* ("who are you") — typically once, at login. Authorization verifies *permission* for a specific action ("can this identity do this") — on every request. Conflating them looks like checking "is this token valid?" and treating that as sufficient — but a *valid* token from a *legitimate* low-privilege user calling an admin endpoint should still be rejected. War Story 3 (§10) is exactly this bug: signature validation (AuthN) passed, but authorization (does this role permit this action on this service) was insufficiently checked.
 
 **Q2: Why is a JWT "stateless," and what problem does that create?**
+**Short:** A JWT validates without a database lookup, but that means it can't be revoked before it expires.
 
 A: A JWT is stateless because its signature can be verified using only the issuer's public key — no database lookup is needed, so any service can validate it independently without calling back to the auth server. The problem is revocation: since validation never checks a database, a JWT remains valid until its `exp` time *no matter what happens server-side* (account disabled, user logged out, permissions changed). The standard fix is short access-token TTLs (5-15 min) combined with server-tracked, revocable refresh tokens (§6.2).
 
 **Q3: Walk through the OAuth2 Authorization Code flow with PKCE, and explain what PKCE protects against.**
+**Short:** PKCE binds the authorization code to a secret only the original client holds, blocking a stolen-code exchange attack.
 
 A: The client generates a random `code_verifier` and sends its SHA256 hash (`code_challenge`) when redirecting the user to the Authorization Server's login page. After login, the Authorization Server redirects back with a one-time `code`. The client then exchanges `code` + the original `code_verifier` for tokens; the server checks that `SHA256(code_verifier) == code_challenge` from the first step. PKCE protects against an attacker intercepting the redirect and stealing the `code` (e.g., via a malicious app registering the same custom URL scheme on mobile) — without the `code_verifier`, which never left the legitimate client, the stolen `code` cannot be exchanged for tokens.
 
 **Q4: How does OIDC relate to OAuth2 — aren't they the same thing?**
+**Short:** OAuth2 grants API access on a user's behalf; OIDC adds an ID token on top that actually proves who logged in.
 
 A: OAuth2 is an *authorization* framework — it grants an access token that lets an app call an API on a user's behalf, but says nothing about the user's identity. OIDC is a thin identity layer built on top of OAuth2: alongside the access token, the Authorization Server also issues an **ID token** (a JWT with identity claims like `sub`, `email`, `name`). "Sign in with Google" uses OIDC — the ID token tells the app *who logged in*; the access token (if requested) lets the app call Google APIs.
 
 **Q5: How do you propagate a user's identity across a chain of microservices without each one calling back to the auth server?**
+**Short:** The edge validates the token once and forwards it downstream, letting each service verify the signature locally against a cached key.
 
 A: The edge validates the token once, then forwards a verified identity token downstream on every internal call. That token is often the same JWT, or an internally-minted short-lived one, carried in the `Authorization` header. Each downstream service independently validates the signature using a cached public key (fetched periodically from a JWKS endpoint) — no network call to the auth server per request. Combined with mTLS (§4.5) between services, this gives both "who is the end user" (from the JWT claims) and "which service is calling me" (from the mTLS certificate) without a synchronous auth-server dependency on the hot path.
 
 **Q6: Why shouldn't you store passwords with encryption instead of hashing?**
+**Short:** Encryption is reversible with a key, while password hashing is one-way, so only hashing belongs in password storage.
 
 A: Encryption is reversible (with the right key) — if the key is ever compromised, every password is recoverable in plaintext. Hashing with a deliberately slow, salted algorithm (bcrypt/Argon2) is one-way: even with the hash database stolen, recovering the original password requires brute-forcing each one individually, and the slow hash function (e.g., ~250ms at bcrypt cost 12) makes large-scale brute-forcing computationally infeasible (§6.4). There is never a legitimate need to recover a user's original password — only to verify a login attempt's hash matches.
 
 **Q7: What's the difference between RBAC and ABAC, and when would you choose one over the other?**
+**Short:** RBAC assigns permissions to roles for simple systems; ABAC evaluates attribute rules for ownership- or context-dependent access.
 
 A: RBAC assigns permissions to roles, and users to roles ("admin can delete any post"). It's simple and auditable but coarse — modeling "users can edit only their own posts" or per-tenant isolation requires either application-code checks layered on top or an explosion of roles. ABAC evaluates rules against attributes of the user, resource, and context ("allow edit if `resource.owner_id == user.id`" or "allow if `resource.tenant_id == user.tenant_id`"). Choose RBAC for simple, role-hierarchy-driven systems; choose ABAC (often via a policy engine like OPA) for multi-tenant SaaS or systems with ownership/context-dependent rules.
 
 **Q8: What is mTLS, and why would a service mesh enable it for ALL internal traffic, even within a "trusted" network?**
+**Short:** mTLS makes both sides of every internal connection authenticate each other, treating no network location as inherently trusted.
 
 A: mTLS (mutual TLS) means both sides of a connection present and verify certificates — the client authenticates the server (normal TLS) AND the server authenticates the client. In a zero-trust model, "internal network" is not treated as inherently trusted (an attacker who compromises one pod/VM has network access to everything else) — so every service-to-service call is independently authenticated and encrypted via mTLS, regardless of network location. This follows Google's BeyondCorp principle (§7): the perimeter isn't the network boundary, it's each individual request.
 
 **Q9: A user reports they're still logged in on a device 2 hours after you disabled their account. How is this possible, and how do you fix it?**
+**Short:** A long-TTL access token stays valid until expiry since nothing re-checks account status, so shorten TTLs and check refresh tokens.
 
 A: This is the stateless-JWT revocation problem (§6.2): a long-TTL access token stays valid until it expires, because nothing re-checks account status. If the TTL is 24 hours and validation never touches a database, the signature alone keeps the session alive. Fix: reduce access token TTL to ~15 minutes, and ensure refresh tokens ARE checked against a server-side store on every refresh — disabling the account deletes/invalidates the refresh token record, so the next refresh attempt (within 15 minutes) fails, and the user is fully logged out within one access-token lifetime.
 
 **Q10: Why is `alg: none` or accepting multiple signature algorithms in JWT validation dangerous?**
+**Short:** Letting the attacker-controlled alg header pick the verification method lets an attacker forge a token signed with the public key.
 
 A: Because the `alg` header is attacker-controlled, branching verification logic on it lets the attacker choose how their own token gets checked. Setting `alg: none` skips signature verification entirely; switching `RS256` to `HS256` makes some libraries verify with the public key as if it were an HMAC secret — and the public key is, by definition, public, so the attacker can sign a forged token with it. The fix is an algorithm **allowlist** decided by the verifier, never the token (§10, War Story 1).
 
 **Q11: How would you design authentication for a system with both a web frontend and a public API for third-party developers?**
+**Short:** Use Authorization Code with PKCE for the web frontend and Client Credentials or Authorization Code for third-party API access.
 
 A: Two different flows, sharing the same underlying IdP/OAuth2 server: the web frontend uses Authorization Code + PKCE (user logs in interactively, gets short-lived tokens via `httpOnly` cookies). Third-party developers register an OAuth2 "application" and use Client Credentials (for server-to-server access to their own data) or Authorization Code (if they need to act on behalf of *your* users — "Connect your account"). Both paths issue the same JWT format, validated identically by the resource servers — only the *issuance* flow differs based on who's authenticating.
 
 **Q12: What's "envelope encryption" and why is it preferred over encrypting everything directly with one master key?**
+**Short:** Envelope encryption wraps a per-object data key with a root key in the KMS, so rotation only re-wraps the small keys, not the data.
 
 A: Envelope encryption encrypts data locally with a per-object data key, then encrypts that data key with a root key that never leaves the KMS. Only the small wrapped data key is stored alongside the ciphertext. In AWS terms the root key is a **customer managed KMS key** whose material stays inside the HSM, and the per-object key is a **data key** returned by `GenerateDataKey`. Rotating the KMS key therefore re-wraps only the (tiny) data keys rather than re-encrypting petabytes of underlying data, and every decrypt is an auditable KMS API call — centralized "who decrypted what, when" logging without re-architecting storage.
 
 **Q13: What is the principle of least privilege, and why scope a service account narrowly even if "it would never misuse broader permissions"?**
+**Short:** Least privilege bounds what stolen credentials can do, regardless of whether the code currently uses that access.
 
 A: Least privilege means every identity gets only the minimum permissions needed for the minimum time needed, never more just because it seems convenient or unlikely to be misused. A service that only reads from a queue should have an IAM role that cannot write or delete, because the question that matters is not "would this service ever do that" but "what happens if this service's credentials are ever stolen" — the blast radius of a compromise is bounded by what the credentials CAN do, not by what the code currently does. A read-only role that gets compromised can only leak data; a role with unnecessary write access that gets compromised can also destroy it. Apply least privilege to every identity — human users, service accounts, and CI/CD pipelines alike — and treat any permission broader than what is actively used as a liability, not a convenience.
 
 **Q14: What is a salt in password hashing, and what attack does it specifically defend against?**
+**Short:** A salt makes identical passwords hash differently, defeating precomputed rainbow-table attacks.
 
 A: A salt is a random value generated per password and stored alongside its hash, ensuring that two users with the identical password produce completely different hash outputs. Without a salt, an attacker can precompute a "rainbow table" — a lookup table mapping common passwords to their hash values — once, and then instantly reverse any stolen hash that matches an entry in the table, across every system using that same hashing scheme. With a unique salt per password, the attacker would need a separate precomputed table for every possible salt value, which makes precomputation practically useless and forces brute-forcing each stolen hash individually. Always generate a fresh random salt per password and store it alongside the hash — bcrypt, scrypt, and Argon2 all handle this automatically as part of their hash output format.
 
 **Q15: What are the security weaknesses of static, long-lived API keys compared to short-lived tokens?**
+**Short:** A static API key grants full access indefinitely until manually rotated, unlike a token that self-expires in minutes.
 
 A: A static API key is coarse-grained and long-lived, so a single leaked key grants full access until manually rotated, unlike a token that self-expires in minutes. Because the key does not change, accidentally logging it — a common mistake when keys are passed as URL query parameters — permanently compromises it until rotation, and rotation itself is often disruptive because every client using the key must be updated in coordination. API keys also usually represent "one key equals full access" rather than a scoped, auditable set of permissions tied to a specific identity and expiry, making it harder to answer "who did this" after an incident. Reserve static API keys for service-to-service or developer-API access with proper scoping (like Stripe's `sk_live_`/`sk_test_` prefixed, permission-scoped keys), and never use them as a substitute for proper user session or token management.
 
 **Q16: What is refresh token rotation, and how does reuse detection signal a compromised token?**
+**Short:** Refresh token rotation invalidates each token after one use, so a second use of the same token reveals a stolen token.
 
 A: Refresh token rotation issues a brand-new refresh token every time the old one is used to get a new access token, immediately invalidating the one that was just used. If an attacker has stolen a refresh token and uses it, and the legitimate user's device later tries to use that same now-invalidated token, the server detects two uses of a token that should only ever be used once and treats this as a compromise signal. On detecting reuse, the server revokes the entire token family — every refresh token descended from that original login — forcing full re-authentication rather than just blocking the one stolen token. This turns a stolen refresh token from a silent, long-lived liability into a detectable event, closing the gap that a non-rotating refresh token would leave open indefinitely.
 

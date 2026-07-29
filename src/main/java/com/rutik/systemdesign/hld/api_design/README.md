@@ -447,54 +447,88 @@ Stripe-Signature: t=1492774577,v1=5257a8...
 ## 12. Interview Questions
 
 **Q1: What is the difference between PUT and PATCH?**
+**Short:** PUT replaces the entire resource, while PATCH applies a partial update to it.
+
 PUT replaces the entire resource. PATCH applies a partial update. Example: PUT /users/1 requires sending all user fields; PATCH /users/1 can send only `{ "email": "new@example.com" }`.
 
 **Q2: How do you handle API versioning?**
+**Short:** URL path, header, and query-parameter versioning are the three common API versioning strategies.
+
 Common strategies: URL path versioning (`/v1/`, `/v2/`), header versioning (`Accept: application/vnd.myapi.v2+json`), and query parameter versioning (`?version=2`). URL path versioning is most visible and commonly used. Always deprecate old versions with sunset headers before removing.
 
 **Q3: What is the difference between authentication and authorization?**
+**Short:** Authentication verifies identity; authorization verifies what that identity may do.
+
 Authentication verifies identity ("who are you?" — JWT, session cookie). Authorization verifies permission ("are you allowed?" — RBAC, ABAC, scope checks). Both are needed; confusing them is a common security mistake.
 
 **Q4: How would you design a pagination strategy for a high-traffic API?**
+**Short:** Cursor-based pagination stays O(1) per page, unlike OFFSET which rescans all preceding rows.
+
 Use cursor-based pagination instead of offset. Store the cursor as a base64-encoded pointer to the last seen row (ID or timestamp). This ensures stable pages under concurrent writes and is O(1) with a proper index, unlike OFFSET which scans all preceding rows.
 
 **Q5: What is idempotency and why does it matter in API design?**
+**Short:** An idempotent operation returns the same result whether it runs once or many times.
+
 An idempotent operation produces the same result whether called once or many times. GET and DELETE are naturally idempotent. POST is not; you add idempotency by accepting a client-provided key that the server uses to deduplicate retries. Critical for payment and order APIs where network failures cause retries.
 
 **Q6: Explain REST constraints.**
+**Short:** REST constraints are statelessness, client-server separation, uniform interface, layered system, cacheability, and optional code-on-demand.
+
 Stateless, client-server separation, uniform interface (resource identification, manipulation through representations, self-descriptive messages, HATEOAS), layered system, cacheable, optional code-on-demand.
 
 **Q7: How does GraphQL solve the N+1 problem on the server side?**
+**Short:** GraphQL's DataLoader batches per-field resolver lookups into one query per event-loop tick.
+
 Using DataLoader: batch individual database lookups that occur during field resolution into a single batched query per tick of the event loop. Instead of 100 separate DB calls to fetch 100 users' avatars, DataLoader fires one `SELECT WHERE id IN (...)` query.
 
 **Q8: What are the tradeoffs of JWT vs opaque session tokens?**
+**Short:** JWTs scale statelessly but cannot be revoked early; opaque tokens can be revoked but need a lookup.
+
 JWTs are stateless (no DB lookup to verify) enabling horizontal scaling, but cannot be invalidated before expiry. Opaque tokens require a DB/cache lookup per request but can be revoked instantly. Hybrid: short-lived JWTs (15 min) + long-lived refresh tokens stored in a revocation store.
 
 **Q9: How would you design rate limiting at the API gateway level?**
+**Short:** API gateway rate limiting typically uses a token bucket or sliding window backed by Redis.
+
 Use a token bucket or sliding window algorithm. Store state in Redis (for distributed rate limiting). Key by IP for unauthenticated endpoints and by user/API key for authenticated ones. Return `429 Too Many Requests` with `Retry-After` and `X-RateLimit-*` headers.
 
 **Q10: What is gRPC and when would you prefer it over REST?**
+**Short:** gRPC uses Protocol Buffers over HTTP/2 for smaller payloads and bidirectional streaming.
+
 gRPC uses Protocol Buffers over HTTP/2, providing binary serialization (smaller payloads), multiplexed streams, bidirectional streaming, and auto-generated type-safe clients. Prefer it for internal service-to-service communication where latency and throughput matter, or when you need streaming.
 
 **Q11: How do you handle breaking changes in a public API?**
+**Short:** Breaking API changes are handled by versioning, running versions in parallel, and a deprecation window.
+
 Version the API (introduce `/v2/`). Run both versions in parallel. Set a deprecation date, communicate via docs and `Deprecation` / `Sunset` headers. Give consumers at least 6-12 months to migrate. Use feature flags for gradual migration. Never silently change behavior of an existing version.
 
 **Q12: What is CORS and how does it work?**
+**Short:** CORS lets a server opt browsers into cross-origin requests via the Access-Control-Allow-Origin header.
+
 Cross-Origin Resource Sharing. Browsers block requests from `a.com` to `b.com` unless `b.com` responds with `Access-Control-Allow-Origin: a.com`. Preflight requests (`OPTIONS`) are sent for non-simple requests. Server-side concern, not an API design concern per se, but APIs must handle it for browser clients.
 
 **Q13: How should an API handle an operation that takes 30+ seconds, like generating a report?**
+**Short:** Long-running work should return 202 Accepted with a job ID instead of blocking the HTTP connection.
+
 Return `202 Accepted` immediately with a job ID instead of holding the HTTP connection open, then let the client poll a status endpoint or receive a webhook when the work finishes. Section 10 calls out "synchronous calls for async work" as a common pitfall — blocking `POST /reports` for 30 seconds ties up a server thread or connection per in-flight request, and most client/proxy timeouts (30-60s) will kill the connection before the work completes anyway. The Stripe case study uses this pattern for the card-network leg: `POST /payment_intents` returns `status: processing` immediately, and the client's registered webhook receives `payment_intent.succeeded` asynchronously (Case Study Step 5). Design `GET /jobs/{id}` to return the same resource shape as the webhook payload so clients can use either mechanism interchangeably.
 
 **Q14: Why is exposing sequential auto-incrementing database IDs in API responses risky?**
+**Short:** Sequential auto-incrementing IDs let attackers enumerate resources and infer business volume.
+
 Sequential integer IDs let attackers enumerate resources by incrementing the ID in the URL, exposing insecure direct object reference (IDOR) risks. For example, an attacker can iterate `GET /orders/1`, `/orders/2`, `/orders/3` to probe records that lack proper per-resource authorization, and competitors can estimate signup or order volume by diffing IDs over time. Section 10 lists this among the common pitfalls precisely because auto-increment primary keys are the free default most ORMs hand you. The fix is to keep the sequential ID as the internal database primary key for index performance, but expose a UUID, ULID, or opaque hashid as the public-facing resource identifier. Always pair opaque IDs with real authorization checks — an unguessable ID alone is not an access-control mechanism, it just removes the cheapest attack.
 
 **Q15: What problem does an API gateway solve, and what risk does it create as more logic gets pushed into it?**
+**Short:** An API gateway centralizes cross-cutting concerns but risks becoming a single point of failure and a logic dump.
+
 An API gateway centralizes cross-cutting concerns — authentication, rate limiting, routing — so individual services don't reimplement them. It acts as a Facade over the service mesh (see Cross-Perspective: LLD Connections). In the REST request lifecycle diagram (§4), the gateway authenticates via JWT and applies a token bucket before the request ever reaches the User Service, meaning all client traffic funnels through one component. The risk is twofold: it becomes a single point of failure that needs its own horizontal scaling and HA setup, and it becomes a dumping ground for business logic — once teams add service-specific transformations, independently deployable services get recoupled at the edge into something close to a monolith. Keep the gateway limited to genuinely cross-cutting concerns and push domain-specific validation back into the owning service.
 
 **Q: How does a webhook receiver prove the request really came from the sender, and how does it stop the same signed request being replayed forever?**
+**Short:** A webhook verifies an HMAC over the raw body and rejects requests outside a short timestamp window.
+
 It verifies an HMAC over the raw body and rejects any request whose signed timestamp falls outside a short tolerance window. Section 5's webhook mechanics use Stripe's scheme as the reference: the `Stripe-Signature` header carries `t=<unix timestamp>,v1=<hex>`, where `v1` is HMAC-SHA256 over the literal string `"<t>.<raw body>"` keyed by the endpoint's signing secret. Two details are load-bearing. First, the HMAC must be recomputed over the exact bytes received — parsing the JSON and re-serializing it changes whitespace or key order and breaks the comparison — and the comparison itself must be constant-time so an attacker cannot use response timing to guess the digest byte by byte. Second, a signature alone only proves authenticity, not freshness: without binding the timestamp into the signed string, a captured POST stays valid forever, which is why the timestamp is part of the signed payload and why Stripe rejects anything more than 5 minutes old by default. A signature check is authentication, not deduplication — you still need the event ID and a seen-set, because retries deliver the same correctly-signed event more than once.
 
 **Q16: What security risk is unique to GraphQL's flexible querying model?**
+**Short:** GraphQL's flexible queries enable complexity-based denial-of-service via deeply nested fields.
+
 A single GraphQL query can request deeply nested or duplicated fields that fan out into an enormous number of resolver calls — a query-complexity denial-of-service. One request can do the database work of thousands of REST calls. The GraphQL tradeoffs table (§7) already flags that server-side query execution is complex to analyze; that complexity is exactly what an attacker exploits by nesting fields like `friends { friends { friends { ... } } }` a few levels deep. Mitigate with query depth limits, a cost/complexity scoring system that rejects queries above a threshold, per-field resolver timeouts, and persisted queries (allow-listing known query shapes) for public-facing schemas. Never expose an unbounded GraphQL schema to untrusted clients without depth limiting and complexity analysis in front of it.
 
 ---

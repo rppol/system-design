@@ -495,30 +495,35 @@ public class UserRepositoryImpl implements UserReader, UserWriter {
 ## Interview Questions and Answers
 
 **Q: What is the Interface Segregation Principle?**
+**Short:** ISP states that no client should be forced to depend on interface methods it never actually uses.
 
 A: ISP states that no client should be forced to depend on methods it does not use. It means interfaces should be narrow and cohesive — tailored to the needs of specific client roles rather than designed as broad contracts that bundle unrelated operations.
 
 ---
 
 **Q: What is a "fat interface" and why is it a problem?**
+**Short:** A fat interface bundles too many unrelated methods, forcing implementors to stub methods they cannot support.
 
 A: A fat interface has too many methods serving too many different clients. It forces implementors to write stub or exception-throwing implementations for methods they do not support, and it forces clients to depend on methods they never call. When one part of the interface changes, all clients are affected — even those that had nothing to do with the change.
 
 ---
 
 **Q: How do you decide when an interface is too big?**
+**Short:** An interface is too big when some implementor cannot support all its methods or some client never calls a subset of them.
 
 A: Ask: "Is there any implementor that legitimately cannot implement some of these methods?" and "Is there any client that never calls some of these methods?" If yes to either, the interface is a candidate for splitting. Also look at test complexity — if mocking the interface requires 10+ stub methods to test a single path, it is too big.
 
 ---
 
 **Q: Is ISP the same as SRP?**
+**Short:** ISP and SRP are related but distinct — SRP governs a class's reasons to change, ISP governs an interface's client dependencies.
 
 A: They are related but distinct. SRP applies to classes and says a class should have one reason to change. ISP applies to interfaces and says no client should depend on methods it does not use. Both push toward cohesion and reduced coupling. ISP can be thought of as SRP for interfaces.
 
 ---
 
 **Q: How does ISP relate to the Dependency Inversion Principle?**
+**Short:** ISP makes DIP's abstractions genuinely useful by keeping the interfaces DIP depends on narrow and focused.
 
 A: DIP says depend on abstractions, not concretions. ISP ensures those abstractions are narrow and focused. If the abstraction is a fat interface, DIP-compliant code still ends up coupled to operations it does not need. ISP makes DIP's abstractions genuinely useful.
 

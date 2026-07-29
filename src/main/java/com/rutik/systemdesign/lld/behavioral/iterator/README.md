@@ -605,33 +605,43 @@ flowchart LR
 **Common interview questions:**
 
 **Q: What is the Iterator pattern and why does Java use it?**
+**Short:** Iterator lets Java traverse any collection uniformly via hasNext()/next() without exposing its internal structure.
 A: Iterator provides a uniform way to traverse collections without exposing their internal structure. Java uses it so that arrays, linked lists, trees, and hash sets are all traversable with identical `hasNext()`/`next()` code, and for-each loops work with any `Iterable`.
 
 **Q: What's `Iterable` vs `Iterator`?**
+**Short:** Iterable is the collection side that creates Iterators, while Iterator itself holds the traversal state.
 A: `Iterable` is the collection side — it has `iterator()` that creates a new Iterator. `Iterator` is the traversal state — it has `hasNext()` and `next()`. Implementing `Iterable` enables for-each loops. You can have multiple active Iterators on one Iterable simultaneously.
 
 **Q: What is `ConcurrentModificationException` and how do you avoid it?**
+**Short:** It fires when a collection is structurally modified during iteration, avoidable via iterator.remove() or a copy-on-write collection.
 A: It's thrown when the collection is structurally modified during iteration (detected via a `modCount` counter). Avoid it by: using `iterator.remove()` instead of `collection.remove()`, using `CopyOnWriteArrayList`, or collecting modifications and applying them after iteration.
 
 **Q: How would you implement a binary tree iterator?**
+**Short:** An explicit stack simulating in-order traversal, pushing left spines and popping nodes, implements a binary tree iterator.
 A: Use an explicit stack to simulate recursive in-order traversal. Push the root's left spine onto the stack. `next()` pops a node, then pushes the right child's left spine. `hasNext()` checks if the stack is non-empty.
 
 **Q: What is a `Spliterator`?**
+**Short:** A Spliterator is Java 8's parallel-aware iterator that can split itself for parallel Stream processing.
 A: Java 8's parallel-aware iterator that can split itself for parallel processing. It supports characteristics (ORDERED, SIZED, etc.) and is used internally by `Stream`.
 
 **Q: When should you use a `Stream` instead of writing a custom `Iterator`?**
+**Short:** Use Stream for transformation pipelines, and a custom Iterator when modeling stateful, caller-controlled traversal.
 A: Use `Stream` when you're describing a transformation pipeline (filter, map, reduce, collect) over a source — it's more expressive, often lazy, and can be parallelized with `.parallelStream()` without manual thread management. Use a custom `Iterator`/`Iterable` when you're modeling a *data structure* that needs to support external, stateful, step-by-step traversal — e.g., a tree that callers walk node-by-node, or a cursor over paginated API results where the caller controls pacing. In practice, a well-designed `Iterable` gives you `Stream` for free (`StreamSupport.stream(spliterator(), false)`), so the two aren't mutually exclusive — implement `Iterable` for the data structure, and let callers choose `for-each` or `.stream()` depending on whether they need control flow or a pipeline.
 
 **Q: Explain `ConcurrentModificationException` mechanics — why does `ArrayList.Itr` throw it, and how do `CopyOnWriteArrayList`/`ConcurrentHashMap` avoid it?**
+**Short:** ArrayList's fail-fast iterator compares a captured modCount on each next(), while CopyOnWriteArrayList and ConcurrentHashMap avoid the check structurally.
 A: `ArrayList` (and most `java.util` collections) maintain a `modCount` field incremented on every structural modification (add/remove, not set); `ArrayList.Itr` captures `expectedModCount` at creation and checks `modCount == expectedModCount` on every `next()` call, throwing `ConcurrentModificationException` (fail-fast) if they diverge. `CopyOnWriteArrayList` avoids this entirely because every write (`add`/`remove`) creates a brand-new backing array — the iterator was handed a reference to the *old* array at creation time and simply never sees the new one, so there's nothing to detect a conflict against; reads are always consistent with a point-in-time snapshot. `ConcurrentHashMap`'s iterators are "weakly consistent" — they tolerate concurrent modification and may or may not reflect updates made during iteration, but never throw CME, because the traversal walks the live bin table directly and there is no modification counter to compare against (Java 8 replaced the old segment array with per-bin locking, so there is no global count to invalidate).
 
 **Q: What's the difference between external and internal iteration, and what control-flow tradeoffs come with each?**
+**Short:** External iteration lets the client control the loop, while internal iteration hands control to the library via callbacks.
 A: External iteration (`while (it.hasNext()) { T x = it.next(); ... }`) puts the client in control of the loop — the client can `break`, `return`, skip elements, or interleave iteration with other logic mid-loop. Internal iteration (`collection.forEach(x -> ...)`, or `Stream` operations) hands control to the collection/library, which calls back into a lambda for each element — this enables the library to optimize (parallelize, fuse operations, short-circuit via `findFirst`/`anyMatch`) but makes early-exit and cross-iteration state awkward (no `break`; mutable captured variables need `AtomicInteger`-style workarounds). Practical guidance: prefer internal iteration (`forEach`, streams) for simple "do this to every element" cases since it's more concise and parallelizable; fall back to external iteration when you need fine-grained control flow (early termination with side effects, coordinating two iterators in lockstep).
 
 **Q: What are the general "iterator invalidation" rules — when does an iterator become unsafe to use?**
+**Short:** An iterator becomes unsafe once the collection is changed outside that iterator's own remove/add methods, throwing CME later.
 A: An iterator becomes invalid the moment the underlying collection is structurally modified through any path other than that iterator's own `remove()`/`add()` methods — this includes another thread's modification, the same thread calling `collection.add()`/`remove()` directly, or (subtly) a framework-triggered side effect like a Hibernate auto-flush during a `@Transactional` loop. Once invalid, fail-fast iterators throw CME on the *next* `hasNext()`/`next()` call (not immediately at the point of modification), which can make the stack trace misleading — the exception surfaces far from the actual mutation. The safe patterns are: use `Iterator.remove()`/`ListIterator.add()` for in-loop mutation, take a defensive copy (`new ArrayList<>(source)`) before iterating if the source might change, or use `Collection.removeIf()` which handles the iteration internally and correctly.
 
 **Q: Implement an in-order iterator over a binary tree without recursion — why is this non-trivial?**
+**Short:** It's non-trivial because in-order traversal is naturally recursive, so an explicit stack must hold the paused state instead.
 A: It's non-trivial because in-order traversal is naturally recursive (`inorder(left); visit(node); inorder(right)`), but `Iterator.next()` must return one element at a time and resume exactly where it left off on the next call — there's no call stack to "pause" between invocations. The standard solution is an explicit `Deque<Node>` that the iterator owns as its state: the constructor pushes the entire left spine of the root onto the stack; `next()` pops a node (this is the next in-order element), then pushes the left spine of that node's right child (if any); `hasNext()` simply checks `!stack.isEmpty()`. Each `next()` call does amortized O(1) work (total O(n) pushes/pops across a full traversal), and because all state lives in the iterator instance, multiple independent iterators over the same tree work correctly with no interference — this is the same technique used to implement `TreeMap`'s iterator without recursion.
 
 ---

@@ -511,54 +511,88 @@ So the first 1.2TB removes 80% of database load, and the second 1.2TB is what yo
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between cache-aside and read-through caching?**
+**Short:** Cache-aside lets the app manage cache population; read-through has the cache layer fetch on a miss.
+
 A: In cache-aside, the application manages cache population — it checks the cache, and on a miss, fetches from DB and writes to cache itself. In read-through, the cache layer handles fetching from DB on a miss transparently. Cache-aside gives more control; read-through simplifies application code.
 
 **Q2: How would you handle a cache stampede?**
+**Short:** Cache stampedes are prevented with a distributed lock so only one request refills the cache.
+
 A: Use distributed locking (Redis SETNX) so only one request repopulates the cache while others wait or serve stale. Alternatively, use probabilistic early expiration (XFetch) or background refresh with stale-while-revalidate semantics.
 
 **Q3: What is cache penetration and how do you prevent it?**
+**Short:** Cache penetration is requests for nonexistent keys, prevented by caching nulls or using a Bloom filter.
+
 A: Cache penetration occurs when requests are made for keys that don't exist in the cache or DB (often malicious). Prevention: cache null/empty results with a short TTL, or use a Bloom filter to quickly reject impossible keys before touching the cache or DB.
 
 **Q4: When would you prefer LFU over LRU?**
+**Short:** LFU beats LRU when hot keys are frequently accessed but not necessarily the most recent.
+
 A: LFU is better when access patterns have long-lived "hot" keys that are not necessarily the most recent (e.g., popular product pages). LRU can evict frequently accessed items if there's a temporary scan workload. LFU resists this. Downside: LFU can be slow to adapt to changing access patterns (frequency counts persist).
 
 **Q5: How does Redis achieve high throughput despite being single-threaded?**
+**Short:** Redis stays fast while single-threaded because its event loop avoids lock contention and I/O is the bottleneck, not CPU.
+
 A: Redis uses a single-threaded event loop (I/O multiplexing via epoll/kqueue) avoiding lock contention. Since most operations are O(1) or O(log n) in-memory, CPU is rarely the bottleneck — network I/O is. Redis 6+ added threaded I/O for reading/writing, keeping command processing single-threaded.
 
 **Q6: What is the difference between write-through and write-back?**
+**Short:** Write-through writes to cache and DB synchronously; write-back writes to cache and flushes to DB later.
+
 A: Write-through: writes go to cache AND DB synchronously — strong consistency, higher write latency. Write-back: writes go to cache only, DB is updated asynchronously — lower latency, risk of data loss.
 
 **Q7: How would you design a cache for a leaderboard?**
+**Short:** A leaderboard cache is best built with a Redis sorted set, giving O(log n) rank and range queries.
+
 A: Use a Redis Sorted Set (ZSET). Member = user ID, score = points. `ZADD`, `ZRANK`, `ZRANGE` are O(log n). For top-N queries, `ZREVRANGE 0 N-1` is O(log n + N). No TTL needed; update in real-time. Persist to DB periodically.
 
 **Q8: What is cache coherence in a distributed cache?**
+**Short:** Cache coherence means every node sees a consistent value after an update, often via invalidation or versioning.
+
 A: Ensuring all cache nodes have a consistent view when data is updated. Strategies: invalidate all nodes on write, use a versioning/ETag scheme, use a single writer pattern, or accept eventual consistency with short TTLs.
 
 **Q9: How does Facebook handle cache invalidation at scale?**
+**Short:** Facebook invalidates Memcached keys by reading the MySQL binlog and deleting keys for changed rows.
+
 A: Facebook's McSqueal reads MySQL binlog and invalidates Memcached keys when the underlying database rows change. This decouples invalidation from the write path and ensures eventual consistency across all caches.
 
 **Q10: What is the N+1 caching problem?**
+**Short:** The N+1 caching problem is fetching a list plus N separate per-item cache lookups instead of batching.
+
 A: When fetching a list of N items, each item requires an individual cache lookup — resulting in N+1 total operations (1 for the list, N for items). Use batch operations (Redis MGET) or cache the entire list as a single key to avoid this.
 
 **Q11: How would you implement rate limiting using a cache?**
+**Short:** Cache-based rate limiting uses Redis INCR plus EXPIRE, or a sorted set for sliding windows.
+
 A: Use Redis with a sliding window counter. Key = `rate_limit:{user_id}:{window}`. Use INCR + EXPIRE for fixed windows, or a sorted set for sliding windows. Atomic Lua scripts ensure race-condition-free increments.
 
 **Q12: What metrics do you monitor for a cache?**
+**Short:** Key cache metrics are hit rate, miss rate, eviction rate, memory usage, and p50/p99 latency.
+
 A: Hit rate, miss rate, eviction rate, memory usage, latency (p50/p99), connection count, replication lag (for read replicas), keyspace size, and slow log for long-running commands.
 
 **Q13: What is cache avalanche, and how is it different from a cache stampede?**
+**Short:** Cache avalanche is many keys expiring together; a cache stampede is many requests racing to refill one key.
+
 A: Cache avalanche is many different keys expiring around the same time and flooding the database across a wide keyspace, while a stampede is many concurrent requests racing to refill one single hot key. Section 6's decision diagram distinguishes them by trigger: one key expiring (stampede) versus many keys expiring together (avalanche) versus a key that never existed (penetration). The fix differs too — TTL jitter and a multi-level L1/L2 cache address avalanche by spreading out expirations and absorbing the spike locally, while a per-key mutex or XFetch fixes a stampede on a single key. In the Twitter case study, a Redis cluster restart that reloaded every key with the same 86400s TTL caused exactly this: 200M timelines expired simultaneously 24 hours later and took down the Manhattan DB for 8 minutes.
 
 **Q14: Why can invalidating the cache right after a DB write still leave stale data behind?**
+**Short:** A naive write-then-delete-cache sequence can still leave stale data due to a race with a concurrent reader.
+
 A: A concurrent reader can slip in between the DB write and the cache delete, repopulating the cache with the pre-write value, so a naive "write DB, then delete cache" sequence is not race-free. Concretely: Thread A writes the DB, Thread B's read misses or reads the stale entry and starts fetching, Thread A deletes the cache, then Thread B's slower fetch lands in the cache after the delete — leaving stale data with no TTL-independent way to self-correct. Section 10's pitfall #3 calls this out directly; mitigations include a distributed lock around the read-repopulate path, a short delayed double-delete (delete again 500ms-1s later), or versioning cache values so a stale write is detected and dropped. Prefer deleting the cache entry over updating it on writes — a delete costs one future cache miss, while an update can itself race and cache the wrong value.
 
 **Q15: How do you protect a cache cluster from a single "hot key" receiving millions of requests per second?**
+**Short:** A hot key is protected by adding a local L1 cache in front of the distributed cache to absorb the traffic.
+
 A: Add an in-process L1 cache (like Caffeine) in front of the distributed L2 cache so the hottest keys are served from local memory without a network hop, and cap or skip expensive per-key operations above a threshold. Section 10's pitfall #4 flags this directly — a single key like a celebrity tweet can overwhelm the one Redis shard it hashes to, since a shard has a practical per-key ceiling (the Twitter case study cites ~100k QPS). The case study's fix layered a 100MB, 5-second-TTL Caffeine cache on each app server for the top 1000 accounts, eliminating roughly 80% of Redis hits for celebrity content, and skipped fan-out entirely for authors above 1M followers instead of writing to every follower's key. A single distributed cache tier alone cannot fix a hot key — replicate the hot value locally (L1) or shard the key itself (key plus random suffix on write, merged on read).
 
 **Q: Why is invalidating the cache from the database's replication log better than invalidating it from the application's write path?**
+**Short:** Invalidating from the replication log guarantees every write is caught, since no writer can bypass it.
+
 A: The replication log is the one record every writer must pass through, so no code path can update a row without producing an invalidation. Application-path invalidation depends on every writer remembering to delete the key — and a migration script, a manual DBA fix, or a second service sharing the table will not, leaving stale data until TTL. Section 6 describes Facebook's `mcsqueal` daemon doing exactly this: it reads the MySQL commit log, extracts the deletes implied by each committed statement, and broadcasts them to the memcache tier in every frontend cluster, batching over a replication link that already exists instead of fanning out from every application server. The generic form is change data capture — Debezium plus a Kafka topic per table. Log-driven invalidation still does not close the stale-set race in pitfall #3, where a reader that missed before the write completes its `set` after the delete; for that you need leases, where the miss hands out a token, a delete invalidates outstanding tokens, and a `set` presenting a pre-invalidation token is rejected.
 
 **Q16: How would you estimate the memory footprint of a distributed timeline cache?**
+**Short:** Estimate cache memory by multiplying per-entity size by active entities, then adding overhead and retention buffers.
+
 A: Multiply the per-entity cache size by the number of active entities, then add headroom for data-structure overhead and burst or retention buffers. In the Twitter case study, each user's timeline caps at 800 tweet IDs (Key Design Decision #3); at 8 bytes per ID that's 6.4KB raw, but Redis sorted-set overhead brings it to roughly 12KB per user, and multiplying by 200M DAU gives a 2.4TB theoretical minimum. Yet the design provisions a 50TB/200-node cluster (38TB actually used, 76% utilization) to cover celebrity-merge buffers and 30 days of inactive-user retention. Compute the theoretical minimum first, then size the real cluster several times higher once you account for overhead, replication, and retention beyond the "active" set — provisioning exactly to the minimum leaves no room for growth or failover.
 
 ---

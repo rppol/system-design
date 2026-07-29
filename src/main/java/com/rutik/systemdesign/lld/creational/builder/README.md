@@ -740,33 +740,53 @@ System.out.println(deluxe);     // Pizza{size='XL', crust='Stuffed', extraCheese
 ### Common Questions
 
 **Q: What problem does the Builder pattern solve?**
+**Short:** Builder solves the telescoping-constructor problem, where many optional parameters spawn combinatorial constructor overloads.
+
 A: The "telescoping constructor" problem — when a class has many optional parameters, constructors proliferate combinatorially. Builder gives each parameter a name at the call site, enforces required vs. optional separation, and allows the final product to be immutable.
 
 **Q: How is Builder different from Factory Method?**
+**Short:** Builder constructs one complex object step-by-step; Factory Method decides which class to instantiate in a single call.
+
 A: Builder constructs a single complex object step-by-step with many optional parts; the client controls the steps. Factory Method decides *which class* to instantiate, typically in one call. Builder focuses on HOW to construct; Factory Method focuses on WHAT class to return.
 
 **Q: What is the role of the Director?**
+**Short:** The Director encapsulates reusable construction recipes by calling a Builder's steps in a fixed sequence.
+
 A: The Director encapsulates reusable construction recipes. It accepts a Builder and calls its methods in a predefined sequence. It isolates "how to build a standard configuration" from both the client and the Builder. The Director is entirely optional — in modern Java, clients usually call the Builder directly.
 
 **Q: Why should the Product's constructor be private?**
+**Short:** A private Product constructor forces every creation path through the Builder, guaranteeing build()'s validation always runs.
+
 A: To enforce that the only way to create a Product is through the Builder. This ensures all validation in `build()` runs, all required fields are present, and the object is never created in a partially-initialized state.
 
 **Q: How does Builder support immutability?**
+**Short:** The Product's all-final fields are set once inside build(), so the object is fully initialized and then frozen atomically.
+
 A: The Product has all-`final` fields. Because `final` fields must be set in the constructor, and the constructor is called only from `build()`, the object is fully initialized — and from that point frozen — in one atomic step.
 
 **Q: What is Lombok's `@Builder` and how does it relate?**
+**Short:** Lombok's @Builder annotation auto-generates the entire nested Builder class with fluent setters and build().
+
 A: `@Builder` is a Lombok annotation that auto-generates the static nested Builder class with all the fluent setters and `build()` method, eliminating manual boilerplate while implementing the same pattern.
 
 **Q: Builder vs. telescoping constructors vs. JavaBeans setters — what are the concrete tradeoffs?**
+**Short:** Builder is the only option giving readability, immutability, and required-field enforcement together; the other two sacrifice one.
+
 A: Telescoping constructors buy compile-time immutability and required-field enforcement, JavaBeans setters buy readability at the cost of both, and Builder is the one option that gives you all three. Telescoping constructors — one overload per parameter combination — become unmanageable past 4-5 optional parameters, and callers can't tell which positional argument means what: `new Pizza("Large", "Thin", true, false, true)` is unreadable. The JavaBeans pattern (`new Pizza(); p.setSize(...); p.setCrust(...)`) solves readability with named setters, but sacrifices immutability (every field must be non-`final`) and thread-safety (the object is mutable and visible in a partially-constructed state between `new` and the last setter call) — two threads could observe `Pizza` mid-configuration. Builder gives you the readability of named setters AND the immutability of telescoping constructors, at the cost of one extra class per product: required fields go in the Builder's constructor (enforced at compile time, same as telescoping constructors), optional fields get named fluent setters (same readability as JavaBeans), and `build()` produces a `final`-field, fully-initialized, thread-safe-to-share `Product`. The practical guidance: choose telescoping constructors for 1-2 optional params, JavaBeans only when the object is inherently mutable (e.g., a UI component), and Builder for 3+ optional params on an otherwise-immutable object.
 
 **Q: Lombok `@Builder` vs. a hand-written builder — when do you reach for each?**
+**Short:** Use Lombok for simple invariant-free DTOs, and switch to a hand-written builder once cross-field validation is needed.
+
 A: Use Lombok for plain data carriers with no invariants, and hand-write the builder the moment validation enters the picture. Lombok `@Builder` eliminates all boilerplate for simple immutable DTOs (2-6 fields, no cross-field invariants): annotate the class and you get a full static nested `Builder` with fluent setters and `build()` for free, which is ideal at API/gRPC boundaries. The moment you need validation — "orderId must not be blank," "if currency is JPY, amountCents must be a whole number," "GET requests must have no body" — Lombok's generated `build()` has none of that by default, and bolting it on means either putting `@Builder` on a hand-written constructor that validates (workable for 3-5 simple checks, because Lombok routes its generated `build()` through that constructor), or abandoning `@Builder` for a fully hand-written builder once cross-field constraints multiply. Note the trap: subclassing the generated builder to override `build()` does *not* work, because `Payment.builder()` returns the generated builder type and never your subclass, so the override is unreachable and validation silently never runs. That is exactly the failure shape to watch for — a `@Builder`-generated `build()` accepting `customerId = null` and `amountCents = -500`, with the error surfacing much later as a database constraint violation far from the actual bug. The practical guidance: start with Lombok for greenfield DTOs, but treat "the first validation rule appears" as the trigger to move validation into an `@Builder`-annotated constructor, not a reason to keep stacking `if` statements into setters.
 
 **Q: How do you validate invariants in `build()` vs. in each setter — and why does it matter?**
+**Short:** Cross-field invariants belong in build(), since only it sees the complete object regardless of setter call order.
+
 A: Setters can only check one field at a time, so cross-field invariants have to wait for `build()`, which is the one place that sees the whole object. A setter-level check such as `public Builder ovenTempC(int t) { if (t < 100) throw ...; this.ovenTempC = t; return this; }` cannot express "GET requests must not have a body," since `.method("GET")` and `.body(...)` are called independently and possibly in either order. Validating only in `build()` means every setter is "unsafe" individually, but `build()` sees the complete picture and can enforce constraints that span multiple fields, plus it runs exactly once regardless of how many setters were called or in what order. The practical guidance: do cheap, single-field, fail-fast sanity checks in setters when it improves the error message's locality (e.g., `ovenTempC` must be a positive integer — reject `-5` immediately rather than waiting), but always do cross-field and "is this object complete and consistent" validation in `build()` — never assume setters alone can guarantee a valid final object.
 
 **Q: What is the "self-type" / generic builder problem when Builder meets inheritance, and how do you solve it in Java?**
+**Short:** An inherited fluent setter returns the parent builder's type, breaking the chain; Java fixes this with a recursive self-type generic.
+
 A: An inherited fluent setter returns the *parent* builder's static type, so the chain loses access to the subclass's own setters and stops compiling. Concretely: with `Car.Builder extends Vehicle.Builder`, `new Car.Builder().wheels(4).color("red")` fails because `wheels(4)` is declared on `Vehicle.Builder` and returns `Vehicle.Builder`, which has no `.color(...)` — even though the runtime object really is a `Car.Builder`. Effective Java's solution is a generic "self-type" via a recursive type parameter: `abstract class Builder<T extends Builder<T>>` where every setter returns `self()` (an abstract method each concrete builder implements as `return (T) this;`), so `Vehicle.Builder<T>.wheels(4)` returns `T`, which `Car.Builder` binds to itself — `Car.Builder extends Vehicle.Builder<Car.Builder>`. This is genuinely awkward boilerplate (the unchecked cast in `self()` is a known wart), which is why many teams avoid builder inheritance entirely and instead favor composition (a `Car` *has a* `VehicleSpec` built separately) or simply don't support subclassing of builder-based products.
 
 ### Key Phrases to Use

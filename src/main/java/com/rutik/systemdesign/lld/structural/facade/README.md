@@ -461,36 +461,58 @@ Facade is the fallback when none of the more specific relationships apply: you s
 ## 16. Interview Questions with Answers
 
 **Q: What is the Facade pattern and when would you use it?**
+**Short:** A Facade provides a simplified interface to a complex subsystem, as JdbcTemplate and SLF4J both do.
+
 A: Explain the intent (simplified interface to a complex subsystem) and give a concrete example — JdbcTemplate or SLF4J are ideal because interviewers know them.
 
 **Q: What is the difference between Facade and Adapter?**
+**Short:** Facade is about simplicity, hiding complexity; Adapter is about compatibility, translating an incompatible interface.
+
 A: Adapter is about *compatibility* — making incompatible interfaces work together. Facade is about *simplicity* — hiding complexity. The Adapter changes the interface signature; the Facade provides a higher-level interface on top of an existing one.
 
 **Q: Can a Facade hurt you? What are the risks?**
+**Short:** Yes, a Facade can become a God Object, hide important subsystem APIs, or turn into a merge-conflict hotspot.
+
 A: Yes. It can become a God Object if business logic leaks in. It can hide important subsystem APIs. It can become a merge conflict hotspot in large teams. Show you understand the tradeoffs.
 
 **Q: How do you make a Facade testable?**
+**Short:** Extract a Facade interface and inject subsystem dependencies via constructor so both can be mocked in tests.
+
 A: Extract an interface for the Facade. In tests, provide a mock implementation. Alternatively, inject subsystem dependencies via constructor so the subsystem can be mocked individually.
 
 **Q: Is SLF4J a Facade?**
+**Short:** Yes, SLF4J is literally named for the pattern: a clean logging API that delegates to any backend implementation.
+
 A: Yes — this is a classic follow-up. SLF4J's name literally contains "Facade" and it demonstrates the pattern perfectly: a clean API that delegates to any logging backend.
 
 **Q: Does using a Facade violate encapsulation if clients can still reach the subsystem classes directly?**
+**Short:** No, Facade is an additive convenience layer, not an access-control mechanism, so it doesn't itself break encapsulation.
+
 A: Not by itself — Facade is an *additive* convenience layer, not an access-control mechanism, so it does not by itself break encapsulation. However, if both the Facade and the raw subsystem classes are public, clients will inconsistently bypass the Facade, and the subsystem can drift out of the invariants the Facade was meant to enforce (e.g., calling `Inventory.reserve()` directly without going through `OrderFacade.placeOrder()` and skipping the payment-hold step). The fix is to keep subsystem classes package-private or module-internal so the Facade is the *only* public entry point — Java's module system (`module-info.java`, `exports` only the facade package) enforces this at compile time.
 
 **Q: How is Facade related to the Law of Demeter ("only talk to your immediate friends")?**
+**Short:** Facade applies the Law of Demeter by collapsing a chain of dot calls into a single message to one collaborator.
+
 A: Facade is a direct application of the Law of Demeter at the subsystem boundary — instead of a client chaining calls like `homeTheater.getAmplifier().getTuner().setFrequency(...)`, the client calls `homeTheaterFacade.watchMovie()` and never touches the amplifier or tuner objects at all. This collapses a long chain of "dot calls" into a single message to one collaborator, reducing the client's knowledge of (and coupling to) the subsystem's internal object graph. The practical guidance: if you find yourself writing `a.getB().getC().doSomething()` across a module boundary, that is a signal to introduce a Facade method on `a`'s module that performs the operation internally.
 
 **Q: How does Facade differ from Mediator — both seem to "centralize" interactions?**
+**Short:** Facade gives outsiders a one-directional entry to a closed subsystem; Mediator centralizes bidirectional peer communication.
+
 A: Facade provides a *one-directional, simplified entry point* for external clients into a subsystem the client doesn't own and usually doesn't change — the subsystem objects are unaware the Facade exists and don't talk back through it. Mediator centralizes *bidirectional* communication *between peer objects that do know about the mediator* — e.g., in a chat room, each `User` object calls back into the `ChatRoomMediator` to broadcast messages to other users. So Facade = "simplify access for outsiders to a closed subsystem"; Mediator = "decouple a set of collaborating peers from each other by routing their communication through a hub." If your "facade" object is also receiving callbacks from the subsystem classes it wraps, you have actually built a Mediator.
 
 **Q: Can you give a business-domain example of a Facade, not just a library example?**
+**Short:** An OrderService facade orchestrates InventoryService, PaymentService, and ShippingService behind one placeOrder call.
+
 A: A common one is an `OrderService` facade that sits in front of `InventoryService`, `PaymentService`, and `ShippingService`. `OrderService.placeOrder(cart)` internally calls `inventoryService.reserveItems(...)`, then `paymentService.charge(...)`, then `shippingService.scheduleDelivery(...)`, and rolls back the reservation if payment fails. The controller layer (e.g., a REST `@RestController`) depends only on `OrderService`, never on the three subsystem services directly — this keeps the web layer thin and makes the three-step workflow independently testable behind one method.
 
 **Q: How do you unit test code that depends on a Facade — do you mock the Facade or its subsystems?**
+**Short:** Mock the Facade interface for its clients, and mock the injected subsystems when testing the Facade implementation itself.
+
 A: For the *client* of the Facade (e.g., the controller calling `orderService.placeOrder()`), mock the Facade interface itself — the test only cares that the controller calls `placeOrder()` with the right arguments and handles the returned result/exception, not how the order is fulfilled internally. For the *Facade implementation itself* (`OrderServiceImpl`), mock the injected subsystem dependencies (`InventoryService`, `PaymentService`, `ShippingService`) via constructor injection and verify the orchestration logic — e.g., that `reserveItems` is called before `charge`, and that a `PaymentException` triggers `releaseReservation`. Keeping the Facade behind an interface (`OrderService`) is what makes both levels of mocking possible without a DI container.
 
 **Q: When does a Facade turn into a God Object, and how do you split it?**
+**Short:** A Facade becomes a God Object once it accumulates business logic for unrelated workflows; split it into one facade per use case.
+
 A: A Facade becomes a God Object when it accumulates business logic, validation rules, and orchestration for unrelated workflows instead of just delegating — e.g., an `OrderFacade` that grows to also handle user authentication, report generation, and email templating because "it's already the entry point." The fix is to split by *workflow* or *bounded context*: keep one thin facade per cohesive use case (`OrderFacade`, `RefundFacade`, `ShippingLabelFacade`), each delegating to the same underlying subsystem services, rather than one mega-facade for the whole module. A practical signal: if a Facade's constructor needs more than 4-5 injected dependencies, or its class has methods that don't share the same subsystem collaborators, it is doing too much and should be decomposed.
 
 ---

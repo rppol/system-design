@@ -415,33 +415,43 @@ public final class Order {
 ## 16. Interview Questions with Answers
 
 **Q: Explain the Memento pattern.**
+**Short:** Memento captures and externalizes an object's state for rollback without breaking its encapsulation.
 A: Lead with the intent — capturing and externalizing state for rollback without breaking encapsulation. Describe the three roles (Originator, Memento, Caretaker), explain the wide vs. narrow interface insight, and give a concrete example (text editor undo).
 
 **Q: How does Memento preserve encapsulation?**
+**Short:** The Memento stores state only the Originator can pack or unpack, often as a private inner class of it.
 A: The Memento stores state that only the Originator knows how to pack/unpack. The Caretaker holds Mementos as opaque tokens. In Java, making Memento an inner class of Originator is the cleanest way to enforce this — the inner class can access private fields of the outer class, but no other class can instantiate it.
 
 **Q: What's the difference between Memento and Command for undo?**
+**Short:** Command-based undo stores the reverse operation, while Memento-based undo stores a full state snapshot.
 A: Command-based undo stores the reverse operation (e.g., "delete this character" undoes "insert this character"). It's memory-efficient but requires implementing an inverse for every command. Memento-based undo stores a full state snapshot — simpler to implement but uses more memory. In practice, most editors use Command for undo since it's more granular.
 
 **Q: What are the memory implications?**
+**Short:** Each Memento stores a full state copy, which grows costly for large objects or frequent saves without mitigation.
 A: Each Memento stores a full copy of state. For large objects or frequent saves, this is costly. Solutions: limit history depth, use incremental/delta Mementos, or use structural sharing (persistent data structures).
 
 **Q: Where have you seen this pattern in the Java SDK?**
+**Short:** javax.swing.undo.UndoManager and Android's onSaveInstanceState both implement the Memento pattern.
 A: `javax.swing.undo.UndoManager`, Android's `onSaveInstanceState`, and conceptually in Java serialization.
 
 **Q: How do you control the memory cost of frequent snapshots on large objects?**
+**Short:** Cap history with a ring buffer, use periodic full snapshots plus deltas, or share structure via immutable data structures.
 A: The naive approach — a full deep copy on every save point — scales linearly with both object size and snapshot frequency, which is exactly the "every keystroke pushes a memento" anti-pattern that caused a 1.6 GB heap and an OOMKill in this file's anti-pattern #2. Three mitigations, in order of increasing complexity: (1) cap history depth with a ring buffer (`Deque` with a fixed max size, evicting the oldest snapshot), (2) store full snapshots only periodically (every Nth change) and *incremental diffs* (deltas) for changes in between — reconstructing an intermediate state means applying the diffs since the last full snapshot, and (3) use persistent/immutable data structures with structural sharing (e.g., an immutable tree where unchanged subtrees are shared by reference between snapshots), so two similar snapshots cost only the size of their differences. The practical guidance: start with a capped ring buffer (it solves 80% of real cases with 5% of the complexity); only build delta-based snapshots if profiling shows full-snapshot memory is actually a problem.
 
 **Q: How does the Originator expose its state to the Memento without breaking encapsulation? Show the Java idiom.**
+**Short:** A private static Snapshot class nested inside the Originator can read its private fields, while outside code cannot.
 A: The canonical Java idiom is a `private static final class Snapshot` (or `Memento`) nested inside the Originator class. Because a nested class has access to its enclosing class's private members, `Snapshot`'s private constructor can read `Order`'s private fields (`status`, `items`, `charged`) directly when building the snapshot, and `Order.restore(Snapshot s)` can read `s`'s private fields directly to write them back — but no class *outside* `Order` can construct a `Snapshot`, read its fields, or do anything with it except hold the reference and pass it back to `restore()`. This gives the Caretaker a token it can store in a stack/list (it needs the *type* `Order.Snapshot` to declare the variable) without any ability to inspect or tamper with its contents — encapsulation is enforced by Java's access-modifier rules, not by convention.
 
 **Q: How does Memento relate to database transaction rollback / savepoints?**
+**Short:** A JDBC Savepoint is literally a database-layer Memento, letting rollback restore a point finer than the whole transaction.
 A: A JDBC `Savepoint` (from `Connection.setSavepoint()`) is literally a Memento at the database layer: the `Connection` (Originator) creates an opaque `Savepoint` token, the calling code (Caretaker) holds onto it without inspecting it, and `connection.rollback(savepoint)` restores the transaction's state to that point without undoing everything before it. This file's production anchor shows the pattern combined at two layers — JDBC savepoints for the database's undo log, and an in-memory `Order.Snapshot` for the application object's state — rolled back together so a failed fraud check undoes only the "charge" step while keeping "reserve inventory" intact. The broader principle: whenever you need rollback granularity *finer* than "abort the entire transaction," you're looking for a Memento-shaped solution, whether that's a DB savepoint, an in-memory snapshot, or both in coordination.
 
 **Q: What are the tradeoffs of a serialization-based Memento (Java serialization or JSON)?**
+**Short:** Serialized Mementos survive restarts and travel over a network, but risk breaking on schema changes without versioning.
 A: Serializing the Originator's state to bytes or JSON gives you a Memento that can survive process restarts, be sent over a network, or be stored in a database/file — useful for game saves, document auto-recovery, or `Activity.onSaveInstanceState(Bundle)` on Android. The cost is versioning: if the Originator's internal structure changes (a field renamed or removed), old serialized Mementos may fail to deserialize or silently populate fields with defaults — this is the same "schema evolution" problem that any persisted format faces, and Java's default serialization is especially brittle here (a missing `serialVersionUID` or a renamed field breaks deserialization). For long-lived persisted Mementos, prefer a versioned format (JSON/Protobuf with explicit schema versioning and migration logic) over raw Java `Serializable`, and write a test that deserializes a Memento captured by an *older* version of the class to catch breakage early.
 
 **Q: What is the "wide vs. narrow interface" distinction in Memento, and why does it matter?**
+**Short:** The Originator sees a wide interface into the Memento's fields, while the Caretaker sees only a narrow, opaque token.
 A: The Originator sees the Memento through a "wide" interface — it can read and write every field needed to fully capture and restore state, because it created the Memento and knows its internal layout. The Caretaker sees the same object through a "narrow" interface — typically just an opaque marker type (or `Object`) that it can store in a list/stack and hand back, with no accessors exposed. In Java, this distinction is enforced structurally rather than by two separate interfaces: a `private static final class Snapshot` nested in the Originator has a "wide" view from the Originator's perspective (private field access) and a "narrow" view from everyone else's (the type is usable as a reference but its fields are inaccessible). The practical reason this matters: if you instead gave the Caretaker a Memento type with public getters "for convenience," any future refactor of the Originator's internals would ripple out to the Caretaker and any other code that reads those getters — the narrow interface is what makes the Originator's internals truly private and independently refactorable.
 
 ---

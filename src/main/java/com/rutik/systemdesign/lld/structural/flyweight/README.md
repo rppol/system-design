@@ -457,33 +457,53 @@ The initial renderer allocated a fresh `Glyph` object per character per frame �
 ## 16. Interview Questions with Answers
 
 **Q: Explain the Flyweight pattern with a real example.**
+**Short:** Integer.valueOf()'s cache is a canonical Flyweight, sharing the boxed int value as immutable intrinsic state.
+
 A: Use Java's `Integer.valueOf()` cache — it is concrete, well-known, and perfectly illustrates intrinsic state (the int value) that is shared. Then explain the text editor scenario for depth.
 
 **Q: What is intrinsic vs extrinsic state?**
+**Short:** Intrinsic state is stored inside the flyweight and shared; extrinsic state varies per use and is passed in by the client.
+
 A: Intrinsic state is stored inside the flyweight — it is context-independent and shared. Extrinsic state is context-dependent — it changes with each use and is passed to the flyweight by the client. This separation is the core insight of the pattern.
 
 **Q: How does Flyweight differ from Singleton?**
+**Short:** Singleton guarantees exactly one instance total; Flyweight guarantees one instance per unique intrinsic state value.
+
 A: Singleton ensures ONE instance total. Flyweight ensures ONE instance per unique intrinsic state — there can be many flyweight types but no duplicates within a type.
 
 **Q: What are the risks of using Flyweight?**
+**Short:** Flyweight risks include extrinsic-state leaks, immutability constraints, and factory thread-safety complexity.
+
 A: Extrinsic state management complexity, immutability constraints, factory thread safety, and the risk of accidentally storing extrinsic state inside the flyweight.
 
 **Q: Is Java's String pool a Flyweight?**
+**Short:** Yes, Java's String pool is a Flyweight: identical string literals share the same interned object.
+
 A: Yes — it is a great example. String literals with the same value share the same object in the string pool. `"hello" == "hello"` is true because they are the same flyweight instance.
 
 **Q: What happens if you accidentally put mutable or extrinsic state into a shared Flyweight?**
+**Short:** Mutable state in a shared Flyweight causes silent data corruption visible to every context that references it.
+
 A: It causes silent data corruption shared across every context that references the flyweight, because one client's "private" change becomes visible to all others. For example, if `GlyphData` exposed a mutable `public int color` field and the render loop set `glyph.color = rgba` before calling `render()`, two threads rendering different colored characters that map to the same glyph would race — one thread's color overwrite would bleed into the other's output, and the bug would only appear under concurrent rendering, making it hard to reproduce. The practical guidance is to never give a flyweight a setter or a non-final field for anything that varies per use; if a value varies per call, it must be a method parameter, not a field.
 
 **Q: How does Flyweight differ from object pooling — aren't they both about saving memory by reusing objects?**
+**Short:** Flyweight shares immutable objects concurrently across contexts; object pooling reuses mutable objects one caller at a time.
+
 A: They share the goal of reducing object overhead but use opposite mechanisms — Flyweight shares *immutable* objects concurrently across many contexts, while an object pool *reuses* mutable objects one at a time via checkout/return. A `ConcurrentHashMap<Key, GlyphData>` flyweight cache returns the *same* `GlyphData` instance to thousands of callers simultaneously, and none of them ever "give it back" because there's nothing to return — it's permanently shared. A connection pool (e.g., HikariCP), by contrast, hands out a `Connection` to exactly one caller at a time; that caller mutates it (executes queries, sets autocommit) and must return it to the pool before another caller can use it. The practical guidance is: reach for Flyweight when the shared data is read-only and reach for pooling when the object has expensive-to-construct state that must be exclusively owned during use.
 
 **Q: Why are concurrent factory caches typically built with `ConcurrentHashMap.computeIfAbsent` instead of `synchronized` blocks or `HashMap` with manual locking?**
+**Short:** computeIfAbsent performs an atomic check-then-create, avoiding the TOCTOU race that would duplicate flyweight instances.
+
 A: Because `computeIfAbsent` provides an atomic check-then-create operation that guarantees the expensive creation logic (e.g., glyph rasterization, regex compilation) runs at most once per key even under heavy concurrent access, without holding a coarse lock across the whole map for the duration of every lookup. A naive `if (!cache.containsKey(key)) cache.put(key, create())` is a classic TOCTOU (time-of-check-to-time-of-use) race — multiple threads can pass the check simultaneously and each perform the expensive creation, producing duplicate flyweight instances that defeat the entire pattern. `ConcurrentHashMap.computeIfAbsent` uses per-bucket locking internally (since Java 8), so unrelated keys don't contend at all, and the mapping function for a given key is guaranteed to execute only once. The practical guidance is to make `computeIfAbsent`'s mapping function side-effect-free and fast-failing, since the map holds an internal lock for that bucket while it runs — a slow or blocking mapping function can stall other threads requesting the same key.
 
 **Q: Give concrete numbers for Java's built-in Flyweight caches — what's the default range and how can it be tuned?**
+**Short:** Integer.valueOf caches -128 to 127 by default, and the upper bound is tunable via the IntegerCache.high JVM flag.
+
 A: `Integer.valueOf(int)` caches boxed integers from -128 to 127 by default (256 instances total), as mandated by JLS §5.1.7, and `Character.valueOf` caches 0-127; the upper bound for `Integer` can be raised with the JVM flag `-Djava.lang.Integer.IntegerCache.high=1023` for workloads with many small positive integers (e.g., HTTP status-code-like values or array indices). Outside this range, every autoboxing operation (`Integer i = 200;`) allocates a fresh `Integer` object, which is why `Integer.valueOf(127) == Integer.valueOf(127)` is `true` but `Integer.valueOf(128) == Integer.valueOf(128)` is `false` — a classic interview trap when comparing boxed integers with `==` instead of `.equals()`. The practical guidance is to never rely on `==` for boxed numeric comparison regardless of cache range, since the cache is an implementation optimization, not a language guarantee for values outside -128..127.
 
 **Q: When does applying Flyweight add complexity without real benefit?**
+**Short:** Flyweight adds needless complexity when object counts are small or intrinsic state is mostly unique across instances.
+
 A: When the object count is small (hundreds, not hundreds of thousands or millions) or when intrinsic state is mostly unique across instances, the factory's lookup/hashing overhead and the intrinsic/extrinsic separation cost more in code complexity than the memory saved. For example, building a `ConcurrentHashMap`-backed flyweight factory for 50 configuration objects that are each only created once at startup adds an indirection layer, a cache-key design problem, and immutability constraints — for a memory saving measured in kilobytes. The practical guidance is to profile actual memory usage first (e.g., with JFR or a heap dump) and confirm that duplicated objects are a measurable fraction of heap before introducing Flyweight; if the savings would be under 1MB or the object count is under ~10,000, plain `new` is simpler and just as correct.
 
 ---

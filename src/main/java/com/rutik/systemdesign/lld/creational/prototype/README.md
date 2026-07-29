@@ -1056,36 +1056,58 @@ public class PrototypeDemo {
 ### Common Questions
 
 **Q: What is the Prototype pattern and when would you use it?**
+**Short:** Prototype creates new objects by cloning an existing one, avoiding expensive construction from scratch.
+
 A: Prototype creates new objects by cloning an existing one instead of constructing from scratch. Use it when object construction is expensive (DB load, network call, complex init), when you need many similar objects that differ in a few fields, or when client code should not depend on concrete types.
 
 **Q: What is the difference between shallow copy and deep copy?**
+**Short:** Shallow copy shares mutable nested references between original and copy; deep copy recursively clones them independently.
+
 A: Shallow copy copies field values as-is. For primitive and immutable fields this is safe. For mutable nested objects, the copy and original share the same reference — mutating one affects the other. Deep copy recursively clones all nested objects, producing a fully independent copy. The choice depends on whether nested objects need to be independently mutable in the clone.
 
 **Q: What is wrong with Java's `Cloneable`?**
+**Short:** Cloneable declares no methods, yet Object.clone() throws a checked exception whenever the interface is absent.
+
 A: `Cloneable` is a marker interface that does not declare the `clone()` method. `Object.clone()` does a shallow copy and is `protected` by default. The method throws `CloneNotSupportedException` if `Cloneable` is not implemented — a checked exception for a pattern that should be natural. The recommended Java alternative is a custom `Prototype` interface with copy constructors at each level.
 
 **Q: How does Spring's `@Scope("prototype")` relate to the Prototype pattern?**
+**Short:** Spring's prototype scope re-runs construction and injection for every request; it never clones an existing object.
+
 A: Spring's prototype scope means the DI container creates a new instance of the bean every time it is requested, rather than returning a shared singleton. It shares the *intent* — an independent instance per use — but not the mechanism: Spring re-runs construction and injection from the bean definition, it never clones an existing object. So the bean definition, not a live prototype instance, plays the role of the template, and there is no deep-vs-shallow-copy question at all.
 
 **Q: How do you handle circular references in a deep clone?**
+**Short:** Track already-cloned objects in an identity map and return the existing clone instead of recursing to break the cycle.
+
 A: Maintain a `Map<Object, Object>` (using `IdentityHashMap` to use reference equality) tracking already-cloned objects. Before cloning any nested object, check if it is already in the map. If so, return the existing clone instead of recursing. This breaks the cycle.
 
 **Q: Prototype vs Factory Method — when do you choose Prototype?**
+**Short:** Factory Method decides which class to instantiate from scratch; Prototype copies an existing, pre-configured blueprint.
+
 A: Use Factory Method when you need to decide *which class* to instantiate. Use Prototype when you need a *copy* of an expensive or pre-configured object. Factory Method creates new objects from scratch; Prototype creates new objects from an existing blueprint.
 
 **Q: Give a concrete example where a shallow copy causes a shared-mutable-state bug, and how would you spot it in code review?**
+**Short:** A shallow clone copying a shared mutable Map reference lets two cloned entities silently mutate each other's state.
+
 A: The classic example is a shallow `clone()` that copies a `BehaviorTree` *reference* instead of the object, leaving two cloned game entities pointing at one shared AI state map. Concretely, `GameEntity` holds a `BehaviorTree` whose `Map<String, Integer>` carries `targetId` and `aggroRange`, and `Object.clone()` copies only the reference, so two cloned archers (`a1` and `a2`) share it. When `a1.behaviorTree.setState("targetId", 42)` runs, `a2.getBehaviorTree().getState("targetId")` also returns 42 — both archers now target the same player, even though they're supposed to be independent units. In code review, the red flag is any field whose declared type is a mutable reference type (`List`, `Map`, `HashMap`, a custom mutable class) that is assigned directly from the source object inside `clone()` or a copy constructor — e.g., `this.stateVariables = other.stateVariables;` instead of `this.stateVariables = new HashMap<>(other.stateVariables);`. The practical guidance: for every reference-typed field in a `clone()`/copy-constructor, ask "is this type immutable (String, Integer, immutable record)?" — if not, it needs its own copy, recursively.
 
 **Q: Why does Effective Java consider `Cloneable`/`clone()` broken, and what's the recommended alternative?**
+**Short:** Cloneable's contract lives outside the type system, so Effective Java recommends a copy constructor or static copy factory instead.
+
 A: Because `Cloneable` declares no methods at all, yet silently changes what the inherited `protected Object.clone()` does — the contract lives outside the type system. If a class implements `Cloneable`, `Object.clone()` performs a field-by-field shallow copy and returns normally; if not, it throws `CloneNotSupportedException`, a checked exception that exists purely because of this implicit contract. This means `clone()`'s correctness depends on an interface that says nothing about what `clone()` should do, every subclass must remember to override `clone()` and call `super.clone()` plus deep-copy its own new mutable fields (Effective Java Item 13's "in practice, a class implementing `Cloneable` is expected to provide a properly functioning public `clone` method" — an *expectation*, not a compiler-checked guarantee), and `final` fields can't always be re-assigned inside `clone()` because `super.clone()` returns an already-allocated object. The recommended alternative is a copy constructor or static copy factory (`public Foo(Foo other)` or `public static Foo copyOf(Foo other)`) — both are ordinary, compiler-checked Java that can freely decide deep vs. shallow per field, don't fight `final`, don't throw checked exceptions, and don't propagate `Cloneable`'s contract to every subclass.
 
 **Q: How would you use Prototype for objects that are expensive to construct because they require a DB or network call — what's the actual workflow?**
+**Short:** Pay expensive I/O once to build a registered prototype, then clone it in-memory in under a microsecond on the hot path.
+
 A: Pay the expensive I/O exactly once at startup to build one fully-initialized prototype per "type", register each in a registry keyed by type name, and clone from memory on the hot path. The startup step is where the cost lands — e.g., load a sprite from disk (20-80ms), compile a behavior-tree script (5-15ms), and query a physics-body configuration from the database (10-30ms). At request/spawn time, the registry's `getClone(key)` returns `registry.get(key).deepClone()`, which is a pure in-memory field-copy operation costing under 1 microsecond — no disk, network, or DB access on the hot path. The measured payoff in the module's example: spawning 500 archers by construction-from-scratch costs 500 × 40ms = 20 seconds, while spawning 500 archers by cloning costs 40ms (one-time) + 500 × ~1µs ≈ 40ms total — a roughly 500x speedup. The practical guidance: this pattern is correct only when the "intrinsic" expensive-to-build state (sprite, compiled AI, base physics config) is the same across instances and only "extrinsic" cheap state (position, health, ID) varies per clone — if every instance genuinely needs a fresh DB row, Prototype doesn't help.
 
 **Q: What is a Prototype registry, and what's the one bug that defeats it entirely?**
+**Short:** A Prototype registry defeats itself the moment getClone() returns the stored instance directly instead of a copy.
+
 A: A Prototype registry is a name-keyed map of pre-configured prototype instances, exposing `getClone(key)` so callers request a "type" by string without ever naming a concrete class. It is typically a `Map<String, Prototype>` (often a `ConcurrentHashMap` for thread-safe registration), and new types are added at runtime by calling `register("newType", somePrototype)` — no recompilation, no new factory classes. The one bug that defeats the entire pattern is `getClone()` returning `registry.get(key)` directly instead of `registry.get(key).clone()` — every caller then receives a reference to the *same* stored prototype object, so the first caller to mutate its "clone" corrupts the shared prototype for all subsequent callers, and the registry's core promise ("you always get an independent copy") silently breaks. In code review, this is the single line to scrutinize in any registry implementation — `return prototype;` vs. `return prototype.clone();` look almost identical but have completely different correctness properties.
 
 **Q: When would you choose Prototype over Builder for constructing objects with variants?**
+**Short:** Choose Prototype when the shared baseline is expensive to build; choose Builder when construction is cheap and variants differ.
+
 A: Choose Prototype when the shared baseline is expensive to build; choose Builder when construction is cheap and variants differ mainly in which optional fields are set. Builder assembles each object from scratch via a fluent API — an `OrderEvent` with optional `currency`, `status`, and `timestampMs` costs nanoseconds to build whichever options are chosen. Prototype is preferable when the *baseline* construction is expensive and shared across variants, and variants differ only in a small number of fields tweaked *after* copying — e.g., cloning a fully-loaded `GameEntity` (sprite + compiled AI + physics config = 40ms) and then calling `.setHealth(60)` or `.spawn(x, y)` on the clone, where re-running that 40ms of setup via a Builder for every variant would be wasteful. A useful combination: a Builder can be the mechanism a Prototype's `toBuilder()` exposes — `event.toBuilder().timestampMs(now).build()` clones the immutable object into a mutable builder, applies a small change, and rebuilds, getting Prototype's "start from an expensive baseline" benefit with Builder's "named, validated field changes" ergonomics.
 
 ### Key Phrases to Use

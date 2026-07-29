@@ -540,33 +540,43 @@ order.get(0).setNext(order.get(1)).setNext(order.get(2));
 **Common interview questions:**
 
 **Q: What is the Chain of Responsibility pattern?**
+**Short:** Chain of Responsibility passes a request along a chain of handlers, decoupling the sender from any specific receiver.
 A: It's a behavioral pattern where a request is passed along a chain of handlers. Each handler decides to process it or pass it to the next. It decouples the sender from receivers.
 
 **Q: How does it differ from a simple if-else chain?**
+**Short:** CoR externalizes decision logic into separate handler objects instead of a hard-coded if-else chain.
 A: CoR externalizes the decision logic into separate handler objects, enabling runtime reconfiguration, independent testability, and adherence to OCP. A hard-coded if-else cannot be reordered or extended without modification.
 
 **Q: Where have you seen this in production?**
+**Short:** Servlet FilterChain, Spring Security, OkHttp interceptors, Netty ChannelPipeline, and Express middleware all use it.
 A: Servlet FilterChain, Spring Security, OkHttp interceptors, Netty ChannelPipeline, Express middleware.
 
 **Q: What's the risk of using CoR?**
+**Short:** The main risk is a request falling off the end of the chain unhandled without a default handler.
 A: No guarantee a request is handled. Must add a default handler. Chain order must be carefully managed. Debugging traversal is harder than direct dispatch.
 
 **Q: Can multiple handlers process the same request?**
+**Short:** Yes in impure CoR every handler runs, while pure CoR stops at the first handler that can process the request.
 A: Yes — in "impure" CoR (e.g., servlet filters), all handlers execute and each calls the next. In "pure" CoR, the first handler that can process the request stops the chain.
 
 **Q: How is Chain of Responsibility different from Decorator? They both wrap objects in a chain.**
+**Short:** CoR routes and may stop at the first matching handler, while every Decorator in the stack always runs.
 A: CoR's intent is routing — each handler decides whether to process the request and may stop the chain, so not every node necessarily runs. Decorator's intent is cumulative behavior augmentation — every decorator in the stack always delegates to the wrapped object, so all of them run on every call. If you removed a node from the middle of a CoR chain, behavior for some requests would simply not execute at all; removing a Decorator just removes one layer of added behavior while the wrapped call still happens. In practice: a validation chain that short-circuits on the first failing validator is CoR; `BufferedInputStream` wrapping a `FileInputStream` (both always read) is Decorator.
 
 **Q: Is a servlet `FilterChain` or Express.js middleware "really" Chain of Responsibility?**
+**Short:** Yes, but as the impure variant, since every filter runs and none knows about the others' identities or order.
 A: Yes, but it's the impure variant — every middleware/filter runs (unless one explicitly short-circuits), so it behaves more like a pipeline than "first handler wins." The key CoR property that's preserved is that each filter only knows about calling `chain.doFilter()` (the next link), not about the other filters' identities or the full pipeline order. This is why Spring's `HandlerInterceptor` and `OncePerRequestFilter` are described as CoR even though, in normal operation, all of them execute — the pattern is about decoupled sequential delegation, not exclusivity. See also `../../structural/proxy/` for how interceptor-style wrapping relates to Proxy/Decorator at the AOP layer.
 
 **Q: What happens if no handler in the chain can process the request?**
+**Short:** Without a terminal handler the request silently falls off the chain, producing a hang or an empty response.
 A: Without a terminal handler, the request silently falls off the end of the chain and nothing responds — a classic CoR bug that manifests as a hung client connection or a default 200 with an empty body. The fix is to always terminate the chain with a catch-all/default handler (e.g., a `NotFoundHandler` that responds 404, or a default discount handler that returns "no discount applies"). This must be a deliberate design decision, not an afterthought — code review should treat "what does this chain do when nothing matches" as a required question for every CoR chain.
 
 **Q: How do you decide the order of handlers in a chain — hardcoded vs. configurable?**
+**Short:** Hardcode order for small stable chains; use priority-based configurable ordering for chains that grow via plugins.
 A: For small, stable chains (3-5 handlers with well-understood dependencies, like auth before authz), hardcoding the order in a factory method is simplest and makes the invariant visible in one place. For chains that grow over time or are extended by plugins (logging interceptors, feature-flag-gated validators), use a priority-based or config-driven ordering — each handler declares an `order` value (similar to Spring's `@Order` / `Ordered` interface) and the chain is assembled by sorting. The tradeoff is debuggability: hardcoded chains are easy to trace by reading one factory method, while priority-based chains require inspecting each handler's declared priority to understand the effective order, so document the ordering contract explicitly either way.
 
 **Q: How does Chain of Responsibility relate to the Single Responsibility Principle, and what's the performance cost of long chains?**
+**Short:** CoR applies SRP to request processing, at the cost of every request traversing up to N handler hops.
 A: CoR is essentially SRP applied to request processing — each handler owns exactly one concern (auth, rate-limiting, validation), so adding or changing a concern means touching exactly one class instead of a monolithic conditional. The cost is that every request traverses up to N handlers even if only one of them actually does meaningful work, and each hop is a virtual method call plus whatever bookkeeping the handler does (logging, metric increments). For latency-sensitive chains, order handlers so the cheapest/most-likely-to-short-circuit checks (rate limiting, cache hits) run first, and keep chains under roughly 10-15 handlers — beyond that, traversal overhead and debugging cost both grow, and it's often a sign the chain is being used as a workflow engine rather than a request pipeline.
 
 **Follow-up traps:**

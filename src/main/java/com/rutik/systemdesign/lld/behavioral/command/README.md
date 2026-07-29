@@ -661,33 +661,43 @@ public class DocumentCommandInvoker {
 **Common interview questions:**
 
 **Q: What is the Command pattern? When would you use it?**
+**Short:** Command encapsulates an operation as an object, enabling undo/redo, queuing, and macro recording.
 A: Command encapsulates an operation as an object. Use it when you need undo/redo, operation queuing, macro recording, or to decouple invokers from receivers.
 
 **Q: How does Command support undo/redo?**
+**Short:** A history stack of executed commands enables undo by calling undo() and redo by re-executing.
 A: The command stores pre-execution state (or the inverse operation). A history stack tracks executed commands. Undo pops the stack and calls `undo()`; redo re-executes.
 
 **Q: What's the difference between Command and Strategy?**
+**Short:** Strategy swaps a single interchangeable algorithm, while Command is a complete, reversible request object.
 A: Strategy replaces a single interchangeable algorithm. Command is a complete request object — it knows the receiver, the operation, and how to reverse it. A Strategy changes how; a Command records what happened.
 
 **Q: Is `Runnable` a Command?**
+**Short:** Yes, `Runnable` is the simplest Command, with no return value and no undo support.
 A: Yes — `Runnable` is the simplest possible Command with no return value and no undo. It decouples the executor (thread pool) from the operation.
 
 **Q: How do you handle commands that can't be undone?**
+**Short:** Irreversible commands use a compensating transaction, like sending a cancellation instead of unsending the original.
 A: Use compensating transactions. The `undo()` method issues a compensating action (e.g., send a cancellation email instead of unsending the original). Document which commands are irreversible.
 
 **Q: How do Command and Memento work together for undo?**
+**Short:** Command captures what action happened while Memento captures the state needed to reverse it.
 A: Command encapsulates the operation (what was done and to whom); Memento captures the state needed to reverse it. A typical flow: before `execute()` mutates the receiver, the command asks the receiver for a `Memento` (or builds one from the receiver's current fields) and stores it internally; `undo()` then calls `receiver.restore(memento)`. This split keeps the command focused on "what action happened" while the memento focuses on "what state existed before" — for example, `DeleteTextCommand` in a text editor stores the deleted substring (a memento-like snapshot) so `undo()` can re-insert it. Use this combination when the inverse of an operation isn't a simple algebraic inverse (e.g., "delete" has no obvious inverse without remembering what was deleted).
 
 **Q: How would you implement a macro/composite command?**
+**Short:** A MacroCommand holds a list of commands, executing them forward and undoing them in reverse order.
 A: A `MacroCommand` implements the same `Command` interface but holds a `List<Command>`; its `execute()` iterates and calls `execute()` on each sub-command in order, and its `undo()` iterates in *reverse* order calling `undo()` on each — this is the Composite pattern applied to Command. The tricky part is partial failure: if sub-command 3 of 5 throws during `execute()`, the macro must undo sub-commands 1-2 (which already succeeded) before propagating the error, otherwise the receiver is left in an inconsistent half-applied state. Treat a macro command's `execute()` like a mini-transaction — either all sub-commands apply or none do, from the caller's perspective.
 
 **Q: How is Command used for task queues and job scheduling?**
+**Short:** Each queued job is a Command object that a thread pool or message queue executes as the Invoker.
 A: Each queued job is a Command object (often a `Runnable` or `Callable`) holding everything needed to perform the work — parameters, target resource references — without the producer needing to know how or when it will run. A `ThreadPoolExecutor` or `BlockingQueue<Runnable>` is the Invoker: producers call `queue.put(command)`, worker threads call `queue.take()` then `command.run()`. This is exactly how `ExecutorService.submit()` works under the hood, and it generalizes to distributed systems — a message on a Kafka topic or SQS queue is a serialized Command that some consumer will eventually execute.
 
 **Q: Is a shared command queue thread-safe? What do you need to watch for?**
+**Short:** The queue mechanics are thread-safe, but a shared mutable Command instance reused across submissions is not.
 A: A `BlockingQueue` (e.g., `LinkedBlockingQueue`, `ArrayBlockingQueue`) is thread-safe for the queue mechanics itself — `put()`/`take()` handle synchronization and blocking when full/empty — but that does NOT make the Command objects themselves thread-safe. If a command holds mutable shared state (e.g., a reference to a receiver that multiple commands mutate concurrently), you still need synchronization or immutable receivers per command. A common bug is reusing a single mutable `Command` instance across multiple `submit()` calls with different parameters — each submission should get its own immutable command instance, or the queue can hand the same logical operation to two threads with stale/overwritten fields.
 
 **Q: How do you serialize a Command for remote execution, and what breaks if the receiver changes?**
+**Short:** A serializable Command carries only primitive data, not live receiver references, and must revalidate preconditions at execution.
 A: A serializable Command must capture everything needed to execute remotely as primitive/serializable data — operation type, parameters, target identifiers — *not* live references to receivers, since `Receiver` objects (database connections, services) typically aren't serializable and wouldn't make sense on a different machine anyway. On the receiving side, a `CommandHandler` deserializes the payload, looks up the appropriate local `Receiver` by ID, and invokes the operation — this is exactly the shape of a Kafka/SQS message: `{"type": "ChargeCardCommand", "orderId": "123", "amount": 49.99}`. The danger is temporal coupling: if the command was created against `orderId: 123` when it was in state "PENDING," but by the time a consumer processes it the order has moved to "CANCELLED," blindly executing the command produces an inconsistent result — handlers must re-validate preconditions at execution time, not just at creation time, because serialized commands can sit in a queue for an arbitrarily long time before execution.
 
 **Follow-up traps:**

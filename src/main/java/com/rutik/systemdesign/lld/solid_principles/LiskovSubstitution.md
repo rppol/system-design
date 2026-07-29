@@ -445,30 +445,35 @@ public void makeSound(Animal animal) {
 ## Interview Questions and Answers
 
 **Q: What is the Liskov Substitution Principle?**
+**Short:** LSP requires that a subclass be substitutable for its base class without breaking the program's correctness.
 
 A: LSP states that a subclass must be substitutable for its base class without breaking the program's correctness. This means the subclass must honor the full behavioral contract of the parent: not strengthening preconditions, not weakening postconditions, and not violating class invariants.
 
 ---
 
 **Q: Explain the Rectangle/Square problem.**
+**Short:** Square extending Rectangle breaks LSP because Square must violate Rectangle's implicit contract that width and height mutate independently.
 
 A: Mathematically, a square is a rectangle. But in OOP, making `Square` extend `Rectangle` causes issues because `Rectangle` has an implicit contract: setting width does not change height. `Square` must break this to maintain its own invariant (all sides equal). Code written against `Rectangle` that assumes independent width/height mutation will break when given a `Square`. The fix is to use an interface or immutable design that does not involve mutable setters.
 
 ---
 
 **Q: How is LSP different from polymorphism?**
+**Short:** Polymorphism is the language mechanism, while LSP is the behavioral constraint that makes substituting a subtype actually safe.
 
 A: Polymorphism is the mechanism; LSP is the constraint that makes polymorphism safe and correct. Polymorphism allows you to write `Shape s = new Circle()`. LSP says: if you do that, `Circle` must behave in a way consistent with what `Shape` promised. Without LSP, polymorphism compiles but produces surprising runtime failures.
 
 ---
 
 **Q: What does `UnsupportedOperationException` tell you about LSP?**
+**Short:** Throwing UnsupportedOperationException from an overridden method almost always signals an LSP violation.
 
 A: Throwing `UnsupportedOperationException` from an overridden method is almost always an LSP violation. It means a subclass is inheriting a contract it cannot fulfill. The right fix is to redesign the hierarchy — either use a narrower interface that does not include the unsupported operation, or switch to composition.
 
 ---
 
 **Q: What is behavioral subtyping?**
+**Short:** Behavioral subtyping means honoring the base type's behavior contract, not merely sharing its structural fields and methods.
 
 A: Behavioral subtyping means "is-a" in the sense of the behavior contract, not just the structural type. A `Square` is structurally a `Rectangle` (same fields and methods), but it is not a behavioral subtype because it cannot fulfill `Rectangle`'s contract. LSP defines when a subtype relationship is behaviorally valid.
 

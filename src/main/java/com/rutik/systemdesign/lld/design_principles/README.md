@@ -288,96 +288,112 @@ Q&As ordered by interview frequency: gotchas and traps first, internals second, 
 ---
 
 **Q: DRY says "don't repeat yourself" — when is duplication actually acceptable?**
+**Short:** Duplication is acceptable when two similar-looking things represent different concepts that would evolve independently.
 
 When two pieces of code happen to look the same but represent different concepts that will evolve independently — forcing them into one abstraction creates unwanted coupling. The Rule of Three: wait for the third occurrence before abstracting. Example: two HTTP error handlers may look identical today but handle different business contexts; abstracting too early means every future change must accommodate both. DRY is about knowledge, not text — the test is "if the rule changes, how many places must I update?"
 
 ---
 
 **Q: What is the Law of Demeter violation in `user.getAddress().getCity().getName()`?**
+**Short:** Each chained `.get()` call couples the caller to a type it never directly received, breaking the Law of Demeter.
 
 Each `.get()` call adds a dependency to an object you didn't directly receive. If `Address` changes to store `city` differently, `User`'s callers break even though `User` didn't change. Fix: add `user.getCityName()` — delegate the traversal to `User`, which owns the navigation path. Benefit: callers are decoupled from `Address` and `City` internals. In practice, LoD violations are detected by "train wreck" chains and are the root cause of "fragile code that breaks in unexpected places."
 
 ---
 
 **Q: YAGNI vs forward compatibility — how do you know what NOT to build?**
+**Short:** Build only what solves the current known requirement, since premature abstraction costs more than tolerated duplication.
 
 Build what solves the current known requirement. Don't build generalization, configurability, or extensibility points until a second concrete use case arrives. The cost of premature abstraction is high: the wrong abstraction is worse than duplication — you can remove duplication; you can't easily remove a load-bearing wrong abstraction. Exception: genuinely irreversible decisions (public API contracts, database schema) — there, some forward-thinking is justified because the cost of changing later is extreme.
 
 ---
 
 **Q: Composition over Inheritance: give a concrete Java example where inheritance breaks and composition fixes it.**
+**Short:** `Stack extends Vector` is the canonical failure, since `Stack` inherits mutation methods it should never expose.
 
 `Stack extends Vector` in Java is the canonical failure. `Stack` inherits all of `Vector`'s mutation methods (`add()`, `set()`, `remove()`) even though a stack should only expose `push()`/`pop()`/`peek()`. Callers can bypass the stack discipline via inherited Vector methods. Fix: `Stack` should have a `Vector` field (`has-a`) and only expose stack-appropriate operations, delegating to the field internally. Effective Java Item 18: prefer composition over inheritance when a subclass would inherit methods it shouldn't expose.
 
 ---
 
 **Q: Program to Interface: when does coding to an interface actually hurt?**
+**Short:** Coding to an interface hurts when there is exactly one implementation and no realistic second one will ever exist.
 
 When the interface has exactly one implementation and no conceivable second implementation in any realistic future — the interface adds indirection without value. Example: `UserRepositoryInterface` with only `JpaUserRepository` as the implementation, in a codebase that will never use anything other than JPA. Fix: code directly to the concrete class until a second implementation emerges. The test: "Would I ever inject a different implementation in production or in tests?" If yes (test doubles count), the interface is justified.
 
 ---
 
 **Q: KISS vs abstraction: how do you argue for simplicity when stakeholders want "extensible architecture"?**
+**Short:** Frame simplicity as reversibility — a simple design is easy to extend later, while premature architecture is hard to undo.
 
 Frame simplicity as reversibility: "a simple implementation is easy to extend when the requirement arrives; a complex premature architecture is hard to change because it's load-bearing." Measure complexity in cognitive overhead: every abstraction a new developer must understand before making a change is a cost. Ask: "what is the current business case for this abstraction?" If the answer is hypothetical ("we might need it"), KISS wins. If the answer is concrete ("we need to swap this implementation in 3 months"), PtI wins.
 
 ---
 
 **Q: How do DRY violations compound over time in a codebase?**
+**Short:** Copied code drifts independently, so a bug fixed in one copy silently persists in every other copy.
 
 Each copy drifts independently: a bug fixed in one copy isn't fixed in the others. After 18 months, you have 5 slightly different versions of the same logic, each with its own bugs. The team doesn't know which is canonical. Adding a feature requires updating all 5 — but developers only find 3. This is "shotgun surgery" (Martin Fowler): a single change requires edits in many places. DRY violations are detected by asking "if this rule changed, how many files would I need to touch?"
 
 ---
 
 **Q: Law of Demeter in Spring: why is `applicationContext.getBean(MyService.class)` everywhere a violation?**
+**Short:** Calling `getBean()` everywhere is the service-locator anti-pattern, hiding dependencies that constructor injection would make explicit.
 
 It's service-locator pattern: every class that calls `getBean()` depends on the entire ApplicationContext (a global registry). The dependencies are hidden — you can't see from the constructor what a class needs. Fix: constructor injection. The class declares its dependencies explicitly; Spring injects them. `getBean()` is legitimate only in framework code or in cases where the dependency cannot be known at startup (e.g., a factory that creates instances with runtime-determined types).
 
 ---
 
 **Q: Composition over Inheritance and the "fragile base class" problem.**
+**Short:** Modifying a base class breaks subclasses that inherited implementation details it never intended to expose.
 
 When a base class is modified, subclasses break even though they didn't change — because they inherited implementation details that the base class author didn't intend to expose. `super.method()` calls mean subclasses are coupled to the order of operations in the base class. Composition avoids this: the component (the "has-a") has no access to the outer class's internals; the outer class calls the component's public API only. Changes to the component are encapsulated.
 
 ---
 
 **Q: DRY applied to configuration and data — not just code.**
+**Short:** DRY governs knowledge, not just code, so duplicated schema fields and config values violate it exactly like duplicated logic.
 
 DRY applies to knowledge, not just code. A database schema that stores the same customer address in three tables violates DRY (update one, get inconsistency). A configuration file that hard-codes port 8080 in 12 places violates DRY. A validation rule that exists in the UI, the service layer, AND the database trigger violates DRY. The fix: single source of truth. For config: a single constants class or environment variable. For validation: server-side as the authoritative source; client-side as a UX convenience only.
 
 ---
 
 **Q: How does Separation of Concerns differ from the Single Responsibility Principle?**
+**Short:** Separation of Concerns partitions a system into layers, while SRP is its class-level refinement of one reason to change per class.
 
 Separation of Concerns is the architecture-level rule that different concerns live in different modules or layers; SRP is its class-level refinement — one reason to change per class. SoC decides the coarse partitions (presentation vs business logic vs persistence); SRP then judges each class inside a partition by asking how many distinct change drivers it has. The two can diverge: a codebase with a clean Controller-Service-Repository layering honors SoC, yet a 2,000-line service class inside the business layer still violates SRP. When designing, draw the SoC boundaries first, then apply SRP to keep each class within its layer focused on a single responsibility.
 
 ---
 
 **Q: Why are private fields with getters and setters for everything not real encapsulation?**
+**Short:** Exposing every field through a getter and setter pair leaks the internal representation instead of truly hiding it.
 
 Encapsulation means information hiding — concealing the design decisions likely to change — not merely marking fields private and exposing every one through a getter and setter pair. A class with accessors for all its fields leaks its entire internal representation: callers read and mutate state as if the fields were public, so changing the representation still breaks them. Real encapsulation exposes behavior and hides data — `order.cancel()` instead of `order.setStatus("CANCELLED")` — so the object enforces its own invariants and the representation can change freely. The test: "can I change how this class stores its state without touching any caller?" Default to no accessors, and add behavior methods instead of setter pairs.
 
 ---
 
 **Q: DRY, YAGNI, and KISS pull in different directions — what tiebreaker decides which one wins?**
+**Short:** Reversibility is the tiebreaker — choose whichever option is cheapest to undo later when principles conflict.
 
 Reversibility is the tiebreaker: when principles conflict, choose the option that is cheapest to change later. Concretely, duplication (tolerated by YAGNI/KISS) is reversible — you can extract an abstraction when the third occurrence arrives — while a premature shared abstraction (pushed by eager DRY) is hard to dismantle once it becomes load-bearing. That is why the Rule of Three lets YAGNI win at the first duplication and DRY win at the third. The exception is genuinely irreversible decisions — public API contracts and database schemas — where forward-thinking design is justified because changing later is extremely expensive. In a design debate, argue from the cost of undoing each option, not from principle names.
 
 ---
 
 **Q: How do Law of Demeter violations show up in unit tests as mock chains?**
+**Short:** Nested mock-stubbing chains in tests are the test-side symptom of a Law of Demeter violation in production code.
 
 A test that stubs nested mocks — `when(a.getB()).thenReturn(b)` followed by `when(b.getC()).thenReturn(c)` — is the test-side symptom of a Law of Demeter violation in the production code. Every level of mock nesting mirrors one `.get()` in a train wreck like `user.getAddress().getCity().getName()`: the test must reconstruct the whole object graph the code reaches through, so it breaks whenever any intermediate type changes. After adding a delegation method (`user.getCityName()`), the same test needs exactly one mock with one stubbed call. Treat multi-level mock setup as a design signal to add delegation, not as a mocking-library problem to work around.
 
 ---
 
 **Q: How does program-to-interface apply at public API and versioning boundaries?**
+**Short:** At a public API boundary, program-to-interface becomes mandatory because a published contract is effectively irreversible.
 
 At a public API boundary, program-to-interface stops being optional, because a published contract is effectively irreversible once external callers depend on it. Returning a concrete type like `ArrayList` or `MySQLDatabase` in a public signature freezes that implementation choice into the contract — swapping it later is a breaking change for every consumer. Exposing an interface or a dedicated DTO instead lets the internals evolve behind a stable contract across versions. This is also the YAGNI exception in action: forward-thinking abstraction is justified exactly where change is most expensive. Expose abstractions at module and API edges; keep concrete types for internals where the "one implementation, no interface" rule still applies.
 
 ---
 
 **Q: How do Java records and sealed interfaces support composition over inheritance?**
+**Short:** Records cannot extend classes, making composition their only reuse mechanism, while sealed interfaces close off unknown subclasses.
 
 Records cannot extend any class, which makes composition the only reuse mechanism available to them, and sealed interfaces close a hierarchy to a fixed set of implementations you control. A record that composes an interface-typed component (`record Checkout(PaymentMethod payment) {}`) is the canonical CoI unit with immutability for free. Sealing eliminates the fragile-base-class risk of open-ended subclassing: `sealed interface Shape permits Circle, Square` means no unknown third party can extend the hierarchy and break assumptions, and `switch` pattern matching over the permitted types is exhaustively checked by the compiler. Model new data-carrying hierarchies as sealed interfaces plus records, and reserve class inheritance for genuine is-a frameworks.
 

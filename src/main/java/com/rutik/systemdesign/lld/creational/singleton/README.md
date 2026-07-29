@@ -528,9 +528,13 @@ flowchart TD
 **Common Interview Questions:**
 
 1. **"What is the Singleton pattern and when would you use it?"**
+   **Short:** Singleton guarantees exactly one instance with global access, at the cost of testability and hidden global state.
+
    Answer: State the intent (one instance, global access), give a concrete example (connection pool, config), and immediately mention the trade-off (testability, global state). Show you know when NOT to use it.
 
 2. **"How do you make a Singleton thread-safe in Java?"**
+   **Short:** Enum Singleton is safest; Holder idiom, synchronized getInstance, and DCL with volatile are the alternatives.
+
    Answer: Mention four approaches in order of preference:
    - Enum-based Singleton (best — JVM guarantees thread safety, handles serialization)
    - Initialization-on-demand holder (lazy + thread-safe + no synchronization overhead)
@@ -538,27 +542,43 @@ flowchart TD
    - Double-checked locking with `volatile` (good performance, but subtle)
 
 3. **"How does an Enum Singleton work?"**
+   **Short:** Java's classloader instantiates each enum value exactly once, making it serialization-safe and reflection-safe automatically.
+
    Answer: Java guarantees each enum value is instantiated once by the classloader. It's serialization-safe and reflection-safe out of the box.
 
 4. **"Can you break a Singleton?"**
+   **Short:** Yes, reflection, deserialization, and multiple class loaders can all create a second instance of a classic Singleton.
+
    Answer: Yes — via reflection (calling private constructor), serialization (deserializing creates a new instance), or multiple class loaders. Explain the defenses.
 
 5. **"What's wrong with Singletons?"**
+   **Short:** Singletons introduce global state, hide dependencies, hurt testability, and violate the Single Responsibility Principle.
+
    Answer: Global state, hidden dependencies, testability issues, SRP violation. Mention that modern apps use DI containers instead.
 
 6. **"Walk through why DCL without `volatile` is broken — what exactly can go wrong at the bytecode/JMM level?"**
+   **Short:** Without volatile, the JMM can reorder construction and reference assignment, exposing a partially-built instance to another thread.
+
    Answer: `new ConfigRegistry()` compiles to three JVM steps — allocate memory, run the constructor, assign the reference to `INSTANCE` — and without `volatile`, the JMM allows the compiler or CPU to reorder steps 2 and 3. A second thread can then see a non-null `INSTANCE` whose constructor hasn't finished running, and read default-valued (zeroed) fields, causing subtle `NullPointerException`s or garbage values that appear only under load. `volatile` (Java 5+) inserts a store-store/load-load barrier via the updated Java Memory Model, forbidding this reordering. In an interview, draw the three-step breakdown explicitly — it's the detail that separates "I memorized the fix" from "I understand the JMM."
 
 7. **"Is a Spring `@Component`/`@Bean` with default scope the same as a GoF Singleton?"**
+   **Short:** No, a GoF Singleton is self-enforcing via a private constructor, while a Spring singleton bean is only container-enforced.
+
    Answer: No — they solve a related but distinct problem. A GoF Singleton is *self-enforcing*: the class itself guarantees only one instance can ever exist (private constructor, static field), even against `new` calls anywhere in the codebase. A Spring singleton-scoped bean is *container-enforced*: Spring's `DefaultListableBeanFactory` caches one instance per bean definition per `ApplicationContext`, but nothing stops you from calling `new MyService()` directly and getting a second, un-managed instance. The practical guidance: in DI-based applications, rely on the container's singleton scope and avoid the GoF private-constructor pattern — it actively fights the framework's ability to create test doubles or multiple contexts (e.g., parallel test contexts each need their own bean instance).
 
 8. **"How would you unit-test a class that depends on a classic `getInstance()` Singleton?"**
+   **Short:** Classic getInstance() Singletons are hard to mock directly; the durable fix is refactoring to inject the dependency via constructor.
+
    Answer: Directly, you mostly can't — the dependency is hard-coded and invisible from the constructor, so standard mocking (Mockito `@Mock` + constructor injection) has nothing to inject into. Workarounds include: making the Singleton implement an interface and adding a package-private setter/reset method for tests (`ConfigRegistry.setInstanceForTesting(mock)`), using `PowerMock` or similar bytecode-manipulation tools to mock static methods (heavyweight, often a code smell), or — the durable fix — refactoring to inject the dependency via constructor and letting a DI container supply the singleton-scoped instance in production while tests supply a mock. The practical guidance: treat "this class is hard to test" as a signal to refactor toward DI rather than reach for a static-mocking framework.
 
 9. **"What happens to a Singleton in an application server with multiple class loaders (e.g., Tomcat, OSGi)?"**
+   **Short:** Each class loader creates its own independent static INSTANCE field, so multiple "singletons" can silently coexist.
+
    Answer: Each class loader that loads the Singleton's `.class` file creates an independent `Class` object, and therefore an independent static `INSTANCE` field — so you can end up with multiple "singletons," one per class loader, silently violating the "exactly one instance" guarantee. This commonly bites when a JAR containing the Singleton is bundled inside multiple WARs deployed to the same Tomcat instance, or when an OSGi bundle is reloaded and re-instantiates its singletons. The fix is architectural: place shared Singleton classes in a parent/shared class loader (e.g., Tomcat's `common` or `shared` lib directory) so all child class loaders delegate to the same loaded class, or avoid the assumption entirely and use an external shared store (Redis, a database row) for state that must truly be process-wide.
 
 10. **"Walk through the Bill Pugh holder idiom — why is it thread-safe without any explicit synchronization?"**
+   **Short:** The Holder idiom is thread-safe because the JVM's own class-initialization lock guarantees lazy, once-only setup.
+
    Answer: The idiom declares a `private static class Holder { static final Singleton INSTANCE = new Singleton(); }` and has `getInstance()` return `Holder.INSTANCE`. The JVM specification guarantees that a class is initialized — and its static fields assigned — only on first active use, and that class initialization runs under a per-class initialization lock and happens-before any subsequent access (JLS §12.4.2). So `Holder` is not initialized (and `INSTANCE` is not created) until the first call to `getInstance()`, giving lazy initialization, but every subsequent read of `Holder.INSTANCE` is a plain field access with no lock — giving the same near-zero overhead as eager initialization. This is why it's the preferred idiom over `synchronized getInstance()` or DCL: it gets laziness, thread safety, and zero per-call synchronization cost simultaneously, with no `volatile` needed.
 
 **Key Phrases to Use:**

@@ -442,6 +442,7 @@ class Button {
 ## Interview Questions with Answers
 
 **Q: When would you use Mediator over Observer?**
+**Short:** Use Observer for one-to-many broadcast and Mediator for many-to-many coordination that would otherwise need direct connections.
 
 > Observer works well for one-to-many relationships where one subject pushes updates to independent subscribers. Mediator works well for many-to-many relationships where multiple objects need to coordinate with each other, and you want to prevent the N*(N-1) direct connections that would otherwise form.
 >

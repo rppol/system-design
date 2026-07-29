@@ -333,14 +333,17 @@ System.out.println(margherita);
 ## Interview Questions with Answers
 
 **Q: When would you choose Builder over Factory?**
+**Short:** Choose Builder when an object has many optional parameters or multi-step construction; choose Factory for single-step creation.
 
 > Use Factory (any variant) when you need a single-step creation of an object and the client doesn't need to configure individual parts. Use Builder when the object has many optional parameters, when construction is multi-step, or when you want to prevent invalid intermediate states. The rule of thumb: if a constructor would need more than 3-4 parameters, consider Builder.
 
 **Q: What is the difference between Factory Method and Abstract Factory?**
+**Short:** Factory Method is a class-based override that produces one product, while Abstract Factory is an injected object that produces a related family.
 
 > Factory Method is class-based: a single method in a base class is overridden by subclasses to produce one type of product. Abstract Factory is object-based: an entire factory object is injected, and it creates multiple related products that belong to the same family. Abstract Factory is essentially a collection of Factory Methods behind an interface.
 
 **Q: Why is Abstract Factory useful?**
+**Short:** Abstract Factory guarantees that related products created together stay consistent, such as matching Windows-style widgets.
 
 > It guarantees consistency across related products. If you ask a Windows factory for a button and a checkbox, you're guaranteed to get Windows-style versions of both — they'll look and feel consistent. Without it, you might accidentally mix a Mac button with a Windows checkbox.
 

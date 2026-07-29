@@ -677,66 +677,82 @@ Thirty-six thousand customers each told "Refunded" while being out $1.50 is what
 ## 12. Interview Questions with Answers
 
 **Q1: Why does Two-Phase Commit "block," and why is that a problem in practice?**
+**Short:** 2PC blocks because a participant that voted YES must hold locks until the coordinator's decision arrives.
 
 A: After a participant votes YES in the prepare phase, it must hold all acquired locks until the coordinator's commit/abort decision arrives. It cannot unilaterally decide either way, because the coordinator might have received a NO from another participant. If the coordinator crashes after collecting votes but before broadcasting the decision, every participant is stuck holding locks (and database connections) indefinitely until the coordinator recovers. In production this can exhaust connection pools and cause an outage far larger than the original transaction (see §10, War Story 1).
 
 **Q2: What is the "dual write" problem, and how does the Outbox pattern solve it?**
+**Short:** The dual-write problem is unatomic DB-write-plus-message-send; the Outbox pattern makes it one local transaction.
 
 A: The dual write problem is a service updating its database AND publishing a message as two separate operations that cannot be made atomic. There is no way to make "commit the DB transaction" and "send the message" atomic across two different systems, so a crash between them leaves one done and the other not. The Outbox pattern solves this by writing the message as a row in an `outbox` table within the *same local database transaction* as the business write — now there's only one atomic operation (a single-database transaction), and a separate relay process (often Debezium reading the WAL) asynchronously publishes outbox rows to the message broker.
 
 **Q3: What's the difference between Saga orchestration and choreography, and what are the tradeoffs?**
+**Short:** Saga orchestration centralizes control and is traceable; choreography decouples services but hides the overall flow.
 
 A: In orchestration, a central coordinator explicitly invokes each step and, on failure, invokes compensations in reverse order. That is easy to understand and trace, but the orchestrator is a new component that must itself be highly available and is a central point of business-logic coupling. In choreography, each service publishes an event when it completes its step, and other services react to events they care about — fully decoupled, but the overall flow is implicit (spread across N services' event handlers), making it hard to answer "what state is order #123 in right now?" without aggregating events from everywhere.
 
 **Q4: Why is idempotency described as "the foundation" for distributed transactions rather than just a nice-to-have?**
+**Short:** Idempotency is foundational because every retry-based resilience pattern relies on retries not duplicating side effects.
 
 A: Every pattern that provides resilience — Saga step retries, Outbox at-least-once delivery, client request retries on timeout — works by re-attempting an operation that *might* have already succeeded. If that operation isn't idempotent, "retry for resilience" becomes "duplicate side effects" (double charges, duplicate emails, oversold inventory). Idempotency keys turn "at-least-once delivery" into "at-most-once effect," which is what callers actually want and what 2PC tries (at much higher cost) to guarantee structurally.
 
 **Q5: When would you actually choose 2PC in a modern system, given its downsides?**
+**Short:** 2PC still fits when all participants share one trust domain and datacenter and strong consistency is mandatory.
 
 A: Choose 2PC only when all participants sit in one trust domain and one datacenter, are few and fixed in number, and strong consistency is a hard requirement. The canonical case is a distributed SQL database's internal cross-shard commit (Spanner, CockroachDB), where sub-millisecond latency keeps the lock-hold window small. You would essentially never hand-roll 2PC across independently-deployed microservices over a WAN; you'd use it (if at all) as an internal mechanism inside a single data platform with a global clock.
 
 **Q6: How does TCC differ from a plain Saga, and when would you prefer it?**
+**Short:** TCC reserves a resource in a Try phase instead of finalizing it, avoiding the visibility gap a plain Saga leaves.
 
 A: A Saga's compensations run *after* a later step has already failed — there's a window where step 1's effect (e.g., inventory decremented) is fully visible to other transactions before it's compensated. TCC's "Try" phase creates a *reservation* (with a TTL) rather than a final effect — inventory is marked "reserved," not "sold," so other transactions see accurate availability immediately. TCC is preferred whenever the resource being manipulated has a meaningful "held but not finalized" state — inventory holds, payment authorizations, seat/room reservations.
 
 **Q7: A saga's compensation for "ChargeCard $50" is "RefundCard $50" — what's wrong with this, potentially?**
+**Short:** A saga's RefundCard compensation can be wrong if the processor keeps its fee, since a refund is not a true inverse.
 
 A: If the processor keeps its fee on refund, refunding the full $50 makes the business eat that fee, while refunding only the net leaves the customer with an unexplained discrepancy. This is the normal case, not an exotic one: Stripe, for example, does not return the original processing fee when a charge is refunded, and card-scheme fees are typically percentage-plus-fixed (Stripe's standard US online rate is 2.9% + $0.30), so the retained amount scales with the charge rather than being a flat $1.50. Compensations are not automatic inverses — they are separate operations that must be explicitly designed, including how partial costs (fees, restocking charges, non-refundable deposits) are handled and communicated. See §10, War Story 4.
 
 **Q8: How do you handle a saga step that fails permanently (not transiently) partway through?**
+**Short:** A permanently failed saga step triggers compensations for all prior steps in reverse, with manual intervention as fallback.
 
 A: First, distinguish transient failures (retry the step itself with backoff) from permanent failures (the step cannot succeed no matter how many times it's retried — e.g., "card declined"). For a permanent failure, the orchestrator runs compensations for all *previously completed* steps, in reverse order. If a *compensation itself* fails permanently, the saga enters a "needs manual intervention" state — this is why production saga systems (Temporal, Camunda) expose a dashboard of stuck workflows and page an on-call engineer; there is no fully-automatic recovery from "the compensation also failed."
 
 **Q9: What is the race condition with idempotency keys, and how do you fix it?**
+**Short:** Idempotency keys race unless the key is atomically claimed first, e.g. via an INSERT ... ON CONFLICT DO NOTHING.
 
 A: If two requests with the same *new* idempotency key arrive concurrently, both can check "does this key exist?", both see "no," and both proceed to execute the operation — defeating the purpose. The fix is to atomically *claim* the key before doing any work: `INSERT ... ON CONFLICT (key) DO NOTHING RETURNING key` (or `SET key val NX` in Redis). Only the request that successfully inserts/sets the key proceeds; the other sees 0 rows affected and either waits for the in-progress result or returns the already-completed result.
 
 **Q10: Why does the Outbox pattern require idempotent consumers, even though it "solves" the dual-write problem?**
+**Short:** The Outbox pattern gives at-least-once delivery, not exactly-once, so consumers still must deduplicate events.
 
 A: The outbox relay provides *at-least-once* delivery, not *exactly-once* — if the relay crashes after publishing to Kafka but before marking the outbox row as published, it will republish that row on restart. The Outbox pattern guarantees the event is *never lost*; it does not (and cannot, without distributed transactions of its own) guarantee it's delivered exactly once. Consumers must therefore deduplicate (e.g., by tracking processed event IDs), which is itself an application of the idempotency-key pattern.
 
 **Q11: How would you design reconciliation for a saga-based system to catch the "stuck in inconsistent state" cases?**
+**Short:** Saga reconciliation runs a periodic job that finds stuck in-progress records and resumes or compensates them.
 
 A: Run a periodic batch job that queries for records whose state implies an in-progress saga that's older than the maximum expected duration (e.g., "orders in `PAYMENT_PENDING` for > 1 hour"). For each, check the actual state of all participants (did the payment actually go through? is inventory actually reserved?) and either resume the saga from the correct step or trigger compensations. This job is the safety net for the eventual-consistency window — without it, "eventual" consistency for edge cases becomes "never."
 
 **Q12: Can you achieve "exactly-once" processing in a distributed system at all?**
+**Short:** True exactly-once processing is impossible without global coordination; systems instead combine retries with idempotency.
 
 A: Not in the sense of "the operation runs exactly one time, period" — that's provably impossible to guarantee without global coordination (which is 2PC, with its costs). What's achievable, and what production systems actually mean by "exactly-once," is **"at-least-once delivery + idempotent processing" = exactly-once *effect***. Kafka's "exactly-once semantics" (EOS) is itself this combination internally (idempotent producers + transactional offset commits), not a violation of the impossibility result.
 
 **Q13: What does Three-Phase Commit fix that Two-Phase Commit doesn't, and why is it rarely used in production despite that?**
+**Short:** Three-Phase Commit removes 2PC's indefinite blocking but breaks under network partitions, so production avoids it.
 
 A: 3PC adds a pre-commit phase so participants can independently commit if the coordinator crashes after that phase. Pre-commit means every participant has already voted yes, which removes 2PC's indefinite-blocking failure mode under a coordinator crash. The catch, per Section 4.2, is that this guarantee only holds "under non-partitioned failures": if the network partitions a participant away from the rest of the cluster after pre-commit, that isolated participant can independently commit while the majority aborts (or vice versa), producing a genuine inconsistency rather than just a delay. Combined with the extra network round trip on every transaction, this means 3PC trades a real latency cost for a guarantee that silently breaks under exactly the failure mode — network partitions — that distributed systems most need to tolerate; production systems facing this problem jump straight to Saga or TCC instead.
 
 **Q14: Why is there no protocol in this module's blocking-vs-consistency plane that's both strong and non-blocking?**
+**Short:** No protocol is both strongly consistent and non-blocking under arbitrary failures, per the atomic-commitment impossibility result.
 
 A: That combination is provably impossible to achieve alongside tolerance of arbitrary failures. Section 3's Core Principle 2 ties this to the atomic-commitment impossibility result (Skeen and Stonebraker, 1983: no atomic commit protocol is non-blocking under network partitions), which sits alongside FLP and the same forces behind CAP. The Section 8 quadrant chart shows this empirically: 2PC sits at strong-but-blocking, Saga and Outbox sit at non-blocking-but-eventual, and nothing occupies the "strong and non-blocking" quadrant, because achieving it would require participants to know the global outcome before the coordinator finishes collecting votes — exactly what an arbitrary node or network failure can prevent. TCC and 3PC sit in between not because they've cheated the impossibility result, but because they narrow the blocking window (a bounded TTL instead of an indefinite lock) rather than eliminating it. Treat any vendor or design that claims "strong consistency with zero blocking, tolerant of any failure" as suspect — it has almost certainly narrowed the failure model rather than solved the general problem.
 
 **Q15: Why does DynamoDB cap `TransactWriteItems` at 100 items, 4MB, and a single AWS region?**
+**Short:** DynamoDB caps transactions at 100 items and one region to keep its 2PC-like coordination window predictably small.
 
 A: 2PC-style blocking cost grows with both the number of participants and the network distance between them, and AWS bounds both to keep that window predictable. Section 7 frames DynamoDB's transaction API as "a 2PC-like protocol" for exactly this reason: more items means more partitions that must all agree before any can proceed, and a cross-region transaction would add tens to hundreds of milliseconds of coordination latency per operation, multiplying the blocking window. These limits are a direct, productized expression of Section 9's "avoid 2PC across a WAN or multiple regions" guidance — AWS chose to enforce the boundary at the API level rather than let a customer discover it as a production incident. When a workload needs more than 100 items or spans regions, treat that as a signal to redesign around Saga or the Outbox pattern rather than looking for a way around the limit.
 
 **Q16: In the PaySwift redesign, why does the external payment network call happen completely outside any database transaction?**
+**Short:** PaySwift's external payment call runs outside the database transaction since a WAN round-trip cannot hold local locks.
 
 A: A third-party network call can take 200-400ms and fail for reasons unrelated to PaySwift's own databases, so wrapping it inside a transaction would hold wallet or ledger locks for that entire round trip. Key Design Decision #3 isolates it as its own retryable step specifically so it can be retried with exponential backoff on transient failure without blocking anything else — made safe to retry via the payment processor's own idempotency-key support (the same mechanism Stripe uses, per Section 7), not by any database mechanism. This is also why 2PC never could have covered this call in the original architecture: you cannot ask an external payment network to participate in your prepare/commit protocol and hold a lock on your behalf, so the original design's "call the external network after the 2PC commits" gap was structural, not a bug — 2PC was the wrong shape for a step involving a party outside your trust domain. Any step that crosses an organizational boundary belongs outside the local transaction, coordinated instead through an idempotent, retryable call plus a saga step that reacts to its outcome.
 

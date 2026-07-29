@@ -496,33 +496,53 @@ flowchart TD
 ### Common Questions
 
 **Q: What problem does the Bridge pattern solve?**
+**Short:** Bridge avoids class explosion when a class varies along two independent dimensions, using m plus n classes instead of m times n.
+
 A: It solves the class explosion problem when a class needs to vary along two independent dimensions. Instead of creating m×n subclasses, you create m+n classes by separating the two dimensions into separate hierarchies connected by composition.
 
 **Q: How does Bridge differ from Adapter?**
+**Short:** Bridge is designed upfront so two hierarchies vary independently; Adapter is applied afterward to fix an incompatibility.
+
 A: Bridge is designed upfront with the intent of making two hierarchies vary independently. Adapter is applied retroactively to make two existing incompatible interfaces work together. Bridge prevents a problem; Adapter fixes one.
 
 **Q: How does Bridge differ from Strategy?**
+**Short:** Bridge structures an abstraction hierarchy that delegates to an implementation hierarchy; Strategy has one behavioral axis.
+
 A: Both use composition to delegate to an interface. Bridge structures the abstraction into a hierarchy (Circle, Rectangle) that delegates to an implementation hierarchy (renderers). Strategy focuses on a single behavioral dimension (algorithms) with no abstraction hierarchy on the calling side.
 
 **Q: Give a real-world example of Bridge in the Java ecosystem.**
+**Short:** JDBC is the canonical Bridge: Connection and Statement abstractions delegate to vendor-specific driver implementors.
+
 A: JDBC is the canonical example. `java.sql.Connection` and `Statement` are abstractions. Each database vendor supplies a driver (Concrete Implementor). Application code uses the abstraction; the JDBC driver is the bridge to the actual database engine.
 
 **Q: When would you choose Bridge over inheritance?**
+**Short:** Choose Bridge when two dimensions of variation must grow independently, since inheritance alone yields m times n classes.
+
 A: When you have two dimensions of variation that need to grow independently. If shapes and renderers both need to scale, inheriting creates m×n classes; Bridge creates m+n.
 
 **Q: Walk through a concrete number showing the class explosion Bridge avoids.**
+**Short:** Four shapes and three renderers need 12 subclasses with inheritance but only 7 classes with Bridge, and the gap widens further.
+
 A: Suppose you have 4 shape types (Circle, Square, Triangle, Hexagon) and 3 rendering engines (Vector, Raster, OpenGL). With single inheritance encoding both dimensions, you need a subclass per combination — `VectorCircle`, `RasterCircle`, `OpenGLCircle`, `VectorSquare`, and so on, which is 4×3 = 12 classes, and adding a 4th engine jumps that to 16. With Bridge, you write 4 shape classes that each hold a `Renderer` reference plus 3 renderer implementations — 4+3 = 7 classes, and a 4th engine only adds 1 class (4+4=8). The savings compound multiplicatively as either dimension grows, which is the core economic argument for Bridge. In an interview, lead with this multiplication-vs-addition framing — it is the single most memorable justification for the pattern.
 
 **Q: What is the "Pluggable Implementation" idiom and how does it relate to Bridge?**
+**Short:** Pluggable Implementation is Bridge plus a discovery mechanism, letting the implementor be swapped via configuration.
+
 A: Pluggable Implementation is Bridge applied at the platform/SDK level so that an abstraction can swap its backing implementation at runtime or via configuration, without recompiling client code. JDBC drivers are the textbook case — `DriverManager.getConnection(url)` returns a `Connection` whose concrete implementor (MySQL, Postgres, Oracle driver) is selected purely by the JDBC URL/classpath, and historically AWT's peer-based windowing toolkit used the same idea: `java.awt.Button` (abstraction) delegated to a native `ButtonPeer` implementation chosen per operating system (Windows, Motif, Mac). The defining trait is that the implementor is resolved through a registry or factory rather than being hardcoded, which is what makes the implementation "pluggable" rather than merely "delegated." When you see a system where you can drop in a new vendor/driver/backend by adding a JAR or config entry with zero code changes to the abstraction, that is Pluggable Implementation — i.e., Bridge plus a discovery mechanism.
 
 **Q: How do you evolve the implementor hierarchy without breaking clients of the abstraction hierarchy?**
+**Short:** Add new implementors as classes implementing the existing Implementor interface; changing that interface breaks every one.
+
 A: Keep the `Implementor` interface as the only contract the `Abstraction` depends on, and add new concrete implementors as new classes that implement that existing interface — clients calling methods on `Shape` never need to know a new `Renderer` was added. The danger is changing the `Implementor` interface itself (e.g., adding a new method to `Renderer`): every existing concrete implementor must now implement it, which is the same fragility as adding a method to any widely-implemented interface. Mitigations include adding default methods (Java 8+) to the `Implementor` interface so old implementors keep compiling, or introducing a new `Renderer2` interface and having the abstraction check for it via `instanceof`/optional capability detection. The practical guidance is to design the implementor interface around stable, low-level primitives (e.g., `drawLine`, `drawCircle`, `fillPolygon`) so it rarely needs to change — new high-level shape behavior should be composable from those primitives in the abstraction layer, not require new implementor methods.
 
 **Q: What are the downsides of using Bridge for a simple, single-dimension problem?**
+**Short:** Applying Bridge to a class with only one real dimension of variation is pure indirection overhead and a YAGNI violation.
+
 A: Bridge adds a layer of indirection — every call from the abstraction to the implementor is a virtual dispatch through an interface, plus you now maintain two class hierarchies and a wiring mechanism (constructor injection, factory, or DI container) instead of one. For a class that genuinely varies along only one axis (say, just shape type, with no alternate rendering engines ever planned), this is pure overhead: more files, more indirection to trace during debugging, and a steeper learning curve for new team members reading the code. The pattern pays for itself only when the second dimension of variation is real or highly likely — applying it speculatively is a YAGNI violation. The practical guidance is to start with a simple class hierarchy and refactor toward Bridge only when a second independent dimension actually materializes (e.g., "we now need to support a second database vendor"), which is also an easier refactor than retrofitting an over-engineered Bridge back down to a simple hierarchy.
 
 **Q: Does the Abstraction always hold exactly one Implementor, and can that reference change at runtime?**
+**Short:** Yes, the Abstraction holds one Implementor reference, and because it is a plain field it can be reassigned at runtime.
+
 A: Yes to both — the Abstraction typically holds a single reference to an `Implementor` (often via constructor injection or a setter), and because it is a plain object reference rather than a compile-time type, it can be reassigned at runtime to swap behavior dynamically. For example, a `RemoteControl` (abstraction) holding a `Device` (implementor) reference could be re-pointed from a `TV` to a `Radio` implementor without the `RemoteControl` class changing at all — this is the same "swap the strategy object" mechanism Strategy uses, but here it is one half of two parallel hierarchies rather than a single behavioral axis. A common gotcha is conflating "the implementor can change" with "the abstraction subclass can change" — switching abstraction subclasses (e.g., from `Circle` to `Square`) requires creating a new object, while switching implementors on the same abstraction instance is a simple field reassignment. When designing the Abstraction's constructor, accept the `Implementor` interface type (not a concrete class) so any current or future implementor can be injected.
 
 ### What Interviewers Look For

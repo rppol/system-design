@@ -454,54 +454,88 @@ Last-write-wins assumes accurate clocks. In distributed systems, clocks drift. N
 ## 12. Interview Questions
 
 **Q1: Explain the CAP theorem in plain language.**
+**Short:** In a network partition, a distributed system must choose between returning consistent or stale-but-available data.
+
 In a distributed system, when a network partition occurs, you can either return consistent data (potentially refusing requests) or stay available (potentially returning stale data). You cannot do both.
 
 **Q2: Is Cassandra CP or AP?**
+**Short:** Cassandra is AP by default but offers tunable consistency to behave more like a CP system.
+
 Cassandra is AP by default. It prioritizes availability and partition tolerance, returning potentially stale data during partitions. However, it offers tunable consistency — requesting `QUORUM` reads and writes effectively makes it behave more like a CP system at the cost of availability.
 
 **Q3: What does "eventual consistency" actually mean?**
+**Short:** Eventual consistency guarantees reads converge to the last written value, with no bound on when.
+
 If no new updates are made to an item, all reads will eventually return the last written value. There is no guarantee on how long "eventually" takes. The system will converge to a consistent state after partitions heal via mechanisms like gossip, read repair, and hinted handoff.
 
 **Q4: Why is partition tolerance non-negotiable?**
+**Short:** Partition tolerance is non-negotiable because real networks drop packets and lose connectivity.
+
 Real networks fail. Packets are dropped, cables are cut, availability zones go down. Any distributed system must handle the case where some nodes cannot communicate with others. A system that simply stops working on a partition is not useful in production.
 
 **Q5: What is the PACELC theorem and how does it extend CAP?**
+**Short:** PACELC extends CAP by adding a latency-versus-consistency tradeoff during normal, partition-free operation.
+
 PACELC: if there is a Partition, choose between Availability and Consistency; Else (no partition), choose between Latency and Consistency. It captures the latency-consistency tradeoff that exists in normal operation, which CAP ignores.
 
 **Q6: How does ZooKeeper handle network partitions?**
+**Short:** ZooKeeper's ZAB protocol makes a CP choice: it goes unavailable during leader election rather than serve stale data.
+
 ZooKeeper uses the ZAB protocol (leader election + atomic broadcast). If the leader cannot reach a quorum of followers, it steps down and a new election starts. During election, ZooKeeper is unavailable. This is a CP choice: it refuses to serve potentially stale data.
 
 **Q7: How do you implement read-your-own-writes in an AP system?**
+**Short:** Read-your-own-writes in an AP system is achieved via sticky sessions or a write-timestamp version token.
+
 Options: (1) Route all reads and writes for a user to the same replica (sticky sessions). (2) Track the write timestamp and refuse to serve reads from replicas that haven't caught up. (3) Use a session token that encodes the write timestamp, and the read includes this as a minimum-version requirement.
 
 **Q8: What are vector clocks and when are they used?**
+**Short:** Vector clocks version each update with per-node counters to detect concurrent, conflicting writes.
+
 Vector clocks are a versioning mechanism where each update carries a vector of `{nodeId: counter}` pairs. They allow the system to detect whether two writes are causally related or concurrent. Concurrent writes (neither dominates the other) represent a conflict requiring resolution. Used in DynamoDB's original Dynamo design and Riak.
 
 **Q9: How does Google Spanner achieve CP with low latency globally?**
+**Short:** Spanner achieves globally consistent CP with low latency using TrueTime's bounded clock uncertainty.
+
 TrueTime: Google uses GPS receivers and atomic clocks in every datacenter to bound global clock uncertainty to milliseconds. Spanner assigns commit timestamps within the uncertainty bound, ensuring global consistency without waiting for arbitrary clock synchronization. This hardware investment eliminates most of the latency penalty of CP systems.
 
 **Q10: What consistency guarantees does DynamoDB provide?**
+**Short:** DynamoDB defaults to eventually consistent reads but offers strongly consistent reads at double the cost.
+
 By default, reads are eventually consistent (may return stale data). Strongly consistent reads are available (cost 2x read capacity units, slightly higher latency). Transactions (TransactGetItems, TransactWriteItems) provide ACID guarantees within a single region.
 
 **Q11: What is the difference between linearizability and serializability?**
+**Short:** Linearizability governs single-operation visibility; serializability governs multi-operation transaction ordering.
+
 Linearizability is a consistency model for individual operations — once an operation completes, its effect is immediately visible to all future operations (single-object, single-operation scope). Serializability is a transaction isolation level — concurrent transactions produce results equivalent to some serial execution (multi-object, multi-operation scope). Strict serializability combines both.
 
 **Q12: Why is it wrong to describe a CP database as providing "ACID consistency"?**
+**Short:** CAP consistency means linearizability, while ACID consistency means preserving database invariants, a different concept.
+
 CAP's "C" and ACID's "C" are different concepts that happen to share the same letter. CAP consistency means linearizability — every node sees the same data at the same time — while ACID consistency means a transaction leaves the database satisfying its defined constraints (foreign keys, checks, uniqueness). Section 10 flags this as the most common CAP misconception. A system can be CAP-consistent (globally agreeing on the latest write) while still violating an ACID invariant if the application logic is buggy, and a single-node database can guarantee ACID consistency without ever facing the CAP tradeoff at all, since it has no partition to survive. Name which "C" you mean explicitly in a design discussion — say "linearizable" or "invariant-preserving" instead of the overloaded word "consistent."
 
 **Q13: With N=3 replicas, how do you configure read/write quorums to guarantee strong consistency?**
+**Short:** Strong consistency requires read and write quorums where R + W exceeds the replica count N.
+
 Set write quorum W and read quorum R so that R + W > N, which forces every read to overlap the most recent write. With N=3, W=2, R=2 satisfies this since 2+2=4 > 3: Section 5's quorum diagram shows a write to Node A + Node B and a read from Node B + Node C are forced to share Node B, so the read always sees the latest value. If you instead set R=1 to shave read latency, R + W = 3 is no longer greater than N, the overlap guarantee disappears, and a read can land on a replica that has not yet received the write — trading consistency for latency, exactly the "else" branch PACELC describes. Pick the quorum split based on your read/write ratio: a read-heavy workload favors a smaller R for cheaper reads, compensated by a larger W.
 
 **Q14: What is hinted handoff, and how does it differ from read repair?**
+**Short:** Hinted handoff proactively replays a missed write later; read repair reactively fixes staleness detected at read time.
+
 Hinted handoff temporarily stores a write meant for an unreachable node on another node, then replays it once the target recovers. Read repair instead fixes a stale replica reactively, when a read happens to detect a mismatch between replicas. Both are eventual-consistency convergence mechanisms used by Cassandra and the original Dynamo design (Section 5): hinted handoff repairs write-path gaps proactively without a client ever noticing, while read repair only fires for keys that are actually read afterward. Neither gives a consistency guarantee alone since a hint can be lost if the coordinator crashes before replay, so combine both with a background anti-entropy process (gossip plus Merkle tree comparison) to bound how long a replica can stay silently stale.
 
 **Q15: What is a CRDT, and why does it eliminate the need for explicit conflict-resolution logic?**
+**Short:** A CRDT's merge function mathematically converges to the same result regardless of update order.
+
 A CRDT (Conflict-free Replicated Data Type) is a data structure whose merge operation mathematically converges to the same result regardless of the order updates arrive in. Section 5 lists three: a G-Counter merges by taking the max of each node's count, an OR-Set supports concurrent add/remove without lost updates, and an LWW-Register uses logical timestamps for last-write-wins at the field level. The shopping-cart case study (§15) uses exactly this pattern — each cart is an OR-Set where concurrent adds from two regions both survive the merge as a union, and a "remove wins" rule keeps a deleted item deleted even if another region concurrently touched it. Reach for a CRDT when conflicting concurrent writes are expected and mergeable, such as counters, sets, or flags — they don't help when resolving a conflict requires business logic, like deciding which of two concurrent balance updates is correct.
 
 **Q: How does a distributed system actually detect that a partition has occurred, and why can it never be certain?**
+**Short:** A network partition can never be confirmed with certainty, so systems detect it via timeouts or suspicion scores.
+
 It cannot be certain — on an asynchronous network a partitioned peer and a slow peer both produce silence, so every system guesses with a timeout. Section 5 walks the three mechanisms. A fixed timeout is binary and both ends hurt: too short and a GC pause or a saturated NIC convicts a healthy node, triggering the failover it was meant to prevent; too long and the CP side blocks for the full window. Cassandra's phi accrual detector replaces up/down with a continuous suspicion score fitted to observed heartbeat inter-arrival times, calibrated so `phi = X` means roughly a `10^-X` chance the suspicion is wrong, and convicts above `phi_convict_threshold` (default `8`) — so it becomes patient by itself on a link that is normally jittery. Leader leases then bound the other side: a Raft or ZAB leader serves only while its lease is renewable and must step down otherwise, which is what turns the quorum argument into a wall-clock guarantee. The number that matters operationally is that a CP system's unavailability window is detection time plus election time, and detection almost always dominates — so tune the detector, not the consensus protocol, when the outage window is too long.
 
 **Q16: Why wasn't a Redis distributed lock enough to enforce a non-negative balance invariant on top of an AP database?**
+**Short:** A Redis lock alone cannot enforce invariants since it can split-brain during the same partition it must survive.
+
 A distributed lock is not a substitute for database-level serializability because it can fail under the same partition the database itself would need to tolerate. The financial-ledger case study's first lessons-learned pitfall hit this directly: during a Redis failover, two concurrent withdrawal requests on the same wallet both acquired what they believed was the lock — a split-brain — and both passed the `balance >= amount` check, producing an overdraft. The fix moved the ledger to Spanner (CP), where `CHECK (balance >= 0)` is enforced transactionally by Paxos consensus rather than by an external lock that can itself partition. Whenever a strong invariant must hold under concurrent writes, enforce it inside the transactional boundary of a CP datastore rather than bolting an application-level lock onto an AP one.
 
 ---

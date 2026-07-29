@@ -492,33 +492,43 @@ flowchart TD
 **Common interview questions:**
 
 **Q: What is the Mediator pattern?**
+**Short:** Mediator centralizes how objects communicate, turning O(n squared) direct coupling into an O(n) hub-and-spoke topology.
 A: Mediator defines an object that centralizes how a set of objects communicate, preventing them from referring to each other directly. It turns a complex O(n²) coupling into a hub-and-spoke (O(n)) topology.
 
 **Q: How does Mediator differ from Observer?**
+**Short:** Observer is one-to-many notification, while Mediator is many-to-many coordination routed through a central hub.
 A: Observer is one-to-many notification (publisher doesn't know about subscribers). Mediator is many-to-many coordination — any colleague can trigger reactions in any other colleague, and the mediator decides the routing. A Mediator is often implemented with Observer internally.
 
 **Q: What is the risk of the Mediator pattern?**
+**Short:** The mediator risks becoming a God Object, trading distributed coupling for one hard-to-maintain centralized class.
 A: The mediator becomes a God Object — it absorbs too much logic and becomes a single, complex, hard-to-maintain class. You trade distributed coupling for a centralized monolith.
 
 **Q: Where is Mediator used in Spring?**
+**Short:** Spring's DispatcherServlet routes HTTP requests and ApplicationEventPublisher routes domain events, both acting as mediators.
 A: `DispatcherServlet` is a mediator routing HTTP requests to controllers. `ApplicationEventPublisher` is a mediator routing domain events to listeners. Both centralize coordination without components knowing each other.
 
 **Q: What's the difference between Mediator and Facade?**
+**Short:** Facade simplifies one-directional access to a subsystem, while Mediator enables bidirectional coordination between peers.
 A: Facade simplifies access to a complex subsystem (one-directional, no coordination between subsystem components). Mediator enables bidirectional communication between peer objects that should not know each other.
 
 **Q: You said Mediator is "often implemented using Observer internally" — what does that look like concretely?**
+**Short:** A Mediator's internal dispatch is frequently an Observer-style registry, but its coordination intent is what makes it a Mediator.
 A: The Mediator interface exposes a coordination contract (`notify(sender, event)` or `publish(event)`), but its internal implementation is frequently a registry of subscribers keyed by event type — exactly the Observer pattern's subject/observer relationship. When `publish(event)` is called, the mediator looks up all colleagues registered for that event type and calls their `onEvent()` callback, which IS Observer's `update()`. The distinction is at the *design intent* level, not the wiring: Observer's contract is "subject doesn't know who's listening, just broadcasts"; Mediator's contract is "colleagues coordinate through a hub that may apply routing logic, transform events, or call back into specific colleagues based on the sender's identity." `DefaultOrderMediator` in this file's production example literally uses a `Map<Class<? extends OrderEvent>, List<Colleague>>` — an Observer-style dispatch table — but the surrounding class is still "the Mediator" because of its coordination role.
 
 **Q: Walk through a chat room example end-to-end — what role does each class play?**
+**Short:** ChatRoom is the concrete mediator and User is the colleague, so users never hold direct references to each other.
 A: `ChatRoom` is the `ConcreteMediator`; `User` is the `Colleague`. Each `User` holds a reference to the `ChatRoom` (not to other users). When Alice sends a message, she calls `chatRoom.sendMessage(this, "hello")`; the `ChatRoom` looks up all *other* registered users and calls `user.receive(sender, message)` on each. Alice never has a reference to Bob or Carol — if Carol joins the room later, Alice's code is completely unaffected because she only ever talked to the mediator. This maps directly onto air traffic control: `Tower` is the mediator, `Aircraft` are colleagues, and `tower.requestLanding(aircraft)` lets the tower sequence multiple landing requests using information no single aircraft has (the full picture of all other aircraft).
 
 **Q: How do you unit-test mediator logic in isolation from real participants?**
+**Short:** Test the mediator's routing decisions with mock colleagues, and test each colleague independently with a mock mediator.
 A: Test the `ConcreteMediator` by registering mock/stub `Colleague` implementations and asserting on the *routing decisions* — e.g., "when a `PaymentSettled` event is published, exactly the `InventoryColleague` and `AuditColleague` mocks receive `onEvent()`, and `FraudColleague` does not." Conversely, test each `Colleague` by injecting a mock `Mediator` and asserting it calls `mediator.publish(...)` with the expected event when its own method is invoked — the colleague test never needs a real mediator or real peers. This two-sided mocking is one of Mediator's biggest testability wins: without it, testing "does changing the password field disable the submit button" would require instantiating the entire form; with it, you test the `FormMediator`'s routing table once, and each field/button independently.
 
 **Q: At what point does a Mediator become a "God Object," and how do you split it?**
+**Short:** A mediator becomes a God Object once its dispatch branching keeps growing; split it into domain-specific mediators instead.
 A: The warning signs are: the mediator's `notify()`/`publish()` method has a large branching structure (switch/if-else over event types) that keeps growing as new colleague types are added, the mediator imports business-rule classes (pricing, tax, fraud logic) directly, or a single PR touching "add one new colleague" requires editing the mediator plus 3+ other files. The fix is to split by domain/event-family into multiple focused mediators (e.g., `CheckoutMediator`, `ShippingMediator`, `NotificationMediator`) each owning a smaller dispatch table, optionally composed under a top-level coordinator — or to replace the growing if-else with a registration-based dispatch table (`Map<EventType, List<Colleague>>`) so adding a colleague is a one-line `register()` call rather than a new branch. The litmus test from this file's production anchor: "adding a new fraud-check colleague should be 1 class + 1 registration line, zero modifications to existing colleagues" — if that's not true, the mediator has absorbed too much.
 
 **Q: How exactly is Spring's `ApplicationEventPublisher` a Mediator, and what are its limits?**
+**Short:** It's a Mediator because publisher and listeners never reference each other, but it stays in-process and synchronous by default.
 A: A bean calls `applicationEventPublisher.publishEvent(new OrderPlacedEvent(orderId))`; Spring's `ApplicationEventMulticaster` (the concrete mediator) looks up all `@EventListener`-annotated methods registered for `OrderPlacedEvent` and invokes each — the publisher never references the listeners, and listeners never reference the publisher or each other, which is the hub-and-spoke topology this pattern provides. It's "lightweight" compared to a hand-rolled `OrderMediator` because Spring handles registration (component scanning + annotation processing) and dispatch (synchronous by default, or async with `@Async` on the listener) for you — you only write the event class and the listener methods. The limits: it's in-process only (doesn't cross JVM/service boundaries — for that you need a real message broker like Kafka or RabbitMQ), synchronous listeners run on the publisher's thread so a slow listener blocks the publisher unless `@Async` is used, and by default a thrown exception in one listener can abort subsequent listeners' invocation depending on the multicaster configuration — so it's best for in-process side effects (cache invalidation, audit logging) rather than critical business logic.
 
 ---

@@ -944,33 +944,43 @@ flowchart TD
 ## 16. Interview Questions with Answers
 
 **Q: Explain the Observer pattern.**
+**Short:** A Subject maintains a list of Observers and calls their update() method whenever its state changes.
 A: One Subject maintains a list of Observers. When the Subject changes state, it notifies all Observers by calling their `update()` method. This decouples the Subject from knowing which specific objects depend on it. Classic example: MVC where the Model is the Subject and Views are Observers.
 
 **Q: What is the lapsed listener problem?**
+**Short:** It's a memory leak where a Subject holds a strong reference to an Observer that was never detached.
 A: When an Observer registers with a Subject but is never detached, the Subject holds a strong reference to it. Even if no other code references the Observer, it cannot be GC'd. This is a memory leak. Fix: always call `detach()` in the Observer's cleanup method.
 
 **Q: Push vs. Pull model — which do you prefer?**
+**Short:** Pull is generally safer since the Observer reads state on its own schedule instead of risking stale pushed data.
 A: Pull is generally safer. With push, the Subject may send stale data if the observer list is iterated asynchronously. With pull, the Observer reads state when it's ready. However, pull requires the Observer to hold a reference to the Subject, which adds coupling. The right choice depends on whether Observers need the exact state at the moment of notification.
 
 **Q: How do you make Observer thread-safe?**
+**Short:** Use a CopyOnWriteArrayList for the observer list and synchronize attach/detach to make Observer thread-safe.
 A: Use `CopyOnWriteArrayList` for the observer list (snapshot on write, lock-free reads), synchronize `attach`/`detach`, and be careful about re-entrant calls. Alternatively, dispatch notifications on a single-threaded event loop (like Android's main thread handler).
 
 **Q: How is Observer different from Pub/Sub?**
+**Short:** Observer's Subject holds direct references to Observers, while Pub/Sub routes through a broker that decouples both sides.
 A: In Observer, the Subject knows its Observers (holds references). In Pub/Sub, there's an intermediary broker; publishers and subscribers don't know about each other. Pub/Sub scales better across processes/machines.
 
 **Q: Should notification be synchronous or asynchronous?**
+**Short:** Synchronous notification guarantees completion but lets one slow Observer stall the rest; asynchronous isolates that risk.
 A: Synchronous notification is simple and gives the Subject a guarantee that all Observers have processed the event before `notify()` returns, but a slow or blocked Observer stalls the Subject and every other Observer behind it. Asynchronous notification — dispatching to an executor, queue, or event bus — isolates failures and latency spikes in one Observer from the rest, at the cost of weaker ordering and harder-to-debug causality. Pick synchronous for in-process invariant updates (e.g., recalculating a derived field) and asynchronous for side effects like sending emails or writing audit logs.
 
 **Q: If one Observer throws an exception during notification, should it block the others?**
+**Short:** No, wrap each Observer's update() call in its own try/catch so one failure cannot block the rest from being notified.
 A: No — wrap each Observer's `update()` call in its own try/catch so one misbehaving Observer cannot prevent the rest from being notified. Log or collect the exception (e.g., into a list of `Throwable` to report after the loop) rather than letting it propagate from inside the iteration. Note that frameworks differ here: Guava's `EventBus` isolates by default (a subscriber's exception goes to the `SubscriberExceptionHandler`), whereas Spring's `SimpleApplicationEventMulticaster` propagates by default and aborts the remaining listeners — it only isolates once you call `setErrorHandler(...)`, so configure one explicitly if you rely on isolation.
 
 **Q: What does the JDK itself give you for Observer, and when do you use each?**
+**Short:** The JDK offers a hand-written listener interface, `PropertyChangeSupport` for beans, and `java.util.concurrent.Flow` for async streams.
 A: Three options: your own listener interface, `java.beans.PropertyChangeSupport` for bean-style property notification, and `java.util.concurrent.Flow` for async streams. A hand-written interface (`interface PriceListener { void onPriceChanged(PriceChangedEvent e); }`) plus a `CopyOnWriteArrayList` is the default choice — it is typed, testable, and has no framework coupling. `PropertyChangeSupport` does the bookkeeping for you (`addPropertyChangeListener`, `removePropertyChangeListener`, and a `firePropertyChange(name, old, new)` that skips the notification when the value did not actually change), so a Subject just delegates to an instance of it. `java.util.concurrent.Flow` (JEP 266) is the Reactive Streams contract in the JDK — `Publisher`, `Subscriber`, `Subscription`, `Processor` with `request(n)` backpressure; use it when the producer can outrun the consumer, and reach for Reactor or RxJava rather than implementing `Flow` by hand. At application level, Spring's `ApplicationEventPublisher` plus `@TransactionalEventListener` covers most in-process fan-out.
 
 **Q: Does the order in which Observers are notified matter?**
+**Short:** It can, since the GoF pattern makes no ordering guarantee, so any real dependency on order should be made explicit.
 A: It can, and the GoF pattern makes no guarantee about ordering — it depends on the iteration order of the underlying collection (e.g., a `List` preserves insertion order, a `Set` may not). If ordering matters — for example, a logging Observer must run before a cache-invalidation Observer — either use an ordered collection and document the dependency, or assign explicit priorities (Spring's `@Order` / `Ordered` interface on `ApplicationListener`). Avoid designs where correctness silently depends on registration order; make ordering explicit if it's required.
 
 **Q: How do you avoid the lapsed listener problem without requiring callers to remember `detach()`?**
+**Short:** Use weak references for the observer registry so the garbage collector reclaims an Observer that was never detached.
 A: Use weak references for the observer list (e.g., `WeakHashMap`-backed registration or `WeakReference<Observer>`) so the garbage collector can reclaim an Observer even if it was never explicitly detached — the Subject then just skips stale entries during notification. This trades a small runtime check for eliminating an entire class of memory-leak bugs, which is why JavaFX ships `WeakChangeListener`/`WeakInvalidationListener` and Android's `LiveData` auto-unregisters on `DESTROYED`. The tradeoff is that the Observer might disappear "silently" mid-lifecycle, so this is best for UI/cache-style listeners, not for Observers whose absence would be a correctness bug.
 
 ---

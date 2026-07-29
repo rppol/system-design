@@ -836,70 +836,87 @@ That last row is the alarm to know: a 95% CHR sitting next to an 83% bandwidth s
 ## Interview Questions
 
 **Q1: What is the difference between a CDN and a regular cache?**
+**Short:** A CDN is a geographically distributed network of edge caches, unlike a single centralized cache server.
 
 A: A regular cache (like Redis or Varnish) is typically a single centralized server. A CDN is a geographically distributed network of caches. CDN reduces latency by serving content from the edge nearest to the user, whereas a single cache still requires crossing the network to the data center. CDNs also provide redundancy, DDoS protection, and edge computing capabilities.
 
 **Q2: What is the difference between Push CDN and Pull CDN? When would you use each?**
+**Short:** Push CDN requires proactively uploading content; Pull CDN fetches and caches on first request from origin.
 
 A: Push CDN requires you to proactively upload content to CDN storage; Pull CDN fetches from origin on first request and caches it. Use Push for large static files you know will be requested (game updates, video releases), where first-request performance matters. Use Pull for large content catalogs with unpredictable access patterns, where pre-uploading everything is impractical.
 
 **Q3: How does a CDN handle cache invalidation?**
+**Short:** CDN cache invalidation is done via TTL expiry, API-based purge, or content-hashed URL versioning.
 
 A: Three main approaches: (1) Wait for TTL expiry — simplest but content can be stale until TTL runs out. (2) API-based purge — call the CDN's purge API to immediately evict specific URLs or cache tags from all PoPs. (3) URL versioning — use content-hashed filenames so new versions have new URLs; old versions expire naturally. URL versioning is the most reliable approach for static assets.
 
 **Q4: How does Anycast routing work in CDN?**
+**Short:** Anycast CDN routing announces one IP from multiple PoPs and lets BGP route users to the nearest one.
 
 A: Anycast assigns the same IP address to servers in multiple locations. Each CDN PoP announces this IP via BGP. The internet's routing protocol automatically routes packets to the "nearest" BGP node (fewest hops). Users in different regions naturally route to their nearest PoP without DNS lookup. This also provides automatic failover — if a PoP goes down, BGP reconverges and traffic flows to the next nearest PoP.
 
 **Q5: How would you design a CDN architecture for a live streaming platform?**
+**Short:** Live-streaming CDN design segments the stream into short HLS chunks cached at the edge with short TTLs.
 
 A: For live streaming: (1) Origin ingest server receives the stream and transcodes it into multiple bitrates. (2) Stream is segmented into small chunks (HLS: .m3u8 manifest + .ts segments, typically 2-6 second chunks). (3) CDN pulls and caches segments with very short TTL (equal to segment duration). (4) Edge caching is shallow — only cache the last N segments since historical segments still get hit. (5) Use CDN with support for chunked streaming to minimize manifest cache lag. (6) Pre-warm edge caches before scheduled events.
 
 **Q6: What is "cache stampede" and how do CDN handle it?**
+**Short:** CDNs prevent cache stampede via request coalescing, probabilistic early expiration, or stale-while-revalidate.
 
 A: Cache stampede (thundering herd) occurs when a popular cached item expires and thousands of requests simultaneously miss the cache and all race to fetch from origin. CDN solutions: (1) Probabilistic early expiration — each request has a small chance of refreshing before TTL expires, spreading revalidation. (2) Request coalescing — when multiple simultaneous misses occur for the same URL, CDN makes only one request to origin and serves the response to all waiting clients. (3) Stale-while-revalidate — serve stale content immediately while one background request refreshes the cache.
 
 **Q7: How does CDN improve TTFB (Time To First Byte)?**
+**Short:** A CDN cuts TTFB by serving from a nearby edge PoP and terminating TLS there instead of at origin.
 
 A: CDN improves TTFB by: (1) Serving from a geographically close PoP — reducing propagation delay from ~150ms transoceanic to <10ms local. (2) TLS termination at the edge — eliminates TLS handshake latency over the WAN. (3) HTTP/2 and HTTP/3 (QUIC) support at edge — multiplexing, 0-RTT resumption. (4) Pre-positioned content — no origin processing delay on cache hits. (5) Persistent connections from edge to origin — avoids TCP handshake overhead for cache misses.
 
 **Q8: What are the tradeoffs of using a CDN for API responses?**
+**Short:** Caching API responses at the CDN cuts origin load but risks staleness and cannot cache user-specific data.
 
 A: Pros: drastically reduces origin load, improves response time for cacheable API responses (search results, product catalogs), natural DDoS protection. Cons: stale data risk if TTL is too long, cache invalidation is complex for mutable resources, user-specific responses cannot be cached in shared edge cache, debugging is harder (need to distinguish CDN vs. origin responses), adds cost per request/GB. Best practice: use CDN for read-heavy, public, cacheable endpoints; bypass CDN for user-specific or write APIs.
 
 **Q9: How would you handle cache poisoning attacks in a CDN?**
+**Short:** Cache poisoning is prevented by normalizing cache keys, validating responses, and correct Vary header use.
 
 A: Cache poisoning occurs when an attacker causes the CDN to cache a malicious response that gets served to all users. Mitigations: (1) Normalize cache keys — strip or normalize query parameters, headers that shouldn't affect cache. (2) Validate responses before caching — don't cache 5xx responses. (3) Use Vary headers correctly — ensure `Vary: Accept-Encoding` doesn't allow different-encoding responses to poison each other. (4) Disable caching for sensitive endpoints. (5) WAF rules to detect and block injection attempts. (6) CDN-level origin verification — only allow known origin IPs.
 
 **Q10: Explain the concept of "Origin Shield" in CDN.**
+**Short:** Origin Shield routes all edge cache misses through one shield node, sharply cutting fan-out to origin.
 
 A: Origin Shield adds an additional caching layer between CDN edge nodes and the origin. Without it, each of hundreds of PoPs might independently request a cache miss from origin, creating a large fan-out. With Origin Shield, all PoP cache misses are routed through a single designated shield node, which is the only one that contacts origin. This dramatically reduces origin traffic (especially for low-traffic content) at the cost of slightly higher latency for shield-miss requests. AWS CloudFront calls this "Origin Shield"; Cloudflare calls it "Tiered Cache" — Smart Tiered Cache picks the single closest upper tier per origin automatically, and Regional Tiered Cache inserts a regional hub between the lower and upper tiers.
 
 **Q11: How do CDNs support HTTPS and certificate management?**
+**Short:** CDNs terminate TLS at the edge and automate certificate issuance and renewal via ACME/Let's Encrypt.
 
 A: CDN terminates TLS at the edge. Modern CDNs handle: (1) Automatic certificate provisioning via Let's Encrypt (ACME protocol). (2) Certificate renewal before expiry. (3) SNI (Server Name Indication) for hosting multiple domains on shared IP. (4) HSTS preloading, OCSP stapling. (5) Custom certificate upload for Enterprise customers. The connection from CDN edge to origin can be HTTP (if on private network) or HTTPS (end-to-end encryption).
 
 **Q12: What is "stale-while-revalidate" and why is it valuable?**
+**Short:** stale-while-revalidate serves the cached copy instantly while refreshing it asynchronously in the background.
 
 A: `stale-while-revalidate` is a Cache-Control directive: `Cache-Control: max-age=60, stale-while-revalidate=300`. It means: serve the cached version immediately (even if up to 5 minutes stale) while asynchronously fetching a fresh copy in the background. This eliminates cache-miss latency from the user's perspective — they always get an instant response. The background revalidation updates the cache for the next request. Ideal for content that changes infrequently and where slight staleness is acceptable.
 
 **Q13: What is the difference between `max-age` and `s-maxage` in a `Cache-Control` header?**
+**Short:** max-age governs every cache including the browser; s-maxage governs only shared caches like the CDN.
 
 A: `max-age` applies to every cache in the chain, including the browser, while `s-maxage` applies only to shared caches like the CDN and is ignored by browsers. A header like `Cache-Control: s-maxage=86400, max-age=3600` lets the CDN hold an object for 24 hours while the browser only trusts it for 1 hour, so you can push an update via a CDN purge without waiting for millions of individual browser caches to expire. This split matters most for content that changes occasionally but should still be cached aggressively at the edge — pair it with `stale-while-revalidate` from the "Caching at CDN" section for a complete freshness policy. When no `s-maxage` is present, the CDN falls back to `max-age`, so omitting it is not an error, just a missed optimization.
 
 **Q14: How do you cache dynamic content that changes every second without hammering the origin on every request?**
+**Short:** Micro-caching dynamic content for just 1-5 seconds at the edge cuts origin load by orders of magnitude.
 
 A: Use micro-caching — cache the dynamic response at the edge for just 1-5 seconds instead of not caching it at all. The "Dynamic Caching Strategies" section gives the concrete payoff: a page generating 10,000 requests/second with a 1-second micro-cache TTL sends only 1 request/second to origin, a 10,000x cut in origin load with 9,999 of every 10,000 requests never leaving the edge, at the cost of at most 1 second of staleness. This works because most "dynamic" pages (news homepages, trending lists, stock summaries) don't actually need per-request freshness — the perceived staleness window is invisible to users but the origin-load reduction is massive. Combine micro-caching with `stale-while-revalidate` so the very first request after expiry is also served instantly while a background fetch refreshes the cache.
 
 **Q15: What went wrong when an engineer ran a blanket "purge everything" to clear one stale CSS file, and how do you prevent it?**
+**Short:** A blanket cache purge evicts every cached object, not just the intended file, spiking origin traffic.
 
 A: A cache-wide purge clears every cached object, not just the one file you intended to invalidate, so a routine CSS fix can accidentally evict your entire image cache along with it. In the media-platform case study's second lessons-learned pitfall, `cf purge --everything` to clear stale CSS also wiped 200TB of cached images; the next hour saw 500k requests/sec hit origin — exceeding the 500k/sec budget the whole architecture was sized around — and end-user p99 latency rose to 4 seconds. The fix was tag-based purging (`cf purge --tag css:v423`), which clears only the ~200MB of objects carrying that surrogate key and leaves unrelated content untouched. Always scope a purge to a cache tag or URL pattern in production, and reserve "purge everything" for a true full-cache emergency, since its blast radius is every cached byte you have.
 
 **Q: Your origin goes down for ten minutes. Which Cache-Control directive keeps the CDN serving users, and why is `stale-while-revalidate` not it?**
+**Short:** stale-if-error, not stale-while-revalidate, keeps serving stale content when the origin refresh itself fails.
 
 A: `stale-if-error` is the directive that survives an origin outage; `stale-while-revalidate` only covers ordinary expiry. RFC 5861 defines both, and they trigger on different conditions: SWR says "the object expired, serve the stale copy while I refresh in the background", whereas SIE says "the refresh itself failed, keep serving the stale copy anyway" for a stated number of seconds past staleness, where a failure means a request that would produce a 500, 502, 503, or 504. Set only SWR and the very first expiry after the outage starts turns every cached URL into a 5xx, because the background refresh fails and there is no permission to keep the stale bytes. The windows are independent, so `max-age=600, stale-while-revalidate=60, stale-if-error=86400` is a sensible combination — refresh aggressively, but ride out a full day of origin downtime rather than serve an error. The limit to remember is that neither directive helps for a URL the edge has never fetched, which is why cache pre-warming and an origin shield are part of the same availability story.
 
 **Q16: Why would a company run multiple CDN providers simultaneously instead of picking one?**
+**Short:** Multi-CDN protects against a single provider's outage and lets each region route to its best-performing CDN.
 
 A: A multi-CDN strategy protects against a single provider's outage and lets you route each region to whichever CDN performs best there. Best Practices item 4 notes that Fastly, Cloudflare, and Akamai have all had major outages — if your entire traffic depends on one vendor, their bad day becomes your outage. Beyond resilience, running multiple providers creates pricing leverage in contract negotiations and lets you compare actual measured latency per region rather than trusting a single vendor's PoP map. The hard part is operational: DNS-based traffic steering (Route 53, NS1) picks the active CDN per request, but cache invalidation must now be synchronized across every provider, multiplying the purge-coordination work.
 

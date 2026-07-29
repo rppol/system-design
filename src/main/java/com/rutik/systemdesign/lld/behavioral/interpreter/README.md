@@ -520,33 +520,43 @@ Composite doesn't appear as a leaf here because it isn't a competing choice — 
 ## 16. Interview Questions with Answers
 
 **Q: What is the Interpreter pattern?**
+**Short:** Interpreter maps grammar rules to classes so parsing a sentence produces an AST evaluated via interpret().
 A: Describe it as "grammar rules mapped to classes." Each rule in the grammar becomes a class; parsing a sentence produces an AST of those classes; evaluating the sentence means calling `interpret()` on the root. Give a concrete example: SQL WHERE clause, SpEL, or a boolean filter expression.
 
 **Q: What is an AST and how does it relate to Interpreter?**
+**Short:** An AST is the tree of expression objects that Interpreter evaluates by recursively calling interpret() from the root.
 A: AST (Abstract Syntax Tree) is the tree of expression objects produced by parsing. In Interpreter, each node of the AST is an `Expression` object. Evaluating the sentence = traversing the AST by calling `interpret()` recursively from the root.
 
 **Q: When would you NOT use the Interpreter pattern?**
+**Short:** Skip hand-rolled Interpreter for complex grammars, performance-critical paths, or languages a library already handles.
 A: When the grammar is complex (use ANTLR/JavaCC), when performance is critical (compile to bytecode), or when a library already exists for the language (regex, SQL, JSON).
 
 **Q: How does Interpreter relate to Composite?**
+**Short:** Interpreter is Composite applied to grammar, with NonTerminalExpressions as composites and TerminalExpressions as leaves.
 A: Interpreter IS Composite applied to grammar. NonTerminalExpressions are composite nodes; TerminalExpressions are leaves. The `interpret()` method traverses the composite tree recursively.
 
 **Q: What is the Context in the Interpreter pattern?**
+**Short:** Context stores the global evaluation state, typically a variable-name-to-value map nodes look up during interpret().
 A: Context stores the global state needed during evaluation — typically a map of variable names to values. When a VariableExpression evaluates itself, it looks up its name in the context to get the current value.
 
 **Q: Where is Interpreter used in real frameworks?**
+**Short:** SpEL, java.util.regex, Jakarta EL, OGNL, and SQL query evaluation engines all use the Interpreter pattern.
 A: Spring Expression Language (SpEL), Java's regex engine (`java.util.regex`), Jakarta Expression Language (`jakarta.el`), OGNL in MyBatis/Struts, SQL query evaluation engines.
 
 **Q: How does Interpreter relate to Visitor — are they the same thing?**
+**Short:** No, they're complementary: Interpreter bakes interpret() into each node while Visitor adds operations externally.
 A: No — they're complementary and frequently combined. Interpreter defines the AST node classes and one built-in operation, `interpret()`, baked directly into each node. Visitor instead keeps the AST node classes free of operation-specific code and lets you add new operations (pretty-print, type-check, optimize, evaluate) as separate `Visitor` implementations that each node's `accept(visitor)` dispatches to. A common production pattern is: build the AST once using Interpreter-style node classes, then implement `EvaluatingVisitor`, `PrettyPrintVisitor`, and `OptimizingVisitor` as separate classes over that same tree — this avoids cramming every new requirement into each node's `interpret()` method (which violates OCP once you need a third or fourth operation).
 
 **Q: When should you NOT hand-roll an Interpreter, and what should you use instead?**
+**Short:** Past roughly 10-15 grammar rules, switch to a parser generator like ANTLR instead of hand-coding Interpreter classes.
 A: Once a grammar grows past roughly 10-15 rules, or needs correct operator precedence/associativity, left-recursion handling, or error recovery, hand-coding Interpreter classes becomes a maintenance trap — you end up debugging your own ad-hoc recursive-descent parser instead of the actual problem. At that point, use a parser generator like ANTLR or JavaCC: it generates the parser and a tree-walker/visitor scaffold for you, with proper precedence handling and much better error messages. The Interpreter pattern still describes the *evaluation* layer (what ANTLR's generated visitor does when it walks the tree) — the pattern doesn't disappear, but you stop hand-writing the parsing half of it.
 
 **Q: What's the performance difference between recursive tree-walking interpretation and compiling to bytecode?**
+**Short:** Tree-walking re-traverses the AST every call, while compiling to bytecode does the traversal once for faster repeated execution.
 A: A tree-walking interpreter re-traverses the AST on every evaluation, paying virtual-dispatch cost at every node each time — fine for infrequent evaluation but expensive at high call volumes (this is why Spring caches and then JIT-compiles SpEL expressions via `SpelCompilerMode.MIXED` after a warm-up threshold). Compiling to bytecode (or to a flat instruction array) does the tree traversal once, up front, producing a linear sequence of operations that a simple loop executes — eliminating repeated dispatch and enabling further optimizations like constant folding. The practical guidance: if the same expression is evaluated thousands of times (authorization checks, hot rule evaluation), invest in caching the parsed AST at minimum, and consider compiling to bytecode/lambdas if profiling shows interpretation overhead dominates; if expressions are evaluated rarely, the simplicity of tree-walking interpretation isn't worth optimizing away.
 
 **Q: Give concrete real-world examples beyond SpEL where Interpreter shows up.**
+**Short:** SQL WHERE clause evaluators, regex engines, and rule engines like Drools are all real-world Interpreter implementations.
 A: A SQL `WHERE` clause evaluator is a textbook case — `age > 25 AND (status = 'ACTIVE' OR vip = true)` parses into a tree of `ComparisonExpression` and `AndExpression`/`OrExpression` nodes, each implementing `interpret(Row)` to return true/false for a given row. Regular expression engines (`java.util.regex.Pattern`) compile a regex string into an internal representation (an NFA) that is then "interpreted" against input characters — each regex construct (`*`, `|`, character classes) corresponds conceptually to a node type. Business rule engines like Drools represent rule conditions as Interpreter trees evaluated against working-memory facts; Elasticsearch's Query DSL and Lucene's query parser similarly parse JSON/string queries into expression trees evaluated against the inverted index.
 
 ---

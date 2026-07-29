@@ -495,19 +495,31 @@ Generally, you should not. Let Spring manage all beans as singletons. However, c
 ## Interview Questions
 
 **Q1: Why is DCL broken without volatile?**
+**Short:** Without volatile, the JVM can reorder construction so another thread sees a partially built Singleton reference.
+
 Without `volatile`, the JVM can reorder object construction steps so the reference is published before the constructor runs. Another thread reading the non-null reference gets a partially constructed object.
 
 **Q2: What makes the Holder idiom better than DCL?**
+**Short:** Holder relies on the JVM's inherently synchronized class loading, achieving thread safety with zero runtime overhead.
+
 Holder relies on JVM class loading (which is inherently synchronized) rather than explicit `synchronized` blocks or `volatile`. It achieves the same thread safety with no runtime overhead and is harder to implement incorrectly.
 
 **Q3: How does Enum prevent serialization attacks?**
+**Short:** Enum deserialization uses Enum.valueOf instead of the constructor, always returning the existing singleton constant.
+
 Java's serialization mechanism uses `Enum.valueOf(enumClass, name)` to deserialize enum constants instead of calling the constructor. This ensures the existing constant is returned, never creating a new instance.
 
 **Q4: Can you break an Enum singleton via reflection?**
+**Short:** No, Constructor.newInstance() explicitly checks for enum classes and throws IllegalArgumentException.
+
 No. `Constructor.newInstance()` explicitly checks if the class is an enum and throws `IllegalArgumentException`. This is enforced by the JVM, not user code.
 
 **Q5: What is the happens-before guarantee provided by volatile?**
+**Short:** A volatile write happens-before all later reads of it, making everything written before it visible to those readers.
+
 A write to a volatile variable happens-before all subsequent reads of that variable. All actions before a volatile write are visible to all threads after they read the volatile variable. This establishes a memory barrier that prevents both reordering and CPU cache staleness.
 
 **Q6: How would you implement a singleton that supports lazy initialization AND is safe under serialization AND reflection?**
+**Short:** An Enum singleton natively satisfies lazy initialization, serialization safety, and reflection safety all at once.
+
 Use an Enum singleton. It satisfies all three requirements natively. Alternatively, use the Holder idiom with `readResolve()` for serialization safety (but reflection safety requires additional checks in the constructor: `throw new IllegalStateException("Already instantiated")`).

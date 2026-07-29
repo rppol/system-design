@@ -351,6 +351,7 @@ sequenceDiagram
 ## Interview Questions with Answers
 
 **Q: What is the difference between Strategy and State?**
+**Short:** Strategy is a client-chosen, independent algorithm, while State models a lifecycle where the object itself drives transitions.
 
 > Both Strategy and State encapsulate behavior in a separate object and allow a context to delegate work to that object. The structural difference is minimal, but the intent is fundamentally different.
 >

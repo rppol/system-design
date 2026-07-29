@@ -508,36 +508,58 @@ The original implementation embedded retry and metrics directly inside `BaseHttp
 ### Common Questions
 
 **Q: What is the Decorator pattern and how does it differ from inheritance?**
+**Short:** Decorator adds behavior to one object instance at runtime via composition; inheritance affects all instances at compile time.
+
 A: Decorator adds behavior to an object instance at runtime by wrapping it in another object with the same interface. Inheritance adds behavior to all instances of a class at compile-time. Decorator avoids subclass explosion by composing behaviors rather than inheriting them, and allows mixing and matching at runtime.
 
 **Q: How does Decorator differ from Proxy?**
+**Short:** Decorator and Proxy share identical structure; Decorator adds behavior while Proxy controls access — intent is the difference.
+
 A: Both wrap an object implementing the same interface. The intent differs: Decorator adds new behavior (I/O buffering, encryption); Proxy controls access (lazy loading, security, remote delegation). In practice the structural difference is identical; intent is what separates them.
 
 **Q: Give a real example of Decorator in the Java SDK.**
+**Short:** BufferedInputStream and DataInputStream are Decorators wrapping InputStream, each layering one added responsibility.
+
 A: The `java.io` package. `BufferedInputStream` and `DataInputStream` are both decorators wrapping `InputStream`. `new DataInputStream(new BufferedInputStream(new FileInputStream("f")))` is three layers: file reading, buffering, and typed data reading, each a separate decorator.
 
 **Q: What's the difference between Decorator and Composite?**
+**Short:** Composite represents a part-whole tree with many children; Decorator wraps exactly one object to add behavior.
+
 A: Composite represents part-whole hierarchies (tree structure; a composite has many children). Decorator wraps exactly one object to add behavior. Both use recursive composition and the same interface, but their structural and semantic intent are different.
 
 **Q: What's the order problem with Decorator?**
+**Short:** Decorator order matters and isn't enforced by the type system, so callers can silently assemble a stack in the wrong sequence.
+
 A: The order in which decorators are applied matters. For example, in I/O: compressing an unencrypted stream is more efficient than encrypting a compressed stream, because encrypted data doesn't compress. Callers must apply decorators in the correct order, and this dependency is not enforced by the type system.
 
 **Q: Give a concrete numeric example of the subclass explosion Decorator avoids.**
+**Short:** Three optional add-ons need 8 subclasses via inheritance but only 4 classes via Decorator, and the gap grows exponentially.
+
 A: Suppose a `Coffee` can independently have Milk, Sugar, and Whip added. With inheritance, you'd need a subclass for every combination — `Coffee`, `CoffeeWithMilk`, `CoffeeWithSugar`, `CoffeeWithWhip`, `CoffeeWithMilkAndSugar`, `CoffeeWithMilkAndWhip`, ... — for 3 optional add-ons that's 2^3 = 8 classes, and a 4th add-on doubles it to 16. With Decorator, you write 1 base `Coffee` class plus 3 decorator classes (`MilkDecorator`, `SugarDecorator`, `WhipDecorator`) — 4 classes total — and any combination is achieved by wrapping at runtime (`new WhipDecorator(new MilkDecorator(new Coffee()))`), with a 4th add-on only adding 1 more class (5 total). The exponential-vs-linear framing (2^n vs n+1) is the sharpest way to make this point in an interview, mirroring the multiplicative argument used for Bridge but driven by combinations rather than two independent axes.
 
 **Q: Does wrapping an object in a Decorator break `equals()` and `hashCode()` semantics?**
+**Short:** Yes, a Decorator inherits identity-based equals and hashCode by default, so it never equals the object it wraps.
+
 A: Yes, by default — if `Decorator` doesn't override `equals()`/`hashCode()`, it inherits `Object`'s identity-based implementation, so a decorated object will never be `.equals()` to the underlying object it wraps, and two different decorator instances wrapping equal underlying objects won't be equal to each other either. This becomes a real bug when decorated objects are placed in a `HashSet`/`HashMap` or compared after passing through different decoration paths — e.g., caching a `Service` instance keyed by equality, then later receiving a freshly-wrapped `LoggingServiceDecorator` around an equal underlying service, gets treated as a different key. The usual fix, if identity-through-wrapping matters, is to override `equals()`/`hashCode()` on the decorator to delegate to the wrapped component's — but note that delegating only on the wrapper's side is asymmetric (`wrapped.equals(base)` is `true` while `base.equals(wrapped)` is `false`), which breaks the `Object.equals` contract and makes `HashSet` membership depend on which form you inserted first; genuine symmetry requires both sides to unwrap before comparing. The practical guidance is therefore to avoid relying on equality across decorated and undecorated forms of the same object unless you've explicitly designed for it.
 
 **Q: Name Decorator examples in `java.util.Collections` beyond the I/O package.**
+**Short:** Collections.unmodifiableList and synchronizedList are Decorators adding read-only or synchronization responsibilities.
+
 A: `Collections.unmodifiableList(list)`, `unmodifiableMap`, `unmodifiableSet`, etc. return a decorator that wraps the given collection and throws `UnsupportedOperationException` on any mutating call while delegating all read operations to the wrapped collection — adding a "read-only" responsibility without changing the underlying type. `Collections.synchronizedList(list)` similarly wraps a `List` and adds a synchronization responsibility by wrapping every method with a `synchronized` block on an internal lock, delegating the actual work to the wrapped list. Both are textbook Decorators: same `List`/`Collection` interface as what they wrap, composable (you can do `synchronizedList(unmodifiableList(list))`), and each adds exactly one orthogonal responsibility. These are useful answers when an interviewer asks for Decorator examples "beyond `java.io`," since they show the pattern isn't limited to streams.
 
 **Q: How do you unit-test a chain of decorators?**
+**Short:** Test each decorator in isolation against a mocked Component, then add a few integration tests for the full chain's ordering.
+
 A: Test each decorator in isolation using a mock or stub of the wrapped `Component` interface, verifying that the decorator both delegates correctly to the mock and adds its specific behavior (e.g., a `LoggingDecorator` test verifies the underlying method is called exactly once AND that a log line was produced). Separately, write a small number of integration tests on realistic chains (e.g., `new EncryptionDecorator(new CompressionDecorator(new RawChannel()))`) to verify the composed behavior end-to-end, since per-decorator unit tests can't catch ordering bugs (like the compression-after-encryption issue) that only manifest when decorators interact. A common pitfall is testing only the fully-assembled chain, which makes it hard to pinpoint which decorator introduced a regression — the practical guidance is unit tests per decorator for correctness-in-isolation, plus a handful of chain-level tests for ordering and interaction correctness.
 
 **Q: What happens if you add a new method to the `Component` interface after several Decorators already exist?**
+**Short:** Adding a method to Component forces every Decorator to update, unless a BaseDecorator delegates it for them centrally.
+
 A: Every concrete `Decorator` subclass that doesn't already extend a base `Decorator` implementing all `Component` methods by delegation will fail to compile (for abstract methods) or silently provide the default `Object`/inherited behavior for the new method (if using a default method), and any decorator that forgets to override the new method will not delegate to it — calls will either fail or hit the wrong implementation. This is why the standard Decorator structure includes an abstract `BaseDecorator` (or `ComponentDecorator`) that implements `Component` by delegating every method to a wrapped `Component` field; adding a new interface method only requires updating that one base class, and concrete decorators only need to override methods whose behavior they actually change. The broader lesson is the same fragile-interface problem seen with Bridge's `Implementor` — design the `Component` interface to be as stable as possible, since every interface change ripples through every decorator and every class implementing the original component.
 
 **Q: How does Decorator relate to the Open/Closed Principle?**
+**Short:** Decorator implements Open/Closed by extending behavior through wrapping rather than modifying the original component's source.
+
 A: Decorator is one of the canonical implementations of OCP — you extend an object's behavior (open for extension) by wrapping it in a new decorator class, without modifying the original component's source code (closed for modification). Contrast this with adding a boolean flag and an `if` branch inside the original class to support a new behavior variant, which requires modifying and re-testing the existing class for every new variant. The OCP framing is a strong way to justify Decorator when an interviewer asks "why not just add a parameter/flag to the existing class" — the answer is that flags accumulate, create combinatorial branching inside one class, and require re-touching tested code, whereas decorators are additive, independently testable, and never require modifying the base.
 
 ### What Interviewers Look For

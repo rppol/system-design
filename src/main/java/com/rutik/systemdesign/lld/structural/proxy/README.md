@@ -477,33 +477,53 @@ A monolith was being decomposed into services. The legacy `BillingFacade` had `@
 ## 16. Interview Questions with Answers
 
 **Q: What is the Proxy pattern and what are its types?**
+**Short:** Proxy has five common types — Virtual, Remote, Protection, Caching, and Logging — each intercepting access differently.
+
 A: Give the one-line intent, then list the 5 types: Virtual, Remote, Protection, Caching, Logging. Give one concrete example per type. Spring AOP covers Logging/Caching/Protection; Hibernate covers Virtual; RMI/gRPC covers Remote.
 
 **Q: How does Spring implement `@Transactional`?**
+**Short:** Spring wraps the bean in a proxy that intercepts calls to open, commit, or roll back a transaction around the method.
+
 A: Spring creates a proxy (JDK dynamic proxy or CGLIB proxy) around the bean. When a `@Transactional` method is called, the proxy intercepts it, opens a transaction, delegates to the real method, and commits or rolls back based on the outcome. This is the Proxy pattern in practice.
 
 **Q: What is the difference between Proxy and Decorator?**
+**Short:** Proxy controls access to an object; Decorator adds new behavior — both share the same wrap-with-same-interface structure.
+
 A: Both wrap an object with the same interface. The key difference is intent: Proxy controls *access* (lazy init, auth, remote, caching); Decorator *adds new behavior* (additional formatting, logging in a chain). A Decorator is applied from the outside by the client to add capability; a Proxy is often transparent and managed by a framework.
 
 **Q: How do you implement a thread-safe Virtual Proxy in Java?**
+**Short:** Use double-checked locking with volatile, AtomicReference with compareAndSet, or a lazily-initialized Supplier.
+
 A: Use double-checked locking with a `volatile` field, or use `AtomicReference` with `compareAndSet`, or use `Supplier<T>` with lazy initialization (`Lazy<T>`).
 
 **Q: Can you use Java's built-in dynamic proxy?**
+**Short:** Yes, java.lang.reflect.Proxy.newProxyInstance creates a runtime proxy via an InvocationHandler, but only for interfaces.
+
 A: Yes — `java.lang.reflect.Proxy.newProxyInstance()` creates a proxy at runtime. You provide an `InvocationHandler` that intercepts all method calls. The limitation is that it only works for interfaces, not concrete classes (use CGLIB for class-based proxies).
 
 **Q: What is the "self-invocation" problem with Spring AOP proxies, and why does it happen?**
+**Short:** Self-invocation skips the Spring AOP proxy because this refers to the raw target, bypassing every interceptor entirely.
+
 A: Self-invocation occurs when a method on a Spring bean calls another `@Transactional`, `@Cacheable`, or `@Async` method on `this` from within the same class, and the proxy's interception logic is silently skipped because the call never passes through the proxy object. Spring AOP proxies work by wrapping the *bean instance* — `ctx.getBean(PriceService.class)` returns the proxy, but inside `totalFor()`, `this` refers to the raw target object, so `this.unitPrice(sku)` is a plain Java method call that never reaches the `CacheInterceptor` or `TransactionInterceptor`. The symptom is that `@Cacheable` shows 0% hit rate or `@Transactional` rollback doesn't happen even though the annotation is present and correctly configured. The practical guidance is to either inject `ApplicationContext` and call `ctx.getBean(SelfType.class).method()`, enable `AopContext.currentProxy()` with `exposeProxy = true`, or — preferably — split the class so the annotated method lives on a different bean that is always called cross-bean (and therefore always through its proxy).
 
 **Q: What's the difference between a JDK dynamic proxy and a CGLIB (or ByteBuddy) proxy?**
+**Short:** JDK dynamic proxies implement interfaces at runtime; CGLIB generates a runtime subclass of the concrete target class instead.
+
 A: A JDK dynamic proxy (`java.lang.reflect.Proxy`) implements one or more *interfaces* at runtime and requires the target to have an interface to proxy against, whereas CGLIB/ByteBuddy generates a *subclass* of the target's concrete class at runtime, so it works even when there's no interface. JDK proxies dispatch through `InvocationHandler.invoke()` and typically reflect into the target; CGLIB generates real bytecode subclass methods that call a `MethodInterceptor` and so avoids per-call reflection. Both are nanosecond-scale once JIT-warm — do not claim one is "the fast one" without a JMH run, because the advice inside the interceptor dominates either way. Plain Spring Framework picks JDK proxies for beans that implement at least one interface and falls back to CGLIB for concrete classes, but Spring Boot sets `spring.aop.proxy-target-class=true` by default (since Boot 2.0), so in a Boot app you get CGLIB even for interface-implementing beans unless you set it back to `false`. The practical guidance is: prefer programming to interfaces in Spring beans so JDK proxies are usable, but be aware that `final` classes and `final` methods cannot be proxied by CGLIB either (CGLIB can't override `final` methods), which is why `@Transactional` silently does nothing on a `final` method. See `../../../spring/spring_proxies/README.md` for the full JDK-vs-CGLIB mechanics.
 
 **Q: What is `LazyInitializationException` and how does it relate to the Proxy pattern?**
+**Short:** LazyInitializationException fires when a Hibernate proxy tries to lazily fetch data after its owning session has closed.
+
 A: `LazyInitializationException` is thrown by Hibernate when code tries to access a lazily-loaded association (a `HibernateProxy` standing in for the real entity) after the owning `Session`/`EntityManager` has already been closed. The proxy holds a reference to the session it was created with; calling `order.getCustomer().getName()` triggers the proxy to lazily fetch `Customer` from the database — but if the transaction/session already ended (e.g., the entity was returned from a `@Transactional` repository method and accessed later in a view layer), there's no session to query with, so the proxy throws instead of silently returning stale or null data. This is the most common Hibernate runtime exception in layered architectures ("the open session in view" anti-pattern is one workaround, though it has its own tradeoffs). The practical guidance is to either fetch eagerly with `JOIN FETCH` / `@EntityGraph` when you know the association will be needed, or access lazy associations only within the transactional boundary, or use DTO projections that don't carry lazy proxies past the service layer.
 
 **Q: How do the four common proxy types differ in a way that's easy to confuse — give a concrete distinguishing example for each?**
+**Short:** Virtual defers construction, Remote adds network I/O, Protection gates with a check, and Caching/Logging wraps with side effects.
+
 A: Virtual, Remote, Protection, and Caching/Logging proxies all share the "implement Subject, hold a delegate, intercept calls" structure, but differ in *what triggers the extra work and when*. A **Virtual proxy** (e.g., `LazyImageProxy`, Hibernate's `HibernateProxy`) defers creation of an expensive object until first use — the extra work is *construction*, triggered once. A **Remote proxy** (e.g., a gRPC `BlockingStub`, an RMI stub) makes a local method call look like a network call — the extra work is *serialization + network I/O*, triggered on every call. A **Protection proxy** (e.g., the `AccessControlProxyFactory` example in this file) checks authorization before delegating — the extra work is a *permission check*, and it can short-circuit (throw) without ever touching the real subject. A **Caching/Logging proxy** (e.g., Spring's `@Cacheable` interceptor) either short-circuits with a stored result or wraps the call with before/after side effects — the extra work is *cache lookup or logging*, and unlike Protection, it usually still delegates (cache miss) or always delegates (logging). The practical guidance when asked to classify a proxy: ask "does it run once (Virtual), per network hop (Remote), as a gate that can reject (Protection), or as a wrapper that observes/short-circuits (Caching/Logging)?"
 
 **Q: How much overhead does a proxy actually add, and when does it start to matter?**
+**Short:** In-process proxy dispatch costs single-digit nanoseconds; remote proxy overhead is dominated by serialization and network I/O.
+
 A: For in-process proxies (JDK dynamic proxy or CGLIB), the dispatch itself costs single-digit nanoseconds once JIT-warm, and what people quote as "~1µs" is really the advice the interceptor runs (transaction bookkeeping, cache lookup) — either way it is negligible next to a 5-20ms database call, though it can become measurable in a tight loop calling a proxied method millions of times per second (e.g., a `@Cacheable`-annotated getter called inside a hot numeric loop). For remote proxies (gRPC stubs, RMI, REST clients), the overhead is dominated by serialization and network round-trip — typically 0.5-5ms even on a fast local network — which is why remote proxies should never be called in a per-element loop without batching. The practical guidance is to benchmark with JMH before assuming a proxy is "too slow" — in the vast majority of business-logic code the proxy overhead is in the noise, and the right question is usually "is this call remote or local," not "is this a proxy or not."
 
 ---

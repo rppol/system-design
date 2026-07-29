@@ -370,6 +370,7 @@ The expensive `HighResolutionImage` construction — and its `loadFromDisk()` ca
 ## Interview Questions with Answers
 
 **Q: Both Decorator and Proxy wrap an object with the same interface. What's the difference?**
+**Short:** Decorator adds new behavior to the wrapped object, while Proxy controls access to it without changing what it does.
 
 > The structural similarity is real — they're nearly identical in UML. The difference is intent.
 >

@@ -531,51 +531,83 @@ Write latency to a well-tuned EventStoreDB or PostgreSQL event store: p50 ~1ms, 
 ## 12. Interview Questions with Answers
 
 **Q: What is the most common mistake engineers make when first implementing Event Sourcing?**
+**Short:** Storing current state inside the event payload instead of the delta and intent that changed.
+
 Storing current state IN the event payload — i.e., emitting `{"status": "shipped", "totalAmount": 99.99, "customerName": "Alice"}` as `OrderUpdated`. This makes the event a state snapshot, losing the "what changed and why" semantics. Events should capture the delta and intent: `OrderShipped{"carrier": "FedEx", "trackingNumber": "..."}`. The read side derives the current state by reducing over all events.
 
 **Q: Why is eventual consistency unavoidable in a CQRS system?**
+**Short:** The write model and read model are updated by separate, asynchronous processes.
+
 The write model (event store) and the read model (projection) are updated by separate processes. The event must first be appended to the event store, then consumed by the projector, then the read model updated — each step adds latency. Under normal conditions this lag is 10–100ms. During projector restarts or backpressure, it can be seconds to minutes. There is no way to make the read model update synchronous and still keep write/read paths decoupled.
 
 **Q: What is Event Sourcing? How does it differ from storing current state?**
+**Short:** It stores every state change as an immutable event and derives current state by replay.
+
 Event Sourcing stores every state change as an immutable event in an append-only log. Current state is derived by replaying those events — it is never stored directly. Traditional databases store the result of operations (current state). Event Sourcing stores the operations themselves (events). The key benefit is that you retain the full history and can reconstruct state at any point in time.
 
 **Q: What is CQRS and when should you use it WITHOUT Event Sourcing?**
+**Short:** CQRS separates write and read models, useful alone when read/write asymmetry is high but audit history isn't needed.
+
 CQRS separates the write model from the read model, allowing each to be independently scaled and optimized. Without Event Sourcing, you use separate write and read databases synchronized via CDC or dual-write — simpler to operate and without eventual consistency complexity of event streams. Use CQRS alone when read/write asymmetry is high but full audit history and time-travel are not requirements.
 
 **Q: What is an aggregate in Event Sourcing and what are its responsibilities?**
+**Short:** An aggregate is a consistency boundary that validates commands, emits events, and applies them to its own state.
+
 An aggregate is a consistency boundary — a cluster of domain objects treated as a unit for writes. Its responsibilities: validate incoming commands against current state, emit domain events if the command is valid, and apply those events to update its own in-memory state. The aggregate's state is reconstructed by replaying its events from the event store. Aggregates should be small — one natural business entity, not a god object.
 
 **Q: How do you handle the read-your-own-writes problem in an eventually consistent CQRS system?**
+**Short:** Return the write result directly, use a consistency token to poll, or query the write side as a last resort.
+
 Three approaches: (1) Return the write-side result directly in the API response — the client already has the data it just wrote. (2) Issue a consistency token (the event's globalSeq) in the write response; the client polls the read model until it reports reaching that sequence. (3) For the immediately-following request, bypass the read model and query the write side directly (with a performance penalty). The third approach is a last resort — it undermines the CQRS separation.
 
 **Q: How do snapshots work, and when should you take one?**
+**Short:** A snapshot is a serialized aggregate state at a version, used to skip replaying all prior events.
+
 A snapshot is a serialized copy of aggregate state at a specific event version, stored in the event store or a companion KV store. On reconstitution: load the latest snapshot, then replay only events with version > snapshot.version. Common threshold: every 50–100 events for interactive aggregates. For high-event-rate aggregates (trading accounts), some teams snapshot every 500 events. Snapshots are a performance optimization — they are never the source of truth. A corrupt snapshot falls back to full replay.
 
 **Q: How do you evolve event schemas without breaking old consumers?**
+**Short:** Use upcasters to transform old-schema events to the current version at read time.
+
 Use upcasters — pure functions that transform an event at an older schema version to the current version at read time. The event store retains the original bytes permanently; the upcaster chain is applied when loading events. Rules: never delete or rename an event type; add fields as optional with defaults; remove fields by deprecation (stop writing them, stop reading them, after all consumers are updated). Include a `schemaVersion` field in every event payload from day one.
 
 **Q: What is a projection and how do you rebuild one safely in production?**
+**Short:** A projection is a read-side materialized view rebuilt safely via a blue/green shadow projection and atomic swap.
+
 A projection is a read-side materialized view built by consuming events from the event store. It is the answer to "what does this data look like for queries?" A safe production rebuild: (1) Start a new projection instance consuming events from globalSeq 0 into a shadow read model (blue/green). (2) Keep the old projection serving live traffic. (3) When the shadow projection reaches the current tail of the event stream, perform an atomic swap (flip the read model pointer). (4) Decommission the old projection. Rebuild time: 3–15 minutes for 100M events on modern hardware.
 
 **Q: What is a Saga and what are the two implementation styles?**
+**Short:** Choreography lets services react to each other's events; orchestration uses a central coordinator.
+
 A Saga is a pattern for managing long-running business processes that span multiple aggregates or services, where a single ACID transaction is not possible. Choreography: each service reacts to events and emits its own events; decentralized, no coordinator, hard to trace at scale. Orchestration: a dedicated saga orchestrator sends commands and listens for replies; centralized state machine, easier to monitor and compensate, but the orchestrator is a new component to operate.
 
 **Q: What is a compensating transaction/event?**
+**Short:** A compensating event reverses a prior step's business effect by appending a new event, not rolling back the old one.
+
 A compensating event reverses the business effect of a previously successful step when a later step in the saga fails. Example: `PaymentProcessed` is followed by `InventoryReservationFailed`. The saga issues `RefundPayment` command → emits `PaymentRefunded` event. Compensations must be defined for every saga step from design time. They are not rollbacks in the ACID sense — they are new events appended to the log, not mutations of old events.
 
 **Q: How do you prevent double-processing of events in a projection (idempotency)?**
+**Short:** Track the last processed sequence per projection and make writes idempotent via upsert.
+
 Track the last processed `globalSeq` (or event ID) per projection in the same storage as the read model. On startup, resume from the saved checkpoint. On each event: check if already processed (event ID in a processed-events set or globalSeq <= checkpoint); if so, skip. Alternatively, make all projection write operations naturally idempotent — upsert by primary key rather than insert, so processing the same event twice produces the same final state.
 
 **Q: Event Sourcing vs Change Data Capture (CDC) — what is the difference?**
+**Short:** CDC captures database changes as an afterthought; Event Sourcing makes the event log itself the system of record.
+
 CDC captures changes to a database as they happen (via transaction log tailing — e.g., Debezium + PostgreSQL WAL). It produces change events from an existing state-mutation database. Event Sourcing is a design decision — the event log IS the system of record, not an afterthought. CDC events reflect storage internals (row inserts, updates). ES events reflect business domain intent (OrderPlaced, PaymentConfirmed). CDC is a migration path toward event-driven architecture without rewriting the write side.
 
 **Q: What are the storage implications of Event Sourcing long-term?**
+**Short:** Event stores grow unbounded since every event is retained forever, unlike mutable state stores.
+
 Event stores grow without bound — every event ever emitted is retained. A system processing 10,000 orders/day with ~10 events/order accumulates 100,000 events/day = 36.5M events/year. At 1KB/event, that is ~35GB/year — modest for disk, but projection rebuild time grows linearly. Mitigation: tiered storage (hot events in fast NVMe, cold events in object storage); aggregate-stream archiving (completed orders archived after 7 years); snapshot-based cutoffs (events older than N are dropped after a snapshot, if regulations allow). Never delete events without explicit compliance approval.
 
 **Q: How do you debug a bug that occurred 6 months ago in an Event Sourced system?**
+**Short:** Replay the aggregate's event stream up to that point in time to reproduce the exact historical state.
+
 Load the aggregate's event stream up to the point in time when the bug manifested. Replay events in a local environment or a dedicated debugging tool. The exact state at any moment is reproducible — no need for log correlation or memory. This is one of the strongest advantages of Event Sourcing: time-travel debugging. Compare the actual event sequence to the expected sequence to identify which event or command handler produced the wrong outcome.
 
 **Q: When is Event Sourcing NOT the right choice?**
+**Short:** Skip Event Sourcing when there's no audit need, the domain model is unstable, or strong read-after-write consistency is required.
+
 When there is no audit requirement; when the domain model is still being discovered and events will change frequently; when the team lacks distributed systems experience to operate eventual consistency safely; when strong read-after-write consistency is required at the application layer; when system lifetime is short (prototype, throwaway service). The operational complexity — event store, projectors, saga, schema evolution tooling — is a significant investment that only pays off for long-lived, audit-critical systems.
 
 ---

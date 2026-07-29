@@ -584,54 +584,88 @@ Round Robin routes evenly by request count but not by cost. One request that tak
 ## Interview Questions
 
 **Q1: What is the difference between L4 and L7 load balancing?**
+**Short:** L4 routes on IP/port at the transport layer; L7 routes on URL, headers, and cookies at the application layer.
+
 L4 operates at the TCP/IP layer — it routes based on IP address and port without inspecting request content. L7 operates at the HTTP layer — it can route based on URL path, headers, cookies, and body. L7 is more flexible; L4 is faster.
 
 **Q2: What algorithms do load balancers use to distribute traffic?**
+**Short:** Round robin, least connections, IP hash, weighted variants, and consistent hashing, chosen by workload shape.
+
 Round Robin (sequential), Weighted Round Robin, Least Connections, Weighted Least Connections, IP Hash (source affinity), Least Response Time, Random, and Consistent Hashing. The choice depends on whether servers are homogeneous, whether sessions matter, and whether request duration varies.
 
 **Q3: What is a sticky session and when would you use it?**
+**Short:** A sticky session pins a client to one backend server, needed only when session state lives in server memory.
+
 A sticky session (session persistence) routes all requests from a given client to the same backend server. It's needed when the application stores session state server-side (e.g., in memory). The better long-term solution is to make the application stateless, but sticky sessions work as a bridge.
 
 **Q4: How does a load balancer detect that a backend is unhealthy?**
+**Short:** Periodic TCP or HTTP probes mark a backend unhealthy after N consecutive failures and remove it from rotation.
+
 Through health checks — periodic probes (TCP or HTTP) sent to each backend. If a backend fails N consecutive checks, it's marked unhealthy and removed from the rotation. After M consecutive successes, it's marked healthy and traffic resumes.
 
 **Q5: What is SSL termination and why is it done at the load balancer?**
+**Short:** SSL termination decrypts HTTPS at the load balancer to offload crypto work and centralize certificates.
+
 SSL termination means the load balancer decrypts HTTPS traffic and forwards plain HTTP to backends. This offloads CPU-intensive cryptographic operations from backend servers, centralizes certificate management, and allows the LB to inspect decrypted content for routing.
 
 **Q6: How do you prevent the load balancer itself from being a single point of failure?**
+**Short:** Run multiple load balancer instances active-active or active-passive behind a shared virtual IP or managed service.
+
 Run multiple load balancer instances in active-active (all handle traffic) or active-passive (one standby, promoted on failure) configuration. Use a virtual IP (VIP) with VRRP/HSRP, or use a cloud-managed load balancer (AWS ALB is inherently highly available across AZs).
 
 **Q7: What is connection draining?**
+**Short:** Connection draining lets in-flight requests finish on a server being removed before it's taken out of rotation.
+
 Connection draining (deregistration delay) is a grace period during which the load balancer stops sending new requests to a server being removed, but waits for in-flight requests to complete before fully removing it. This enables zero-downtime deployments.
 
 **Q8: Explain the difference between client-side and server-side load balancing.**
+**Short:** Server-side routes through a central load balancer; client-side lets each client pick a backend directly.
+
 Server-side: a central load balancer intercepts all traffic and routes it. Client-side: the client (or a sidecar) knows all server instances and makes routing decisions locally. Client-side (used by gRPC's built-in load balancing policies, and by Envoy sidecars in a service mesh) eliminates the central LB hop but requires clients to maintain server lists.
 
 **Q9: How would you design a load balancer for WebSocket connections?**
+**Short:** WebSocket load balancing needs upgrade support, no idle-connection timeouts, and sticky routing to the established backend.
+
 WebSockets are long-lived connections — once established, traffic flows bidirectionally on the same connection. The load balancer must support WebSocket upgrade (L7 feature) and not close idle connections. Sticky sessions are needed to ensure WebSocket traffic stays on the established backend connection.
 
 **Q10: What is the role of a load balancer in a blue-green deployment?**
+**Short:** The load balancer is the control plane that instantly switches all traffic between blue and green deployments.
+
 In a blue-green deployment, the new version (green) is deployed alongside the old (blue). The load balancer is switched to route traffic to green. If green has issues, the LB is switched back to blue instantly. The load balancer is the routing control plane for zero-downtime deployments.
 
 **Q11: What is consistent hashing and why is it better than simple IP hash for caching?**
+**Short:** Consistent hashing remaps only K/N keys on a topology change, versus a full remap under simple IP hashing.
+
 Consistent hashing places servers on a virtual ring. Each key maps to the nearest server on the ring. When a server is added or removed, only K/N keys need remapping (K = keys, N = servers), compared to simple hash where all keys remap. This minimizes cache misses when the pool changes.
 
 **Q12: How can an overly aggressive health check turn a brief GC pause into a cascading failure?**
+**Short:** An aggressive health check can eject a server mid-GC-pause, shifting load onto peers and triggering the same pauses there.
+
 A health check tuned tighter than the application's normal pause behavior can eject a healthy-but-momentarily-slow server, shifting its load onto the rest of the pool and triggering the same pauses there. The case study's second pitfall shows the chain: a 12-second G1 mixed-GC pause spanned two consecutive 10s health checks (`unhealthy_threshold = 2`, so a pause only has to outlast one interval to trip it), the ALB pulled the instance, traffic spiked on the remaining servers, their JVMs hit GC pauses too, and the failure cascaded. The fix was two-sided — raise `unhealthy_threshold` to 3, which widens the survivable pause to `interval x (N - 1)` = 20 seconds and the full detection window to 30 and have the `/health` endpoint return a tolerant "warming up" 200 for 5 seconds after a GC ends, so the JVM can stabilize before the LB decides. Tune health-check thresholds against your application's real worst-case pause profile, not against an idealized always-responsive server.
 
 **Q13: Why must a load balancer inject an `X-Forwarded-For` header, and what breaks without it?**
+**Short:** Without X-Forwarded-For, backends see only the load balancer's IP, breaking per-client rate limiting and geo-routing.
+
 Without it, every backend sees the load balancer's internal IP as the client IP, because the LB opens its own connection to the backend on the client's behalf. Common Pitfall 6 lists the concrete casualties: per-client rate limiting collapses (all traffic appears to come from one IP), geo-blocking and geo-routing make decisions on the LB's location, and access logs become useless for debugging or abuse investigation. An L7 load balancer fixes this by appending the real client IP to the `X-Forwarded-For` (or `X-Real-IP`) header before forwarding — this is exactly the header-modification step in the module's request-lifecycle sequence. Configure the header at the LB and have backends trust it only from the LB's known IP range, since a client can spoof the same header if it reaches a backend directly.
 
 **Q14: A flash sale drives 80% of traffic to one product page — why do sticky sessions make this worse, and what's the fix?**
+**Short:** Sticky sessions concentrate a surge onto whichever few servers received the first requests, defeating horizontal scaling.
+
 Sticky sessions pin each user to one server, so a surge of users arriving for the same hot content gets concentrated onto the few servers that received them first instead of spread across the fleet. The case study's first pitfall quantifies this: a TikTok-driven flash sale with cookie stickiness pinned the surge onto 6 servers (12% of the fleet) at 100% CPU while the other 88% sat idle — the sticky-session-defeats-scaling failure that Common Pitfall 2 warns about. The fix replaced cookie stickiness on `/product/*` with consistent hashing on `product_id` via a dedicated NLB, spreading the hot SKU across 12 hash-selected servers while keeping their caches warm — hit rate rose from 41% to 94%. Reserve stickiness for genuinely stateful sessions, and never apply it to read-heavy content paths where cache-warmth hashing on the content key does the job without pinning users.
 
 **Q15: When hundreds of new instances boot during an auto-scale event, how do you stop the load balancer from overwhelming them with cold traffic?**
+**Short:** Pre-warm new instances and ramp their traffic share gradually instead of a full load right after the first health check.
+
 Ramp traffic into new instances gradually instead of sending them a full share the instant they pass their first health check. The case study, which scaled from 50 to 487 instances in 14 minutes on Black Friday, uses three layers: hit a `/warmup` endpoint to pre-warm the JVM (JIT compilation, class loading) before registering with the LB, enable the target group's `slow_start = 60s` so the LB linearly ramps each new instance's traffic share over a minute, and pre-initialize connection pools with min-idle connections so the first real requests don't pay lazy-connect latency. Without these, a cold instance receives its full 1/N of peak traffic while still JIT-compiling, its latency spikes, health checks fail, and it gets ejected — wasting the scale-out. Treat instance readiness as "warmed up and ramped," not merely "process started and port open."
 
 **Q16: Why does the case study use three different load-balancing algorithms behind one ALB instead of a single algorithm for everything?**
+**Short:** Different traffic classes need different algorithms — round robin for assets, least-connections for APIs, hashing for WebSockets.
+
 Because the three traffic classes have opposite needs, and no single algorithm serves all of them well. Static assets are uniform-cost, so round robin's perfect evenness is optimal; API requests vary 16x in duration (50ms product page to 800ms checkout), so least-connections is needed to stop long requests from piling onto one server — the switch cut server-utilization variance from 35% to 8%; and WebSockets are long-lived (average 30 minutes), so consistent hashing on `user_id` is required to keep a user on the same server across the connection's life. This is the module's evenness-versus-affinity quadrant made operational: round robin and least-connections maximize evenness for stateless tiers, while consistent hashing trades some evenness for the affinity that stateful and cache-warm workloads demand. Match the algorithm to each target group's workload shape — request-cost variance and connection lifetime — rather than standardizing on one default.
 
 **Q17: What is passive health checking (outlier ejection), and why isn't an active `/health` probe enough on its own?**
+**Short:** Passive health checking ejects backends based on real response failures, catching bad responses an active probe alone would miss.
+
 Passive health checking ejects a backend based on the real responses it is already returning, rather than on a separate synthetic probe. An active check only proves the backend can answer `GET /health` — a server can pass that in 2ms while returning 503s or 10-second latencies to actual user requests, and between probes the load balancer has no signal at all, so detection has a hard floor of `interval x unhealthy_threshold`. Envoy's outlier detection supplies the missing signal with four triggers: consecutive 5xx, consecutive gateway failure (502/503/504), success rate measured against the cluster mean, and a flat failure-percentage threshold for pools too small for a meaningful mean; AWS exposes a softer form on ALB by combining the `weighted_random` routing algorithm with `anomaly_mitigation`, which shifts traffic share away from anomalous targets instead of removing them. The setting that matters most is `max_ejection_percent`, because a shared-dependency outage makes every backend return 5xx at once and an uncapped ejector would remove the entire fleet. Run both layers — active checks catch a process that is gone, passive checks catch a process that is present and useless.
 
 ---

@@ -531,24 +531,28 @@ public class UserServiceTest {
 ## Interview Questions and Answers
 
 **Q: What is the Dependency Inversion Principle?**
+**Short:** DIP requires high-level and low-level modules to both depend on abstractions rather than on each other directly.
 
 A: DIP states that high-level modules should not depend on low-level modules — both should depend on abstractions. Additionally, abstractions should not depend on details; details should depend on abstractions. In practice, this means business logic classes should reference interfaces rather than concrete implementations, with concrete objects supplied via constructor injection.
 
 ---
 
 **Q: What is the difference between DIP and Dependency Injection?**
+**Short:** DIP is the design principle to prefer abstractions; Dependency Injection is the technique that supplies them from outside a class.
 
 A: DIP is a design principle about what to depend on — prefer abstractions over concretions. Dependency Injection is a technique for supplying those dependencies from outside the class rather than instantiating them inside. DI is the mechanism; DIP is the goal. You can use DI without following DIP (injecting concrete classes), and you can follow DIP without a DI framework (manual constructor injection).
 
 ---
 
 **Q: Why should `new ConcreteClass()` inside a service be a red flag?**
+**Short:** Instantiating a concrete class inside a service hard-couples it to that implementation and blocks testing without it.
 
 A: Because it creates a hard coupling between the service and that specific implementation. The service can no longer be tested without the concrete class, cannot swap implementations without modifying the service, and gains an additional reason to change whenever the concrete class changes. Constructing dependencies is a separate concern from using them — DIP says delegate construction to a composition root.
 
 ---
 
 **Q: What is a composition root?**
+**Short:** A composition root is the single place, typically main() or a DI container, where every concrete class is wired to its abstraction.
 
 A: The single place in the application where all concrete implementations are wired to their abstractions — typically `main()`, an application context, or a DI container configuration. All `new ConcreteImplementation()` calls happen here. Everything else depends only on interfaces.
 

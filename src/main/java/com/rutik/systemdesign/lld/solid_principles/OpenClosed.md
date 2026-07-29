@@ -400,30 +400,35 @@ flowchart LR
 ## Interview Questions and Answers
 
 **Q: What does "open for extension, closed for modification" mean?**
+**Short:** You add new behavior by writing new code rather than editing the existing, already-tested code.
 
 A: It means you can add new behavior to a system by writing new code — new classes, new implementations — without changing the existing code that already works and is already tested. The stability of the existing code is protected while the system remains flexible.
 
 ---
 
 **Q: How do you achieve OCP in Java?**
+**Short:** OCP in Java is achieved through interfaces and polymorphism, so a new variant is a new implementation, not a client-code change.
 
 A: Through interfaces and polymorphism. Define a stable interface representing the concept that varies (e.g., `Shape`, `PaymentGateway`, `NotificationSender`). When a new variant is needed, write a new implementation of that interface. The client code, which depends only on the interface, never needs to change.
 
 ---
 
 **Q: Isn't it impossible to be completely closed for modification?**
+**Short:** Yes — the realistic goal is strategic closure along the axes your system is most likely to change, not universal closure.
 
 A: Yes — and that's acknowledged. The goal is strategic closure: identify the axes along which your system is most likely to change, and close for modification along those axes. You cannot close for all possible changes, so you prioritize the most likely ones.
 
 ---
 
 **Q: What is the relationship between OCP and the Strategy pattern?**
+**Short:** Strategy embodies OCP directly — the context class stays closed while a new strategy class is the extension point.
 
 A: Strategy is one of the primary design patterns that embodies OCP. The context class (e.g., `PaymentProcessor`) is closed — it never changes. The strategy (e.g., `PaymentGateway`) is the extension point. Adding a new payment method means writing a new strategy class, not touching the processor.
 
 ---
 
 **Q: Can you give an example of OCP violation and how you refactored it?**
+**Short:** A switch-on-type notification service was refactored into one NotificationSender implementation per channel plus a registry.
 
 A: The classic one is a notification service with a `switch (type)` over EMAIL, SMS, and PUSH, where every new channel means reopening the same method. Adding SLACK there meant editing a method that already had three tested branches, so the whole existing suite had to be re-run and any shared state in the method was a regression risk. The refactor extracted a `NotificationSender` interface with one implementation per channel and a registry keyed by type; SLACK then arrived as one new class plus one new test, with zero edits to the existing senders or the dispatcher. State the contrast explicitly in the interview: the switch version puts working code at risk on every addition, the interface version cannot.
 

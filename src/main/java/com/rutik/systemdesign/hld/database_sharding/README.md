@@ -1063,70 +1063,87 @@ Shard proxies sit between the application and the database shards, abstracting t
 ## Interview Questions
 
 **Q1: What is the difference between sharding and replication?**
+**Short:** Replication copies identical data for availability; sharding splits distinct data across nodes for write scale.
 
 A: Replication copies the same data to multiple nodes for read scalability and high availability. All replicas hold identical data; writes go to the primary. Sharding distributes different data across nodes for write scalability and storage scaling. Each shard holds a unique subset of data. In production, you combine both: each shard has its own replica set.
 
 **Q2: How do you choose a shard key?**
+**Short:** A good shard key is high-cardinality, uniformly distributed, non-monotonic, immutable, and query-aligned.
 
 A: Pick the field that is high-cardinality, uniformly distributed, non-monotonic, immutable, and aligned with your dominant query pattern. Each property rules out a specific failure: high cardinality (many distinct values) so the shard count is not capped; uniform distribution so no shard becomes a hotspot; non-monotonic so new writes do not all pile onto the newest shard; immutable, since changing the key would require moving the record to a different shard; and query-aligned so most queries hit one shard. Common good choices: user_id, tenant_id. Common bad choices: timestamp, status, low-cardinality fields.
 
 **Q3: What is a hotspot shard and how do you fix it?**
+**Short:** A hotspot shard gets disproportionate traffic from a bad key or a celebrity entity, fixed by hashing or salting.
 
 A: A hotspot occurs when one shard receives disproportionately more traffic than others. Causes: bad shard key (monotonic or low cardinality), "celebrity" entities that are extremely popular. Fixes: (1) Use hash-based sharding for even write distribution. (2) Key salting: write hot entities to multiple sub-keys spread across shards. (3) Caching layer in front of the hot shard. (4) Dedicated "VIP shard" for identified hot entities with more resources.
 
 **Q4: How would you handle a cross-shard JOIN query?**
+**Short:** Cross-shard joins are handled via scatter-gather, denormalization, broadcast tables, or co-locating related data.
 
 A: Options: (1) Scatter-gather: run the query on all relevant shards in parallel, merge results at the application layer. This works but requires application code to handle merging and sorting. (2) Denormalize data: store redundant data on the same shard so JOINs are local. (3) Broadcast/global tables: replicate small lookup tables to all shards. (4) Avoid cross-shard JOINs in the schema design by co-locating related data on the same shard (e.g., both user and user's orders share the same user_id shard key).
 
 **Q5: How does resharding work and what are the challenges?**
+**Short:** Resharding redistributes data across shard-count changes; consistent hashing keeps the moved fraction near 1/N.
 
 A: Resharding redistributes data when adding or removing shards. With simple hash modulo, changing N to N+1 shards moves ~80% of data. Consistent hashing reduces this to ~1/N. Online resharding steps: (1) dual-write to old and new shard, (2) backfill historical data in background, (3) verify consistency, (4) cutover reads, (5) clean up old shard. Challenges: maintaining consistency during migration, handling in-flight requests during cutover, throttling migration to avoid impacting production.
 
 **Q6: What is the celebrity problem in social media platforms and how is it handled?**
+**Short:** The celebrity problem is a write/fan-out spike from one hot entity, solved with pull-based fan-out or key salting.
 
 A: When a celebrity user with millions of followers posts something, the system generates millions of notifications/updates simultaneously, creating a massive spike on the shard storing that celebrity's data. Solutions: (1) Pull-based fan-out for celebrities — don't pre-compute timelines for large accounts, compute on read. (2) Key salting — distribute writes across multiple sub-shards. (3) Identify hot entities and give them dedicated shards or move them to a hot-shard cluster with more resources.
 
 **Q7: How would you design a globally distributed database that complies with GDPR?**
+**Short:** GDPR-compliant sharding uses geographic shards so EU user data stays physically in EU data centers.
 
 A: Use geographic sharding to ensure EU user data stays in EU data centers. Shard by user_id with a metadata lookup that records which region a user belongs to. EU users are assigned EU shard IDs, US users are assigned US shard IDs. The EU shards physically reside in EU AWS/GCP regions. Ensure no cross-region replication of EU data. For global analytics, use anonymization/aggregation pipelines that don't expose individual data cross-region.
 
 **Q8: What is consistent hashing and why is it used in sharding?**
+**Short:** Consistent hashing maps shards and keys onto a ring so adding a shard moves only about 1/N of the data.
 
 A: Consistent hashing maps both shards and keys to positions on a ring. A key is assigned to the nearest shard in clockwise direction. Adding a shard only requires moving data from one neighboring shard — approximately 1/N of total data (not 80%+ as with modulo hashing). Virtual nodes (each physical shard occupies multiple ring positions) ensure even distribution even with few shards. Used by DynamoDB, Cassandra, and consistent-hashing-based sharding implementations.
 
 **Q9: What are the tradeoffs between range-based and hash-based sharding?**
+**Short:** Range-based sharding favors range queries but risks hotspots; hash-based sharding balances load but scatters ranges.
 
 A: Range-based: good for range queries and ordered scans (hits one or few shards), but risks hotspots with monotonic keys and uneven distribution with skewed data. Hash-based: excellent uniform distribution, no hotspots for uniform access, but range queries require scatter-gather across all shards, and resharding is expensive (most keys remap). Choosing depends on workload: time-series / range-heavy queries favor range-based; random point lookups favor hash-based.
 
 **Q10: How does Vitess enable online resharding?**
+**Short:** Vitess enables online resharding by streaming binlog changes via VReplication before a near-instant traffic cutover.
 
 A: Vitess uses VReplication, which streams MySQL binlog changes from source shards to target shards in real-time. Process: (1) Create new target shards. (2) VReplication copies existing data via backfill. (3) VReplication continuously applies binlog changes to keep target in sync. (4) Once target is caught up, pause traffic, do final sync, update routing in VTGate, resume traffic. (5) Old shards become inactive and can be cleaned up. Total downtime is seconds.
 
 **Q11: How would you design the sharding strategy for an e-commerce platform like Amazon?**
+**Short:** An e-commerce sharding strategy shards users and orders by user_id, and products by product_id, per data type.
 
 A: Separate different data types with different strategies: (1) User data: shard by user_id (hash-based), co-locate user profiles, addresses, preferences. (2) Product catalog: shard by product_id (hash-based), replicate popular products to all shards. (3) Orders: shard by user_id (so a user's orders are on one shard), not order_id. (4) Inventory: shard by product_id and warehouse_id, keep inventory updates local to each warehouse shard. (5) Search index: Elasticsearch with its own sharding handles product search. The hardest query is "all orders for a product" — requires a secondary index or scatter-gather since orders are sharded by user.
 
 **Q12: What is a "scatter-gather" query and when does it become a problem?**
+**Short:** A scatter-gather query fans out to every shard and becomes costly under low selectivity or deep pagination.
 
 A: Scatter-gather sends a query to all shards simultaneously and merges results. It becomes problematic when: (1) Low selectivity — returning large result sets from all shards. (2) Complex aggregations — like global ORDER BY with LIMIT requires fetching many rows from each shard. (3) Deep pagination — page 1000 of results requires fetching 1000 * page_size rows from each shard. (4) Number of shards is large — latency is still bounded by slowest shard, but resource usage scales linearly. Mitigations: avoid unbounded queries, add query execution limits, use materialized aggregates, choose shard keys that align with common query patterns.
 
 **Q13: What's the advantage of mapping 1000 "logical" shards onto 100 physical hosts instead of just using 100 shards directly?**
+**Short:** Mapping logical shards onto fewer physical hosts decouples capacity changes from the fixed shard-assignment formula.
 
 A: Logical shards decouple capacity changes from data movement, since you can remap which physical host owns a logical shard without touching the shard-assignment formula. The Instagram case study uses exactly this: `shard_id = user_id % 1000` never changes, but the Redis-cached logical-to-physical lookup table can move any of those 1000 logical shards to a different host. Adding capacity becomes "take a heavily loaded host's 10 logical shards, migrate 5 of them to a new host" rather than a full resharding event that remaps every key's formula — the case study's 50-to-100-host resharding takes 4 hours of data movement with zero downtime. Provision more logical shards than your current physical host count from day one, since splitting an already-deployed shard later is far more expensive than moving a pre-existing one.
 
 **Q14: A tweet from a user with 1M followers, sharded across 4 shards, produces how much write amplification with fan-out-on-write, and how do you avoid it?**
+**Short:** Fan-out-on-write to a celebrity's million followers multiplies one post into hundreds of thousands of shard writes.
 
 A: Fan-out-on-write turns one write into roughly 250,000 writes per shard — 1M followers divided across 4 shards, all triggered by a single post. The "Write Amplification" section's diagram shows this concretely: a normal user's post is one write to one shard, but a celebrity's post fans out to every follower's feed table, so the write cost scales with follower count, not with the number of posts. The fix is the hybrid model used throughout this module and its case studies: fan-out-on-write (push) for small accounts where follower count is manageable, and fan-out-on-read (pull) for celebrity accounts, where the feed is assembled from the celebrity's own shard at read time instead of pre-computed into millions of follower feeds. Decide the push/pull boundary by a follower-count threshold, and monitor it, since an account can cross that threshold as it grows.
 
 **Q15: What's the fundamental tradeoff of directory-based sharding compared to hash- or range-based sharding?**
+**Short:** Directory-based sharding trades a lookup on every request for the flexibility to place any entity on any shard.
 
 A: Directory-based sharding trades routing simplicity for placement flexibility: any entity can move to any shard, at the cost of a lookup on every request's path. Hash- and range-based sharding compute the shard from the key itself with no external state, so there's nothing extra to keep available or consistent; a directory-based router, by contrast, becomes a single point of failure and a potential bottleneck unless it's cached and made highly available itself. The payoff is real: a directory lets you rebalance a hot entity onto its own dedicated shard, or migrate a tenant, without changing a formula that every other key also depends on — exactly what the case study's logical-shard-to-host mapping and the module's directory-based approach both exploit. Cache directory entries aggressively — the case study's shard-lookup cache runs at a 99.97% hit rate — so the common case avoids the extra network hop entirely.
 
 **Q16: Why did Instagram embed the shard ID inside the photo ID itself instead of always doing a directory lookup?**
+**Short:** Instagram embeds the shard ID in the photo ID itself, letting a bit-shift replace a directory lookup on reads.
 
 A: Embedding the shard ID lets you route a request to the correct shard using only the ID you already have, with no extra database or cache lookup required. Instagram's 64-bit scheme packs 41 bits of timestamp, 13 bits of shard ID, and 10 bits of per-shard sequence into every photo_id, so recovering the shard is a pure bit-shift operation — given a photo_id from a permalink URL, you know its shard instantly. This only works because the shard_id is embedded at write time from a value that's already being computed (`user_id % 1000`), and it trades away the flexibility of a pure directory lookup: since the shard is baked into the ID forever, moving that entity to a different logical shard later is no longer possible without changing its ID. Reach for an embedded-ID scheme when reads by ID (not by owning entity) are common and you want to eliminate the lookup hop; keep a separate directory when entities need to migrate shards over their lifetime.
 
 **Q17: In a sharded database, what is the difference between a local and a global secondary index?**
+**Short:** A local secondary index still scatters lookups across shards; a global index removes the scatter but makes writes cross-shard.
 
 A: A local index is partitioned by the table's shard key, so lookups by the indexed attribute still scatter to every shard; a global index is partitioned by the indexed attribute itself, so a lookup is two hops. That difference decides where you pay. A local index keeps writes cheap and synchronous — one row, one shard, one index — but never removes the scatter, because no shard can know whether a matching row lives elsewhere. A global index removes the scatter and pays for it on the write path: inserting a row now also writes to a *different* shard's index, which is a cross-shard write, so real systems make it asynchronous. That is exactly why DynamoDB's global secondary indexes support eventual consistency only and carry their own capacity, while its local secondary indexes share the base table's partition key, can be read strongly consistently, must be created with the table, and cap each partition key's item collection at 10 GB. Vitess implements the global form as a lookup vindex — a `indexed_value -> shard_key` table in its own keyspace that VTGate consults before routing, which is directory-based sharding narrowed to one attribute. Reach for a global index only when a non-shard-key lookup is genuinely hot, since every one you add makes writes cross-shard and pushes the result into eventual consistency.
 

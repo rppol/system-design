@@ -616,33 +616,43 @@ flowchart LR
 ## 16. Interview Questions with Answers
 
 **Q: What is the Template Method pattern and when would you use it?**
+**Short:** Template Method puts a fixed algorithm skeleton in the base class and lets subclasses fill in individual steps.
 A: Describe the pattern as "algorithm skeleton in base class, steps in subclasses." Use a concrete example like `HttpServlet.service()` calling `doGet()`/`doPost()`. Emphasize it's about code reuse and enforcing a process.
 
 **Q: How does Template Method differ from Strategy?**
+**Short:** Template Method fixes the algorithm in the base class via inheritance, while Strategy injects a swappable algorithm at runtime.
 A: Template Method = inheritance, fixed structure, compile-time. Strategy = composition, swappable algorithm, runtime. If the interviewer probes further, say: "In Template Method, the base class IS the algorithm. In Strategy, the algorithm IS injected into the context."
 
 **Q: Why make the template method `final`?**
+**Short:** Making the template method final protects the algorithm skeleton from subclasses reordering or breaking its steps.
 A: To protect the algorithm skeleton. If subclasses could override the template method itself, they could alter the sequence of steps, break invariants, and defeat the entire purpose of having a shared skeleton.
 
 **Q: What is a hook method?**
+**Short:** A hook method is a concrete, optional extension point in the base class with a default no-op implementation.
 A: A concrete method in the base class with a default (often empty/no-op) implementation. Subclasses can optionally override it to inject behavior at a specific point in the algorithm. It's an optional extension point, unlike abstract primitive operations which are mandatory.
 
 **Q: Name a real-world example of Template Method in Java.**
+**Short:** HttpServlet.service() dispatching to doGet() and doPost() is the canonical Template Method example in Java.
 A: `HttpServlet.service()` dispatching to `doGet()`/`doPost()` is the canonical example. Also `AbstractList` in Java Collections, or `JdbcTemplate` in Spring.
 
 **Q: What's the Hollywood Principle and how does it relate?**
+**Short:** The Hollywood Principle, "don't call us, we'll call you," describes the base class calling subclass methods, not the reverse.
 A: "Don't call us, we'll call you." High-level base class controls the flow and calls low-level subclass methods — not the other way around. This inverts the typical dependency direction in inheritance.
 
 **Q: How do you decide whether a step should be an abstract method or a hook method?**
+**Short:** Make a step abstract when every subclass must implement it, and a hook when it's optional with a sensible default.
 A: Make a step abstract when every subclass MUST provide its own meaningful implementation and there's no sensible default — the algorithm is incomplete without it (e.g., `parseFormat()` in a data-import pipeline). Make it a hook (concrete, default no-op or default-behavior) when the step is optional and most subclasses can use the default — e.g., `beforeSave()` or `onError()` extension points that only some subclasses care about. Too many abstract methods makes every subclass verbose with boilerplate overrides; too many hooks can hide important required customization. A good template typically has 1-3 abstract "primitive operations" and any number of optional hooks.
 
 **Q: What's the classic gotcha with calling overridable methods from a constructor in a Template-Method-style base class?**
+**Short:** Calling an overridable step from the base constructor runs it before the subclass finishes initializing its own fields.
 A: If the base class constructor calls a method that a subclass overrides (an abstract or hook "step"), the overridden version runs *before* the subclass's own constructor has finished initializing its fields — so the override may see `null`/zero-valued fields it expects to be set. This is a well-known Java pitfall (Effective Java explicitly warns against it). The fix is to never invoke abstract/overridable methods from a constructor; instead, have the algorithm's entry point be an explicit method (`run()`, `process()`) called after construction is complete, which is exactly how Template Method is normally structured anyway.
 
 **Q: How does Template Method interact with the Liskov Substitution Principle?**
+**Short:** Subclasses must implement each abstract step honoring the skeleton's contract, or overriding it violates Liskov substitution.
 A: Subclasses must implement the abstract steps in a way that preserves the invariants and overall contract of the template algorithm — a subclass that throws an unexpected exception, returns null where a value is required, or has wildly different performance/side-effect characteristics than the skeleton expects violates LSP even though it compiles fine. For example, if `AbstractReportGenerator.generate()` assumes `fetchData()` returns a non-null (possibly empty) list, a subclass returning `null` breaks every caller of `generate()`, not just that one method — document the contract of each abstract step (preconditions, postconditions, allowed exceptions) so subclasses can be substituted safely.
 
 **Q: Beyond `HttpServlet`, what other Template Method examples exist in the JDK and Spring?**
+**Short:** JUnit's test lifecycle, AbstractList, and Spring's JdbcTemplate all implement Template Method, the last via callbacks.
 A: JUnit's test lifecycle is a Template Method: the test runner calls `@BeforeEach` setup, then the `@Test` method, then `@AfterEach` teardown, in a fixed sequence the test class cannot reorder. `java.util.AbstractList` implements `indexOf()`, `contains()`, and iterators in terms of the abstract `get(int)` and `size()` that subclasses must provide. In Spring, `JdbcTemplate.execute()`/`query()` handle connection acquisition, exception translation, and resource cleanup (the fixed skeleton) while you supply a `RowMapper` or `PreparedStatementSetter` callback (the customizable step) — this is Template Method implemented via callback objects instead of subclassing, which is a common modern variation.
 
 ---

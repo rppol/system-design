@@ -439,39 +439,63 @@ Month 1: introduce `AuthProvider` interface; ship `LdapAuthProviderAdapter` as t
 ### Common Questions
 
 **Q: What is the Adapter pattern and when would you use it?**
+**Short:** Adapter converts one interface into another that a client expects, letting incompatible interfaces work together.
+
 A: The Adapter pattern converts one interface to another that a client expects. Use it when integrating third-party libraries or legacy systems whose interfaces differ from your domain model.
 
 **Q: What's the difference between Class Adapter and Object Adapter?**
+**Short:** Class Adapter uses inheritance to extend the adaptee; Object Adapter uses composition and is preferred in Java.
+
 A: Class Adapter uses inheritance — `class Adapter extends Adaptee implements Target`, which does compile in Java whenever Target is an interface (the common Java case); GoF call it multiple inheritance because in C++ Target is a class as well. Object Adapter uses composition, holding an Adaptee reference — the preferred approach in Java because one adapter works for every adaptee subclass, the adaptee can be swapped or mocked at runtime, and the adaptee's public API is not re-exported through the adapter.
 
 **Q: How does Adapter differ from Facade?**
+**Short:** Adapter reconciles two incompatible interfaces; Facade creates a new simplified interface over a complex subsystem.
+
 A: Adapter makes two existing incompatible interfaces work together. Facade creates a new simplified interface to a complex subsystem. Adapter is about compatibility; Facade is about simplification.
 
 **Q: How does Adapter differ from Decorator?**
+**Short:** Adapter changes an object's interface, while Decorator preserves the interface and only adds behavior.
+
 A: The key difference is the interface: Adapter changes it, Decorator preserves it. A Decorator wraps an object to add behavior while keeping the same interface; an Adapter wraps to translate between interfaces.
 
 **Q: Give a real-world example from the Java SDK.**
+**Short:** InputStreamReader adapts the byte-based InputStream interface to the character-based Reader interface.
+
 A: `InputStreamReader` is a classic example — it adapts the byte-stream `InputStream` interface to the character-stream `Reader` interface, translating bytes to characters using a specified charset.
 
 **Q: How does Adapter differ from Bridge — they both wrap an object behind an interface?**
+**Short:** Adapter retrofits an existing incompatible interface; Bridge is designed upfront so two hierarchies can vary independently.
+
 A: The structural shape is similar (an object holding a reference to another and delegating), but the intent and timing differ. Adapter is retrofitted after the fact to make an already-existing, incompatible interface work with code that wasn't designed with it in mind — the Adaptee's interface is fixed and "wrong" from the client's perspective. Bridge is designed upfront, before either hierarchy has incompatible code, specifically so an abstraction hierarchy and an implementation hierarchy can each evolve and vary independently. In short: reach for Adapter when integrating something that already exists and doesn't fit; reach for Bridge when you're designing two axes of variation from day one.
 
 **Q: What is a two-way (bidirectional) adapter and when is it needed?**
+**Short:** A two-way adapter implements both Target and Adaptee interfaces so either side can be passed to the other's code.
+
 A: A two-way adapter implements both the Target and Adaptee interfaces so objects on either side can be passed to code expecting the other interface, without either side knowing an adapter is involved. It's needed when two systems need to call into each other symmetrically — for example, adapting between `java.util.Iterator` and an older `Enumeration`-based API where code on both sides may hand objects back and forth. The risk is that a single class implementing both interfaces becomes a hub that couples both hierarchies together, so changes to either interface can ripple through the shared adapter. In practice, prefer two separate one-way adapter classes (`OldToNewAdapter` and `NewToOldAdapter`) plus a shared mapper, unless the bidirectional case is simple and stable.
 
 **Q: How would you adapt a single-method interface using a lambda instead of writing a full adapter class?**
+**Short:** A functional-interface Target can be adapted directly with a lambda or method reference, skipping a dedicated class.
+
 A: When the Target is a functional interface (a single abstract method), you can often skip the adapter class entirely and use a lambda or method reference that calls the adaptee directly. For example, if `Target` is `interface Validator { boolean isValid(String s); }` and the adaptee is a third-party `LegacyStringChecker` with a `check(String)` method, you can write `Validator v = legacyChecker::check` instead of a dedicated `LegacyCheckerAdapter` class. This works because Java's functional interfaces let any compatible method reference or lambda serve as an implicit adapter at the call site. Use this lightweight approach for one-off, single-method translations; switch to a full adapter class once you need to adapt multiple methods, hold state, or translate exceptions.
 
 **Q: How does the Adapter pattern relate to the Dependency Inversion Principle?**
+**Short:** Adapter satisfies DIP by letting high-level code depend on a Target interface it owns, not on the low-level detail.
+
 A: Adapter is one of the primary mechanisms for satisfying DIP in practice — high-level code depends on an abstraction (the Target interface) that it owns, and the Adapter, not the high-level code, depends on the low-level concrete adaptee. Without the adapter, the high-level checkout logic would directly depend on `StripeClient`, a low-level detail, inverting the desired dependency direction. With the adapter, `PaymentProcessor` is owned by the domain layer, and `StripeAdapter` implements it while depending downward on the Stripe SDK — dependencies point toward the abstraction, not away from it. This is why Adapter is so common at architectural boundaries (ports and adapters / hexagonal architecture): the "port" is the Target interface and the "adapter" is literally this pattern.
 
 **Q: What other adapter examples exist in the Java standard library besides `InputStreamReader`?**
+**Short:** Arrays.asList, Executors.callable, and Channels.newInputStream are all Object Adapters built into the JDK.
+
 A: `Arrays.asList(T...)`, `Executors.callable(Runnable)`, `Channels.newInputStream(...)` and `Enumeration.asIterator()` are all Object Adapters in the JDK. `Arrays.asList` adapts a fixed-size array to the `List<T>` interface: mutations write through to the backing array, but structural operations like `add`/`remove` throw `UnsupportedOperationException` because the array can't be resized. `Executors.callable(Runnable)` adapts a `Runnable` (which returns nothing) to a `Callable<Object>` (which returns a value), letting a `Runnable` be submitted where a `Callable` is required. `java.nio.channels.Channels` adapts in both directions between the blocking stream API and the NIO channel API — `newInputStream(ReadableByteChannel)` and `newChannel(InputStream)` — and `Enumeration.asIterator()` is a one-call default-method adapter from the old enumeration protocol to `Iterator`. These examples illustrate that adapters are everywhere once you start treating "wrap a thing in an interface my code expects" as the pattern's signature.
 
 **Q: How do you unit test an adapter in isolation?**
+**Short:** Test the adapter against a mocked Adaptee, asserting Target calls translate into correct Adaptee calls and back.
+
 A: Test the adapter against a mock or stub of the Adaptee, asserting that calls to the Target interface translate into the correct Adaptee calls with correctly transformed parameters, and that Adaptee responses (including exceptions) are correctly translated back. For the `LdapAuthProviderAdapter` example, you'd mock `LdapAuthService` to throw an `LdapException` with result code 49 and assert the adapter throws `InvalidCredentialsException`, without needing a real LDAP server. Because the adapter's only job is translation, its tests should be pure unit tests with no I/O — if a test needs a real database or network call, that logic probably belongs in the adaptee or a higher layer, not the adapter. Keep a separate, smaller suite of integration tests that exercise the adapter against the real adaptee to catch interface drift (e.g., the third-party SDK changing its method signatures).
 
 **Q: Does the extra indirection layer in an Adapter cause a meaningful performance hit?**
+**Short:** The indirection from an Adapter is almost always negligible, typically costing well under a microsecond per call.
+
 A: In almost all cases, no — the cost is one additional virtual method call plus whatever lightweight transformation (unit conversion, field mapping) the adapter performs, typically sub-microsecond. In the LDAP-to-OAuth2 migration example, the adapter added about 1.2 microseconds per call against an 80ms LDAP bind latency — utterly negligible. The exception is adapters that perform expensive translation on every call (e.g., full object graph serialization/deserialization, reflection-based mapping per invocation) — in those cases, cache the mapping logic or precompute reusable converters rather than rebuilding them per call. As a practical guideline, profile before assuming the adapter is a bottleneck; the interface mismatch it solves is almost always worth far more than the translation cost.
 
 ### What Interviewers Look For

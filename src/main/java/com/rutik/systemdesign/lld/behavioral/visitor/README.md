@@ -479,33 +479,43 @@ The two axes that decide Visitor's fit — operation count and element-hierarchy
 ## 16. Interview Questions with Answers
 
 **Q: What problem does Visitor solve?**
+**Short:** Visitor lets you add new operations over a fixed class hierarchy without modifying the element classes themselves.
 A: Explain the "operations vs types" problem: when you have a fixed class hierarchy and need many unrelated operations, Visitor lets you add operations without modifying the element classes. The classic example is a compiler AST with multiple analysis passes.
 
 **Q: What is double dispatch and why does Visitor need it?**
+**Short:** Double dispatch lets Visitor pick behavior by both element type and visitor type through two chained method calls.
 A: Java uses single dispatch — method selection based on the runtime type of the receiver object only. But Visitor needs behavior based on BOTH the element type AND the visitor type. Double dispatch achieves this: `accept()` on the element selects based on element type (1st dispatch), and `visitor.visit(this)` selects the overload based on the visitor type (2nd dispatch).
 
 **Q: What are the main limitations of Visitor?**
+**Short:** Adding a new element type forces every existing visitor to be updated, and elements must expose internal state to visitors.
 A: Adding new element types requires updating all visitors. It also requires elements to expose their internal state, breaking encapsulation. Best used when the element hierarchy is stable.
 
 **Q: Where is Visitor used in the Java ecosystem?**
+**Short:** java.nio.file.FileVisitor, ANTLR's generated visitors, and javac's tree visitor API all use the Visitor pattern.
 A: `java.nio.file.FileVisitor`, ANTLR's generated visitor interfaces, Eclipse JDT's `ASTVisitor`, javac's tree visitor API.
 
 **Q: How would you implement Visitor without the pattern?**
+**Short:** Without Visitor you'd use instanceof chains or add operation methods directly to each element class.
 A: You'd use `instanceof` chains or add operation methods to each element class. Both approaches lead to scattered code and force modification of existing classes for new operations.
 
 **Q: How does Visitor relate to the Interpreter pattern?**
+**Short:** Interpreter defines the AST class hierarchy, and Visitor implements operations over that AST without modifying its node classes.
 A: They're often used together — Interpreter defines a grammar as a class hierarchy (an Abstract Syntax Tree of expression nodes), and Visitor is the natural way to implement *operations over that AST* (evaluation, pretty-printing, type-checking, optimization) without cramming all of them into the expression node classes themselves. Each AST node class (`NumberExpr`, `AddExpr`, `MultiplyExpr`) implements `accept(Visitor)`, and separate Visitor classes implement `EvaluatorVisitor`, `PrettyPrinterVisitor`, etc. This combination is exactly how compiler/interpreter front-ends are structured: the parser builds the Interpreter's tree, and every subsequent compiler pass is a Visitor over that tree.
 
 **Q: When is Visitor overkill, and what would you use instead?**
+**Short:** Visitor is overkill for a small, stable hierarchy with few operations, where a plain polymorphic method is simpler.
 A: If the object structure is small and stable (rarely gains new element types) and you only have a handful of operations, adding a regular polymorphic method to each element class (`element.calculateArea()`, `element.render()`) is simpler, more discoverable, and avoids the double-dispatch boilerplate entirely. Visitor pays off specifically when operations multiply faster than element types — e.g., a shapes hierarchy with 4 shapes but 10 different export/analysis operations. Introducing Visitor for a 2-shape, 2-operation hierarchy is needless indirection; YAGNI applies.
 
 **Q: Does the Visitor pattern break encapsulation?**
+**Short:** Yes, to some degree, since elements must expose enough internal state via getters for external visitors to read.
 A: To some degree, yes — for a Visitor to compute something about an element (e.g., a `Circle`'s area, a `File`'s size), the element must expose enough of its internal state via public getters for the external Visitor class to read, which can leak implementation details that would otherwise stay private inside the element. This is the explicit tradeoff GoF acknowledges: Visitor centralizes related operations at the cost of widening the element's public surface. Mitigate by exposing only the minimal data needed (e.g., a `getSizeInBytes()` accessor rather than raw internal buffers) rather than generic "give me everything" getters.
 
 **Q: How would you design a Visitor interface to be extensible when new element types are rare but possible?**
+**Short:** Provide default no-op visit() methods so adding an element type doesn't break every existing visitor's compilation.
 A: Provide a default/no-op `visit()` method for each element type — in Java, this means either using an abstract base `Visitor` class with concrete default implementations (subclasses override only the types they care about) or, in Java 8+, default methods on a `Visitor` interface. When a new element type is added, you add a new default method to the base/interface so existing concrete visitors compile unchanged (they simply inherit the no-op default), while visitors that *do* care about the new type override it. This doesn't eliminate the core OCP tradeoff (you still touch the Visitor interface), but it avoids a compile break across every existing visitor implementation.
 
 **Q: Walk through a concrete real-world use of Visitor.**
+**Short:** A file-system tool with separate SizeCalculator, Search, and PermissionAudit visitors over the same FileNode tree is a concrete example.
 A: A file-system traversal tool: `FileSystemElement` (interface with `accept(Visitor)`) is implemented by `FileNode` and `DirectoryNode`. A `SizeCalculatorVisitor` sums file sizes recursively to compute disk usage, a `SearchVisitor` collects paths matching a name pattern, and a `PermissionAuditVisitor` flags files with overly permissive ACLs — all three are separate classes that traverse the same tree without modifying `FileNode`/`DirectoryNode`. This mirrors `java.nio.file.FileVisitor`/`Files.walkFileTree()`, where you implement `visitFile`/`preVisitDirectory`/`postVisitDirectory` callbacks and the JDK handles the traversal (the "accept" side).
 
 ---

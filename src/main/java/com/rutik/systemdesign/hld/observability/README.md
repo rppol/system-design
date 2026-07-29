@@ -584,66 +584,82 @@ The asymmetry is the point: the 95% that is dropped is the traces that all look 
 ## 12. Interview Questions with Answers
 
 **Q1: What's the difference between monitoring and observability?**
+**Short:** Monitoring answers predefined questions; observability lets you answer questions you never anticipated.
 
 A: Monitoring answers questions you defined in advance — dashboards and alerts for known failure modes ("known unknowns"). Observability is the property that lets you answer questions you *didn't* anticipate, by exploring the metrics/logs/traces a system already emits ("unknown unknowns") — e.g., "why is checkout slow specifically for users in the EU on the new payment provider?" without having pre-built that exact dashboard.
 
 **Q2: Why can't you just put everything in logs and grep when something goes wrong?**
+**Short:** Logs alone are too costly to store, too slow to aggregate, and too hard to correlate across services.
 
 A: Three reasons: (1) cost — structured logging every field of every request at high QPS generates terabytes/day, far more expensive than aggregated metrics; (2) query speed — "is the system healthy right now" requires aggregation across millions of log lines, which is slow, whereas a metric is pre-aggregated and queries in milliseconds; (3) cross-service correlation — a single request's logs are spread across N services' log streams, and without a shared trace ID, correlating them by timestamp alone doesn't scale (§10, War Story 3).
 
 **Q3: What is cardinality, and why is it dangerous in metrics?**
+**Short:** Cardinality is the number of unique label combinations in a metric, and unbounded labels can crash the metrics database.
 
 A: Cardinality is the number of unique label-value combinations a metric can have — `http_requests_total{service, endpoint, status}` with 30 services, 20 endpoints, 5 statuses has 3,000 time series. Adding a high-cardinality label like `user_id` (millions of values) multiplies this into billions of series, which can exhaust a metrics database's memory and crash it — taking down dashboards and alerts platform-wide (§10, War Story 1). The fix is to keep high-cardinality data (user IDs, request IDs) in traces or logs, where it's stored per-event rather than as a multiplied-out time series.
 
 **Q4: Explain SLI, SLO, SLA, and error budget, and how they relate.**
+**Short:** An SLI is measured, an SLO is the internal target, an SLA is the looser contractual promise, and the error budget is 100% minus the SLO.
 
 A: An SLI is a measured indicator (e.g., "% of requests under 500ms"). An SLO is an internal target for that SLI (e.g., 99.9%). An SLA is an external, contractual promise — typically looser than the SLO (e.g., 99.5%) to provide a safety margin before penalties apply. The error budget is `100% - SLO` — the amount of "badness" allowed (0.1% over 28 days = ~40 minutes). When the budget is exhausted, the team prioritizes reliability work over new features until it recovers — this turns reliability into a quantified, negotiable resource rather than an abstract goal.
 
 **Q5: How does distributed tracing actually connect spans across different services?**
+**Short:** Spans connect across services via a shared trace ID propagated in a traceparent header on every call.
 
 A: Via context propagation — when Service A calls Service B, it includes a `traceparent` header (W3C standard) containing the trace ID (shared across the whole request), Service A's span ID (becomes B's parent-span-id), and a sampling flag. Service B extracts this, starts its own span as a child, and propagates its own `traceparent` (same trace ID, B's span ID as parent) to any services it calls. A tracing backend collects all spans sharing a trace ID and assembles them into a parent-child tree, visualized as a waterfall.
 
 **Q6: What's the difference between head-based and tail-based sampling, and why does it matter?**
+**Short:** Head-based sampling decides upfront and misses rare errors; tail-based sampling decides after the outcome is known.
 
 A: Head-based sampling decides whether to keep a trace at the start of the request, before knowing the outcome — e.g., "keep 1% randomly." This is cheap but will discard most error/slow traces, since they're statistically rare. Tail-based sampling buffers all spans for a trace until it completes, then decides based on the *outcome* — "keep if any span errored or total duration exceeded a threshold, otherwise sample 1%." This captures nearly 100% of the traces you'd actually want during an incident, at the cost of buffering in-flight span data (memory) at a collector layer.
 
 **Q7: Why is "alert on causes" (CPU, disk, pod restarts) considered an anti-pattern?**
+**Short:** Cause-based alerts fire on conditions that may not affect users, while symptom-based SLO alerts track actual user impact.
 
 A: Cause-based alerts fire frequently for conditions that don't actually impact users (CPU at 75% might be totally fine if latency is unaffected) and don't fire for causes nobody anticipated. The result is either alert fatigue (too many low-value pages train engineers to ignore alerts — §10, War Story 2) or missed incidents (the one cause nobody wrote a rule for). Alerting on symptoms — SLO burn rate, which directly measures user-facing impact — fires only when something the business actually cares about is degrading, regardless of root cause.
 
 **Q8: How would you design the observability strategy for a new microservice from scratch?**
+**Short:** Start with RED metrics, add trace-linked structured logging, then define SLIs and burn-rate alerts, not infra thresholds.
 
 A: Start with RED metrics (rate, errors, duration) exposed via a `/metrics` endpoint (Prometheus format) — this is the minimum for "is it healthy." Add structured JSON logging with the trace ID attached to every log line via the request's `traceparent` context. Instrument with an OpenTelemetry SDK so traces propagate automatically through HTTP clients/servers. Define 1-3 SLIs that map to user experience (e.g., "% of requests under 300ms," "% of requests succeeding") and set SLOs based on what the business needs, then build burn-rate alerts off those SLOs — not off CPU/memory.
 
 **Q9: A service's p50 latency looks fine, but customers are complaining about slowness. What's going on, and how would observability help?**
+**Short:** A healthy median can hide a badly degraded tail, so always alert on p95/p99 and inspect individual slow traces.
 
 A: p50 (median) can look healthy while a meaningful tail (p95/p99) is badly degraded — if 5% of requests take 5 seconds, the median is unaffected but 5% of users have a terrible experience, and at high request volume that's a lot of users. Always alert on and dashboard p95/p99, not just p50/average. To investigate, pull traces for slow requests specifically (tail-sampled, or filtered by duration in the tracing backend) — the aggregate metric tells you the tail exists, but only individual traces show *which* span in *which* requests is slow, and whether it's correlated with a specific user segment, region, or code path.
 
 **Q10: How do metrics, logs, and traces get tied together in practice?**
+**Short:** A shared trace ID links metrics, logs, and traces, and exemplars jump from a metric bucket straight to an example trace.
 
 A: Through a shared trace ID. The trace ID is generated at the edge, propagated via `traceparent` headers to every downstream service, attached to every log line emitted while processing that request (via thread-local/MDC context), and embedded as span attributes in the trace itself. Many metrics systems also support "exemplars" — a metric data point (e.g., one slow request in a latency histogram bucket) can carry a reference to the specific trace ID that produced it, letting you jump directly from "this histogram bucket has unusually high counts" to "here's an example trace from that bucket."
 
 **Q11: What's the operational cost of running a full observability stack, and how do you control it?**
+**Short:** Costs come from storage and query compute, controlled via bounded cardinality, log sampling, and tail-based trace sampling.
 
 A: Costs come from storage (metrics retention, log volume, trace volume) and compute (query/aggregation, especially for logs and high-cardinality metrics). Control levers: keep metric label cardinality bounded (§6.5); use log levels appropriately and sample/drop DEBUG logs in production; use tail-based sampling for traces (§5.3) to retain ~100% of interesting traces at ~1-5% of total volume; set retention policies appropriate to each signal (metrics: months, for trend analysis; traces: days, for recent-incident debugging; logs: balance compliance requirements against cost, often with tiered/cold storage for older logs).
 
 **Q12: How would you debug an incident where the error rate metric is normal, but a specific customer reports failures?**
+**Short:** Query traces or logs filtered by the affected customer's attributes, since the aggregate metric hides small-population failures.
 
 A: This is exactly the scenario observability (vs. monitoring) is for — the aggregate metric is healthy because the affected population is a small fraction of total traffic, below the threshold that would move the aggregate noticeably. Query traces or structured logs filtered by attributes specific to that customer (user ID, tenant ID, region, feature flag) — these are high-cardinality dimensions that live in traces/logs, not metrics. This is also a strong argument for "wide event" / Honeycomb-style approaches (§7) that let you `GROUP BY` arbitrary high-cardinality fields after the fact, rather than only the dimensions someone thought to pre-aggregate into a metric.
 
 **Q13: What's the difference between the RED method and the USE method, and when do you use each?**
+**Short:** RED measures a service's health from outside; USE measures the resources underneath it to find the bottleneck.
 
 A: RED (Rate, Errors, Duration) measures request-driven services from the outside, while USE (Utilization, Saturation, Errors) measures the resources underneath them. RED answers "is this service healthy?" — request rate, error rate, and the latency distribution — and is the first thing to instrument for any service. USE answers "which resource is the bottleneck?" by tracking utilization, saturation, and errors for CPU, connection pools, thread pools, and queues, turning a RED-detected symptom like "checkout is slow" into a resource-level cause like "the DB connection pool is at 100% utilization with a 40-deep wait queue." Instrument RED for every service and USE for every shared resource from day one, so the two together connect symptom to cause without a separate investigation step.
 
 **Q14: How do you calculate SLO burn rate, and why use two-window alerting instead of a single threshold?**
+**Short:** Burn rate is the error rate divided by the allowed budget, and two-window alerting avoids paging on a self-resolving blip.
 
 A: Burn rate is the current error rate divided by (1 minus the SLO), showing how many times faster than the allowed pace you are consuming the error budget. At a 99.9% SLO (0.1% error budget), a 10% current error rate gives a burn rate of 100x, meaning the entire 28-day budget would be consumed in about 6.7 hours (28 days x 24h x 60m / 100 ≈ 403 minutes) if that rate continued — a signal to page immediately. Two-window alerting requires both a short window (5 minutes) and a long window (1 hour) to independently confirm the same burn-rate breach before firing, which prevents a single brief blip that self-resolves within the short window from paging anyone. This two-window confirmation is what keeps burn-rate alerting fast enough to catch real incidents quickly while still avoiding the noise a naive single-threshold check would generate.
 
 **Q15: Why should application logs be structured (JSON) instead of free text?**
+**Short:** Structured JSON logs are queryable and joinable with traces via trace ID, unlike free-text logs.
 
 A: Structured logs are queryable like a database, letting you filter with something like `WHERE level='ERROR' AND service='inventory-service'` instead of grep-ing free text across files. Free-text logs require full-text search or regex matching that scales poorly and misses fields that were not anticipated when the log line was written, whereas a JSON log line's fields are all queryable and filterable without parsing tricks. Critically, structured logs are joinable with traces and metrics via a shared `trace_id` field, which is what makes it possible to jump from a metric anomaly to the exact log line that explains it. Emit every log line as a structured object from day one, since retrofitting structure onto years of free-text logs is a much larger effort than starting with it.
 
 **Q16: What's the architectural tradeoff between Loki and ELK/Elasticsearch for log storage at scale?**
+**Short:** Loki indexes only labels for cheap storage; Elasticsearch fully indexes every field for richer but costlier full-text search.
 
 A: Loki indexes only a small set of labels and stores log content compressed and unindexed, while Elasticsearch (ELK) fully indexes every field of every log line for rich full-text search. This makes Loki dramatically cheaper to run at high log volume, since it avoids building and storing a full-text search index over terabytes of daily log data, but query flexibility suffers — a Loki query must first narrow by label before it can grep the remaining log content, whereas Elasticsearch can search any field directly. Elasticsearch remains the better choice when engineers need to search arbitrary text across unindexed fields quickly, such as searching for a specific error message string with no known service or time range. Choose Loki when log volume is the dominant cost driver and queries are typically scoped by trace ID or a few known labels; choose Elasticsearch when ad hoc full-text search flexibility matters more than storage cost.
 
