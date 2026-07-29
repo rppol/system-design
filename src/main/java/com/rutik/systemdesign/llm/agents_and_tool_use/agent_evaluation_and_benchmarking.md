@@ -1,6 +1,6 @@
 # Agent Evaluation & Benchmarking
 
-## Concept Overview
+## 1. Concept Overview
 
 Evaluating LLM agents is fundamentally different from evaluating single-call LLMs. Agent evaluation must account for multi-step trajectories, tool use correctness, error recovery, efficiency (steps taken, tokens used, cost per task), and final outcome quality. Standard NLP metrics (BLEU, ROUGE, perplexity) are nearly useless for agents.
 
@@ -8,7 +8,7 @@ Two complementary evaluation modes exist: trajectory-level evaluation (was each 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Evaluating an agent is like reviewing a surgeon's procedure, not just the patient outcome — you need to check both that the patient survived and that the technique was sound.
 
@@ -20,7 +20,7 @@ Two complementary evaluation modes exist: trajectory-level evaluation (was each 
 
 ---
 
-## Core Principles
+## 3. Core Principles
 
 - **Benchmark ≠ production quality**: all benchmarks have distributional gaps from real tasks; treat benchmark scores as directional, not absolute.
 - **Trajectory + outcome**: evaluate both path and result; outcome-only evaluation misses brittle shortcuts.
@@ -30,7 +30,94 @@ Two complementary evaluation modes exist: trajectory-level evaluation (was each 
 
 ---
 
-## How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
+
+Agent evaluation splits along four independent axes: **what you score** (the outcome, the
+path, or the bill), **who scores it** (a program, an LLM judge, or a human), **which
+benchmark family you score it on**, and **how many runs you score**. Every method in this
+file is a point in that space.
+
+### 4.1 By evaluation target
+
+| Target | Question it answers | How it is scored | Cost |
+|--------|--------------------|------------------|------|
+| Outcome | Did the task succeed? | Exact match, test suite, or backend-state check | Lowest — fully automated, binary |
+| Trajectory | Was each step necessary and correct? | Step annotation against a rubric or golden trajectory | Highest — one judgment per step |
+| Efficiency | What did success cost? | Steps, tokens, wall time, dollars, logged per run | Near-zero once instrumented |
+| Reliability | Does it succeed *every* time? | pass@k / pass^k across repeated runs | Multiplies every other cost by k |
+
+Outcome-only evaluation is the default and the trap: it cannot separate a coherent plan
+from a lucky shortcut, and it is blind to an agent that spends 20 steps on a 5-step task.
+Trajectory and efficiency metrics are what make that visible.
+
+### 4.2 By scoring mechanism
+
+| Mechanism | Reference needed | Strength | Where it breaks |
+|-----------|-----------------|----------|-----------------|
+| Programmatic check | Expected answer or test suite | Deterministic, free to rerun, ungameable by prose | Only works where correctness is mechanically checkable |
+| Backend-state check | Annotated goal state | Verifies the world changed, not that the agent said it did | Needs a controlled, resettable environment |
+| LLM-as-judge | A specific rubric | Scales to open-ended tasks and to per-step scoring | Self-preference bias; must be calibrated against humans |
+| Human expert | Rubric plus adjudication | Highest quality, and the calibration ground truth | Slow and expensive; needs kappa > 0.6 between annotators |
+
+### 4.3 By benchmark family
+
+| Benchmark | Environment | Scored on | What it uniquely stresses |
+|-----------|------------|-----------|--------------------------|
+| GAIA | Web search, files, tools | Exact match on the final answer | General assistant tool use across three step-count tiers |
+| SWE-bench | Real Python repositories | Repository test suite after applying a patch | Codebase comprehension, not code generation |
+| AgentBench | 8 environments (OS, DB, KG, games, web) | Per-environment native metrics, normalized | Breadth — where an agent's competence stops |
+| WebArena | Self-hosted functional websites | Backend state matches the annotated goal state | Realistic multi-step web navigation |
+| τ-bench / τ²-bench | Domain policy plus an LM user simulator | Final database state, reported as pass^k | Requirement gathering through dialogue, and reliability |
+| Custom harness | Your own production task distribution | Whatever your users mean by success | The distribution gap every public benchmark has |
+
+Public benchmarks are directional; the custom harness is the only one measured on the
+distribution you actually serve. Run both — a public benchmark for comparability, a private
+harness for deployment decisions.
+
+### 4.4 By run count — capability versus reliability
+
+`pass@1` is what a single user experiences. `pass@k` is the ceiling when an oracle can pick
+the winning run, and is the right metric only where retrying is genuinely free — code
+generation with a unit test, patch selection against a test suite. `pass^k` is the floor
+when every run reaches a user and no selection step exists: customer service, booking,
+anything that writes to a database. All three are computed from the same `n` runs and `c`
+successes, so the choice costs nothing extra to make — and making it wrong is how an agent
+that looks strong on a leaderboard turns out to be unusable in production.
+
+---
+
+## 5. Architecture Diagrams
+
+### Evaluation Pipeline
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    DS([Test Dataset — N tasks]) --> EXEC["AGENT EXECUTION\nfor each task: agent.run(task)\n→ trajectory (steps + answer)\n→ cost, tokens, time"]
+    EXEC --> OUT["OUTCOME EVAL\nexact match / LLM judge"]
+    EXEC --> TRAJ["TRAJECTORY EVAL\nLLM-as-judge rubric"]
+    EXEC --> EFF["EFFICIENCY EVAL\nper-task and aggregate"]
+    OUT -->|"binary success (0/1)"| AGG["AGGREGATE METRICS\nTask success rate\nAvg cost per task\nAvg steps per task\nStep success rate\npass@k distribution\nResults by difficulty/category"]
+    TRAJ -->|"step scores"| AGG
+    EFF -->|"cost/tokens/steps"| AGG
+
+    class DS,AGG io
+    class EXEC base
+    class OUT,TRAJ,EFF mathOp
+```
+
+Every trajectory produced by agent execution fans out to three independent scorers — outcome (binary 0/1 success), trajectory (LLM-as-judge step scores), and efficiency (cost/tokens/steps) — whose results merge into the aggregate metrics used for regression tracking.
+
+---
+
+## 6. How It Works — Detailed Mechanics
 
 ### GAIA Benchmark
 
@@ -577,38 +664,7 @@ is the number to put on the dashboard next to `pass@1`.
 
 ---
 
-## Architecture Diagrams
-
-### Evaluation Pipeline
-
-```mermaid
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    DS([Test Dataset — N tasks]) --> EXEC["AGENT EXECUTION\nfor each task: agent.run(task)\n→ trajectory (steps + answer)\n→ cost, tokens, time"]
-    EXEC --> OUT["OUTCOME EVAL\nexact match / LLM judge"]
-    EXEC --> TRAJ["TRAJECTORY EVAL\nLLM-as-judge rubric"]
-    EXEC --> EFF["EFFICIENCY EVAL\nper-task and aggregate"]
-    OUT -->|"binary success (0/1)"| AGG["AGGREGATE METRICS\nTask success rate\nAvg cost per task\nAvg steps per task\nStep success rate\npass@k distribution\nResults by difficulty/category"]
-    TRAJ -->|"step scores"| AGG
-    EFF -->|"cost/tokens/steps"| AGG
-
-    class DS,AGG io
-    class EXEC base
-    class OUT,TRAJ,EFF mathOp
-```
-
-Every trajectory produced by agent execution fans out to three independent scorers — outcome (binary 0/1 success), trajectory (LLM-as-judge step scores), and efficiency (cost/tokens/steps) — whose results merge into the aggregate metrics used for regression tracking.
-
----
-
-## Real-World Examples
+## 7. Real-World Examples
 
 ### Frontier-lab internal agent eval (typical shape; specific suite sizes are not public)
 
@@ -634,7 +690,7 @@ A large enterprise deploys a research agent:
 
 ---
 
-## Tradeoffs
+## 8. Tradeoffs
 
 | Evaluation Method | Cost | Scale | Quality | Latency |
 |------------------|------|-------|---------|---------|
@@ -653,7 +709,7 @@ A large enterprise deploys a research agent:
 
 ---
 
-## When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Invest in Comprehensive Eval When:
 - Before any production deployment — task success rate and cost-per-task must be benchmarked
@@ -668,7 +724,7 @@ A large enterprise deploys a research agent:
 
 ---
 
-## Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Evaluating only on benchmark, not production distribution**: GAIA and SWE-bench have different task distributions from your actual use case. Always build a custom eval dataset from real production tasks.
 
@@ -693,7 +749,7 @@ assert spearman(judge.scores(calibration_set), human_scores) > 0.8
 
 ---
 
-## Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -709,7 +765,7 @@ assert spearman(judge.scores(calibration_set), human_scores) > 0.8
 
 ---
 
-## Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: Why is evaluating agents harder than evaluating single LLM calls?**
 A: Single LLM evaluation compares one output to one expected output — straightforward. Agent evaluation has three additional dimensions: (1) trajectory length — multiple steps, each potentially correct or incorrect; (2) path non-uniqueness — many valid trajectories lead to the same correct answer, so you can't compare to a single reference; (3) efficiency — a correct answer achieved in 20 steps is worse than one achieved in 5. Additionally, agent errors compound: a wrong tool call in step 2 causes cascading failures in steps 3-10. Evaluation must account for both outcome correctness and trajectory quality, requiring either human annotation or capable LLM judges with rubrics.
@@ -776,7 +832,7 @@ A: pass^k is the probability that ALL k independent trials of the same task succ
 
 ---
 
-## Best Practices
+## 13. Best Practices
 
 1. **Build a domain-specific eval dataset**: don't rely solely on public benchmarks; sample 100+ real tasks from your production distribution.
 2. **Track cost-per-task from day 1**: quality improvements that double cost may not be worth it; cost efficiency is as important as raw quality (see [Agent Cost & Token Budget](agent_cost_and_token_budget.md)).

@@ -8,7 +8,7 @@ Chunking strategy selection involves three fundamental tradeoffs: precision (sma
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Chunking is like cutting a book into pages before filing it — cut at chapter boundaries and each page is coherent; cut mid-sentence and the page is meaningless out of context.
 
@@ -20,7 +20,7 @@ Chunking strategy selection involves three fundamental tradeoffs: precision (sma
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Semantic coherence**: A chunk should represent a single complete idea — a paragraph, a section, a topic — not an arbitrary text span.
 - **Embedding precision vs. context completeness tradeoff**: Smaller chunks embed precise concepts but lack context; larger chunks have context but embed imprecisely.
@@ -30,9 +30,122 @@ Chunking strategy selection involves three fundamental tradeoffs: precision (sma
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Fixed-Size Chunking
+Chunking strategies differ in exactly one respect: **what decides the boundary**. Chunk size,
+overlap, and metadata are knobs applied on top of whichever boundary rule you choose, so pick
+the boundary rule first.
+
+### Boundary strategies
+
+| Strategy | Boundary decided by | Index-time cost | Input it requires | Best for |
+|----------|--------------------|-----------------|-------------------|----------|
+| Fixed-size | Raw character or token count | None | Nothing | Prototypes; uniform, unstructured text |
+| Sentence / paragraph | Punctuation and blank lines, tried as an ordered separator list | None | Detectable sentence boundaries | General-purpose default |
+| Semantic | Embedding distance between consecutive sentences crossing a percentile threshold | One embedding call per sentence | An embedding model | Long documents whose topic shifts mid-file |
+| Hierarchical (parent-child) | Two boundary passes at two sizes; children are embedded, parents are returned | Moderate — children embedded, parents stored only | Documents long enough to have sections | Manuals, regulations, research papers |
+| Header-aware | Markdown or HTML heading levels | Negligible — a parse, no model | Explicit heading markup | Docs sites, wikis, API references |
+| AST-aware | Function and class nodes from a language parser | Low — a tree-sitter parse | Syntactically valid source | Code corpora |
+
+The list is ordered by how much the strategy knows about the document. Fixed-size knows
+nothing and therefore never fails to run; AST-aware knows the most and fails outright on a
+file that does not parse. Every strategy below the first is a bet that the structure it
+depends on is actually present and reliable in your corpus.
+
+### The two orthogonal knobs
+
+Boundary rule chosen, two parameters remain, and they trade against different things:
+
+- **Chunk size** trades retrieval precision against context completeness. Small chunks embed a
+  single idea precisely but arrive at the LLM stripped of context; large chunks carry context
+  but average several topics into one vector. It is also a capacity-planning number — chunk
+  count scales as `1/(size - overlap)`, so halving the stride nearly doubles vectors, embedding
+  spend, and index bytes.
+- **Overlap** buys back information lost at whichever boundary you drew, at the cost of
+  duplicating that text across two vectors. It is insurance against the boundary rule being
+  wrong, which is why the strategies that place boundaries badly need the most of it.
+
+### Composition, not exclusivity
+
+These are layers, not alternatives. Production pipelines stack them: header-aware splitting
+establishes the section tree, hierarchical chunking splits each section into parent and child
+levels, sentence boundaries keep the children from cutting mid-sentence, and overlap covers the
+residual seams. The header path each chunk inherits then becomes metadata for filtering and an
+embedding-time prefix that anchors an otherwise context-free paragraph to its topic.
+
+### Choosing
+
+- Structure is explicit and machine-readable (Markdown, HTML, code) — use the
+  structure-aware strategy; it is cheaper than semantic chunking and more accurate.
+- Structure is absent but topics shift — semantic chunking earns its embedding cost.
+- Documents are long and queries are narrow — hierarchical, so retrieval stays precise while
+  generation still sees the whole section.
+- None of the above, or you are still prototyping — sentence/paragraph splitting, and treat
+  fixed-size as the fallback for text too malformed for sentence detection.
+
+Whatever you pick, the choice is empirical: measure recall@K at several sizes on your own
+corpus and query distribution rather than importing a chunk size from a blog post.
+
+---
+
+## 5. Architecture Diagrams
+
+### Chunking Strategy Selection
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    DOC{"Document type?"}
+    CODE["Code\nAST-aware chunking\n(function / class level)"]
+    STRUCT["Structured (legal, API docs)\nSection / heading-based\n+ metadata for section title"]
+    MIXED["Mixed content (research, reports)\nHierarchical chunking\nparent: 600 tokens · child: 150 tokens"]
+    CONV["Conversational (chat logs)\nTurn-based chunking\n5–10 turns per chunk"]
+    PROSE["General prose\nSentence-boundary chunking\n300–500 tokens + 50-token overlap"]
+
+    DOC -->|"code"| CODE
+    DOC -->|"structured"| STRUCT
+    DOC -->|"mixed"| MIXED
+    DOC -->|"conversational"| CONV
+    DOC -->|"general prose"| PROSE
+
+    class DOC mathOp
+    class CODE,STRUCT,MIXED,CONV,PROSE train
+```
+
+### Hierarchical Chunk Architecture
+```
+Document: "Chapter 3: Neural Networks"
+    |
+    +-- Parent Chunk P1: Introduction paragraph (600 tokens)
+    |       |
+    |       +-- Child C1.1: "Neural networks are..." (150 tokens)
+    |       +-- Child C1.2: "The key building block..." (150 tokens)
+    |       +-- Child C1.3: "Training involves..." (150 tokens)
+    |
+    +-- Parent Chunk P2: Architecture section (600 tokens)
+            |
+            +-- Child C2.1: "Layers in a neural..." (150 tokens)
+            +-- Child C2.2: "Activation functions..." (150 tokens)
+
+Query: "What is backpropagation?"
+  → ANN search finds Child C1.3 (most relevant sentence-level)
+  → System returns Parent P1 (complete paragraph context)
+  → LLM sees full introduction paragraph, not just the sentence
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Fixed-Size Chunking
 
 Split text into chunks of exactly N characters or tokens:
 
@@ -95,9 +208,9 @@ Now halve the chunk size but leave `overlap` at its absolute value of 50:
 
 **Why halving more than doubles.** Overlap is an absolute token count, so it consumes a larger *fraction* of a smaller window: 50 tokens is 10% of a 500-token window but 20% of a 250-token one. The denominator (`stride`) shrinks faster than the numerator, so chunk count grows super-linearly. Scale the overlap proportionally instead (50 -> 25) and the effect vanishes: `stride = 225`, `ceil(9975/225) = 45` chunks = 1.96x, just under double. This is the whole argument for expressing overlap as a percentage rather than a constant.
 
-At corpus scale the difference is a capacity-planning number, not a curiosity. The 200-million-token compliance corpus in Section 12 yields `ceil((200000000 - 50)/450) = 444,445` chunks at 500/50, but `ceil((200000000 - 60)/240) = 833,334` chunks at the 300/60 setting the case study uses for children — 1.88x the vectors, embeddings, and index bytes.
+At corpus scale the difference is a capacity-planning number, not a curiosity. The 200-million-token compliance corpus in Section 14 yields `ceil((200000000 - 50)/450) = 444,445` chunks at 500/50, but `ceil((200000000 - 60)/240) = 833,334` chunks at the 300/60 setting the case study uses for children — 1.88x the vectors, embeddings, and index bytes.
 
-### 3.2 Sentence / Paragraph Chunking
+### 6.2 Sentence / Paragraph Chunking
 
 Split at natural linguistic boundaries:
 
@@ -125,7 +238,7 @@ Advantages: preserves sentence meaning, widely applicable.
 Disadvantages: chunk sizes vary significantly; can still split mid-argument.
 Sweet spot: 300-600 characters (approximately 75-150 tokens) with 50-100 character overlap.
 
-### 3.3 Semantic Chunking
+### 6.3 Semantic Chunking
 
 Detect topic shifts in the text and split at semantic boundaries:
 
@@ -166,7 +279,7 @@ Disadvantages: requires embedding during indexing, computationally heavier.
 Best for: long documents with diverse topics (research papers, technical manuals).
 Tuning: threshold 0.6-0.8; lower threshold = more splits = smaller chunks.
 
-### 3.4 Hierarchical (Parent-Child) Chunking
+### 6.4 Hierarchical (Parent-Child) Chunking
 
 Create two levels: small child chunks for precise retrieval, larger parent chunks for complete context:
 
@@ -205,7 +318,7 @@ def retrieve_with_parent_context(query: str, k: int = 5):
 
 Why it works: embedding small chunks captures precise semantics; returning the full parent provides the surrounding context the LLM needs.
 
-### 3.5 Chunk Size Selection Guide
+### 6.5 Chunk Size Selection Guide
 
 ```
 Task: Simple factual Q&A
@@ -230,7 +343,7 @@ Document types:
   Chat logs: 5-10 conversation turns per chunk
 ```
 
-### 3.6 Overlap Mechanics
+### 6.6 Overlap Mechanics
 
 ```
 Without overlap (strict boundaries):
@@ -265,7 +378,7 @@ Rule of thumb: overlap = 10-15% of chunk size
 | `k x chunk_size` | Context tokens spent per query — the number your token budget cares about |
 | duplication | `chunks x chunk_size / T` again — index bloat from the overlap |
 
-**Walk one example.** The same 10,000-token document, k = 5, compared against the 50%-overlap sliding window from Section 10:
+**Walk one example.** The same 10,000-token document, k = 5, compared against the 50%-overlap sliding window from Section 12:
 
 ```
   standard: chunk 500, overlap 50 (10%)
@@ -286,7 +399,7 @@ Rule of thumb: overlap = 10-15% of chunk size
 
 Halving the chunk instead changes the other side of the ledger: at chunk 250 with k = 5 the prompt carries `5 x 250 = 1250` tokens, half the context for the same number of retrieved units. Chunk size therefore sets two independent budgets at once — index size (through stride) and context spend (through `k x chunk_size`) — which is why the two are always tuned together.
 
-### 3.7 Header-Aware Chunking for Markdown and HTML
+### 6.7 Header-Aware Chunking for Markdown and HTML
 
 Sections 3.1-3.4 split a flat string. Real corpora are rarely flat: Markdown docs, API references and scraped HTML carry an explicit heading hierarchy that already marks the boundaries the other strategies are trying to guess. `RecursiveCharacterTextSplitter` cannot see it — its separators are `["\n\n", "\n", " ", ""]`, so `##` is just two characters, and a pipe table is a run of newline-separated lines the splitter will happily cut between the header row and the data rows, leaving orphan rows whose columns no longer have names.
 
@@ -311,68 +424,13 @@ sizer = RecursiveCharacterTextSplitter(chunk_size=1600, chunk_overlap=200)
 chunks = sizer.split_documents(sections)     # split_documents, not split_text
 ```
 
-Two things make the extra pass worth it. First, every chunk inherits its heading path as metadata for free — that is exactly the `section_title` that Pitfall 4 and the case study's metadata enrichment both demand, obtained without a parser of your own. Second, the path is a cheap embedding-time prefix: prepending `"Billing API > Refunds > Partial refunds: "` to the chunk text anchors an otherwise context-free paragraph ("This is not permitted after 90 days") to its topic, the same trick as the regulation-ID injection in Section 12.
+Two things make the extra pass worth it. First, every chunk inherits its heading path as metadata for free — that is exactly the `section_title` that Pitfall 4 and the case study's metadata enrichment both demand, obtained without a parser of your own. Second, the path is a cheap embedding-time prefix: prepending `"Billing API > Refunds > Partial refunds: "` to the chunk text anchors an otherwise context-free paragraph ("This is not permitted after 90 days") to its topic, the same trick as the regulation-ID injection in Section 14.
 
 HTML has the matching pair. `HTMLHeaderTextSplitter(headers_to_split_on=[("h1", "Header 1"), ("h2", "Header 2")])` is the direct analogue and reflects the tag hierarchy into metadata. `HTMLSemanticPreservingSplitter` goes further: its `elements_to_preserve` list (typically `["table", "ul", "ol"]`) keeps those elements whole and falls back to `RecursiveCharacterTextSplitter` only for oversized prose, so a chunk containing a large table may exceed the configured maximum on purpose — half a table, stripped of its header row, is worth less to a retriever than none.
 
 ---
 
-## 4. Architecture Diagram
-
-### Chunking Strategy Selection
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    DOC{"Document type?"}
-    CODE["Code\nAST-aware chunking\n(function / class level)"]
-    STRUCT["Structured (legal, API docs)\nSection / heading-based\n+ metadata for section title"]
-    MIXED["Mixed content (research, reports)\nHierarchical chunking\nparent: 600 tokens · child: 150 tokens"]
-    CONV["Conversational (chat logs)\nTurn-based chunking\n5–10 turns per chunk"]
-    PROSE["General prose\nSentence-boundary chunking\n300–500 tokens + 50-token overlap"]
-
-    DOC -->|"code"| CODE
-    DOC -->|"structured"| STRUCT
-    DOC -->|"mixed"| MIXED
-    DOC -->|"conversational"| CONV
-    DOC -->|"general prose"| PROSE
-
-    class DOC mathOp
-    class CODE,STRUCT,MIXED,CONV,PROSE train
-```
-
-### Hierarchical Chunk Architecture
-```
-Document: "Chapter 3: Neural Networks"
-    |
-    +-- Parent Chunk P1: Introduction paragraph (600 tokens)
-    |       |
-    |       +-- Child C1.1: "Neural networks are..." (150 tokens)
-    |       +-- Child C1.2: "The key building block..." (150 tokens)
-    |       +-- Child C1.3: "Training involves..." (150 tokens)
-    |
-    +-- Parent Chunk P2: Architecture section (600 tokens)
-            |
-            +-- Child C2.1: "Layers in a neural..." (150 tokens)
-            +-- Child C2.2: "Activation functions..." (150 tokens)
-
-Query: "What is backpropagation?"
-  → ANN search finds Child C1.3 (most relevant sentence-level)
-  → System returns Parent P1 (complete paragraph context)
-  → LLM sees full introduction paragraph, not just the sentence
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### LlamaIndex Hierarchical Chunking
 - `HierarchicalNodeParser`: creates document → sections → paragraphs → sentences hierarchy
@@ -391,7 +449,7 @@ Query: "What is backpropagation?"
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Strategy | Semantic Coherence | Precision | Complexity | Compute |
 |----------|-------------------|-----------|------------|---------|
@@ -410,7 +468,7 @@ Query: "What is backpropagation?"
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Semantic Chunking When:
 - Documents have distinct topic sections that shift throughout
@@ -430,7 +488,7 @@ Query: "What is backpropagation?"
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Ignoring document structure**
 Applying generic character-count chunking to structured documents (legal contracts, technical specifications) destroys the semantic boundaries that give each section its meaning.
@@ -497,7 +555,7 @@ Fix: For each candidate chunk size, compute recall@10 on 100 labeled (query, exp
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Chunking Type | Notes |
 |------|--------------|-------|
@@ -512,7 +570,7 @@ Fix: For each candidate chunk size, compute recall@10 on 100 labeled (query, exp
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: How would you choose the right chunk size for a RAG system?**
 A: Chunk size depends on three factors: query granularity, document structure, and embedding model capacity. For precise factual queries ("What is X's phone number?"), 100-300 tokens captures the specific fact without diluting the embedding. For explanation queries ("How does X work?"), 300-600 tokens preserves a complete paragraph of reasoning. For synthesis queries ("What are the key themes?"), 600-1500 tokens provides enough context. Practically: start with 300-500 tokens as a baseline, create a labeled eval set of 100 (query, expected_chunk) pairs, and measure recall@10 at chunk sizes of 100, 300, 500, 1000 tokens. The size with highest recall wins. Document type also matters: code chunks at function level, legal at clause level, regardless of token count.
@@ -567,7 +625,7 @@ A: It cannot see structure: RecursiveCharacterTextSplitter treats Markdown headi
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Always test empirically** — measure recall@10 at multiple chunk sizes on 100+ labeled (query, expected_chunk) pairs on your specific corpus; don't trust general guidelines.
 2. **Use sentence-boundary chunking as the baseline** — RecursiveCharacterTextSplitter is the right starting point for most document types; never use pure character-count chunking in production.
@@ -579,7 +637,7 @@ A: It cannot see structure: RecursiveCharacterTextSplitter treats Markdown headi
 
 ---
 
-## 12. Case Study
+## 14. Case Study
 
 ### Design a Chunking Pipeline for a Legal Compliance Knowledge Base
 

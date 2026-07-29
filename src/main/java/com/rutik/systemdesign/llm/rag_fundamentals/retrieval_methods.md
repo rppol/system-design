@@ -8,7 +8,7 @@ Each paradigm has systematic strengths and blind spots. Dense retrieval handles 
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Dense retrieval is a semantic search engine that understands meaning; sparse retrieval is Ctrl+F across all documents. Hybrid combines both.
 
@@ -16,11 +16,11 @@ Each paradigm has systematic strengths and blind spots. Dense retrieval handles 
 
 **Why it matters**: The choice of retrieval method determines which queries your RAG system can answer correctly. Dense-only fails for exact-match queries (proper nouns, IDs, codes); sparse-only fails for semantic queries (synonyms, paraphrases, multilingual). For production systems serving real users with diverse query types, hybrid retrieval is the correct default.
 
-**Key insight**: Hybrid retrieval via RRF is simple to implement (two separate retrievers + a rank fusion formula) and needs no additional model training. The size of the win is corpus- and query-mix dependent — Section 12's documentation corpus gained 17 points of recall@5 (54% to 71%) because a third of its queries were exact-identifier lookups — so measure it on your own query distribution rather than budgeting a fixed percentage.
+**Key insight**: Hybrid retrieval via RRF is simple to implement (two separate retrievers + a rank fusion formula) and needs no additional model training. The size of the win is corpus- and query-mix dependent — Section 14's documentation corpus gained 17 points of recall@5 (54% to 71%) because a third of its queries were exact-identifier lookups — so measure it on your own query distribution rather than budgeting a fixed percentage.
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Dense retrieval is semantic, not lexical**: A dense retriever compares meaning via embedding geometry, not words via term overlap.
 - **Sparse retrieval is exact and interpretable**: BM25 gives a well-defined score based on term frequency and document frequency; easy to debug.
@@ -30,9 +30,109 @@ Each paradigm has systematic strengths and blind spots. Dense retrieval handles 
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Dense Retrieval (Bi-Encoder + ANN)
+Retrieval methods divide into three layers that stack rather than compete: how a candidate is
+*scored*, how multiple scorers are *fused*, and how the surviving set is *constrained* before
+it reaches the LLM.
+
+### Layer 1 — scoring
+
+| Method | Matches on | Index | Strong at | Blind to |
+|--------|-----------|-------|-----------|----------|
+| Dense (bi-encoder + ANN) | Proximity in embedding space | HNSW / IVF graph over one vector per chunk | Paraphrase, synonymy, conceptual queries | Exact identifiers, rare tokens, unseen vocabulary |
+| Sparse lexical (BM25) | Term overlap, weighted by IDF and length-normalized | Inverted index | SKUs, error codes, regulation numbers, proper names | Any query that shares no terms with the document |
+| Learned sparse (ELSER, SPLADE) | Expanded term weights produced by a model | Inverted index | Keyword behaviour with some semantic expansion | Needs a model at index time; larger postings |
+
+Dense and sparse fail in orthogonal ways, which is the entire argument for combining them:
+dense misses the exact-match query, sparse misses the paraphrase, and neither failure predicts
+the other.
+
+### Layer 2 — fusion
+
+| Strategy | How it combines | Requires score normalization | Tuning surface |
+|----------|-----------------|------------------------------|----------------|
+| Reciprocal Rank Fusion (RRF) | Sums `1/(k + rank)` over each list, using ranks only | No — ranks are already comparable | Just the constant `k` |
+| Weighted score combination | Linear blend of the two scores, e.g. `alpha * dense + (1 - alpha) * sparse` | **Yes** — cosine and BM25 live on different scales | `alpha` per query mix, plus normalization bounds |
+| Two-stage (retrieve then rerank) | A cross-encoder rescores the fused candidate list | N/A — the reranker produces its own scale | Candidate depth `k` |
+
+RRF is the safe default precisely because it never touches raw scores: an unnormalized weighted
+blend lets whichever leg has the larger numeric range silently dominate. Weighted fusion is
+worth the extra care only when you have labeled queries to tune `alpha` against.
+
+### Layer 3 — constraining the result set
+
+- **Metadata filtering** narrows the candidate space by structured attributes (tenant, date,
+  document type). Pre-filtering restricts the ANN search itself and is correct for selective
+  filters; post-filtering scores first and drops after, and quietly returns fewer than `k`
+  results when the filter is aggressive.
+- **Diversity-aware selection (MMR)** re-picks the final `k` from a larger fetched pool,
+  penalizing each candidate by its similarity to what is already selected. It fixes the case
+  where five slots are filled by five near-copies of one paragraph — recall@5 looks perfect
+  while the prompt carries a single fact.
+
+### Choosing a combination
+
+Dense-only is defensible when every query is conceptual and infrastructure simplicity matters.
+BM25-only is right when every query is an identifier lookup and latency is unforgiving. In
+production the query distribution is almost always mixed, which makes hybrid the correct
+default — and the size of the win is a property of *your* query mix, not a constant, so measure
+it before budgeting for it. Add reranking on top when top-5 precision is the binding constraint,
+and MMR when redundancy rather than relevance is what wastes the context window.
+
+---
+
+## 5. Architecture Diagrams
+
+### Hybrid Retrieval Pipeline
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q([User Query]) --> TE["Text Embedding\n→ dense vector"]
+    Q --> BM["BM25 Tokenization\n→ token list + scoring"]
+    TE --> ANN["ANN Search (HNSW)\ntop-100 dense candidates"]
+    BM --> BSC["BM25 Scoring\ntop-100 sparse candidates"]
+    ANN --> RRF["RRF Fusion\nscore = Σ 1/(60+rank_dense)\n      + Σ 1/(60+rank_sparse)"]
+    BSC --> RRF
+    RRF --> MF["Metadata Filter\ndate · source · category"]
+    MF --> RNK["Reranker\ncross-encoder: top-100 → top-5"]
+    RNK --> GEN["LLM Generation"]
+    GEN --> ANS([Final Answer])
+
+    class Q,ANS io
+    class TE,BM,ANN,BSC,MF train
+    class RRF mathOp
+    class RNK,GEN frozen
+```
+
+### HNSW Graph Structure
+```
+Layer 2 (coarse):   A ----- E
+                    |
+Layer 1 (medium):   A - B - E - F
+                    |   |
+Layer 0 (fine):     A-B-C-D-E-F-G-H
+
+Search for Q:
+  Start at layer 2: navigate to closest node (E)
+  Drop to layer 1: navigate from E to closest (F)
+  Drop to layer 0: navigate from F to exact nearest neighbors
+  Result: approximate nearest neighbors in O(log N) steps
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Dense Retrieval (Bi-Encoder + ANN)
 
 **Bi-encoder architecture:**
 ```
@@ -77,7 +177,7 @@ def dense_retrieve(query: str, chunks: list[dict], top_k: int = 20):
     return [(chunks[i], float(scores[i])) for i in top_indices]
 ```
 
-### 3.2 Sparse Retrieval (BM25)
+### 6.2 Sparse Retrieval (BM25)
 
 BM25 (Best Match 25) is the industry-standard sparse retrieval formula:
 
@@ -110,7 +210,7 @@ Every part of BM25 exists to defeat a specific way of gaming plain term-frequenc
 | `t` | One term from the query; the score is a sum over all of them |
 | `tf(t,d)` | How many times `t` appears in this document |
 | `df(t)` | How many documents in the corpus contain `t` at all |
-| `N` | Corpus size — 120,000 chunks in the Section 12 case study |
+| `N` | Corpus size — 120,000 chunks in the Section 14 case study |
 | `IDF(t)` | Rarity weight, `log((N - df + 0.5)/(df + 0.5) + 1)`; big for rare terms |
 | `k1` | Saturation knob, 1.2-2.0; caps how much repeated occurrences can add |
 | `b` | Length-normalization knob, 0-1; how hard long documents are penalized |
@@ -166,7 +266,7 @@ Every part of BM25 exists to defeat a specific way of gaming plain term-frequenc
   document's score, purely for being 4x longer.
 ```
 
-**What breaks without `b`.** Set `b = 0` (Pitfall 2 in Section 8) and length drops out: a 1000-token chunk that mentions the term twice scores identically to a 100-token chunk that mentions it twice, even though the short chunk is far more *about* the term. Long documents then flood the top of every result list simply because length gives them more chances to contain any given query term.
+**What breaks without `b`.** Set `b = 0` (Pitfall 2 in Section 10) and length drops out: a 1000-token chunk that mentions the term twice scores identically to a 100-token chunk that mentions it twice, even though the short chunk is far more *about* the term. Long documents then flood the top of every result list simply because length gives them more chances to contain any given query term.
 
 BM25 strengths:
 ```
@@ -196,7 +296,7 @@ def sparse_retrieve(query: str, bm25: BM25Okapi,
     return [(chunks[i], float(scores[i])) for i in top_indices]
 ```
 
-### 3.3 Hybrid Retrieval with RRF
+### 6.3 Hybrid Retrieval with RRF
 
 Reciprocal Rank Fusion combines rankings from multiple retrieval systems:
 
@@ -291,7 +391,7 @@ def reciprocal_rank_fusion(
     return [(item["doc"], item["rrf"]) for item in sorted_docs]
 ```
 
-### 3.4 Weighted Score Combination (Alternative to RRF)
+### 6.4 Weighted Score Combination (Alternative to RRF)
 
 ```
 Linear combination:
@@ -378,7 +478,7 @@ set, because BM25's absolute range shifts with query length and term rarity.
 
 **Why min and max are recomputed per query.** BM25's absolute magnitude depends on query length and term rarity: a two-word query with a `df = 3` identifier can score 20+, while a ten-word conversational query over common terms tops out near 4. A global normalization constant fitted on one query distribution silently mis-scales the other. Cosine has no such problem — it is bounded in `[-1, 1]` by construction — which is the asymmetry that makes rank-based RRF the safer default.
 
-### 3.5 Metadata Filtering
+### 6.5 Metadata Filtering
 
 Scope retrieval to a subset of the index using structured metadata:
 
@@ -411,9 +511,9 @@ results = collection.query.near_vector(
 
 Metadata filtering is often more impactful than retrieval algorithm choice for precision-sensitive applications. A filter for `document_date >= 2024-01-01` eliminates all stale documents regardless of embedding similarity.
 
-### 3.6 Reading the Retrieval Metrics — Recall@K, MRR, NDCG@K
+### 6.6 Reading the Retrieval Metrics — Recall@K, MRR, NDCG@K
 
-Section 10 asks you to evaluate retrieval with Recall@K, MRR, and NDCG@K. They are three different questions asked of the same ranked list, and they routinely disagree — which is the point of computing all three.
+Section 12 asks you to evaluate retrieval with Recall@K, MRR, and NDCG@K. They are three different questions asked of the same ranked list, and they routinely disagree — which is the point of computing all three.
 
 ```
 Recall@K  = (relevant docs in top K) / (total relevant docs in corpus)
@@ -484,9 +584,9 @@ Now compute both systems:
 
 Three metrics, three different verdicts on the same pair of lists. Recall@10 calls them identical because both eventually surface everything. Recall@5 prefers A because A packs two hits into the window a RAG prompt actually reads. MRR prefers B because B's very first result is correct. NDCG@10 also prefers B, because its 1.0000 discount at position 1 outweighs A's three mid-list hits.
 
-For RAG the tie-break is structural: the LLM sees only the top-K chunks you paste into the prompt, and it sees them all at once — it does not care which was ranked first. That makes **Recall@5 the metric that predicts answer quality**, and it is why Section 10 tells you to fix retrieval before touching the generator when Recall@5 is under 80%. Use MRR when a human scans results top-down (search UI), and NDCG when graded relevance levels exist and ordering genuinely matters.
+For RAG the tie-break is structural: the LLM sees only the top-K chunks you paste into the prompt, and it sees them all at once — it does not care which was ranked first. That makes **Recall@5 the metric that predicts answer quality**, and it is why Section 12 tells you to fix retrieval before touching the generator when Recall@5 is under 80%. Use MRR when a human scans results top-down (search UI), and NDCG when graded relevance levels exist and ordering genuinely matters.
 
-### 3.7 Diversity-Aware Selection (MMR)
+### 6.7 Diversity-Aware Selection (MMR)
 
 Everything above ranks candidates independently, so nothing stops the top-5 from being five copies of one paragraph — the same passage duplicated by chunk overlap, boilerplate repeated across document versions, or one popular section that dominates its neighbourhood in embedding space. Recall@5 still reports five slots filled; the prompt actually carries one fact.
 
@@ -522,55 +622,7 @@ In LangChain this is `vectorstore.max_marginal_relevance_search(query, k=4, fetc
 
 ---
 
-## 4. Architecture Diagram
-
-### Hybrid Retrieval Pipeline
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 45, 'rankSpacing': 55}}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Q([User Query]) --> TE["Text Embedding\n→ dense vector"]
-    Q --> BM["BM25 Tokenization\n→ token list + scoring"]
-    TE --> ANN["ANN Search (HNSW)\ntop-100 dense candidates"]
-    BM --> BSC["BM25 Scoring\ntop-100 sparse candidates"]
-    ANN --> RRF["RRF Fusion\nscore = Σ 1/(60+rank_dense)\n      + Σ 1/(60+rank_sparse)"]
-    BSC --> RRF
-    RRF --> MF["Metadata Filter\ndate · source · category"]
-    MF --> RNK["Reranker\ncross-encoder: top-100 → top-5"]
-    RNK --> GEN["LLM Generation"]
-    GEN --> ANS([Final Answer])
-
-    class Q,ANS io
-    class TE,BM,ANN,BSC,MF train
-    class RRF mathOp
-    class RNK,GEN frozen
-```
-
-### HNSW Graph Structure
-```
-Layer 2 (coarse):   A ----- E
-                    |
-Layer 1 (medium):   A - B - E - F
-                    |   |
-Layer 0 (fine):     A-B-C-D-E-F-G-H
-
-Search for Q:
-  Start at layer 2: navigate to closest node (E)
-  Drop to layer 1: navigate from E to closest (F)
-  Drop to layer 0: navigate from F to exact nearest neighbors
-  Result: approximate nearest neighbors in O(log N) steps
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### Elasticsearch Hybrid Search (ELSER + BM25)
 - Elasticsearch combines BM25 (inverted index) with ELSER (learned sparse embedding)
@@ -593,7 +645,7 @@ Search for Q:
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Method | Recall (semantic) | Recall (keyword) | Latency | Setup Complexity | Index Size |
 |--------|------------------|-----------------|---------|-----------------|------------|
@@ -605,7 +657,7 @@ Search for Q:
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Dense-Only When:
 - All queries are semantic/conceptual (no exact keyword requirements)
@@ -624,7 +676,7 @@ Search for Q:
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Dense search on exact-match queries without BM25**
 A user queries for a specific regulation number ("21 CFR 820.30"). Dense search may return documents about medical device regulations in general, not this specific section.
@@ -652,7 +704,7 @@ Fix: Apply query preprocessing: lowercase, remove stopwords for BM25 (not dense)
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Type | Notes |
 |------|------|-------|
@@ -668,10 +720,10 @@ Fix: Apply query preprocessing: lowercase, remove stopwords for BM25 (not dense)
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is hybrid search and why does it outperform dense-only retrieval?**
-A: Hybrid search combines dense (vector/semantic) retrieval and sparse (BM25/keyword) retrieval. Dense retrieval handles semantic similarity — a query about "car purchase" retrieves documents about "automobile buying" because they're close in embedding space. BM25 handles exact keyword matching — product SKUs, regulation numbers, proper names that dense models don't reliably cluster. They have orthogonal failure modes: dense misses exact-match queries; BM25 misses semantic paraphrases. Combining via RRF beats either leg alone whenever the query mix contains both kinds, but the margin scales with how mixed that distribution is — Section 12 measured 54% to 71% recall@5 on a corpus with heavy identifier traffic, and a purely conversational corpus would gain far less. In practice, real user query distributions include both types — hybrid is the correct default for production.
+A: Hybrid search combines dense (vector/semantic) retrieval and sparse (BM25/keyword) retrieval. Dense retrieval handles semantic similarity — a query about "car purchase" retrieves documents about "automobile buying" because they're close in embedding space. BM25 handles exact keyword matching — product SKUs, regulation numbers, proper names that dense models don't reliably cluster. They have orthogonal failure modes: dense misses exact-match queries; BM25 misses semantic paraphrases. Combining via RRF beats either leg alone whenever the query mix contains both kinds, but the margin scales with how mixed that distribution is — Section 14 measured 54% to 71% recall@5 on a corpus with heavy identifier traffic, and a purely conversational corpus would gain far less. In practice, real user query distributions include both types — hybrid is the correct default for production.
 
 **Q: How does Reciprocal Rank Fusion work and why is it preferred over score combination?**
 A: RRF computes a fused score using position ranks: `score(doc) = Σ 1/(k + rank_i)` for each retriever i, where k=60 is a smoothing constant. Documents ranked high by multiple retrievers accumulate high RRF scores. RRF is preferred over weighted score combination for two reasons: (1) RRF is scale-invariant — dense scores (cosine similarity in [-1,1]) and BM25 scores (unbounded positive) are incomparable raw values; RRF uses only rank positions, avoiding the need for normalization; (2) RRF is parameter-free — no α weight to tune; it's robust to the score distributions of each retriever. Linear score combination requires careful per-dataset α tuning and normalization.
@@ -720,7 +772,7 @@ A: Apply Maximal Marginal Relevance, which picks each next chunk by relevance mi
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Default to hybrid retrieval in production** — pure dense or pure BM25 consistently underperforms hybrid on diverse real-world query distributions.
 2. **Use RRF as the fusion method** — scale-invariant, parameter-free, and works well out of the box.
@@ -732,7 +784,7 @@ A: Apply Maximal Marginal Relevance, which picks each next chunk by relevance mi
 
 ---
 
-## 12. Case Study
+## 14. Case Study
 
 ### Building a Hybrid Retrieval System for a Technical Documentation Platform
 

@@ -8,7 +8,7 @@ The choice of embedding model determines what "semantically similar" means in yo
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: An embedding model is a translator that converts text meaning into a geometric space — semantically similar texts land near each other, regardless of the words used.
 
@@ -20,7 +20,7 @@ The choice of embedding model determines what "semantically similar" means in yo
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Dimensionality vs. quality tradeoff**: Higher-dimensional embeddings (1536d vs. 768d) capture more nuance but cost more to store and search.
 - **Training objective determines alignment**: Models trained on query-document pairs (MSMARCO, natural questions) are better for RAG than models trained on semantic textual similarity (STS) tasks.
@@ -30,9 +30,161 @@ The choice of embedding model determines what "semantically similar" means in yo
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Sentence-Transformers Architecture
+Nearly every model in production retrieval is the same architecture — a transformer encoder
+whose token vectors are pooled into one vector per text, trained with a contrastive objective.
+The models differ along four independent axes, and a deployment decision is a choice on each.
+
+### Axis 1 — where it runs
+
+| Type | Examples | What you gain | What you give up |
+|------|----------|---------------|------------------|
+| Managed API | `text-embedding-3-small/large`, Cohere `embed-v4.0`, Gemini Embedding, Voyage | No GPU to operate; long context; multilingual out of the box | Per-token cost that dominates at volume; text leaves your perimeter; model can change under you |
+| Self-hosted open weights | BGE family, E5, Qwen3-Embedding, nomic-embed | Free per token, pinned weights, data stays in-house, fine-tunable | GPU capacity and serving to run; you own the upgrades |
+| On-device / edge | `embeddinggemma-300m` | Runs with no network at all | Smallest quality budget of the three |
+
+Quality does not track hosting: on MTEB Retrieval the self-hosted BGE models sit above
+`text-embedding-3-small`, whose appeal is the managed endpoint and the 8k context window
+rather than raw retrieval score.
+
+### Axis 2 — how the vector is produced
+
+- **Pooling**: mean pooling over token vectors (the sentence-transformers default) versus CLS
+  pooling. It is a property of how the model was trained, not a runtime choice — using the
+  wrong one silently degrades every score.
+- **Normalization**: unit-normalized vectors make cosine similarity and dot product the same
+  operation, so normalize once at index time rather than on every comparison.
+- **Instruction conditioning**: the newer open-weights models expect a task prefix and
+  distinguish query text from document text — Qwen3-Embedding wants `Instruct: ...\nQuery:`,
+  EmbeddingGemma wants `task: search result | query:`, nomic wants
+  `search_query:` / `search_document:`. Omitting the prefix, or applying the query prefix to
+  documents, costs measurable recall.
+
+### Axis 3 — dimensionality
+
+Older models ship one fixed dimension; MRL-trained models (the `text-embedding-3` family,
+Qwen3-Embedding, `embed-v4.0`, `voyage-4`, EmbeddingGemma) are trained so that a truncated
+prefix of the vector is still a usable embedding. Dimension therefore becomes a deployment
+knob rather than a model property, and it is a linear multiplier on index bytes, RAM, and
+per-comparison FLOPs. Truncate when storage dominates; keep full width when the last points of
+recall matter.
+
+### Axis 4 — specialization
+
+| Variant | Reach for it when |
+|---------|-------------------|
+| General-purpose English | The corpus is English prose and MTEB Retrieval predicts your task well |
+| Multilingual | Documents or queries span languages and a single shared space is required |
+| Long context (8k-128k) | Chunks legitimately exceed the 512-token ceiling of the older encoders |
+| Multimodal | Images or PDFs must land in the same space as text |
+| Domain fine-tuned | A general model's recall@10 on your own eval set is under 70% and the vocabulary is specialized |
+
+The axes are independent, which is what makes selection tractable: fix the hosting constraint
+first (privacy, budget, ops capacity), then the specialization the corpus demands, and only
+then trade dimension against index cost. Whatever the leaderboard says, the deciding number is
+recall on your own labeled queries — and swapping models means re-embedding the entire corpus,
+so treat the choice as durable.
+
+---
+
+## 5. Architecture Diagrams
+
+### Embedding Model in RAG Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph IDX ["Index Time"]
+        CHUNKS["Document chunks"]
+        EMB_I["Embedding model\nBAAI/bge-base or text-embedding-3-small"]
+        VECS["Dense vectors\n768-dim or 1536-dim, L2-normalised"]
+        VDB[("Vector Database\nHNSW index + metadata")]
+        CHUNKS --> EMB_I --> VECS --> VDB
+    end
+
+    subgraph QRY ["Query Time"]
+        Q["User query"]
+        EMB_Q["Same embedding model\n(CRITICAL: identical model at query time)"]
+        QVEC["Query vector\n(same dimensionality)"]
+        ANN["ANN search\n→ top-100 candidate chunks"]
+        RERANK["Reranker\n→ top-5 final chunks"]
+        LLM["LLM generation"]
+        Q --> EMB_Q --> QVEC --> ANN --> RERANK --> LLM
+    end
+
+    VDB --> ANN
+
+    class CHUNKS,VECS,QVEC io
+    class Q req
+    class EMB_I,EMB_Q,LLM base
+    class ANN,RERANK mathOp
+    class VDB frozen
+```
+
+Using a different embedding model at query time than at index time is the most common RAG production bug — vectors live in incompatible spaces and similarity scores are meaningless. The reranker stage that narrows top-100 candidates to top-5 is covered in [reranking.md](reranking.md).
+
+### Matryoshka Representation Learning (MRL)
+```
+Full vector:         [d1, d2, d3, ..., d3072]  → 3072-dim embedding
+
+Truncated to 512d:   [d1, d2, d3, ..., d512]   → works well (MRL training)
+Truncated to 256d:   [d1, d2, d3, ..., d256]   → still reasonable
+Truncated to 64d:    [d1, d2, d3, ..., d64]    → lower quality but fast
+
+MRL models (text-embedding-3-small/large, Qwen3-Embedding, gemini-embedding-2,
+            Cohere embed-v4.0, voyage-4-large, EmbeddingGemma, nomic-embed-text):
+  Trained so first N dimensions are meaningful at any N
+  Enables adaptive dimensionality: use 512d for fast retrieval,
+  3072d for final reranking
+  Storage optimization: 6× smaller index at 512d vs 3072d, ~5% quality loss
+```
+
+**What the formula is telling you.** "Truncate to `k` dimensions" is just `v[:k]` — keep the first `k` numbers, discard the rest — and the saving is the plain ratio `d_full / k`. MRL training is what makes that legal: the model was optimized so the leading dimensions already carry the most information, rather than meaning being smeared evenly across all 3072.
+
+| Symbol | What it is |
+|--------|------------|
+| `d_full` | The model's native dimensionality, 3072 for text-embedding-3-large |
+| `k` | The prefix length you keep — 512, 256, 64 |
+| `v[:k]` | The truncation itself; no projection matrix, no retraining, just a slice |
+| `d_full / k` | Storage and distance-computation saving factor |
+| quality retention | Recall@10 at `k` divided by recall@10 at `d_full` |
+
+**Walk one example.** The 10M-chunk index, truncating a 3072-dim model:
+
+```
+  k      bytes/vec        index size (10M)   saving vs 3072d
+  ------------------------------------------------------------
+  3072   3072 x 4 = 12288      122.88 GB     1.0x   (baseline)
+  1024   1024 x 4 =  4096       40.96 GB     3.0x
+   512    512 x 4 =  2048       20.48 GB     6.0x   <- the "6x" above
+   256    256 x 4 =  1024       10.24 GB    12.0x
+    64     64 x 4 =   256        2.56 GB    48.0x
+
+  Choosing k = 512: 122.88 - 20.48 = 102.40 GB of RAM freed, for a quality
+  cost of ~5% of recall@10. A 6x index reduction for a 5% quality dip is
+  the trade almost every production system takes.
+```
+
+Dimension is only one of the two levers on that `N x d x 4` product. The other is the `4` — the bytes per component — which scalar (int8) and binary quantization cut to 1 byte and 1 bit respectively, independently of `d` and stackable with MRL truncation. The mechanics, the recall cost, and the rescoring pass that recovers it live next door in [embeddings and similarity search](../embeddings_and_similarity_search/README.md).
+
+Distance computation shrinks by the same factor, because a dot product over `k` dimensions is `k` multiply-adds: at `k = 512` each comparison does 512 instead of 3072, so the ANN scan is roughly 6x cheaper in FLOPs as well as 6x smaller in bytes. This is the arithmetic behind the two-speed pattern above — scan at 512d, then rescore only the survivors at 3072d.
+
+The e-commerce case study in Section 14 is the same formula on a different corpus: 8M SKUs at 1024d is `1024 x 4 x 8e6 = 32.77 GB`, and truncating to 512d gives `512 x 4 x 8e6 = 16.38 GB` — the 32GB-to-16GB halving it reports, bought for 2.3% recall@10.
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Sentence-Transformers Architecture
 
 The dominant architecture for RAG embeddings:
 
@@ -131,9 +283,9 @@ The reason this matters is that the denominator is the *only* thing protecting y
   a . b = 3x6 + 4x8   = 50      cos = 50 / (5 x 10)  = 1.0   (identical direction)
 ```
 
-**Why the denominator has to be there.** Without it, embedding magnitude — which for most pooling schemes drifts with text length and token count — leaks into the score. That is Pitfall 3 in Section 8, and the fix is to divide *once* at index time rather than on every one of the millions of comparisons an ANN search performs. Normalizing up front makes the expensive-to-compute cosine and the cheap-to-compute dot product the same operation.
+**Why the denominator has to be there.** Without it, embedding magnitude — which for most pooling schemes drifts with text length and token count — leaks into the score. That is Pitfall 3 in Section 10, and the fix is to divide *once* at index time rather than on every one of the millions of comparisons an ANN search performs. Normalizing up front makes the expensive-to-compute cosine and the cheap-to-compute dot product the same operation.
 
-### 3.2 Major Embedding Models Compared
+### 6.2 Major Embedding Models Compared
 
 ```
 Model                          Dim    Context  MTEB Avg  Use Case
@@ -217,10 +369,10 @@ The reason this is worth memorising is that dimension is the one model attribute
   quality bought      :  55.4  -  53.3  = 2.1 MTEB Retrieval points
 
   So the last 2.1 points of retrieval score cost 4x the index. Whether that
-  is a good trade is exactly the question Section 6's table exists to answer.
+  is a good trade is exactly the question Section 8's table exists to answer.
 ```
 
-### 3.3 OpenAI Embedding API
+### 6.3 OpenAI Embedding API
 
 ```python
 from openai import OpenAI
@@ -290,7 +442,7 @@ def embed_batch(texts: list[str], model: str = "text-embedding-3-small",
 
 **Why the round trip is the whole story.** At 10,000 unbatched calls, 10,000 x 100 ms = 1000 s of the 1005 s total is network latency; only 5 s is actual embedding. Batching amortizes that fixed cost across 100 or 256 inputs, which is why the curve flattens hard after batch sizes of roughly 100 — beyond that, `batch_size x per_item` starts to dominate and further batching buys little.
 
-### 3.4 Open Source Embedding with sentence-transformers
+### 6.4 Open Source Embedding with sentence-transformers
 
 ```python
 from sentence_transformers import SentenceTransformer
@@ -325,7 +477,7 @@ doc_embedding = model.encode_document(chunk_text, normalize_embeddings=True)
 # nomic-embed-text-v2-moe, each of which wants a different prefix string.
 ```
 
-### 3.5 MTEB Benchmark
+### 6.5 MTEB Benchmark
 
 MTEB (Massive Text Embedding Benchmark) evaluates models across 8 task types spanning 58 datasets and 112 languages (Muennighoff et al., 2022):
 ```
@@ -352,7 +504,7 @@ Key retrieval datasets in MTEB:
   TREC-COVID: Medical; COVID-19 literature
 ```
 
-### 3.6 Domain-Specific Fine-Tuning of Embedding Models
+### 6.6 Domain-Specific Fine-Tuning of Embedding Models
 
 ```python
 from sentence_transformers import (
@@ -400,101 +552,7 @@ trainer.train()
 
 ---
 
-## 4. Architecture Diagram
-
-### Embedding Model in RAG Pipeline
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    subgraph IDX ["Index Time"]
-        CHUNKS["Document chunks"]
-        EMB_I["Embedding model\nBAAI/bge-base or text-embedding-3-small"]
-        VECS["Dense vectors\n768-dim or 1536-dim, L2-normalised"]
-        VDB[("Vector Database\nHNSW index + metadata")]
-        CHUNKS --> EMB_I --> VECS --> VDB
-    end
-
-    subgraph QRY ["Query Time"]
-        Q["User query"]
-        EMB_Q["Same embedding model\n(CRITICAL: identical model at query time)"]
-        QVEC["Query vector\n(same dimensionality)"]
-        ANN["ANN search\n→ top-100 candidate chunks"]
-        RERANK["Reranker\n→ top-5 final chunks"]
-        LLM["LLM generation"]
-        Q --> EMB_Q --> QVEC --> ANN --> RERANK --> LLM
-    end
-
-    VDB --> ANN
-
-    class CHUNKS,VECS,QVEC io
-    class Q req
-    class EMB_I,EMB_Q,LLM base
-    class ANN,RERANK mathOp
-    class VDB frozen
-```
-
-Using a different embedding model at query time than at index time is the most common RAG production bug — vectors live in incompatible spaces and similarity scores are meaningless. The reranker stage that narrows top-100 candidates to top-5 is covered in [reranking.md](reranking.md).
-
-### Matryoshka Representation Learning (MRL)
-```
-Full vector:         [d1, d2, d3, ..., d3072]  → 3072-dim embedding
-
-Truncated to 512d:   [d1, d2, d3, ..., d512]   → works well (MRL training)
-Truncated to 256d:   [d1, d2, d3, ..., d256]   → still reasonable
-Truncated to 64d:    [d1, d2, d3, ..., d64]    → lower quality but fast
-
-MRL models (text-embedding-3-small/large, Qwen3-Embedding, gemini-embedding-2,
-            Cohere embed-v4.0, voyage-4-large, EmbeddingGemma, nomic-embed-text):
-  Trained so first N dimensions are meaningful at any N
-  Enables adaptive dimensionality: use 512d for fast retrieval,
-  3072d for final reranking
-  Storage optimization: 6× smaller index at 512d vs 3072d, ~5% quality loss
-```
-
-**What the formula is telling you.** "Truncate to `k` dimensions" is just `v[:k]` — keep the first `k` numbers, discard the rest — and the saving is the plain ratio `d_full / k`. MRL training is what makes that legal: the model was optimized so the leading dimensions already carry the most information, rather than meaning being smeared evenly across all 3072.
-
-| Symbol | What it is |
-|--------|------------|
-| `d_full` | The model's native dimensionality, 3072 for text-embedding-3-large |
-| `k` | The prefix length you keep — 512, 256, 64 |
-| `v[:k]` | The truncation itself; no projection matrix, no retraining, just a slice |
-| `d_full / k` | Storage and distance-computation saving factor |
-| quality retention | Recall@10 at `k` divided by recall@10 at `d_full` |
-
-**Walk one example.** The 10M-chunk index, truncating a 3072-dim model:
-
-```
-  k      bytes/vec        index size (10M)   saving vs 3072d
-  ------------------------------------------------------------
-  3072   3072 x 4 = 12288      122.88 GB     1.0x   (baseline)
-  1024   1024 x 4 =  4096       40.96 GB     3.0x
-   512    512 x 4 =  2048       20.48 GB     6.0x   <- the "6x" above
-   256    256 x 4 =  1024       10.24 GB    12.0x
-    64     64 x 4 =   256        2.56 GB    48.0x
-
-  Choosing k = 512: 122.88 - 20.48 = 102.40 GB of RAM freed, for a quality
-  cost of ~5% of recall@10. A 6x index reduction for a 5% quality dip is
-  the trade almost every production system takes.
-```
-
-Dimension is only one of the two levers on that `N x d x 4` product. The other is the `4` — the bytes per component — which scalar (int8) and binary quantization cut to 1 byte and 1 bit respectively, independently of `d` and stackable with MRL truncation. The mechanics, the recall cost, and the rescoring pass that recovers it live next door in [embeddings and similarity search](../embeddings_and_similarity_search/README.md).
-
-Distance computation shrinks by the same factor, because a dot product over `k` dimensions is `k` multiply-adds: at `k = 512` each comparison does 512 instead of 3072, so the ANN scan is roughly 6x cheaper in FLOPs as well as 6x smaller in bytes. This is the arithmetic behind the two-speed pattern above — scan at 512d, then rescore only the survivors at 3072d.
-
-The e-commerce case study in Section 12 is the same formula on a different corpus: 8M SKUs at 1024d is `1024 x 4 x 8e6 = 32.77 GB`, and truncating to 512d gives `512 x 4 x 8e6 = 16.38 GB` — the 32GB-to-16GB halving it reports, bought for 2.3% recall@10.
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### OpenAI Embeddings API (the managed option, as used for file-retrieval features)
 - text-embedding-3-small is the default managed model; text-embedding-3-large is the
@@ -514,7 +572,7 @@ The e-commerce case study in Section 12 is the same formula on a different corpu
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Model | MTEB Retrieval | Dimensions | Context | Hosting | Cost |
 |-------|---------------|------------|---------|---------|------|
@@ -538,7 +596,7 @@ restructured, so re-check the live leaderboard before quoting a ranking.
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use OpenAI text-embedding-3-small When:
 - Team cannot manage GPU infrastructure
@@ -559,7 +617,7 @@ restructured, so re-check the live leaderboard before quoting a ranking.
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Using different models for indexing and querying**
 If documents are indexed with text-embedding-3-large truncated to 1536 dimensions but queries are embedded with text-embedding-3-small, the vectors have identical shape and are still in different semantic spaces — cosine similarity is meaningless and nothing errors.
@@ -587,7 +645,7 @@ Fix: Batch up to 2048 inputs per OpenAI API call (or 256 per sentence-transforme
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -606,7 +664,7 @@ Fix: Batch up to 2048 inputs per OpenAI API call (or 256 per sentence-transforme
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: How do you select an embedding model for a RAG system?**
 A: Selection process in four steps. First, check MTEB Retrieval scores — filter to the top-10 models by retrieval task performance (not average MTEB, which includes STS and classification). Second, evaluate on your domain: build a 50-200 (query, expected_chunk) labeled eval set from your actual corpus and measure recall@10 for each model candidate. The domain-specific recall often differs from MTEB Retrieval. Third, consider operational constraints: API models (OpenAI, Cohere) for teams without GPU; self-hosted (BGE, nomic) for budget-sensitive or privacy-sensitive deployments. Fourth, consider context window: if your chunks exceed 512 tokens, you need a longer-context model (bge-m3, nomic-embed-text-v1.5, text-embedding-3).
@@ -655,7 +713,7 @@ A: Higher dimensions capture more semantic nuance but increase storage and ANN s
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Evaluate on your domain** — MTEB Retrieval scores are a starting point; always measure recall@10 on your specific corpus and query distribution before selecting a model.
 2. **Match context window to chunk size** — ensure chunk size (in tokens) is below the embedding model's limit; check with the model's tokenizer, not a character estimate.
@@ -667,7 +725,7 @@ A: Higher dimensions capture more semantic nuance but increase storage and ANN s
 
 ---
 
-## 12. Case Study
+## 14. Case Study
 
 ### Building a Multilingual Embedding Pipeline for Global E-Commerce Product Search
 

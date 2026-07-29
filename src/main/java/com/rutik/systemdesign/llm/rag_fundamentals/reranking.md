@@ -8,19 +8,19 @@ Initial retrieval via bi-encoders encodes queries and documents independently �
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Retrieval is a talent scout who screens hundreds of candidates quickly; the reranker is the expert interviewer who thoroughly evaluates the top 100 and picks the best 5.
 
 **Mental model**: A bi-encoder encodes the query and each document separately into vectors, then compares vectors by cosine similarity. This is fast (compute once, compare with dot product) but misses fine-grained interaction — "What is the capital of France?" and a document saying "Paris is called the 'City of Light' and serves as France's political center" may have moderate cosine similarity even though the document perfectly answers the question. A cross-encoder concatenates query+document as a single input and produces a direct relevance score using full attention across both — it can detect that "political center" answers "capital" and score this document higher.
 
-**Why it matters**: Adding a cross-encoder reranker to an existing retrieval pipeline is usually the largest single precision win available — Section 12's case study moved precision@5 from 51% to 81% for a ~95ms latency cost. The starting point varies enormously by corpus, so measure your own baseline rather than assuming a headline range; the reranker is nonetheless the single highest-ROI addition to most production RAG pipelines.
+**Why it matters**: Adding a cross-encoder reranker to an existing retrieval pipeline is usually the largest single precision win available — Section 14's case study moved precision@5 from 51% to 81% for a ~95ms latency cost. The starting point varies enormously by corpus, so measure your own baseline rather than assuming a headline range; the reranker is nonetheless the single highest-ROI addition to most production RAG pipelines.
 
 **Key insight**: The two-stage retrieval pipeline (bi-encoder for recall, cross-encoder for precision) is the correct separation of concerns — each component does what it's architecturally suited for.
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Bi-encoder vs. cross-encoder tradeoff**: Bi-encoder is fast (separate encoding) but imprecise; cross-encoder is slow (joint encoding) but highly accurate.
 - **Reranking operates on a candidate pool, not the full index**: Cross-encoders can only evaluate hundreds of candidates (not millions) within reasonable latency.
@@ -30,9 +30,108 @@ Initial retrieval via bi-encoders encodes queries and documents independently �
 
 ---
 
-## 3. How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
 
-### 3.1 Bi-Encoder Architecture (First Stage)
+Every reranking architecture answers the same question — how much of the query is allowed to
+interact with how much of the document, and at what point in time. That single choice sets
+latency, quality, and index size simultaneously.
+
+### The interaction spectrum
+
+| Architecture | Query-document interaction | When the document is encoded | Latency (100 candidates) | Index cost |
+|--------------|---------------------------|------------------------------|--------------------------|------------|
+| Bi-encoder (first stage, no reranker) | None — two independent vectors, one dot product | Offline, at index time | ~0 ms (already paid) | One vector per chunk |
+| Late interaction (ColBERT) | Token-to-token MaxSim, no cross-attention | Offline, at index time (per token) | ~5 ms | Large — one 128-d vector per document token |
+| Cross-encoder, self-hosted (BGE-reranker-base/large) | Full self-attention over query and document jointly | At query time, per candidate | ~30 ms base / ~80 ms large | None beyond the first stage |
+| Cross-encoder, managed API (Cohere Rerank) | Full self-attention, vendor-hosted | At query time, per candidate | ~100 ms plus network | None |
+| A general LLM prompted to rank | Full attention plus generation | At query time | ~500 ms | None |
+
+Read the table top to bottom as buying precision with latency and index bytes. The bi-encoder
+cannot see the query and document together at all, which is precisely the failure reranking
+exists to fix; the cross-encoder sees everything and therefore cannot be pre-computed, which is
+precisely why it can never be the first stage over a large corpus.
+
+### Late interaction as the middle ground
+
+ColBERT is the deliberate compromise: documents are still encoded offline like a bi-encoder,
+but as one vector per token rather than one per chunk, so query time is a cheap MaxSim matrix
+operation instead of a forward pass. Quality lands between bi-encoder and cross-encoder, and
+the bill arrives as index size rather than latency — which makes it the right pick when the
+latency budget is hard and the corpus is small enough to afford the storage.
+
+### Hosting and specialization
+
+- **Self-hosted open weights** (BGE-reranker-large, BGE-reranker-v2-m3, FlashRank) — fixed GPU
+  cost independent of query volume, weights pinned, fine-tunable on your domain.
+- **Managed API** (Cohere Rerank, Jina Reranker) — no GPU to operate, strongest multilingual
+  quality, priced per search rather than per pair, so cost is flat in `k` but linear in traffic.
+- **Multilingual, long-document, and multimodal variants** exist across both, and matter
+  because most cross-encoders truncate — a reranker whose document limit is below your chunk
+  size scores only the prefix it can see.
+
+### Where reranking sits in the pipeline
+
+The architecture choice is inseparable from the two-stage design it lives in. The first stage
+optimizes recall over the whole corpus and hands up `k` candidates; the reranker optimizes
+precision over those `k` only. It reorders — it can never recover a document the retriever
+failed to fetch, so recall@k of the first stage is the hard ceiling on everything downstream.
+Scores from different rerankers are not interchangeable, so any threshold you tune is tied to
+the specific model and must be recalibrated on labeled data whenever the model changes.
+
+---
+
+## 5. Architecture Diagrams
+
+### Two-Stage Retrieval Pipeline
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q([User Query]) --> S1["Stage 1: Bi-Encoder Retrieval\nQuery → embedding → ANN search\nReturns: top-100 candidates\nLatency: ~20–50ms"]
+    S1 --> S2["Stage 2: Cross-Encoder Reranking\n(CLS) query (SEP) document (SEP) → score\nReturns: top-5 reranked\nLatency: ~50–100ms"]
+    S2 --> GEN["LLM Generation\nuses only top-5 documents\ntotal retrieval: ~150ms"]
+    GEN --> ANS([Answer])
+
+    class Q,ANS io
+    class S1 train
+    class S2 frozen
+    class GEN base
+```
+
+### Bi-Encoder vs. Cross-Encoder Comparison
+```
+Bi-Encoder:
+  Query ─[BERT]─> q_vec ─────┐
+                              ├─> cosine_sim ─> score
+  Doc   ─[BERT]─> d_vec ─────┘
+  (separate encoding; interaction is vector dot product only)
+
+Cross-Encoder:
+  [CLS] Q1 Q2 Q3 [SEP] D1 D2 D3 D4 [SEP]
+    └─────────────────────────────────────┘
+              Full self-attention
+                     |
+                 [Dense] ─> relevance_score
+  (joint encoding; every query token attends to every document token)
+
+ColBERT (Late Interaction):
+  [q1 q2 q3]  pre-compute query tokens at query time
+  [d1 d2 d3]  pre-compute document tokens at index time
+  Score: Σ_i max_j(qi · dj)  ← MaxSim operation
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 Bi-Encoder Architecture (First Stage)
 
 ```
 Bi-encoder:
@@ -52,7 +151,7 @@ Models:
   nomic-embed-text-v1.5  (768d, 8192 token context)
 ```
 
-### 3.2 Cross-Encoder Architecture (Reranker)
+### 6.2 Cross-Encoder Architecture (Reranker)
 
 ```
 Cross-encoder:
@@ -81,9 +180,9 @@ That single structural difference — precomputable versus not — is the entire
 | `L` | Sequence length of the concatenated query + document, capped at 512 here |
 | `L^2` | Self-attention's cost: every token attends to every other token |
 | per-pair latency | Amortized wall-clock per `(query, doc)` pair in a batched pass — 0.8 ms for BGE-reranker-large (~560M params) on an A10G |
-| `N` | Corpus size — 45,000 chunks in Section 12, 1,000,000 in the "why not first stage" argument |
+| `N` | Corpus size — 45,000 chunks in Section 14, 1,000,000 in the "why not first stage" argument |
 
-**Walk one example — why it cannot be the retriever.** Section 10's 1M-document corpus, at the 0.8 ms/pair implied by the table in Section 6 (100 candidates in ~80 ms):
+**Walk one example — why it cannot be the retriever.** Section 12's 1M-document corpus, at the 0.8 ms/pair implied by the table in Section 8 (100 candidates in ~80 ms):
 
 ```
   cross-encoder over the full corpus
@@ -97,7 +196,7 @@ That single structural difference — precomputable versus not — is the entire
   ratio: 800 s / 0.04 s = 20,000x
 ```
 
-**Walk one example — why batching is not optional.** Pitfall 6 in Section 8, on 100 candidates:
+**Walk one example — why batching is not optional.** Pitfall 6 in Section 10, on 100 candidates:
 
 ```
   batched  : one padded forward pass over 100 pairs      =  80 ms
@@ -109,7 +208,7 @@ That single structural difference — precomputable versus not — is the entire
 
 The `L^2` term is why Pitfall 2 matters as much as it does: doubling chunk length from 256 to 512 tokens does not double reranker cost, it roughly quadruples the attention work — so oversized chunks are punished twice, once by truncation and once by latency.
 
-### 3.3 Reranking Implementation
+### 6.3 Reranking Implementation
 
 ```python
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -155,13 +254,13 @@ class CrossEncoderReranker:
 | `k` | Candidates handed to the reranker — `len(documents)` in the code above |
 | `per_pair_ms` | Amortized cost of one `(query, doc)` pair; 0.8 ms for BGE-reranker-large on an A10G |
 | `top_k` | Survivors passed to the LLM; costs nothing, it is a slice of an already-computed list |
-| SLO | End-to-end budget the whole pipeline must fit in — 2000 ms in Section 12 |
+| SLO | End-to-end budget the whole pipeline must fit in — 2000 ms in Section 14 |
 | slack | `SLO - (everything that is not reranking)`; the real ceiling on `k` |
 
 **Walk the k sweep.** At 0.8 ms/pair:
 
 ```
-  k      rerank latency    what it buys (from Section 10's guidance)
+  k      rerank latency    what it buys (from Section 12's guidance)
   ---------------------------------------------------------------------
    10       8 ms           barely reorders retrieval; near-zero gain
    20      16 ms           adequate when retriever recall@20 > 90%
@@ -170,7 +269,7 @@ class CrossEncoderReranker:
   200     160 ms           diminishing; mostly buys latency
 ```
 
-**Walk the budget.** The 2-second SLO from Section 10, laid out end to end:
+**Walk the budget.** The 2-second SLO from Section 12, laid out end to end:
 
 ```
   embedding the query          10 ms
@@ -184,15 +283,15 @@ class CrossEncoderReranker:
   Everything except reranking is fixed at 1640 ms, so the true ceiling is
     k_max = (2000 - 1640) / 0.8 = 450 candidates
 
-  You could rerank 450 candidates and still hit the SLO -- but Section 10
+  You could rerank 450 candidates and still hit the SLO -- but Section 12
   says the curve is flat past 100, so the extra 350 pairs (280 ms) would
   buy under 2% recall. The budget is not the binding constraint here; the
   diminishing-returns curve is.
 ```
 
-**Where the linearity breaks.** `k` also multiplies cost on managed APIs. Cohere Rerank bills `$2/1000 queries` regardless of `k`, so `k = 100` costs `$0.002` per query, or `$0.00002` per pair — at Section 12's 100,000 queries/day that is `$200/day`. Self-hosting BGE-reranker-large costs roughly `$15/day` in GPU time for the same volume, a `200/15 = 13.3x` reduction, which is exactly the tradeoff the case study's alternatives section weighs.
+**Where the linearity breaks.** `k` also multiplies cost on managed APIs. Cohere Rerank bills `$2/1000 queries` regardless of `k`, so `k = 100` costs `$0.002` per query, or `$0.00002` per pair — at Section 14's 100,000 queries/day that is `$200/day`. Self-hosting BGE-reranker-large costs roughly `$15/day` in GPU time for the same volume, a `200/15 = 13.3x` reduction, which is exactly the tradeoff the case study's alternatives section weighs.
 
-### 3.4 ColBERT: Late Interaction
+### 6.4 ColBERT: Late Interaction
 
 ColBERT is a hybrid approach between bi-encoder (independent encoding) and cross-encoder (joint encoding):
 
@@ -264,7 +363,7 @@ query token finds its best lexical-semantic counterpart instead of being average
 
 The score itself scales with query length, not with quality: the grid above sums three row maxima to `0.88 + 0.40 + 0.91 = 2.19`, but a six-token query would sum six maxima and land near 4-5 for equally good matching. ColBERT scores are therefore comparable **across documents for one query** and meaningless across queries — the same caveat that makes cross-encoder scores unsafe as confidence values.
 
-### 3.5 Cohere Rerank API
+### 6.5 Cohere Rerank API
 
 ```python
 import cohere
@@ -306,11 +405,11 @@ The three architectures in this module emit numbers that look comparable and are
 | `logit` | Raw cross-encoder output before squashing; unbounded, trained by ranking loss |
 | `sigmoid(x)` | `1/(1 + e^-x)` — squashes to `(0, 1)` for readability, not for calibration |
 | `m` | Query token count; MaxSim's implicit upper bound and its scale problem |
-| threshold | A cutoff applied to a score, e.g. Cohere's `0.30` in Section 12 |
+| threshold | A cutoff applied to a score, e.g. Cohere's `0.30` in Section 14 |
 
-**Why `sigmoid` output is not a probability.** The model is trained to rank — its loss only ever compares a positive against a negative for the *same* query. Nothing in that objective forces `0.8` to mean "relevant 80% of the time." Two consequences follow directly. First, a fixed threshold must be calibrated per deployment on labeled data, which is exactly what Section 12 does when it settles on `0.30` (89% answer precision) rather than `0.40` (94% precision but 28% of queries deflected to humans). Second, scores from different reranker models are never interchangeable — swapping BGE-reranker-large for Cohere invalidates every threshold you tuned.
+**Why `sigmoid` output is not a probability.** The model is trained to rank — its loss only ever compares a positive against a negative for the *same* query. Nothing in that objective forces `0.8` to mean "relevant 80% of the time." Two consequences follow directly. First, a fixed threshold must be calibrated per deployment on labeled data, which is exactly what Section 14 does when it settles on `0.30` (89% answer precision) rather than `0.40` (94% precision but 28% of queries deflected to humans). Second, scores from different reranker models are never interchangeable — swapping BGE-reranker-large for Cohere invalidates every threshold you tuned.
 
-**Walk the quantified gain.** Section 12's before/after, converted from percentages into chunks the LLM actually sees:
+**Walk the quantified gain.** Section 14's before/after, converted from percentages into chunks the LLM actually sees:
 
 ```
   metric              before      after      delta
@@ -328,60 +427,11 @@ The three architectures in this module emit numbers that look comparable and are
   the generator is no longer being handed near-half a context of distractors.
 ```
 
-Note which metric moved most. Recall@5 gained 17 points and precision@5 gained 30 — reranking is a *precision* intervention. It cannot invent documents the retriever never fetched, which is why Section 8's first pitfall (too small a candidate pool) is fatal: with `k = 10`, recall@10 is the hard ceiling on everything the reranker can achieve.
+Note which metric moved most. Recall@5 gained 17 points and precision@5 gained 30 — reranking is a *precision* intervention. It cannot invent documents the retriever never fetched, which is why Section 10's first pitfall (too small a candidate pool) is fatal: with `k = 10`, recall@10 is the hard ceiling on everything the reranker can achieve.
 
 ---
 
-## 4. Architecture Diagram
-
-### Two-Stage Retrieval Pipeline
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis', 'nodeSpacing': 50, 'rankSpacing': 55}}}%%
-flowchart TD
-    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
-    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
-    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
-    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
-    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
-    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
-    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
-
-    Q([User Query]) --> S1["Stage 1: Bi-Encoder Retrieval\nQuery → embedding → ANN search\nReturns: top-100 candidates\nLatency: ~20–50ms"]
-    S1 --> S2["Stage 2: Cross-Encoder Reranking\n(CLS) query (SEP) document (SEP) → score\nReturns: top-5 reranked\nLatency: ~50–100ms"]
-    S2 --> GEN["LLM Generation\nuses only top-5 documents\ntotal retrieval: ~150ms"]
-    GEN --> ANS([Answer])
-
-    class Q,ANS io
-    class S1 train
-    class S2 frozen
-    class GEN base
-```
-
-### Bi-Encoder vs. Cross-Encoder Comparison
-```
-Bi-Encoder:
-  Query ─[BERT]─> q_vec ─────┐
-                              ├─> cosine_sim ─> score
-  Doc   ─[BERT]─> d_vec ─────┘
-  (separate encoding; interaction is vector dot product only)
-
-Cross-Encoder:
-  [CLS] Q1 Q2 Q3 [SEP] D1 D2 D3 D4 [SEP]
-    └─────────────────────────────────────┘
-              Full self-attention
-                     |
-                 [Dense] ─> relevance_score
-  (joint encoding; every query token attends to every document token)
-
-ColBERT (Late Interaction):
-  [q1 q2 q3]  pre-compute query tokens at query time
-  [d1 d2 d3]  pre-compute document tokens at index time
-  Score: Σ_i max_j(qi · dj)  ← MaxSim operation
-```
-
----
-
-## 5. Real-World Examples
+## 7. Real-World Examples
 
 ### Cohere Rerank in Enterprise RAG
 - AI coding assistant: 200 code snippet candidates → cross-encoder reranks → top-5 for generation
@@ -400,7 +450,7 @@ ColBERT (Late Interaction):
 
 ---
 
-## 6. Tradeoffs
+## 8. Tradeoffs
 
 | Model | Latency (100 docs) | Quality | Cost | Notes |
 |-------|-------------------|---------|------|-------|
@@ -413,7 +463,7 @@ ColBERT (Late Interaction):
 
 ---
 
-## 7. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Always Use Reranking When:
 - LLM context is limited to top-5 to 10 documents
@@ -433,7 +483,7 @@ ColBERT (Late Interaction):
 
 ---
 
-## 8. Common Pitfalls
+## 10. Common Pitfalls
 
 **1. Retrieval top-K too small for reranking**
 Reranking top-10 after retrieval provides minimal improvement over just using the retrieval top-5. The reranker needs at least 50-100 candidates to show significant precision improvement.
@@ -461,7 +511,7 @@ Fix: Batch all candidates in a single model forward pass with padding. This is 1
 
 ---
 
-## 9. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Type | Notes |
 |------|------|-------|
@@ -477,10 +527,10 @@ Fix: Batch all candidates in a single model forward pass with padding. This is 1
 
 ---
 
-## 10. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is a cross-encoder reranker and when should you use it?**
-A: A cross-encoder takes the query and a candidate document together as a single input sequence and outputs a direct relevance score using full self-attention across both texts. This joint encoding captures fine-grained query-document interactions that bi-encoders miss — "capital" in a query correctly matching "political center" in a document. Use it as a second stage after initial retrieval: bi-encoder retrieves top-100 candidates (fast, high recall); cross-encoder reranks to top-5 (slow but high precision). The precision gain is corpus-dependent and can be large — Section 12 measured precision@5 going from 51% to 81% on a support knowledge base. The cost is ~50-100ms additional latency and self-hosting or API charges for the reranker model.
+A: A cross-encoder takes the query and a candidate document together as a single input sequence and outputs a direct relevance score using full self-attention across both texts. This joint encoding captures fine-grained query-document interactions that bi-encoders miss — "capital" in a query correctly matching "political center" in a document. Use it as a second stage after initial retrieval: bi-encoder retrieves top-100 candidates (fast, high recall); cross-encoder reranks to top-5 (slow but high precision). The precision gain is corpus-dependent and can be large — Section 14 measured precision@5 going from 51% to 81% on a support knowledge base. The cost is ~50-100ms additional latency and self-hosting or API charges for the reranker model.
 
 **Q: Why can't you use a cross-encoder as the primary retriever?**
 A: Cross-encoders require a forward pass for each (query, document) pair — O(N) passes for a corpus of N documents, each taking ~1ms on GPU. For 1M documents: 1M passes × 1ms = 1000 seconds per query — completely impractical. Cross-encoders cannot pre-compute document representations (unlike bi-encoders) because the document representation depends on the specific query. Bi-encoders pre-compute all document embeddings once at index time, then only compute one query embedding at query time + ANN search. The fundamental constraint is that cross-encoder relevance depends on the query, preventing pre-computation.
@@ -526,7 +576,7 @@ A: Pointwise reranking scores each document independently with a single relevanc
 
 ---
 
-## 11. Best Practices
+## 13. Best Practices
 
 1. **Retrieve 50-100 candidates before reranking** — don't rerank top-10; the benefit diminishes sharply with small candidate pools.
 2. **Ensure chunk size fits within reranker's context window** — silent truncation by the reranker is the most common failure mode; check your reranker's token limit.
@@ -539,7 +589,7 @@ A: Pointwise reranking scores each document independently with a single relevanc
 
 ---
 
-## 12. Case Study
+## 14. Case Study
 
 ### Adding Reranking to a Customer Support RAG Pipeline
 

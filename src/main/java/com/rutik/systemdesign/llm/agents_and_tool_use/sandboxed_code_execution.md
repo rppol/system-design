@@ -12,7 +12,7 @@ Modern sandbox providers offer cloud-hosted microVMs or WebAssembly runtimes tha
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: A sandbox is like a hospital glovebox — you can work with dangerous materials through it, but nothing gets in or out that you didn't explicitly allow.
 
@@ -24,7 +24,7 @@ Modern sandbox providers offer cloud-hosted microVMs or WebAssembly runtimes tha
 
 ---
 
-## 2. Core Principles
+## 3. Core Principles
 
 - **Isolation**: The sandbox process cannot access the host filesystem, network, or other processes beyond what is explicitly allowed.
 - **Resource limits**: CPU, memory, disk, and execution time are bounded to prevent denial-of-service by runaway code.
@@ -35,9 +35,9 @@ Modern sandbox providers offer cloud-hosted microVMs or WebAssembly runtimes tha
 
 ---
 
-## 3. Types / Architectures / Strategies
+## 4. Types / Architectures / Strategies
 
-### 3.1 MicroVM Sandboxes (E2B, Daytona)
+### 4.1 MicroVM Sandboxes (E2B, Daytona)
 
 Full Linux virtual machines started from snapshots in well under a second. Each sandbox is a real Firecracker microVM with a full OS, filesystem, and network stack. Provides the most compatibility (any Linux binary works) at the cost of higher startup latency and memory overhead than a Wasm runtime.
 
@@ -57,7 +57,7 @@ Full Linux virtual machines started from snapshots in well under a second. Each 
 - Pay-as-you-go per vCPU-hour plus storage; sandboxes can run in your own cloud
 - Good for agents that need to clone a repo, run tests, and iterate
 
-### 3.2 WebAssembly Sandboxes (Riza)
+### 4.2 WebAssembly Sandboxes (Riza)
 
 Code runs inside a WebAssembly sandbox — no real OS, no real filesystem, no real network. There is no VM to boot, so execution starts almost immediately. More restrictive than microVMs but faster and cheaper.
 
@@ -69,7 +69,7 @@ Code runs inside a WebAssembly sandbox — no real OS, no real filesystem, no re
 - Wasm modules are not reused across executions, so nothing leaks between runs
 - Good for data processing, format conversion, computation
 
-### 3.3 Serverless Container Sandboxes (Modal)
+### 4.3 Serverless Container Sandboxes (Modal)
 
 Serverless functions in containers with GPU support. Not microVMs — Modal containerizes and virtualizes compute jobs with **gVisor**, Google's user-space kernel, which intercepts guest syscalls in a sandboxed process rather than passing them to the host kernel. Stronger than plain namespaces-and-cgroups, weaker than a hardware-virtualized guest kernel.
 
@@ -80,7 +80,7 @@ Serverless functions in containers with GPU support. Not microVMs — Modal cont
 - `@app.function()` decorator turns any Python function into a sandboxed serverless call
 - Good for agents that need GPU compute (image generation, model inference)
 
-### 3.4 Local Process Sandboxes (subprocess + seccomp)
+### 4.4 Local Process Sandboxes (subprocess + seccomp)
 
 For self-hosted deployments, run code in a subprocess with Linux seccomp profiles, namespaces, and cgroups. Higher operational overhead but no external dependency.
 
@@ -90,7 +90,7 @@ namespaces     → separate PID, mount, network, user namespaces
 cgroups        → CPU 1 core, memory 512MB, no network interface
 ```
 
-### 3.5 Provider-Hosted Sandboxes (no sandbox to provision)
+### 4.5 Provider-Hosted Sandboxes (no sandbox to provision)
 
 The four strategies above all assume you own the execution environment. The model
 providers now run one for you as a server-side tool, and for a large class of agents that
@@ -126,7 +126,7 @@ Billing is by execution time, not tokens: a 5-minute minimum per invocation, **1
 hours per organization per month**, then **$0.05 per hour per container**. Attaching files
 bills execution time even if Claude never calls the tool, because the files are preloaded
 onto the container. Code execution is free when the request also includes the current web
-search or web fetch tool. Compare that to the E2B and Modal per-second pricing in 3.1-3.3:
+search or web fetch tool. Compare that to the E2B and Modal per-second pricing in 4.1-4.3:
 for bursty analysis workloads the free tier usually wins outright; for anything needing
 network access, GPUs, arbitrary `apt`/`pip` installs, or a session longer than a single
 task, you are back to a sandbox you provision.
@@ -141,7 +141,7 @@ automatically alongside your existing shell tool.
 
 ---
 
-## 4. Architecture Diagrams
+## 5. Architecture Diagrams
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
@@ -203,11 +203,11 @@ A sandbox is not a prediction that code will behave. It is a *bound* on misbehav
    300s        $0.009750            $ 9,750
 ```
 
-Choosing `300s` over `15s` because "some analyses are slow" is a 20× multiplier on your worst case — `$9,750` versus `$488` at a million hung runs. The right move is not one global timeout but a per-task-class one, because the ceiling is paid by every runaway regardless of how rare the slow legitimate task is. Note also that the first five rows only bound *resource* damage; a sandbox with perfect limits on all five and an open Network ACL still leaks every secret it can see, which is exactly the failure in the war story in Section 9.
+Choosing `300s` over `15s` because "some analyses are slow" is a 20× multiplier on your worst case — `$9,750` versus `$488` at a million hung runs. The right move is not one global timeout but a per-task-class one, because the ceiling is paid by every runaway regardless of how rare the slow legitimate task is. Note also that the first five rows only bound *resource* damage; a sandbox with perfect limits on all five and an open Network ACL still leaks every secret it can see, which is exactly the failure in the war story in Section 10.
 
 ---
 
-## 5. How It Works — Detailed Mechanics
+## 6. How It Works — Detailed Mechanics
 
 ### E2B: Cloud MicroVM Execution
 
@@ -378,7 +378,7 @@ with app.run():
 
 ---
 
-## 6. Real-World Examples
+## 7. Real-World Examples
 
 **Cursor Composer / Claude Code**: Uses sandboxed shell execution for every bash command. Commands run in the project's directory but with the agent's own process — isolated from other sessions.
 
@@ -392,7 +392,7 @@ with app.run():
 
 ---
 
-## 7. Tradeoffs
+## 8. Tradeoffs
 
 | Dimension | subprocess (unsafe) | E2B MicroVM | Riza WASM | Modal Container | Local seccomp |
 |---|---|---|---|---|---|
@@ -433,7 +433,7 @@ Two things this makes visible that the table hides. First, cold start is a *cost
 
 ---
 
-## 8. When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 **Use sandboxed execution when:**
 - Agent generates code from user input or LLM output (any untrusted code)
@@ -451,7 +451,7 @@ Two things this makes visible that the table hides. First, cold start is a *cost
 
 ---
 
-## 9. Common Pitfalls
+## 10. Common Pitfalls
 
 ### Pitfall 1: Direct subprocess execution of LLM code
 
@@ -545,7 +545,7 @@ sandbox.upload_file(sample_data_bytes, "/data/sample.csv")
 
 ---
 
-## 10. Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Type | Languages | Cold Start | Network | GPU | Pricing |
 |---|---|---|---|---|---|---|
@@ -559,7 +559,7 @@ sandbox.upload_file(sample_data_bytes, "/data/sample.csv")
 
 ---
 
-## 11. Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: Why is running LLM-generated code with subprocess dangerous even if you trust the LLM?**
 LLMs are susceptible to prompt injection — malicious content in retrieved documents or tool outputs can cause the model to generate harmful code. Even a well-intentioned LLM can produce code with bugs that cause accidental file deletion or network exposure. Defense-in-depth requires assuming the generated code is untrusted regardless of the LLM's intent.
@@ -611,7 +611,7 @@ Use the hosted tool for self-contained data work such as analysis, charts and fi
 
 ---
 
-## 12. Best Practices
+## 13. Best Practices
 
 1. Always use a cloud-managed sandbox for LLM-generated code — avoid in-process sandboxes (RestrictedPython) for production.
 2. Set execution timeout at both the sandbox level (hard kill) and the SDK call level (soft timeout with error propagation to agent).
@@ -626,7 +626,7 @@ Use the hosted tool for self-contained data work such as analysis, charts and fi
 
 ---
 
-## 13. Case Study
+## 14. Case Study
 
 **Production Data Analysis Agent at a FinTech Company**
 

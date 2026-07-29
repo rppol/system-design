@@ -1,6 +1,6 @@
 # Computer Use & Browser Agents
 
-## Concept Overview
+## 1. Concept Overview
 
 Computer use agents interact with graphical interfaces — browsers, desktop applications, and operating systems — by observing the screen (via screenshots or accessibility trees) and issuing UI actions (clicks, typing, scrolling). Unlike API-based agents that call structured tool functions, computer use agents operate on the visual layer, enabling them to automate any software that a human could use, even without a programmatic API.
 
@@ -8,7 +8,7 @@ Browser agents specifically navigate the web: filling forms, clicking buttons, e
 
 ---
 
-## Intuition
+## 2. Intuition
 
 > **One-line analogy**: Computer use agents are like robotic process automation (RPA) with a brain — traditional RPA scripts break when the UI changes; a computer use agent adapts by reasoning about what it sees.
 
@@ -20,7 +20,7 @@ Browser agents specifically navigate the web: filling forms, clicking buttons, e
 
 ---
 
-## Core Principles
+## 3. Core Principles
 
 - **See → decide → act → verify**: every computer use step observes current screen state, decides the appropriate action, executes it, and takes a new screenshot to verify the action had the intended effect.
 - **Accessibility tree > pixel grounding**: parsing the accessibility tree (structured DOM representation) is faster and more robust than pixel-coordinate clicking when available.
@@ -30,7 +30,112 @@ Browser agents specifically navigate the web: filling forms, clicking buttons, e
 
 ---
 
-## How It Works — Detailed Mechanics
+## 4. Types / Architectures / Strategies
+
+Computer use systems differ along four choices that are made independently: **what the
+agent perceives**, **what actually performs the action**, **which surface the agent
+drives**, and **how tightly the task is specified**.
+
+### 4.1 Grounding strategy — what the agent perceives
+
+| Strategy | Input to the model | Working accuracy | Coverage | Per-step cost |
+|----------|-------------------|------------------|----------|---------------|
+| Pixel grounding | Screenshot; model returns `(x, y)` | ~70-85% | Universal — any GUI, Canvas, games, desktop | High (vision inference plus image transfer) |
+| Accessibility tree | Structured text of roles, labels, bounds | ~85-95% | Anything exposing an accessibility API | Low (text-only prompt) |
+| Hybrid | Tree first, pixels as fallback | Best available | Universal | Medium, and the most complex to build |
+
+Those accuracies are per step and multiply across a task, which is why a ten-point per-step
+gap becomes a forty-point gap over eight steps. Hybrid grounding does not raise any single
+method's accuracy — it exists so that a Canvas element or an unlabeled custom widget does
+not end the run at step 4.
+
+### 4.2 Execution layer — what performs the action
+
+| Layer | Drives | Stealth | Desktop | Typical use |
+|-------|--------|---------|---------|-------------|
+| Playwright | Chromium / Firefox / WebKit | Low — headless is detectable | No | Default for web agents; locators auto-wait |
+| Selenium | W3C WebDriver browsers | Low | No | Existing WebDriver estates; widest language coverage |
+| PyAutoGUI | Real OS input events | High | Yes | Desktop applications with no web surface |
+| xdotool / OS APIs | X11 and native windows | High | Yes | Linux VMs hosting a full desktop session |
+
+The execution layer is orthogonal to grounding: a vision model can drive Playwright by
+coordinates, and an accessibility-tree agent can drive PyAutoGUI. Pick the layer from the
+software you must reach, then pick grounding from what that software exposes.
+
+### 4.3 Agent surface — browser, desktop, or provider-hosted
+
+Browser-only agents (browser-use, Skyvern, a Playwright harness) get a narrower action
+space, a real DOM to ground against, and cheap session persistence through cookies. Full
+desktop agents (Anthropic's `computer` tool driving a VM, PyAutoGUI, xdotool) trade all
+three away for the ability to automate software that never had a web front end.
+Provider-hosted surfaces — the Anthropic computer use tool, OpenAI's `computer` tool on the
+Responses API, ChatGPT agent — supply the action vocabulary and the injection classifiers,
+but you still run the environment and execute every action yourself.
+
+### 4.4 Task specification — open-ended versus declarative
+
+An open-ended natural-language task ("book the cheapest 4-star hotel") lets the agent plan,
+but widens the action space and makes failures hard to reproduce. A declarative scenario —
+structured steps with explicit targets and verification assertions, as in the YAML suite in
+Section 14 — constrains the action space, makes reproduction steps deterministic, and is
+what gives step budgets and bug deduplication something stable to key on. Production
+systems usually pin the high-risk paths declaratively and leave only discovery and
+extraction open-ended.
+
+---
+
+## 5. Architecture Diagrams
+
+### Computer Use Agent Loop
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Task([Task Input]) --> Observe
+    Observe["OBSERVATION\nTake screenshot → encode as base64 PNG\n(optionally: parse accessibility tree)"] --> Reason
+    Reason["REASONING (vision-language model)\nDescribe what is visible\nSelect next action"] --> Execute
+    Execute["EXECUTION (Playwright / OS API)\npage.fill / page.click\nlocator wait_for visible"] --> Done{"task\ncomplete?"}
+    Done -- NO --> Observe
+    Done -- YES --> Output([Task complete])
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
+
+    class Task,Output io
+    class Observe,Execute proc
+    class Reason llm
+    class Done decide
+```
+
+Each iteration takes a fresh screenshot as input; the loop continues until the agent produces a final answer or a stopping condition is reached.
+
+### Grounding Pipeline
+
+```mermaid
+%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
+flowchart TD
+    Screenshot([Raw Screenshot]) --> A11y & Vision
+    A11y["Accessibility Tree Parser\nStructured elements:\nid, role, label, bounds"] --> LLMLabel["LLM: match label\n'click button — Book Room'"]
+    LLMLabel --> ExecA["Execute: page.click\n'aria-label=Book Room'"]
+    Vision["Vision Model\nfallback for Canvas / custom widgets\nraw pixel coordinates"] --> ExecB["Execute: click\nx=490 y=335"]
+
+    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
+    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
+    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
+
+    class Screenshot io
+    class A11y,Vision proc
+    class LLMLabel llm
+    class ExecA,ExecB proc
+```
+
+The accessibility tree path is preferred (structured, reliable); the vision model fires only for canvas elements or custom widgets where the DOM offers no labels.
+
+---
+
+## 6. How It Works — Detailed Mechanics
 
 ### Anthropic Computer Use API
 
@@ -427,58 +532,7 @@ agent's poisoned output becomes another's trusted input, is in
 
 ---
 
-## Architecture Diagrams
-
-### Computer Use Agent Loop
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    Task([Task Input]) --> Observe
-    Observe["OBSERVATION\nTake screenshot → encode as base64 PNG\n(optionally: parse accessibility tree)"] --> Reason
-    Reason["REASONING (vision-language model)\nDescribe what is visible\nSelect next action"] --> Execute
-    Execute["EXECUTION (Playwright / OS API)\npage.fill / page.click\nlocator wait_for visible"] --> Done{"task\ncomplete?"}
-    Done -- NO --> Observe
-    Done -- YES --> Output([Task complete])
-
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-    classDef decide fill:#1e2127,stroke:#e5c07b,color:#abb2bf
-
-    class Task,Output io
-    class Observe,Execute proc
-    class Reason llm
-    class Done decide
-```
-
-Each iteration takes a fresh screenshot as input; the loop continues until the agent produces a final answer or a stopping condition is reached.
-
-### Grounding Pipeline
-
-```mermaid
-%%{init: {'flowchart': {'curve': 'basis'}, 'theme': 'dark'}}%%
-flowchart TD
-    Screenshot([Raw Screenshot]) --> A11y & Vision
-    A11y["Accessibility Tree Parser\nStructured elements:\nid, role, label, bounds"] --> LLMLabel["LLM: match label\n'click button — Book Room'"]
-    LLMLabel --> ExecA["Execute: page.click\n'aria-label=Book Room'"]
-    Vision["Vision Model\nfallback for Canvas / custom widgets\nraw pixel coordinates"] --> ExecB["Execute: click\nx=490 y=335"]
-
-    classDef io     fill:#282c34,stroke:#61afef,color:#abb2bf
-    classDef proc   fill:#1e2127,stroke:#98c379,color:#abb2bf
-    classDef llm    fill:#1e2127,stroke:#c678dd,color:#abb2bf
-
-    class Screenshot io
-    class A11y,Vision proc
-    class LLMLabel llm
-    class ExecA,ExecB proc
-```
-
-The accessibility tree path is preferred (structured, reliable); the vision model fires only for canvas elements or custom widgets where the DOM offers no labels.
-
----
-
-## Real-World Examples
+## 7. Real-World Examples
 
 ### Anthropic Computer Use
 
@@ -518,7 +572,7 @@ the action, your code executes it and returns the next screenshot.
 
 ---
 
-## Tradeoffs
+## 8. Tradeoffs
 
 | Approach | Speed | Reliability | Coverage | Cost |
 |----------|-------|-------------|----------|------|
@@ -536,7 +590,7 @@ the action, your code executes it and returns the next screenshot.
 
 ---
 
-## When to Use / When NOT to Use
+## 9. When to Use / When NOT to Use
 
 ### Use Computer Use / Browser Agents When:
 - No stable API exists for the target software
@@ -553,7 +607,7 @@ the action, your code executes it and returns the next screenshot.
 
 ---
 
-## Common Pitfalls
+## 10. Common Pitfalls
 
 1. **Acting without verifying**: clicking a button and immediately assuming success. Always take a post-action screenshot and check the resulting state matches expectation before proceeding.
 
@@ -569,7 +623,7 @@ the action, your code executes it and returns the next screenshot.
 
 ---
 
-## Technologies & Tools
+## 11. Technologies & Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
@@ -586,7 +640,7 @@ the action, your code executes it and returns the next screenshot.
 
 ---
 
-## Interview Questions with Answers
+## 12. Interview Questions with Answers
 
 **Q: What is computer use and how does it differ from API-based tool calling?**
 A: Computer use enables an LLM agent to interact with software through its graphical interface — taking screenshots, clicking, typing, and scrolling — just like a human user. API-based tool calling sends structured function calls to programmatic interfaces. Key differences: computer use works on any software regardless of API availability (covering legacy systems, proprietary portals, anything with a UI); API tool calling is 5-10× faster per step (200ms vs 3-8s), more reliable (no stale element risk), and cheaper (no vision model). Use computer use when no API exists; use API tool calling when it does.
@@ -638,7 +692,7 @@ A: Because the observation channel and the instruction channel are the same pixe
 
 ---
 
-## Best Practices
+## 13. Best Practices
 
 1. **Always verify actions by taking a new screenshot**: never assume an action succeeded; check the resulting state before proceeding.
 2. **Prefer accessibility tree over pixel grounding**: faster, cheaper, more robust; fall back to pixel only for Canvas or poorly labeled elements.
