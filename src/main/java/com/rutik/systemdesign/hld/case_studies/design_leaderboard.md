@@ -76,7 +76,7 @@ This same tension — exact-but-expensive versus approximate-but-cheap — reapp
 
 - **Score-update ingest**: 50,000-75,000 updates/sec x ~40 bytes/update (§2 above) ~= **2-3 MB/sec inbound** — negligible
 - **Top-N response egress**: 500,000 req/sec x ~3KB (a top-100 response with player names, scores, and ranks serialized) ~= **1.5 GB/sec ~= 12 Gbps** at peak — this is the dominant bandwidth consumer, and it is **entirely served from the Top-N Cache** (§3), making it a cache-tier/CDN-edge cost rather than a sharded-store cost
-- **Rank-lookup response egress**: 50,000 req/sec x ~200 bytes (a single player's rank, score, and a small "nearby" snippet) ~= **10 MB/sec ~= 80 Mbps** — three orders of magnitude below the top-N egress, illustrating again how heavily top-N dominates total traffic despite personal-rank being the "harder" query computationally
+- **Rank-lookup response egress**: 50,000 req/sec x ~200 bytes (a single player's rank, score, and a small "nearby" snippet) ~= **10 MB/sec ~= 80 Mbps** — roughly **150x** below the top-N egress, illustrating again how heavily top-N dominates total traffic despite personal-rank being the "harder" query computationally
 - **"Players around my rank" response egress**: 10,000 req/sec x ~1KB (10-11 entries with names/scores) ~= **10 MB/sec ~= 80 Mbps**
 
 | Traffic Type | Direction | Peak Bandwidth |
@@ -187,7 +187,9 @@ The following implements the core operations of a single-shard leaderboard using
 ```java
 package com.rutik.systemdesign.hld.case_studies.leaderboard;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -197,7 +199,9 @@ import java.util.concurrent.ConcurrentSkipListMap;
  * Single-shard leaderboard backed by a skip-list-ordered map (composite sort
  * key -> playerId) plus a reverse hash map (playerId -> composite key) for
  * O(log N) update-by-player-id. Mirrors the semantics of Redis ZADD/ZRANK/
- * ZRANGE/ZREVRANGE on a ZSET.
+ * ZRANGE/ZREVRANGE on a ZSET -- with one important exception called out on
+ * getRank(): the JDK skip list does not track ranks, so rank lookup here is
+ * NOT the O(log N) Redis delivers.
  */
 public class SkipListLeaderboard {
 
@@ -229,8 +233,15 @@ public class SkipListLeaderboard {
 
     /**
      * Returns the 0-indexed global rank of {@code playerId} within this
-     * shard, or -1 if not present. O(log N) via headMap().size() on the
-     * skip-list-backed map.
+     * shard, or -1 if not present.
+     *
+     * <p>COST: O(rank), not O(log N). ConcurrentSkipListMap.size() on the
+     * WHOLE map is O(1) (a LongAdder counter), but a sub-map view's size()
+     * -- which is what headMap(...).size() calls -- walks the base-level
+     * list node by node, because the JDK skip list stores no per-level
+     * "span" counts. Redis's ZSET skip list DOES store a span on every
+     * forward pointer, which is exactly why ZRANK is O(log N) there and
+     * why this design buys Redis rather than shipping this class (§7).
      */
     public int getRank(String playerId) {
         Long key = playerKeys.get(playerId);
@@ -254,20 +265,27 @@ public class SkipListLeaderboard {
 
     /**
      * Returns up to {@code windowSize} entries above and below the given
-     * player's rank (inclusive of the player). O(log N + windowSize).
+     * player's rank (inclusive of the player). O(log N + windowSize) --
+     * unlike getRank(), this genuinely is, because it navigates outward
+     * from the player's own key instead of counting from the head.
      */
     public List<Entry> getRangeAroundPlayer(String playerId, int windowSize) {
-        int rank = getRank(playerId);
-        if (rank < 0) {
+        Long key = playerKeys.get(playerId);
+        if (key == null) {
             return List.of();
         }
-        int start = Math.max(0, rank - windowSize);
-        int count = windowSize * 2 + 1;
-        List<Entry> result = new ArrayList<>(count);
-        int skipped = 0;
-        for (var e : byScore.entrySet()) {
-            if (skipped++ < start) continue;
-            if (result.size() >= count) break;
+        // Walk backwards from the player's key for the "above" half...
+        Deque<Entry> above = new ArrayDeque<>(windowSize);
+        for (var e : byScore.headMap(key, false).descendingMap().entrySet()) {
+            if (above.size() >= windowSize) break;
+            above.addFirst(new Entry(e.getValue(), e.getKey()));
+        }
+        // ...then forwards from the player for the player plus "below".
+        List<Entry> result = new ArrayList<>(windowSize * 2 + 1);
+        result.addAll(above);
+        int limit = above.size() + windowSize + 1;
+        for (var e : byScore.tailMap(key, true).entrySet()) {
+            if (result.size() >= limit) break;
             result.add(new Entry(e.getValue(), e.getKey()));
         }
         return result;
@@ -281,7 +299,7 @@ public class SkipListLeaderboard {
 }
 ```
 
-`ConcurrentSkipListMap.headMap(key, false).size()` is documented as `O(log N)` for `NavigableMap` implementations backed by a skip list (the structure tracks subtree/span sizes at each level), matching Redis's `ZRANK` complexity. The `getRangeAroundPlayer` and `getTopN` methods both pay an `O(log N)` cost to locate the starting position and then `O(M)` to walk `M` elements — exactly the `O(log N + M)` bound Redis documents for `ZRANGE`.
+**One place the JDK class is *not* a stand-in for a ZSET — and it is precisely the leaderboard's signature operation.** Redis's skip list stores a **span** on every forward pointer (how many base-level nodes that pointer jumps over), so `ZRANK` sums spans down one top-to-bottom traversal in `O(log N)`. `ConcurrentSkipListMap` stores no spans: `headMap(key, false).size()` returns a *sub-map view* whose `size()` walks the base-level list node by node, making `getRank` **`O(rank)`** — cheap for a player near the top, but a multi-million-node walk for a mid-table player on a 6.25M-entry shard (§10). (The whole map's `size()` *is* `O(1)`, via an internal `LongAdder`; only sub-map views pay the walk, which is exactly the trap.) `getTopN` and `getRangeAroundPlayer` are unaffected — both navigate to a position in `O(log N)` and then walk `M` elements, matching the `O(log N + M)` bound Redis documents for `ZRANGE`. This gap is the concrete reason §7's build-vs-buy table says *buy* Redis: the span-augmented skip list is the part that is hard to reproduce, not the ordered map.
 
 #### Memory Layout
 
@@ -289,7 +307,7 @@ Each skip-list node carries: the member ID (8 bytes for a numeric player ID), th
 
 ### 4.2 Sharding Strategy and Global Top-K Merge
 
-A single sorted set holding **100M entries** and absorbing **50,000 ZADD/sec** is workable on one well-provisioned node in isolation — but it concentrates *all* write traffic for *every* player onto *one* node, and a single Redis instance has a practical ceiling somewhere in the **low hundreds of thousands of ops/sec** depending on payload size and persistence settings. War Story 1 (§9) walks through what happens when that ceiling is approached during a real event. The fix is **sharding by `hash(playerId)` into `N` independent sorted sets** (cross-ref [`./design_key_value_store.md`](./design_key_value_store.md) §4.1 for the consistent-hashing mechanics that decide which shard owns which player — the same ring-with-virtual-nodes approach applies here, with `playerId` as the hash key).
+A single sorted set holding **100M entries** and absorbing **50,000 ZADD/sec** is workable on one well-provisioned node in isolation — but it concentrates *all* write traffic for *every* player onto *one* node, and a single Redis instance sustains only **tens of thousands of `ZADD`/sec** against a sorted set this large once latency headroom is accounted for (§10 derives ~20,000-30,000/sec; the six-figure `ops/sec` numbers Redis is famous for are for pipelined `GET`/`SET`, not for repositioning a member inside a 100M-entry skip list). War Story 1 (§9) walks through what happens when that ceiling is approached during a real event. The fix is **sharding by `hash(playerId)` into `N` independent sorted sets** (cross-ref [`./design_key_value_store.md`](./design_key_value_store.md) §4.1 for the consistent-hashing mechanics that decide which shard owns which player — the same ring-with-virtual-nodes approach applies here, with `playerId` as the hash key).
 
 Sharding solves the write-hotspot problem but introduces a new one: **no single shard knows the global top-K**, because each shard only sees `1/N` of the players, chosen by hash, not by score — the globally-best player could be on any shard, and a shard's "top 10" is only the top 10 *of its own slice*. The fix is a **k-way merge**: each shard exposes its own local top-K (`K >= globalTopN` to guarantee correctness — see the worked argument below), and a merger periodically pulls all `N` shards' local top-K lists and merges them into the global top-N.
 
@@ -376,7 +394,7 @@ public class GlobalTopKMerger {
 }
 ```
 
-`countAboveKey` (referenced above) is a one-line addition to `SkipListLeaderboard`: `byScore.headMap(key, false).size()` — the same `O(log N)` `headMap` operation `getRank` already uses, just against an arbitrary key rather than a player's own key.
+`countAboveKey` (referenced above) is a one-line addition to `SkipListLeaderboard`: `byScore.headMap(key, false).size()` — the same operation `getRank` already uses, just against an arbitrary key rather than a player's own key, and carrying the same `O(rank)` cost noted in §4.1. Against Redis this is `ZCOUNT key (compositeKey +inf` — genuinely `O(log N)`, because Redis's spans make it a rank subtraction rather than a walk. That difference is why `approximateGlobalRank` is described as *expensive* below: on `N-1` remote shards it is `N-1` round trips, and the per-shard cost is only acceptable when each shard is a real ZSET.
 
 **Cost of the merge at scale**: with `N = 16` shards and `globalN = 100`, each merge pulls `16 x 100 = 1,600` entries (a few hundred KB) and runs a 16-way merge bounded at 100 output elements — on the order of **single-digit milliseconds**. Running this merge **every 1-2 seconds** (§3) and caching the result means the 500,000 req/sec top-N read load (§2) never touches this computation directly — it's entirely absorbed by the Top-N Cache.
 
@@ -391,8 +409,8 @@ A 64-bit composite key is split into a **high bits** region for the score and a 
 ```
 Composite Key (64 bits, unsigned):
 +----------------------------------------------+------------------------+
-|              Score (40 bits)                  |  Tiebreaker (24 bits)  |
-|        max value: 2^40 - 1 ~= 1.0995 x 10^12  |  max: 2^24 - 1 = ~16.7M |
+|              Score (40 bits)                 |  Tiebreaker (24 bits)  |
+|       max value: 2^40 - 1 ~= 1.0995 x 10^12  | max: 2^24 - 1 = ~16.7M |
 +----------------------------------------------+------------------------+
    bits 63..24                                     bits 23..0
 ```
@@ -617,7 +635,7 @@ flowchart LR
 
 One score event fans out into a small, constant number of `ZADD` calls (3-5 leaderboards), each landing on its own independently-keyed, independently-expiring shard set, so a failure in one leg never blocks or rolls back the others.
 
-This fan-out is **small and constant-factor** — typically 3-5 leaderboards per score event, each a single `ZADD` (`O(log M)`, §4.1) — so it multiplies the §2 write QPS (50K/sec peak) by a small constant (3-5x), landing well within the per-shard headroom established in §10's shard-count derivation (which already assumed some multiplier). The key design choice is **doing the fan-out once, at ingestion**, rather than letting each leaderboard type independently subscribe to a raw score-event stream — a single ingestion-tier service (stateless, horizontally scalable per [`../scalability/README.md`](../scalability/README.md)) knows "this player is in season 12, and today is 2026-06-12, and this week is 2026-W24" and issues exactly the right `ZADD` calls, rather than every downstream leaderboard re-deriving that membership independently.
+This fan-out is **small and constant-factor** — typically 3-5 leaderboards per score event, each a single `ZADD` (`O(log M)`, §4.1). Critically, it does **not** multiply the *per-shard* write rate: each leaderboard type gets its **own** 16-shard set (the diagram above), so the multiplier lands on the *shard count* (4 types x 16 = 64 shard instances), not on the ~4,700 `ZADD`/sec each shard already sees (§10). The one place it does bite is co-location: §10 notes all four types' shards fit *memory*-wise on 16 nodes (~2.25 GB/node), but a node hosting all four would absorb ~4 x 4,700 ~= **~18,800 `ZADD`/sec**, which is at the top of the 20,000-30,000/sec per-instance envelope §10 derives — so the four shard sets must be spread across separate instances, not stacked, and the "4-6x headroom" in §10 is per shard-set, not per physical node. The key design choice is **doing the fan-out once, at ingestion**, rather than letting each leaderboard type independently subscribe to a raw score-event stream — a single ingestion-tier service (stateless, horizontally scalable per [`../scalability/README.md`](../scalability/README.md)) knows "this player is in season 12, and today is 2026-06-12, and this week is 2026-W24" and issues exactly the right `ZADD` calls, rather than every downstream leaderboard re-deriving that membership independently.
 
 **Partial-failure handling**: if 3 of the 4 `ZADD`s in the fan-out succeed and the 4th (say, the daily leaderboard) fails transiently, the system does *not* roll back the other three — each leaderboard is an independent sorted set, and a missing entry on the daily leaderboard is a **self-healing gap**: the write-behind durability layer (§4.5) retries the failed `ZADD`, and even in the worst case, the daily leaderboard (TTL = 2 days, §4.4) simply expires and is rebuilt fresh the next day, bounding the blast radius of any one fan-out leg's failure to "at most one short-lived leaderboard, for at most one day." This is a deliberate consequence of the time-windowed leaderboards (§4.4) being **independently-keyed, independently-expiring** sorted sets rather than views derived from the all-time leaderboard — independence costs a small constant-factor write multiplier but buys exactly this kind of fault isolation.
 
@@ -641,7 +659,7 @@ This fan-out is **small and constant-factor** — typically 3-5 leaderboards per
 
 | Dimension | Single Global Sorted Set | Sharded (by `hash(playerId)`) + Merge (§4.2, this design) |
 |---|---|---|
-| Write throughput ceiling | Bounded by one node's sustainable `ZADD` rate (low hundreds of thousands ops/sec) — War Story 1's failure mode | Scales linearly with shard count — `N` shards each handle `total/N` writes |
+| Write throughput ceiling | Bounded by one node's sustainable `ZADD` rate (~20,000-30,000/sec against a 100M-entry ZSET, §10) — War Story 1's failure mode | Scales linearly with shard count — `N` shards each handle `total/N` writes |
 | Hot-key / hotspot risk | Every write touches the same node — a write hotspot by construction during high-traffic events | Writes spread across `N` independent nodes by `hash(playerId)` — no single node sees disproportionate write load (absent pathological hash skew) |
 | Global top-N accuracy | Always exact — one structure, one `ZRANGE` | Requires periodic k-way merge (§4.2) — global top-N is as fresh as the last merge cycle (typically 1-2 seconds stale) |
 | Global rank accuracy | Always exact — one `ZRANK` call | Either an exact but expensive cross-shard sum, or an approximation from the last merge cycle (§4.2's `approximateGlobalRank`) |
@@ -668,7 +686,7 @@ Given a fixed total write QPS and player count, the number of shards `N` is itse
 |---|---|---|
 | Per-shard write QPS | Higher — closer to the single-node ceiling, less headroom before War Story 1 recurs | Lower — more headroom per shard, but more total shards to operate |
 | Per-shard memory | Larger (`9GB/4` ~= 2.25GB/shard) — still small relative to modern instance RAM | Smaller (`9GB/64` ~= 140MB/shard) — many shards could be co-located on fewer physical nodes |
-| Hash-skew / hotspot probability (War Story 1, §8) | **Higher** — fewer "buckets" means a higher probability that a small set of high-traffic players (tournament finalists) collide on the same shard | **Lower** — more buckets reduce collision probability, but never to zero (birthday-paradox-style — even 64 buckets can have collisions among a handful of finalists) |
+| Hash-skew / hotspot probability (War Story 1, §9) | **Higher** — fewer "buckets" means a higher probability that a small set of high-traffic players (tournament finalists) collide on the same shard | **Lower** — more buckets reduce collision probability, but never to zero (birthday-paradox-style — even 64 buckets can have collisions among a handful of finalists) |
 | Global top-K merge cost (§4.2) | Lower — fewer shards to query and merge (`N x globalN` entries fetched) | Higher — `64 x 100` = 6,400 entries fetched per merge cycle vs. `4 x 100` = 400 — still cheap in absolute terms, but scales linearly with `N` |
 | Operational surface (replicas, monitoring, failover) | Smaller — fewer primary/replica groups to manage (§4.7) | Larger — `64` primary/replica groups vs. `4`, each independently monitored |
 | Rebalancing cost if `N` changes | Smaller absolute number of shards to redistribute, but each redistribution moves a *larger* fraction of data | Larger absolute number of shards, but consistent hashing (§4.2, cross-ref [`./design_key_value_store.md`](./design_key_value_store.md) §4.1) means each individual shard's data movement is smaller |
@@ -775,6 +793,8 @@ This is a client-architecture decision layered **on top of** the read path (§3)
 
 ## 9. Common Pitfalls & War Stories
 
+*The three incidents below are **illustrative composites**, not reports of specific public outages — the failure modes and the fixes are real and recur across production leaderboards, but the timings, ticket volumes and latency figures are constructed to make the mechanism legible, not drawn from a published post-mortem.*
+
 The three incidents below share a common shape: each one passed code review and worked correctly under normal load and normal conditions, and each one failed only when a specific *operational* condition — a promotional event, a tie at scale, a season boundary — exposed an assumption that held everywhere else but broke at exactly that moment. Reading these in order (write-path scaling, ordering correctness, and lifecycle/rollover) roughly mirrors the order in which a leaderboard system tends to encounter them as it matures from prototype to production.
 
 ### War Story 1: A Global Leaderboard Becomes a Write Hotspot During a Double-XP Event — Broken, Then Fixed
@@ -849,7 +869,7 @@ The broader lesson: **a multi-step operation that "looks atomic" (archive, delet
 - Target: sustain **75,000 updates/sec** (event peak, §2) with headroom
 - A single Redis instance's sustainable `ZADD` throughput against a multi-million-entry ZSET, accounting for the hash-table-plus-skip-list dual update and realistic payload sizes, is conservatively **~20,000-30,000 ops/sec** with comfortable latency headroom (well below the point where p99 latency degrades, per War Story 1's failure threshold)
 - `75,000 / 20,000` = **3.75**, round up and add headroom for uneven hash distribution (War Story 1's finalist-clustering scenario) -> **`N = 16` shards** gives `75,000 / 16` ~= **~4,700 updates/sec/shard** — roughly **4-6x headroom** below the per-shard ceiling, absorbing both normal load variance and the hash-skew scenarios from §8's runbook
-- Per-shard memory: `9 GB / 16` ~= **~560 MB/shard** for the all-time leaderboard — comfortably fits in memory alongside the daily/weekly/seasonal shards on the same node (total per-node footprint across all 4 leaderboard types' shards: roughly `36GB / 16` ~= **~2.25 GB/shard-node**, leaving ample headroom on any modern instance type)
+- Per-shard memory: `9 GB / 16` ~= **~560 MB/shard** for the all-time leaderboard. All four leaderboard types' shards would fit in *memory* on one node (`36GB / 16` ~= **~2.25 GB/shard-node**), but they must not be co-located anyway: the §4.9 fan-out means each type's shard independently absorbs ~4,700 `ZADD`/sec, so one node hosting all four would run at ~18,800/sec — the top of the per-instance envelope below. **The 4-6x headroom derived here is per shard-set, and only holds if the four shard-sets sit on different instances.**
 
 ### Top-N Cache TTL / Refresh Interval
 

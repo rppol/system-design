@@ -48,19 +48,19 @@
 
 ### Cardinality Budget
 
-- **Active series target: 50-100 million.** At 10 bytes/sample on disk after compression (§4.3's Gorilla-style encoding) and one sample every 15 seconds: `100,000,000 series x (86,400/15) samples/day x 10 bytes` ~= **~5.8 TB/day** of raw 15-second-resolution data before any downsampling
+- **Active series target: 50-100 million.** At ~1.3 bytes/sample on disk after compression (§4.3's Gorilla-style encoding; Prometheus documents "an average of only 1-2 bytes per sample") and one sample every 15 seconds: `100,000,000 series x (86,400/15) samples/day x 1.3 bytes` ~= **~750 GB/day** of raw 15-second-resolution data before any downsampling
 - A single careless label change is the dominant cardinality risk: adding a label with **N** unique values to a metric with **M** existing series multiplies it to `M x N` — a metric with 10,000 series gaining a `pod_id` label with 50,000 distinct (ephemeral) values becomes **500 million series** from one metric alone, exceeding the entire fleet's budget (War Story 1, §9)
 
 ### Storage Sizing by Retention Tier
 
 | Tier | Resolution | Retention | Bytes/sample (compressed) | Series | Storage |
 |---|---|---|---|---|---|
-| Raw | 15s | 15 days | ~1.3 bytes (Gorilla, §4.3) | 100M | `100M x (86400/15) x 15 x 1.3B` ~= **~1.0 TB** |
+| Raw | 15s | 15 days | ~1.3 bytes (Gorilla, §4.3) | 100M | `100M x (86400/15) x 15 x 1.3B` ~= **~11 TB** |
 | Rollup 1 | 5m | 90 days | ~2 bytes (less compressible, fewer repeats) | 100M | `100M x (86400/300) x 90 x 2B` ~= **~5.2 TB** |
 | Rollup 2 | 1h | 2 years | ~2 bytes | 100M | `100M x (86400/3600) x 730 x 2B` ~= **~3.5 TB** |
 
-- **Total steady-state storage: roughly 10 TB** across all three tiers for 100M active series — small compared to the raw 5.8 TB/day figure above precisely *because* downsampling (§4.4) discards resolution that long-range queries never need
-- Without downsampling, retaining 15-second resolution for 2 years would be `100M x (86400/15) x 730 x 1.3B` ~= **~284 TB** — a ~28x blowup, which is why retention tiers are not an optimization but a load-bearing design decision
+- **Total steady-state storage: roughly 20 TB** across all three tiers for 100M active series — only ~27 days' worth of the raw ingest rate above, for 2 years of queryable history, precisely *because* downsampling (§4.4) discards resolution that long-range queries never need
+- Without downsampling, retaining 15-second resolution for 2 years would be `100M x (86400/15) x 730 x 1.3B` ~= **~550 TB** — a ~27x blowup, which is why retention tiers are not an optimization but a load-bearing design decision
 
 ### Alert Rule Evaluation Load
 
@@ -224,7 +224,7 @@ This design uses **pull as the primary ingestion path** for the bulk of infrastr
 At 5-10 million points/sec (§2), a generic relational database (one row per point: `(series_id, timestamp, value)`) fails on three axes simultaneously:
 
 1. **Write amplification**: a B-tree index on `(series_id, timestamp)` means every insert is a random-ish write into the index — at 10M inserts/sec, the index itself becomes the bottleneck, and index pages for "hot" recent timestamps thrash constantly
-2. **Storage size**: a naive row is `8 bytes (series_id) + 8 bytes (timestamp) + 8 bytes (value) + row overhead` ~= 30-40 bytes/point. At 10M points/sec that's 300-400 MB/sec, ~26-35 TB/day *before* any retention beyond raw — compare to the ~1 TB/15-days figure in §2 achieved via compression
+2. **Storage size**: a naive row is `8 bytes (series_id) + 8 bytes (timestamp) + 8 bytes (value) + row overhead` ~= 30-40 bytes/point. At 10M points/sec that's 300-400 MB/sec, ~26-35 TB/day *before* any retention beyond raw — compare to the ~11 TB-for-15-days figure in §2 achieved via compression
 3. **Read pattern mismatch**: "give me the last 6 hours of `cpu_usage{host="x"}` at 15s resolution" is a sequential scan of one series' time range — a row-oriented index optimized for point lookups and arbitrary `WHERE` clauses does this far less efficiently than a format that stores each series' values **contiguously and compressed**
 
 **The fix — time-partitioned, columnar, chunked storage** (the TSM engine in InfluxDB, the chunk format in Prometheus's local TSDB, M3DB's storage layer): data is organized into **chunks**, each covering a fixed time range (e.g., 2 hours) and containing, for each series active in that range, a compressed byte stream of `(timestamp, value)` pairs. Two compression techniques (Gorilla, from Facebook's in-memory TSDB paper) exploit the specific structure of time-series data:
@@ -232,7 +232,7 @@ At 5-10 million points/sec (§2), a generic relational database (one row per poi
 - **Delta-of-delta timestamp encoding**: timestamps within a series arrive at a roughly constant interval (every 15s). Instead of storing each timestamp (8 bytes), store the *delta from the previous delta* — if the interval is perfectly regular, this delta-of-delta is **zero**, encodable in a single bit. Real-world jitter produces small non-zero deltas, still encodable in a handful of bits.
 - **XOR value encoding**: many metrics (CPU%, queue depth, gauge values) change slowly between consecutive samples. XOR-ing consecutive float64 values produces a result with many leading/trailing zero bits when the values are close — store only the differing bit range plus its position. A constant value compresses to **1 bit per sample**.
 
-Combined, Gorilla-style encoding achieves roughly **1.3-2 bytes/sample** for typical metrics — a 15-20x reduction versus the naive 30-40 byte row, which is exactly the gap between the §2 "naive" estimate (~284 TB for full-resolution 2-year retention) and the actual ~10 TB total footprint.
+Combined, Gorilla-style encoding achieves roughly **1.3-2 bytes/sample** for typical metrics — a **15-30x reduction** versus the naive 30-40 byte row. Note that compression and downsampling are *two separate* multipliers, and it is worth keeping them apart: compression alone takes the raw tier from ~26-35 TB/day to ~750 GB/day (§2); **downsampling** is what then takes 2 years of history from ~550 TB (compressed, full resolution) to the ~20 TB three-tier total (§2, §4.4). Neither one alone gets there.
 
 ```
 Chunk for series http_requests_total{service="checkout",...}, time range [12:00:00, 14:00:00):
@@ -247,7 +247,7 @@ Chunk for series http_requests_total{service="checkout",...}, time range [12:00:
 
 ### 4.4 Downsampling and Retention Tiers — The Rollup Pipeline
 
-Storing every series at 15-second resolution forever is both unaffordable (§2's 284 TB figure) and unnecessary — nobody queries "CPU usage at 15-second resolution from 18 months ago" for a trend dashboard; they query "what did CPU usage look like, hour by hour, over the last 6 months." The **rollup pipeline** progressively aggregates raw data into coarser tiers, each retained longer than the one below it:
+Storing every series at 15-second resolution forever is both unaffordable (§2's ~550 TB figure) and unnecessary — nobody queries "CPU usage at 15-second resolution from 18 months ago" for a trend dashboard; they query "what did CPU usage look like, hour by hour, over the last 6 months." The **rollup pipeline** progressively aggregates raw data into coarser tiers, each retained longer than the one below it:
 
 ```mermaid
 flowchart LR
@@ -370,17 +370,51 @@ public class TimeSeriesWriteBuffer {
         }
 
         long bucketStart = (sample.timestampMillis() / rollupBucketMillis) * rollupBucketMillis;
+
+        // The remapping function of ConcurrentHashMap.compute() runs while
+        // holding the bin lock, and the javadoc requires it to be "short and
+        // simple". Emitting to rollupSink is an I/O call -- doing it inside
+        // compute() would stall every other writer hashing to that bin for the
+        // duration of a network write. So capture the closed bucket here and
+        // flush it AFTER compute() returns.
+        RollupRow[] closed = new RollupRow[1];
         rollupBuckets.compute(sample.seriesId(), (seriesId, acc) -> {
             if (acc == null || acc.bucketStart != bucketStart) {
                 if (acc != null) {
-                    // Previous bucket's window has closed -- emit its rollup.
-                    rollupSink.write(acc.toRollupRow(seriesId));
+                    closed[0] = acc.toRollupRow(seriesId); // window closed
                 }
                 acc = new BucketAccumulator(bucketStart, reservoirCapacity);
             }
             acc.add(sample.value());
             return acc;
         });
+        if (closed[0] != null) {
+            rollupSink.write(closed[0]);
+        }
+    }
+
+    /**
+     * Closes and emits any rollup bucket whose window ended before
+     * {@code nowMillis}. Required because ingest() only closes a bucket when
+     * the NEXT sample for that series arrives -- a series that stops
+     * reporting (pod terminated, target removed from service discovery) would
+     * otherwise strand its final bucket in memory forever, both leaking the
+     * accumulator and silently losing the last 5 minutes of that series.
+     * Call this on the same cadence as flushRaw().
+     */
+    public void closeExpiredBuckets(long nowMillis) {
+        long currentBucket = (nowMillis / rollupBucketMillis) * rollupBucketMillis;
+        for (String seriesId : rollupBuckets.keySet()) {
+            RollupRow[] closed = new RollupRow[1];
+            rollupBuckets.computeIfPresent(seriesId, (id, acc) -> {
+                if (acc.bucketStart >= currentBucket) return acc; // still open
+                closed[0] = acc.toRollupRow(id);
+                return null; // drop the accumulator
+            });
+            if (closed[0] != null) {
+                rollupSink.write(closed[0]);
+            }
+        }
     }
 
     /** Periodically called (e.g., every rawFlushIntervalMillis) to flush
@@ -621,7 +655,7 @@ flowchart LR
 Two properties make this work:
 
 - **Regional alerting never depends on the global layer.** Each regional stack evaluates its own alert rules (§4.6) against its own local storage — a federation-layer outage degrades *global* dashboards and cross-region rules only, never a region's ability to page on-call for that region's own incidents. This is the single most important availability property of the whole architecture: the system that's supposed to detect "region X is down" cannot itself live only in region X.
-- **Federation moves rollups, not raw data.** Shipping every region's full 15-second-resolution raw tier (§2's ~667 GB/day/region at full scale) to a central federation point would recreate the exact write-throughput problem §4.3 exists to avoid, just one layer up. Instead, only the 5-minute and 1-hour rollup tiers (§4.4) — already 1-2 orders of magnitude smaller — are federated, which is sufficient for cross-region trend dashboards and SLO burn-rate calculations (cross-ref [`../observability/README.md`](../observability/README.md) §6.3) without re-creating a global single point of failure for raw data.
+- **Federation moves rollups, not raw data.** Shipping every region's full 15-second-resolution raw tier (§2's ~750 GB/day of raw samples, split across regions) to a central federation point would recreate the exact write-throughput problem §4.3 exists to avoid, just one layer up. Instead, only the 5-minute and 1-hour rollup tiers (§4.4) — already 1-2 orders of magnitude smaller — are federated, which is sufficient for cross-region trend dashboards and SLO burn-rate calculations (cross-ref [`../observability/README.md`](../observability/README.md) §6.3) without re-creating a global single point of failure for raw data.
 
 This mirrors the regional-stack-plus-global-rollup structure in [`./design_ad_click_aggregation.md`](./design_ad_click_aggregation.md) §4.8 — both designs converge on "evaluate locally, federate only aggregates" for the same underlying reason: a global component that everything depends on for *correctness* is acceptable (eventual global dashboards), but a global component that everything depends on for *detection* is not (every region must be able to alert on itself).
 
@@ -679,7 +713,7 @@ The 990th request (99% of the 1,000 total) falls between the `le=0.5` bucket (98
 
 | Dimension | Single resolution (15s) forever | Tiered downsampling (this design, §4.4) |
 |---|---|---|
-| Storage for 100M series, 2 years | ~284 TB (§2) | ~10 TB total across 3 tiers (§2) |
+| Storage for 100M series, 2 years | ~550 TB (§2) | ~20 TB total across 3 tiers (§2) |
 | Long-range query cost | Scans full-resolution data even for a 1-year chart | Reads the appropriately coarse tier — orders of magnitude fewer points |
 | Information loss for old data | None | `avg`/`max`/`p99` per bucket retained (§4.4) — enough for trend + worst-case, not enough to reconstruct sub-bucket spikes |
 | Best fit | Short-term debugging only, unaffordable past days/weeks | Any system with multi-month+ retention requirements |
@@ -786,11 +820,13 @@ The **dead-man's-switch** pattern deserves emphasis: a rule that always evaluate
 
 ## 9. Common Pitfalls & War Stories
 
+*Both incidents below are **illustrative composites**, not accounts of specific named outages. The mechanisms (cardinality explosion from an unbounded label; a missing `for` duration causing flapping) recur constantly in production monitoring stacks, but the series counts, outage durations and page counts are constructed to make the failure legible rather than quoted from a published post-mortem.*
+
 ### War Story 1: A `user_id` Label Takes Down the TSDB — Broken, Then Fixed
 
 **Broken**: A team instrumented a new checkout-flow metric, `checkout_step_duration_seconds`, with labels `{step, payment_method, user_id}` — the `user_id` label was added "for debugging," with the intent of letting an engineer filter to a specific user's checkout flow during investigations. The metric had previously existed with just `{step, payment_method}` — roughly `8 steps x 5 payment methods` = 40 series. Code review approved the change; nobody flagged the new label, because in isolation "add a label for debugging" sounds harmless.
 
-**Impact**: Within hours of the deploy reaching production traffic, the TSDB's active series count for this single metric went from 40 to **over 12 million** (roughly the platform's daily active user count) — `40 x 300,000+ distinct user_ids seen per scrape interval`. The TSDB's in-memory series index, sized for the platform's existing ~50 million total active series across *all* metrics, absorbed this new metric's 12 million series on top of the existing baseline, pushing memory usage past the instance's limit. The TSDB began OOM-killing and restarting on a loop — and because it restarted mid-write repeatedly, both **ingestion and querying failed platform-wide** for roughly 40 minutes, including the dashboards and alert rules that would normally have surfaced the checkout service's *own* problems. The on-call engineer's first signal wasn't a `checkout_step_duration_seconds` alert — it was "every dashboard in the company is blank and every alert rule is erroring."
+**Impact**: Within hours of the deploy reaching production traffic, the TSDB's active series count for this single metric went from 40 to **over 12 million** — `40 x 300,000+ distinct user_ids observed within the active-series window`. The TSDB's in-memory series index, sized for the platform's existing ~50 million total active series across *all* metrics, absorbed this new metric's 12 million series on top of the existing baseline, pushing memory usage past the instance's limit. The TSDB began OOM-killing and restarting on a loop — and because it restarted mid-write repeatedly, both **ingestion and querying failed platform-wide** for roughly 40 minutes, including the dashboards and alert rules that would normally have surfaced the checkout service's *own* problems. The on-call engineer's first signal wasn't a `checkout_step_duration_seconds` alert — it was "every dashboard in the company is blank and every alert rule is erroring."
 
 **Fixed**: Three layers, ordered by immediacy:
 1. **Immediate mitigation**: a relabeling rule was applied at the ingestion layer (§4.2) to drop the `user_id` label from `checkout_step_duration_seconds` before it reached storage — this stopped further cardinality growth within one scrape interval, though the millions of already-created series remained in the index until they aged out of the active window
@@ -835,8 +871,8 @@ The `for` field was omitted — the author's mental model was "if the error rate
 
 ### Storage Tier Sizing
 
-- From §2: **~10 TB total** across raw (15s/15d), rollup-1 (5m/90d), and rollup-2 (1h/2y) tiers for 100M active series
-- Write path: 10 TB / 15 days (raw tier churn) ~= **~667 GB/day** of new raw-tier data, plus rollup writes (smaller, derived) — well within the sequential-write throughput of modern SSD-backed storage nodes when spread across the ~40-100 ingestion shards
+- From §2: **~20 TB total** across raw (15s/15d), rollup-1 (5m/90d), and rollup-2 (1h/2y) tiers for 100M active series
+- Write path: the ~11 TB raw tier turns over every 15 days ~= **~750 GB/day** of new raw-tier data, plus rollup writes (smaller, derived) — well within the sequential-write throughput of modern SSD-backed storage nodes when spread across the ~40-100 ingestion shards
 - A single storage node, holding a shard of series with its associated chunk files, comfortably handles **low-single-digit millions of active series** at this compression ratio — `100,000,000 / 2,000,000` ~= **~50 storage nodes** for the active-series budget, with replication factor 2-3 for durability -> **~100-150 storage nodes total**
 
 ### Alert Rule Engine Sizing
@@ -861,7 +897,7 @@ The `for` field was omitted — the author's mental model was "if the error rate
 |---|---|---|
 | Ingestion shards | 25M points/sec burst / ~250K points/sec/shard | ~100 shards |
 | Storage nodes | 100M active series / ~2M series/node, replication 2-3x | ~100-150 nodes |
-| Total storage | 3-tier retention (15s/15d, 5m/90d, 1h/2y) for 100M series | ~10 TB |
+| Total storage | 3-tier retention (15s/15d, 5m/90d, 1h/2y) for 100M series | ~20 TB |
 | Alert rule evaluators | 10K rules / 30s, ~5ms/eval | 4-8 instances with headroom |
 | Query-serving capacity | 5K-15K queries/sec peak, mostly cache-served | Sized for incident-time co-occurrence with ingestion burst |
 
@@ -876,7 +912,7 @@ A: Cardinality is the number of unique label-value combinations for a metric —
 A: Without a `for` duration, the alert fires the instant the condition is true on a single evaluation cycle, and resolves the instant it's false again — so any brief, self-resolving blip (a 20-second connection-pool hiccup, a single slow scrape) produces a fire-and-resolve pair, and if the underlying value oscillates around the threshold, the rule can flap dozens of times in minutes (War Story 2, §9). It's common because the instinct "page immediately, every second counts" feels correct in isolation, but ignores that *real* sustained incidents can tolerate a few minutes of debounce far better than on-call can tolerate dozens of pages for non-issues — and the second-order effect (on-call muting the alert) means the *next* genuine incident on that rule goes unnoticed. The fix is always: add `for: Nm` (commonly 2-5 minutes), and if sub-minute detection is genuinely required, use a separate, more carefully-tuned rule rather than removing `for` from the general-purpose one.
 
 **Q: Why can't you just store metrics in a regular relational database?**
-A: Three compounding reasons (§4.3): write throughput (a B-tree index on `(series_id, timestamp)` thrashes under 10M+ inserts/sec — there's no good place to put a "new" row that doesn't perturb existing index pages), storage size (a naive 30-40 byte row vs. ~1.3-2 bytes/sample with Gorilla-style delta-of-delta timestamp and XOR value encoding — a 15-20x difference that determines whether multi-year retention is feasible at all), and read-pattern mismatch (the dominant query — "the last N hours of series X" — wants one series' values stored *contiguously and compressed*, which a row-oriented table optimized for arbitrary `WHERE` clauses doesn't provide). A purpose-built TSDB exploits the fact that timestamps are nearly-regular and values change slowly — properties a generic store has no way to leverage.
+A: Three compounding reasons (§4.3): write throughput (a B-tree index on `(series_id, timestamp)` thrashes under 10M+ inserts/sec — there's no good place to put a "new" row that doesn't perturb existing index pages), storage size (a naive 30-40 byte row vs. ~1.3-2 bytes/sample with Gorilla-style delta-of-delta timestamp and XOR value encoding — a 15-30x difference that determines whether multi-year retention is feasible at all), and read-pattern mismatch (the dominant query — "the last N hours of series X" — wants one series' values stored *contiguously and compressed*, which a row-oriented table optimized for arbitrary `WHERE` clauses doesn't provide). A purpose-built TSDB exploits the fact that timestamps are nearly-regular and values change slowly — properties a generic store has no way to leverage.
 
 **Q: Walk through what happens end-to-end when a counter increments in an application until that increment shows up on a dashboard.**
 A: The client library increments an in-process counter immediately (§4.2) — no network call yet. On the next scrape cycle (every 15s for pull-based ingestion), the scrape manager issues a GET to the instance's `/metrics` endpoint and receives the counter's current cumulative value. That value, with its timestamp, is hashed by series ID onto an ingestion shard, buffered briefly (§4.3's `TimeSeriesWriteBuffer`), and appended to that series' chunk in compressed form. In parallel, the value folds into the in-progress 5-minute rollup bucket for that series (§4.4). A dashboard panel querying `rate(my_counter[5m])` triggers the query layer (§4.5) to read the relevant chunk(s), compute the per-second rate from the counter's delta over the window, and return it — typically within the 10-30 second freshness window from §1, dominated by the scrape interval plus a small ingestion-to-queryable lag.
@@ -888,7 +924,7 @@ A: A counter only ever increases (or resets to 0 on process restart) — graphin
 A: First, the label matcher resolves to the set of series matching `http_requests_total` (potentially millions, §4.1) across all shards that own pieces of that series space. Each shard independently reads its local chunks (§4.3) for the requested time range and returns its partial series' values. The query coordinator merges these partial results, then performs the `sum by (service)` grouping — collapsing all labels *except* `service` by summing values across series that share the same `service` label. The critical cost point (§4.5): the work done *before* the `sum by` — resolving and reading every matching series — scales with the metric's full cardinality, regardless of how few distinct `service` values exist in the output. A metric with 10 million series producing 30 summed output rows still costs "read 10 million series," not "read 30 rows."
 
 **Q: Why does this design use three retention tiers instead of one resolution forever?**
-A: Because the cost of full resolution forever is prohibitive (~284 TB vs. ~10 TB for 100M series over 2 years, §2) and because nobody's *query pattern* needs 15-second resolution for data from 18 months ago — long-range dashboards want hour-by-hour trends, not second-by-second noise. The tiers (15s/15d, 5m/90d, 1h/2y, §4.4) are produced by a streaming rollup pipeline using the same tumbling-window mechanics as click-event aggregation (cross-ref [`./design_ad_click_aggregation.md`](./design_ad_click_aggregation.md) §4.2) — each tier stores `avg`/`max`/`p99` per bucket, preserving enough information for both trend lines and "was there a spike" questions without retaining every raw sample. The query layer automatically picks the tier matching the requested range/resolution (§4.5).
+A: Because the cost of full resolution forever is prohibitive (~550 TB vs. ~20 TB for 100M series over 2 years, §2) and because nobody's *query pattern* needs 15-second resolution for data from 18 months ago — long-range dashboards want hour-by-hour trends, not second-by-second noise. The tiers (15s/15d, 5m/90d, 1h/2y, §4.4) are produced by a streaming rollup pipeline using the same tumbling-window mechanics as click-event aggregation (cross-ref [`./design_ad_click_aggregation.md`](./design_ad_click_aggregation.md) §4.2) — each tier stores `avg`/`max`/`p99` per bucket, preserving enough information for both trend lines and "was there a spike" questions without retaining every raw sample. The query layer automatically picks the tier matching the requested range/resolution (§4.5).
 
 **Q: Pull-based (Prometheus) vs. push-based (Datadog agent) ingestion — what's the real tradeoff, and when would you pick each?**
 A: The headline tradeoff is operational, not about raw throughput (§4.2, §5): pull gives you a free "is this target even alive" signal (`up == 0` on scrape failure is itself alertable) and is the natural fit for long-lived services behind service discovery, but requires the scraper to have network access *to* every target — awkward across firewalls, NAT, or serverless. Push flips this — targets only need egress, which is usually easier, and ephemeral/serverless workloads that don't live long enough to be scraped can still emit metrics before exiting — but you lose the implicit liveness signal (a dead target just silently stops sending, indistinguishable from "nothing happened" without a separate heartbeat) and push-based agents typically pre-aggregate client-side, trading some flexibility for reduced network volume. Most large deployments run both: pull as the default for the service fleet, push (via a gateway that's *itself* scraped) for short-lived jobs.

@@ -57,10 +57,10 @@
 
 ### Provider Rate-Limit Constraints (the real bottleneck)
 
-- **FCM**: No hard documented cap on total throughput, but per-app and per-project quotas exist, and FCM applies its own server-side throttling if a single app suddenly spikes — practical safe ceiling for a well-behaved sender is in the tens of thousands of messages/sec, achieved via batching (FCM's batch send API accepts up to 500 tokens per request).
+- **FCM**: No hard documented cap on total throughput, but per-app and per-project quotas exist, and FCM applies its own server-side throttling if a single app suddenly spikes — practical safe ceiling for a well-behaved sender is in the tens of thousands of messages/sec. **There is no longer a batch-send HTTP endpoint**: the `/batch` endpoint that once packed up to 500 sends into one HTTP request was retired in June 2024, along with the `sendAll()` / `sendMulticast()` Admin SDK methods that called it. The replacements — `sendEach()` / `sendEachForMulticast()` — still accept a list of up to **500 messages per call**, but issue **one HTTP request per message**, multiplexed over the HTTP/2 connection pool. The 500 is now a client-side fan-out batch, not a network-level one; sizing must be done in requests/sec, not batches/sec (§4.5).
 - **APNs**: HTTP/2-based, supports thousands of notifications/sec per connection, but Apple recommends connection pooling (multiple persistent HTTP/2 connections) rather than one-shot connections — connection churn itself becomes a bottleneck before raw throughput does.
-- **Twilio**: SMS throughput is capped **per sending phone number** — a standard long code is limited to **~1 message/sec**; a toll-free number to ~3/sec; a short code to 30-100/sec. To send 580 SMS/sec sustained, you need a pool of **20+ short codes** (or use Twilio's Messaging Service with a number pool that load-balances automatically).
-- **SES**: Sending quota is account-level (e.g., 50 emails/sec for a "production access" account by default, scalable on request to thousands/sec) — exceeding it returns `Throttling` errors.
+- **Twilio**: SMS throughput is capped **per sending phone number**. A US **10DLC long code** starts at ~1 message/sec and rises to anywhere between **3 and 180 MPS** depending on the brand's Trust Score and registered campaign type; a **toll-free** number is **3 MPS** by default; a **short code** is **100 MPS**. To send 580 SMS/sec sustained you need roughly **6 short codes**, or a comparable pool of high-Trust-Score 10DLC numbers — in practice, a Twilio Messaging Service with a number pool that load-balances across them automatically.
+- **SES**: Sending quota is account-level and **per AWS Region**. A sandbox account is capped at **1 email/sec and 200 emails per 24 hours**; once production access is granted, AWS sets the rate and daily quota per account based on the use case rather than publishing a fixed default, and raises them on request. Exceeding the granted rate returns `Throttling` errors — so the limiter in §4.4 must be configured from the account's *actual* granted quota, never from a remembered number.
 
 **Conclusion**: at peak, push (101K/sec) and in-app (29K/sec) are absorbed by horizontally-scaled internal infrastructure (FCM/Kafka/workers scale linearly), but SMS (2.9K/sec) and email (11.6K/sec) are bottlenecked by *provider-side* per-account/per-number limits that don't scale just by adding more workers — this drives the per-provider token-bucket design in §4.
 
@@ -75,8 +75,8 @@
 ### Dedup Cache (Redis)
 
 - 2.5B notifications/day, each needing a dedup key with 24h TTL.
-- Key (`notification_id` hash, 16 bytes) + value (small marker, ~8 bytes) + Redis overhead (~40 bytes/key) ≈ **~50 bytes/key**.
-- 2.5B keys x 50 bytes ≈ **125 GB** — sized in detail in §10.
+- Key string (`dedup:notif:` + a 64-char SHA-256 hex digest = 76 bytes) + a 1-byte marker value + Redis's per-key overhead (dict entry, object headers, and a second entry in the expires dict because every key carries a TTL) ≈ **~140 bytes/key**.
+- 2.5B keys x ~140 bytes ≈ **~350 GB** — sized in detail in §10, where it drives the shard count.
 
 ---
 
@@ -396,7 +396,7 @@ Each `<channel>.<priority>` topic has its **own consumer group**, scaled indepen
 
 Each channel worker pool (push, SMS, email, in-app) consumes from its Kafka topics and calls the corresponding provider API. Two protections wrap every provider call:
 
-1. **Token-bucket rate limiter** — proactively meters outbound calls to stay under the provider's documented rate limit (e.g., 1 msg/sec per Twilio long code, 50/sec for SES). This is *our* enforcement, independent of whether the provider would reject us.
+1. **Token-bucket rate limiter** — proactively meters outbound calls to stay under the provider's rate limit (e.g., the per-number MPS Twilio has granted this long code, or the send rate SES has granted this account in this Region, §2). This is *our* enforcement, independent of whether the provider would reject us — and it is configured from the quota the provider actually granted, read at deploy time, not hard-coded.
 2. **Circuit breaker** — reactively trips if the provider starts erroring (5xx, timeouts) so we stop hammering a degraded provider and can fail over (e.g., SES -> SendGrid). The breaker's state machine (closed -> open -> half-open) is the same one used throughout the codebase — see [`../resilience_patterns/README.md`](../resilience_patterns/README.md) for the full state-machine definition; it is not redefined here.
 
 **Token-bucket rate limiter** (one instance per provider identity — e.g., one per Twilio sending number, one per SES account/region):
@@ -412,8 +412,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public class TokenBucketRateLimiter {
 
     private final long capacity;          // max burst size (tokens)
-    private final long refillTokensPerNs; // refill rate, expressed per nanosecond (scaled)
-    private final long refillIntervalNs;  // how often `refillTokensPerNs` tokens are added
+    private final long refillTokensPerInterval; // tokens added per refill interval
+    private final long refillIntervalNs;  // how often refillTokensPerInterval tokens are added
 
     private final AtomicLong availableTokens;
     private volatile long lastRefillTimestampNs;
@@ -425,7 +425,7 @@ public class TokenBucketRateLimiter {
      */
     public TokenBucketRateLimiter(long capacity, long refillTokens, long refillIntervalNs) {
         this.capacity = capacity;
-        this.refillTokensPerNs = refillTokens;
+        this.refillTokensPerInterval = refillTokens;
         this.refillIntervalNs = refillIntervalNs;
         this.availableTokens = new AtomicLong(capacity);
         this.lastRefillTimestampNs = System.nanoTime();
@@ -461,7 +461,7 @@ public class TokenBucketRateLimiter {
             return;
         }
         long intervalsElapsed = elapsed / refillIntervalNs;
-        long tokensToAdd = intervalsElapsed * refillTokensPerNs;
+        long tokensToAdd = intervalsElapsed * refillTokensPerInterval;
         if (tokensToAdd > 0) {
             // Best-effort CAS update of the timestamp; if another thread
             // wins, we just skip this refill cycle (next call retries).
@@ -493,7 +493,9 @@ public class TokenBucketRateLimiter {
 ```java
 public class SmsChannelWorker {
 
-    // One bucket per Twilio sending number, ~1 msg/sec (long code limit)
+    // One bucket per Twilio sending number, sized from the MPS actually
+    // granted to that number (1 for an unregistered long code, up to 180
+    // for a high-Trust-Score 10DLC campaign, 100 for a short code -- §2).
     private final Map<String, TokenBucketRateLimiter> perNumberLimiters;
     private final CircuitBreaker twilioBreaker; // see resilience_patterns/README.md
 
@@ -525,7 +527,7 @@ public class SmsChannelWorker {
 }
 ```
 
-The rate limiter and the breaker answer different questions: the limiter asks "*am I about to exceed my contractual quota?*" (proactive, always-on shaping), while the breaker asks "*is the provider currently healthy?*" (reactive, only matters during incidents). Both are needed — a limiter alone won't help if Twilio itself is down, and a breaker alone won't prevent gradually creeping past the per-number 1/sec cap during normal operation.
+The rate limiter and the breaker answer different questions: the limiter asks "*am I about to exceed my contractual quota?*" (proactive, always-on shaping), while the breaker asks "*is the provider currently healthy?*" (reactive, only matters during incidents). Both are needed — a limiter alone won't help if Twilio itself is down, and a breaker alone won't prevent gradually creeping past the number's granted MPS cap during normal operation.
 
 ---
 
@@ -540,18 +542,19 @@ The rate limiter and the breaker answer different questions: the limiter asks "*
    - Target throughput: **145,000 msgs/sec** (the system's overall peak design point — this campaign should not exceed the capacity already provisioned for peak load, since transactional traffic shares the same downstream FCM connection pool, just on different partitions).
    - 100,000,000 users / 145,000 msgs/sec = **~690 seconds ≈ 11.5 minutes**.
 
-3. **Producer-side batching**: FCM's batch-send API accepts up to 500 registration tokens per HTTP request. At 145,000 msgs/sec / 500 per batch = **290 batch requests/sec** to FCM — well within FCM's tolerance for a properly batched, steady-rate sender (versus 145,000 individual HTTP/2 streams/sec, which is far more connection overhead for the same payload).
+3. **Worker-side fan-out, not network batching**: `sendEachForMulticast` takes up to 500 messages per call, so a worker issues **290 SDK calls/sec** at 145,000 msgs/sec — but since the `/batch` endpoint's retirement (§2) each of those calls expands into 500 separate HTTP requests, so FCM still sees the full **~145,000 requests/sec**, multiplexed as HTTP/2 streams over a pooled set of connections. Size the connection pool and the worker's outbound concurrency against that request rate; the 500-message call is an ergonomics and error-handling boundary (it is what returns the per-message result list War Story 2 depends on), not a network-traffic reduction.
 
 4. **Backpressure-aware pacing**: The fan-out producer monitors the `push.marketing` consumer group's lag. If lag grows beyond a threshold (e.g., 2 minutes of backlog), the producer slows its enqueue rate — there's no point producing faster than the workers (and FCM) can drain, since Kafka's disk is not infinite and a runaway producer just shifts the bottleneck from "FCM throttling us" to "Kafka disk filling up."
 
-5. **Result**: 100M-user broadcast completes in ~11.5 minutes, FCM never sees more than its sustainable batch rate, and the `push.transactional` topic — on separate partitions with its own consumer group — continues serving OTPs and trip alerts at p99 < 5s throughout.
+5. **Result**: 100M-user broadcast completes in ~11.5 minutes, FCM never sees more than its sustainable request rate, and the `push.transactional` topic — on separate partitions with its own consumer group — continues serving OTPs and trip alerts at p99 < 5s throughout.
 
 ```
 Campaign: 100,000,000 users, push channel
 Target rate: 145,000 msgs/sec  (shared peak budget with transactional)
-Batch size: 500 tokens/FCM request
-=> 290 FCM batch requests/sec
-=> 100,000,000 / 145,000 = 689.7 sec ≈ 11.5 minutes to fully drain
+SDK call size: 500 messages per sendEachForMulticast call
+=> 290 SDK calls/sec, but ~145,000 HTTP/2 requests/sec on the wire
+   (the /batch endpoint that once collapsed these was retired in 2024)
+=> 100,000,000 / 145,000 = 689.7 sec ~= 11.5 minutes to fully drain
 ```
 
 ```mermaid
@@ -568,13 +571,13 @@ flowchart LR
     Producer(Fan-out Producer<br/>token bucket, 145K/sec cap)
     Topic@{ icon: "logos:kafka", form: "square", label: "Kafka<br/>push.marketing", pos: "b", h: 44 }
     Workers(Push Worker Pool)
-    Fcm([FCM batch API<br/>500 tokens/request])
+    Fcm([FCM HTTP v1<br/>1 request per message])
     LagMonitor{consumer lag<br/>over 2 min?}
 
     Segment --> Producer
     Producer -->|paced enqueue| Topic
     Topic --> Workers
-    Workers -->|290 batches/sec| Fcm
+    Workers -->|145K req/sec<br/>over pooled HTTP/2| Fcm
     Topic -.->|lag reading| LagMonitor
     LagMonitor -.->|yes, slow down| Producer
 
@@ -665,7 +668,7 @@ The **Status DB** (Cassandra/DynamoDB, partitioned by `notification_id`) is the 
 
 - **Choice**: Separate Kafka topics per channel (push/sms/email/in-app), further split by priority (§4.3).
 - **Reason**: A single unified queue means a slow or degraded channel's messages sit interleaved with healthy channels' messages on the same partitions — if SMS workers fall behind because Twilio is degraded, push messages stuck behind SMS messages in the same partition would also be delayed (Kafka guarantees order *within* a partition, so a stuck consumer blocks everything behind it on that partition).
-- **Trade-off**: More topics/partitions to operate and monitor (8 topics x up to 24 partitions in §4.3), but this is purely an operational cost — it buys complete failure isolation between channels, which is non-negotiable given push (101K/sec peak) and SMS (2.9K/sec peak, provider-throttled to ~1/sec/number) have wildly different sustainable rates.
+- **Trade-off**: More topics/partitions to operate and monitor (8 topics x up to 24 partitions in §4.3), but this is purely an operational cost — it buys complete failure isolation between channels, which is non-negotiable given push (101K/sec peak) and SMS (2.9K/sec peak, provider-throttled per sending number, §2) have wildly different sustainable rates.
 
 ### Async Enqueue-Ack API vs. Synchronous Send-and-Wait
 
@@ -707,7 +710,7 @@ The **Status DB** (Cassandra/DynamoDB, partitioned by `notification_id`) is the 
 | Dedup cache | Redis (Cluster) | Sub-millisecond `SETNX` for the idempotency check (§4.1); also caches user preferences |
 | Preferences cache | Redis | `prefs:{user_id}` cached blob, ~1h TTL, avoids a DB round-trip on every send |
 | Notification log / status DB | Cassandra or DynamoDB | High write throughput (145K/sec peak), partitioned by `notification_id`, conditional writes for dedup backstop (§4.1) |
-| Push providers | FCM (Android), APNs (iOS) | Industry-standard mobile push gateways; batch-send APIs (§4.5) |
+| Push providers | FCM HTTP v1 (Android), APNs (iOS) | Industry-standard mobile push gateways; both are one-request-per-message over pooled HTTP/2 (§2, §4.5) |
 | SMS providers | Twilio, AWS SNS (SMS) | Twilio for primary with number pools; SNS as a secondary/failover path |
 | Email providers | AWS SES, SendGrid | SES primary (cost-efficient at scale), SendGrid as failover (War Story 2) |
 | Searchable history | Elasticsearch | Support and ops teams search "did user X receive notification about Y" across the notification log |
@@ -795,6 +798,8 @@ flowchart LR
 ---
 
 ## 9. Common Pitfalls & War Stories
+
+*The four incidents below are **illustrative composites**. The failure modes — at-least-once duplicates through a rebalance, a batch API's per-message failures hidden behind an aggregate status, a shared-dependency outage fanning out as user-facing notifications, and a frozen UTC offset going stale across a DST change — are all real and recurrent, but the message counts, delivery percentages, ticket volumes and durations are constructed to make each mechanism legible, not quoted from any published post-mortem.*
 
 ### War Story 1: Triplicate "Your Order Has Shipped" Emails During a Kafka Rebalance
 
@@ -893,7 +898,7 @@ public void sendBatch(List<PushMessage> batch) {
 }
 ```
 
-**Lesson**: "200 OK at the HTTP level" and "all messages in this batch were delivered" are **not the same claim** for any provider with a batch API — FCM, SES (`SendBulkTemplatedEmail`), and Twilio's bulk APIs all return per-item results that must be inspected individually. Combined with producer-side throttling that respects the *system's* sustainable rate (not just "how fast can our Kafka producer serialize messages"), this closed the gap from 68% to >99.5% measured delivery on subsequent campaigns of similar size.
+**Lesson**: "the call returned successfully" and "all messages in this batch were delivered" are **not the same claim** for any provider with a multi-message API — FCM's `sendEachForMulticast` returns a `BatchResponse` whose per-message `SendResponse` entries each carry their own success flag and error code, and SES (`SendBulkEmail`) and Twilio's bulk APIs are the same shape. Per-item results must be inspected individually; a single aggregate status is never the answer. Combined with producer-side throttling that respects the *system's* sustainable rate (not just "how fast can our Kafka producer serialize messages"), this closed the gap from 68% to >99.5% measured delivery on subsequent campaigns of similar size.
 
 ---
 
@@ -986,10 +991,11 @@ Per Little's Law, `L = λ * W` (number of in-flight items = arrival rate x avera
 ### Redis Dedup Cache Footprint
 
 - 2.5B notifications/day, each holding a dedup key for its 24h TTL — at steady state, the cache holds roughly one full day's worth of keys (~2.5B keys) at any given moment (older keys expiring as new ones are added).
-- Per-key footprint: a 64-character SHA-256 hex digest as the key (~64 bytes) + Redis's per-key overhead (object header, hash table entry — typically 50-70 bytes for small string values in Redis) + a tiny value (~8 bytes) ≈ **~50 bytes/key effective** when accounting for Redis's internal encoding optimizations for small keys (using `OBJ_ENCODING_EMBSTR` and shared integer values where possible) — consistent with the back-of-envelope figure used in §2.
-- Total: 2.5B keys x 50 bytes ≈ **125 GB**.
-- **A single Redis instance (even a large one, 256GB+ RAM) could theoretically hold this**, but a single instance is unacceptable: it's a single point of failure for *every* dedup check across *all* channels and priorities, and 145K/sec of `SETNX` calls at peak against one instance risks CPU-bound throughput limits (Redis is single-threaded for command execution).
-- **Provisioned: a sharded Redis Cluster** — e.g., 8-16 shards, each holding ~8-16GB of dedup keys, distributing both the memory footprint and the 145K/sec command rate (roughly 9K-18K SETNX/sec per shard) comfortably within a single Redis instance's single-threaded command-processing capacity (Redis comfortably handles 100K+ simple ops/sec per instance, so even the lower shard count leaves significant headroom).
+- Per-key footprint, added up honestly: the key string is `dedup:notif:` + a 64-character SHA-256 hex digest = **76 bytes**, plus its `sds`/`robj` headers and main-dict entry (~50-70 bytes for a small string), plus a second entry in the **expires dict** — every one of these keys has a TTL, and the TTL is not free. That totals roughly **~140 bytes/key**, not the ~50 a "small key" intuition suggests. `OBJ_ENCODING_EMBSTR` and shared integers help the 1-byte *value*, which was never the expensive part.
+- Total: 2.5B keys x ~140 bytes ≈ **~350 GB**.
+- **The cheapest lever is the key itself.** Truncating the digest to 128 bits and storing it as 32 hex chars behind a 2-char prefix (`d:` + 32 = 34 bytes) cuts ~42 bytes/key, or **~105 GB**, at a collision probability that is still negligible over a 2.5B-key population — worth doing before buying RAM.
+- **A single Redis instance cannot hold 350 GB comfortably**, and a single instance would be unacceptable regardless: it's a single point of failure for *every* dedup check across *all* channels and priorities, and 145K/sec of `SET NX` calls at peak against one instance risks CPU-bound throughput limits (Redis is single-threaded for command execution).
+- **Provisioned: a sharded Redis Cluster** — e.g., 16 shards, each holding **~22 GB** of dedup keys, distributing both the memory footprint and the 145K/sec command rate (roughly **9K `SET NX`/sec per shard**) comfortably within a single Redis instance's single-threaded command-processing capacity, which handles 100K+ simple ops/sec — so the shard count here is driven by **memory, not throughput**, and should be revisited whenever DAU or the TTL changes, not whenever QPS does.
 
 ---
 
@@ -1011,7 +1017,7 @@ A: A poll-based model — workers periodically querying a "pending notifications
 A: Physical separation at the Kafka topic level — `<channel>.transactional` and `<channel>.marketing` are different topics with different partition counts, different retention settings, and crucially **different consumer groups that scale independently** (§4.3). This isn't just a priority field on a shared queue (which would still let a transactional message get stuck behind millions of marketing messages on the same partition, since Kafka guarantees in-partition ordering) — it's complete infrastructure isolation, so a 100M-user marketing campaign growing `push.marketing` lag to hours has zero effect on `push.transactional`'s <5s p99.
 
 **Q: How would you scale a notification to 100M users without tripping FCM's or Twilio's rate limits?**
-A: Throttle at the producer (fan-out) side using the same token-bucket rate limiter that guards individual provider calls (§4.4), capped at the system's overall sustainable peak rate (145,000 msgs/sec in this design) — and additionally make the fan-out producer backpressure-aware, watching the target consumer group's lag and slowing down if a backlog starts building (§4.5). For FCM specifically, batch sends (up to 500 tokens/request) reduce the request rate by 500x relative to individual sends. The math: 100,000,000 users / 145,000 msgs/sec ≈ 11.5 minutes to fully drain — comfortably "well under an hour" per the NFR (§1), without exceeding any provider's sustainable rate. War Story 2 (§9) shows the failure mode when this throttling is absent: ~32% of a 50M-user campaign was silently dropped by FCM with no top-level error.
+A: Throttle at the producer (fan-out) side using the same token-bucket rate limiter that guards individual provider calls (§4.4), capped at the system's overall sustainable peak rate (145,000 msgs/sec in this design) — and additionally make the fan-out producer backpressure-aware, watching the target consumer group's lag and slowing down if a backlog starts building (§4.5). For FCM specifically, note what batching does and does not buy you today: `sendEachForMulticast` accepts 500 messages per call, but since the `/batch` endpoint's 2024 retirement each message is still its own HTTP/2 request, so the win is per-message error handling and connection reuse, not a 500x cut in request rate — size the connection pool for the full message rate. The math: 100,000,000 users / 145,000 msgs/sec ≈ 11.5 minutes to fully drain — comfortably "well under an hour" per the NFR (§1), without exceeding any provider's sustainable rate. War Story 2 (§9) shows the failure mode when this throttling is absent: ~32% of a 50M-user campaign was silently dropped by FCM with no top-level error.
 
 **Q: What's the trade-off between at-least-once delivery with idempotent consumers vs. Kafka's exactly-once semantics (EOS)?**
 A: EOS adds real overhead (transactional producers have higher per-write latency, transaction coordinators are an additional failure mode) and only guarantees exactly-once *within Kafka itself* — it does not, and cannot, make the external side effect (calling FCM/Twilio/SES) idempotent, since those are systems Kafka has no visibility into. Since application-level idempotency (§4.1) is therefore mandatory regardless of whether you use EOS, the marginal value of also paying EOS's overhead is small — at-least-once + a Redis `SETNX`-based idempotency check achieves the same user-visible guarantee (no duplicate sends) at lower cost and complexity.
@@ -1038,16 +1044,16 @@ A: (1) Order Service publishes an `OrderShippedEvent` with a stable `event_id` (
 
 - 500M DAU x 5 notifications/user/day = 2.5B/day ≈ 29K/sec average, **145K/sec peak** (5x).
 - Channel mix: ~70% push, ~20% in-app, ~8% email, ~2% SMS.
-- Twilio long code: ~1 SMS/sec/number — need 20+ numbers (or a number pool) for 580 SMS/sec sustained.
-- FCM batch API: 500 tokens/request -> 100M-user broadcast at 145K/sec ≈ **11.5 minutes**.
-- Dedup cache: 2.5B keys x ~50 bytes x 24h TTL ≈ **125 GB** -> sharded Redis Cluster (8-16 shards).
+- Twilio per-number MPS: 10DLC long code 1 -> 180 (Trust Score dependent), toll-free 3, short code 100 — ~6 short codes for 580 SMS/sec sustained.
+- FCM: `sendEachForMulticast` takes 500 messages/call but sends 1 HTTP request each (the `/batch` endpoint retired in 2024) -> 100M-user broadcast at 145K msgs/sec ≈ **11.5 minutes**.
+- Dedup cache: 2.5B keys x ~140 bytes x 24h TTL ≈ **~350 GB** -> sharded Redis Cluster (16 shards, ~22 GB each).
 - Notification log: 2.5B/day x 500 bytes x 30-day retention ≈ 37.5 TB (x3 replication ≈ 112.5 TB).
 - Kafka partitions: 145K/sec / ~10K msgs/sec/partition ≈ 15 minimum -> **24 provisioned** for headroom.
 - Transactional SLA: <5s p99 end-to-end. Broadcast SLA: 100M users in well under an hour.
 
 ### Cost Estimate (rough order of magnitude)
 
-- **Provider fees dominate**: at $0.0075/SMS and 50M SMS/day (2% of 2.5B), SMS alone is ~$375K/day -> this is why SMS is reserved for high-priority/transactional only, with push as the default channel.
+- **Provider fees dominate**: at Twilio's US list price of **$0.0083 per outbound message segment** (long code and short code price identically; carrier surcharges are additional) and 50M SMS/day (2% of 2.5B), SMS alone is **~$415K/day, ~$150M/year** before carrier fees -> this is why SMS is reserved for high-priority/transactional only, with push as the default channel.
 - **Push (FCM/APNs) is effectively free** at this volume, so the infrastructure cost is dominated by Kafka, Redis, and the worker fleet -> low-to-mid six figures per year, an order of magnitude below the SMS provider bill.
 - **Takeaway for interviews**: channel selection is a cost decision as much as a UX one — defaulting marketing/broadcast traffic to push and reserving SMS/email for transactional or opt-in cases is the single biggest lever on the provider bill.
 

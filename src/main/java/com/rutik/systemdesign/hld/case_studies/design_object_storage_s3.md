@@ -24,7 +24,7 @@
 
 ### Non-Functional Requirements
 
-- **Durability: 99.999999999% (11 nines)** annually for a given object — translated, the expected annual loss rate is on the order of 1 object per 10 billion stored per year. This is a *data-loss* guarantee, distinct from availability.
+- **Durability: 99.999999999% (11 nines)** annually for a given object — a per-object annual loss probability of `10^-11`, which translated means roughly **1 object lost per 100 billion stored per year** (equivalently: store 10 million objects and expect to lose one about once every 10,000 years). §10 checks this against the 100-billion-object target and lands on ~1 object/year fleet-wide. This is a *data-loss* guarantee, distinct from availability.
 - **Availability: 99.99%** (the "four nines") for the read/write API — roughly 52 minutes of downtime/year — distinct from durability; an object can be 100% durable (the bytes are safe on disk) while being temporarily unavailable (the service serving it is down)
 - **Exabyte-scale**: the system must scale to **exabytes** of logical data and **hundreds of billions to trillions of objects**, across millions of buckets, with no single component (especially the metadata index) becoming a bottleneck at that scale
 - **Object size range**: from **0 bytes** (zero-length "folder marker" objects, a common client convention) to **multiple terabytes** (via multipart upload) — no single API call ever transfers more than 5 GB (a single `PUT` or a single multipart part is capped at 5 GB)
@@ -60,7 +60,7 @@ The "512 KB average" hides a heavily **bimodal** distribution that matters for b
 | 100 MB - 5 GB | Video segments, dataset shards, single-part backups | ~2.5% | ~30% |
 | > 5 GB (multipart, §4.3) | VM images, database dumps, training-data archives, multi-TB backups | ~0.5% | ~39% |
 
-The practical consequence: **roughly half of all objects are smaller than a single 64 MB erasure-coding chunk (§4.2)** — for these, "one object = one chunk = 9 shards" and the 1.5x overhead applies directly. The largest 0.5% of objects (by count) account for nearly 40% of total bytes and are *always* multipart — this is the tail that makes the §10 capacity numbers dominated by large-object storage even though small objects dominate the metadata-index row count (§4.1, §10).
+The practical consequence: **roughly 85% of all objects are under 1 MB, and ~97% are smaller than a single 64 MB erasure-coding chunk (§4.2)** — for these, "one object = one chunk = 9 shards" and the 1.5x overhead applies directly. Note what that does to a *small* object: a 4 KB config file still becomes 9 shards spread across 3 AZs, so its real cost is dominated by 9 shard-placement records and 9 storage-node round trips, not by 6 KB of raw capacity — which is why per-request pricing exists alongside per-GB pricing in every commercial object store. The largest 0.5% of objects (by count) account for nearly 40% of total bytes and are *always* multipart — this is the tail that makes the §10 capacity numbers dominated by large-object storage even though small objects dominate the metadata-index row count (§4.1, §10).
 
 ### Ingestion and Read Rates
 
@@ -796,11 +796,11 @@ A tempting optimization: hash each chunk's content and store only one physical c
 ## 6. Real-World Implementations
 
 - **Amazon S3**: the reference architecture for this entire design. In **December 2020**, S3 announced it had achieved **strong read-after-write consistency** for all objects, replacing its prior eventual-consistency model — a change AWS described as requiring no application changes and no performance tradeoff, achieved (per AWS's public description) by re-architecting the metadata layer that every read path depends on (§4.4 is modeled directly on this change). S3 also pioneered the storage-class tiering model (Standard / Standard-IA / One Zone-IA / Glacier / Glacier Deep Archive, §4.5) and the multipart upload API (§4.3) that most other providers' APIs mirror closely.
-- **Google Cloud Storage (GCS)**: offers a directly analogous storage-class model (Standard, Nearline, Coldline, Archive) and has provided strong consistency for object metadata operations since launch — GCS's design explicitly treats "list after write" and "read after write" consistency as a baseline guarantee, an architectural starting point rather than a later migration (contrast with S3's 2020 change).
+- **Google Cloud Storage (GCS)**: offers a directly analogous storage-class model (Standard, Nearline, Coldline, Archive) and documents strong global consistency for object reads, writes and metadata updates as a baseline guarantee rather than something bolted on later — bucket and object *listing* also became strongly consistent, so the "write then immediately list" pattern that S3 could not support before December 2020 has long been safe on GCS (contrast with S3's 2020 change).
 - **Azure Blob Storage**: uses a similar tiering model (Hot / Cool / Archive) and implements redundancy options ranging from **locally-redundant storage (LRS)**, which is conceptually 3x replication within one datacenter, up to **zone-redundant (ZRS)** and **geo-redundant (GRS)** storage — giving customers an explicit dial between the replication-heavy and erasure-coded-and-distributed ends of the spectrum described in §5.
 - **MinIO**: a widely-deployed open-source, S3-API-compatible object store, notable for running its own erasure-coding scheme (configurable, commonly deployed as variants of N data + M parity, e.g., 8+4) across a much smaller node count than hyperscale providers — MinIO documentation explicitly frames its erasure-coding choice in the same storage-overhead-vs-failure-tolerance terms as §4.2's 6+3 example, just at a self-hosted scale (a single MinIO deployment might span 4-16 nodes rather than tens of thousands).
 - **Ceph / RADOS**: the storage backend underlying many private-cloud and on-prem object stores (via the RADOS Gateway, S3-API-compatible). RADOS supports both **replicated pools** and **erasure-coded pools** as a per-pool configuration choice — operators explicitly choose, pool by pool, the same 3x-replication-vs-erasure-coding tradeoff from §5, often using replicated pools for small/hot metadata-like data and erasure-coded pools for bulk object data, mirroring this design's split between the metadata index (§4.1, replicated) and object data (§4.2, erasure-coded).
-- **Backblaze B2**: published detailed engineering-blog cost breakdowns of its Reed-Solomon-based erasure-coding implementation (a 17-shard scheme: 17 data + 3 parity in some configurations, optimized for Backblaze's specific "Storage Pod" hardware density), making it one of the most concretely-documented public examples of the storage-overhead-vs-durability math worked through in §4.2 — Backblaze's blog posts on this topic are commonly cited as a real-world grounding for erasure-coding interview discussions.
+- **Backblaze B2**: published detailed engineering-blog cost breakdowns of its Reed-Solomon-based erasure-coding implementation — **20 shards per file: 17 data + 3 parity**, one shard per Storage Pod in a 20-pod "Vault", giving a 1.18x overhead that tolerates the loss of any 3 pods — making it one of the most concretely-documented public examples of the storage-overhead-vs-durability math worked through in §4.2 — Backblaze's blog posts on this topic are commonly cited as a real-world grounding for erasure-coding interview discussions.
 
 ### Provider Comparison at a Glance
 
@@ -811,7 +811,7 @@ A tempting optimization: hash each chunk's content and store only one physical c
 | Azure Blob Storage | LRS (3x replication) up to GRS (cross-region replication) — customer-selectable | Strong for metadata operations | Hot / Cool / Archive | Explicit replication-vs-erasure-coding dial exposed directly to the customer (§5) |
 | MinIO | Configurable N+M erasure coding (e.g., 8+4), per-deployment | Strong within a single deployment | Customer-managed via lifecycle policies | Self-hosted; same erasure-coding math at a 4-16 node scale instead of tens of thousands |
 | Ceph/RADOS | Per-pool: replicated or erasure-coded | Strong within a cluster | Customer-managed via CRUSH placement rules | Operators choose redundancy scheme *per pool*, mirroring this design's metadata-vs-data split |
-| Backblaze B2 | Reed-Solomon, ~17+3-style wide erasure coding | Strong | Standard tier only (no Archive-class tier as of public docs) | Most-published cost/durability engineering math for erasure coding at scale |
+| Backblaze B2 | Reed-Solomon 17+3 (20 shards across a 20-pod Vault, 1.18x overhead) | Strong | Standard tier only (no Archive-class tier as of public docs) | Most-published cost/durability engineering math for erasure coding at scale |
 
 ---
 
@@ -896,6 +896,8 @@ stateDiagram-v2
 
 ## 9. Common Pitfalls & War Stories
 
+*Both incidents below are **illustrative composites**. The mechanisms — an unthrottled FIFO repair queue starving foreground traffic on a shared fabric, and monotonically-increasing object keys pinning every write to one metadata shard — are real and recur across erasure-coded object stores, but the node counts, latency multiples and queue depths are constructed to make each failure legible, not drawn from a published post-mortem.*
+
 ### War Story 1: A Rack Failure Triggers a Cluster-Wide Repair Storm — Broken, Then Fixed
 
 **Broken**: An early version of the repair pipeline (§4.2, §4.6) processed the repair queue strictly **FIFO**, with **no bandwidth cap** — the reasoning was "repair is urgent, so repair as fast as possible." When a chunk's shard count dropped below 9/9, a reconstruction job (read 6 surviving shards, run Reed-Solomon reconstruction, write the missing shard(s)) was enqueued and dequeued as fast as worker capacity allowed, with workers given no ceiling on network bandwidth consumption.
@@ -945,9 +947,10 @@ stateDiagram-v2
 ### Repair Bandwidth Budget
 
 - Per §9's War Story 1 fix, repair traffic is capped at **10-20%** of inter-rack/inter-AZ provisioned bandwidth
-- Illustrative inter-AZ link capacity: 100 Gbps per AZ-pair link; repair cap at 15% = **15 Gbps** dedicated to repair traffic
-- A single chunk reconstruction (6+3 scheme): read 6 shards of, say, 64 MB each (the chunk size from §3) = 384 MB read, write 1-3 shards of 64 MB each = 64-192 MB write -> ~450-576 MB of network I/O per chunk repaired
-- At 15 Gbps (~1.875 GB/sec) repair bandwidth: `1.875 GB / 0.5 GB` ~= **~3,750 chunk-repairs/sec** sustainable — sized against the repair-queue-depth metric (§8) to bound drain time for a rack-scale failure (tens of millions of affected chunks / 3,750/sec ~= a few hours, consistent with War Story 1's "hours instead of tens of minutes" outcome)
+- **Shard size first — this is the number everything else divides by.** A 64 MB chunk (§3) is split into 6 data shards, so each shard is `64 / 6` ~= **~10.7 MB**, and the 9 shards together occupy ~96 MB (the 1.5x overhead, §4.2). Shards are chunk-fragments, *not* chunk-sized copies; getting this backwards inflates every repair estimate by 6x
+- A single chunk reconstruction (6+3): read 6 surviving shards = `6 x 10.7 MB` ~= **~64 MB**, run the Reed-Solomon reconstruction, write 1 replacement shard ~= **~10.7 MB** -> **~75 MB of network I/O per chunk repaired**
+- Illustrative inter-AZ link capacity: 100 Gbps per AZ-pair link; repair cap at 15% = **15 Gbps** (~1.875 GB/sec) per link -> `1.875 GB / 0.075 GB` ~= **~25 chunk-repairs/sec per link**
+- Repair is fleet-parallel, so the cluster-wide rate is that figure times the number of links carrying repair traffic: an aggregate repair budget of ~2.25 Tbps (15% of a ~15 Tbps cross-AZ fabric, i.e. ~150 such links) sustains **~3,750 chunk-repairs/sec**. Sized against the repair-queue-depth metric (§8), that bounds drain time for a rack-scale failure to `tens of millions of chunks / 3,750/sec` ~= **a few hours**, consistent with War Story 1's "hours instead of tens of minutes" outcome. The lesson for capacity planning: repair throughput scales with the *fabric*, not with any one link, which is exactly why the cap in §8's runbook is expressed as a percentage rather than an absolute Gbps number
 
 ### Summary Table
 
@@ -955,7 +958,7 @@ stateDiagram-v2
 |---|---|---|
 | Raw object storage (all tiers) | 1 EB logical x blended ~1.49x overhead | ~1.49 EB |
 | Metadata index | 100B objects x ~1KB x 3x replication | ~300 TB, ~200 nodes |
-| Repair bandwidth (per AZ-pair link) | 15% of 100 Gbps | ~15 Gbps, ~3,750 chunk-repairs/sec |
+| Repair bandwidth | 15% of the cross-AZ fabric (~2.25 Tbps aggregate; 15 Gbps per 100 Gbps link) | ~25 chunk-repairs/sec/link, ~3,750/sec fleet-wide at ~75 MB per repair |
 | Expected annual object loss | 100B objects x ~10^-11/object/year | ~1 object/year |
 
 ---

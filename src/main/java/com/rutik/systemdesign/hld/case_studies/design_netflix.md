@@ -2,9 +2,9 @@
 
 ## Intuition
 
-> **Design intuition**: Netflix's central challenges are video delivery at global scale (solved by Open Connect CDN — Netflix's own 800+ PoP network) and personalized recommendations (ML-driven, multi-factor ranking). 90% of Netflix traffic is video bytes; CDN architecture is the dominant engineering concern.
+> **Design intuition**: Netflix's central challenges are video delivery at global scale (solved by Open Connect — Netflix's own CDN, embedded inside partner ISPs and peered at 80+ internet exchanges in 25+ countries) and personalized recommendations (ML-driven, multi-factor ranking). Nearly all of Netflix's traffic is video bytes; CDN architecture is the dominant engineering concern.
 
-**Key insight**: Netflix solved the CDN problem by building their own: Open Connect appliances (ISP-co-located servers) pre-populate with popular content during off-peak hours. Most Netflix video is served from within your ISP's network, never touching the internet backbone. This is why Netflix streams 4K reliably where YouTube struggles.
+**Key insight**: Netflix solved the CDN problem by building their own: Open Connect Appliances (ISP-co-located servers) pre-populate with popular content during off-peak hours. Most Netflix video is served from within the viewer's own ISP network, never crossing a transit link. That is what converts the single largest cost line in the business — egress — from a per-gigabyte bill into a one-time hardware and logistics cost (§10).
 
 ---
 
@@ -18,7 +18,7 @@
 - **Billing**: Subscription management, payment processing, plan tiers (Basic, Standard, Premium)
 - **User Profiles**: Multiple profiles per account (kids, adults), separate watch history
 - **Continue Watching**: Resume playback from where user left off
-- **Download**: Offline viewing on mobile (Premium plan)
+- **Download**: Offline viewing on mobile and tablet (plan-dependent; see the download path at the end of the Adaptive Bitrate Streaming deep dive)
 
 ### Non-Functional Requirements
 - **High Availability**: 99.99% uptime — video must always be streamable
@@ -26,7 +26,7 @@
 - **Adaptive Quality**: Seamlessly adjusts video quality based on available bandwidth
 - **Global Scale**: Serve users across 190+ countries
 - **Fault Tolerant**: A single server/region failure should not interrupt active streams
-- **Scalability**: Handle 10M+ concurrent streams at peak
+- **Scalability**: Handle tens of millions of concurrent streams at peak (§2 works to ~24M)
 
 ### Out of Scope
 - Live streaming (Netflix is primarily on-demand)
@@ -38,27 +38,27 @@
 ## 2. Scale Estimation
 
 ### Users and Traffic
-- 200M paid subscribers globally
-- Peak concurrent streams: **10M simultaneous streams**
-- Average stream bitrate: 5 Mbps (1080p)
-- Peak bandwidth: 10M * 5 Mbps = **50 Tbps** (Netflix is ~15% of global internet traffic)
-- Requests per second (API): 200M DAU / 86,400 sec * avg 10 API calls = ~23K API RPS
+- **325M+ paid memberships** globally (Netflix's Q4 2025 shareholder letter — the company stopped publishing quarterly membership counts in 2025 and now announces milestones only)
+- Netflix does not publish concurrent-stream counts. Assume peak simultaneous viewing on the order of **7-8% of memberships** -> **~24M concurrent streams** (this is the working assumption §10 sizes against, not a disclosed figure)
+- Blended stream bitrate across the device/quality mix: **~7 Mbps** (§10 derives this from the ladder)
+- Peak bandwidth: 24M * 7 Mbps = **168 Tbps ~= 21 TB/sec**. For scale: Sandvine's 2023 Global Internet Phenomena Report put Netflix at **14.9% of global downstream internet traffic** in 2022, the single largest application
+- Requests per second (API): ~100M profiles active daily * ~20 API calls / 86,400 sec = **~23K API RPS**
 
 ### Content Library
-- ~15,000 titles in the catalog
-- Each title encoded in ~30+ quality variants (resolution + codec combinations)
-- Average movie: 2 hours at highest quality (4K HDR) = ~50 GB per variant
-- 15,000 titles * 30 variants * 10 GB avg per variant = **4.5 PB** for video content
+- **~17,000 titles** in the global catalog
+- Each title encoded into **~120 variants** (codecs x bitrate ladders x audio tracks x languages x HDR/SDR)
+- A 2-hour movie's single highest-quality variant (4K HDR) is on the order of **~15 GB**; averaged across all 120 variants a title occupies **~3 TB**
+- 17,000 titles * ~3 TB = **~50 PB** for video content
 - Plus thumbnails, metadata, subtitle files: additional ~100 TB
 
 ### Storage Growth
 - Netflix adds ~500 new titles/month
-- Each new title: 500 titles * 30 variants * 10 GB = **150 TB/month** new content
+- Each new title: 500 titles * ~3 TB all-variants = **~1.5 PB/month** of new encoded content
 
 ### CDN Cache
 - 80/20 rule: 20% of content accounts for 80% of views
 - Top 1,000 titles need to be aggressively cached at edge nodes
-- Each Open Connect Appliance (OCA): 100-200 TB SSD storage
+- Each Open Connect Appliance (OCA): **up to 120 TB** raw storage on the flash-based Storage Appliance, **up to 60 TB** on the smaller Global Appliance (Netflix's published hardware specs)
 
 ---
 
@@ -126,16 +126,16 @@ Client traffic splits at the top into a control plane (API + microservice logic 
 ### Content Delivery and Open Connect CDN
 
 ### Why Netflix Built Their Own CDN
-- **Cost**: Paying commercial CDNs (Akamai, Cloudflare) for 50 Tbps = billions/year
+- **Cost**: Paying commercial CDNs (Akamai, Cloudflare) for 168 Tbps of peak egress = billions/year (§10)
 - **Control**: Full control over cache eviction, pre-positioning, routing decisions
 - **Performance**: Co-locate hardware inside ISPs — video travels fewer network hops
 - **Custom Hardware**: Optimized for large sequential reads (video streaming), not general web assets
 
 ### Open Connect Appliances (OCA)
-- Custom hardware servers installed **inside ISP data centers** at no cost to ISPs
+- Custom FreeBSD-based servers installed **inside ISP data centers** at no cost to ISPs
 - ISPs benefit: traffic stays local, lower transit costs, better user experience
-- Each OCA: 100 TB to 200 TB of SSD + high-speed NICs (100 Gbps)
-- There are thousands of OCAs in over 1,000 cities globally
+- Two published hardware models (both 2U): the **Storage Appliance** — up to **120 TB** raw flash, **~200 Gbps** operational throughput, used at internet exchanges and larger ISPs — and the **Global Appliance** — up to **60 TB**, **~80 Gbps**, aimed at smaller ISPs and emerging markets
+- Netflix does not publish a fleet count. What it does publish: partnerships with **over a thousand ISPs** running embedded appliances, an open peering policy at **80+ internet exchanges across 25+ countries**, and 60+ of its own global data centers
 
 ### Content Pre-Positioning
 Netflix does not wait for a cache miss to populate edge nodes — they **proactively push content**:
@@ -164,7 +164,7 @@ Runs nightly at off-peak hours (2-4 AM local); by the time users wake up the con
 **Benefits:**
 - Near-zero cache miss rate for popular content
 - Origin S3 is rarely hit during peak hours
-- Completely eliminates buffering for popular titles
+- Removes the origin fetch as a cause of start-up delay and rebuffering for popular titles (last-mile congestion and client-side conditions can still cause rebuffers — pre-positioning eliminates one cause, not all of them)
 
 ### Routing: Steering Service
 - When a client initiates playback, it contacts Netflix's **Steering Service**
@@ -191,7 +191,7 @@ flowchart LR
     class OCA1 train
     class OCA2 frozen
 ```
-Each hop is tried only if the previous one is unavailable; roughly 95% of Netflix's bytes resolve at the first hop (local ISP OCA), so the origin S3 fallback is rarely exercised.
+Each hop is tried only if the previous one is unavailable; the overwhelming majority of bytes resolve at the first hop (the local ISP OCA), so the origin fallback is rarely exercised. Netflix does not publish the per-hop breakdown — treat the tier ordering as the design point, not the ratio.
 
 ---
 
@@ -258,6 +258,13 @@ https://oca1.netflix.com/title123/720p/chunk_001.m4s
 https://oca1.netflix.com/title123/1080p/chunk_001.m4s
 ```
 
+**Downloads (offline viewing) — the same pipeline with the adaptation removed.** The Download requirement from §1 reuses every component above and changes exactly two things, which is why it costs so little to support:
+
+1. **No adaptation, one variant chosen up front.** Streaming picks a quality per chunk from the ladder; a download commits to a *single* rung at request time (the app's "Standard" / "High" toggle), fetches every segment of that one variant from the same OCA the streaming path would have used, and writes them to device storage. There is no bandwidth estimator, no mid-title switching, and no manifest re-evaluation — the ABR loop simply never runs.
+2. **The DRM license becomes the expiry mechanism.** For streaming, the Widevine/FairPlay license is short-lived and scoped to the playback session (§9, War Story 4). For a download, the client is issued a **persistent, offline-capable license** with a much longer validity, bound to that device. That license — not the file — is what enforces the product rules: a download stops playing when its license expires, and "how long you can keep it" and "how many devices can hold it at once" are license-policy parameters set per title by the content deal, not storage-layer or CDN concerns.
+
+Two architectural consequences worth naming in an interview. First, **downloads shift load in the CDN's favour**: they are pre-fetches, usually issued on Wi-Fi and often off-peak, so they smooth exactly the peak the §10 capacity model is sized against. Second, **downloads decouple playback from availability entirely** — a downloaded title survives a full regional outage, an OCA failure, and a DRM-server outage alike, because both the bytes and the license are already on the device. That makes the download path the only part of this design with no runtime dependency on anything in §3's control plane.
+
 ---
 
 ### Video Transcoding Pipeline
@@ -304,8 +311,8 @@ Netflix's innovation: **Variable Bitrate Encoding per Scene Complexity**
 
 ### Codec Strategy
 - **H.264 (AVC)**: Universal compatibility, older devices
-- **H.265 (HEVC)**: 40% better compression than H.264, newer devices
-- **AV1**: 30-40% better than HEVC, royalty-free, used for mobile (battery efficient)
+- **H.265 (HEVC)**: roughly **50% bitrate reduction** at equivalent quality versus H.264 — HEVC's design target, and what published comparisons broadly bear out — on newer devices
+- **AV1**: a further **~20-30% over HEVC** (~30% over VP9), royalty-free, used heavily on mobile
 - Netflix encodes all titles in all supported codecs for device-specific serving
 
 ---
@@ -355,7 +362,7 @@ flowchart LR
     class Track req
     class Sig mathOp
 ```
-Example experiment — "Does showing trailers autoplay increase click rate?": result was +10% click rate, so it rolled out to 100% of users.
+A typical experiment shape — "does autoplaying a trailer on the detail row increase play starts?" — runs until the significance test fires, and only a treatment that clears the bar is ramped to 100%. Netflix does not publish per-experiment effect sizes; the point is the pipeline, not any one lift number.
 
 ### Personalized Thumbnails
 - The same title shows different thumbnails to different users
@@ -434,7 +441,7 @@ CREATE TABLE viewing_history (
 ### Apache Kafka
 - Event bus for all user activity events (play, pause, search, click)
 - Feeds: analytics pipeline, recommendation model training, billing events
-- 700B+ events/day
+- Netflix's Keystone stream-processing platform, which sits on this bus, is described by Netflix's own engineering blog as operating **beyond the trillion-events-per-day scale**
 
 ---
 
@@ -449,9 +456,9 @@ Netflix operates on the premise: **"Everything will fail — build systems that 
 - If a service goes down and takes the site with it, that's a design flaw exposed proactively
 
 ### Chaos Kong
-- Terminates an **entire AWS availability zone**
-- Tests that Netflix can survive a full AZ outage
-- Run periodically, not randomly
+- Simulates the loss of an **entire AWS region**, evacuating all its traffic to the surviving regions
+- Its AZ-level sibling is **Chaos Gorilla**, which takes out a single availability zone — the intermediate blast radius between one instance (Monkey) and one region (Kong)
+- Run on a schedule, never randomly — the blast radius is far too large for a random trigger
 
 ### Failure Injection Testing (FIT)
 - Injects: latency, errors, resource exhaustion into service dependencies
@@ -607,13 +614,13 @@ Fallback for a recommendation-service failure specifically: return a generic "To
 
 Netflix's actual production stack (from public engineering blog posts, conference talks, and the Netflix Tech Blog) validates the architectural choices above:
 
-- **Open Connect** — Netflix's purpose-built CDN: ~15,000 custom FreeBSD storage appliances (OCAs), each holding up to 280 TB, donated to ISPs and embedded directly in their networks. ~95% of Netflix's bytes never touch the public internet.
+- **Open Connect** — Netflix's purpose-built CDN: custom FreeBSD storage appliances (OCAs) supplied free to ISPs and embedded directly in their networks. Published specs: up to 120 TB and ~200 Gbps for the Storage Appliance, up to 60 TB and ~80 Gbps for the Global Appliance; over a thousand ISP partners, plus open peering at 80+ IXPs in 25+ countries. Netflix states that Open Connect delivers **100% of its video traffic** — the embedded-versus-IXP split is not broken out publicly.
 - **Cassandra** — Stores viewing history, ratings, and "my list" — write-heavy, append-mostly data with no cross-row transactions, sharded with `NetworkTopologyStrategy` and RF=3 per region.
 - **EVCache** — Netflix's Memcached-based caching layer, deployed as a thin read-through cache in front of Cassandra to absorb hot-title read spikes.
 - **Hystrix / Resilience4j** — Circuit-breaker libraries wrapping every inter-service call; when a downstream (e.g., personalization) is slow, the circuit opens and a fallback (e.g., "Recently Watched" instead of "Top Picks for You") is served instantly instead of hanging.
 - **Zuul** — The edge API gateway that all client requests pass through, handling auth, routing, and dynamic traffic shifting during failover.
 - **Spinnaker** — Netflix's open-sourced continuous-delivery platform; every deploy goes through canary analysis (1% traffic, automated metric comparison) before ramping to 100%.
-- **Chaos Monkey / Chaos Kong** — Chaos Monkey randomly terminates production instances daily; Chaos Kong simulates the loss of an entire AWS region monthly. Both are scheduled, expected events, not incidents.
+- **Chaos Monkey / Chaos Gorilla / Chaos Kong** — Chaos Monkey randomly terminates production instances; Chaos Gorilla takes out an availability zone; Chaos Kong simulates the loss of an entire AWS region. All are expected, planned events, not incidents.
 - **Atlas / Mantis** — Atlas is Netflix's in-house time-series metrics platform (handles billions of metrics); Mantis is a real-time stream-processing platform used to detect anomalies (like the SPS metric in §8) within seconds.
 
 **Comparable systems for cross-reference:**
@@ -627,7 +634,7 @@ Netflix's actual production stack (from public engineering blog posts, conferenc
 
 | Component | Technology | Why |
 |---|---|---|
-| CDN / content delivery | Open Connect Appliances (custom FreeBSD) | ISP-embedded, near-zero marginal egress cost at 21 TB/sec peak |
+| CDN / content delivery | Open Connect Appliances (custom FreeBSD; up to 120 TB / ~200 Gbps) | ISP-embedded, near-zero marginal egress cost at 21 TB/sec peak |
 | Viewing history, ratings, "my list" | Cassandra (multi-region, RF=3) | Write-heavy, append-only, no cross-row transactions, linear scalability |
 | Billing and subscriptions | MySQL | ACID transactions required for financial data |
 | Hot-read caching | EVCache (Memcached-based) | Absorbs read spikes for popular titles in front of Cassandra |
@@ -659,16 +666,16 @@ Netflix's actual production stack (from public engineering blog posts, conferenc
 - Read repair and hinted handoff keep eventual consistency strong.
 
 **Open Connect: ISP-Embedded CDN**
-- Netflix offers OCAs (custom-built FreeBSD storage servers, ~280 TB each) to ISPs **for free**.
-- ISPs install them in their head-ends; Netflix traffic never traverses the public internet for that ISP's subscribers.
-- ~95% of Netflix's bytes are served from OCAs; only 5% from AWS-backed fill clusters at internet exchanges.
+- Netflix offers OCAs (custom-built FreeBSD storage servers, up to 120 TB each) to ISPs **for free**.
+- ISPs install them in their head-ends; Netflix traffic never traverses a transit link for that ISP's subscribers.
+- All Netflix video is delivered by Open Connect; the bytes are split between ISP-embedded appliances and Netflix-operated appliances at internet exchanges, with AWS serving only the control plane, never the video itself.
 - Pre-positioning: new content is pushed to OCAs during off-peak hours (3-6 AM local), based on predicted demand from the recommendation system.
 
 **Per-Title Encoding (Dynamic Optimizer)**
 - Traditional CDN: fixed bitrate ladder (e.g., 235/375/560/750/1050/1750/2350/3000 kbps) applied to all titles.
 - Netflix's innovation: **per-title encoding**. The dynamic optimizer analyzes each title scene-by-scene and picks the optimal bitrate ladder per scene.
 - A high-motion action scene needs more bits; a static dialog scene needs few. Result: **~20% bandwidth reduction** for equivalent quality.
-- Stranger Things season premiere encoded with 27 thumbnail variants tested via A/B for click-through rate optimization.
+- The same experimentation machinery runs on artwork: a flagship title's box art is A/B tested across many candidate images per user segment, the personalized-thumbnail mechanism described in §4.
 
 **Data Residency**
 - EU subscriber PII (email, payment, viewing history) stored only in eu-west-1.
@@ -709,22 +716,22 @@ Netflix's actual production stack (from public engineering blog posts, conferenc
 
 ### Evolution and Future Improvements
 
-**At 10x Scale (2.4B Subscribers — Hypothetical)**
-- Open Connect would need ~150,000 OCAs globally; logistics of physical deployment dominate.
-- AV1 (or successor) adoption critical for bandwidth: ~30% reduction over H.265.
-- Recommendation training would move to on-device personalization (TFLite/Core ML) for privacy + freshness.
-- Cassandra would be replaced by FoundationDB or similar (Cassandra's gossip overhead doesn't scale past ~5,000 nodes per cluster).
+**At 10x Scale (~3.25B Subscribers — Hypothetical)**
+- Open Connect's appliance fleet would grow by the same order; logistics of physical deployment dominate long before software does.
+- AV1 (or its successor) adoption critical for bandwidth: ~20-30% reduction over H.265.
+- Recommendation training would move to on-device personalization (LiteRT/Core ML) for privacy + freshness.
+- Cassandra would be replaced by FoundationDB or similar (Cassandra's gossip overhead doesn't scale past a few thousand nodes per cluster).
 
-**Technical Debt**
-- Java 8 legacy services still present in some corners (most migrated to Java 17/21 with virtual threads).
-- Hystrix is deprecated upstream; migration to Resilience4j ongoing.
+**Technical Debt (the generic shape at any long-lived streaming platform, not a disclosure about Netflix's internals)**
+- A long tail of services still on an older JDK while the bulk of the fleet runs a current LTS (Java 25) with virtual threads — the migration cost is integration testing, not the language.
+- Circuit-breaking sits on a library that is no longer the ecosystem default; the *discipline* worth carrying forward is that the breaker and its fallback are owned by the caller, so swapping the library is a dependency change rather than a redesign.
 - Custom CDN steering (in-house) competes with mature solutions (Cloudflare, Akamai); a build-vs-buy tradeoff continually re-evaluated.
-- Erlang/Elixir for some legacy systems (e.g., the original Roku integration) — limited talent pool.
+- Device-specific integrations written in whatever language that platform's SDK dictated, each with a small talent pool.
 
 **Future Capabilities**
 - **Cloud Gaming integration**: streaming gameplay requires <50ms latency end-to-end; current CDN architecture is optimized for one-way video and needs WebRTC for interactive use cases.
 - **Interactive content (Black Mirror: Bandersnatch successor)**: requires player-side state machine and dynamic stream switching at decision points.
-- **Live streaming at scale**: Netflix's first major live event (Chris Rock special, 2023) revealed gaps in their VOD-optimized architecture. Migration to low-latency HLS / DASH-LL is in progress.
+- **Live streaming at scale**: no longer speculative. Since the first live event (the Chris Rock special, March 2023), live has become a standing part of the product — weekly WWE Raw, NFL games on Christmas Day, live boxing, and an MLB rights package from 2026 — which means the VOD-optimized assumptions that make the rest of this design work (pre-position everything overnight, cache immutable segments forever) do not apply to a growing share of traffic, and the live path is architecturally a *different* system sharing the same delivery fleet.
 - **Generative AI for content**: AI-generated dubbing (preserving original actor voice), automated trailer generation, personalized thumbnails per user.
 - **On-device personalization**: move recommendation inference to the client to reduce server cost and improve privacy.
 
@@ -744,8 +751,10 @@ Netflix's actual production stack (from public engineering blog posts, conferenc
 | Single hot-table reads against Cassandra | Read overload on popular-title rows | EVCache read-through cache in front of Cassandra |
 | No regional failover plan | A single AWS region outage takes down the service | Multi-region active-active + monthly Chaos Kong drills |
 
+*The five scenarios below are **illustrative walk-throughs** of failure modes this architecture is built to absorb, with response timings and TTRs constructed to show the mechanism. They are not transcriptions of specific Netflix incidents, except where a named public event is cited as precedent.*
+
 ### War Story 1: Full AWS Region Loss (Chaos Kong Drill)
-**Scenario**: us-east-1 becomes unavailable (real-world precedent: the September 2015 DynamoDB outage that took down half of AWS for hours). Netflix's "Chaos Kong" simulates this monthly.
+**Scenario**: us-east-1 becomes unavailable. Real-world precedent: the **20 October 2025** us-east-1 outage, in which a latent race condition in DynamoDB's automated DNS management left two concurrent enactor processes overwriting each other's plans, wiping DynamoDB's DNS records and cascading across dependent AWS services for roughly 15 hours. Netflix's "Chaos Kong" rehearses exactly this evacuation.
 
 **Response sequence**:
 1. **Detection** (T+0 to T+60s): Atlas metrics show elevated error rates from us-east-1; Mantis (real-time event stream) confirms cross-AZ failure pattern.
@@ -830,35 +839,38 @@ sequenceDiagram
 ## 10. Capacity Planning
 
 ### Streaming Bandwidth
-- **238M subscribers**, average concurrent viewers at peak ~10% = **~24M concurrent streams**.
-- Bitrate mix: 30% mobile (1.5 Mbps), 40% HD (5 Mbps), 25% 4K (15 Mbps), 5% 4K HDR (25 Mbps).
-- Weighted average: ~7 Mbps per stream.
+- **325M+ paid memberships** (§2); peak concurrent viewing assumed at ~7-8% of that = **~24M concurrent streams**.
+- Bitrate mix: 30% mobile (1.5 Mbps), 40% HD (5 Mbps), 25% 4K (15 Mbps), 5% 4K HDR (15.6 Mbps, the top rung of §4's ladder).
+- Weighted average: `0.30x1.5 + 0.40x5 + 0.25x15 + 0.05x15.6` = **~7 Mbps** per stream.
 - **Peak aggregate bandwidth**: 24M × 7 Mbps = **168 Tbps** ≈ **21 TB/sec** of egress.
-- This is why Open Connect exists: serving this from AWS at $0.05/GB would cost **~$2.7M/hour** = **$1.6B/month** in egress alone. Open Connect pushes 95%+ of this to ISP-embedded boxes at near-zero marginal cost.
+- This is why Open Connect exists. At a $0.05/GB egress rate, 21 TB/sec costs `21,000 GB/sec x 3,600 x $0.05` ≈ **$3.8M/hour at peak**; averaged over a month at a realistic ~50% average-to-peak duty cycle that is on the order of **$1.4B/month** in egress alone. Open Connect converts almost all of that into a one-time appliance cost.
 
 ### Content Storage
-- ~17,000 titles in catalog.
+- ~17,000 titles in catalog (§2).
 - Each title encoded into ~120 variants (multiple codecs × bitrate ladders × audio tracks × languages × HDR/SDR).
 - Avg title size all variants: ~3 TB.
 - **Total catalog size**: 17,000 × 3 TB = **~50 PB**.
-- Cached on **15,000+ OCAs globally**; not every OCA has the full catalog (popularity-tiered: top 1% titles on every OCA, long tail on regional/AWS-backed fills).
+- No single OCA holds the full catalog — a 120 TB Storage Appliance holds ~0.2% of 50 PB, so placement is popularity-tiered (the most-watched titles on every appliance, the long tail on larger regional appliances at internet exchanges). This ratio, not the fleet count, is what forces the pre-positioning algorithm in §4 to exist.
 
 ### Metadata Storage (Cassandra)
 - User profile, watch history, ratings, queue: ~5KB/user.
-- 238M × 5KB = ~1.2 TB of hot metadata.
-- With RF=3 across 3 regions: ~11 TB total.
-- Watch event log (every play/pause/seek for analytics): 50 events/user/day × 238M × 200 bytes = **~2.4 TB/day** → 870 TB/year, sampled and archived to S3.
+- 325M × 5KB = **~1.6 TB** of hot metadata.
+- With RF=3 in each of 3 regions: ~15 TB total.
+- Watch event log (every play/pause/seek for analytics): 50 events/user/day × 325M × 200 bytes = **~3.3 TB/day** → ~1.2 PB/year, sampled and archived to S3.
 
 ### Compute Footprint
-- Microservices: ~1,000 services running ~100,000 EC2 instances at peak (auto-scaled down off-peak).
+- Microservices: the 700+ services of §4 running on the order of ~100,000 EC2 instances at peak (auto-scaled down off-peak).
 - Encoding fleet: ~300,000 vCPU-hours/day burst on EC2 Spot (60–90% cheaper) for new title encoding.
 - Recommendation training: ~5,000 GPU-hours/day on GPU instances.
 
 ### Cost Envelope
-- Compute on AWS: **~$1B/year** (publicly disclosed AWS spend).
-- Open Connect (capex): ~15,000 OCAs at ~$30K each amortized over 5 years = **~$90M/year capex**, plus ~$50M/year colocation/power.
-- Content licensing/production: $17B/year (separate from infra; included for context).
-- Total infra: **~$1.2B/year** for serving 238M subscribers = ~$5/subscriber/year.
+
+*Netflix does not break out infrastructure spend in its filings; the figures below are order-of-magnitude planning estimates built from the sizing above, not disclosures.*
+
+- Compute on AWS: **~$1B/year** order of magnitude — Netflix confirms it runs the vast majority of its computing on AWS but does not publish the bill.
+- Open Connect (capex): an illustrative fleet of ~15,000 appliances at ~$30K each amortized over 5 years = **~$90M/year capex**, plus ~$50M/year colocation/power.
+- Content licensing/production: Netflix has guided to roughly **$20B for 2026**, up ~10% year over year (separate from infra; included for context).
+- Total infra: **~$1.2B/year** for serving 325M+ memberships ≈ **~$3.7/member/year** — more than an order of magnitude below the ~$17B/year the raw egress bill in this section would have run to.
 
 ---
 
@@ -866,7 +878,7 @@ sequenceDiagram
 
 ### How to Structure a 45-Minute Answer
 1. **Clarify requirements** (5 min) — streaming, upload, recommendations, billing, search.
-2. **Scale estimation** (5 min) — 200M+ users, ~24M concurrent streams, ~21 TB/sec peak bandwidth, PB-scale storage.
+2. **Scale estimation** (5 min) — 325M+ memberships, ~24M concurrent streams, ~21 TB/sec peak bandwidth, PB-scale storage.
 3. **High-level architecture** (5 min) — control plane vs. data plane separation.
 4. **Content delivery deep dive** (10 min) — Open Connect CDN, pre-positioning, OCA routing.
 5. **Adaptive streaming** (5 min) — DASH/HLS, quality ladder, client algorithm.
@@ -877,13 +889,13 @@ sequenceDiagram
 A: Delivering ~21 TB/sec of video egress globally without bandwidth becoming the company's largest cost line. Open Connect exists specifically to solve this; nearly every other architectural decision — recommendations, transcoding, multi-region failover — is secondary to "how do we move video bytes cheaply and reliably." If asked to prioritize where to spend your design time, content delivery should get roughly half of it.
 
 **Q: Why did Netflix build its own CDN instead of using a commercial one (Akamai, CloudFront)?**
-A: At Netflix's volume (~21 TB/sec peak), commercial CDN egress pricing (~$0.05/GB) would cost roughly $1.6B/month, versus near-zero marginal cost for ISP-embedded OCAs that Netflix gives away for free (§10). The trade-off is enormous upfront capex — custom hardware, ISP relationship management, and global logistics for ~15,000 appliances — plus an entire engineering org dedicated to CDN operations. This is only justified at Netflix's traffic volume; smaller streaming services correctly use commercial CDNs (see §6).
+A: At Netflix's volume (~21 TB/sec peak), commercial CDN egress pricing (~$0.05/GB) works out to roughly $3.8M/hour at peak and on the order of $1.4B/month averaged over a realistic duty cycle, versus near-zero marginal cost for ISP-embedded OCAs that Netflix gives away for free (§10). The trade-off is enormous upfront capex — custom hardware, ISP relationship management, and global logistics for a fleet in the tens of thousands of appliances — plus an entire engineering org dedicated to CDN operations. This is only justified at Netflix's traffic volume; smaller streaming services correctly use commercial CDNs (see §6).
 
 **Q: Why two databases (Cassandra + MySQL) instead of one?**
 A: Viewing history, ratings, and "my list" are write-heavy and append-mostly with no need for cross-row transactions — a strong fit for Cassandra's linear scalability. Billing and subscriptions need ACID guarantees (a payment must not be partially applied), which Cassandra deliberately doesn't provide, so MySQL handles that. The cost is operating two database systems with different consistency models, backup strategies, and on-call runbooks — accepted because using one database for both would either compromise billing correctness or cripple viewing-history scalability.
 
 **Q: Explain adaptive bitrate streaming beyond "it adjusts quality" — what's actually happening?**
-A: The encoding pipeline produces a "quality ladder" — the same content encoded at multiple bitrate/resolution combinations (235 kbps up to 25 Mbps for 4K HDR), broken into 2-10 second chunks described in a manifest (MPD for DASH, M3U8 for HLS). The client continuously measures its actual download throughput and buffer health, then requests the next chunk at whichever quality level it estimates it can download faster than it plays back — switching up or down chunk-by-chunk, not stream-wide. Per-title encoding (§8) takes this further: the ladder itself is tuned per title, and even per scene, rather than being one fixed ladder for the whole catalog.
+A: The encoding pipeline produces a "quality ladder" — the same content encoded at multiple bitrate/resolution combinations (235 kbps at 240p up to ~15.6 Mbps for 4K HDR, §4), broken into 2-10 second chunks described in a manifest (MPD for DASH, M3U8 for HLS). The client continuously measures its actual download throughput and buffer health, then requests the next chunk at whichever quality level it estimates it can download faster than it plays back — switching up or down chunk-by-chunk, not stream-wide. Per-title encoding (§8) takes this further: the ladder itself is tuned per title, and even per scene, rather than being one fixed ladder for the whole catalog.
 
 **Q: How does Netflix prepare for a hit show launch with millions of simultaneous new viewers?**
 A: The recommendation/marketing systems generate a demand forecast before release, which feeds the Open Connect pre-positioning pipeline — encoded variants are pushed to OCAs during off-peak hours (3-6am local) in proportion to predicted regional demand, so the bytes are already sitting on ISP-embedded hardware close to viewers when the show drops. The encoding fleet (EC2 Spot) and microservice auto-scaling groups pre-scale based on the same forecast. The signal that a launch is going well or poorly is the SPS metric (§8) — a sudden SPS deviation from forecast is the first thing on-call checks.
@@ -906,17 +918,18 @@ A: Encoding is naturally interruptible and checkpointable — if a Spot instance
 **Q: How does a DRM (license server) outage affect users, and why is the blast radius limited?**
 A: Licenses are cached client-side for the session duration (1-24 hours), so anyone already watching is completely unaffected by a license-server outage — only *new* play starts fail at the license-acquisition step. At ~10K new-play-starts/sec at peak, even a 2-minute regional DRM outage means roughly 1.2M failed play starts before the regionally-replicated DRM service fails over via DNS (TTR 1-3 minutes, War Story 4 in §9). The architectural lesson: separating "is this session allowed to keep playing" (cached, resilient) from "is this new session allowed to start" (live dependency) limits the blast radius of a DRM outage to new starts only.
 
-**Q: At 10x Netflix's current scale (2.4B subscribers), what breaks first?**
-A: Open Connect's physical logistics — deploying and maintaining ~150,000 OCAs globally (vs. ~15,000 today) becomes a hardware-supply-chain and ISP-relationship problem before it's a software problem. Cassandra's gossip protocol doesn't scale cleanly past ~5,000 nodes per cluster, so the metadata tier would need to move to something like FoundationDB or a hierarchical Cassandra topology. On the bandwidth side, codec efficiency becomes the lever that matters most — moving from H.265 to AV1 (or its successor) yields ~30% bandwidth reduction, which at 10x scale is the difference between a feasible and infeasible egress bill even with Open Connect absorbing most of it.
+**Q: At 10x Netflix's current scale (~3.25B subscribers), what breaks first?**
+A: Open Connect's physical logistics — growing the appliance fleet tenfold becomes a hardware-supply-chain and ISP-relationship problem before it's a software problem. Cassandra's gossip protocol doesn't scale cleanly past a few thousand nodes per cluster, so the metadata tier would need to move to something like FoundationDB or a hierarchical Cassandra topology. On the bandwidth side, codec efficiency becomes the lever that matters most — moving from H.265 to AV1 (or its successor) yields ~20-30% bandwidth reduction, which at 10x scale is the difference between a feasible and infeasible egress bill even with Open Connect absorbing most of it.
 
 ### Numbers to Remember
-- 200M-238M subscribers, ~24M concurrent streams at peak
-- Peak egress: ~21 TB/sec (168 Tbps), ~95% served from Open Connect OCAs
+- 325M+ paid memberships (Q4 2025), ~24M concurrent streams at peak (an assumption, not a disclosure)
+- Peak egress: ~21 TB/sec (168 Tbps), 100% of video served by Open Connect
 - ~17,000 titles, ~120 encoded variants each, ~50 PB total catalog
+- OCA hardware: up to 120 TB / ~200 Gbps (Storage Appliance), up to 60 TB / ~80 Gbps (Global Appliance)
 - 700+ microservices, ~100,000 EC2 instances at peak
 - Per-title encoding: ~20% bandwidth reduction vs. a fixed bitrate ladder
 - Spot instances: 60-90% cheaper than on-demand for encoding (~300K vCPU-hours/day)
-- Total infra cost: ~$1.2B/year (~$5/subscriber/year)
+- Total infra cost: ~$1.2B/year order of magnitude (~$3.7/member/year)
 - ~80% of viewing comes from recommendations
 
 ---
