@@ -164,6 +164,45 @@ Denormalization intentionally introduces redundancy for read performance:
 
 Trade-off: Faster reads, but updates must propagate to multiple places — risk of inconsistency.
 
+### Constraints — Where Data Integrity Is Actually Enforced
+
+Normalization decides where a fact *lives*; constraints decide whether an invalid fact can be
+written at all. This is the Data Integrity principle from §2, and the reason Best Practice #8
+says to enforce it in the database rather than only in application code: the database is the
+one component every writer must go through. Application-only validation is bypassed by a
+second service, a batch job, a data-fix script, or a psql session — and it cannot see a
+concurrent transaction, so two requests can both pass an application-level "is this email
+taken?" check and both insert.
+
+| Constraint | Guarantees | Note |
+|-----------|------------|------|
+| `NOT NULL` | The column always has a value | Cheapest possible check |
+| `UNIQUE` | No two rows share the value | Backed by an index, so it costs a write like any index |
+| `PRIMARY KEY` | `UNIQUE` + `NOT NULL`, one per table | In InnoDB it also decides physical row order (clustered) |
+| `FOREIGN KEY` | The referenced row exists | Needs an index on the referencing column or every check is a scan |
+| `CHECK` | A boolean expression holds per row | Good for domain rules: `price >= 0`, valid status values |
+| `EXCLUDE` | No two rows *conflict* under chosen operators | PostgreSQL-specific — the clean way to forbid overlapping bookings |
+
+Three behaviours that surprise people:
+
+- **`UNIQUE` does not stop duplicate NULLs.** By default PostgreSQL treats two NULLs as
+  distinct, so a "unique" column can hold any number of NULL rows. `UNIQUE NULLS NOT
+  DISTINCT` is the opt-in that makes NULLs collide.
+- **A foreign key's default `ON DELETE` action is `NO ACTION`, not `CASCADE`.** `NO ACTION`
+  and `RESTRICT` both block the delete; the difference is that `NO ACTION` can be deferred to
+  commit time while `RESTRICT` fires immediately. `CASCADE`, `SET NULL` and `SET DEFAULT`
+  change the child rows instead of rejecting the parent delete — pick deliberately, because
+  `CASCADE` on a widely-referenced table turns one `DELETE` into an unbounded one.
+- **Constraints are not free at scale.** Every `UNIQUE` is an index (a write cost, per §6),
+  and an unindexed FK column makes every parent delete a full scan of the child table — which
+  is exactly Common Pitfall #1.
+
+The counter-argument you will hear is that constraints are painful across shards and in
+NoSQL: a `FOREIGN KEY` cannot span shards, and DynamoDB or Cassandra offer nothing beyond
+per-item conditional writes. That is true, and it is a real cost of the sharded and
+non-relational designs elsewhere in this module — you trade an enforced invariant for a
+reconciliation job that finds violations after the fact.
+
 ---
 
 ## 6. Indexing
@@ -413,9 +452,10 @@ flowchart LR
 - **MySQL**: Account, billing, and subscription data (ACID required).
 - **EVCache (Redis)**: Session and metadata caching.
 
-### Twitter
-- **MySQL** with heavy sharding for tweet storage (moved to Manhattan, a proprietary store).
-- **Cassandra** for social graph and timelines.
+### Twitter / X
+- **MySQL** with heavy sharding for tweet storage, later migrated to Manhattan, their proprietary distributed key-value store.
+- **FlockDB** for the social graph — a MySQL-backed distributed graph store holding over 13 billion edges at 20k writes/sec and 100k reads/sec, since folded into Manhattan.
+- **Redis** for materialized home timelines (fan-out-on-write into a per-user list).
 - **Snowflake** (their ID generator) for globally unique, roughly time-ordered tweet IDs.
 
 ### Google
@@ -424,9 +464,8 @@ flowchart LR
 - **Firestore**: Document store for Firebase apps.
 
 ### Uber
-- **Schemaless** (MySQL-based): Custom wide-column layer on top of MySQL.
-- **PostgreSQL** for core trip data with heavy replication.
-- Migrated from PostgreSQL to MySQL due to write-ahead log efficiency differences at scale.
+- **Schemaless** (MySQL-based): Custom wide-column layer on top of MySQL, holding core trip data.
+- Migrated off PostgreSQL to MySQL in 2016: Postgres replicates physical WAL rather than logical rows, and its immutable-tuple/indirect-index layout meant an update to one indexed column rewrote every index entry for that row — both amplified writes and replication bandwidth at Uber's scale.
 
 ---
 
@@ -533,7 +572,7 @@ Note that the cost is linear in `N` while the fix is constant, so this defect ge
 ## 14. Interview Questions with Answers
 
 **Q1: When would you choose NoSQL over SQL?**
-A: When the access pattern is well-defined and simple (key-value or range queries), when horizontal write scalability is paramount, when schema flexibility is needed (evolving documents), or when the data model naturally fits a non-relational structure (graphs, time-series, documents).
+A: Choose NoSQL when the access pattern is known and simple, and horizontal write scalability matters more than query flexibility. That covers key-value or range lookups, schema flexibility for evolving documents, and data models that naturally fit a non-relational structure (graphs, time-series, documents).
 
 **Q2: What is the N+1 query problem and how do you fix it?**
 A: Fetching a list of N entities, then making one additional query per entity. Fix: use a JOIN in a single query, or use an ORM eager-loading feature (`include`/`select_related`), or batch fetch with a WHERE id IN (...) clause.
@@ -551,7 +590,7 @@ A: Horizontal partitioning of data across multiple database nodes, each holding 
 A: A consistency model where, given no new updates, all replicas will converge to the same value over time. Acceptable when slight staleness is tolerable: social media likes/counts, product view counts, recommendation data. Not acceptable for: bank balances, inventory, authentication tokens.
 
 **Q7: How would you handle schema migrations on a live production database?**
-A: Use backward-compatible migrations: add columns before removing them, use tools like Flyway/Liquibase, use online schema change tools (pt-osc, gh-ost for MySQL; pg_repack for PostgreSQL) to avoid table locks, deploy application code that handles both old and new schema, then clean up old schema in a follow-up migration.
+A: Use backward-compatible migrations in an expand-then-contract sequence, so old and new application code can both run against the schema at once. Concretely: add columns before removing them; version migrations with Flyway or Liquibase; use online schema change tools (pt-osc, gh-ost for MySQL; pg_repack for PostgreSQL) to avoid table locks; deploy application code that handles both old and new schema; then drop the old schema in a follow-up migration.
 
 **Q8: What are the tradeoffs of read replicas?**
 A: Pros: Scale read throughput, geographic distribution, offload analytics. Cons: Replication lag causes stale reads, adds operational complexity, failover to replica requires application reconfiguration or use of a proxy (ProxySQL, RDS Proxy).
@@ -575,10 +614,13 @@ A: Denormalize when read latency matters more than write simplicity, by storing 
 A: A composite B-tree index is physically sorted by the first column, then the second within each first-column value. This is the leftmost-prefix rule from Section 6: a query on `col_a` alone, or on `(col_a, col_b)` together, can use the index directly since both match a contiguous range of the sorted structure, but a query on `col_b` alone has to check every distinct `col_a` value's sub-range, which degrades toward a full index scan. If both single-column lookups are common, you generally need two separate indexes — one on `(col_a, col_b)` and one on `(col_b)` alone — rather than expecting one composite index to serve both directions. Always confirm with `EXPLAIN ANALYZE` (Section 6's Index Pitfalls) rather than assuming a composite index covers a query it doesn't.
 
 **Q15: Why would you vertically split a table into "hot" and "cold" columns instead of keeping everything in one row?**
-A: Splitting keeps frequently-accessed columns small enough to stay resident in the buffer pool while large, rarely-read columns don't compete for that memory. The Airbnb case study's Key Design Decision #4 does exactly this: `listings_hot` holds price, availability, title, and photo_url (queried on every search result), while `listings_cold` holds the full description, amenities JSON, and house rules (loaded only on the listing detail page) — keeping the hot table around 5GB, small enough to fit entirely in InnoDB's buffer pool so search queries hit memory instead of disk. This is a column-store technique retrofitted onto a row-oriented database: instead of fetching an entire wide row for a query that only needs four fields, you fetch only the table that has those four fields. Split along access-frequency lines, not along logical/entity lines — the goal is keeping the frequently-scanned working set small, not achieving a "clean" schema.
+A: Splitting keeps frequently-accessed columns small enough to stay resident in the buffer pool while large, rarely-read columns don't compete for that memory. The Vitess case study's Key Design Decision #4 does exactly this: `listings_hot` holds price, availability, title, and photo_url (queried on every search result), while `listings_cold` holds the full description, amenities JSON, and house rules (loaded only on the listing detail page) — keeping the hot table around 5GB, small enough to fit entirely in InnoDB's buffer pool so search queries hit memory instead of disk. This is a column-store technique retrofitted onto a row-oriented database: instead of fetching an entire wide row for a query that only needs four fields, you fetch only the table that has those four fields. Split along access-frequency lines, not along logical/entity lines — the goal is keeping the frequently-scanned working set small, not achieving a "clean" schema.
 
 **Q16: Why do monotonically increasing shard keys (like an auto-increment ID) create hot partitions?**
-A: A key that always increases means every new row's key is greater than all previous keys, so every insert lands on the same shard. Section 12's pitfall #10 calls this out directly, and the Airbnb case study hit a variant of it: a single property-management company's 12M listings all shared one `user_id`, so that shard's storage grew to 800GB (versus ~125GB for others) and its write throughput ran at 4x its peers. The fix in both cases is the same shape — choose a shard key with naturally distributed values (a hash of the ID, not the ID itself) or detect and manually split outlier keys, which is what Airbnb did by splitting the company into 50 regional sub-accounts. Always plot the expected key distribution before picking a shard key, since a key that looks fine at 1M rows can concentrate catastrophically at 100M.
+A: A key that always increases means every new row's key is greater than all previous keys, so every insert lands on the same shard. Section 12's pitfall #10 calls this out directly, and the Vitess case study hits a variant of it: a single property-management company's 12M listings all shared one `user_id`, so that shard's storage grew to 800GB (versus ~125GB for others) and its write throughput ran at 4x its peers. The fix in both cases is the same shape — choose a shard key with naturally distributed values (a hash of the ID, not the ID itself) or detect and manually split outlier keys, which the case study does by splitting the company into 50 regional sub-accounts. Always plot the expected key distribution before picking a shard key, since a key that looks fine at 1M rows can concentrate catastrophically at 100M.
+
+**Q17: Why enforce integrity with database constraints instead of validating in application code?**
+A: Because the database is the one component every writer has to pass through, and it is the only layer that sees concurrent transactions. Application-level validation is bypassed the moment a second service, a batch job, a data-fix script, or a `psql` session writes to the same table — and even within one service, two concurrent requests can both pass an "is this email taken?" check and both insert, because neither sees the other's uncommitted row; a `UNIQUE` constraint rejects the second one. Section 5's constraint table maps each guarantee to its enforcement cost: `NOT NULL` is nearly free, `UNIQUE` is an index (so it carries the write cost of §6), and a `FOREIGN KEY` on an unindexed child column turns every parent delete into a full scan, which is Common Pitfall #1. Two defaults regularly catch people out — `UNIQUE` permits unlimited NULL rows unless you write `UNIQUE NULLS NOT DISTINCT`, and a foreign key's default `ON DELETE` action is `NO ACTION` (block the delete), not `CASCADE`. Enforce every invariant you can in the schema, and accept that the ones you cannot (cross-shard references, NoSQL stores with no constraint layer) now need a reconciliation job instead.
 
 ---
 
@@ -608,7 +650,7 @@ A: A key that always increases means every new row's key is greater than all pre
 
 ---
 
-**Cross-references:** [backend/database_internals_and_indexing](../../backend/database_internals_and_indexing/) (B-tree/LSM internals behind the indexing strategies above), [backend/query_optimization](../../backend/query_optimization/), [database/README](../../database/README.md) (all 29 modules — schema design, normalization, NoSQL data modeling), [database/schema_design_and_normalization](../../database/schema_design_and_normalization/).
+**Cross-references:** [backend/database_internals_and_indexing](../../backend/database_internals_and_indexing/) (B-tree/LSM internals behind the indexing strategies above), [backend/query_optimization](../../backend/query_optimization/), [database/README](../../database/README.md) (all 29 modules — schema design, normalization, NoSQL data modeling), [database/schema_design_and_normalization](../../database/schema_design_and_normalization/), [hld/database_sharding](../database_sharding/README.md) (the Partitioning/Sharding principle in §2, developed in full: shard-key selection, resharding, hotspots, cross-shard queries), [hld/cap_theorem](../cap_theorem/README.md) (why the ACID-vs-BASE choice in §4 is forced, and what PACELC adds to it).
 
 ---
 
@@ -638,11 +680,21 @@ A: A key that always increases means every new row's key is greater than all pre
 
 ---
 
-## Case Study: Airbnb Monolithic MySQL to Vitess Migration
+## Case Study: Monolithic MySQL to Vitess Migration (Listings Marketplace)
+
+> **How to read this case study**: this is an **illustrative composite** modelled on a
+> short-term-rental marketplace, not a post-mortem of any named company. Vitess itself and
+> everything it does here is real and publicly documented — VTGate, VSchema, vindexes,
+> VReplication/MoveTables, and its production use at YouTube, Slack, GitHub, Square,
+> Shopify, Etsy and Pinterest (see `vitessio/vitess` `ADOPTERS.md`). The scale figures,
+> latency numbers, costs and incident details below are constructed so the arithmetic that
+> follows each one is concrete and checkable; treat them as a worked example, not as
+> published metrics. The same convention as the explicitly fictional case studies elsewhere
+> in this repo.
 
 ### Problem Statement
 
-Airbnb operated a monolithic MySQL database for its listings, bookings, and reviews. By 2018 the database had hit IOPS limits at 70% capacity; a hardware upgrade would extend runway by ~12 months but would not solve the underlying scaling ceiling. Scale at migration time:
+The marketplace operated a monolithic MySQL database for its listings, bookings, and reviews. The database had hit IOPS limits at 70% capacity; a hardware upgrade would extend runway by ~12 months but would not solve the underlying scaling ceiling. Scale at migration time:
 
 - 100M listings, 500M reviews, 200M user accounts
 - Data volume: 2 TB on the primary MySQL instance
@@ -766,7 +818,7 @@ pt-online-schema-change \
   --execute \
   --max-load Threads_running=50 \
   --critical-load Threads_running=200 \
-  D=airbnb,t=listings_hot
+  D=marketplace,t=listings_hot
 ```
 
 ### Tradeoffs
@@ -885,7 +937,7 @@ The hot table (price, availability, title) is queried on every search result; th
 Monitor per-shard: storage size, write QPS, replication lag, CPU. Alert when any shard exceeds 1.5x the cluster median on any of these. Also instrument the application to track top-N user_ids by row count and request rate — a 100x outlier is a future hotspot. Stripe and Slack publish similar runbooks.
 
 **Q6: What's the difference between Vitess and a simple PgBouncer/ProxySQL?**
-PgBouncer/ProxySQL are connection poolers and basic read/write splitters — they don't understand sharding or VSchema. Vitess is a full sharding layer: query parsing, vindex routing, online resharding, schema migration coordination, and topology management. PgBouncer would not have solved Airbnb's IOPS ceiling.
+PgBouncer/ProxySQL are connection poolers and basic read/write splitters — they don't understand sharding or VSchema. Vitess is a full sharding layer: query parsing, vindex routing, online resharding, schema migration coordination, and topology management. PgBouncer would not have solved the marketplace's IOPS ceiling.
 
 **Q7: When is the right time to migrate from a monolith DB to sharding?**
 When (a) you're consistently at 60%+ of IOPS or storage on the largest available instance, (b) vertical scaling has < 18 months of runway, and (c) your traffic growth makes ceiling-hit predictable. Migrating earlier wastes effort; migrating later means doing it under fire when the database is already failing.

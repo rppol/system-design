@@ -434,6 +434,25 @@ Detection time is a product of two numbers you configure, and it trades directly
 
 Note the third row: dropping the interval to 5s while *raising* the threshold to 3 detects failure faster than the 2-threshold config yet survives a 4-second GC pause, because a pause shorter than `interval x (N - 1)` can never accumulate N consecutive failures. Shortening the interval is almost always the better lever than lowering the threshold.
 
+### Passive Health Checking (Outlier Ejection)
+
+Everything above is **active** health checking: the load balancer sends its own synthetic probe on a fixed interval. That probe is a different request from the ones real users send, which is exactly the failure mode Core Principle 5 (Failure Isolation) runs into — a backend can answer `GET /health` in 2ms while returning 503s or 10-second latencies to actual traffic. Detection time also has a floor of `interval x N`, so between probes the LB has no opinion at all.
+
+**Passive health checking** closes both gaps by judging a backend on the real responses it is already producing, and ejecting it the moment they go bad. Envoy calls this *outlier detection* and offers four independent triggers:
+
+| Trigger | Ejects a host when… | Use it for |
+|---------|---------------------|-----------|
+| `consecutive_5xx` | N real responses in a row are 5xx | a backend that has hard-failed |
+| `consecutive_gateway_failure` | N in a row are 502/503/504 specifically | a dead or refusing upstream |
+| Success rate | its success rate falls statistically below the *cluster mean* | one bad host in an otherwise healthy pool |
+| Failure percentage | its failure rate crosses a flat configured threshold | small pools, where a "mean" is meaningless |
+
+Two guardrails make ejection safe. `base_ejection_time` bounds how long a host stays out and grows multiplicatively on repeat offences, so a flapping host is penalised harder each time instead of rejoining instantly. `max_ejection_percent` caps how much of the pool may be ejected at once — the single most important setting, because a dependency outage makes *every* backend return 5xx, and without the cap the LB would eject the entire fleet and turn a degraded service into a total one.
+
+AWS ships the same idea on ALB as a routing algorithm rather than an ejection rule: set the target group's `load_balancing.algorithm.type` to `weighted_random` and turn on `load_balancing.algorithm.anomaly_mitigation`, and the ALB shifts traffic share away from targets whose observed error rate is anomalous relative to their peers — a soft version of ejection that never removes a target outright.
+
+Run both layers. Active checks catch a process that is gone; passive checks catch a process that is present, answering probes, and useless.
+
 ---
 
 ## Real-World Examples
@@ -442,16 +461,17 @@ Note the third row: dropping the interval to 5s while *raising* the threshold to
 - Google Front End (GFE) handles all external traffic before it reaches any Google service
 - GFE is a globally distributed L7 load balancer / reverse proxy running on thousands of machines
 - Uses Maglev (Google's software-based load balancer) for consistent hashing across backend pools
-- Maglev handles 1M+ packets per second per server using ECMP (Equal Cost Multi-Path) routing
+- Routers spread packets across the Maglev machines via ECMP (Equal Cost Multi-Path); each Maglev machine then hashes each packet to a backend using "Maglev hashing," a lookup-table consistent-hashing scheme
+- A single Maglev machine saturates a 10 Gbps link with small packets — the NSDI 2016 paper sizes that as 9.06 Mpps at a 100-byte average packet size (813 Kpps at 1500 bytes)
 
 ### AWS (Amazon Elastic Load Balancing)
 - ALB (Application Load Balancer): L7, content-based routing, WebSocket support, targets ECS/Lambda
 - NLB (Network Load Balancer): L4, ultra-low latency, millions of RPS, static IP support
-- CLB (Classic, legacy): Simple L4/L7, being phased out
+- CLB (Classic, legacy): Simple L4/L7, superseded by ALB/NLB — still supported in VPC, but AWS steers all new deployments to ALB or NLB
 - AWS uses its own Hyperplane network service as the backend for NLB, capable of handling millions of flows
 
 ### Netflix
-- Netflix uses Eureka (service discovery) + Ribbon (client-side load balancing) in its microservices
+- Netflix uses Eureka (service discovery) with client-side load balancing in its microservices; the internal RPC path is gRPC, whose load-balancing and discovery interceptors replaced the older Ribbon library (Ribbon is in maintenance mode and takes no new features)
 - Client-side load balancing means each service knows about all instances of its dependencies and makes routing decisions locally — no central load balancer hop
 - Zuul is Netflix's API gateway that acts as an L7 load balancer for external traffic into the microservices cluster
 
@@ -585,7 +605,7 @@ Run multiple load balancer instances in active-active (all handle traffic) or ac
 Connection draining (deregistration delay) is a grace period during which the load balancer stops sending new requests to a server being removed, but waits for in-flight requests to complete before fully removing it. This enables zero-downtime deployments.
 
 **Q8: Explain the difference between client-side and server-side load balancing.**
-Server-side: a central load balancer intercepts all traffic and routes it. Client-side: the client (or a sidecar) knows all server instances and makes routing decisions locally. Client-side (used by Netflix Ribbon, gRPC) eliminates the central LB hop but requires clients to maintain server lists.
+Server-side: a central load balancer intercepts all traffic and routes it. Client-side: the client (or a sidecar) knows all server instances and makes routing decisions locally. Client-side (used by gRPC's built-in load balancing policies, and by Envoy sidecars in a service mesh) eliminates the central LB hop but requires clients to maintain server lists.
 
 **Q9: How would you design a load balancer for WebSocket connections?**
 WebSockets are long-lived connections — once established, traffic flows bidirectionally on the same connection. The load balancer must support WebSocket upgrade (L7 feature) and not close idle connections. Sticky sessions are needed to ensure WebSocket traffic stays on the established backend connection.
@@ -597,7 +617,7 @@ In a blue-green deployment, the new version (green) is deployed alongside the ol
 Consistent hashing places servers on a virtual ring. Each key maps to the nearest server on the ring. When a server is added or removed, only K/N keys need remapping (K = keys, N = servers), compared to simple hash where all keys remap. This minimizes cache misses when the pool changes.
 
 **Q12: How can an overly aggressive health check turn a brief GC pause into a cascading failure?**
-A health check tuned tighter than the application's normal pause behavior can eject a healthy-but-momentarily-slow server, shifting its load onto the rest of the pool and triggering the same pauses there. The case study's second pitfall shows the chain: a 4-second G1 mixed-GC pause failed two consecutive 10s health checks (`unhealthy_threshold = 2`), the ALB pulled the instance, traffic spiked on the remaining servers, their JVMs hit GC pauses too, and the failure cascaded. The fix was two-sided — raise `unhealthy_threshold` to 3 (a 30-second grace window) and have the `/health` endpoint return a tolerant "warming up" 200 for 5 seconds after a GC ends, so the JVM can stabilize before the LB decides. Tune health-check thresholds against your application's real worst-case pause profile, not against an idealized always-responsive server.
+A health check tuned tighter than the application's normal pause behavior can eject a healthy-but-momentarily-slow server, shifting its load onto the rest of the pool and triggering the same pauses there. The case study's second pitfall shows the chain: a 12-second G1 mixed-GC pause spanned two consecutive 10s health checks (`unhealthy_threshold = 2`, so a pause only has to outlast one interval to trip it), the ALB pulled the instance, traffic spiked on the remaining servers, their JVMs hit GC pauses too, and the failure cascaded. The fix was two-sided — raise `unhealthy_threshold` to 3, which widens the survivable pause to `interval x (N - 1)` = 20 seconds and the full detection window to 30 and have the `/health` endpoint return a tolerant "warming up" 200 for 5 seconds after a GC ends, so the JVM can stabilize before the LB decides. Tune health-check thresholds against your application's real worst-case pause profile, not against an idealized always-responsive server.
 
 **Q13: Why must a load balancer inject an `X-Forwarded-For` header, and what breaks without it?**
 Without it, every backend sees the load balancer's internal IP as the client IP, because the LB opens its own connection to the backend on the client's behalf. Common Pitfall 6 lists the concrete casualties: per-client rate limiting collapses (all traffic appears to come from one IP), geo-blocking and geo-routing make decisions on the LB's location, and access logs become useless for debugging or abuse investigation. An L7 load balancer fixes this by appending the real client IP to the `X-Forwarded-For` (or `X-Real-IP`) header before forwarding — this is exactly the header-modification step in the module's request-lifecycle sequence. Configure the header at the LB and have backends trust it only from the LB's known IP range, since a client can spoof the same header if it reaches a backend directly.
@@ -610,6 +630,9 @@ Ramp traffic into new instances gradually instead of sending them a full share t
 
 **Q16: Why does the case study use three different load-balancing algorithms behind one ALB instead of a single algorithm for everything?**
 Because the three traffic classes have opposite needs, and no single algorithm serves all of them well. Static assets are uniform-cost, so round robin's perfect evenness is optimal; API requests vary 16x in duration (50ms product page to 800ms checkout), so least-connections is needed to stop long requests from piling onto one server — the switch cut server-utilization variance from 35% to 8%; and WebSockets are long-lived (average 30 minutes), so consistent hashing on `user_id` is required to keep a user on the same server across the connection's life. This is the module's evenness-versus-affinity quadrant made operational: round robin and least-connections maximize evenness for stateless tiers, while consistent hashing trades some evenness for the affinity that stateful and cache-warm workloads demand. Match the algorithm to each target group's workload shape — request-cost variance and connection lifetime — rather than standardizing on one default.
+
+**Q17: What is passive health checking (outlier ejection), and why isn't an active `/health` probe enough on its own?**
+Passive health checking ejects a backend based on the real responses it is already returning, rather than on a separate synthetic probe. An active check only proves the backend can answer `GET /health` — a server can pass that in 2ms while returning 503s or 10-second latencies to actual user requests, and between probes the load balancer has no signal at all, so detection has a hard floor of `interval x unhealthy_threshold`. Envoy's outlier detection supplies the missing signal with four triggers: consecutive 5xx, consecutive gateway failure (502/503/504), success rate measured against the cluster mean, and a flat failure-percentage threshold for pools too small for a meaningful mean; AWS exposes a softer form on ALB by combining the `weighted_random` routing algorithm with `anomaly_mitigation`, which shifts traffic share away from anomalous targets instead of removing them. The setting that matters most is `max_ejection_percent`, because a shared-dependency outage makes every backend return 5xx at once and an uncapped ejector would remove the entire fleet. Run both layers — active checks catch a process that is gone, passive checks catch a process that is present and useless.
 
 ---
 
@@ -924,8 +947,8 @@ The 16-minute figure is the reason the case study also lists predictive/schedule
    - *Broken:* `stickiness { enabled = true; type = "lb_cookie"; duration = 3600 }`
    - *Fix:* removed cookie stickiness for `/product/*`, added an NLB with consistent hashing on `product_id` — distributes hot product across 12 servers (a subset chosen by hash ring) while preserving cache warmth.
 
-2. **Health-check flapping during GC pause.** A 4-second G1 mixed-GC pause failed two 10s health checks, marking the server unhealthy. The LB pulled it out, traffic spiked on remaining servers, triggering more GC pauses — cascading failure.
-   - *Broken:* `healthy_threshold = 2; unhealthy_threshold = 2;` (4s flap window)
+2. **Health-check flapping during GC pause.** A 12-second G1 mixed-GC pause spanned two consecutive 10s health checks, marking the server unhealthy. The LB pulled it out, traffic spiked on remaining servers, triggering more GC pauses — cascading failure.
+   - *Broken:* `healthy_threshold = 2; unhealthy_threshold = 2;` (any pause past ~10s trips it)
    - *Fix:* raise `unhealthy_threshold = 3` (30s grace) + the post-GC `warming up` 200 response above, giving the JVM time to stabilize before removal.
 
 3. **Connection draining not configured.** During a deploy, in-flight checkout requests were killed when the instance terminated, causing duplicate orders when clients retried.
@@ -944,7 +967,7 @@ Three layers: (1) pre-warm the JVM by hitting `/warmup` before registering with 
 Route 53 health checks detect the failed regional ALB endpoint in ~30s and remove it from DNS. ALB is multi-AZ by default, so traffic shifts to remaining AZs. Auto-scaling adds capacity to surviving AZs. Total recovery: ~2 minutes with no manual intervention.
 
 **Q: How do you load-balance gRPC?**
-ALB does not support HTTP/2 for backend connections to gRPC, so we use NLB + client-side load balancing via gRPC's `round_robin` policy with `xDS` service discovery from Envoy. ALB is HTTP/1.1 only on the backend side as of 2024.
+ALB load-balances gRPC natively: set the target group's protocol version to `GRPC` (or `HTTP2`), which requires an HTTPS listener, a `forward` action, and `instance`/`ip` targets, and give the health check a `/package.service/method` path plus the gRPC status codes that count as healthy. The ALB then parses each call and routes by package, service, and method, so per-call balancing works instead of pinning every call to one long-lived HTTP/2 connection. The alternative is NLB plus client-side load balancing via gRPC's `round_robin` policy with xDS discovery from Envoy, which is what you want when you also need per-endpoint outlier ejection.
 
 **Q: Why consistent hashing over modulo hashing for the cache tier?**
 Modulo hashing (`server = hash(key) % N`) reshuffles ~all keys when N changes (scale-out, server failure). Consistent hashing reshuffles only `1/N` of keys. At 200 servers, scale-out moves 0.5% of keys vs 100% with modulo.

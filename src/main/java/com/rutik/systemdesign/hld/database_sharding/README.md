@@ -693,6 +693,40 @@ orders = scatter_gather(order_shards,
 result = {**user, 'orders': orders}
 ```
 
+### Secondary Indexes: Local vs Global
+
+Scatter-gather above is the *fallback* for a query that does not carry the shard key. The
+structural fix is a secondary index, and in a sharded system there are exactly two shapes it
+can take — the choice is the same one as range-vs-hash sharding, replayed one level down.
+
+**Local (partitioned) index** — each shard indexes only its own rows. Writes stay local, so
+an insert touches exactly one shard and one index. But a lookup by the indexed attribute
+still has to ask every shard, because no shard knows whether a match lives elsewhere. A local
+index makes each shard's part of the scatter cheap; it does not remove the scatter.
+
+**Global index** — one index over the whole dataset, itself sharded by the *indexed*
+attribute rather than by the table's shard key. A lookup becomes two hops (index shard, then
+data shard) instead of N. The cost moves to the write path: inserting one row now writes to
+its data shard *and* to a different shard's index, which is a cross-shard write — the exact
+thing §"Best Practices" tells you to avoid. Systems therefore make global indexes
+asynchronous and eventually consistent, which is why DynamoDB's global secondary indexes
+support eventual consistency only, while its local secondary indexes (same partition key,
+different sort key) can be read strongly consistently.
+
+| | Local index | Global index |
+|---|---|---|
+| Partitioned by | the table's shard key | the indexed attribute |
+| Lookup by indexed attr | scatter to all N shards | 2 hops (index, then data) |
+| Write cost | one shard, synchronous | extra cross-shard write |
+| Consistency | can be strong | usually eventual |
+| DynamoDB name | LSI — must be created with the table, capacity drawn from the base table, 10 GB cap per partition key value | GSI — can be added later, has its own capacity, no size cap |
+
+Vitess implements the global form as a **lookup vindex**: a small table mapping
+`indexed_value -> shard_key`, kept in its own keyspace, that VTGate consults before routing.
+That is directory-based sharding (above) applied to one attribute instead of the whole entity,
+and it is how Q11's hardest query — "all orders for a product", when orders are sharded by
+`user_id` — stops being a scatter.
+
 ---
 
 ## Resharding
@@ -942,9 +976,9 @@ Sharding divides the load; it never removes it. That is why the production answe
 
 Instagram started with a single PostgreSQL instance. As they scaled:
 1. **Early sharding**: Manually sharded PostgreSQL across multiple servers, sharding by `user_id`
-2. **Schema design insight**: Used UUIDs that encode shard ID, making routing deterministic
+2. **Schema design insight**: Generated 64-bit integer IDs that embed the shard ID, making routing deterministic from the ID alone — no directory lookup
 3. **ID format**: `id = timestamp_ms | shard_id | sequence` — first 41 bits timestamp, next 13 bits shard ID, last 10 bits local sequence
-4. **Migration to Cassandra**: Eventually moved media metadata to Cassandra for better write scalability, while keeping social graph in PostgreSQL shards
+4. **Added Cassandra alongside PostgreSQL** for the most write-heavy workloads (feeds, inboxes), where its LSM write path beats a B-tree; the sharded PostgreSQL tier kept the core relational metadata
 
 ### Discord: Cassandra Sharding
 
@@ -1034,7 +1068,7 @@ A: Replication copies the same data to multiple nodes for read scalability and h
 
 **Q2: How do you choose a shard key?**
 
-A: A good shard key must be: high cardinality (many distinct values), uniformly distributed (to avoid hotspots), non-monotonic (to avoid write hotspots on the newest shard), immutable (changing the key would require moving the record to a different shard), and aligned with query patterns (most queries should hit one shard). Common good choices: user_id, tenant_id. Common bad choices: timestamp, status, low-cardinality fields.
+A: Pick the field that is high-cardinality, uniformly distributed, non-monotonic, immutable, and aligned with your dominant query pattern. Each property rules out a specific failure: high cardinality (many distinct values) so the shard count is not capped; uniform distribution so no shard becomes a hotspot; non-monotonic so new writes do not all pile onto the newest shard; immutable, since changing the key would require moving the record to a different shard; and query-aligned so most queries hit one shard. Common good choices: user_id, tenant_id. Common bad choices: timestamp, status, low-cardinality fields.
 
 **Q3: What is a hotspot shard and how do you fix it?**
 
@@ -1078,7 +1112,7 @@ A: Scatter-gather sends a query to all shards simultaneously and merges results.
 
 **Q13: What's the advantage of mapping 1000 "logical" shards onto 100 physical hosts instead of just using 100 shards directly?**
 
-A: Logical shards decouple capacity changes from data movement, since you can remap which physical host owns a logical shard without touching the shard-assignment formula. The Instagram case study uses exactly this: `shard_id = user_id % 1000` never changes, but the Redis-cached logical-to-physical lookup table can move any of those 1000 logical shards to a different host. Adding capacity becomes "take a heavily loaded host's 10 logical shards, migrate 5 of them to a new host" rather than a full resharding event that remaps every key's formula — Instagram's own 50-to-100-host resharding took 4 hours of data movement with zero downtime. Provision more logical shards than your current physical host count from day one, since splitting an already-deployed shard later is far more expensive than moving a pre-existing one.
+A: Logical shards decouple capacity changes from data movement, since you can remap which physical host owns a logical shard without touching the shard-assignment formula. The Instagram case study uses exactly this: `shard_id = user_id % 1000` never changes, but the Redis-cached logical-to-physical lookup table can move any of those 1000 logical shards to a different host. Adding capacity becomes "take a heavily loaded host's 10 logical shards, migrate 5 of them to a new host" rather than a full resharding event that remaps every key's formula — the case study's 50-to-100-host resharding takes 4 hours of data movement with zero downtime. Provision more logical shards than your current physical host count from day one, since splitting an already-deployed shard later is far more expensive than moving a pre-existing one.
 
 **Q14: A tweet from a user with 1M followers, sharded across 4 shards, produces how much write amplification with fan-out-on-write, and how do you avoid it?**
 
@@ -1086,11 +1120,15 @@ A: Fan-out-on-write turns one write into roughly 250,000 writes per shard — 1M
 
 **Q15: What's the fundamental tradeoff of directory-based sharding compared to hash- or range-based sharding?**
 
-A: Directory-based sharding trades routing simplicity for placement flexibility: any entity can move to any shard, at the cost of a lookup on every request's path. Hash- and range-based sharding compute the shard from the key itself with no external state, so there's nothing extra to keep available or consistent; a directory-based router, by contrast, becomes a single point of failure and a potential bottleneck unless it's cached and made highly available itself. The payoff is real: a directory lets you rebalance a hot entity onto its own dedicated shard, or migrate a tenant, without changing a formula that every other key also depends on — exactly what Instagram's logical-shard-to-host mapping and the module's directory-based approach both exploit. Cache directory entries aggressively — Instagram sees a 99.97% Redis hit rate on its shard lookup — so the common case avoids the extra network hop entirely.
+A: Directory-based sharding trades routing simplicity for placement flexibility: any entity can move to any shard, at the cost of a lookup on every request's path. Hash- and range-based sharding compute the shard from the key itself with no external state, so there's nothing extra to keep available or consistent; a directory-based router, by contrast, becomes a single point of failure and a potential bottleneck unless it's cached and made highly available itself. The payoff is real: a directory lets you rebalance a hot entity onto its own dedicated shard, or migrate a tenant, without changing a formula that every other key also depends on — exactly what the case study's logical-shard-to-host mapping and the module's directory-based approach both exploit. Cache directory entries aggressively — the case study's shard-lookup cache runs at a 99.97% hit rate — so the common case avoids the extra network hop entirely.
 
 **Q16: Why did Instagram embed the shard ID inside the photo ID itself instead of always doing a directory lookup?**
 
 A: Embedding the shard ID lets you route a request to the correct shard using only the ID you already have, with no extra database or cache lookup required. Instagram's 64-bit scheme packs 41 bits of timestamp, 13 bits of shard ID, and 10 bits of per-shard sequence into every photo_id, so recovering the shard is a pure bit-shift operation — given a photo_id from a permalink URL, you know its shard instantly. This only works because the shard_id is embedded at write time from a value that's already being computed (`user_id % 1000`), and it trades away the flexibility of a pure directory lookup: since the shard is baked into the ID forever, moving that entity to a different logical shard later is no longer possible without changing its ID. Reach for an embedded-ID scheme when reads by ID (not by owning entity) are common and you want to eliminate the lookup hop; keep a separate directory when entities need to migrate shards over their lifetime.
+
+**Q17: In a sharded database, what is the difference between a local and a global secondary index?**
+
+A: A local index is partitioned by the table's shard key, so lookups by the indexed attribute still scatter to every shard; a global index is partitioned by the indexed attribute itself, so a lookup is two hops. That difference decides where you pay. A local index keeps writes cheap and synchronous — one row, one shard, one index — but never removes the scatter, because no shard can know whether a matching row lives elsewhere. A global index removes the scatter and pays for it on the write path: inserting a row now also writes to a *different* shard's index, which is a cross-shard write, so real systems make it asynchronous. That is exactly why DynamoDB's global secondary indexes support eventual consistency only and carry their own capacity, while its local secondary indexes share the base table's partition key, can be read strongly consistently, must be created with the table, and cap each partition key's item collection at 10 GB. Vitess implements the global form as a lookup vindex — a `indexed_value -> shard_key` table in its own keyspace that VTGate consults before routing, which is directory-based sharding narrowed to one attribute. Reach for a global index only when a non-shard-key lookup is genuinely hot, since every one you add makes writes cross-shard and pushes the result into eventual consistency.
 
 ---
 
@@ -1141,10 +1179,18 @@ Putting sharding logic in application code creates a maintenance nightmare as ro
 
 ### Problem Statement
 
-Instagram stores photo metadata for 1B users with 100B photos. Photos are immutable after upload, simplifying consistency. Scale:
+> **How to read this case study**: the *design* is Instagram's and is publicly documented —
+> sharding by `user_id` into a few thousand logical shards mapped onto far fewer physical
+> PostgreSQL hosts, and a 64-bit ID packing 41 timestamp bits, 13 shard bits and 10 sequence
+> bits so the shard is recoverable from the ID alone ("Sharding & IDs at Instagram"). The
+> *numbers* below — account and photo counts, QPS, latencies, cost, incident details — are an
+> illustrative composite chosen so the arithmetic that follows each one is concrete and
+> checkable. They are not published Instagram metrics.
+
+A photo-sharing platform stores photo metadata for 1B users with 100B photos. Photos are immutable after upload, simplifying consistency. Scale:
 
 - Users: 1B accounts, 500M monthly actives
-- Photos: 100B records, 5M new uploads/day, ~50M/day peak
+- Photos: 100B records, ~50M new uploads/day
 - Photo metadata size: ~500 bytes (id, user_id, caption, location, timestamps, S3 URL); blob in S3
 - Read QPS: 200k (profile views, feed loads)
 - Write QPS: 600/sec sustained, 6k/sec peak (post upload spikes)
@@ -1179,12 +1225,12 @@ That is the entire point of a scale estimation: the design is validated not by t
     peak factor = 6,000 / 600 = 10x
     peak per host = 6,000 / 100 = 60 writes/sec
 
-  Storage (the 10B metadata rows reported under Metrics & Results)
-    10,000,000,000 rows x 500 bytes = 5,000,000,000,000 bytes = 5 TB
-    5 TB / 100 hosts                = 50 GB per host
-    50 GB / 10 shards per host      =  5 GB per logical shard
+  Storage (the 100B metadata rows in the Problem Statement)
+    100,000,000,000 rows x 500 bytes = 50,000,000,000,000 bytes = 50 TB
+    50 TB / 100 hosts                = 500 GB per host
+    500 GB / 10 shards per host      =  50 GB per logical shard
 
-  Every per-host number is unremarkable: 2,000 reads/sec and 50 GB is a
+  Every per-host number is unremarkable: 2,000 reads/sec and 500 GB is a
   workload a single Postgres box handles without effort. That slack is
   the "4x headroom before the next reshard" claimed in the metrics.
 ```
@@ -1303,9 +1349,11 @@ CREATE TABLE photos (
     s3_key        TEXT NOT NULL,
     caption       TEXT,
     location_id   BIGINT,
-    created_at    TIMESTAMP NOT NULL DEFAULT NOW(),
-    INDEX idx_user_created (user_id, created_at DESC)
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- PostgreSQL has no inline INDEX clause in CREATE TABLE; indexes are separate DDL.
+CREATE INDEX idx_user_created ON photos (user_id, created_at DESC);
 
 -- Per-shard sequence for monotonic IDs
 CREATE SEQUENCE photo_seq INCREMENT 1 START 1;
@@ -1343,17 +1391,17 @@ public class ShardRouter {
 
 - p50 profile load: 3 ms; p99: 11 ms (SLA: 50 ms end-to-end)
 - p99 photo upload metadata write: 24 ms
-- 10B photo metadata rows, ~50 GB per physical host
+- 100B photo metadata rows, ~500 GB per physical host
 - Resharding from 50 to 100 hosts: 4 hours of data movement, zero downtime
 - Redis cache hit rate on shard lookup: 99.97%
-- Cost: ~$45k/month for 100 PG hosts (db.r5.xlarge) + S3 storage
+- Cost: dominated by 100 memory-optimized managed-Postgres instances plus their block storage; the S3 blob tier is billed separately and is the larger line item by volume
 - Throughput headroom: 4x current load before next reshard
 
 ### Common Pitfalls / Lessons Learned
 
 1. **Initial shard key was `photo_id`** — Broken: profile page issued queries to all 1000 shards. p99 was 800 ms. Fix: re-shard to `user_id`; required a 3-week migration with dual-writes during cutover. Lesson: pick the shard key based on the dominant query pattern, not the natural primary key.
 
-2. **Celebrity hotspot (Cristiano Ronaldo)** — Broken: a single user_id with 10M photos and 500k follower-feed reads/sec collapsed onto one shard, peaking at 90% CPU. Fix: detect users above a threshold (100k photos or 100k follower reads/min), promote them to a "celebrity shard" with dedicated hardware (db.r5.4xlarge) and aggressive caching.
+2. **Celebrity hotspot** — Broken: a single user_id with 10M photos and 500k follower-feed reads/sec collapsed onto one shard, peaking at 90% CPU. Fix: detect users above a threshold (100k photos or 100k follower reads/min), promote them to a "celebrity shard" on a larger memory-optimized instance with aggressive caching.
 
 3. **Lookup table as single point of failure** — Broken: the config DB holding shard→host mapping became a bottleneck during deploys when caches were cold; thousands of services hit it simultaneously. Fix: cache in Redis with 1-day TTL, pre-warm caches at service startup, and gossip mapping updates via pub/sub instead of cold reads.
 

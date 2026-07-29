@@ -678,15 +678,15 @@ Thirty-six thousand customers each told "Refunded" while being out $1.50 is what
 
 **Q1: Why does Two-Phase Commit "block," and why is that a problem in practice?**
 
-A: After a participant votes YES in the prepare phase, it must hold all acquired locks until it receives the coordinator's commit/abort decision — it cannot unilaterally decide either way, because the coordinator might have received a NO from another participant. If the coordinator crashes after collecting votes but before broadcasting the decision, every participant is stuck holding locks (and database connections) indefinitely until the coordinator recovers. In production this can exhaust connection pools and cause an outage far larger than the original transaction (see §10, War Story 1).
+A: After a participant votes YES in the prepare phase, it must hold all acquired locks until the coordinator's commit/abort decision arrives. It cannot unilaterally decide either way, because the coordinator might have received a NO from another participant. If the coordinator crashes after collecting votes but before broadcasting the decision, every participant is stuck holding locks (and database connections) indefinitely until the coordinator recovers. In production this can exhaust connection pools and cause an outage far larger than the original transaction (see §10, War Story 1).
 
 **Q2: What is the "dual write" problem, and how does the Outbox pattern solve it?**
 
-A: The dual write problem occurs when a service must update its database AND publish a message/call another service as two separate operations — there's no way to make "commit the DB transaction" and "send the message" atomic across two different systems, so a crash between them leaves one done and the other not. The Outbox pattern solves this by writing the message as a row in an `outbox` table within the *same local database transaction* as the business write — now there's only one atomic operation (a single-database transaction), and a separate relay process (often Debezium reading the WAL) asynchronously publishes outbox rows to the message broker.
+A: The dual write problem is a service updating its database AND publishing a message as two separate operations that cannot be made atomic. There is no way to make "commit the DB transaction" and "send the message" atomic across two different systems, so a crash between them leaves one done and the other not. The Outbox pattern solves this by writing the message as a row in an `outbox` table within the *same local database transaction* as the business write — now there's only one atomic operation (a single-database transaction), and a separate relay process (often Debezium reading the WAL) asynchronously publishes outbox rows to the message broker.
 
 **Q3: What's the difference between Saga orchestration and choreography, and what are the tradeoffs?**
 
-A: In orchestration, a central coordinator explicitly invokes each step and, on failure, invokes compensations in reverse order — easy to understand and trace, but the orchestrator is a new component that must itself be highly available and is a central point of business-logic coupling. In choreography, each service publishes an event when it completes its step, and other services react to events they care about — fully decoupled, but the overall flow is implicit (spread across N services' event handlers), making it hard to answer "what state is order #123 in right now?" without aggregating events from everywhere.
+A: In orchestration, a central coordinator explicitly invokes each step and, on failure, invokes compensations in reverse order. That is easy to understand and trace, but the orchestrator is a new component that must itself be highly available and is a central point of business-logic coupling. In choreography, each service publishes an event when it completes its step, and other services react to events they care about — fully decoupled, but the overall flow is implicit (spread across N services' event handlers), making it hard to answer "what state is order #123 in right now?" without aggregating events from everywhere.
 
 **Q4: Why is idempotency described as "the foundation" for distributed transactions rather than just a nice-to-have?**
 
@@ -694,7 +694,7 @@ A: Every pattern that provides resilience — Saga step retries, Outbox at-least
 
 **Q5: When would you actually choose 2PC in a modern system, given its downsides?**
 
-A: When all participants are in the same trust domain and datacenter (sub-millisecond latency), the number of participants is small and fixed, and the business requires strong consistency that eventual consistency cannot satisfy — e.g., a distributed SQL database's internal cross-shard commit (Spanner, CockroachDB). You would essentially never hand-roll 2PC across independently-deployed microservices over a WAN; you'd use it (if at all) as an internal mechanism inside a single data platform with a global clock.
+A: Choose 2PC only when all participants sit in one trust domain and one datacenter, are few and fixed in number, and strong consistency is a hard requirement. The canonical case is a distributed SQL database's internal cross-shard commit (Spanner, CockroachDB), where sub-millisecond latency keeps the lock-hold window small. You would essentially never hand-roll 2PC across independently-deployed microservices over a WAN; you'd use it (if at all) as an internal mechanism inside a single data platform with a global clock.
 
 **Q6: How does TCC differ from a plain Saga, and when would you prefer it?**
 
@@ -890,7 +890,7 @@ The wallet debit commits locally in single-digit milliseconds; Kafka carries the
 
 5. **Ledger entries have a `PENDING` -> `COMPLETED` / `FAILED` state machine**, satisfying the regulatory "no phantom debits" requirement: a `PENDING` ledger entry *is* the audit record that a debit occurred and is being processed — there's never a window where the debit exists with zero record of it.
 
-6. **A reconciliation job runs every 15 minutes**, querying for `payment_ledger` rows in `PENDING` for > 10 minutes (longer than the external network's worst-case timeout) and either re-driving the external call (if not yet attempted due to a crash) or triggering the `TransferFailed` compensation (if the external call's idempotency key shows it never succeeded).
+6. **A reconciliation job runs every 15 minutes**, querying for `payment_ledger` rows that have been `PENDING` for > 20 minutes — the external network's documented 12-minute worst-case timeout plus buffer, a threshold arrived at the hard way in Pitfall #3 below — and either re-driving the external call (if not yet attempted due to a crash) or triggering the `TransferFailed` compensation (if the external call's idempotency key shows it never succeeded).
 
 ### Implementation — Idempotency Key Claim + Debit (wallet-service)
 
@@ -980,5 +980,5 @@ Under half a row per cycle means the job is effectively idle and can afford an e
 
 2. **Debezium's initial snapshot phase replayed the entire `outbox` table's history** on first deployment, causing payments-service to receive ~3 months of historical `FundsDebited` events. Because consumers were already idempotent (by design, per Best Practice #2), this was a non-event operationally — but it did spike Kafka consumer lag alerts for ~20 minutes, which the on-call team initially mistook for an incident. **Lesson: idempotent consumers turn potential incidents into noisy-but-harmless events — but document the expected noise so on-call doesn't page unnecessarily.**
 
-3. **The reconciliation job's 15-minute interval was initially too aggressive** relative to the external payment network's documented (but rarely hit) 12-minute worst-case timeout — the job occasionally fired compensations for transfers that were about to succeed. Widened to 20 minutes (worst-case timeout + buffer), eliminating false-positive compensations entirely.
+3. **The reconciliation job's 10-minute "stuck" threshold was initially too aggressive** relative to the external payment network's documented (but rarely hit) 12-minute worst-case timeout — a transfer still legitimately in flight looked abandoned, so the job occasionally fired compensations for transfers that were about to succeed. Widened the threshold to 20 minutes (worst-case timeout + buffer) while leaving the 15-minute scan interval alone, eliminating false-positive compensations entirely. **Lesson: a reconciliation job's staleness threshold must exceed the slowest legitimate path it is watching, or the safety net becomes the failure source.**
 

@@ -309,7 +309,7 @@ Use case: e-commerce order placement triggering billing, inventory, and notifica
 | **Routing**               | Topic + partition key             | Exchanges, routing keys, bindings| Queue URL-based                  |
 | **Dead letter**           | Via config (DLT)                  | Built-in DLX                     | Built-in DLQ                     |
 | **Protocol**              | Custom binary (TCP)               | AMQP 0-9-1, STOMP, MQTT          | HTTPS/REST + SQS API             |
-| **Ops overhead**          | High (Zookeeper/KRaft, brokers)   | Medium                           | None (fully managed)             |
+| **Ops overhead**          | High (KRaft controllers, brokers) | Medium                           | None (fully managed)             |
 | **Exactly-once**          | Yes (Kafka transactions)          | No                               | No (at-least-once)               |
 | **Best for**              | High-throughput event streaming   | Complex routing, RPC, tasks      | Simple decoupling on AWS         |
 
@@ -328,7 +328,7 @@ quadrantChart
     RabbitMQ: [0.5, 0.45]
     SQS: [0.08, 0.4]
 ```
-*Kafka trades the highest operational burden (brokers, ZooKeeper/KRaft) for the highest throughput ceiling (millions of msg/sec); SQS inverts that trade — fully managed, but capped (300 TPS per FIFO group); RabbitMQ sits in between at ~50k–100k msg/sec with moderate ops. Positions are illustrative, drawn from the ratings in the table above.*
+*Kafka trades the highest operational burden (brokers, KRaft controller quorum) for the highest throughput ceiling (millions of msg/sec); SQS inverts that trade — fully managed, but FIFO ordering is bought by serializing each MessageGroupId; RabbitMQ sits in between at ~50k–100k msg/sec with moderate ops. Positions are illustrative, drawn from the ratings in the table above.*
 
 ### Kafka Deep Dive
 
@@ -360,7 +360,7 @@ RabbitMQ implements the **AMQP** protocol with a flexible routing model:
 Amazon SQS is a fully managed queuing service with two variants:
 
 - **Standard Queue**: at-least-once, best-effort ordering, near-unlimited throughput.
-- **FIFO Queue**: exactly-once within a 5-minute deduplication window, 300 TPS (3000 with batching), strict ordering per message group.
+- **FIFO Queue**: exactly-once within a 5-minute deduplication window, strict ordering per `MessageGroupId`. Throughput is quota'd per API action rather than per message, and the quota depends on whether **high throughput mode** is enabled and whether you batch (a batch carries up to 10 messages in one API call, so batching multiplies effective message rate by up to 10x). Look up the current per-region TPS quotas in the SQS "message quotas" page — they have been raised repeatedly and vary by region.
 - **Visibility Timeout**: when a consumer receives a message, it becomes invisible to others for a configured period. If not deleted in time, the message reappears for reprocessing.
 - **Long Polling**: consumers wait up to 20 seconds for messages, reducing empty responses and cost.
 
@@ -521,7 +521,7 @@ Strict global ordering across a distributed queue is expensive and limits throug
 | Per-partition ordering  | Kafka: messages with same key go same partition | Linear per partition           |
 | Per-queue ordering      | RabbitMQ single queue with single consumer   | No parallelism                  |
 | Global ordering         | Single partition / single consumer           | Throughput limited to one node  |
-| FIFO ordering           | SQS FIFO + MessageGroupId                    | Up to 300 TPS per group         |
+| FIFO ordering           | SQS FIFO + MessageGroupId                    | Per-group serialization; API-quota bound |
 
 ### How to guarantee ordering when you need it:
 1. **Use a partition key / routing key**: ensure all related messages (same order ID, same user ID) go to the same partition.
@@ -625,7 +625,7 @@ LinkedIn built Kafka internally to handle member activity (post, like, share, co
 LinkedIn uses Kafka for:
 - Real-time newsfeed ranking
 - Offline analytics pipelines
-- Change Data Capture from MySQL (Debezium → Kafka)
+- Change Data Capture into Kafka via Brooklin, LinkedIn's own CDC/streaming service (which replaced the earlier Databus), with connectors for Espresso, Oracle and MySQL
 
 ### Netflix — Event Pipeline
 
@@ -635,7 +635,7 @@ Netflix uses Apache Kafka as the backbone of its data pipeline, processing trill
 - Alerting and anomaly detection (consumer reads stream, checks thresholds)
 - ETL into data warehouses (Kafka → Flink → S3 / Redshift)
 
-Netflix's "Keystone" pipeline processes ~500 billion events per day with Kafka at the center.
+Netflix's "Keystone" pipeline is the vehicle for that volume: it grew past 1 trillion events/day in 2017 and runs at 2+ trillion today, ingesting several petabytes daily with Kafka at the center.
 
 ---
 
@@ -729,6 +729,44 @@ Alerting on absolute lag alone is the classic mistake. A lag of 50,000 that is s
 ```
 
 A 10-minute burst took 40 minutes to clear on the original capacity. That ratio — recovery far longer than the incident — is why lag alarms need to fire on the gap turning positive, not on lag crossing a threshold.
+
+### Backpressure and Flow Control
+
+The opening table sells the queue as the thing that "absorbs spikes so consumers drain at
+their own pace." That is true only while the queue has somewhere to put the spike. A queue
+does not remove a capacity deficit — the lag arithmetic above shows it converts an
+*immediate* failure into a *deferred* one, and if `A > S` for long enough the deferral runs
+out. Where it runs out depends on the broker:
+
+- **Kafka** never rejects a producer for consumer slowness — the log just grows until
+  `retention.ms` or `retention.bytes` evicts the oldest segments. A consumer further behind
+  than retention does not "catch up"; it gets an `OffsetOutOfRange` and skips forward, and
+  those messages are **gone**. Silent data loss, not an error.
+- **RabbitMQ** applies real backpressure. Queues have `x-max-length` / `x-overflow`
+  (`drop-head`, `reject-publish`, or dead-letter), and broker-wide memory and disk alarms
+  block publishing connections entirely until the pressure clears.
+- **SQS** has no depth limit at all — the queue simply grows, and you pay for it.
+
+So "the queue absorbs it" is a broker-specific claim, and the three failure modes are
+different enough that you must design for yours. Four levers, cheapest first:
+
+1. **Consumer-side flow control.** Bound in-flight work: Kafka's `max.poll.records` and
+   RabbitMQ's per-channel `prefetch` (QoS) stop a consumer from pulling more than it can
+   process before its next heartbeat. A consumer that pulls 5,000 records and takes longer
+   than `max.poll.interval.ms` to process them is ejected from the group, triggering a
+   rebalance that makes the lag worse — the classic backpressure own-goal.
+2. **Autoscale on lag, not CPU.** Lag is the only metric that sees the deficit; a consumer
+   pinned at 40% CPU while lag climbs is waiting on a downstream, and CPU-based scaling will
+   never react.
+3. **Load-shed at the producer.** When lag crosses a ceiling, start rejecting or sampling
+   low-value events at the edge. This is the only lever that reduces `A` rather than raising
+   `S`, and it is the one people reach for last instead of first.
+4. **Separate the topics.** Non-critical high-volume events sharing a topic with critical
+   ones means the critical ones inherit the backlog. Split them so shedding is possible.
+
+The signal to alert on is `A - S` turning positive and *staying* positive, plus the ratio
+`lag / S` — "seconds of backlog," which is directly comparable to your retention window and
+tells you how long you have before the loss above starts.
 
 ### Schema Management
 - Use Apache Avro with a Schema Registry (Confluent) for structured messages.
@@ -848,13 +886,17 @@ Kafka replicates each partition across multiple brokers (replication factor, typ
 With `acks=1` the producer gets an acknowledgment as soon as the partition leader has the write, before any follower replicates it — so a leader crash in that window loses the batch permanently despite RF=3. The Uber case study hit exactly this: producers used `acks=1` "for performance," a broker crashed before replicating a batch, and 800 payment events were lost with no way to recover them. The fix is `acks=all` combined with `min.insync.replicas=2`, which guarantees every acknowledged write is durable on at least 2 of the 3 replicas; the measured cost was only 8ms of added p99 latency. Match the acks setting to the topic's loss tolerance — `acks=1` is fine for disposable metrics, never for money.
 
 **Q14: How do you choose the partition count for a new Kafka topic, and why does over-provisioning hurt?**
-Size partitions for your maximum expected consumer parallelism with growth headroom, since consumers in a group can never exceed the partition count and partitions can only ever be added, never removed. The Uber case study picked 96 partitions for a largest consumer group of 16 — roughly 4x headroom — keeping per-partition throughput (~1.5 MB/s) well under the ~10 MB/s per-partition guideline. Over-provisioning has real costs the module calls out: each partition consumes file handles and controller metadata, and rebalances take longer with more partitions to reassign, so tens of thousands of partitions on a topic actively degrades the cluster. Start with roughly `expected_consumers * 2` to `* 4` and add partitions later if needed — the reverse operation doesn't exist.
+Size partitions for your maximum expected consumer parallelism with growth headroom, since consumers in a group can never exceed the partition count and partitions can only ever be added, never removed. The Uber case study picked 96 partitions for a largest consumer group of 16 — roughly 4x headroom — and at 4x peak that still leaves each partition carrying only ~208 events/sec, about 83 KB/s at 400 bytes an event, orders of magnitude under the ~10 MB/s per-partition guideline. Over-provisioning has real costs the module calls out: each partition consumes file handles and controller metadata, and rebalances take longer with more partitions to reassign, so tens of thousands of partitions on a topic actively degrades the cluster. Start with roughly `expected_consumers * 2` to `* 4` and add partitions later if needed — the reverse operation doesn't exist.
 
 **Q15: Why do the Uber pipeline's events carry small deltas instead of the full ride object?**
-Embedding full state multiplies network and storage cost by the payload ratio on every single event, while most consumers only need to know what changed. The case study's third pitfall quantifies it: full ride objects (driver profile, route polyline, fare breakdown) made each event ~5 KB, and at 5,000 events/sec that saturated broker networks at 25 MB/s; slimming events to deltas (`ride_id`, `from_state`, `to_state`, timestamp, minimal context) cut them to ~400 bytes — a 12x network reduction. The tradeoff is that a consumer needing full state must fetch it from the source-of-truth service, adding a read dependency; that's acceptable because only a minority of consumers need it and the ride service is already built for reads. Default to thin events with a stable ID for lookup, and only embed full state when consumers genuinely cannot tolerate the extra fetch.
+Embedding full state multiplies network and storage cost by the payload ratio on every single event, while most consumers only need to know what changed. The case study's third pitfall quantifies it: full ride objects (driver profile, route polyline, fare breakdown) made each event ~5 KB, and at 5,000 events/sec that is 25 MB/s of produce traffic, which RF=3 and four consumer groups multiply to roughly 175 MB/s of cluster traffic; slimming events to deltas (`ride_id`, `from_state`, `to_state`, timestamp, minimal context) cut them to ~400 bytes — a 12x network reduction. The tradeoff is that a consumer needing full state must fetch it from the source-of-truth service, adding a read dependency; that's acceptable because only a minority of consumers need it and the ride service is already built for reads. Default to thin events with a stable ID for lookup, and only embed full state when consumers genuinely cannot tolerate the extra fetch.
 
 **Q16: A ride's COMPLETED event was processed before its IN_PROGRESS event — how does that happen with a single partition key, and what fixes it?**
 Producer retries without idempotence can reorder messages within a partition, because a failed batch is retried while later batches are already in flight. The Uber case study's second pitfall shows the mechanics: a transient broker error made the producer retry IN_PROGRESS, and with multiple in-flight requests the retried message landed behind COMPLETED, breaking the per-ride state machine even though both events shared a partition. The fix is `enable.idempotence=true`, which assigns per-partition sequence numbers so the broker rejects out-of-sequence duplicates and preserves order across retries (while allowing up to 5 in-flight requests per connection). Enable idempotence on any producer whose events form an ordered sequence — per-partition ordering is only guaranteed when retries can't shuffle the queue.
+
+**Q17: A queue is supposed to "absorb spikes" — so what actually happens when consumers stay slower than producers, and how do the brokers differ?**
+
+A: The queue does not remove a capacity deficit, it defers the failure, and each broker fails differently once the deferral runs out. Kafka never rejects a producer for consumer slowness: the log grows until `retention.ms` or `retention.bytes` evicts the oldest segments, at which point a consumer further behind than retention gets an `OffsetOutOfRange` and, under the default `auto.offset.reset`, skips forward — silent data loss rather than an error. RabbitMQ applies real backpressure instead: `x-max-length` / `x-max-length-bytes` with `x-overflow` set to `drop-head` (the default), `reject-publish` or `reject-publish-dlx`, plus broker-wide memory and free-disk alarms that block every publishing connection cluster-wide until the pressure clears (consumers keep running). SQS has no depth limit at all — the queue just grows and you pay for it. The four levers, cheapest first: bound in-flight work per consumer (`max.poll.records`, RabbitMQ channel `prefetch`), autoscale on consumer lag rather than CPU, load-shed or sample low-value events at the producer, and split non-critical high-volume events onto their own topic so shedding is even possible. Alert on the arrival-minus-service gap staying positive and on `lag / service_rate` — "seconds of backlog" — because that is the number directly comparable to your retention window.
 
 ---
 
@@ -1014,17 +1056,23 @@ Consumer with manual commit and DLQ:
 consumer.subscribe(List.of("ride.state.events"));
 while (running) {
   ConsumerRecords<String, RideStateEvent> recs = consumer.poll(Duration.ofMillis(500));
+  boolean commit = true;
   for (ConsumerRecord<String, RideStateEvent> rec : recs) {
     try {
       pricingService.recalculateSurge(rec.value());
     } catch (PoisonPillException e) {
+      // Unprocessable payload: park it and move past it, or it blocks the partition.
       dlqProducer.send(new ProducerRecord<>("pricing.dlq", rec.key(), rec.value()));
     } catch (TransientException e) {
-      // Don't commit; will be re-polled
-      return;
+      // Rewind to THIS record so the next poll redelivers it, and skip the
+      // commit so nothing past it is marked done. Never `return` here: that
+      // would exit the loop and silently stop the consumer.
+      consumer.seek(new TopicPartition(rec.topic(), rec.partition()), rec.offset());
+      commit = false;
+      break;
     }
   }
-  consumer.commitSync();
+  if (commit) consumer.commitSync();
 }
 ```
 
@@ -1046,8 +1094,8 @@ kafka-topics.sh --create \
 |----------|-----------|----------|--------|----------------------|
 | Kafka (chosen) | Very high (10M+/s) | Per-partition | Yes (offset reset) | High (broker ops) |
 | RabbitMQ | Medium (50k/s) | Per-queue FIFO | Limited | Medium |
-| AWS SQS | Medium (3k/s/queue) | FIFO queue only | No | Low (managed) |
-| AWS Kinesis | High | Per-shard | 7-day | Medium (managed) |
+| AWS SQS | Standard: near-unlimited; FIFO: bounded per group | FIFO queue only | No | Low (managed) |
+| AWS Kinesis | High | Per-shard | 24h default, up to 365 days | Medium (managed) |
 
 ### Metrics & Results
 
@@ -1057,7 +1105,7 @@ kafka-topics.sh --create \
 - Consumer lag: < 500 messages per partition at steady state
 - Zero data loss in 18 months of production operation
 - Broker failover (1 broker killed): consumers paused ~3 seconds during leader election
-- Storage: 1.2 TB across 12 brokers (7-day retention, RF=3, LZ4 compression)
+- Storage: ~800 GB across 12 brokers (~66 GB each; 7-day retention, RF=3, LZ4 compression)
 
 **What it means.** "Retention is not a time setting, it is a disk purchase — the bytes you must own are your byte rate multiplied by how long you keep it, and then multiplied again by the replication factor."
 
@@ -1080,8 +1128,9 @@ The `x RF` at the end is the term people forget, and it is the one that triples 
   x RF           =        252 x 3                =   756 GB (all replicas)
   per broker     =        756 / 12               =    63 GB each
 
-  reported: 1.2 TB -- the extra ~450 GB is record headers, Avro schema IDs,
-  and the .index/.timeindex files Kafka keeps alongside every log segment.
+  reported: ~800 GB -- the extra ~45 GB (about 6%) is record headers,
+  Avro schema IDs, and the .index/.timeindex files Kafka keeps beside
+  every log segment. LZ4 pulls the other way, so the two roughly cancel.
 
   what decision 8 was worth (5 KB full state vs 400 B deltas):
     5,000 B/event -> 90,000,000 x 5,000 x 7 x 3  = 9,450 GB = 9.45 TB
@@ -1131,7 +1180,7 @@ That last block is the useful habit: lag is an integral, so dividing observed la
 
 2. **Ordering violation: COMPLETED before IN_PROGRESS** — Broken: a transient broker error caused the producer to retry IN_PROGRESS; without idempotence, it was buffered behind COMPLETED. Consumer saw out-of-order events and skipped state validation. Fix: enabled `enable.idempotence=true` (which forces `max.in.flight.requests.per.connection ≤ 5` with per-partition sequence numbers, preserving order across retries).
 
-3. **5 KB events crushing the network** — Broken: producers embedded the full ride object (driver profile, route polyline, fare breakdown) in every event. At 5,000 events/sec × 5 KB = 25 MB/s per partition; brokers saturated. Fix: events now carry only deltas (~400 bytes); consumers fetch full state from the ride-service REST API when needed. Network use dropped 12x.
+3. **5 KB events crushing the network** — Broken: producers embedded the full ride object (driver profile, route polyline, fare breakdown) in every event. At 5,000 events/sec x 5 KB the topic pushed 25 MB/s of produce traffic, tripled to 75 MB/s of writes by RF=3 and multiplied again by four consumer groups reading it — roughly 175 MB/s of cluster traffic for a payload almost no consumer needed. Fix: events now carry only deltas (~400 bytes); consumers fetch full state from the ride-service REST API when needed. Network use dropped 12x.
 
 4. **`acks=1` and a broker crash** — Broken: in early deployment, producers used `acks=1` (leader-only ack) for "performance." A broker crashed before replicating a batch of 800 payment events; those events were lost permanently. Fix: switched all payment-critical topics to `acks=all` + `min.insync.replicas=2`. p99 latency rose by 8 ms — acceptable for durability.
 
@@ -1147,7 +1196,7 @@ Use Kafka's transactional API. The payment consumer reads an event, writes the c
 Lag grows. Kafka exposes `consumer-lag` metric per partition. Alert when lag exceeds N or when wall-clock lag exceeds T seconds. Mitigations: scale consumer instances up to partition count, increase consumer compute, batch processing, or shed non-critical work. If lag exceeds retention (7 days), oldest messages are lost — the consumer skips ahead to the earliest available offset.
 
 **Q4: Why 96 partitions specifically?**
-Enough headroom for 4x growth in consumer count (currently 16 max in the largest group). Each partition handles ~1.5 MB/s comfortably (well under the ~10 MB/s/partition guideline). More partitions = more file handles, more metadata in ZK/KRaft, longer rebalance times — so don't over-provision (avoid 10,000 partitions unless needed).
+Enough headroom for 4x growth in consumer count (currently 16 max in the largest group). Throughput is not the binding constraint: even at 4x peak each partition carries ~208 events/sec, about 83 KB/s at 400 bytes an event, against a ~10 MB/s per-partition guideline. More partitions = more file handles, more metadata in the KRaft controller quorum, longer rebalance times — so don't over-provision (avoid 10,000 partitions unless needed).
 
 **Q5: How does Kafka guarantee at-least-once delivery?**
 The producer retries on errors (with idempotence to avoid duplicates). The consumer commits the offset only after successful processing. If the consumer crashes between processing and committing, on restart it re-reads from the last committed offset — replaying the unprocessed message. This is at-least-once. Exactly-once requires transactions or idempotent processing on the consumer side.
