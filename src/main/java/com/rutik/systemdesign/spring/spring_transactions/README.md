@@ -827,63 +827,103 @@ logging.level.org.springframework.orm.jpa=DEBUG
 ## 12. Interview Questions with Answers
 
 **Q1: What does @Transactional actually do at runtime?**
+**Short:** A proxy intercepts the method call and delegates transaction begin, commit, and rollback to the transaction manager.
+
 Spring creates a CGLIB (or JDK) proxy around the bean class at ApplicationContext startup. When a method annotated with @Transactional is invoked through the proxy, the TransactionInterceptor AOP advice runs before and after the method. It calls PlatformTransactionManager.getTransaction() to begin or join a transaction, invokes the real method, then calls commit() or rollback() based on whether an exception was thrown and whether it matches the rollbackFor rules. The proxy approach means any call not going through the proxy — such as a direct internal call using this — will not be intercepted.
 
 **Q2: Explain the self-invocation problem and all the ways to fix it.**
+**Short:** Self-invocation bypasses the proxy entirely, so extracting the called method into another bean is the cleanest fix.
+
 Self-invocation occurs when a method in a Spring bean calls another method in the same object using this. The call goes directly to the real object, bypassing the AOP proxy entirely, so any @Transactional annotation on the called method has no effect. Fix options: (A) Extract the called method into a separate Spring bean — cleaner, preferred. (B) Inject the bean into itself using @Autowired @Lazy on the same field, then call via the injected reference (the proxy). (C) Use ApplicationContext.getBean() to retrieve the proxy reference at runtime. (D) Use AspectJ compile-time or load-time weaving instead of Spring AOP proxies — weaving modifies the bytecode directly, so internal calls are intercepted. For most production codebases, option A (extraction) is the right answer.
 
 **Q3: What is the difference between REQUIRES_NEW and NESTED propagation?**
+**Short:** REQUIRES_NEW suspends and starts a fully independent transaction; NESTED creates a savepoint inside the same one.
+
 REQUIRES_NEW suspends the current transaction entirely and starts a completely independent new transaction with its own connection. The inner transaction commits or rolls back independently of the outer. The outer transaction resumes after the inner completes. NESTED creates a savepoint within the current transaction rather than starting a new one. If the nested block rolls back, it rolls back only to the savepoint — the outer transaction remains intact. NESTED uses the same connection and shares the outer transaction, so the inner rollback does not prevent an eventual outer commit. A critical limitation: NESTED requires JDBC savepoint support, which only `DataSourceTransactionManager` enables by default — `JpaTransactionManager` defaults `nestedTransactionAllowed` to false (a savepoint rolls back the connection, not the persistence context) and JTA has no savepoint concept, so both throw `NestedTransactionNotSupportedException`. REQUIRES_NEW works everywhere, including JTA.
 
 **Q4: Why does readOnly=true improve performance and what exactly does it affect?**
+**Short:** readOnly=true skips Hibernate's dirty-checking flush and can route the JDBC connection to a read replica.
+
 readOnly=true affects three layers. First, Hibernate: it sets FlushMode.MANUAL on the session, skipping dirty checking entirely on flush — this avoids the per-entity snapshot comparison that normally runs before every commit. For a transaction loading 500 entities, dirty checking can be a significant CPU cost. Second, the JDBC driver: many drivers propagate Connection.setReadOnly(true) to the DB, which may disable certain lock acquisitions. Third, at the infrastructure level: PostgreSQL and some connection pool proxies (like PgBouncer in replica mode or AWS RDS Proxy) use the read-only hint to route the connection to a read replica. The hint is not a guarantee — a developer calling save() inside a readOnly transaction will likely get an exception from Hibernate, which is the intended behavior.
 
 **Q5: By default, which exceptions trigger a rollback in @Transactional?**
+**Short:** Only unchecked RuntimeExceptions and Errors trigger a default rollback; checked exceptions do not.
+
 By default, Spring rolls back for RuntimeException (and its subclasses) and java.lang.Error. Checked exceptions (those that extend Exception but not RuntimeException) do NOT trigger rollback by default. This default was inherited from EJB semantics and reflects the philosophy that checked exceptions represent expected business conditions, not unexpected failures. In practice, this default is dangerous for business operations. The safer pattern is to declare rollbackFor = Exception.class on any service method that performs multiple DB writes, ensuring that ANY exception — including checked ones from third-party libraries — triggers a rollback.
 
 **Q6: How does Spring determine which PlatformTransactionManager to use when multiple are configured?**
+**Short:** Spring auto-selects a sole transaction manager, or needs @Primary or an explicit named reference when several exist.
+
 If only one PlatformTransactionManager bean exists in the context, Spring uses it automatically. If multiple exist (e.g., DataSourceTransactionManager for one DB and JpaTransactionManager for another), you must either: (A) declare one as @Primary, which Spring picks by default; or (B) reference a specific manager by name in the annotation: @Transactional("secondaryTransactionManager"). TransactionManagementConfigurer interface can also programmatically designate the default. In tests, @Transactional picks up the single transaction manager in the test context unless overridden.
 
 **Q7: What happens if a @Transactional method throws an exception that is listed in noRollbackFor?**
+**Short:** The exception still propagates to the caller, but the transaction commits instead of rolling back.
+
 The exception propagates normally to the caller, but Spring does NOT roll back the transaction — it commits instead. This is the reverse of rollbackFor. Use noRollbackFor for specific RuntimeException subclasses that represent non-fatal conditions: for example, an inventory warning that is a RuntimeException but should not roll back the entire order creation. Example: @Transactional(noRollbackFor = InventoryWarningException.class). This is used rarely; most engineers should default to committing on success and rolling back on any exception.
 
 **Q8: What is the difference between TransactionTemplate and using @Transactional?**
+**Short:** @Transactional declaratively wraps a whole method, while TransactionTemplate gives programmatic, fine-grained boundaries.
+
 @Transactional is declarative — Spring wraps the entire method in a transaction via AOP proxy. It is the right choice for service layer methods where the entire method should be transactional. TransactionTemplate is programmatic — you define a code block and pass it as a lambda/callback. The advantage is fine-grained control: you can have multiple transaction boundaries within a single method, set rollback-only programmatically via TransactionStatus, vary timeouts or propagation per block, and use it in contexts where AOP proxies are unavailable (e.g., abstract base classes with overriding edge cases). TransactionTemplate is also useful in batch processing where you want to commit per chunk within a loop.
 
 **Q9: How does Spring transaction management integrate with JPA's EntityManager?**
+**Short:** JpaTransactionManager binds an EntityManager to the current thread and flushes it during commit.
+
 JpaTransactionManager bridges Spring transactions and JPA. When a @Transactional method is entered, JpaTransactionManager calls EntityManagerFactory.createEntityManager(), binds it to the current thread via ThreadLocal in EntityManagerFactoryUtils, and begins a JDBC transaction on the underlying connection. Repository code that calls EntityManagerHolder.getEntityManager() receives this bound EntityManager. On commit, JpaTransactionManager calls EntityManager.flush() (runs dirty checking, sends SQL), then the JDBC commit, then closes the EntityManager. This means the EntityManager lifecycle is tied to the transaction — entity managed state is valid only within the transaction boundary.
 
 **Q10: What is TransactionSynchronizationManager and when would you use afterCommit?**
+**Short:** afterCommit fires only once the database transaction has durably committed, making it safe for publishing events.
+
 TransactionSynchronizationManager is a Spring infrastructure class that maintains thread-local state about the current transaction — bound resources (EntityManagers, connections), transaction name, read-only status, and registered synchronizations. Synchronizations are callbacks that fire at transaction lifecycle points: beforeCommit, afterCommit, beforeCompletion, afterCompletion. The most useful is afterCommit, which fires only after the DB transaction successfully commits. Use it to publish events, send messages to Kafka/RabbitMQ, or trigger external API calls only after you are certain the DB write is durable. This prevents the dual-write problem where you send an event but the DB later rolls back, leaving downstream consumers with data that does not exist in the source of truth.
 
 **Q11: How do you handle the case where a @Transactional service method calls another @Transactional method in a different service bean?**
+**Short:** Cross-bean calls pass through the proxy, so the called method's propagation setting is correctly honored.
+
 When the second service bean is a separate Spring-managed bean, the call goes through the proxy. The propagation behavior is determined by the @Transactional annotation on the called method. With default REQUIRED, the called method joins the existing transaction — both methods share the same transaction, commit, and rollback. With REQUIRES_NEW, the called method gets its own transaction (current one suspended). With NESTED, a savepoint is created. The key is that cross-bean calls respect propagation correctly because both beans are proxied, unlike same-bean self-invocation. However, both methods sharing a REQUIRED transaction means any unhandled exception in the inner call rolls back the entire transaction including the outer method's work.
 
 **Q12: Describe the Outbox Pattern and how it relates to Spring transactions.**
+**Short:** The Outbox Pattern writes an event row in the same DB transaction, then a separate process publishes it reliably.
+
 The Outbox Pattern solves the dual-write problem: you need to write to the DB and publish a message to a broker atomically. XA transactions can do this but are operationally expensive. The Outbox Pattern writes the "message to be sent" as a row in an outbox table in the SAME DB transaction as the business data. A separate background process (Debezium CDC, a scheduled Spring task) reads unprocessed outbox rows and publishes them to Kafka/RabbitMQ, then marks them as processed. Spring implementation: in the @Transactional service method, save the business entity and save an OutboxEvent row in the same transaction. Use TransactionSynchronizationManager.afterCommit to trigger the publisher immediately after commit (for low latency), or rely on a @Scheduled poller for reliability.
 
 **Q13: What happens to @Transactional when used with @Async?**
+**Short:** @Async runs on a new thread with no bound transaction, so a @Transactional async method starts its own independent one.
+
 @Async causes the method to run in a separate thread pool thread, completely disconnecting from the caller's thread and its transaction context. Spring's transaction infrastructure uses ThreadLocal to bind transaction state to the current thread. When @Async spawns a new thread, the new thread has no transaction bound to it. If the async method also has @Transactional, Spring starts a NEW transaction on the async thread (Propagation.REQUIRED → no existing tx → create new). This new transaction is completely independent of the caller's. The implication: data written in the caller's uncommitted transaction is NOT visible to the async thread until it commits. This creates a race condition if the async method reads data the caller just wrote.
 
 **Q14: How do isolation levels map to database locking behavior in PostgreSQL?**
+**Short:** PostgreSQL uses MVCC snapshots instead of read locks, so isolation levels govern snapshot timing, not blocking.
+
 PostgreSQL uses MVCC (Multi-Version Concurrency Control) rather than read locks. READ_UNCOMMITTED behaves the same as READ_COMMITTED in PostgreSQL — the engine never returns dirty reads. READ_COMMITTED (default) takes a new snapshot at the start of each statement; non-repeatable reads are possible. REPEATABLE_READ takes a snapshot at transaction start; the same query returns identical results within the transaction, and PostgreSQL's implementation is stronger than the SQL standard requires — it prevents phantom reads outright, leaving only serialization anomalies. SERIALIZABLE uses Serializable Snapshot Isolation (SSI) — no locks for reads, but tracks read/write dependencies and aborts transactions with serialization conflicts. PostgreSQL's implementation means SERIALIZABLE has less throughput impact than traditional range-locking databases, but serialization failures (40001 error code) must be handled with retry logic.
 
 **Q15: How do you test transaction boundaries and rollback behavior in Spring Boot tests?**
+**Short:** Testcontainers with a real database plus TestTransaction.flagForRollback verifies rollback and propagation accurately.
+
 Use @DataJpaTest or @SpringBootTest with a real database (Testcontainers). @Transactional on the test class wraps each test in a transaction that rolls back at the end, keeping tests isolated. To test rollback behavior: remove @Transactional from the test, call the service method that should roll back, then assert the DB state using a separate non-transactional read. For testing REQUIRES_NEW (inner tx must persist even if outer rolls back), use TestTransaction.flagForRollback() programmatically. For testing afterCommit callbacks, use a TransactionSynchronizationManager test spy or verify side effects (events fired, emails sent). Testing with embedded H2 misses PostgreSQL-specific isolation behaviors — always run isolation tests against a real Postgres instance via Testcontainers.
 
 **Q16: Explain a scenario where a deadlock can occur in Spring transactions and how to prevent it.**
+**Short:** Deadlocks arise from opposite lock-acquisition ordering across transactions; consistent ordering and timeouts prevent them.
+
 Classic deadlock scenario: Thread A holds a lock on Row 1 and waits for Row 2. Thread B holds a lock on Row 2 and waits for Row 1. Both wait forever. In Spring: if two concurrent REQUIRES_NEW transactions update the same rows in different order, a deadlock is possible. For example, TransferService.transfer(A→B) locks account A then B; simultaneously, TransferService.transfer(B→A) locks account B then A — deadlock. Prevention strategies: (A) consistent lock ordering — always acquire locks in the same order (e.g., by ascending account ID). (B) timeout: spring.jpa.properties.jakarta.persistence.lock.timeout=5000 (ms) — Hibernate throws LockTimeoutException instead of waiting indefinitely. (C) reduce lock scope: use optimistic locking with @Version to avoid DB locks entirely at low contention. (D) narrow the transaction: hold the pessimistic lock for the shortest time possible.
 
 **Q17: What is the difference between JDBC transaction management and JPA transaction management in Spring?**
+**Short:** JpaTransactionManager extends JDBC transaction management by also binding and flushing an EntityManager.
+
 DataSourceTransactionManager manages raw JDBC transactions: it sets connection.setAutoCommit(false), binds the connection to the thread via TransactionSynchronizationManager, and calls connection.commit() or connection.rollback(). It knows nothing about entities or persistence contexts. JpaTransactionManager extends DataSourceTransactionManager and adds JPA lifecycle management: it creates and binds an EntityManager to the thread, integrates Hibernate session flushing into the commit phase, and manages the persistence context lifecycle. If you use Spring Data JPA repositories, JpaTransactionManager is required — repositories need a bound EntityManager. If you mix JDBC templates with JPA in the same transaction, JpaTransactionManager handles both by exposing the underlying connection to JdbcTemplate via DataSourceUtils.
 
 **Q18: How does the Saga pattern differ from XA transactions and when should each be used?**
+**Short:** XA gives strong synchronous ACID consistency; Sagas trade that for eventual consistency with no coordinator single point of failure.
+
 XA (two-phase commit) provides ACID consistency across multiple resources within a single distributed transaction. The transaction coordinator (JtaTransactionManager) ensures all resources commit or all roll back. It is synchronous, strongly consistent, but has high latency (two round trips), requires XA-capable drivers (not all NoSQL/cloud DBs support XA), and the coordinator is a single point of failure. The Saga pattern decomposes a distributed business transaction into a sequence of local transactions, each publishing an event or message to trigger the next step. On failure, compensating transactions undo previous steps (e.g., release inventory reservation if payment fails). Sagas provide eventual consistency, not ACID. They have no coordinator SPoF and work with any data store. Use XA when ACID is non-negotiable and the resource set is small and XA-capable (e.g., DB + JMS in a monolith). Use Saga for microservices, high-scale systems, or when using non-XA data stores (Kafka, DynamoDB, MongoDB). Spring Modulith and Eventuate Tram provide Saga orchestration support on top of Spring. (See [../../java/microservices_patterns/](../../java/microservices_patterns/) for the saga/outbox mechanics.)
 
 **Q19: Why is `@Transactional(readOnly = true)` more than a hint, and what does it actually change?**
+**Short:** readOnly disables the dirty-checking flush entirely, so any mutation inside such a transaction is silently discarded.
+
 It is not just documentation. For Hibernate/JPA it sets the flush mode to `MANUAL`, so the persistence context performs *no dirty-checking and no automatic flush* at commit — eliminating the cost of snapshotting and comparing every loaded entity, which is a real performance win on read-heavy paths and prevents accidental writes. It also propagates to the JDBC connection as `Connection.setReadOnly(true)`, which some drivers/databases use to route to read replicas or optimize (e.g. Postgres can reject writes). The trap: because there is no dirty-check flush, modifications to managed entities inside a `readOnly` transaction are silently *not* persisted — developers occasionally "update" an entity in a read-only method and are baffled that nothing changes. Use it for all pure-read service methods, never for anything that mutates.
 
 **Q20: What happens to a transaction when an exception is caught inside a nested `REQUIRES_NEW` call, and what is the "marked rollback-only" trap?**
+**Short:** Catching an exception inside a shared REQUIRED transaction cannot clear its rollback-only mark, so commit later fails.
+
 If an inner method runs in a *new* physical transaction (`REQUIRES_NEW`), its rollback is independent: it rolls back its own transaction and the outer one can catch the exception and continue/commit normally. But if the inner method participates in the *same* transaction (default `REQUIRED`) and throws a rollback-triggering exception, Spring marks the shared transaction `rollback-only`; even if the outer method catches the exception and tries to proceed, the eventual commit fails with `UnexpectedRollbackException` ("Transaction silently rolled back because it has been marked as rollback-only"). The lesson: catching an exception does not un-mark a transaction for rollback within the same physical transaction — to truly isolate a failing sub-operation so the caller can recover, run it in `REQUIRES_NEW`, or do not let it mark the shared transaction rollback-only.
 
 ---

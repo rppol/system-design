@@ -470,51 +470,83 @@ out-of-band or guard with a content hash so only changed documents are re-embedd
 ## 12. Interview Questions with Answers
 
 **Q1: What problem does Spring AI solve, and how does it relate to the raw vendor SDKs?**
+**Short:** Spring AI provides portable, auto-configured abstractions over LLM providers so AI code uses ordinary Spring idioms.
+
 Spring AI provides portable, auto-configured abstractions over LLM providers so that Spring applications integrate AI with the same idioms as everything else — DI, starters, `@ConfigurationProperties`, fluent clients, and Micrometer observability. Instead of coding against OpenAI's or Anthropic's REST SDK directly (vendor lock-in, hand-rolled retries, manual JSON parsing), you program against `ChatClient`/`ChatModel`/`VectorStore`. Switching providers becomes a matter of changing a starter dependency and properties. The tradeoff is that cutting-edge vendor features may arrive in the raw SDK before Spring AI exposes them.
 
 **Q2: What is `ChatClient` and how does it differ from `ChatModel`?**
+**Short:** `ChatModel` is the low-level model-call interface; `ChatClient` is the fluent, advisor-aware builder API on top of it.
+
 `ChatModel` is the low-level, portable interface representing a chat model call (synchronous `call` and streaming variants) — analogous to `JdbcTemplate`. `ChatClient` is a higher-level fluent API built on top of a `ChatModel`, analogous to `RestClient`: it supports a builder, default system prompts, prompt templates, an **advisor chain** (RAG, memory, logging), tools, and structured output via `.entity(...)`. You typically inject the auto-configured `ChatClient.Builder`, customize defaults per bean, and call `.prompt().user(...).call().content()`. Use `ChatModel` directly only for low-level control.
 
 **Q3: What is an Advisor in Spring AI and what is it analogous to in core Spring?**
+**Short:** An `Advisor` intercepts a `ChatClient` call around-style, the same model as Spring AOP advice or a `HandlerInterceptor`.
+
 An `Advisor` is an interceptor that wraps a `ChatClient` call, able to mutate the request on the way down and the response on the way back up — exactly the around-advice model of Spring AOP or the pre/post pattern of a `HandlerInterceptor`. Advisors compose cross-cutting prompt concerns: `QuestionAnswerAdvisor` injects retrieved RAG context, `MessageChatMemoryAdvisor` injects conversation history, `SafeGuardAdvisor` blocks unsafe content, and custom advisors add logging or token budgeting. They are ordered, so you control whether memory is injected before or after retrieval. This is the key abstraction that keeps RAG/memory/safety out of business code.
 
 **Q4: How does RAG work in Spring AI, end to end?**
+**Short:** Documents are chunked and embedded into a `VectorStore` offline, then similar chunks are retrieved and injected into the prompt at query time.
+
 RAG has two phases. **Ingestion (ETL, offline):** a `DocumentReader` parses source files into `Document`s, a `TextSplitter` chunks them (~hundreds of tokens each), and `VectorStore.add()` embeds and stores the chunks in a vector database (PgVector, Redis, etc.). **Query (online):** the user's question is embedded, `VectorStore.similaritySearch(topK, threshold)` returns the nearest chunks, and a `QuestionAnswerAdvisor` injects those chunks into the prompt as grounding context before calling the model. The point is to ground answers in your private data and reduce hallucination. Setting a `similarityThreshold` and handling the low-confidence case prevents the model from confabulating when nothing relevant is retrieved.
 
 **Q5: What is a `VectorStore` and how do you choose a backend?**
+**Short:** `VectorStore` is Spring AI's SPI for embedding storage and similarity search, swappable between PgVector, Redis, and dedicated vector DBs.
+
 `VectorStore` is Spring AI's SPI for storing embeddings and performing similarity search — the `Repository` analogue for vectors. Implementations include PgVector (reuse your existing Postgres, good default), Redis (low latency), Chroma/Milvus/Weaviate (purpose-built vector DBs), and an in-memory `SimpleVectorStore` for tests. Choose PgVector when you already run Postgres and want one operational surface; choose a dedicated vector DB at very large scale or when you need advanced indexing (HNSW tuning, hybrid search). All are swappable behind the same interface, so you can start with PgVector and migrate later without changing application code.
 
 **Q6: How does structured output work and what are its failure modes?**
+**Short:** `.entity(MyRecord.class)` appends format instructions and parses the reply into a typed object, but malformed model output throws.
+
 `.call().entity(MyRecord.class)` instructs Spring AI to append format instructions to the prompt and parse the model's text response into a typed Java object via `BeanOutputConverter` (which generates a JSON schema from the record and deserializes the reply). This turns free-text output into compile-time-typed data, e.g., a `Triage` record fed straight into a workflow. The failure mode is non-conforming output — if the model returns prose or malformed JSON, parsing throws. Mitigate by lowering temperature, providing a clear schema/example, and wrapping the call in a retry so a one-off malformed response is re-requested.
 
 **Q7: What is tool/function calling and how does Spring AI implement it?**
+**Short:** Tool calling lets the model invoke an `@Tool`-annotated Spring bean method and feed the result back into its own answer.
+
 Tool calling lets the *model* decide to invoke your code. You annotate a Spring bean method with `@Tool(description=...)`; when registered on a `ChatClient` call via `.tools(...)`, Spring AI advertises the method's name, description, and parameter schema to the model. If the model returns a tool-call request, Spring AI invokes your Java method, feeds the result back, and lets the model compose the final answer — possibly across multiple tool calls. This is the foundation of agentic behavior. Critically, the business logic stays in ordinary, individually testable Spring beans; Spring AI only orchestrates the function-calling round trips.
 
 **Q8: How do you make a Spring AI application portable across model providers?**
+**Short:** Program against `ChatClient`/`ChatModel`/`VectorStore` abstractions and swap the provider starter, never a vendor SDK type directly.
+
 Program against the abstractions (`ChatClient`, `ChatModel`, `EmbeddingModel`, `VectorStore`), never a vendor's concrete SDK type, and supply the provider via a `spring-ai-<vendor>-spring-boot-starter` plus properties. Auto-configuration creates the right `ChatModel` bean from the classpath and config. For multi-model routing, define multiple `ChatClient` beans with `@Qualifier`s (e.g., a cheap "fast" model and a capable "smart" model) and select per request. Because everything is bean-wired, you can also mock the `ChatModel` in tests. The anti-pattern is `new OpenAiChatModel(...)` in application code, which re-introduces lock-in and untestability.
 
 **Q9: How do you observe and control the cost of Spring AI calls?**
+**Short:** Spring AI emits Micrometer observations for latency and token usage, and cost is controlled by windowing memory and capping tokens.
+
 Spring AI emits Micrometer `Observation`s for model and vector-store calls, capturing latency and token usage (prompt/completion tokens), which surface through Actuator/Micrometer into Prometheus/Grafana like any other Boot metric. To control cost: cap context with a windowed `ChatMemory` (don't append unbounded history), set `topK`/chunk sizes deliberately in RAG, route easy queries to cheaper models, lower `max-tokens`, and cache deterministic responses. Token usage is the dominant cost driver, so the same observability you use for latency should alert on token spend.
 
 **Q10: How does Spring AI handle streaming, and what is the underlying mechanism?**
+**Short:** `.stream().content()` returns a Reactor `Flux<String>` of tokens as the model produces them, built on the same foundation as WebFlux.
+
 `chatClient.prompt().user(q).stream().content()` returns a `Flux<String>` that emits tokens as the model produces them, ideal for `text/event-stream` SSE endpoints so users see output incrementally. Under the hood this is Reactor (Project Reactor) — the same reactive foundation as Spring WebFlux. The implication is that streaming handlers must remain non-blocking: doing blocking work in the subscriber on a Netty event-loop thread stalls other connections. For non-streaming use cases, `.call()` is the simpler synchronous path.
 
 **Q11: What is the ETL pipeline in Spring AI and why split documents into chunks?**
+**Short:** Documents are extracted, split into a few hundred tokens each, then embedded into a `VectorStore` for precise, budget-fitting retrieval.
+
 The ETL pipeline is `DocumentReader` (extract: PDF/HTML/Markdown/Tika → `Document`s) → `DocumentTransformer`/`TextSplitter` (transform: chunk and enrich metadata) → `VectorStore` (load: embed and store). Documents are split into chunks of a few hundred tokens because (1) embedding models have input limits, (2) retrieval is more precise when each chunk is a focused unit of meaning, and (3) you can fit several relevant chunks into the prompt's context budget rather than one giant document. Chunk size and overlap are tuning knobs: too large dilutes relevance, too small loses context. The `TokenTextSplitter` handles this with configurable size/overlap.
 
 **Q12: How do you test a Spring AI application without calling a real, paid model?**
+**Short:** Mock the `ChatModel`/`ChatClient` bean for unit tests, and use `SimpleVectorStore` or a local Testcontainers/Ollama instance for RAG.
+
 Mock the `ChatModel`/`ChatClient` bean (with Mockito or a test configuration) to return canned responses for unit and slice tests, asserting that your advisors, prompt templates, and structured-output mapping behave correctly. For integration tests of RAG, use a `SimpleVectorStore` or a Testcontainers PgVector/Ollama instance so embeddings and similarity search run locally without external cost. Spring AI's portability is itself a testing asset: point the same code at a local Ollama model in CI. Avoid asserting on exact LLM text (non-deterministic); assert on structure, tool invocation, and that retrieval injected the expected context.
 
 **Q13: What is chat memory and how do you keep it from blowing the context window?**
+**Short:** `ChatMemory` persists conversation turns per id, and a windowed memory retaining only the last N turns prevents unbounded growth.
+
 `ChatMemory` persists conversation turns so the model has context across requests — `MessageChatMemoryAdvisor` injects prior messages into each prompt, keyed by a conversation id (analogous to `HttpSession`). The risk is unbounded growth: appending every turn eventually exceeds the model's context window and inflates token cost linearly. The fix is a windowed memory (`MessageWindowChatMemory`) that retains only the last N turns, optionally with a summarization step that compresses older history into a short summary message. Persist memory in Redis/JDBC for multi-instance services rather than in-memory.
 
 **Q14: How does Spring AI's auto-configuration decide which model bean to create, and how do you override it?**
+**Short:** A `@ConditionalOnClass`/`@ConditionalOnMissingBean` autoconfiguration creates the model bean, so defining your own bean overrides it.
+
 The provider starter contributes an `AutoConfiguration` class registered in `AutoConfiguration.imports`, gated by `@ConditionalOnClass` (the vendor classes are on the classpath) and properties like `spring.ai.openai.api-key`. It creates the `ChatModel`/`EmbeddingModel` and a `ChatClient.Builder` bean, each guarded by `@ConditionalOnMissingBean` so you can override by simply defining your own bean of that type. This is the standard Boot back-off pattern (see [spring_boot_autoconfiguration](../spring_boot_autoconfiguration/README.md)). With multiple provider starters on the classpath you disambiguate via properties and `@Qualifier`s.
 
 **Q15: When would you choose Spring AI over LangChain4j or the raw SDK, and when not?**
+**Short:** Choose Spring AI on a Spring stack for native DI and portability; choose the raw SDK for a one-off script needing a brand-new feature.
+
 Choose Spring AI when you are on the Spring/Boot stack and want native DI, auto-configuration, Actuator observability, and provider portability with minimal new concepts — the LLM feature becomes "just another Spring service." Choose the **raw vendor SDK** for one-off scripts, single-provider apps with no Spring context, or when you need a brand-new vendor feature immediately. Consider **LangChain4j** if you want a more mature, chain-oriented JVM framework with a larger catalog of integrations and don't mind a less Spring-native feel. The deciding factors are: how Spring-centric your stack is, how much you value portability vs. bleeding-edge features, and how much custom orchestration you need beyond advisors and tools.
 
 **Q16: Describe a production concern unique to LLM-backed Spring services and how you'd address it.**
+**Short:** LLM calls are slow, costly, and non-deterministic, so treat them as a flaky remote dependency with timeouts, retries, and a circuit breaker.
+
 LLM calls are slow (hundreds of ms to seconds), non-deterministic, costly per token, and can fail or return unsafe/hallucinated content — unlike a deterministic DB call. Address these with: timeouts and retries (Resilience4j) around model calls; a circuit breaker and a graceful fallback ("I'm unable to answer right now"); a `similarityThreshold` plus "answer only from context" prompting to curb hallucination; token-usage metrics and budget alerts via Micrometer; `SafeGuardAdvisor`/content filtering for safety; and caching deterministic prompts. Treat the model as an unreliable, expensive remote dependency and apply the same resilience patterns you'd use for any flaky third-party API.
 
 ---

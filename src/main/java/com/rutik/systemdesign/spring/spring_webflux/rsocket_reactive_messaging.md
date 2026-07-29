@@ -621,55 +621,91 @@ reactive web server to host the mapping path.
 ## 12. Interview Questions with Answers
 
 **Q: Why does a blocking JDBC call inside a reactive `@MessageMapping` handler cripple an RSocket server?**
+**Short:** Blocking a Reactor event-loop thread stalls every multiplexed stream sharing that connection, not just one request.
+
 The handler runs on a Reactor event-loop thread, and blocking it stalls every multiplexed stream on that connection, not just the one request. RSocket carries many logical streams over one connection dispatched by a small pool of event-loop threads; parking a thread on a JDBC call means no other stream on that loop is serviced until the query returns, so p99 latency spikes 10-100x under load. Fix by using R2DBC, or offload the blocking call with `Mono.fromCallable(...).subscribeOn(Schedulers.boundedElastic())`, and catch violations with BlockHound in tests.
 
 **Q: How is RSocket's backpressure different from HTTP's flow control?**
+**Short:** RSocket backpressure is per-stream application-level demand via REQUEST_N frames, unlike HTTP's connection-level byte window.
+
 RSocket serializes the subscriber's `request(n)` demand into `REQUEST_N` frames sent to the remote producer, so backpressure is application-level and per-logical-stream. HTTP/1.1 has no flow control at all, and HTTP/2 flow control is a transport-level byte window shared per connection/stream that knows nothing about message boundaries or consumer demand. This is why a slow RSocket consumer can throttle a fast remote producer message-by-message, whereas an HTTP consumer must resort to polling, pagination, or an unbounded buffer.
 
 **Q: Why can't you put a normal per-request L4/L7 load balancer in front of RSocket?**
+**Short:** A per-request load balancer cannot route RSocket, since one long-lived connection pins all its streams to a single backend.
+
 RSocket uses one long-lived, multiplexed connection, so all of its logical streams are pinned to whichever backend that connection landed on. A per-request load balancer assumes each request opens a fresh connection it can route independently, which does not hold — every stream after connect goes to the same backend. Use client-side load balancing (`LoadbalanceRSocketClient` over a pool of targets) or an RSocket broker that terminates connections and routes logical streams.
 
 **Q: Does fire-and-forget guarantee the server received the message?**
+**Short:** Fire-and-forget completes once the frame is written, with no acknowledgment that the server ever received it.
+
 No — fire-and-forget completes as soon as the frame is written to the transport, with no response frame and no server-side acknowledgment. On a reconnect or a server-side error the message can be silently lost, so it suits high-volume, loss-tolerant signals like metrics. For anything that must not be lost, use request-response with an ack or a durable broker.
 
 **Q: What happens to in-flight streams when the TCP connection briefly drops?**
+**Short:** Resumption lets in-flight streams survive a transient TCP drop by replaying unacknowledged frames after reconnect.
+
 With resumption enabled, in-flight streams survive a transient drop. Each side tracks the position of frames sent and acknowledged, and after reconnect a `RESUME` frame declares the last received position so the peer replays unacknowledged frames from its buffer. Keepalive frames detect the dead connection within the configured max-lifetime and trigger the reconnect-and-resume. Without resumption, a drop errors all active streams and the client must resubscribe from scratch.
 
 **Q: What are the four RSocket interaction models and their Spring signatures?**
+**Short:** The four RSocket interaction models are request-response, request-stream, fire-and-forget, and request-channel.
+
 Request-Response (`Mono` in, `Mono` out), Request-Stream (`Mono` in, `Flux` out), Fire-and-Forget (`Mono` in, `Mono<Void>` out, no reply), and Request-Channel (`Flux` in, `Flux` out, bidirectional). In Spring you express each as an `@MessageMapping` method whose return and parameter types match that cardinality, and on the client the terminal operator (`retrieveMono`, `retrieveFlux`, `send`) selects the model. There is also metadata push, which sends metadata with no data and no response.
 
 **Q: What is metadata push and when do you use it?**
+**Short:** Metadata push sends a metadata-only frame with no payload and no response, used for control-plane signals.
+
 Metadata push sends a metadata-only frame with no data payload and no response, used for out-of-band signals like cache invalidation, a config change nudge, or a lease update. It bypasses normal routing to a business handler and is handled at the connection level. Use it for lightweight control-plane messages, not for carrying business data.
 
 **Q: How does routing work in Spring RSocket if there are no URLs?**
+**Short:** Spring RSocket routes on a metadata string matched against @MessageMapping patterns, not a URL.
+
 Routing metadata (MIME type `message/x.rsocket.routing.v0`) carries a route string that `RSocketMessageHandler` matches against `@MessageMapping` route patterns. On the client you set it with `requester.route("prices.AAPL")`, and route templates like `prices.{symbol}` bind segments via `@DestinationVariable`, mirroring `@PathVariable` in MVC. A `MetadataExtractor` and `PathPatternRouteMatcher` (configured in `RSocketStrategies`) perform the extraction and matching.
 
 **Q: What does `RSocketRequester` do and how do you create one in Spring Boot?**
+**Short:** RSocketRequester is the fluent client that configures a connector and issues requests in any of the four models.
+
 `RSocketRequester` is the fluent client that opens a connection and issues requests in any of the four models. You inject the auto-configured `RSocketRequester.Builder`, configure the connector (keepalive, resume), set a setup route/data, and terminate with `.tcp(host, port)` or `.websocket(uri)`. Then `requester.route("...").data(...).retrieveMono(T.class)` (or `retrieveFlux`, or `send()`) performs the interaction.
 
 **Q: What is `RSocketStrategies` responsible for?**
+**Short:** RSocketStrategies configures encoders, route matching, and metadata extraction, mirroring HttpMessageConverter in MVC.
+
 `RSocketStrategies` holds the encoders/decoders, route matcher, and metadata extractor for an RSocket connection — the RSocket analog of Spring MVC's `HttpMessageConverter` configuration. It determines how payloads are serialized (CBOR, Protobuf, JSON), how routes are matched (`PathPatternRouteMatcher`), and how composite metadata is parsed. Both server (`RSocketMessageHandler`) and client (`RSocketRequester.Builder`) are configured with it.
 
 **Q: How do keepalive and connection liveness work in RSocket?**
+**Short:** Keepalive frames on a set interval detect a dead connection when no acknowledgment arrives within the max lifetime.
+
 Both peers exchange `KEEPALIVE` frames on a configured interval, and each expects an ack within a configured max-lifetime; if none arrives, the connection is declared dead. In Spring you set this via `connector.keepAlive(interval, maxLifetime)` — for example every 20s with a 90s lifetime. This detects half-open connections that TCP alone would leave hanging and, combined with resumption, drives reconnect.
 
 **Q: Where can JWT authentication happen in RSocket, and how does Spring enforce it?**
+**Short:** RSocket JWT auth happens either once at SETUP for the whole session or per-route via composite metadata on each request.
+
 Authentication can occur at SETUP (a token in the connection metadata authenticating the whole session) or per-route (a token in each request's composite metadata). Spring Security's `@EnableRSocketSecurity` with `RSocketSecurity.authorizePayload(...)` and `.jwt(...)` installs a `PayloadSocketAcceptorInterceptor` that authorizes routes (e.g. `route("admin.*").hasRole("ADMIN")`), and `@PreAuthorize` on `@MessageMapping` methods adds method-level authz. SETUP suits stable session identity; per-route suits fine-grained, per-message authorization.
 
 **Q: What transports does RSocket support and when would you choose each?**
+**Short:** RSocket runs over TCP, WebSocket, and Aeron/UDP, chosen respectively for internal meshes, browsers, and extreme throughput.
+
 RSocket runs over TCP, WebSocket, and UDP via Aeron. TCP is the default and lowest-overhead for service-to-service; WebSocket traverses HTTP infrastructure and reaches browsers; Aeron suits very high-throughput, low-latency, loss-tolerant flows like telemetry. In Spring you select the server transport with `spring.rsocket.server.transport=tcp|websocket`; WebSocket additionally requires `spring-boot-starter-webflux` because it rides inside the reactive web server. Choose TCP for internal meshes, WebSocket for browser/proxy reach, Aeron for extreme throughput.
 
 **Q: When does RSocket win over gRPC, and when does gRPC win?**
+**Short:** RSocket wins with application-level backpressure and server-initiated streaming; gRPC wins for polyglot Protobuf RPC.
+
 RSocket wins when you need application-level backpressure (`REQUEST_N`), symmetric bidirectional streaming where the server can initiate, transport flexibility (UDP/Aeron), or resumable sessions. gRPC wins for polyglot RPC with strict Protobuf contracts and its mature ecosystem, where HTTP/2 flow control suffices and you want broad language and tooling support. gRPC is HTTP/2-only and its "backpressure" is a transport byte window, not per-message demand.
 
 **Q: How does the `spring.rsocket.server.*` config change what server starts?**
+**Short:** spring.rsocket.server.transport=websocket embeds RSocket inside the existing WebFlux server instead of a standalone port.
+
 `transport: tcp` with a `port` starts a standalone RSocket server on that port, independent of any web server. `transport: websocket` with a `mapping-path` embeds RSocket inside the existing WebFlux web server on the HTTP port, so browsers and HTTP-aware proxies can reach it. Choosing websocket without `spring-boot-starter-webflux` on the classpath fails to start because there is no reactive web server to host the mapping path.
 
 **Q: What is leasing in RSocket and how does it differ from per-stream backpressure?**
+**Short:** Leasing caps how many new requests may start at all, while REQUEST_N only paces items within an accepted stream.
+
 Leasing is connection-level admission control: a responder grants the requester a lease of N requests valid for T milliseconds, and the requester must not exceed it. It differs from `REQUEST_N` backpressure, which paces items *within* an already-accepted stream — leasing instead limits *how many requests* may be started at all, letting an overloaded responder shed load before work begins. It is opt-in and configured on the connector.
 
 **Q: How does request-channel handle backpressure in both directions?**
+**Short:** Request-channel is symmetric backpressure, since each direction's Flux carries its own independent REQUEST_N demand.
+
 Request-channel is fully symmetric: the outbound `Flux` (requester → responder) and the inbound `Flux` (responder → requester) each carry independent `REQUEST_N` demand, so each side paces the other. A slow responder throttles the requester's uploads while a slow requester throttles the responder's downloads, all over the one stream. This makes it correct for bidirectional sync or collaborative editing where neither side should overwhelm the other.
 
 **Q: How do you handle errors in an RSocket handler and propagate them to the client?**
+**Short:** An RSocket handler's thrown or onError signal sends an ERROR frame, surfacing as an errored Mono or Flux on the client.
+
 Throwing or emitting `onError` in an `@MessageMapping` handler sends an `ERROR` frame to the requester, surfacing as an errored `Mono`/`Flux` on the client. Use `@MessageExceptionHandler` methods in the controller (or a `@ControllerAdvice`-style bean) to map specific exceptions to a structured error payload, and use Reactor operators (`onErrorResume`, `onErrorMap`, `timeout`) in the pipeline for fallbacks. Always set `.timeout(...)` on client request-response calls, since a live connection will not make a hung responder fail fast on its own.

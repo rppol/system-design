@@ -564,52 +564,69 @@ Use the immutable `java.time.DateTimeFormatter`.
 ## 12. Interview Questions with Answers
 
 **Q: Why does `?lang=fr` with `LocaleChangeInterceptor` sometimes have no effect?**
+**Short:** AcceptHeaderLocaleResolver is read-only, so LocaleChangeInterceptor cannot persist a locale change through it.
 Because the default `AcceptHeaderLocaleResolver` is read-only and its `setLocale` throws `UnsupportedOperationException`, so the interceptor cannot persist the change. `LocaleChangeInterceptor` calls `LocaleResolver.setLocale`, which only mutable resolvers (`SessionLocaleResolver`, `CookieLocaleResolver`) implement. Fix by registering a Cookie or Session resolver as the `LocaleResolver` bean so the switch is stored for subsequent requests.
 
 **Q: What is the `SimpleDateFormat` bug in a Spring app and how do you fix it?**
+**Short:** SimpleDateFormat is mutable and not thread-safe; replace it with the immutable, locale-aware DateTimeFormatter.
 `SimpleDateFormat` is mutable and not thread-safe, so a shared static instance corrupts output or throws under concurrent requests, and a fixed locale ignores the user's locale. Replace it with `java.time.DateTimeFormatter`, which is immutable and thread-safe, bound to the current locale via `.withLocale(LocaleContextHolder.getLocale())`. This both eliminates the race and makes formatting locale-aware.
 
 **Q: How do you localize hardcoded strings in controllers and exceptions?**
+**Short:** Move literal text into keyed messages_xx.properties and resolve it via MessageSource in a ControllerAdvice.
 Move the text into `messages_xx.properties` keyed by a code, and have controllers/exceptions carry the code (plus args) instead of literal prose. Resolve it with `messageSource.getMessage(code, args, LocaleContextHolder.getLocale())` — typically in a `@ControllerAdvice` for exceptions, producing a localized `ProblemDetail`. The exception stores the code as its message and an `args` array, so the handler renders it in the user's language.
 
 **Q: How is the Spring `ApplicationContext` related to `MessageSource`?**
+**Short:** ApplicationContext extends MessageSource, so the container itself can resolve localized messages directly.
 `ApplicationContext` extends the `MessageSource` interface, so the container itself resolves messages — you can call `context.getMessage(...)` directly. Boot registers a `MessageSource` bean (named `messageSource`) that the context delegates to, and any bean can inject `MessageSource` or implement `MessageSourceAware`. This is why localization needs no special infrastructure beyond a properties file and the standard container.
 
 **Q: What is the gotcha with single quotes in message templates?**
+**Short:** A single quote opens a MessageFormat quoted region, so an unescaped apostrophe swallows the substitution argument.
 A single quote opens a quoted region in `java.text.MessageFormat`, so `L'utilisateur {0}` renders as the literal `Lutilisateur {0}` and the argument is never substituted. Spring runs a message through `MessageFormat` only when arguments are supplied. You must double the quote: `L''utilisateur {0}`, which yields `L'utilisateur Marie`. The trap is that no-argument lookups skip `MessageFormat`, so the same string can look correct until an argument is passed.
 
 **Q: What is the difference between `ResourceBundleMessageSource` and `ReloadableResourceBundleMessageSource`?**
+**Short:** ResourceBundleMessageSource caches classpath bundles for the JVM's life; the reloadable variant reloads on an interval.
 `ResourceBundleMessageSource` wraps `java.util.ResourceBundle`, reads only from the classpath, and caches bundles for the JVM's lifetime, so translations change only on restart. `ReloadableResourceBundleMessageSource` reads from any Spring `Resource` (including `file:`), supports explicit encoding, and reloads edited files on a `cacheSeconds` interval. Use the reloadable one when translators or ops must edit copy without a redeploy; otherwise the classpath one is Boot's simpler default.
 
 **Q: What are the LocaleResolver implementations and how do they differ?**
+**Short:** Only SessionLocaleResolver and CookieLocaleResolver are mutable, so only they support LocaleChangeInterceptor.
 Spring ships four: AcceptHeader, Session, Cookie, and Fixed. `AcceptHeaderLocaleResolver` (Boot's default) reads the `Accept-Language` header and is stateless/read-only; `SessionLocaleResolver` stores the locale in the `HttpSession`; `CookieLocaleResolver` stores it in a cookie surviving across sessions; `FixedLocaleResolver` forces one constant locale. Only Session and Cookie resolvers support `setLocale`, so only they work with `LocaleChangeInterceptor` for user-driven language switching. Choose Accept-Header for stateless APIs and Cookie/Session when users must override their browser language.
 
 **Q: How does `LocaleChangeInterceptor` work?**
+**Short:** LocaleChangeInterceptor reads a request parameter and calls LocaleResolver.setLocale on a mutable resolver.
 It is a `HandlerInterceptor` whose `preHandle` reads a request parameter (default `locale`, commonly reconfigured to `lang`) and, if present, calls `LocaleResolver.setLocale(request, response, parsed)`. On `?lang=fr` it sets the locale on a mutable resolver, which then persists it (session attribute or cookie) so later requests keep it. It must be registered via `WebMvcConfigurer.addInterceptors` and paired with a mutable resolver.
 
 **Q: What is `LocaleContextHolder` and why is it used?**
+**Short:** LocaleContextHolder is a ThreadLocal holding the current request's Locale and TimeZone for ambient access.
 `LocaleContextHolder` is a `ThreadLocal` holding the current request's `LocaleContext` — its `Locale` and `TimeZone` — so any code in the request thread can read the ambient locale without it being passed as a parameter. The `DispatcherServlet` populates it per request from the `LocaleResolver` before invoking the controller. This is what lets a formatter deep in the call stack render per-locale without threading a `Locale` argument through every method.
 
 **Q: How does Spring Boot auto-configure the `MessageSource`?**
+**Short:** Boot's MessageSourceAutoConfiguration creates a ResourceBundleMessageSource from spring.messages.* properties.
 Boot's `MessageSourceAutoConfiguration` creates a `ResourceBundleMessageSource` unless you define your own `MessageSource` bean. It is configured from `spring.messages.*` — `basename` (default `messages`), `encoding` (UTF-8), `cache-duration`, and `fallback-to-system-locale`. So placing `messages.properties` and `messages_fr.properties` on the classpath is enough for i18n to work with no Java config. Define an explicit bean only to switch to the reloadable implementation or tune behaviors like use-code-as-default.
 
 **Q: How do you make Bean Validation messages locale-aware?**
+**Short:** Wire a LocalValidatorFactoryBean with setValidationMessageSource so Bean Validation resolves via Spring's MessageSource.
 By default Hibernate Validator interpolates from `ValidationMessages.properties` on the classpath, independent of Spring's locale. To route validation through Spring's `MessageSource` and the resolved locale, define a `LocalValidatorFactoryBean` and call `setValidationMessageSource(messageSource)`, then reference codes in constraints like `@NotBlank(message = "{user.name.required}")`. Now validation errors come from `messages_xx.properties` and honor the request's locale like everything else.
 
 **Q: How do you format numbers, dates, and currency per locale in Spring?**
+**Short:** Bind formatting to locale-aware formatters like DateTimeFormatter and NumberFormat instead of string concatenation.
 Use locale-aware formatters bound to the current locale, never string concatenation. Examples are `DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale)`, `NumberFormat.getCurrencyInstance(locale)`, and Spring's `@DateTimeFormat`/`@NumberFormat` on bound fields. Spring's `FormattingConversionService` reads `LocaleContextHolder`, so binding and rendering pick up the request locale automatically. This yields `1 234,56 €` in `fr_FR` versus `$1,234.56` in `en_US` from the same value.
 
 **Q: How do you handle per-user timezone?**
+**Short:** Store instants in UTC and render them using the timezone from LocaleContextHolder.getTimeZone() at display time.
 Store all instants in UTC and render them in the user's zone read from `LocaleContextHolder.getTimeZone()`, which is populated when the resolver implements `TimeZoneAwareLocaleContext` (Cookie/Session resolvers do). Convert with `instant.atZone(LocaleContextHolder.getTimeZone().toZoneId())` at display time. This keeps storage unambiguous while showing each user their local wall-clock time.
 
 **Q: How does i18n differ in WebFlux versus MVC?**
+**Short:** WebFlux can't use the thread-bound LocaleContextHolder, so it resolves locale via LocaleContextResolver on the exchange.
 WebFlux cannot rely on the thread-bound `LocaleContextHolder` because operators switch threads. Instead it uses a `LocaleContextResolver` (default `AcceptHeaderLocaleContextResolver`) and reads the locale from `ServerWebExchange.getLocaleContext().getLocale()`. You pass that locale explicitly to `MessageSource.getMessage`, or propagate it via the Reactor `Context`. Using `LocaleContextHolder` inside a reactive pipeline risks reading a default or stale locale.
 
 **Q: How does content negotiation for language work?**
+**Short:** AcceptHeaderLocaleResolver parses the quality-weighted Accept-Language header to pick the client's best match.
 The `Accept-Language` header is the standard signal: `AcceptHeaderLocaleResolver` parses its quality-weighted list and resolves the best match, so a client sending `Accept-Language: fr-FR, en;q=0.8` gets French. It is stateless and requires no per-user storage, which is why it is the default for APIs. For user overrides beyond the browser preference, layer a Cookie/Session resolver plus `LocaleChangeInterceptor`.
 
 **Q: What happens on a missing message code and how do you control it?**
+**Short:** By default MessageSource throws NoSuchMessageException on a missing code, unless useCodeAsDefaultMessage is set.
 By default the `MessageSource` throws `NoSuchMessageException` when no bundle in the fallback chain has the code. Setting `setUseCodeAsDefaultMessage(true)` returns the raw code instead of throwing, and `getMessage(code, args, defaultMessage, locale)` lets you supply an inline default. The robust approach is a complete default `messages.properties` so the hierarchical `messages_fr_FR -> messages_fr -> messages` fallback always resolves.
 
 **Q: What is the fallback order when resolving a message for locale `fr_FR`?**
+**Short:** MessageSource tries the most specific bundle first, widening from messages_fr_FR to messages_fr to messages.
 The `MessageSource` tries the most specific bundle first and widens: `messages_fr_FR.properties`, then `messages_fr.properties`, then the default `messages.properties`. Within each, the code is looked up; the first hit wins. This is why a complete default bundle guarantees resolution even when a specific translation is missing a key, and why you only need to translate the deltas per locale.

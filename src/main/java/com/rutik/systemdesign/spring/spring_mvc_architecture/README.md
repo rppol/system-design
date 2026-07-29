@@ -446,48 +446,63 @@ server.tomcat.max-swallow-size=-1
 ## 12. Interview Questions with Answers
 
 **Q: What is the role of DispatcherServlet in Spring MVC?**
+**Short:** It is the Front Controller that orchestrates every HTTP request through the Spring MVC pipeline.
 `DispatcherServlet` is the Front Controller — a single servlet that handles all HTTP requests. It orchestrates the request pipeline by delegating to `HandlerMapping` (find the right controller method), `HandlerAdapter` (invoke it with resolved arguments), `ViewResolver` or `HttpMessageConverter` (render the response), and `HandlerExceptionResolver` (handle exceptions). Every Spring MVC request flows through this pipeline. In Spring Boot, `DispatcherServlet` is auto-configured and mapped to `"/"`.
 
 **Q: What is the difference between HandlerMapping and HandlerAdapter?**
+**Short:** HandlerMapping resolves a request to a handler; HandlerAdapter knows how to actually invoke that handler.
 `HandlerMapping` resolves the request URL (and method, headers, params) to a handler — in most cases a `HandlerMethod` representing a `@RequestMapping`-annotated controller method. `HandlerAdapter` knows how to invoke a particular type of handler — `RequestMappingHandlerAdapter` handles `HandlerMethod` objects, resolving method parameters (`@RequestBody`, `@PathVariable`, etc.) and converting the return value. The separation allows non-standard handlers (WebSocket handlers, HTTP function handlers) to integrate via custom adapter implementations.
 
 **Q: What are HTTP message converters and when are they used?**
+**Short:** They convert request bodies into Java objects and Java objects into response bodies based on content type.
 `HttpMessageConverter<T>` handles reading a request body into a Java object (`@RequestBody`) and writing a Java object to the response body (`@ResponseBody`). Selection is based on: the Java type being converted, and the `Content-Type` (for reading) or `Accept` header (for writing). `JacksonJsonHttpMessageConverter` handles `application/json`. `StringHttpMessageConverter` handles `text/plain`. If no converter can handle the type/media-type combination, Spring returns `406 Not Acceptable` (write) or `415 Unsupported Media Type` (read).
 
 **Q: What is the WebApplicationContext hierarchy in Spring MVC?**
+**Short:** A root ApplicationContext holds services while a child WebApplicationContext holds MVC-specific beans.
 Classic Spring MVC creates two contexts: a root `ApplicationContext` (started by `ContextLoaderListener`) containing service and repository beans, and a child `WebApplicationContext` per `DispatcherServlet` containing MVC beans (controllers, view resolvers, handler mappings). Child can see parent beans; parent cannot see child beans. Controllers can inject services from the root context. Spring Boot collapses this into a single merged context for simplicity, though the logical separation of concerns is still recommended.
 
 **Q: How does Spring MVC handle async requests?**
+**Short:** DeferredResult, Callable, and SseEmitter all release the servlet thread while a response is prepared.
 Spring MVC supports three async patterns: `DeferredResult<T>` (completed by any thread, releasing the servlet thread immediately), `Callable<T>` (Spring executes in a `TaskExecutor` thread pool, releasing the servlet thread), and `SseEmitter`/`StreamingResponseBody` (streaming). For `DeferredResult`, the Tomcat NIO connector holds the connection without occupying a thread. This allows 200-thread Tomcat to handle thousands of concurrent long-polling connections. Each pattern works with the underlying servlet container's async support (Servlet 3.0+).
 
 **Q: What is content negotiation in Spring MVC?**
+**Short:** It picks the response format from the Accept header, an optional parameter, or a configured default.
 Content negotiation determines the response format based on: (1) `Accept` header in the request (`Accept: application/json`), (2) request parameter (`?format=json`, if configured), or (3) configured default content type. `ContentNegotiatingViewResolver` selects the best view resolver for the negotiated type. For `@ResponseBody`, the appropriate `HttpMessageConverter` is selected. There is no URL-suffix strategy — only the `Accept` header and the opt-in request parameter participate.
 
 **Q: How do you add a custom HandlerMethodArgumentResolver?**
+**Short:** Implement supportsParameter and resolveArgument, then register it via WebMvcConfigurer to bind custom arguments.
 Implement `HandlerMethodArgumentResolver` with `supportsParameter(MethodParameter p)` (return true for your custom type) and `resolveArgument(...)` (extract and return the argument from the request). Register via `WebMvcConfigurer.addArgumentResolvers()`. Example: a `@CurrentUser` annotation on a controller parameter that extracts the authenticated user from `SecurityContextHolder`. `resolveArgument` calls `SecurityContextHolder.getContext().getAuthentication().getPrincipal()` and casts it to your `User` type.
 
 **Q: What is the difference between DispatcherServlet and a Filter?**
+**Short:** A Filter runs in the servlet container before DispatcherServlet ever sees the request.
 `Filter` (javax/jakarta Servlet API) runs before the `DispatcherServlet` in the servlet container's filter chain — it sees the raw `HttpServletRequest`/`HttpServletResponse` before Spring MVC touches them. `DispatcherServlet` is a servlet, subject to filter wrapping. Spring's `HandlerInterceptor` runs inside the `DispatcherServlet` pipeline after handler mapping but before/after handler execution. Implication: Spring Security (`FilterChainProxy`) is a filter and runs before `DispatcherServlet` — it can block requests before they reach any controller.
 
 **Q: What happens when no HandlerMapping matches a request?**
+**Short:** DispatcherServlet raises NoHandlerFoundException, rendered as a 404 through the exception resolver chain.
 `DispatcherServlet` always raises `NoHandlerFoundException`, which flows through the `HandlerExceptionResolver` chain and is rendered as a 404 — there is no switch to configure. Before that point, the resource-handling mapping gets a chance: a request under a static-resource path that matches no file raises `NoResourceFoundException` instead. Both are handled by `ResponseEntityExceptionHandler`, so a `@ControllerAdvice` extending it returns a proper `ProblemDetail` 404 for either; override `handleNoHandlerFoundException` / `handleNoResourceFoundException` to customise the body.
 
 **Q: What is @EnableWebMvc and why should you NOT use it in Spring Boot?**
+**Short:** It disables all of Boot's MVC auto-configuration, including Jackson, Actuator, and static resources.
 `@EnableWebMvc` imports `DelegatingWebMvcConfiguration` which extends `WebMvcConfigurationSupport`. Spring Boot's `WebMvcAutoConfiguration` has `@ConditionalOnMissingBean(WebMvcConfigurationSupport.class)` — it backs off when `WebMvcConfigurationSupport` is detected. Using `@EnableWebMvc` in Spring Boot therefore disables ALL of Boot's MVC auto-configuration: Jackson customization, Actuator MVC endpoints, static resource serving, welcome page, content negotiation defaults. Instead, implement `WebMvcConfigurer` (without `@EnableWebMvc`) to extend Spring Boot's auto-configuration.
 
 **Q: How does multipart file upload work in Spring MVC?**
+**Short:** A MultipartResolver parses multipart/form-data requests into parts bound as MultipartFile parameters.
 Multipart support is handled by `MultipartResolver`. Spring Boot auto-configures `StandardServletMultipartResolver` (delegates to the servlet container, supports Servlet 3.0 API). When a request has `Content-Type: multipart/form-data`, the resolver parses the request into parts. `RequestMappingHandlerAdapter` resolves `@RequestParam MultipartFile file` parameters using `RequestPartMethodArgumentResolver`. Size limits are configured via `spring.servlet.multipart.max-file-size` and `spring.servlet.multipart.max-request-size`. Exceeding limits throws `MaxUploadSizeExceededException`, catchable in `@ControllerAdvice`.
 
 **Q: How does Spring MVC integrate with Tomcat's thread pool?**
+**Short:** Each request occupies one Tomcat thread for its full duration, capping concurrency at the pool size.
 Spring Boot auto-configures an embedded Tomcat with a thread pool (default max 200 threads via `server.tomcat.threads.max`). Each HTTP request acquires a thread for its entire duration. Blocking database calls, external API calls, and file I/O occupy the thread while waiting. When all 200 threads are busy, new requests queue (Tomcat's `acceptCount`, default 100) or are rejected (connection refused). This is the fundamental scalability limit of the thread-per-request model. WebFlux on Reactor Netty uses `max(CPU cores, 4)` event-loop threads and handles thousands of concurrent I/O-bound requests.
 
 **Q: What is the difference between @Controller and @RestController?**
+**Short:** @RestController is @Controller plus @ResponseBody, serializing every return value straight to the body.
 `@RestController` is `@Controller` + `@ResponseBody` — every handler method's return value is serialized directly to the response body via `HttpMessageConverter`. `@Controller` is for MVC controllers that return view names (String) or `ModelAndView` objects resolved by `ViewResolver`. In REST API development, always use `@RestController`. Use `@Controller` only when rendering server-side templates (Thymeleaf, FreeMarker, JSP).
 
 **Q: What is content negotiation in Spring MVC and how does `produces` on `@RequestMapping` control it?**
+**Short:** The produces attribute narrows a handler to only match requests whose Accept header requests that media type.
 Content negotiation is the process by which Spring MVC selects the response media type (e.g., `application/json`, `application/xml`) based on the client's `Accept` header and the handler's declared capabilities. `produces = "application/json"` on `@GetMapping` narrows the handler to only handle requests that accept JSON — if the client sends `Accept: application/xml`, this mapping is skipped and Spring looks for another handler. If no handler matches, Spring returns `406 Not Acceptable`. Content negotiation order: `Accept` header → query parameter (`?format=json`, disabled by default). In REST APIs, always declare `produces = MediaType.APPLICATION_JSON_VALUE` on all handlers for clear documentation and to prevent accidental content type negotiation fall-through.
 
 **Q: How does Spring MVC's `HandlerExceptionResolver` hierarchy work, and in what order are resolvers consulted?**
+**Short:** ExceptionHandlerExceptionResolver runs first, then ResponseStatusExceptionResolver, then the default resolver.
 `DispatcherServlet` catches handler exceptions and passes them through a chain of `HandlerExceptionResolver` beans in order: (1) `ExceptionHandlerExceptionResolver` — processes `@ExceptionHandler` methods in `@Controller` and `@ControllerAdvice` (highest priority, handles most cases). (2) `ResponseStatusExceptionResolver` — handles `@ResponseStatus` on exception classes and `ResponseStatusException` thrown programmatically. (3) `DefaultHandlerExceptionResolver` — handles standard Spring MVC exceptions (e.g., `MethodArgumentNotValidException` → 400, `HttpRequestMethodNotSupportedException` → 405, `HttpMediaTypeNotSupportedException` → 415). (4) Fallback: unhandled exceptions propagate to the Servlet container, which renders a generic 500 error page. `ResponseEntityExceptionHandler` is the convenient base class for a `@ControllerAdvice`: it handles every standard Spring MVC exception and returns RFC 9457 `ProblemDetail` bodies.
 
 ---

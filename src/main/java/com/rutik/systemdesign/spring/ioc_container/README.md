@@ -375,48 +375,78 @@ public class CacheWarmup {
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between BeanFactory and ApplicationContext?**
+**Short:** ApplicationContext extends BeanFactory with eager singleton init, event publishing, and lifecycle callbacks.
+
 `BeanFactory` is the basic IoC container with lazy initialization; `ApplicationContext` extends it with eager singleton initialization, event publishing, i18n support, and `@PostConstruct`/`@PreDestroy` lifecycle. `ApplicationContext` is used in all production applications; `BeanFactory` is only used for testing or resource-constrained environments. In practice, always use `ApplicationContext` unless you have a specific reason not to.
 
 **Q: What happens during ApplicationContext.refresh()?**
+**Short:** refresh() loads bean definitions, runs post-processors, instantiates all singletons, then publishes ContextRefreshedEvent.
+
 `refresh()` is the container's startup sequence: it reads BeanDefinitions from configuration metadata, runs `BeanFactoryPostProcessors` (resolving property placeholders), registers `BeanPostProcessors` (for `@Autowired`, `@PostConstruct`), instantiates all non-lazy singletons in dependency order, and publishes `ContextRefreshedEvent`. Any misconfiguration (missing required bean, circular constructor dependency) causes an exception here. This is the "fail-fast" behavior that makes Spring apps reliable.
 
 **Q: What is a BeanDefinition and what does it contain?**
+**Short:** A BeanDefinition holds a bean's class, scope, init/destroy methods, constructor args, and property values.
+
 A `BeanDefinition` is the metadata object Spring stores for each bean: the class name, scope (singleton/prototype), init/destroy method names, constructor arguments, property values, lazy flag, and explicit `@DependsOn` dependencies. It is created from your configuration metadata (annotations, XML, Java config) before any bean is instantiated. `BeanFactoryPostProcessors` can modify these definitions before instantiation.
 
 **Q: What is the difference between @Import and @ComponentScan?**
+**Short:** @ComponentScan discovers annotated classes via classpath scanning, while @Import explicitly registers specific configuration classes.
+
 `@ComponentScan` discovers `@Component`-annotated classes by classpath scanning within specified packages. `@Import` explicitly registers specific `@Configuration` classes, `ImportSelector` results, or `ImportBeanDefinitionRegistrar` programmatic registrations. `@Import` is more precise and does not require classpath scanning; it is how Spring Boot auto-configuration works internally. Use `@Import` for library/framework integration; use `@ComponentScan` for your own application code.
 
 **Q: What is the ApplicationContext parent/child hierarchy? Where is it used?**
+**Short:** A child context can see beans from its parent, but the parent cannot see beans defined in the child.
+
 A child `ApplicationContext` can see all beans from its parent but the parent cannot see child beans. Classic Spring MVC uses this: the root context (parent) holds services and repositories, while the servlet context (child) holds MVC infrastructure (controllers, view resolvers). Spring Boot collapses this into a single context for simplicity. This hierarchy is still useful for multi-tenant systems or plugin architectures.
 
 **Q: Why should you register a shutdown hook with ApplicationContext?**
+**Short:** A shutdown hook ensures @PreDestroy and DisposableBean callbacks run on JVM exit instead of leaking resources.
+
 Without a shutdown hook, JVM exit does not trigger `@PreDestroy` methods, `DisposableBean.destroy()`, or `destroyMethod` on beans. This leaks resources: database connections remain open, Kafka consumers do not commit final offsets, scheduled tasks continue in background threads. `ctx.registerShutdownHook()` registers a JVM shutdown hook that calls `ctx.close()`, triggering orderly bean destruction. Spring Boot registers this automatically via `SpringApplication`.
 
 **Q: What is the BeanFactoryPostProcessor and when does it run?**
+**Short:** It runs after bean definitions load but before any bean is instantiated, and can modify that metadata.
+
 `BeanFactoryPostProcessor` runs after all `BeanDefinition`s are loaded but before any bean is instantiated. It receives the `ConfigurableListableBeanFactory` and can modify or add `BeanDefinition`s. The most important built-in example is `PropertySourcesPlaceholderConfigurer`, which resolves `${property.key}` placeholders in bean definitions. Do not instantiate application beans inside a `BeanFactoryPostProcessor`; it runs too early in the lifecycle.
 
 **Q: What is the difference between BeanFactoryPostProcessor and BeanPostProcessor?**
+**Short:** BeanFactoryPostProcessor modifies bean definition metadata, while BeanPostProcessor modifies fully constructed bean instances.
+
 `BeanFactoryPostProcessor` operates on `BeanDefinition`s (metadata) before any bean is created. `BeanPostProcessor` operates on fully constructed bean instances, with hooks before and after initialization (`postProcessBeforeInitialization` / `postProcessAfterInitialization`). `BeanPostProcessor` is how `@Autowired`, `@Value`, `@PostConstruct`, and AOP proxying are implemented. `BeanFactoryPostProcessor` modifies the recipe; `BeanPostProcessor` modifies the cooked dish.
 
 **Q: How does Spring detect circular dependencies at startup?**
+**Short:** Spring tracks beans currently being created and throws BeanCurrentlyInCreationException when a constructor cycle is found.
+
 Spring tracks beans currently being created in a `Set<String> singletonsCurrentlyInCreation`. When creating bean A requires bean B, which requires bean A (constructor injection), Spring detects that A is already in the "currently creating" set and throws `BeanCurrentlyInCreationException`. For setter/field injection, Spring can resolve circular deps by exposing the partially initialized bean via `earlySingletonObjects`. Spring Boot 2.6+ disables circular dependency resolution by default.
 
 **Q: What is @DependsOn and when would you use it?**
+**Short:** @DependsOn forces one bean to initialize before another even without a direct injection dependency between them.
+
 `@DependsOn("beanName")` tells the container to initialize the specified bean before the current one, even when there is no direct injection dependency. This is needed when a bean relies on a side effect of another bean's initialization — for example, a bean that registers a JNDI resource or sets a system property that the current bean reads during its own initialization. Without `@DependsOn`, the order is non-deterministic. Use sparingly; a direct injection dependency is usually better design.
 
 **Q: What are SmartLifecycle and Lifecycle interfaces used for?**
+**Short:** Lifecycle gives beans start/stop callbacks, and SmartLifecycle adds phase ordering to control startup and shutdown sequence.
+
 `Lifecycle` beans have `start()` and `stop()` methods called when the `ApplicationContext` starts and stops. `SmartLifecycle` extends this with a `getPhase()` method (lower phase = starts first, stops last) and `isAutoStartup()`. Spring Boot uses `SmartLifecycle` for the embedded server (Tomcat starts after all beans are initialized, stops before they are destroyed). Use `SmartLifecycle` when you have a resource (server, connection, scheduler) that should start after all beans are ready.
 
 **Q: What is the FactoryBean<T> and how does it differ from a @Bean method?**
+**Short:** Requesting a FactoryBean's name returns the product it builds, while prefixing with & returns the factory itself.
+
 `FactoryBean<T>` is a special bean that produces other beans of type `T`. Requesting `beanName` from the container returns the product (`T`), not the factory. Requesting `&beanName` returns the `FactoryBean` itself. This pattern pre-dates Java config and is used in legacy Spring integrations (e.g., `LocalSessionFactoryBean` for Hibernate). A `@Bean` method is the modern equivalent and is simpler for most cases. Know `FactoryBean` for legacy codebase interviews.
 
 **Q: How does @Lazy affect ApplicationContext startup?**
+**Short:** @Lazy delays a bean's instantiation until first requested, trading faster startup for later-surfacing init errors.
+
 `@Lazy` on a `@Component` or `@Bean` delays that bean's instantiation until first requested (via injection or `getBean()`). `spring.main.lazy-initialization=true` makes all beans lazy globally. This reduces startup time (useful for fast-test iteration) but moves initialization errors from startup to first-request time, which is undesirable in production where Kubernetes readiness probes check startup health. Spring Boot 2.4+ introduced a startup actuator endpoint to profile which beans are slow to initialize.
 
 **Q: What events does ApplicationContext publish and how do you listen to them?**
+**Short:** The container publishes lifecycle events like ContextRefreshedEvent, consumed via @EventListener methods on any bean.
+
 The container publishes: `ContextRefreshedEvent` (refresh complete), `ContextStartedEvent`, `ContextStoppedEvent`, `ContextClosedEvent`, and request-scoped events in web apps. Listen with `@EventListener` on any bean method: `@EventListener public void onRefresh(ContextRefreshedEvent e) {...}`. For async events, add `@Async`. For ordering, add `@Order`. Custom events extend `ApplicationEvent` and are published via `applicationContext.publishEvent(new MyEvent(this))`. Events are synchronous by default; all listeners execute in the publisher's thread.
 
 **Q: What is the difference between ClassPathXmlApplicationContext and AnnotationConfigApplicationContext?**
+**Short:** Both implement ApplicationContext identically after startup, differing only in whether definitions come from XML or annotations.
+
 `ClassPathXmlApplicationContext` reads XML files from the classpath and builds `BeanDefinition`s from XML element tags (`<bean>`, `<property>`). `AnnotationConfigApplicationContext` reads `@Configuration` classes and `@Component`-annotated classes (via scanning) and builds `BeanDefinition`s from annotations. Both implement `ApplicationContext` and behave identically after startup. XML config is legacy and rarely used in new code; annotated Java config is the modern standard.
 
 ---

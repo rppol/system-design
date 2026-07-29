@@ -468,6 +468,8 @@ requirement; REST wins when *simplicity and cacheability* dominate.
 ## 12. Interview Questions with Answers
 
 **Q: What problem does GraphQL solve compared to REST?**
+**Short:** GraphQL lets clients request exactly the fields they need from one endpoint, avoiding REST's over- and under-fetching.
+
 It eliminates over-fetching and under-fetching: the client specifies exactly which
 fields it wants against a typed schema and receives precisely that shape from a single
 endpoint, instead of REST's fixed payloads (which return unneeded fields) and multiple
@@ -477,6 +479,8 @@ complexity — resolving an arbitrary client-shaped graph efficiently, controlli
 cost, and batching nested loads.
 
 **Q: What is the N+1 problem in GraphQL and why is it the default rather than an accident?**
+**Short:** Resolving fields parent-by-parent means a naive per-book resolver issues one query per book, producing 1+N calls.
+
 GraphQL resolves a query field-by-field, parent-by-parent: a query like `books { author
 { name } }` resolves the list of books (1 query), then resolves `author` *once per
 book* (N queries) — 1+N. It is the default because the engine inherently calls each
@@ -485,6 +489,8 @@ that does one lookup per call produces N+1 automatically. Avoiding it requires
 deliberately batching, which is why it is the defining GraphQL performance concern.
 
 **Q: How does DataLoader fix N+1?**
+**Short:** DataLoader batches deferred per-key loads into one query and caches results for the duration of a single request.
+
 A `DataLoader` defers individual `load(key)` calls made during the resolution pass,
 collects all the keys, and then dispatches a single batch load (e.g. `WHERE id IN
 (...)`) instead of one query per key — turning 1+N into 1+1. It also caches results
@@ -494,6 +500,8 @@ use `@BatchMapping` where the framework creates the loader and your method recei
 full list of parents at once.
 
 **Q: What is the difference between `@SchemaMapping` and `@BatchMapping`?**
+**Short:** @SchemaMapping resolves one field per parent, causing N+1, while @BatchMapping resolves all parents in one batched call.
+
 `@SchemaMapping` resolves a single field for a single parent — it is called once per
 parent object, so using it for an association naively causes N+1. `@BatchMapping`
 resolves the field for *all* parents at once: Spring auto-creates a DataLoader, calls
@@ -503,6 +511,8 @@ is the low-boilerplate way to batch; explicit `DataLoader` + `@SchemaMapping` gi
 finer control over keys and caching.
 
 **Q: Why does GraphQL usually return HTTP 200 even on errors, and how do you handle errors properly?**
+**Short:** A response can partially succeed, so errors are returned in a top-level errors array alongside whatever data resolved.
+
 Because a GraphQL response can be *partially* successful — some fields resolve while
 others fail — so a single HTTP status cannot express the result; instead errors are
 returned in a top-level `errors` array alongside whatever `data` resolved. You handle
@@ -512,6 +522,8 @@ with meaningful error types and extensions; unhandled exceptions become an opaqu
 `INTERNAL_ERROR`, so explicit mapping is required for usable error semantics.
 
 **Q: How do GraphQL subscriptions work and what transport do they use?**
+**Short:** Subscriptions push events over a persistent transport like WebSocket, since request/response HTTP cannot stream.
+
 A subscription is a long-lived operation where the server *pushes* events to the client
 as they occur (e.g. `bookAdded`). It cannot use plain request/response HTTP, so it runs
 over a persistent transport — WebSocket (the `graphql-ws` protocol) or Server-Sent
@@ -520,6 +532,8 @@ the framework streams each emitted element to the subscribed client over the cho
 transport. Queries and mutations, by contrast, stay on ordinary HTTP POST.
 
 **Q: Why is caching harder in GraphQL than REST, and what are the options?**
+**Short:** POST requests to a single endpoint bypass HTTP caching, so persisted queries or normalized client caches are needed instead.
+
 REST caches naturally because GETs have stable, unique URLs that HTTP caches and CDNs
 key on; GraphQL sends queries as POST bodies to one endpoint, so standard HTTP caching
 does not apply, and responses are highly variable by query shape. Options include
@@ -529,6 +543,8 @@ Redis), response caching keyed on the normalized query, and client-side normaliz
 caches (Apollo/Relay). You must choose and build one — it is not free.
 
 **Q: How do you prevent expensive or malicious queries?**
+**Short:** Depth limits, complexity-cost analysis, pagination caps, and persisted-query allow-listing guard against expensive queries.
+
 Because the query language is open, a client can request deeply nested or cyclic
 selections that are exponentially expensive — a denial-of-service vector. You guard it
 with query *depth* limits (`maxQueryDepth`), query *complexity*/cost analysis that
@@ -537,6 +553,8 @@ assigns a cost to fields and rejects queries over a budget, pagination limits (c
 vetted queries run. These controls are mandatory for any public GraphQL API.
 
 **Q: What is cursor-based (Relay Connection) pagination and why prefer it over offset?**
+**Short:** Cursor pagination anchors to a stable position, avoiding the slow scans and row-shift bugs offset pagination has under writes.
+
 Cursor pagination returns a `Connection` with `edges { node cursor }` and `pageInfo
 { hasNextPage endCursor }`; the client pages by passing the last cursor (`after`) rather
 than a numeric offset. It is preferred over offset/limit because deep offsets are slow
@@ -546,6 +564,8 @@ Spring for GraphQL supports it via Spring Data's `Window`/`ScrollPosition` and a
 the result to the Connection shape automatically.
 
 **Q: Schema-first vs code-first — what does Spring for GraphQL use?**
+**Short:** Spring for GraphQL is schema-first, binding handler methods to fields defined in an SDL schema file.
+
 Spring for GraphQL is schema-first: you author the schema in SDL (`.graphqls` files),
 and Spring binds handler methods (`@QueryMapping`, etc.) to schema fields, similar to
 how `@RequestMapping` binds to HTTP routes. Code-first approaches (some other frameworks)
@@ -555,6 +575,8 @@ schema independently of implementation, which is the dominant approach in the Sp
 ecosystem.
 
 **Q: What does the `@Argument` annotation do, and how are inputs handled?**
+**Short:** @Argument binds a GraphQL field argument to a controller-method parameter, including complex input types.
+
 `@Argument` binds a GraphQL field argument to a controller-method parameter, converting
 the incoming value to the parameter type (including binding complex input types to a
 POJO). For structured inputs you define an `input` type in the schema and bind it to a
@@ -563,6 +585,8 @@ via Bean Validation on the bound objects. It is the GraphQL analogue of
 `@RequestParam`/`@RequestBody` binding in MVC.
 
 **Q: Can Spring for GraphQL resolvers be reactive, and how does that interact with DataLoader?**
+**Short:** Resolvers can return Mono or Flux, and DataLoader's future-based batching composes naturally with reactive code.
+
 Yes — handler methods can return `Mono`/`Flux` (and run on WebFlux) or plain blocking
 values (on WebMVC); subscriptions specifically return `Flux`. DataLoader fits naturally
 because it is inherently asynchronous: `loader.load(key)` returns a
@@ -571,6 +595,8 @@ resolvers compose with batched loading without blocking. This lets you do non-bl
 batched resolution end to end, which matters under high concurrency.
 
 **Q: How does GraphQL relate to a backend-for-frontend (BFF) and federation?**
+**Short:** A GraphQL BFF aggregates many backends behind one query, and federation composes per-team subgraphs into one supergraph.
+
 A GraphQL BFF is a single graph that aggregates data from many backend services so a
 client issues one query instead of fanning out to many REST calls — the server does the
 fan-out and assembly. Federation (Apollo Federation, Netflix DGS) extends this across
@@ -580,6 +606,8 @@ services. This is how large organizations scale GraphQL across many teams withou
 monolithic resolver layer.
 
 **Q: What is query introspection and what is its security consideration?**
+**Short:** Introspection exposes the entire schema to any client, so production APIs often disable or gate it behind auth.
+
 Introspection is a built-in GraphQL feature where the schema itself is queryable
 (`__schema`, `__type`), enabling tooling like GraphiQL, auto-generated clients, and
 documentation. The security consideration is that on a sensitive/internal API,
@@ -589,6 +617,8 @@ production for non-public APIs or gate it behind auth, while keeping it on in
 development.
 
 **Q: How do you test a Spring for GraphQL API?**
+**Short:** GraphQlTester asserts on typed response paths, and @GraphQlTest loads only the GraphQL layer with mocked collaborators.
+
 Use `GraphQlTester` (and the `@GraphQlTest` slice for controller-focused tests): you
 send a query/mutation document, then assert on the typed response path-by-path
 (`.path("books[0].title").entity(String.class).isEqualTo(...)`) and on expected errors.
@@ -597,6 +627,8 @@ collaborators mocked, making tests fast, while `GraphQlTester` also works in ful
 integration tests over the real transport. This mirrors `WebMvcTest`/`MockMvc` for REST.
 
 **Q: Why might eagerly join-fetching the whole graph be the wrong fix for N+1?**
+**Short:** Join-fetching every association re-introduces over-fetching, while DataLoader loads only what the client selected.
+
 Because it re-introduces over-fetching: if you always join-fetch every association in
 the root resolver to avoid per-field queries, you load data the client may not have
 requested, wasting DB work and memory, and you couple the query to an anticipated

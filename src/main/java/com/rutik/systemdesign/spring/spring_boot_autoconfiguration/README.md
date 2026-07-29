@@ -377,48 +377,78 @@ public class MyStarterAutoConfiguration {
 ## 12. Interview Questions with Answers
 
 **Q: How does Spring Boot auto-configuration work?**
+**Short:** AutoConfigurationImportSelector loads listed classes and registers their beans only when every @Conditional passes.
+
 `@EnableAutoConfiguration` (included via `@SpringBootApplication`) imports `AutoConfigurationImportSelector`, which aggregates every `AutoConfiguration.imports` file on the classpath. The full path in each jar is `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`. Each listed class is annotated `@AutoConfiguration` — a `@Configuration` with `proxyBeanMethods = false` — carrying `@Conditional` annotations. The container evaluates each condition — if all pass, the beans are registered; if any fail, the entire configuration class is skipped. Users override by defining their own beans (caught by `@ConditionalOnMissingBean`) or excluding via `spring.autoconfigure.exclude`.
 
 **Q: What is the difference between spring.factories and AutoConfiguration.imports?**
+**Short:** AutoConfiguration.imports registers auto-configuration classes exclusively, while spring.factories still registers other SPI extension points.
+
 They register different things, and both files are live today. `AutoConfiguration.imports` is a plain list of fully-qualified class names, one per line, read only by `AutoConfigurationImportSelector` — it is the sole registration path for auto-configuration classes. `spring.factories` is a generic key-value properties file keyed by interface name, and it still registers `FailureAnalyzer`, `EnvironmentPostProcessor`, `ApplicationContextInitializer`, `ApplicationListener`, `PropertySourceLoader`, `ConfigDataLoader` and `SpringApplicationRunListener`. Auto-configurations were moved off the `EnableAutoConfiguration` key onto their own dedicated file so Spring Boot can load them more efficiently, and that key no longer works at all.
 
 **Q: Why does @ConditionalOnMissingBean work correctly even though Spring beans are initialized in dependency order?**
+**Short:** It checks the bean definition registry during the BeanFactoryPostProcessor phase, before any bean is instantiated.
+
 `@ConditionalOnMissingBean` is evaluated during the `BeanFactoryPostProcessor` phase, after all `BeanDefinition`s are loaded but before any beans are instantiated. It checks the `BeanDefinitionRegistry` for existing definitions (not instances). This means: if you define a `@Bean DataSource` in your `@Configuration` class, the `BeanDefinition` for it exists in the registry when `DataSourceAutoConfiguration` evaluates `@ConditionalOnMissingBean(DataSource.class)` — the condition fails and auto-configuration backs off correctly.
 
 **Q: How would you write a custom Spring Boot starter?**
+**Short:** A starter pairs an @AutoConfiguration module registered in AutoConfiguration.imports with a POM that pulls in its dependency.
+
 Four steps: (1) Create an autoconfigure module with `@AutoConfiguration` class containing `@Conditional`-guarded `@Bean` methods and `@ConfigurationProperties` for user-overridable settings. (2) Register the class in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`. (3) Do NOT use `@ComponentScan` — register all beans explicitly. (4) Create a starter POM that depends on your autoconfigure module and any required third-party JARs. Users add the starter dependency and get auto-configured behavior immediately.
 
 **Q: How do you debug which auto-configurations are applied and which are skipped?**
+**Short:** Running with --debug prints a ConditionEvaluationReport showing every positive and negative condition match.
+
 Start the application with `--debug` flag: `java -jar app.jar --debug`. This prints the `ConditionEvaluationReport` to the console showing positive matches (applied), negative matches (skipped with reasons), and exclusions. Alternatively, expose the `/actuator/conditions` endpoint (require `spring-boot-actuator` on classpath and `management.endpoints.web.exposure.include=conditions`). For unit testing auto-configuration, use `ApplicationContextRunner` from `spring-boot-test` to test specific configurations in isolation.
 
 **Q: What is @AutoConfigureAfter and why does order matter?**
+**Short:** @AutoConfigureAfter guarantees a dependency's auto-configuration runs first so its beans exist when conditions evaluate.
+
 `@AutoConfigureAfter(OtherAutoConfig.class)` ensures `OtherAutoConfig` is processed before the current class. This matters when your auto-configuration needs beans from another auto-configuration to be available. For example, `JdbcTemplateAutoConfiguration` is `@AutoConfigureAfter(DataSourceAutoConfiguration.class)` because it needs the `DataSource` bean. Without ordering, `@ConditionalOnBean(DataSource.class)` in `JdbcTemplateAutoConfiguration` might evaluate before `DataSourceAutoConfiguration` runs, failing the condition incorrectly.
 
 **Q: What happens when you exclude an auto-configuration class?**
+**Short:** Excluding a class removes it from the import list entirely, so its beans never register regardless of conditions.
+
 The class name is added to an exclusion set checked by `AutoConfigurationImportSelector`. The class is removed from the import list before any condition evaluation. This is a hard exclusion — even if all conditions would have passed, the class is never imported and its beans are never registered. This is useful when: you want to completely replace auto-configuration with your own, the auto-configuration conflicts with another library, or you want to disable a feature entirely (like Spring Security auto-config in tests).
 
 **Q: What is @ConditionalOnProperty and when is matchIfMissing important?**
+**Short:** matchIfMissing controls whether an absent property counts as a match, and it defaults to false.
+
 `@ConditionalOnProperty` registers a bean only when a named property holds the expected value. With `@ConditionalOnProperty(name="feature.enabled", havingValue="true", matchIfMissing=false)` the bean appears only when the property is literally set to "true"; if the property is absent it is NOT registered, because `matchIfMissing` defaults to false. Setting `matchIfMissing=true` inverts this: the bean is registered when the property is missing (treat "absent" as "true"). Use `matchIfMissing=true` for features that should be on by default and disabled by setting the property to "false".
 
 **Q: How does spring-boot-autoconfigure-processor improve performance?**
+**Short:** A compile-time processor generates metadata that lets Spring Boot skip loading classes whose conditions obviously fail.
+
 The processor runs at compile time and generates `META-INF/spring-autoconfigure-metadata.properties`. This file lists the conditions for each auto-configuration class (class names for `@ConditionalOnClass`, property names for `@ConditionalOnProperty`). Spring Boot reads this metadata at startup and filters out auto-configuration classes whose conditions obviously fail (e.g., required class not on classpath) WITHOUT loading and processing the configuration class. This makes startup faster because fewer classes are loaded and parsed.
 
 **Q: What is the ApplicationContextRunner and how is it used for testing?**
+**Short:** ApplicationContextRunner builds a minimal context to test one auto-configuration in isolation without a full application.
+
 `ApplicationContextRunner` is a test utility from `spring-boot-test` that creates a minimal `ApplicationContext` for testing auto-configuration. It does not start a full Spring Boot application — just evaluates specific configurations in isolation. Example: `new ApplicationContextRunner().withConfiguration(AutoConfigurations.of(MyAutoConfig.class)).withPropertyValues("my.property=value").run(context -> { assertThat(context).hasSingleBean(MyBean.class); })`. This is the recommended way to test auto-configuration without requiring `@SpringBootTest`.
 
 **Q: What is `@ConditionalOnBean` and how does it differ from `@ConditionalOnMissingBean`, and which ordering trap can affect both?**
+**Short:** @ConditionalOnBean is ordering-sensitive and needs @AutoConfigureAfter, unlike @ConditionalOnMissingBean.
+
 `@ConditionalOnBean(DataSource.class)` registers the bean only if a `DataSource` bean already exists. `@ConditionalOnMissingBean(DataSource.class)` registers the bean only if a `DataSource` does NOT exist — this is the "sensible default / override" pattern. The ordering trap: conditions are evaluated in the order auto-configuration classes are processed. If `JdbcTemplateAutoConfiguration` evaluates `@ConditionalOnBean(DataSource.class)` before `DataSourceAutoConfiguration` registers the `DataSource`, the condition incorrectly fails. Fix: declare `@AutoConfigureAfter(DataSourceAutoConfiguration.class)` to guarantee `DataSource` is registered first. Key principle: `@ConditionalOnBean` is inherently ordering-sensitive; `@ConditionalOnMissingBean` is less so (it only needs the bean definition to be absent at evaluation time).
 
 **Q: What is a Spring Boot "failure analyser" and how do you write a custom one?**
+**Short:** A failure analyser intercepts a startup exception and prints a human-readable cause and action instead of a raw stack trace.
+
 A failure analyser is a component that intercepts a startup failure, diagnoses the root cause, and displays a human-readable message with a suggested action — replacing a raw stack trace with a concise explanation. Examples: `PortInUseFailureAnalyzer` extends `AbstractFailureAnalyzer<PortInUseException>` and prints "Web server failed to start. Port 8080 was already in use." plus the action "Identify and stop the process that's listening on port 8080". To write one: implement `AbstractFailureAnalyzer<T extends Throwable>`, override `analyze(Throwable rootFailure, T cause)`, return a `FailureAnalysis` with a description and action, and register it in `META-INF/spring.factories` under `org.springframework.boot.diagnostics.FailureAnalyzer`. That file is the only registration path — analysers run when startup has already failed, so a `@Component` in the application context is never consulted. If your analyser needs context, declare a constructor taking `Environment` and/or `BeanFactory`: `SpringFactoriesLoader` resolves those two argument types when it instantiates the analyser, exactly as `InvalidConfigurationPropertyValueFailureAnalyzer` does.
 
 **Q: What does `@ImportAutoConfiguration` do and when is it used instead of `@EnableAutoConfiguration`?**
+**Short:** @ImportAutoConfiguration imports a named subset of auto-configurations explicitly, used by narrow test slices.
+
 `@ImportAutoConfiguration` imports specific auto-configuration classes explicitly, bypassing the full autoconfiguration discovery mechanism. It is used in test slices (`@WebMvcTest`, `@DataJpaTest`) to import only the subset of auto-configurations relevant to the tested layer — avoiding loading the entire application context for a narrow test. The subset is not hard-coded on the slice annotation: each `@AutoConfigureXxx` meta-annotation names a companion imports file, so `@DataJpaTest` (via `@AutoConfigureDataJpa`) resolves `META-INF/spring/org.springframework.boot.data.jpa.test.autoconfigure.AutoConfigureDataJpa.imports`, whose two entries are `DataJpaRepositoriesAutoConfiguration` and `HibernateJpaAutoConfiguration`. Security, web and messaging auto-configurations are never loaded. Use `@ImportAutoConfiguration` in your own test slices or when you need a specific subset of auto-configurations for an integration test.
 
 **Q: How does a GraalVM native image affect auto-configuration, and what is AOT processing?**
+**Short:** AOT processing resolves auto-configuration conditions at build time, generating the beans and hints native-image needs upfront.
+
 Spring Boot runs an AOT (Ahead-of-Time) processing phase at build time that resolves auto-configuration before the image is ever produced. AOT processes the `ApplicationContext` at build time: evaluates conditions, determines which beans will be created for the active profile, and generates Java source code plus reflection/proxy/resource hints that GraalVM's `native-image` tool needs. This means auto-configuration conditions are resolved at build time, not at runtime — the native image knows exactly which beans it will create. The practical payoff is a startup measured in tens of milliseconds rather than seconds, and a much smaller resident set, paid for with a long build and a lower peak throughput ceiling than the JIT reaches. A profile that was not active during AOT processing cannot be activated at runtime, because its beans were never generated. For your custom starter: if it uses reflection or dynamic proxies, you must provide `RuntimeHintsRegistrar` or `@RegisterReflectionForBinding` annotations to tell the AOT phase to preserve those types.
 
 **Q: What is the difference between `@ConfigurationProperties` and `@Value`, and when should you choose each?**
+**Short:** @ConfigurationProperties binds a whole prefix to a validated typed POJO, while @Value injects a single raw property.
+
 `@Value` injects one property at a time, while `@ConfigurationProperties` binds a whole prefix to a typed POJO. `@Value("${my.property}")` is simple but has downsides: a typo in the property name fails silently (evaluates to the literal `${...}` or throws on startup), no type conversion for complex types, no IDE autocompletion, and no validation. `@ConfigurationProperties(prefix="my")` binds an entire prefix hierarchy to a typed POJO with: relaxed binding (camelCase, kebab-case, snake_case, env var all work), JSR-303 validation with `@Validated`, IDE autocompletion via `spring-configuration-metadata.json`, and structured documentation. Choose `@ConfigurationProperties` for any group of related properties (two or more); reserve `@Value` for single simple values that don't logically belong to a group or for SpEL expressions.
 
 ---

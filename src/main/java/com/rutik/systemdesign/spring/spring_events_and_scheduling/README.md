@@ -523,27 +523,43 @@ A `@Scheduled` method calling another `@Transactional` method on `this` bypasses
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `@EventListener` and `@TransactionalEventListener`?**
+**Short:** `@EventListener` fires inline regardless of transaction outcome, while `@TransactionalEventListener` waits for commit by default.
+
 `@EventListener` fires synchronously inline within the publisher's call stack, participating in the same transaction (if any). `@TransactionalEventListener` binds the listener to a transaction lifecycle phase — defaulting to `AFTER_COMMIT`. If the publisher's transaction rolls back, `@TransactionalEventListener(AFTER_COMMIT)` listeners never fire; `@EventListener` listeners would have already fired and cannot be rolled back. Use `@TransactionalEventListener` for any side effect that must only happen if the primary operation persisted — sending an email after a successful order, pushing an event to Kafka after a DB write.
 
 **Q2: Why does `@TransactionalEventListener` silently not fire in some situations, and how do you fix it?**
+**Short:** It needs an active transaction to bind to, so an event published outside one is silently dropped unless `fallbackExecution = true`.
+
 `@TransactionalEventListener` requires an active transaction to bind to. If the event is published outside a transaction (from a test, a scheduler, or a non-`@Transactional` method), the event is silently discarded. Diagnosis: add `fallbackExecution = true` to the annotation — this makes it fire even without a surrounding transaction. Alternatively, ensure the publishing code is always called within a `@Transactional` method. The silent discard is a frequent source of "event listener not called" bugs in test environments where the service method is called without the transaction proxy active.
 
 **Q3: What happens when an `@Async` listener throws an exception?**
+**Short:** By default it is logged at WARN and silently swallowed, so the publisher never learns the async side effect failed.
+
 By default, async exceptions are logged by Spring's `SimpleAsyncUncaughtExceptionHandler` at `WARN` level and silently swallowed — the publisher's thread never sees them. This can cause data inconsistencies: the primary transaction committed, the async listener failed, and the side effect never happened. Fix: implement `AsyncConfigurer.getAsyncUncaughtExceptionHandler()` to return a handler that alerts on failure, retries, or writes to a DLQ. For critical side effects, consider using `@TransactionalEventListener` with a persistent message broker (Kafka, RabbitMQ) instead of `@Async`.
 
 **Q4: How does ShedLock prevent multiple instances from running a scheduled task, and what are `lockAtLeastFor` and `lockAtMostFor`?**
+**Short:** ShedLock uses an atomic lock-row write so only one instance runs a task; `lockAtMostFor` frees the lock if that instance crashes.
+
 ShedLock uses an `INSERT ... WHERE lock_until < NOW()` statement (or equivalent) in the backing store (JDBC table, Redis key, MongoDB document). Only one JVM instance succeeds in inserting/updating the lock row; all others get a constraint violation and skip the task for that scheduled run. `lockAtLeastFor` is the minimum duration the lock is held — even if the task finishes quickly, other instances cannot start until this duration expires (prevents near-simultaneous re-runs from two pods). `lockAtMostFor` is the safety valve: if the lock-holder JVM crashes without releasing the lock, the lock is released after this duration so other instances can take over. Always set `lockAtMostFor` to prevent permanent lock-up.
 
 **Q5: Can you use `@Transactional` on an `@Async` method, and what are the pitfalls?**
+**Short:** Yes, but the async method's transaction is fully independent of the caller's, so its failure never rolls back the caller.
+
 Yes, but with important caveats. An `@Async` method runs on a different thread with no transaction context from the caller. Adding `@Transactional` on the async method opens a new transaction on that thread — the async method's transaction is completely independent. Pitfall 1: the caller's transaction commits before the async method starts, so the async method sees the committed state (usually desired). Pitfall 2: if the async method's transaction fails, the caller's transaction is NOT rolled back — they are independent. Pitfall 3: `SecurityContextHolder` (which is `ThreadLocal`) is not automatically propagated to the async thread — configure `DelegatingSecurityContextAsyncTaskExecutor` to propagate security context.
 
 **Q6: What is the default scheduling thread pool size, and why does it matter?**
+**Short:** Spring defaults to a single scheduling thread, so every `@Scheduled` method runs sequentially and one slow task delays the rest.
+
 Spring's default scheduler uses a single thread (`ScheduledThreadPoolExecutor` with `corePoolSize=1`). This means all `@Scheduled` methods share one thread and execute sequentially. If one task is long-running or slow, it delays all other tasks. Configure a `ThreadPoolTaskScheduler` bean with `setPoolSize(N)` to allow N tasks to run concurrently. Choose N based on expected concurrent scheduled tasks — typically 5–20 for a service with a dozen scheduled jobs. Without explicit configuration, a slow nightly job can delay a critical 30-second health check.
 
 **Q7: What is `ApplicationReadyEvent` and why should it be preferred over `@PostConstruct` for post-startup work?**
+**Short:** It fires only after the full context is refreshed and the server accepts requests, unlike `@PostConstruct` which runs mid-refresh.
+
 `@PostConstruct` fires during the Spring context refresh, before the embedded server (Tomcat/Netty) starts accepting requests. Code in `@PostConstruct` that takes a long time delays server startup. More importantly, if `@PostConstruct` code makes HTTP calls or accesses beans that haven't been initialised yet, it fails silently. `ApplicationReadyEvent` fires after the full application context is refreshed, all beans are initialised, and the embedded server is accepting requests. It is the correct hook for: cache pre-loading, connectivity checks, background initialisation threads, or any work that should start after the application is genuinely "ready."
 
 **Q8: How would you test a `@TransactionalEventListener` to ensure it fires only on commit?**
+**Short:** Spy on the real listener with `@MockitoSpyBean` and assert it ran after a real commit but never ran after a rollback.
+
 Drive a real `@Transactional` service method in a `@SpringBootTest` and assert the listener ran after a successful commit and did not run after a rollback.
 ```java
 @SpringBootTest
@@ -571,9 +587,13 @@ class OrderEventTest {
 Use `@MockitoSpyBean` (not `@MockitoBean`) to wrap the real listener in a Mockito spy — the spy delegates to the real instance, so the `@TransactionalEventListener` method is still registered and still executes, while `@MockitoBean` would replace it with a stub that does nothing and never proves the commit-phase wiring works. Call the real service method (not a test fixture) so the full transaction lifecycle fires.
 
 **Q9: Explain the `fixedRate` vs `fixedDelay` difference and when an overlap can occur.**
+**Short:** `fixedDelay` waits N ms after the previous run finishes, while `fixedRate` targets N ms between start times and can overlap on a pooled scheduler.
+
 `fixedDelay = N` starts the next run N milliseconds after the previous run completes — if a run takes 8 seconds and `fixedDelay=5000`, the next run starts at 8+5=13s after the first started. `fixedRate = N` tries to maintain N milliseconds between start times — if a run takes longer than N, the next run starts immediately after the previous finishes (no overlap, but the schedule slips). If the scheduler has multiple threads (via `ThreadPoolTaskScheduler`), `fixedRate` can actually run multiple instances simultaneously if a run takes longer than the rate. This can cause concurrent modification issues in stateful tasks. Use `fixedDelay` for tasks that must not overlap; use `fixedRate` with a pool size of 1 (default) if you want constant-rate scheduling with sequential execution.
 
 **Q10: How does Spring's `@Async` propagate security context to async methods?**
+**Short:** Wrap the executor in `DelegatingSecurityContextAsyncTaskExecutor`, which copies the caller's `SecurityContext` onto the async thread.
+
 `SecurityContextHolder` is `ThreadLocal`-based — the async thread has a fresh, empty security context by default. To propagate the caller's `Authentication`: configure a `DelegatingSecurityContextAsyncTaskExecutor` wrapping your task executor. Spring Security provides this out of the box:
 ```java
 @Bean
@@ -586,18 +606,28 @@ public Executor asyncExecutor() {
 The `DelegatingSecurityContextAsyncTaskExecutor` captures the `SecurityContext` at submission time and sets it in the async thread before running the task, then clears it afterwards. Without this, async methods calling `SecurityContextHolder.getContext()` see `AnonymousAuthenticationToken`.
 
 **Q11: What is the difference between publishing a Spring event and sending a message to Kafka/RabbitMQ?**
+**Short:** A Spring event is in-process and lost on crash, while Kafka or RabbitMQ messages are durable and survive across process failure.
+
 Spring application events are in-process, in-memory, synchronous (or async via `@Async`) — they live and die with the JVM. If the application crashes between publishing and a listener firing, the event is lost. Kafka/RabbitMQ messages are durable, cross-process, and replayed after failure. Use Spring events for: in-process decoupling, cache invalidation, audit logging, and side effects that do not need durability. Use Kafka/RabbitMQ for: cross-service communication, durable event sourcing, at-least-once delivery guarantees, and fan-out to multiple services. The outbox pattern bridges the gap: write the event to a DB table in the same transaction, then a relay process publishes it to Kafka — giving transactional guarantees + durability.
 
 **Q12: How would you make a `@Scheduled` task conditional (e.g., only run in production)?**
+**Short:** Guard the scheduled bean with `@Profile` or `@ConditionalOnProperty` so it is never registered outside the intended environment.
+
 Three approaches: (1) `@Profile("!test")` on the class — scheduling is not registered in the `test` profile; (2) `@ConditionalOnProperty(name = "tasks.enabled", havingValue = "true")` on the bean — disable via property; (3) `SchedulingConfigurer` to programmatically register tasks with conditions. The simplest production pattern is a `@ConditionalOnProperty` guard combined with `spring.tasks.enabled=false` in `application-test.yaml`. For feature-flag-style control at runtime, use `ScheduledFuture` + manual reschedule, though this adds complexity. ShedLock inherently makes tasks conditional on lock acquisition — which handles the multi-instance case.
 
 **Q13: What happens if a `@TransactionalEventListener` listener method opens a new transaction (`REQUIRES_NEW`) and that transaction fails?**
+**Short:** The original transaction stays committed while only the new `REQUIRES_NEW` transaction rolls back, leaving a partial final state.
+
 The new transaction's failure does not affect the original transaction — it has already committed. The new transaction rolls back atomically. The result is a partial state: the original data is committed, but the secondary update (e.g., analytics insert) is not. This is the fundamental tradeoff of `@TransactionalEventListener` — it provides post-commit fire guarantee but cannot participate in the original atomicity. For cases where both changes must succeed or fail together, use an explicit `@Transactional` service that performs both writes in one transaction, or use the outbox pattern + a reliable message relay to ensure the secondary effect eventually happens (at-least-once, with idempotent consumer).
 
 **Q14: How does `spring.threads.virtual.enabled=true` affect `@Async` and `@Scheduled` in Spring Boot 3.2?**
+**Short:** It gives every `@Async` invocation and `@Scheduled` run its own virtual thread, so blocking I/O no longer pins a pooled OS thread.
+
 With `spring.threads.virtual.enabled=true`, Spring Boot 3.2 replaces the default `ThreadPoolTaskExecutor` for `@Async` with a `VirtualThreadTaskExecutor` (`Executors.newVirtualThreadPerTaskExecutor()`). For `@Scheduled`, it replaces the scheduler with a `SimpleAsyncTaskScheduler` backed by virtual threads. This means: (1) `@Async` no longer needs a bounded thread pool — each invocation gets its own virtual thread; (2) blocking I/O in async methods does not pin OS threads; (3) `@Scheduled` tasks no longer share a fixed thread pool — each scheduled run gets a virtual thread. Important: what still holds a carrier is a **native frame** — a scheduled task that blocks inside a JNI method or a Foreign Function & Memory downcall cannot unmount, and with the carrier pool sized to the CPU count a handful of such tasks starve everything else. Monitor with the `jdk.VirtualThreadPinned` JFR event, which is enabled by default at a 20 ms threshold and names the blocking operation and carrier thread. `synchronized` is not a pinning reason: JEP 491 (Java 24) removed monitor pinning, so a lock held across I/O now costs you serialisation, not a lost carrier.
 
 **Q15: Describe the outbox pattern and how it solves the dual-write problem for events.**
+**Short:** Writing the event to an outbox table in the same DB transaction, then relaying it separately, makes the write and publish atomic.
+
 The dual-write problem: after a DB write, publishing a Kafka message in a separate network call is non-atomic. If the app crashes between the commit and the publish, the event is lost. The outbox pattern solves this: (1) within the same DB transaction, write both the business entity and an `outbox_events` row; (2) a separate relay process (Debezium CDC, Quartz job, or `@Scheduled`) reads from `outbox_events` and publishes to Kafka; (3) on successful Kafka publish, delete or mark the outbox row as processed. Both writes are in one DB transaction — they succeed or fail atomically. The relay retries on failure — providing at-least-once delivery. Consumers must be idempotent (use event ID deduplication). Spring Batch's chunk-oriented model is well-suited for the relay: read pending outbox rows, publish, write completion — with restart-on-failure built in.
 
 ---

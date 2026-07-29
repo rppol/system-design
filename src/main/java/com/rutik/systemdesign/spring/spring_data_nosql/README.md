@@ -856,6 +856,7 @@ spring.data.redis.timeout=2000ms
 ## 12. Interview Questions with Answers
 
 **Why does calling `mongoTemplate.findAll(Order.class)` on a large collection risk an OutOfMemoryError?**
+**Short:** findAll() materializes every document into memory as a List, so heap usage scales with the whole collection.
 `findAll()` loads every document in the collection into memory as a `List` in one call, so
 heap usage grows linearly with collection size regardless of what you actually need. On a
 50-million-document collection this materializes 50 million live objects before any
@@ -864,6 +865,7 @@ filtering happens. Fix by pushing the filter into a `Query`/`Criteria` and pagin
 a time.
 
 **Why does a MongoDB field annotated `@Indexed` still get a COLLSCAN in production?**
+**Short:** @Indexed only declares intent; auto-index-creation defaults to false, so no index actually gets built.
 `@Indexed` only describes intent — Spring Boot's `spring.data.mongodb.auto-index-creation`
 defaults to false, so the annotation alone never creates the index. The index only exists
 if something explicitly ran `IndexOperations.createIndex(...)` or a migration tool like
@@ -871,6 +873,7 @@ Mongock. Always verify with `explain("executionStats")` that the plan says `IXSC
 `COLLSCAN`, before trusting an annotation.
 
 **Why does `RedisTemplate<String, Object>` store values as unreadable binary blobs by default?**
+**Short:** RedisTemplate defaults to JdkSerializationRedisSerializer, encoding values as binary Java serialization.
 Its default key/value/hashKey/hashValue serializer is `JdkSerializationRedisSerializer`,
 which writes Java's binary serialization format, not human-readable text. This is why
 `redis-cli GET` on an unconfigured template's key shows garbage bytes, why non-JVM clients
@@ -879,6 +882,7 @@ Always configure `StringRedisSerializer` for keys and a JSON serializer
 (`GenericJackson2JsonRedisSerializer`) for values explicitly.
 
 **Why can't a `@RedisHash` repository query a field unless it's annotated `@Indexed`?**
+**Short:** Redis has no secondary-index engine, so only fields marked @Indexed can be queried by repositories.
 Redis has no built-in secondary-index engine, so Spring Data Redis maintains its own index
 as a separate Set per distinct value, only for fields you mark `@Indexed`. A derived query
 like `findByCity` on a non-indexed field has no Set to read from, so it is unsupported —
@@ -887,6 +891,7 @@ way. The workaround is to add `@Indexed`, or drop to `RedisTemplate` and scan/fi
 yourself, or maintain your own index structure.
 
 **Why does wrapping two MongoDB writes in `@Transactional` throw at runtime against a fresh single-node `mongod`?**
+**Short:** MongoDB transactions require a replica set or mongos router, so a standalone mongod rejects them outright.
 MongoDB transactions require a replica set or a `mongos` router, so a standalone `mongod`
 rejects the very first transactional command outright. The exact error is "Transaction
 numbers are only allowed on a replica set member or mongos" — even a local, single-node
@@ -896,6 +901,7 @@ surprise; Testcontainers' MongoDB module can start in replica-set mode specifica
 catch it in CI.
 
 **What's the difference between `StringRedisTemplate` and `RedisTemplate<String, Object>`?**
+**Short:** StringRedisTemplate pre-wires StringRedisSerializer, while RedisTemplate<String, Object> defaults to Java serialization.
 `StringRedisTemplate` pre-wires `StringRedisSerializer` for keys, values, and hash fields,
 while a bare `RedisTemplate<String, Object>` defaults to Java serialization unless
 reconfigured. Use `StringRedisTemplate` when every value truly is a string (counters,
@@ -904,6 +910,7 @@ serializer when you're storing structured objects. Mixing the two against the sa
 without matching serializers produces deserialization errors.
 
 **When should you drop from a `MongoRepository` down to `MongoTemplate` directly?**
+**Short:** Use MongoTemplate for dynamic queries, aggregation pipelines, or projections a derived method name can't express.
 Reach for `MongoTemplate` when the query is dynamic, needs an aggregation pipeline, or
 requires field-level projections that a derived method name can't cleanly express. A
 back-office search screen with five optional filters is a `Criteria` chain built at
@@ -911,6 +918,7 @@ runtime, not a 5-keyword derived method name. Repositories remain the right choi
 fixed, common-path lookups that make up most of an application's queries.
 
 **How does the MongoDB aggregation framework differ from a derived query or `@Query` method?**
+**Short:** The aggregation framework reshapes and combines data through pipeline stages, not just filters documents as-is.
 The aggregation framework runs documents through a pipeline of stages (`$match`, `$group`,
 `$lookup`, `$sort`) that can reshape and combine data, not just filter it. Derived queries
 and `@Query` return documents (or projections of them) as-is; an aggregation can compute
@@ -920,6 +928,7 @@ entirely. Use `@Aggregation` on a repository method for a fixed pipeline, or
 on runtime input.
 
 **What are the hard constraints on MongoDB multi-document transactions (4.0+)?**
+**Short:** MongoDB transactions need a replica set, default to a 60-second lifetime, and can abort with a retryable error.
 They require a replica set or sharded cluster, default to a 60-second lifetime, and abort
 with a retryable `TransientTransactionError` on write conflicts. The caller is responsible
 for catching that error label and retrying the whole transaction from the start, not just
@@ -928,6 +937,7 @@ is why most teams model writes around one aggregate document first and reserve
 transactions for the cases that truly need cross-document atomicity.
 
 **How does `@Version` optimistic locking work in Spring Data MongoDB, and how does it differ from JPA?**
+**Short:** MongoDB's @Version only tracks the top-level document, unlike JPA's independent per-entity versioning across a graph.
 Spring Data MongoDB adds the current version to the update filter and increments it on
 write, so a stale write matches zero documents and throws
 `OptimisticLockingFailureException`. The key difference from JPA is scope: MongoDB's
@@ -936,6 +946,7 @@ so two concurrent updates to different embedded sub-objects within the same docu
 conflict, unlike JPA where each entity in a graph can version independently.
 
 **How does Spring Data Redis implement a secondary index for a `@RedisHash` entity?**
+**Short:** Spring Data Redis stores one extra Set per @Indexed field, mapping each value to matching entity ids.
 It stores the entity as a Redis Hash and maintains one extra Set per `@Indexed` field,
 named after the field and value, holding the ids of all matching entities. A query like
 `findByUserId("u42")` becomes `SMEMBERS Session:userId:u42` followed by one `HGETALL` per
@@ -944,6 +955,7 @@ a real, if implicit, storage and write-amplification cost that's easy to forget 
 looks exactly like `@Indexed` in JPA.
 
 **What is `@Reference` in Spring Data Redis and what does it cost?**
+**Short:** @Reference resolves eagerly on every load with no lazy option, reproducing JPA's N+1 problem as extra HGETALLs.
 `@Reference` links one `@RedisHash` aggregate to another by id, and Spring Data Redis
 resolves it eagerly on every load — there is no lazy option the way JPA's `FetchType.LAZY`
 provides. Looping over a collection of entities that each carry a `@Reference` field
@@ -952,6 +964,7 @@ reproduces JPA's N+1 problem, except as N extra `HGETALL` calls instead of N ext
 always accessed together.
 
 **How do Redis pub/sub and Redis Streams differ as messaging mechanisms for a Spring application?**
+**Short:** Pub/sub is fire-and-forget with no persistence, while Streams add a durable log with consumer groups and acks.
 Pub/sub is fire-and-forget with zero persistence — a subscriber that isn't connected at
 publish time simply never sees the message, and Redis gives no delivery-failure signal at
 all. Streams (accessed via `RedisTemplate.opsForStream()`) add an append-only log, consumer
@@ -961,6 +974,7 @@ dashboards, chat presence); use Streams for anything a downstream consumer canno
 miss.
 
 **Does `ReactiveMongoRepository` give you the same non-blocking guarantee as `ReactiveCrudRepository` over R2DBC?**
+**Short:** Yes for both, but MongoDB has a native async driver while R2DBC retrofits reactivity onto blocking JDBC.
 Yes for both, but for different underlying reasons — MongoDB ships a native asynchronous
 driver, while R2DBC is a separate driver specification built because JDBC has no
 non-blocking equivalent at all. Both surface through the shared `ReactiveCrudRepository`
@@ -969,6 +983,7 @@ though one sits on a store with reactive support built in and the other exists s
 to retrofit it onto relational databases.
 
 **Does Spring Data Redis offer reactive `@RedisHash` repositories the same way MongoDB does?**
+**Short:** No — @RedisHash repositories are imperative-only; reactive access requires ReactiveRedisTemplate directly.
 No — the `@RedisHash` repository layer is imperative-only, built on the synchronous Spring
 Data KeyValue infrastructure, even though Redis itself has a fully reactive driver
 (Lettuce). For non-blocking Redis access you use `ReactiveRedisTemplate` directly
@@ -977,6 +992,7 @@ Data KeyValue infrastructure, even though Redis itself has a fully reactive driv
 Spring Data module.
 
 **When should you choose MongoDB or Redis over Spring Data JPA on a relational database?**
+**Short:** Choose by access pattern: JPA for ACID joins, MongoDB for document aggregates, Redis for sub-millisecond key access.
 Choose by access pattern and consistency: JPA for cross-entity ACID joins, MongoDB for
 aggregate-shaped documents, Redis for single-key sub-millisecond access. If most queries
 join three or more tables and must be transactionally consistent by default, stay
@@ -985,6 +1001,7 @@ scale matters more than joins, MongoDB fits; if the access is "get/set by key" a
 budgets JPA can't hit, Redis fits.
 
 **When should Redis be a `@Cacheable` cache versus a Spring Data Redis-backed primary store?**
+**Short:** Use @Cacheable when Redis merely accelerates data that has a durable source of truth elsewhere.
 Use the cache abstraction when Redis merely accelerates data that has a durable source of
 truth elsewhere and can vanish without permanent loss — that's exactly the domain of
 [Spring Caching](../spring_caching/README.md)'s `RedisCacheManager`. Use Spring Data Redis
@@ -993,6 +1010,7 @@ leaderboards, real-time counters), because then durability configuration (AOF, r
 and query design matter in a way pure caching never has to consider.
 
 **How do you manage MongoDB indexes safely across multiple application instances in production?**
+**Short:** Create indexes through a controlled migration step, not @Indexed plus auto-index-creation, to avoid startup races.
 Create indexes explicitly through a controlled migration step, not through `@Indexed` plus
 `auto-index-creation=true`, so instances don't race to build the same index concurrently at
 startup. A single migration job (Mongock, or a one-shot `IndexOperations` call gated behind
@@ -1001,6 +1019,7 @@ already exists. Building a large index inline during normal request traffic can 
 degrade write throughput.
 
 **What happens when two concurrent writers both update the same `@Version`-tracked MongoDB document?**
+**Short:** Only the first writer's version-matching filter succeeds; the second throws OptimisticLockingFailureException.
 Only the first write's version-matching filter succeeds — the second write's filter no
 longer matches the already-incremented version, so it updates zero documents and fails with
 `OptimisticLockingFailureException`. The losing caller must retry: reload the document,
@@ -1008,6 +1027,7 @@ reapply its change, and attempt the save again, typically wrapped in a bounded r
 (`@Retryable`) rather than surfaced directly to the user.
 
 **Why can't you page through a 50-million-document MongoDB collection with `skip()`/`limit()`?**
+**Short:** skip() must walk and discard every preceding document, so cost grows linearly with how deep the page offset is.
 `skip()` still has to walk and discard every preceding document before the limit window, so
 cost grows linearly with the offset regardless of index usage — page 100,000 costs roughly
 100,000x the work of page 1. The fix is keyset (cursor-based) pagination: query
@@ -1015,6 +1035,7 @@ cost grows linearly with the offset regardless of index usage — page 100,000 c
 same regardless of how deep into the collection you are.
 
 **Can Spring Data's derived query method names (`findByXAndY`) express the same things across JPA, MongoDB, and Redis?**
+**Short:** No — each Spring Data module only translates the derived-query keywords its underlying store can actually execute.
 No — the method-name grammar (`PartTree`) is shared, but each module only translates the
 keywords its store can actually execute. MongoDB additionally supports geospatial keywords
 like `Near`/`Within` because its query language understands geometry natively; Redis
@@ -1022,6 +1043,7 @@ supports almost nothing beyond equality on `@Indexed` fields because there is no
 engine underneath to translate anything richer into.
 
 **What happens to data already stored with the default JDK serializer if you switch a Redis app to JSON serialization?**
+**Short:** Existing keys stay in the old format and fail to deserialize, requiring a dual-read migration strategy.
 Existing keys stay encoded in the old format and fail to deserialize under the new
 serializer, so a mid-flight switch needs a dual-read migration, not a config change. A safe
 rollout reads with a fallback (try JSON, fall back to JDK, rewrite on next save) until a TTL

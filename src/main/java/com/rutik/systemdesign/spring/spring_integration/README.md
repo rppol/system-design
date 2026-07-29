@@ -443,6 +443,8 @@ reach for `spring_messaging` when the hard part is *throughput through one broke
 ## 12. Interview Questions with Answers
 
 **Q: What is Spring Integration and how is it different from spring_messaging / Kafka?**
+**Short:** Spring Integration orchestrates messaging across heterogeneous systems, while Kafka tooling maximizes throughput through one broker.
+
 Spring Integration is an in-app implementation of the Enterprise Integration Patterns
 — a messaging model (messages, channels, endpoints) plus built-in routing,
 transformation, splitting, and aggregation primitives, and adapters for many
@@ -452,6 +454,8 @@ like Kafka or RabbitMQ. The mental model: SI is for *orchestrating integration a
 heterogeneous systems*; Kafka tooling is for *throughput through one broker*.
 
 **Q: What are the core abstractions in Spring Integration?**
+**Short:** Messages, channels, and endpoints are the core abstractions, with endpoints only ever communicating through channels.
+
 Messages (payload + headers), channels (the pipes connecting components), and
 endpoints (the components: filters, transformers, routers, splitters, aggregators,
 service activators, adapters). Endpoints never call each other directly — they only
@@ -459,6 +463,8 @@ read from and write to channels, which is the pipes-and-filters decoupling. Adap
 and gateways bridge this messaging model to external protocols.
 
 **Q: Explain the main channel types and how they affect threading.**
+**Short:** `DirectChannel` runs synchronously inline, `QueueChannel` decouples via a poller, `ExecutorChannel` parallelizes, and pub-sub fans out.
+
 `DirectChannel` (the default) invokes the next endpoint synchronously on the sender's
 thread, so the whole flow runs inline and can share one transaction. `QueueChannel`
 buffers messages and requires a downstream poller, decoupling producer and consumer
@@ -467,6 +473,8 @@ rates asynchronously. `ExecutorChannel` hands off to a thread pool for paralleli
 sets the concurrency, transaction boundary, and back-pressure behavior of that seam.
 
 **Q: Why is the channel being a first-class, swappable component important?**
+**Short:** Swapping a channel changes threading, buffering, and transport without touching any business logic on either side.
+
 Because endpoints communicate only through channels, you can change threading,
 buffering, persistence, and transport by swapping the channel without modifying any
 business logic. For example, replacing a `DirectChannel` with a `QueueChannel` turns a
@@ -474,6 +482,8 @@ synchronous flow asynchronous, and the endpoints on either side are unchanged. T
 decoupling is the central design benefit of the framework.
 
 **Q: What does a splitter and an aggregator do, and what makes the aggregator tricky?**
+**Short:** A splitter turns one message into many; an aggregator's difficulty is correlating, releasing, and durably buffering partial groups.
+
 A splitter turns one message into many (e.g. an order into its line items); an
 aggregator collects many correlated messages back into one. The aggregator is tricky
 because it must correlate messages into groups (correlation strategy), decide when a
@@ -483,6 +493,8 @@ right — and persisting the buffer so groups survive restarts — is exactly th
 SI provides so you do not hand-roll it.
 
 **Q: How do you make an aggregator durable across restarts?**
+**Short:** Configure a persistent `MessageStore`, such as `JdbcMessageStore`, plus a `groupTimeout` so incomplete groups don't leak.
+
 Configure a persistent `MessageStore` (e.g. `JdbcMessageStore`) so in-flight groups
 are written to a database instead of living only in memory, plus a `groupTimeout` so
 groups missing parts are eventually released or expired rather than leaking. Without a
@@ -491,6 +503,8 @@ outbox principle that buffered intermediate state must be persisted to survive
 failure.
 
 **Q: What is a messaging gateway?**
+**Short:** A `@MessagingGateway` interface turns a plain Java method call into a send-and-await-reply round trip through a flow.
+
 A gateway exposes a flow behind a plain Java interface: you annotate an interface with
 `@MessagingGateway` and the framework implements it so a normal method call is turned
 into "send a message to the request channel and await the reply on the reply
@@ -499,6 +513,8 @@ cleanly separating application logic from the integration layer. A channel adapt
 by contrast, is one-way (no reply).
 
 **Q: What is the difference between a channel adapter and a gateway?**
+**Short:** A channel adapter is one-directional with no reply, while a gateway sends a message and correlates a response back.
+
 A channel adapter is one-directional — an inbound adapter brings external data into a
 flow, an outbound adapter sends flow messages to an external system — with no reply
 semantics. A gateway is request-reply: it sends a message and correlates a response
@@ -506,6 +522,8 @@ back, used when the caller needs an answer (inbound gateway: external request �
 flow → response; messaging gateway: Java call → flow → return value).
 
 **Q: What is a poller and when do you need one?**
+**Short:** A poller periodically pulls messages from a pollable source, and without one that source is silently never consumed.
+
 A poller drives pollable sources — `QueueChannel`s, file/JDBC inbound adapters — by
 periodically pulling messages at a configured rate, batch size, and (optionally)
 within a transaction. You need one on any pollable endpoint; without it, the source
@@ -513,6 +531,8 @@ silently never consumes. The poller is also your back-pressure and scheduling kn
 it controls how fast and in what batch size work enters the flow.
 
 **Q: How does error handling work in a Spring Integration flow?**
+**Short:** A failure is wrapped in a `MessagingException` carrying the failed message and routed to an error channel for logging or dead-lettering.
+
 Failures are wrapped in a `MessagingException` that carries the failed `Message` and
 routed to an error channel (the default `errorChannel`, or a flow-specific one). You
 attach a flow to that channel to log, alert, or dead-letter the failure. For
@@ -521,6 +541,8 @@ failures roll back and are re-polled. The failed message being preserved is what
 you recover or DLQ it.
 
 **Q: Why can switching a channel to async break your transaction?**
+**Short:** Moving work to another thread via an async channel runs it outside the original transaction, so a later rollback can't undo it.
+
 A transaction is bound to a thread; when you move work onto another thread via an
 `ExecutorChannel` or a polled `QueueChannel`, the downstream endpoints run outside the
 original transaction, so a rollback upstream no longer undoes that downstream work.
@@ -529,6 +551,8 @@ asynchronous segment idempotent and transact it independently. This is a common,
 subtle correctness bug when "just making it async."
 
 **Q: When would you choose Spring Integration over plain @KafkaListener or writing the glue yourself?**
+**Short:** Choose Spring Integration when orchestrating multiple protocols with routing and aggregation; a single-hop listener is simpler alone.
+
 Choose SI when the hard part is orchestration across multiple systems and you need EIP
 primitives — content-based routing, splitting/aggregating with correlation, content
 enrichment, claim check — that are error-prone to hand-build, and when you integrate
@@ -537,6 +561,8 @@ from one broker, call a service," a plain `@KafkaListener`/`@RabbitListener` is 
 and SI's abstraction is overkill.
 
 **Q: What is the relationship between Spring Integration and Spring Cloud Stream?**
+**Short:** Spring Cloud Stream is built on Spring Integration's channel/adapter model, specialized for broker-backed streaming with binders.
+
 Spring Cloud Stream is built on top of Spring Integration's channel/adapter model; its
 binder abstraction sits on SI's messaging core, which is why they share concepts like
 channels and message handlers. Spring Cloud Stream specializes SI for broker-backed
@@ -545,6 +571,8 @@ engine underneath. Knowing SI helps you understand what Spring Cloud Stream does
 the hood.
 
 **Q: How does Spring Integration relate to Apache Camel?**
+**Short:** Both implement the same EIP catalogue; Spring Integration is Spring-native while Camel is a broader, framework-agnostic engine.
+
 Both are EIP-based integration engines implementing the same pattern catalogue
 (routers, transformers, aggregators, adapters). Spring Integration is a Spring-native
 library expressed in beans and a Java DSL, ideal when you are already in a Spring app.
@@ -554,6 +582,8 @@ want a framework-agnostic engine. They overlap heavily; the choice is mostly eco
 fit.
 
 **Q: What are message headers used for, and what is the risk when transforming messages?**
+**Short:** Headers carry routing and correlation metadata, and a transformer that builds a fresh `Message` can silently drop them.
+
 Headers carry out-of-band metadata — message id, timestamp, correlation id, sequence
 number, reply channel, and custom keys — that drive routing, aggregation, and
 request-reply correlation. The risk is that a custom transformer which constructs a
@@ -562,6 +592,8 @@ breaking aggregation or gateways. The fix is to use `MessageBuilder.copyHeaders(
 or simply return the payload and let SI preserve the existing headers.
 
 **Q: How do you test a Spring Integration flow?**
+**Short:** Use `spring-integration-test` and `@SpringIntegrationTest` to feed a channel's input and assert on its output in isolation.
+
 Use `spring-integration-test` with `@SpringIntegrationTest`, which lets you mock
 inbound adapters and capture/assert on channel traffic; `MockIntegration` provides
 mock message sources and handlers, and you can send test messages directly to input

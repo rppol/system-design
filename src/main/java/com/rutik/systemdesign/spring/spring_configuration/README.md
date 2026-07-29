@@ -490,45 +490,73 @@ public class RegionConfig {
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between @Configuration and @Component for classes with @Bean methods?**
+**Short:** @Configuration proxies the class in full mode so inter-@Bean calls return the same singleton; @Component creates new instances.
+
 `@Configuration` creates a CGLIB subclass (full mode) where calls to `@Bean` methods return the singleton from the container. `@Component` uses no proxy (lite mode) — calls to `@Bean` methods are plain Java method invocations that create new instances. The difference only matters when one `@Bean` method calls another within the same class. Always use `@Configuration` for configuration classes that define inter-dependent beans.
 
 **Q: What is the order of @Conditional evaluation?**
+**Short:** @Conditional evaluation order is set by each Condition's @Order, not declaration order, with bean conditions running last.
+
 Declaration order is irrelevant — `ConditionEvaluator.collectConditions()` sorts the conditions with `AnnotationAwareOrderComparator` before running them, so the `@Order` on each `Condition` class decides. Spring Boot orders them cheapest-first: `OnClassCondition` at `HIGHEST_PRECEDENCE`, then `OnWebApplicationCondition`/`OnJavaCondition`/`OnResourceCondition` at `+20`, then `OnPropertyCondition` at `+40`, then `OnExpressionCondition`/`OnJndiCondition`, and finally `OnBeanCondition` at `LOWEST_PRECEDENCE`. Bean conditions run last on purpose: they are the only ones that need the bean definition registry to be populated, so putting them anywhere else would make them read a half-built picture. Evaluation short-circuits on the first failing condition, so a missing class costs nothing. The `--debug` startup flag prints the `ConditionEvaluationReport` showing which conditions passed or failed.
 
 **Q: How does @PropertySource differ from @ConfigurationProperties?**
+**Short:** @PropertySource just adds properties to the Environment; @ConfigurationProperties binds a whole prefix to a typed Java object.
+
 `@PropertySource` adds a `.properties` file to the Spring `Environment`, making its properties accessible via `@Value` and `Environment.getProperty()`. It does not bind properties to a Java object. `@ConfigurationProperties` takes a prefix and binds all matching properties from the `Environment` to a typed Java class with getters/setters. `@ConfigurationProperties` supports relaxed binding (camelCase, kebab-case, SCREAMING_SNAKE_CASE all map to the same property), JSR-303 validation, and IDE autocompletion. Prefer `@ConfigurationProperties` for any group of related properties.
 
 **Q: What is an ImportSelector and when would you use it?**
+**Short:** ImportSelector's selectImports returns class names to import, powering conditional configuration like @EnableAutoConfiguration.
+
 `ImportSelector` is an interface with `selectImports(AnnotationMetadata)` that returns an array of fully-qualified class names to import. The Spring container calls this at configuration processing time. `AutoConfigurationImportSelector` (which powers `@EnableAutoConfiguration`) is the most important example. You write an `ImportSelector` when building a library that needs to conditionally import different configurations based on annotation attributes — for example, `@EnableMyFeature(mode=Mode.SYNC)` importing different config classes based on the `mode` attribute.
 
 **Q: What is the difference between @Import and @ComponentScan?**
+**Short:** @ComponentScan discovers classes by scanning packages; @Import explicitly registers specific classes by name at compile time.
+
 `@ComponentScan` discovers classes by scanning package paths at runtime. `@Import` explicitly registers specific classes by name (compile-time reference). `@Import` is faster (no classpath scanning) and more explicit. Use `@ComponentScan` for your application's own classes; use `@Import` in library/starter code to programmatically register configuration without requiring the user to scan specific packages.
 
 **Q: How does @Profile work and how can you activate multiple profiles?**
+**Short:** @Profile activates a bean only when its named profile is active, set via spring.profiles.active or spring.profiles.include.
+
 `@Profile("name")` on a `@Configuration` class or `@Bean` method registers the bean only when the named profile is active. Activate via `spring.profiles.active` property (comma-separated for multiple), the `SPRING_PROFILES_ACTIVE` environment variable, or `SpringApplication.setAdditionalProfiles()` programmatically. `spring.profiles.include` always activates additional profiles regardless of the primary active profile. A bean with `@Profile("!production")` is active when production is NOT active.
 
 **Q: What is relaxed binding in @ConfigurationProperties?**
+**Short:** Relaxed binding lets @ConfigurationProperties match a field regardless of casing or separator convention across property sources.
+
 Relaxed binding lets one Java field accept a property name written in any casing or separator convention. `app.max-connections`, `APP_MAX_CONNECTIONS`, `app.maxConnections` and `app.max_connections` all bind to a Java field `maxConnections`. This allows properties defined by operations (OS environment variables in SCREAMING_SNAKE_CASE) to bind to Java convention (camelCase) without duplication. `@Value` does NOT support relaxed binding — it uses exact property name matching.
 
 **Q: How do you exclude an auto-configuration class?**
+**Short:** Auto-configuration is excluded via @SpringBootApplication's exclude attribute or the spring.autoconfigure.exclude property.
+
 Two ways: the `exclude` attribute of `@SpringBootApplication`, or the `spring.autoconfigure.exclude` property. The annotation form takes a `Class<?>` — `@SpringBootApplication(exclude = {DataSourceAutoConfiguration.class})`; the property form takes a fully-qualified name — `spring.autoconfigure.exclude=org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration`. The annotation approach is compile-time safe (catches typos); the property approach is useful when you need runtime control or the class may not be on the classpath. Exclusion is necessary when you define your own DataSource bean but the auto-configuration would still try to create one.
 
 **Q: What is @Order and when does it matter for @Configuration classes?**
+**Short:** @Order on @Configuration classes controls processing order, which affects @ConditionalOnMissingBean and BeanPostProcessor sequencing.
+
 `@Order(n)` on `@Configuration` classes controls the order in which they are processed. Lower values are processed first. This affects which `@ConditionalOnMissingBean` evaluations see existing beans. More importantly, `@Order` on `BeanPostProcessor` beans controls the order they are applied to each bean. For `ApplicationListener` beans, it controls which listener handles events first. For `@Configuration` classes in user code, order matters when multiple classes provide the same bean type and conditional logic depends on processing order.
 
 **Q: What is proxyBeanMethods=false and when should you use it?**
+**Short:** proxyBeanMethods=false skips the CGLIB proxy for a configuration class, improving startup when @Bean methods never call each other.
+
 `@Configuration(proxyBeanMethods=false)` disables the CGLIB proxy for the configuration class (making it behave like lite mode). Use it when the `@Bean` methods in the class are never called from other `@Bean` methods in the same class (independent beans), to improve startup performance (CGLIB proxying adds overhead). Spring Boot's own auto-configuration classes use `proxyBeanMethods=false` for most configurations since they define independent beans. Use `proxyBeanMethods=true` (the default) whenever inter-`@Bean` method calls are needed.
 
 **Q: How would you write a custom Spring Boot starter?**
+**Short:** A custom Spring Boot starter uses @AutoConfiguration with conditions listed in AutoConfiguration.imports, never @ComponentScan.
+
 Write an `@AutoConfiguration` class, guard it with conditions, list it in the imports file, and never component-scan from it. In detail: (1) Create a module with your auto-configuration class annotated with `@AutoConfiguration`; (2) Use `@ConditionalOnClass`, `@ConditionalOnMissingBean`, `@ConditionalOnProperty` to make it conditional; (3) List the class in `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`, one fully-qualified name per line; (4) Do NOT use `@ComponentScan` in the starter — let user applications scan their own packages, and keep the auto-configuration class in a package no consumer scans. Include your auto-configure module as a dependency in the starter POM.
 
 **Q: What is the difference between @PropertySource and spring.config.import?**
+**Short:** spring.config.import supports YAML and full config priority ordering, unlike the older @PropertySource annotation.
+
 `@PropertySource` is a Java annotation that loads a `.properties` file into the Environment during the configuration class processing phase. It does not work with YAML files and processes at a fixed point in the config loading lifecycle. `spring.config.import` (Spring Boot 2.4+) is a property that loads additional config files or config tree directories, supports YAML, and participates fully in the config priority ordering. `spring.config.import=configserver:` is how Spring Cloud Config Server is imported in Boot 3.x, replacing the bootstrap context approach.
 
 **Q: What is @ImportBeanDefinitionRegistrar?**
+**Short:** ImportBeanDefinitionRegistrar registers BeanDefinition objects programmatically, unlike ImportSelector which only returns class names.
+
 `ImportBeanDefinitionRegistrar` is an interface that allows programmatic registration of `BeanDefinition` objects during configuration processing. Unlike `ImportSelector` (which returns class names), the registrar directly calls `registry.registerBeanDefinition()`. It receives the annotation metadata of the `@Import` annotation's declaring class, enabling dynamic bean registration based on annotation attributes. Spring Data JPA uses this internally to register repository proxy bean definitions for each `@Repository` interface found during component scanning.
 
 **Q: What is the difference between `@Configuration` full mode and lite mode, and when does it matter?**
+**Short:** Lite-mode @Bean methods calling each other create separate object instances instead of returning the container's singleton.
+
 A `@Configuration` class (full mode) is CGLIB-proxied: `@Bean` method calls from within the class are intercepted and return the same singleton instance from the bean factory. A `@Component` or `@ComponentScan`-discovered class containing `@Bean` methods (lite mode) is NOT proxied: inter-`@Bean` calls create plain Java object instances, bypassing the container. This matters when one `@Bean` method calls another:
 
 ```java
@@ -548,6 +576,8 @@ class AppConfig {
 In lite mode, `dataSource()` creates a second `HikariDataSource` outside the container — a connection pool leak. Always use `@Configuration` for classes where `@Bean` methods call each other. Lite mode is appropriate only for simple factories that have no inter-`@Bean` dependencies.
 
 **Q: What is `@Conditional` and how does it compare to `@ConditionalOnProperty` / `@ConditionalOnClass`?**
+**Short:** @Conditional is the base mechanism whose Condition implementation decides inclusion; @ConditionalOnProperty is a prebuilt case of it.
+
 `@Conditional(MyCondition.class)` is the meta-annotation that powers all `@ConditionalOn*` variants. The referenced `Condition` implementation receives `ConditionContext` (access to `Environment`, `BeanDefinitionRegistry`, `ClassLoader`) and `AnnotatedTypeMetadata` and returns `true` (include) or `false` (skip). `@ConditionalOnProperty`, `@ConditionalOnClass`, `@ConditionalOnBean` are Spring Boot's pre-built `Condition` implementations registered as composed annotations for common use cases. Write a custom `@Conditional` when the built-in variants don't cover your logic — e.g., enabling a bean only when running in Kubernetes (check for `KUBERNETES_SERVICE_HOST` env var) or only on a specific OS. Custom conditions are registered with `@Conditional(MyKubernetesCondition.class)` and can be composed into a custom `@ConditionalOnKubernetes` annotation.
 
 ---

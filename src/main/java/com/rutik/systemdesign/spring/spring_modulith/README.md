@@ -418,6 +418,8 @@ clean microservices anyway, so this order is rarely wasted work.
 ## 12. Interview Questions with Answers
 
 **Q: What problem does Spring Modulith solve, and where does a modular monolith sit between a plain monolith and microservices?**
+**Short:** Modulith enforces internal module boundaries in one deployable, giving microservices' discipline without the distributed-systems tax.
+
 It solves boundary erosion: in a plain monolith every class can reach every other, so
 modules decay into a big ball of mud. Microservices fix this by making boundaries
 network boundaries — at the cost of latency, partial failure, and operational
@@ -427,6 +429,8 @@ decoupling. So it gives microservices' internal discipline without the distribut
 systems tax, and a clean seam to extract a real service later if needed.
 
 **Q: How does Spring Modulith define a module and its public API?**
+**Short:** Each direct sub-package is a module whose base package is its public API; nested packages like internal are module-private.
+
 By package convention: each direct sub-package of the application's main package is an
 application module, the types in that base package are its public API, and types in
 nested sub-packages (e.g. `internal`) are module-private and may not be referenced from
@@ -436,6 +440,8 @@ surfaces via `@NamedInterface`. The package structure literally is the access-co
 boundary.
 
 **Q: How are module boundaries actually enforced?**
+**Short:** An ArchUnit-backed verify() test fails the build when a module reaches another's internal types or a cycle exists.
+
 Through a test: `ApplicationModules.of(App.class).verify()`, which builds a module
 model from the package structure and runs ArchUnit rules that fail if one module
 references another's internal (non-API) types or if there is a cyclic dependency
@@ -444,6 +450,8 @@ failing test. This mechanical enforcement is the key value — unenforced bounda
 (conventions, wikis) inevitably decay under deadline pressure.
 
 **Q: Why are cyclic dependencies between modules disallowed?**
+**Short:** A cycle means two modules can't be understood, tested, or extracted independently, so verify() fails on it.
+
 Because a cycle means two modules cannot be understood, tested, changed, or extracted
 independently — they are effectively one tangled unit, which defeats modularity.
 Modulith's `verify()` fails on cycles. The standard fix is dependency inversion via
@@ -452,6 +460,8 @@ and the other listens, so both depend only on the event type and the graph becom
 DAG.
 
 **Q: What is `@ApplicationModuleListener` and how does it differ from `@EventListener`?**
+**Short:** @ApplicationModuleListener runs asynchronously after commit in its own transaction, unlike the synchronous @EventListener.
+
 `@ApplicationModuleListener` is a composed annotation equivalent to
 `@TransactionalEventListener(phase = AFTER_COMMIT)` + `@Async` + `@Transactional`: the
 listener runs asynchronously, only after the publishing transaction commits, and in
@@ -462,6 +472,8 @@ effects between modules; use `@EventListener` only when you genuinely want synch
 same-transaction handling.
 
 **Q: What is the event publication registry and what problem does it solve?**
+**Short:** It persists each published event with the transaction as a durable outbox, replaying incomplete ones after a crash.
+
 It is Modulith's durability mechanism: when you add a persistence starter
 (`spring-modulith-events-jpa`/`-jdbc`/`-mongodb`), each published event and its
 intended listener are written to an event-publication table *within the publisher's
@@ -472,6 +484,8 @@ transactional-outbox pattern applied in-process, giving at-least-once delivery t
 in-process listeners.
 
 **Q: How do you test a single module in isolation?**
+**Short:** @ApplicationModuleTest bootstraps only the module under test plus its declared dependencies, for fast scoped tests.
+
 Use `@ApplicationModuleTest`, which bootstraps only the module under test (and its
 declared dependencies) rather than the whole application, making tests fast and
 scoped. Combined with the `Scenario` API you can drive event-based behavior: publish an
@@ -480,6 +494,8 @@ verifies a module's contract (events in → effects out) without standing up unr
 modules.
 
 **Q: When should you turn a Modulith module into a real microservice?**
+**Short:** Extract only when independent deployment, scaling, tech stack, or team ownership genuinely justifies the network tax.
+
 Only when the module has a concrete need that justifies the network tax: independent
 deployment cadence, independent scaling (a hot path that must scale separately),
 independent technology stack, or separate team ownership requiring autonomous releases.
@@ -488,6 +504,8 @@ Because Modulith already gives the module a clean boundary and event contracts,
 extraction later is far easier — modularize first, distribute on demand.
 
 **Q: What are the limits of a modular monolith — what does it NOT give you?**
+**Short:** A modular monolith gives structural boundaries but not operational independence, since it still shares one process's fate.
+
 It does not give independent deployment, independent scaling, fault isolation, or
 technology heterogeneity. It is one process with shared fate: an OOM, a crash, or a
 runaway thread in one module takes the whole app down, and you scale the entire
@@ -496,6 +514,8 @@ decoupling, testability, docs) but not *operational* independence — those requ
 service extraction.
 
 **Q: How does Modulith relate to ArchUnit?**
+**Short:** Modulith translates its module model into ArchUnit rules about package access and acyclic dependencies.
+
 Modulith's verification is built on ArchUnit: `verify()` translates the module model
 (derived from package structure and `@ApplicationModule` metadata) into ArchUnit rules
 about allowed package access and acyclic dependencies, then executes them. You can also
@@ -503,6 +523,8 @@ use ArchUnit directly for finer-grained custom rules. Modulith is essentially a
 higher-level, module-aware layer over ArchUnit's general architecture-testing engine.
 
 **Q: How does Modulith generate documentation, and why is that valuable?**
+**Short:** The Documenter API generates component diagrams and a module canvas directly from code, so docs never go stale.
+
 The `Documenter` API produces PlantUML/C4 component diagrams (whole-system and
 per-module) and a "module canvas" listing each module's API, published/consumed events,
 and dependencies — derived directly from the code. Running it inside the verification
@@ -511,6 +533,8 @@ solving the perennial problem of architecture diagrams that are stale the day af
 they are drawn.
 
 **Q: How do events help keep the module dependency graph acyclic?**
+**Short:** Events invert the dependency so a consumer depends on the event type rather than on the publisher's beans, avoiding cycles.
+
 Direct calls create dependencies in the direction of the call, so two-way interaction
 produces a cycle. Events invert the consumer's dependency: the publisher emits an event
 without knowing who consumes it (it depends only on the event type it owns), and
@@ -519,6 +543,8 @@ would-be back-edge (B notifying A) becomes "A listens to an event B publishes," 
 module graph stays a DAG that passes verification.
 
 **Q: Can a module expose more than one public API package?**
+**Short:** Yes, marking a sub-package with @NamedInterface exposes it as an additional public surface beyond the base package.
+
 Yes — by default only the module's base package is the public API, but you can mark
 additional sub-packages with `@NamedInterface` to expose them as named public surfaces
 that other modules are allowed to depend on. This lets you, for example, separate a
@@ -527,6 +553,8 @@ internals hidden. Everything not in the base package or a named interface remain
 module-private.
 
 **Q: How does Modulith fit a strangler-fig or monolith-first migration strategy?**
+**Short:** A modular monolith is an ideal extraction source since its module boundaries and event contracts define a bounded context already.
+
 A modular monolith is the ideal starting point and the ideal extraction source: you
 build with enforced module boundaries and event contracts from day one, so each module
 is already a candidate bounded context. When a module needs to become a service, its
@@ -536,6 +564,8 @@ externalization to Kafka/AMQP) and extract the module behind its existing contra
 far less risky than carving boundaries out of a tangled monolith.
 
 **Q: What is event externalization in Spring Modulith?**
+**Short:** Event externalization publishes selected in-process events to an external broker like Kafka via @Externalized.
+
 It is the ability to publish selected application events not just in-process but also to
 an external broker (Kafka, AMQP/RabbitMQ) via `@Externalized`, so an in-process module
 event can simultaneously become a message other systems consume. This is the bridge
@@ -544,6 +574,8 @@ in-process events, then externalize the ones a future microservice will need, ea
 extraction without rewriting the publishing code.
 
 **Q: Does the event publication registry guarantee exactly-once handling?**
+**Short:** No, the registry guarantees only at-least-once delivery, so listeners must still be idempotent.
+
 No — it guarantees at-least-once in-process delivery: events are persisted with the
 transaction and incomplete ones are replayed on restart, but a crash after a listener's
 side effect but before the publication is marked complete will cause the listener to run

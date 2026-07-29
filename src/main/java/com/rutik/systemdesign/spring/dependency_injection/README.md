@@ -487,48 +487,78 @@ private int timeoutSeconds;
 ## 12. Interview Questions with Answers
 
 **Q: What are the three types of dependency injection in Spring and which is preferred?**
+**Short:** Constructor injection is preferred because it makes dependencies explicit, allows final fields, and fails fast at startup.
+
 Constructor injection (via constructor parameters), setter injection (via `@Autowired` setter methods), and field injection (via `@Autowired` on instance fields). Constructor injection is strongly preferred because it makes dependencies explicit (visible in method signature), allows `final` fields (immutability), enables testing without Spring (just call `new`), and provides fail-fast behavior when a required dependency is missing. Field injection is an anti-pattern despite its convenience.
 
 **Q: How does Spring resolve ambiguity when multiple beans of the same type exist?**
+**Short:** @Qualifier filters candidates first, then @Primary and name matching apply only to the survivors of that filter.
+
 A `@Qualifier` on the injection point is applied first, as a filter on the candidate set, and only the survivors go through the rest of the resolution. Within that filtered set Spring checks `@Primary`, then matches the field/parameter name (and any qualifier-suggested name) against bean names, then falls back to `@Priority` (lowest numeric value wins). If nothing selects a single candidate, `NoUniqueBeanDefinitionException` is thrown at startup. This filter-then-select ordering is exactly why `@Qualifier` beats `@Primary` — the qualifier has already removed the primary bean from consideration before `determinePrimaryCandidate()` runs. Best practice: use `@Primary` for the default implementation, `@Qualifier` for explicit overrides.
 
 **Q: What is the difference between @Autowired, @Resource, and @Inject?**
+**Short:** @Autowired resolves by type first; @Resource resolves by name first; @Inject is the most portable JSR-330 standard.
+
 `@Autowired` (Spring) resolves by type first, then by name if ambiguous; supports `required=false`. `@Resource` (JSR-250) resolves by name first, then by type; no `required` attribute. `@Inject` (JSR-330) resolves by type like `@Autowired` but without `required=false` support. For maximum portability, use `@Inject` (JSR-330). For Spring-specific features like `required=false`, use `@Autowired`. For name-based lookup, use `@Resource`.
 
 **Q: Why is field injection considered an anti-pattern?**
+**Short:** Field injection hides dependencies, prevents final fields, and makes unit testing without a Spring context fragile.
+
 Four reasons: (1) fields cannot be `final` — the bean is mutable; (2) dependencies are hidden — no constructor/method reveals them; (3) unit testing requires Spring context or Mockito `@InjectMocks` (fragile, breaks with multiple same-type dependencies); (4) violates the explicit dependency principle. IntelliJ IDEA, SonarQube, and the Spring team all recommend constructor injection. The only acceptable use of field injection is in `@SpringBootTest` integration tests where the test class itself is not a Spring bean.
 
 **Q: What happens when @Autowired cannot find a required bean?**
+**Short:** A required @Autowired dependency that cannot be found throws NoSuchBeanDefinitionException and fails the context refresh.
+
 With `required=true` (default), Spring throws `NoSuchBeanDefinitionException` at startup during `finishBeanFactoryInitialization`, immediately failing the context refresh. With `required=false` or `@Autowired(required=false)`, the field is left `null` and the application starts. `ObjectProvider<T>` is the preferred alternative to `required=false` because it is explicit about optionality and provides null-safe methods like `getIfAvailable()`.
 
 **Q: How do you inject all beans of a given type into one injection point?**
+**Short:** Declaring an injection point as List<T> collects every matching bean in the context, ordered by @Order.
+
 Declare the injection point as `List<T>` to get all matching beans in `@Order` order, or as `Map<String, T>` to get a map of bean name to bean instance. Spring automatically collects all beans of type `T` from the context and injects them. This is extremely useful for plugin patterns (strategy pattern), notification channels, validators, or processing pipelines where adding a new bean automatically plugs it in.
 
 **Q: What is ObjectProvider and when is it better than @Autowired(required=false)?**
+**Short:** ObjectProvider is better than required=false because it makes optionality explicit and supports lazy, multi-bean access.
+
 `ObjectProvider<T>` provides explicit optional injection with null-safe methods (`getIfAvailable()`, `getIfUnique()`, `stream()`). It is better than `required=false` because it is self-documenting (makes optionality explicit in the code), provides access to multiple beans, and enables lazy initialization (the bean is not requested until `getObject()` is called). It is also the correct solution for injecting prototype beans into singleton beans without the singleton becoming stale.
 
 **Q: What is the difference between @Primary and @Qualifier?**
+**Short:** @Primary sets a global default candidate on the bean itself; @Qualifier overrides it locally at one injection point.
+
 `@Primary` is declared on the bean class/method and makes that bean the default whenever type resolution is ambiguous — it is a global preference. `@Qualifier` is declared at the injection point and overrides the default for that specific injection — it is a local override. Use `@Primary` for "this is the main implementation"; use `@Qualifier` to explicitly select a specific non-primary bean at a specific injection point. Both can coexist: `@Primary` wins when no `@Qualifier` is specified.
 
 **Q: How does @Value injection work and what are its limitations?**
+**Short:** @Value resolves ${...} placeholders and #{...} SpEL but cannot inject complex bean graphs or reload at runtime.
+
 `@Value` is processed by `AutowiredAnnotationBeanPostProcessor` using `PropertySourcesPlaceholderConfigurer` (for `${...}` expressions) and `ExpressionEvaluator` (for `#{...}` SpEL expressions). Limitations: (1) cannot inject complex bean graphs (only primitives, Strings, and simple collections); (2) if a property is missing without a default, context fails to start; (3) type conversion happens automatically but fails with cryptic errors for malformed values; (4) `@Value` does not support reloading at runtime (use `@ConfigurationProperties` with `@RefreshScope` for that).
 
 **Q: Can you inject a Spring bean into a non-Spring-managed object?**
+**Short:** Injecting Spring beans into a non-Spring object requires @Configurable weaving or having a Spring factory create the object.
+
 Not directly via `@Autowired`. Options: (1) use `@Configurable` with AspectJ load-time weaving (complex setup); (2) call `SpringBeanAutowiringSupport.processInjectionBasedOnCurrentContext(this)` in the object's constructor (legacy); (3) redesign so the non-Spring object is created by a Spring-managed factory; (4) use `ApplicationContext.getBean()` (service locator, anti-pattern). The cleanest solution is usually option 3 — make the factory a Spring bean and have it create the instances.
 
 **Q: What is the effect of @Autowired on a constructor with multiple parameters?**
+**Short:** With multiple constructors, @Autowired must be placed explicitly on the one Spring should use to resolve dependencies.
+
 Since Spring 4.3, `@Autowired` is implicit on a class with a single constructor. With multiple constructors, `@Autowired` must be placed explicitly on the preferred constructor. If no constructor is annotated and there is no no-arg form, Spring falls back to the default constructor and fails with `BeanInstantiationException: No default constructor found`, wrapping a `NoSuchMethodException: <init>()`. Each constructor parameter is resolved as a separate injection point. This is why constructor injection is explicit about all required dependencies — missing one fails with a clear error at context startup.
 
 **Q: How does Spring handle circular dependencies with constructor injection?**
+**Short:** Constructor-injection circular dependencies throw BeanCurrentlyInCreationException immediately, with no automatic resolution.
+
 It throws `BeanCurrentlyInCreationException` immediately at startup. Spring tracks in-progress beans in `singletonsCurrentlyInCreation`. When bean A's constructor requires B, and B's constructor requires A, Spring detects the cycle and fails. There is no way to resolve constructor circular dependencies in Spring — the design must be changed. Common fixes: extract a third bean with shared logic, use events, or change one injection to setter/field injection (which Spring can resolve via early references, though this is still a design smell).
 
 **Q: What is the difference between @Autowired on a field vs @Autowired on a constructor when a dependency is null?**
+**Short:** Constructor injection fails fast on a missing dependency, while field injection can silently leave the field null.
+
 With field injection, if the bean is not available and `required=false`, the field stays `null` — your code must null-check everywhere. With constructor injection, there is no `required=false` (the parameter is either resolved or startup fails). This makes constructor injection safer: a missing required dependency causes an informative startup failure rather than a silent `null` that causes a `NullPointerException` during a production request at 2am.
 
 **Q: What is `ObjectProvider<T>` and when should you use it over `@Autowired(required=false)`?**
+**Short:** ObjectProvider exposes getIfAvailable, getIfUnique, and stream for optional, unique, and multiple-bean resolution scenarios.
+
 `ObjectProvider<T>` (Spring 4.3) is an injection point that provides lazy, on-demand access to a bean with safe handling of optional and multiple-bean scenarios. Unlike `@Autowired(required=false)` which silently injects null when the bean is absent, `ObjectProvider` exposes `getIfAvailable()`, `getIfUnique()`, and `stream()`. Use cases: (1) **Optional dependency** — `provider.getIfAvailable()` returns null cleanly without `NullPointerException` surprises. (2) **Deferred resolution** — `provider.getObject()` resolves the bean lazily on first call, avoiding circular dependency issues. (3) **Multiple candidates** — `provider.stream()` iterates all matching beans, ordered by `@Order`. `ObjectProvider` is preferred over `@Autowired(required=false) Optional<T>` because it works for both single and multiple beans and gives the injection point a name that is visible in IDE warnings and Spring's actuator beans report.
 
 **Q: What is `@Lazy` and how does it interact with circular dependencies?**
+**Short:** @Lazy injected as a proxy can break a constructor circular dependency by deferring the real bean until first access.
+
 `@Lazy` on a bean definition (class or `@Bean` method) defers instantiation until first access — the proxy is injected at wiring time, but the actual bean is created on first method call. On an injection point (`@Autowired @Lazy`), Spring injects a lazy-resolution proxy instead of the real bean. This can break circular dependency cycles: if A requires B (constructor) and B requires A (constructor), add `@Lazy` to one constructor parameter. Spring injects a proxy for A into B's constructor — B is fully created, then A's constructor completes using the real B, then the proxy for A in B's dependency resolves to the real A on first call. Caution: `@Lazy` on a class means it is not initialized during application startup, so startup-time validation (e.g., configuration binding errors) won't be caught until the first access. Use `@Lazy` only for genuinely expensive optional beans and circular dependency resolution of last resort.
 
 ---

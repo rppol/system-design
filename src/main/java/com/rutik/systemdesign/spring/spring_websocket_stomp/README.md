@@ -709,57 +709,93 @@ public ErrorPayload handleBadBid(IllegalBidException ex) {
 ## 12. Interview Questions with Answers
 
 **Q: Why does broadcasting a message never reach some clients once you run more than one application instance?**
+**Short:** The simple broker keeps subscriptions in one JVM's memory, so broadcasts never reach clients on other instances.
+
 The default simple broker keeps its subscription registry in that one JVM's memory, so a broadcast issued on Instance 2 only ever checks Instance 2's local subscribers. Any client connected to a different instance is invisible to it, and the message is dropped with no error. The fix is `enableStompBrokerRelay` pointed at a shared external broker (RabbitMQ or ActiveMQ) so every instance publishes and subscribes through the same place. Treat "we might run two instances" as the trigger to make this switch before launch, not after the first support ticket.
 
 **Q: What is wrong with `setAllowedOriginPatterns("*")` on a STOMP endpoint in production?**
+**Short:** A wildcard origin exposes the endpoint to cross-site WebSocket hijacking since cookies ride along with the handshake.
+
 It disables the one control that replaces same-origin policy for WebSocket, exposing the endpoint to cross-site WebSocket hijacking. A browser attaches cookies to a WebSocket handshake exactly as it would to a same-site request, and unlike `fetch`, the handshake itself isn't blocked cross-origin by the browser — so a malicious page can open a live, authenticated session against your endpoint. Always enumerate the exact origins allowed to connect. Treat this the same way you'd treat a wide-open CORS policy on a state-changing endpoint.
 
 **Q: Why does an app fail to start when you configure simple-broker heartbeats?**
+**Short:** Heartbeat values require a TaskScheduler bean to actually fire the frames, or Spring throws at startup.
+
 `setHeartbeatValue` on the simple broker registration requires a `TaskScheduler` to actually fire the heartbeat frames on schedule, and Spring throws at startup if none is supplied. The heartbeat values alone only declare the negotiated interval; something still has to wake up periodically and send the frame. Provide a small dedicated `ThreadPoolTaskScheduler` bean and pass it to `.setTaskScheduler(...)` alongside the heartbeat values.
 
 **Q: A `@MessageMapping` method has no `@SendTo` — where does its return value go?**
+**Short:** With no @SendTo, Spring rewrites the app-prefix destination to the broker prefix and broadcasts there implicitly.
+
 Spring applies a default rule: the same destination the client sent to, but with the configured application-destination prefix (typically `/app`) replaced by the first configured broker prefix (typically `/topic`). This means a `SEND` to `/app/auction.42.bid` with no `@SendTo` broadcasts to `/topic/auction.42.bid` — easy to get by accident if you assumed no destination meant no broadcast. Always add an explicit `@SendTo` when the target destination matters, rather than relying on the implicit substitution rule.
 
 **Q: Why do some clients disconnect randomly under a load balancer, but only when using SockJS's HTTP fallback transports?**
+**Short:** SockJS's fallback splits one session into requests that must hit the same instance, so it needs sticky routing.
+
 SockJS's HTTP fallback transports split one logical session into a sequence of separate HTTP requests that must all land on the same instance. Without sticky routing, request two of that sequence can hit a different instance that has never heard of the session, and the client is disconnected. This is a distinct failure from the broker-fan-out problem — fixing the broker relay does nothing for it, because the issue is connection routing, not message delivery. Configure load-balancer session affinity (cookie- or source-IP-based) specifically to keep each client's request sequence pinned to one instance.
 
 **Q: Where does an exception thrown inside a `@MessageMapping` method go if there's no explicit handler?**
+**Short:** The default StompSubProtocolErrorHandler catches it and sends back a bare STOMP ERROR frame the UI may never show.
+
 It is caught by Spring's default `StompSubProtocolErrorHandler` and converted into a bare STOMP `ERROR` frame sent back to the client. This does not crash the application or surface as an HTTP error, and many client STOMP libraries don't display `ERROR` frames anywhere visible by default. Add a `@MessageExceptionHandler` method (optionally paired with `@SendToUser`) so the failure reaches the user in a form the UI actually renders. Treat a missing exception handler here the same way you'd treat a missing `@ControllerAdvice` in a REST API — errors that vanish silently are worse than ones that are visible.
 
 **Q: What actually happens to a message between `clientInboundChannel` and `clientOutboundChannel`?**
+**Short:** A handler routes the inbound frame to brokerChannel, and the configured broker delivers it via clientOutboundChannel.
+
 An inbound STOMP frame lands on `clientInboundChannel` and is routed to a matching handler by `SimpAnnotationMethodMessageHandler`. Destinations under `/user/**` are routed by `UserDestinationMessageHandler` instead, and either way the handler's return value is then handed to `brokerChannel`, where whichever broker is configured — simple or relay — decides which sessions should receive it before it reaches `clientOutboundChannel` for delivery. This pipeline is the same regardless of which broker you choose, which is exactly why switching brokers requires no controller changes. Understanding this pipeline is the fastest way to reason about where a message "got stuck" when debugging.
 
 **Q: What is the difference between `@SubscribeMapping` and `@MessageMapping` combined with `@SendTo`?**
+**Short:** @SubscribeMapping replies once to the requester; @MessageMapping with @SendTo broadcasts durably to all subscribers.
+
 `@SubscribeMapping` answers the `SUBSCRIBE` frame itself with a one-time reply sent only to the requesting session, and it never registers with the broker's ongoing subscription registry. `@MessageMapping` plus `@SendTo` instead registers a durable broadcast: the return value goes to every current and future subscriber of that destination via the broker, indefinitely. Use `@SubscribeMapping` for "give me a snapshot when I first connect" and `@MessageMapping`/`@SendTo` for "keep everyone updated as things change."
 
 **Q: How does `SimpMessagingTemplate.convertAndSendToUser` find the right WebSocket session for a given username?**
+**Short:** UserDestinationMessageHandler rewrites per-user destinations into session-specific ones before the broker sees them.
+
 `UserDestinationMessageHandler` rewrites the logical `/user/{username}/queue/x` destination into a physical, session-unique destination for each of that user's connected sessions. This happens before the message ever reaches the broker, so one call can reach several open browser tabs for the same logged-in user simultaneously. This resolution happens entirely on the Spring side; an external broker relay never sees `/user/**` at all, only the already-resolved physical destinations. This is why per-user destinations still work correctly even when you switch from the simple broker to a broker relay.
 
 **Q: What does `enableStompBrokerRelay` actually change mechanically compared to `enableSimpleBroker`?**
+**Short:** The relay replaces the JVM-local registry with TCP connections to an external broker that owns subscription state.
+
 It replaces the JVM-local subscription registry with two TCP connections per instance to a real STOMP-speaking broker. One is a "system" connection for frames not tied to any client session, and the other is a relay connection per active client session that forwards that client's own frames. The broker itself — not any application instance — now owns the authoritative subscription state, which is what makes broadcasts correct across any number of instances. The tradeoff is an extra network hop per message and a broker cluster to operate.
 
 **Q: How does Spring Security protect the STOMP CONNECT frame, and why isn't ordinary CSRF protection enough?**
+**Short:** Origin validation guards the raw handshake, while a CSRF token on CONNECT specifically protects SockJS's HTTP fallback.
+
 Ordinary CSRF protection assumes same-origin policy blocks a forged cross-origin request, and that assumption does not hold for a raw WebSocket handshake. A malicious page can open a cross-origin `WebSocket` and the victim's cookies ride along regardless, so Origin validation at the handshake (`setAllowedOriginPatterns`) is the primary defense for that vector. Separately, Spring Security requires a valid CSRF token as a native header on the STOMP CONNECT frame specifically to protect SockJS's HTTP-based fallback transports, which genuinely are same-origin-policy-governed HTTP requests where classic CSRF applies. The two mechanisms guard two different transports of the same logical connection.
 
 **Q: How do you authenticate a WebSocket/STOMP connection when the client can't attach a custom Authorization header to the handshake?**
+**Short:** The auth token instead rides as a native STOMP header validated by an interceptor on the CONNECT frame.
+
 The browser's native `WebSocket` constructor does not expose a way to set custom headers on the Upgrade request. Token-based auth instead rides as a native STOMP header on the CONNECT frame, which is sent after the socket is already open, and a `ChannelInterceptor.preSend()` inspects `StompCommand.CONNECT`, validates the token, and calls `accessor.setUser(principal)` so the Principal applies to every subsequent frame on that session. Cookie-based session auth avoids this entirely, since cookies are attached automatically to the handshake request itself.
 
 **Q: What happens when a message exceeds `setSendBufferSizeLimit` or a client is too slow to keep up with `setSendTimeLimit`?**
+**Short:** Spring closes the session as a slow consumer rather than let its outbound buffer grow without bound.
+
 Spring treats that session as a slow consumer and closes it rather than letting the outbound buffer grow without bound. `setSendBufferSizeLimit` (default 512 KB) caps how much unsent data can queue for one session, and `setSendTimeLimit` (default 10 seconds) caps how long a send can take before the session is abandoned. This protects the server's memory from one badly-behaved or disconnected client at the cost of forcibly dropping that client's connection. Size both limits to your real traffic rather than leaving unexamined defaults in a high-throughput deployment.
 
 **Q: Why does Spring negotiate STOMP heartbeats instead of relying on TCP keep-alive or WebSocket ping/pong alone?**
+**Short:** STOMP heartbeats give an application-level liveness signal that TCP keep-alive and WebSocket ping/pong cannot reliably provide.
+
 TCP keep-alive operates on a timescale of minutes by default and is frequently disabled or unreachable through NATs and proxies. WebSocket ping/pong isn't even exposed to browser JavaScript, so neither mechanism reliably proves the application layer is still responsive. STOMP's `heart-beat:<send-ms>,<receive-ms>` header, negotiated during CONNECT, instead gives the framework an application-level, configurable-interval signal that both sides are actually alive, independent of what the network layer is doing. This is also why SockJS runs its own, separately-scheduled heartbeat — it's protecting a different layer (the HTTP transport) for a different reason (proxy idle timeouts).
 
 **Q: Can you point `enableStompBrokerRelay` at Kafka the way `spring_messaging` uses Kafka for event streaming?**
+**Short:** No, the relay requires a broker that natively speaks STOMP, such as RabbitMQ or ActiveMQ, and Kafka does not.
+
 No — the relay requires a broker that natively speaks the STOMP protocol, such as RabbitMQ (via its `rabbitmq_stomp` plugin) or ActiveMQ/Artemis, and Kafka does not implement STOMP. Using Kafka for WebSocket fan-out would require a separate STOMP-to-Kafka bridge component, which is unusual and adds an extra moving part most teams avoid. If a system already standardizes on Kafka for other messaging, it's still common to run a small RabbitMQ instance purely for the WebSocket broker-relay role.
 
 **Q: How does WebFlux's reactive WebSocket support differ from the `WebSocketHandler` covered in this module?**
+**Short:** WebFlux's reactive handler runs on the Netty event loop with Flux streams, incompatible with the Servlet-stack handler.
+
 WebFlux ships its own `org.springframework.web.reactive.socket.WebSocketHandler`, built around `Flux<WebSocketMessage>` instead of imperative callback methods. It runs on the Netty/reactive-stack event loop rather than a Servlet thread per connection, and the two are not interchangeable — a Servlet-stack `@Controller` cannot use the reactive handler, and vice versa — though STOMP messaging itself is Servlet-stack-oriented in the mainstream Spring configuration shown here. See [Spring WebFlux](../spring_webflux/README.md) for the reactive programming model this reactive handler is built on.
 
 **Q: When would you reach for the low-level `WebSocketHandler` instead of STOMP messaging for a new real-time feature?**
+**Short:** Use the low-level handler for one dedicated channel; reach for STOMP once multiple topics or per-user delivery are needed.
+
 Reach for it when the feature is genuinely one dedicated channel with its own framing, not a general pub/sub surface. Binary game-state sync, WebRTC signaling exchange, and a proprietary streaming protocol are good examples, where STOMP's destinations, subscriptions, and broker abstraction would add configuration without adding value. STOMP earns its complexity when you need multiple logical topics, per-user targeted delivery, or broadcast to an open-ended set of subscribers; a single-purpose channel usually doesn't need any of that. Reach for `TextWebSocketHandler` first and only add STOMP once a second destination or a broadcast requirement actually shows up.
 
 **Q: How do you test a `@MessageMapping` STOMP endpoint in an integration test?**
+**Short:** Connect a real STOMP client to an embedded server and assert on frames received, rather than mocking the protocol.
+
 Start the application with a real embedded server and connect using a real STOMP client library rather than mocking the protocol. Use `@SpringBootTest(webEnvironment = RANDOM_PORT)` with `WebSocketStompClient` backed by `StandardWebSocketClient`, subscribe to the destination under test, send a frame, and assert on what arrives via a `BlockingQueue` or `CompletableFuture` populated by the test's own `StompFrameHandler`. For the broker-relay path specifically, use Testcontainers to run a real RabbitMQ instance rather than mocking the relay, since the relay's TCP-level behavior is exactly the part most likely to break in production. Testing the low-level `WebSocketHandler` API is simpler still — connect with a plain `WebSocketClient` and assert on raw `TextMessage` payloads.
 
 ---

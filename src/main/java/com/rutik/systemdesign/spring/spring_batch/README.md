@@ -558,27 +558,43 @@ Spring Boot 3 auto-configures Spring Batch when `spring-boot-starter-batch` is o
 ## 12. Interview Questions with Answers
 
 **Q1: What is the chunk-oriented processing model in Spring Batch, and why does it matter for transactional safety?**
+**Short:** Chunk-oriented processing commits items in fixed-size batches, so a write failure only rolls back the current chunk.
+
 In chunk-oriented processing, items flow through three phases — `ItemReader`, `ItemProcessor`, `ItemWriter` — in configurable lots called chunks (e.g., `chunk(500)`). The framework reads and processes 500 items, then writes them all in a single transaction. If the write fails, only those 500 items roll back; previously committed chunks (items 1–499, 500–999) are not affected. This is fundamentally different from wrapping an entire million-row loop in one transaction (which holds locks for minutes) or processing one item per transaction (which creates 1M DB round trips). Chunk size is the key tuning parameter: too small = excessive commit overhead; too large = big rollback penalty on failure.
 
 **Q2: What is `JobRepository` and why is it central to Spring Batch's restartability?**
+**Short:** JobRepository persists batch metadata after every chunk, letting a restarted job resume from the last saved position.
+
 `JobRepository` is the persistence layer that stores all batch metadata in a relational database (tables: `BATCH_JOB_INSTANCE`, `BATCH_JOB_EXECUTION`, `BATCH_JOB_EXECUTION_PARAMS`, `BATCH_STEP_EXECUTION`, `BATCH_STEP_EXECUTION_CONTEXT`). After every chunk, Spring Batch calls `ItemStream.update(ExecutionContext)` and persists the result to `BATCH_STEP_EXECUTION_CONTEXT`. On restart, `ItemStream.open(ExecutionContext)` reads the saved state and skips already-processed items. Without a `JobRepository`, a job is stateless — there is no way to resume. The database also provides auditing: which jobs ran, when, how many items were processed, what failed.
 
 **Q3: What is the difference between `@StepScope` and `@JobScope`, and when do you need each?**
+**Short:** @StepScope creates a bean per StepExecution for step-local SpEL; @JobScope creates one per JobExecution shared across steps.
+
 `@StepScope` is a Spring Batch custom scope that creates a new bean instance per `StepExecution`. It enables SpEL late-binding of `jobParameters` and `stepExecutionContext` — the values are only available when the step starts, not at application context refresh. `@JobScope` creates a new instance per `JobExecution` — available for beans that need `jobParameters` but are shared across steps. Typical usage: `@StepScope` for `ItemReader`/`ItemWriter` that need the step's partition context (`stepExecutionContext['minId']`); `@JobScope` for a shared `ItemProcessor` that needs a `jobParameter` but is reused by multiple steps. Without the appropriate scope, SpEL resolves to null because the execution context does not yet exist.
 
 **Q4: Describe the skip and retry policies. How does Spring Batch handle a bad item that causes an exception?**
+**Short:** Skip logs and discards a bad item up to a limit; retry re-attempts a failing chunk, then scans items to isolate it.
+
 `faultTolerant().skip(ExceptionClass.class).skipLimit(N)` configures item-level skipping. When an exception occurs during read or process, Spring Batch increments the skip count and marks the item as skipped (logged to `BATCH_STEP_EXECUTION.SKIP_COUNT`). `faultTolerant().retry(ExceptionClass.class).retryLimit(M).backOffPolicy(policy)` configures writer-level retry: if the writer throws a retryable exception, the entire chunk is retried up to M times with the specified back-off. If all retries are exhausted, Spring Batch performs a "binary search" — it re-processes each item in the chunk individually to identify the bad one, then skips it (up to `skipLimit`). This item-scan pass ensures bad items are isolated without re-committing all other items.
 
 **Q5: What causes `JobInstanceAlreadyCompleteException` and how do you prevent it for repeatable jobs?**
+**Short:** JobInstanceAlreadyCompleteException fires when the same Job and parameters already completed, needing a time-varying parameter to rerun.
+
 `JobInstanceAlreadyCompleteException` is thrown when `JobLauncher.run()` is called with `Job + JobParameters` that match an already-COMPLETED `JobInstance`. Spring Batch uses this uniqueness to guarantee idempotency: re-running a completed job with the same parameters is rejected to prevent accidental double-processing. To run the same logical job repeatedly (nightly batch): add a time-varying parameter like `addLong("run.id", System.currentTimeMillis())` or `addString("runDate", today)`. For true idempotency (re-runnable for the same date), use `JobParametersIncrementer` to automatically add a sequence number to the parameters.
 
 **Q6: How does partitioning improve throughput, and what is the difference between local and remote partitioning?**
+**Short:** Local partitioning runs sub-ranges on threads in one JVM; remote partitioning distributes them to separate worker JVMs via a broker.
+
 Partitioning splits a large dataset into N non-overlapping sub-ranges (partitions), each processed by an independent `StepExecution`. Local partitioning (`TaskExecutorPartitionHandler`) runs all partition steps in parallel on N threads of the same JVM — limited to available CPU cores. Remote partitioning runs partition steps on separate JVM instances (workers), communicating via a message broker (JMS/RabbitMQ/Kafka). Remote partitioning allows horizontal scale-out: a dataset of 1 billion records can be spread across 100 worker pods, each handling 10 million. Each worker's progress is independently tracked in `JobRepository`, so individual partitions can be restarted without reprocessing the others.
 
 **Q7: What is `JdbcPagingItemReader` and why must the sort key be unique?**
+**Short:** JdbcPagingItemReader pages via keyset pagination, and a non-unique sort key can duplicate or skip rows across page boundaries.
+
 `JdbcPagingItemReader` reads a database table in pages using keyset (cursor-based) pagination. It queries `SELECT ... WHERE id > :lastId ORDER BY id LIMIT pageSize` — using the sort key's last value to start the next page. If the sort key is not unique (e.g., `status` column), page boundaries may overlap or gap: if multiple rows have `status = 'PENDING'` that straddle a page boundary, some rows may appear in two pages (duplicates) or be missed after a re-sort. Always append a unique primary key as the final sort dimension: `Map.of("createdAt", ASCENDING, "id", ASCENDING)`. On restart, the reader re-reads `lastReadCount` from `ExecutionContext` and reconstructs the correct WHERE clause.
 
 **Q8: How do you test a Spring Batch step in isolation without running the full job?**
+**Short:** launchStep() from JobLauncherTestUtils runs a single named step in isolation, without executing the rest of the job.
+
 ```java
 @SpringBatchTest
 @SpringBootTest(classes = BatchConfig.class)
@@ -605,15 +621,23 @@ class ImportStepTest {
 `@SpringBatchTest` registers `JobLauncherTestUtils` and `JobRepositoryTestUtils`. `launchStep()` executes only the named step, not the full job — isolating the test from upstream/downstream steps.
 
 **Q9: What happens to the current chunk's transaction when an ItemWriter throws a non-retryable exception?**
+**Short:** A non-retryable writer exception rolls back the whole chunk's transaction and can trigger item-scanning to isolate the bad record.
+
 The chunk's transaction is rolled back. All write operations for that chunk (typically `chunk-size` items) are undone. Spring Batch increments `StepExecution.rollbackCount`. If the exception is classified as skippable and the skip limit is not exceeded, Spring Batch attempts to identify the offending item via item-scanning (retry each item individually). Items that succeed in isolation are committed one-by-one; the single offending item is skipped. If the exception is not skippable, the `StepExecution` is marked `FAILED`, the `JobExecution` is marked `FAILED`, and processing stops.
 
 **Q10: How does `CompositeItemProcessor` work, and what is a `ClassifierCompositeItemWriter`?**
+**Short:** CompositeItemProcessor chains processors sequentially, while ClassifierCompositeItemWriter routes items to different writers by strategy.
+
 `CompositeItemProcessor<I, O>` chains multiple `ItemProcessor`s sequentially: the output of processor-1 becomes the input of processor-2. Type alignment is required (`O` of step N must be assignable to `I` of step N+1). Use case: validate → enrich → transform, where each concern is in its own processor class. `ClassifierCompositeItemWriter<T>` routes items to different `ItemWriter`s based on a `Classifier<T, ItemWriter<T>>` — a strategy function. Use case: write premium customers to PostgreSQL and standard customers to Redis, both in the same step. This avoids forking the pipeline into two steps when the routing logic is item-level.
 
 **Q11: What is remote chunking and when would you choose it over remote partitioning?**
+**Short:** Remote chunking distributes processing and writing to workers over a queue while one manager reads; remote partitioning distributes reading too.
+
 In remote chunking, the manager step runs the `ItemReader` and sends items over a message queue (JMS/RabbitMQ) to worker JVMs, which run the `ItemProcessor` and `ItemWriter`. The manager waits for all workers to acknowledge before committing. Use remote chunking when the reader is a bottleneck-free singleton (e.g., one file) but processing is expensive and horizontally scalable (e.g., ML enrichment, external API calls). In remote partitioning, both reading AND processing happen on workers — the manager only partitions the key space. Use remote partitioning when the dataset is in a horizontally partitioned store (sharded DB, partitioned Kafka topic) and the reader itself can be distributed. Remote chunking requires exactly-once delivery guarantees from the message broker; remote partitioning requires only the partition key assignment to be correct.
 
 **Q12: How do you run a Spring Batch job on a schedule without a separate scheduler?**
+**Short:** A Spring Batch job can be scheduled with a plain @Scheduled method that calls jobLauncher.run() with fresh JobParameters.
+
 ```java
 @Scheduled(cron = "0 0 2 * * *")   // 2:00 AM every day
 public void runDailyImport() throws Exception {
@@ -630,12 +654,18 @@ public void runDailyImport() throws Exception {
 Alternatively, use `spring.batch.job.enabled=true` (Spring Boot auto-launches jobs at startup) or `spring.batch.job.name=myJob` for targeting. For production, prefer an external scheduler (Quartz, Spring Cloud Data Flow, or Kubernetes CronJob) to provide retry-on-crash, distributed locking (avoid double-trigger), and a UI for monitoring.
 
 **Q13: What are `ItemStream` and `ExecutionContext`, and why are they important for restartability?**
+**Short:** ItemStream's open/update/close persists reader and writer progress into ExecutionContext so a restart can resume mid-step.
+
 `ItemStream` is an interface with three methods: `open(ExecutionContext)`, `update(ExecutionContext)`, `close()`. `ExecutionContext` is a key-value map persisted per `StepExecution`. On startup, `open()` is called with the saved context (may be empty for a new execution, or populated for a restart). After each chunk, `update()` is called — the reader/writer serialises its progress (e.g., "I've read 5,000 records") into the context, which is written to `BATCH_STEP_EXECUTION_CONTEXT`. On restart, `open()` receives the saved context and can fast-forward to the correct starting position. Most built-in readers (`FlatFileItemReader`, `JdbcPagingItemReader`) implement `ItemStream` automatically. Custom readers must implement it to enable restartability.
 
 **Q14: What is the default behavior of Spring Boot 3's batch auto-configuration, and what changed from Spring Batch 4?**
+**Short:** Spring Boot 3's Batch 5 auto-config removes @EnableBatchProcessing and the *BuilderFactory classes and disables job-at-startup.
+
 Spring Boot 3 + Spring Batch 5 auto-configuration changes: (1) `@EnableBatchProcessing` is no longer needed — Spring Boot auto-creates `JobRepository`, `JobLauncher`, `PlatformTransactionManager`; adding `@EnableBatchProcessing` DISABLES the auto-config (you take full manual control); (2) `spring.batch.jdbc.initialize-schema=always|embedded|never` replaces `spring.batch.initialize-schema`; (3) `JobBuilderFactory` and `StepBuilderFactory` are removed — use `JobBuilder(name, jobRepository)` and `StepBuilder(name, jobRepository)` directly; (4) `spring.batch.job.enabled=false` (default in Boot 3) — jobs no longer run automatically at startup unless enabled. The key migration action for Boot 2 → Boot 3: remove `@EnableBatchProcessing`, replace `*Factory` builders, update property keys.
 
 **Q15: How would you implement an idempotent batch job that can safely re-run for the same date without double-processing?**
+**Short:** An idempotent batch job keys JobParameters on the business date and uses upsert writes so reruns never duplicate records.
+
 Idempotency in batch requires: (1) **unique `JobParameters`** keyed on the business date (`{runDate=2024-01-15}`) so Spring Batch treats each date as one `JobInstance`; (2) a completed `JobInstance` for that date is rejected on re-launch — no double-run is possible; (3) if the job fails partway and is restarted, the same `{runDate=2024-01-15}` parameters re-use the existing `JobInstance` and resume from the checkpoint — no reprocessing of already-committed chunks; (4) for the `ItemWriter`, use `INSERT ... ON CONFLICT DO UPDATE` (PostgreSQL) or `MERGE` (SQL Server/Oracle) to make individual writes idempotent against DB-level duplicates; (5) add `skipLimit` to skip malformed records that would otherwise cause repeated failures without progress. This combination ensures that regardless of how many times the job is restarted, each record is written exactly once.
 
 ---

@@ -719,48 +719,78 @@ public class FilterConfig {
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between a Servlet Filter and a Spring HandlerInterceptor?**
+**Short:** A Filter runs at the servlet container level before DispatcherServlet, while a HandlerInterceptor runs after handler resolution.
+
 A Filter operates at the servlet container level, before DispatcherServlet processes the request, and can intercept any HTTP request regardless of whether Spring handles it. A HandlerInterceptor operates inside DispatcherServlet, after Spring has resolved the target handler, giving access to `HandlerMethod` and its annotations. Filters use the `doFilter(request, response, chain)` method; interceptors use three hooks: `preHandle`, `postHandle`, and `afterCompletion`. Use filters for authentication and CORS; use interceptors when you need controller-level metadata.
 
 **Q: Why does Spring Security use filters instead of interceptors?**
+**Short:** Filters run before any handler resolution and apply uniformly to every request, including ones interceptors never see.
+
 Spring Security must intercept requests before any handler resolution happens — including before any Spring MVC route is matched. If an unauthenticated request reaches DispatcherServlet, Spring MVC might expose information through error handling before the interceptor even fires. Additionally, filters apply uniformly to all requests (static files, actuator, error pages), while interceptors only apply to DispatcherServlet-mapped requests. `FilterChainProxy` is a single filter that manages a complete security filter chain independently of Spring MVC.
 
 **Q: When is postHandle NOT called?**
+**Short:** `postHandle` is skipped whenever the handler method throws an exception, jumping straight to `afterCompletion`.
+
 `postHandle` is not called when the handler method throws an exception. Spring MVC skips `postHandle` and jumps directly to `afterCompletion`. This means any cleanup or resource release that relies on `postHandle` will be silently skipped on error paths. Always use `afterCompletion` for cleanup code, checking the `Exception ex` parameter for null to detect whether the request succeeded.
 
 **Q: What is OncePerRequestFilter and why is it needed?**
+**Short:** It guarantees a filter's logic executes exactly once per logical request, even across internal forward or include dispatches.
+
 `OncePerRequestFilter` guarantees that a filter's logic executes exactly once per logical HTTP request, even if the servlet container dispatches the request multiple times (e.g., via `RequestDispatcher.forward()` or `RequestDispatcher.include()`, or async dispatch). It achieves this by setting a boolean attribute on the request and checking it at the start of `doFilter`. Without this guard, a filter that performs authentication or request ID injection could execute two or three times on a single logical request.
 
 **Q: How do you control the order of multiple filters in a Spring Boot application?**
+**Short:** Use `@Order`/`Ordered` on filter beans, `FilterRegistrationBean.setOrder()`, or `HttpSecurity.addFilterBefore/After/At()` for security filters.
+
 Three mechanisms exist: (1) Implement `Ordered` or annotate with `@Order(n)` on a filter bean — lower numbers execute first; (2) Use `FilterRegistrationBean.setOrder(n)` for explicit registration without the `@Component` annotation — this also allows URL pattern restrictions; (3) For Spring Security filters, use `HttpSecurity.addFilterBefore/After/At()` to position filters relative to existing security filter positions. Avoid mixing `@Order` and `FilterRegistrationBean` for the same filter — the `FilterRegistrationBean` order takes precedence.
 
 **Q: How do you read the request body in a filter without breaking @RequestBody deserialization?**
+**Short:** Wrap the request in a `ContentCachingRequestWrapper` and read the cached bytes only after `chain.doFilter()` returns.
+
 Wrap the request in a `ContentCachingRequestWrapper` and pass the wrapper to `chain.doFilter()`. The wrapper intercepts reads by downstream components (including Jackson's `HttpMessageConverter`) and caches the bytes. After `chain.doFilter()` returns, call `wrapper.getContentAsByteArray()` to read the cached body. The key insight is that the body is available for inspection only after the chain completes, not before, because the wrapper caches bytes as they are read — not upfront. If you need the body before the chain executes, you must read the original stream yourself and create a new `HttpServletRequestWrapper` that replays those bytes.
 
 **Q: What happens if you call chain.doFilter() with a ContentCachingResponseWrapper but forget to call copyBodyToResponse()?**
+**Short:** The client receives a 200 response with the correct headers but a completely empty body.
+
 The client receives an empty response body. `ContentCachingResponseWrapper` intercepts writes to the response output stream and stores them in an internal buffer instead of writing them to the actual response. `copyBodyToResponse()` flushes that buffer to the real response. This is a silent bug — the status code is correct, Content-Type is set, but the body is empty. Load balancer health checks will often still pass (HTTP 200 with no body), masking the bug in monitoring.
 
 **Q: How does DelegatingFilterProxy work?**
+**Short:** It is a servlet filter that looks up a named Spring bean and delegates every `doFilter()` call to it lazily, per request.
+
 `DelegatingFilterProxy` is a `jakarta.servlet.Filter` registered with the servlet container that looks up a Spring bean by name from the `ApplicationContext` and delegates all `doFilter()` calls to it. This bridges the lifecycle gap: the servlet container initializes filters at startup before the Spring context is ready, but `DelegatingFilterProxy` defers the actual bean lookup to the first request. Spring Security's `FilterChainProxy` is registered through `DelegatingFilterProxy` under the bean name `"springSecurityFilterChain"`.
 
 **Q: Can an interceptor's preHandle method access path variables?**
+**Short:** Not directly; they must be read from the `HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE` request attribute instead.
+
 Not directly from the `HttpServletRequest`. Path variables are extracted by Spring MVC after routing and stored in a request attribute: `request.getAttribute(HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE)`. In `preHandle`, this attribute is already populated because handler mapping has completed before the interceptor fires. Cast the result to `Map<String, String>` to access individual path variable values.
 
 **Q: How do you exclude specific URL patterns from a HandlerInterceptor?**
+**Short:** Call `excludePathPatterns()` in `WebMvcConfigurer.addInterceptors()`, which is evaluated before any include pattern.
+
 Use `InterceptorRegistration.excludePathPatterns()` in `WebMvcConfigurer.addInterceptors()`. The exclusion patterns use Ant-style path matching: `"/api/public/**"` excludes all sub-paths, `"/api/v1/health"` excludes a specific path. Exclusion is evaluated before `addPathPatterns`, so excluded paths are always skipped regardless of include patterns. For complex conditional logic, implement the check inside `preHandle` itself using `shouldNotFilter` semantics.
 
 **Q: What is the difference between preHandle returning false vs. throwing an exception?**
+**Short:** Returning `false` silently halts the chain with whatever you wrote, while throwing routes through the normal exception-handling pipeline.
+
 Returning `false` from `preHandle` halts the handler chain — DispatcherServlet stops processing and returns the response as-is (typically empty 200 if you haven't written anything, or whatever you wrote in `preHandle`). You are responsible for writing a meaningful error response before returning `false`. Throwing an exception triggers Spring MVC's exception handling pipeline (`@ExceptionHandler`, `@ControllerAdvice`) and results in a structured error response. For API error responses with proper JSON bodies and status codes, throw an appropriate exception rather than returning `false`.
 
 **Q: What is `OncePerRequestFilter` and why is it preferred over implementing `Filter` directly?**
+**Short:** It uses an `alreadyFiltered` request attribute and dispatch-type checks to guarantee single execution, unlike a plain `Filter`.
+
 `OncePerRequestFilter` (Spring's abstract class) guarantees the filter executes exactly once per request, even when the request is forwarded internally via `RequestDispatcher.forward()`. A plain `jakarta.servlet.Filter` is called on every dispatch type it is mapped to — including `FORWARD` and `INCLUDE` dispatches within the same request, which means it runs multiple times for a request involving `RequestDispatcher`. `OncePerRequestFilter` uses two mechanisms: it marks the request with an `alreadyFiltered` attribute on first execution and skips if the attribute is already set (this covers `FORWARD`/`INCLUDE`), and `skipDispatch()` bypasses `ASYNC` and `ERROR` dispatches outright because `shouldNotFilterAsyncDispatch()` and `shouldNotFilterErrorDispatch()` both return `true` by default. Override `shouldNotFilter(HttpServletRequest)` to exclude specific requests (e.g., static resources). Almost all Spring Security filters extend `OncePerRequestFilter` for this reason.
 
 **Q: How do you measure and record per-request latency in a `Filter` without blocking the response body write?**
+**Short:** Prefer the auto-configured `ServerHttpObservationFilter`, which times `http.server.requests` correctly attributed to the URI template.
+
 Timing in a filter wraps `chain.doFilter(request, response)` with `System.nanoTime()` measurements. However, for streaming responses, the response body write happens after `doFilter` returns — the `afterCompletion` timing in an interceptor or a `ContentCachingResponseWrapper` is needed for body size. For simple request latency (time to send the last byte of headers + body): use a `ContentCachingResponseWrapper` in the filter to buffer the response, record `nanoTime()` before and after `doFilter`, then write the cached response. For real production latency instrumentation, do not hand-roll it: Spring Framework's `ServerHttpObservationFilter` is auto-configured by Spring Boot Actuator and is what produces the `http.server.requests` metric. It is an `OncePerRequestFilter` that opens an `Observation` around `filterChain.doFilter` and stops it in a `finally` block, and because it defers tagging until the handler has been resolved it attributes the timing to the right `uri` template rather than the raw path. Customise the tags by contributing a `DefaultServerRequestObservationConvention` subclass instead of writing your own timing filter.
 
 **Q: What happens to a Spring Security filter that is ordered too early in the security filter chain?**
+**Short:** A filter placed before `SecurityContextHolderFilter` sees a null `SecurityContext` because authentication hasn't run yet.
+
 Spring Security's `SecurityFilterChain` is itself a `Filter` registered in the Servlet filter chain at `SecurityProperties.DEFAULT_FILTER_ORDER` (-100 by default). Within the security chain, filters have a fixed order defined by `FilterOrderRegistration`. If you insert a custom filter too early (e.g., `addFilterBefore(myFilter, UsernamePasswordAuthenticationFilter.class)`) when your filter depends on the `SecurityContext` being populated, the context will not be set yet — `SecurityContextHolder.getContext().getAuthentication()` returns null. The correct pattern: know the security filter order, place authentication-dependent filters after `SecurityContextHolderFilter` (which restores the context from the session). Use `HttpSecurity.addFilterAfter` / `addFilterBefore` with precise reference filters.
 
 **Q: How does `AsyncContext` and async servlet processing affect `HandlerInterceptor.afterCompletion`?**
+**Short:** `afterCompletion` fires on a different thread than `preHandle` for async requests, so thread-local state like MDC does not carry over.
+
 When a controller starts async processing (`DeferredResult`, `Callable`, `@Async` with `SseEmitter`), the servlet container thread that handled the request is released before the response is committed. Spring MVC's `HandlerInterceptor.afterCompletion` is called when the response is finally committed — but on a *different* thread than `preHandle` and `postHandle`. Implication: any thread-local state set in `preHandle` (e.g., in `MDC`) is not automatically available in `afterCompletion` unless you use `CallableProcessingInterceptor` or `DeferredResultProcessingInterceptor`, which provide explicit callbacks for the async processing lifecycle. For accurate async request timing, instrument `DeferredResult.setResult()` or the `Callable` body directly rather than relying on `afterCompletion` timing.
 
 ---

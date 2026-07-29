@@ -424,48 +424,63 @@ public class AppConfig { }
 ## 12. Interview Questions with Answers
 
 **Q: What is the property source priority order in Spring Boot?**
+**Short:** Command-line arguments win over every other source, down to @PropertySource and default properties.
 From highest to lowest: command-line arguments, SPRING_APPLICATION_JSON env var, servlet init params, JNDI, Java system properties (-D flags), OS environment variables, profile-specific config files outside JAR, profile-specific files inside JAR, base application.properties outside JAR, base application.properties inside JAR, @PropertySource annotations, default properties. Command-line args win, meaning `--spring.datasource.password=...` overrides everything else. OS environment variables override packaged config files, which is the standard pattern for Kubernetes secrets.
 
 **Q: What is relaxed binding and how does it help with Kubernetes secrets?**
+**Short:** It maps multiple property name formats like camelCase and UPPER_SNAKE_CASE to the same Java field.
 Relaxed binding maps multiple property name formats to the same Java field. `maxConnections`, `max-connections`, `max_connections`, and `MAX_CONNECTIONS` all bind to a Java field named `maxConnections`. This is critical for Kubernetes: Kubernetes Secret env vars must use uppercase and underscores (`SPRING_DATASOURCE_PASSWORD`), but Java code uses camelCase (`password`) under prefix `spring.datasource`. Relaxed binding handles the translation automatically. `@Value` does NOT support relaxed binding — only `@ConfigurationProperties`.
 
 **Q: What is the difference between profile-specific files inside and outside the JAR?**
+**Short:** Files outside the JAR on the filesystem override the packaged defaults inside it.
 Profile-specific files outside the JAR (filesystem, current directory) have higher priority than those inside the JAR. This allows operations teams to place an `application-production.properties` file alongside the JAR to override packaged defaults. Spring Boot checks `./config/`, `./`, then `classpath:/config/`, then `classpath:/` in order. The convention enables the same JAR to be configured differently per environment without rebuilding.
 
 **Q: How does @ConstructorBinding work and why is it preferred for immutable classes?**
+**Short:** It binds properties through constructor parameters instead of setters, enabling safe final fields.
 `@ConstructorBinding` (Spring Boot 2.x) or automatic detection of single constructor (Spring Boot 3.x) tells Spring to bind properties via constructor parameters instead of setters. This enables `final` fields — the bound object is immutable after creation. Immutable configuration is safer: no code can accidentally modify configuration post-initialization, and the object can be safely shared across threads. In Spring Boot 3.x, if `@ConfigurationProperties` class has only one constructor, `@ConstructorBinding` is implicit.
 
 **Q: What is spring.config.import and how does it replace bootstrap.yml?**
+**Short:** It imports additional config sources like configserver: directly into the main context, replacing bootstrap.yml.
 `spring.config.import` (Spring Boot 2.4+) is a property that specifies additional configuration files or sources to import. It supports file paths, classpath resources, and protocol handlers like `configserver:` (Spring Cloud Config) and `vault:` (Vault). Before 2.4, Spring Cloud Config required a separate `bootstrap.yml` file loaded by a bootstrap ApplicationContext. `spring.config.import=configserver:` replaces this, importing Config Server properties into the main context with proper priority ordering. It also supports `optional:` prefix to silently skip missing imports.
 
 **Q: How does @ConfigurationProperties validation work?**
+**Short:** Adding @Validated with JSR-303 annotations runs Bean Validation at startup and fails fast on bad config.
 Add `@Validated` to the `@ConfigurationProperties` class and JSR-303 annotations (`@NotNull`, `@Min`, `@Max`, `@NotEmpty`, `@Pattern`) to fields. Spring Boot runs Bean Validation on bound properties during context startup. A validation failure throws `BindValidationException` with the full list of constraint violations, preventing the application from starting with invalid configuration. This is the correct "fail fast" behavior for misconfiguration. Without `@Validated`, invalid values like `poolSize=-5` or `url=null` are silently accepted and cause failures much later.
 
 **Q: Can YAML files be used with @PropertySource?**
+**Short:** No, @PropertySource only parses .properties files unless you register a custom YAML-aware factory.
 No. `@PropertySource` only supports `.properties` files by default. It uses `PropertiesPropertySourceLoader` which parses key=value format. YAML requires `YamlPropertySourceLoader`. You can register a custom `PropertySourceFactory` on `@PropertySource` to handle YAML: `@PropertySource(value="classpath:extra.yml", factory=YamlPropertySourceFactory.class)`. Alternatively, use `spring.config.import=classpath:extra.yml` (Boot 2.4+), which uses the full config loading pipeline supporting YAML natively.
 
 **Q: What is the @ConfigurationProperties metadata processor and why should you use it?**
+**Short:** It generates metadata JSON at compile time that powers IDE autocompletion and documentation for properties.
 Add `spring-boot-configuration-processor` to build dependencies (optional compile scope). It runs at compile time and generates `META-INF/spring-configuration-metadata.json` describing all `@ConfigurationProperties` classes. IDE plugins (IntelliJ, Eclipse) read this metadata to provide: property name autocompletion in `application.properties`, documentation tooltips showing field descriptions, type information, and default values. Without this, application.properties is edited without any IDE assistance. For library/starter authors, this metadata is what makes their configuration discoverable and documented.
 
 **Q: How do multi-document YAML files work with profiles?**
+**Short:** Documents separated by --- can each be activated per profile, with later documents overriding earlier keys.
 A YAML file can contain multiple documents separated by `---`. Each document can be conditionally activated using `spring.config.activate.on-profile`. When a profile is active, only the matching documents (plus documents with no activation condition) are applied. Documents are applied in order — later documents override earlier ones for the same key. This allows a single `application.yml` to contain all environment configurations, which some teams prefer over multiple files. Multi-document `.properties` files are not supported; only YAML supports this.
 
 **Q: What is EnvironmentPostProcessor and when would you use it?**
+**Short:** It is an SPI that manipulates the Environment before the ApplicationContext is created, e.g. for loading secrets.
 `EnvironmentPostProcessor` is an SPI that runs before the ApplicationContext is created, allowing programmatic manipulation of the `ConfigurableEnvironment`. Register via `spring.factories` (key: `org.springframework.boot.env.EnvironmentPostProcessor`) or `META-INF/spring/...` (Boot 3.x). Use cases: loading secrets from Vault or AWS Secrets Manager before other config is bound (ensuring secrets are available at highest priority), decrypting encrypted property values, or adding environment-specific property sources based on system detection.
 
 **Q: What does /actuator/env expose and what are the security risks?**
+**Short:** It exposes every property source's values with only pattern-based, non-exhaustive secret masking.
 `/actuator/env` exposes the full `Environment` including all property source values, showing which property source provides each property. The response masks values matching patterns like `*password*`, `*secret*`, `*key*` with `******`. However, this masking is pattern-based and not exhaustive — less obvious secret names may be exposed. In production, always secure actuator endpoints with Spring Security: `management.endpoints.web.exposure.include=health,info` (whitelist), and require authentication for the rest via `SecurityFilterChain`. Never expose `/actuator/env` without authentication.
 
 **Q: What is relaxed binding in `@ConfigurationProperties` and what are the four binding conventions it supports?**
+**Short:** It matches kebab-case, upper-snake-case, camelCase, and underscore property keys to one Java field.
 Relaxed binding means Spring automatically matches property keys in multiple formats to the same `@ConfigurationProperties` field. For a field `private String myApiKey`, all four formats bind to it: (1) `my.api-key` (kebab-case — recommended for `.yml`/`.properties` files), (2) `MY_API_KEY` (upper-case with underscore — OS environment variables, also allows `MY.API_KEY`), (3) `my.apiKey` (camelCase — older convention), (4) `my.api_key` (underscore — legacy). This relaxed binding is crucial for containerised deployments: `MY_DATABASE_URL=jdbc:...` in a Kubernetes Secret mounts as an environment variable and maps cleanly to `spring.datasource.url` without any custom mapping code.
 
 **Q: What is `@ConfigurationPropertiesScan` and when is it needed?**
+**Short:** It auto-registers every @ConfigurationProperties class in a package without an explicit @EnableConfigurationProperties.
 Without `@ConfigurationPropertiesScan`, `@ConfigurationProperties` classes are only registered if they have `@Component` (not recommended) or are referenced via `@EnableConfigurationProperties(MyProps.class)`. `@ConfigurationPropertiesScan("com.example")` (Spring Boot 2.2+, analogous to `@ComponentScan` for `@ConfigurationProperties`) automatically registers all `@ConfigurationProperties` classes found in the specified packages without needing `@EnableConfigurationProperties` per class. In practice: use `@ConfigurationPropertiesScan` at the application level (alongside `@SpringBootApplication`) for automatic discovery; use `@EnableConfigurationProperties` inside autoconfiguration classes where you want explicit, self-contained registration.
 
 **Q: How do you validate `@ConfigurationProperties` fields, and what happens if validation fails at startup?**
+**Short:** JSR-380 annotations plus @Validated make the app refuse to start when any constraint fails at refresh.
 Add `@Validated` to the `@ConfigurationProperties` class and use JSR-380 annotations (`@NotNull`, `@Min`, `@Max`, `@Pattern`, `@NotEmpty`, etc.) on the fields. Spring Boot evaluates validation during `ApplicationContext` refresh (before the app starts serving traffic). If any constraint fails, a `BindValidationException` is thrown with a clear message listing every failing constraint — the application does not start. Custom validators: implement `Validator` (Spring's interface) or `javax.validation.ConstraintValidator` and annotate the class with `@Validated`. Example: `@NotNull @URL private String externalApiUrl` — the app refuses to start if `external-api.url` is missing or not a valid URL, preventing deployment of misconfigured images.
 
 **Q: How do Spring profiles interact with `@ConfigurationProperties` and what is the profile-specific properties file convention?**
+**Short:** Profile-specific application-{profile}.yml files load after and override the base file for matching keys.
 Profiles activate profile-specific property sources loaded after (and overriding) the base `application.yml`. Convention: `application-{profile}.yml` (e.g., `application-prod.yml`, `application-staging.yml`) is automatically loaded when that profile is active. For `@ConfigurationProperties`, there is no per-profile annotation — the binding applies to whatever the active `Environment` contains. The active profiles' property files override the base file for matching keys. Multi-document YAML with `spring.config.activate.on-profile` achieves the same in a single file. Key pitfall: `@Profile("prod")` on a `@ConfigurationProperties` class means the class is not registered in non-prod environments, so non-prod code that injects it will fail. Prefer single always-registered `@ConfigurationProperties` class with profile-specific values handled by different `application-{profile}.yml` files.
 
 ---

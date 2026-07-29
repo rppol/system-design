@@ -497,48 +497,78 @@ public class DataMigrationService {
 ## 12. Interview Questions with Answers
 
 **Q: What is the complete Spring bean lifecycle sequence?**
+**Short:** The bean lifecycle runs constructor, property injection, Aware callbacks, BeanPostProcessor before, init, then destroy hooks.
+
 Instantiation (constructor) → populate properties (@Autowired injection) → BeanNameAware.setBeanName → BeanFactoryAware.setBeanFactory → ApplicationContextAware.setApplicationContext → BeanPostProcessor.postProcessBeforeInitialization → @PostConstruct → InitializingBean.afterPropertiesSet → init-method → BeanPostProcessor.postProcessAfterInitialization (AOP proxy created here) → READY → @PreDestroy → DisposableBean.destroy → destroy-method. Knowing this sequence explains almost every initialization bug in Spring.
 
 **Q: Why is the AOP proxy created after @PostConstruct and not before?**
+**Short:** The AOP proxy is created in postProcessAfterInitialization, so @PostConstruct always runs on the raw, unproxied bean.
+
 `BeanPostProcessor.postProcessAfterInitialization` runs after all initialization hooks complete. `AnnotationAwareAspectJAutoProxyCreator` is a `BeanPostProcessor` that creates CGLIB/JDK proxies. This means `@PostConstruct` always runs on the raw bean, not the proxy. Consequently, `@Transactional` in `@PostConstruct` has no effect. Use `@EventListener(ContextRefreshedEvent.class)` for initialization logic that needs to run within a transaction.
 
 **Q: What happens when you inject a prototype bean into a singleton?**
+**Short:** A prototype injected into a singleton field is resolved once at startup, so every later call reuses that same instance.
+
 The prototype bean is injected exactly once at singleton initialization time. All subsequent calls use that same instance. This defeats the purpose of prototype scope. Fix options: `ObjectProvider<T>` for lazy per-call retrieval, `@Lookup` method injection (Spring overrides the method body), or scoped proxy with `@Scope(proxyMode = ScopedProxyMode.TARGET_CLASS)`. The proxy approach is most transparent for callers.
 
 **Q: What is the difference between @PostConstruct and InitializingBean.afterPropertiesSet()?**
+**Short:** @PostConstruct and afterPropertiesSet run at the same lifecycle phase, but @PostConstruct is the framework-independent standard.
+
 Both execute at the same lifecycle phase, with `@PostConstruct` running first if both are present. `@PostConstruct` is preferred because it is a JSR-250 standard annotation that does not tie your code to the Spring API. `InitializingBean` requires your class to implement a Spring interface and allows checked exceptions. `@Bean(initMethod=...)` is the best choice for third-party classes you cannot annotate. For your own code, use `@PostConstruct`.
 
 **Q: Does @PreDestroy get called for prototype beans?**
+**Short:** The container never calls @PreDestroy on a prototype bean, since it does not retain a reference after handing it out.
+
 No — the container never invokes `@PreDestroy` or `destroy()` on a prototype bean. The container creates prototype beans but does not retain a reference to them after delivery. The container cannot call `@PreDestroy` on objects it does not track. Only singleton beans (and other container-managed scoped beans like request/session) have their destroy lifecycle called. If your prototype bean holds resources (connections, file handles), the caller is responsible for cleanup. This is a common memory/resource leak in Spring applications.
 
 **Q: What are the Aware interfaces and when should you implement them?**
+**Short:** Aware interfaces hand a bean framework infrastructure references and should only be used by framework code, never application beans.
+
 `BeanNameAware`, `BeanFactoryAware`, `ApplicationContextAware` (and others) provide callbacks for beans to obtain framework infrastructure references. Only three run outside the post-processor chain — `invokeAwareMethods()` handles `BeanNameAware`, `BeanClassLoaderAware` and `BeanFactoryAware` after property injection and before any `BeanPostProcessor`. The rest, including `ApplicationContextAware`, are injected by `ApplicationContextAwareProcessor`, itself a `BeanPostProcessor` that the context registers first so it still precedes your own. You should implement them only when writing framework extensions, not application beans. Application beans should never hold an `ApplicationContext` reference — that is the Service Locator anti-pattern. Use `@Autowired` injection for application-level dependencies.
 
 **Q: What is BeanPostProcessor and what are its two methods?**
+**Short:** BeanPostProcessor exposes postProcessBeforeInitialization and postProcessAfterInitialization, both required to return the bean.
+
 `BeanPostProcessor` has two methods: `postProcessBeforeInitialization(Object bean, String beanName)` (runs before `@PostConstruct`) and `postProcessAfterInitialization(Object bean, String beanName)` (runs after all init methods, returns the bean or a proxy replacement). Both must return the bean (or a modified/wrapped version of it). Returning `null` is not permitted. Spring uses `BeanPostProcessor`s to implement `@Autowired`, `@Value`, `@PostConstruct`, and AOP proxying.
 
 **Q: What is the difference between @Bean(initMethod=...) and @PostConstruct?**
+**Short:** @Bean(initMethod=...) is set in the configuration class, letting you add an init callback to a third-party class you cannot edit.
+
 `@PostConstruct` is declared on a method inside the bean class — requires access to modify the source. `@Bean(initMethod="methodName")` is declared in the `@Configuration` class — works for third-party classes you cannot modify. Both execute at the same lifecycle point (after `InitializingBean.afterPropertiesSet()`). For Spring libraries integrating external resources (HikariCP, Flyway), `initMethod` is the standard approach.
 
 **Q: What is SmartLifecycle and how does phase ordering work?**
+**Short:** SmartLifecycle's getPhase() starts lower phases first and stops them last, ordering infrastructure around application beans.
+
 `SmartLifecycle` extends `Lifecycle` with a `getPhase()` method. During `start()`, lower phase numbers start first. During `stop()`, higher phase numbers stop first (reverse order). This ensures that infrastructure beans (phase 0) start before application beans (phase MAX_VALUE) and stop after them. Spring Boot's embedded Tomcat uses a high phase so that it starts after all application beans are ready and stops before beans are destroyed — ensuring no requests are processed against a partially destroyed context.
 
 **Q: Can a @Configuration class be a BeanPostProcessor?**
+**Short:** A @Configuration class can be a BeanPostProcessor, but its early instantiation risks bypassing later BeanFactoryPostProcessor steps.
+
 Yes, but with caveats. `BeanPostProcessor` beans are instantiated very early in the container lifecycle — before `BeanFactoryPostProcessors` run and before other singleton beans are ready. A `BeanPostProcessor` that `@Autowired` non-infrastructure beans may trigger those beans' premature instantiation, causing them to miss certain `BeanFactoryPostProcessor` processing (like property placeholder resolution). Spring logs a warning: "Bean X is not eligible for processing by all BeanPostProcessors". Prefer keeping `BeanPostProcessor` implementations simple with minimal dependencies.
 
 **Q: What happens during context shutdown? What order do beans get destroyed?**
+**Short:** Beans are destroyed in reverse dependency order during context close, so a bean's dependents are destroyed before it is.
+
 During `AbstractApplicationContext.close()`, Spring calls `destroySingletons()` on the `BeanFactory`. Beans are destroyed in reverse dependency order: a bean that depends on others is destroyed first, then its dependencies. For explicit ordering, implement `SmartLifecycle` with phase values (higher phase = destroyed first) or use `@DependsOn`. `@PreDestroy` runs first, then `DisposableBean.destroy()`, then `destroy-method`. This orderly shutdown ensures connections are not closed while other beans are still using them.
 
 **Q: What is the difference between singleton scope and prototype scope?**
+**Short:** Singleton beans get one shared instance with full lifecycle management; prototype beans are recreated per request with no destroy callback.
+
 Singleton: one instance per ApplicationContext, created eagerly at startup (unless `@Lazy`), managed for its full lifecycle including destruction. Prototype: new instance created for every `getBean()` call or injection point, initialization lifecycle runs fully, but the container never calls `@PreDestroy` or `destroy()`. Prototype beans must have their resources cleaned up by their consumers. For web apps, `request` and `session` scopes provide scoped lifecycle management with automatic destruction.
 
 **Q: How does Spring resolve the initialization order of singleton beans?**
+**Short:** Spring initializes singleton beans in dependency-first order, walking the injection graph depth-first from each root bean.
+
 Spring builds a dependency graph from injection relationships (`@Autowired` fields, constructor parameters, `@DependsOn` annotations). Beans are initialized in dependency-first order using a depth-first traversal. If bean A requires bean B and C, B and C are fully initialized before A. Cycles in constructor injection are detected immediately. Cycles in setter/field injection are resolved by exposing partially initialized beans via the early singleton object cache (`earlySingletonObjects`).
 
 **Q: What is the purpose of ObjectProvider<T>?**
+**Short:** ObjectProvider<T> gives lazy, optional, and multi-bean access to Spring beans without the boilerplate of Optional<T> wrapping.
+
 `ObjectProvider<T>` provides lazy, optional, and multi-bean access to Spring-managed beans. Key methods: `getObject()` (throws if not found), `getIfAvailable()` (returns null if not found), `getIfUnique()` (returns null if multiple beans), `stream()` (iterate all matching beans). It is more explicit than `@Autowired(required=false)` and avoids the need for `Optional<T>` workarounds. Primarily used for optional dependencies and prototype beans that should be retrieved on each call.
 
 **Q: What is the @Lazy annotation and when does it apply?**
+**Short:** @Lazy on an injection point installs a proxy immediately but defers the target bean's actual instantiation until first use.
+
 `@Lazy` on a `@Component` or `@Bean` delays instantiation until first requested. `@Lazy` on an `@Autowired` injection point creates a CGLIB proxy at injection time but delays actual bean instantiation until the proxy is first invoked. `spring.main.lazy-initialization=true` makes all beans lazy globally. Lazy init reduces startup time but moves initialization errors from startup to first-use, which is undesirable in production. Use selectively for beans with expensive initialization that may not be needed (e.g., rarely-used admin endpoints).
 
 ---

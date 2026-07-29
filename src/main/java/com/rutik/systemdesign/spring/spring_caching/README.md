@@ -589,48 +589,78 @@ public List<ProductDto> searchProducts(String query, int page, int size) {
 ## 12. Interview Questions with Answers
 
 **Q: What does `@EnableCaching` actually do under the hood?**
+**Short:** @EnableCaching registers a CacheInterceptor-backed proxy advisor, and without it every cache annotation is silently ignored.
+
 It imports `CachingConfigurationSelector`, which registers `BeanFactoryCacheOperationSourceAdvisor` into the application context. This advisor scans beans for `@Cacheable`/`@CachePut`/`@CacheEvict` annotations and wraps matching beans in CGLIB (or JDK dynamic) proxies with a `CacheInterceptor`. Without `@EnableCaching`, all cache annotations are silently ignored — no errors, no caching.
 
 **Q: What is the difference between `@Cacheable` and `@CachePut`?**
+**Short:** @Cacheable skips execution on a cache hit; @CachePut always executes and always overwrites the cached value.
+
 `@Cacheable` skips method execution on a cache hit and populates the cache only on a miss — it is a read optimization. `@CachePut` always executes the method and always writes the result to the cache regardless of existing entries — it is a write-through pattern used after data mutations to keep the cache consistent. Mixing them on the same method with the same key is undefined behavior and should be avoided.
 
 **Q: How does `SimpleKeyGenerator` generate cache keys?**
+**Short:** SimpleKeyGenerator builds a SimpleKey from the parameter array, relying on each parameter's equals and hashCode.
+
 Zero parameters produce `SimpleKey.EMPTY`. One parameter produces the parameter itself as the key. Multiple parameters produce a `SimpleKey` wrapping the parameter array. It relies on `equals` and `hashCode` of parameters — if the parameter does not override these (e.g., a mutable POJO), every call may appear as a cache miss. Always prefer SpEL expressions for complex types.
 
 **Q: What is a cache stampede and how does `sync=true` address it?**
+**Short:** sync=true serializes computation for a key on a single JVM, but distributed stampede protection needs a Redis-wide lock.
+
 A cache stampede occurs when many threads simultaneously observe a cache miss and all call the underlying data source concurrently, multiplying load. `sync=true` on `@Cacheable` causes `CacheInterceptor` to use `Cache.get(key, Callable)`, which in Caffeine and ConcurrentMap serializes computation for the same key — only one thread calls the method, others wait. `CacheAspectSupport` enforces four restrictions on it, each throwing at startup: the operation may name only one cache, it may not be combined with any other cache operation on the same method, only one `sync=true` operation is allowed, and `unless` is not supported. This is a JVM-local lock only; across instances, either build the manager on `RedisCacheWriter.lockingRedisCacheWriter(cf)` (a cluster-wide lock, but held per cache rather than per key) or take a per-key distributed lock with Redisson.
 
 **Q: Explain `condition` vs `unless` in `@Cacheable`.**
+**Short:** condition decides before execution whether to cache at all; unless decides after execution whether to store the result.
+
 `condition` is evaluated before the method executes using SpEL; if it returns false, caching is completely bypassed for this invocation (no lookup, no store). `unless` is evaluated after the method returns and can inspect `#result`; if it returns true, the result is not stored in the cache (but the method did execute). Use `condition` to skip caching for invalid inputs (e.g., `#id > 0`) and `unless` to skip caching null or empty results (e.g., `#result == null`).
 
 **Q: Why can `@Cacheable` and `@Transactional` interact badly?**
+**Short:** @Cacheable can populate the cache before a wrapping @Transactional method commits, caching data that then gets rolled back.
+
 Spring's cache abstraction is not transaction-aware by default. When both annotations are on the same method, `CacheInterceptor` populates the cache when the method returns, but the transaction may not have committed yet. If the transaction rolls back, the cache contains data that was never persisted to the database. The fix is to separate read (cacheable) from write (transactional) operations, or to wrap the manager in `TransactionAwareCacheManagerProxy`, which makes every `put`, `evict` and `clear` register an `afterCommit` synchronization automatically — with the caveat that a write is then invisible to a read later in the same transaction.
 
 **Q: What is `@CacheEvict(beforeInvocation = true)` used for?**
+**Short:** beforeInvocation=true evicts the cache entry before the method runs, so a thrown exception still leaves the entry cleared.
+
 By default, eviction happens after the method returns successfully. If the method throws, the cache is not cleared. Setting `beforeInvocation = true` evicts the cache entry before the method runs, ensuring the entry is removed regardless of whether the method succeeds or throws. Use this when it is safer to serve a cache miss than to serve potentially stale data during a failed update.
 
 **Q: How do you configure per-cache TTL with `RedisCacheManager`?**
+**Short:** Per-cache TTL is set by building one RedisCacheConfiguration per cache name and passing them into RedisCacheManager.builder.
+
 Build one `RedisCacheConfiguration` per named cache, each with its own `entryTtl(Duration)`. Use `RedisCacheConfiguration.defaultCacheConfig().entryTtl(Duration)` per cache, then pass a `Map<String, RedisCacheConfiguration>` to `RedisCacheManager.builder(...).withInitialCacheConfigurations(map).build()`. Caches not in the map use the default configuration provided via `cacheDefaults(...)`.
 
 **Q: How do you prevent storing null values in Redis cache?**
+**Short:** disableCachingNullValues() throws if a null reaches the cache, forcing null results to be filtered before caching.
+
 Call `.disableCachingNullValues()` on `RedisCacheConfiguration`. This throws an `IllegalArgumentException` if a null value reaches the cache. Pair this with `@Cacheable(unless = "#result == null")` so nulls are filtered out before reaching the cache store, or have methods return `Optional<T>` instead of nullable types.
 
 **Q: Why does the cache not work when calling a `@Cacheable` method from within the same class?**
+**Short:** Calling a @Cacheable method via this bypasses the AOP proxy entirely, so the CacheInterceptor never runs.
+
 Spring caching uses AOP proxies. When a method calls `this.method()`, it bypasses the proxy and invokes the method directly on the target object. The `CacheInterceptor` is never invoked, so no cache lookup or population occurs. The fix is to either inject the bean into itself (`@Autowired @Lazy private MyService self`) and call `self.method()`, or refactor the cached method into a separate Spring bean.
 
 **Q: How does `@CacheConfig` help reduce boilerplate?**
+**Short:** @CacheConfig sets class-level defaults like cacheNames and keyGenerator so individual methods need not repeat them.
+
 `@CacheConfig` at the class level sets default `cacheNames`, `keyGenerator`, `cacheManager`, and `cacheResolver` for all cache annotations in the class. Instead of repeating `cacheNames = "products"` on every method, declare `@CacheConfig(cacheNames = "products")` on the class. Individual method annotations can still override the class-level defaults.
 
 **Q: How do you test `@Cacheable` behavior in a Spring Boot integration test?**
+**Short:** Testing @Cacheable means calling the method twice and asserting the mocked repository was invoked only once.
+
 Annotate the test with `@SpringBootTest` to load the full context. Inject the service under test and call the method twice. Verify the underlying dependency (repository mock) was called exactly once using `Mockito.verify(repository, times(1)).findById(anyLong())`. Alternatively, use `@CacheConfig` on the test configuration with a `ConcurrentMapCacheManager` to avoid Redis dependency in unit tests. Use `CacheManager.getCache("products").clear()` in `@BeforeEach` to reset state between tests.
 
 **Q: What is cache stampede (thundering herd) and how does Spring's `@Cacheable` expose your system to it — and how do you mitigate it?**
+**Short:** Cache stampede is when a key's expiry causes many concurrent threads to hit the source at once; a lock on miss is the most robust fix.
+
 Cache stampede occurs when a cached key expires and many concurrent threads simultaneously hit a cache miss on it. All of them then execute the expensive source query and try to populate the cache at once, multiplying load on the backing store. `@Cacheable` provides no built-in protection: if 500 threads call `getProduct(id)` within the same millisecond after the TTL expires, all 500 call the database. Mitigation strategies: (1) **Probabilistic early expiry (jitter)** — randomise the TTL slightly so keys expire at different times, preventing simultaneous expiry of related keys. (2) **Mutex / distributed lock on cache miss** — only one thread computes the value; others wait. Implement with `RedisTemplate.opsForValue().setIfAbsent()` as a distributed lock in a custom `CacheManager`. (3) **Background refresh** — use a scheduled job to proactively refresh near-expiry keys before they expire. For critical paths, option 2 (lock on miss) is the most robust.
 
 **Q: What is the difference between `@CachePut` and `@Cacheable`, and when should you use each?**
+**Short:** @CachePut always writes without reading, while @Cacheable reads first and only writes on a miss.
+
 `@Cacheable` performs a cache-read: it checks the cache first; if a hit is found, returns the cached value without executing the method. If a miss, executes the method and populates the cache. `@CachePut` always executes the method AND always writes the result to the cache — no cache read is performed. Use `@CachePut` on update/create operations where you want to refresh the cache with the newly written value without requiring a subsequent cache miss to repopulate it. Example: a `save(Product)` method annotated with `@CachePut(key="#product.id")` ensures the cache is always consistent with what was just persisted. Never put `@Cacheable` and `@CachePut` with the same key on the same method — the write path would be skipped by `@Cacheable` if a cached value already exists.
 
 **Q: How do you configure Redis as the Spring cache backend with per-cache TTLs?**
+**Short:** Redis TTL per cache is configured via a map of RedisCacheConfiguration objects passed to withInitialCacheConfigurations.
+
 Configure a `RedisCacheManager` with a `RedisCacheConfiguration` that sets default TTL and per-cache overrides. Here's an example:
 
 ```java
@@ -656,12 +686,18 @@ RedisCacheManager cacheManager(RedisConnectionFactory cf) {
 Use JSON serialization (not Java serialization) so cached objects survive rolling deploys that rename classes. Java serialization is the default and will throw `SerializationException` when a cached class has changed between versions.
 
 **Q: What causes a cache key collision between two different `@Cacheable` methods, and how do you prevent it?**
+**Short:** Key collisions happen when two methods share a cache name and produce identical keys, silently returning the wrong cached value.
+
 A key collision happens when two methods share the same cache name and produce identical computed keys, so one method's cached value is silently returned for the other. For example, `findById(1L)` and `findByVariantId(1L)` both default to key `1` under `SimpleKeyGenerator` when they share the `products` cache — the second call returns the first entity's cached result with no error or warning of any kind. The fix is to always prefix the key with `#root.methodName` (e.g. `key = "#root.methodName + ':' + #id"`) or give each method its own cache name, so keys are namespaced and cannot collide across method boundaries.
 
 **Q: When should you choose cache-aside (`@Cacheable`) over write-through (`@CachePut`), and what consistency risk does each carry?**
+**Short:** Cache-aside caches lazily on read miss and risks staleness; write-through refreshes on every write but wastes work on unread entries.
+
 Cache-aside populates the cache lazily on a read miss, while write-through refreshes the cache eagerly on every write, trading staleness risk against wasted work. Cache-aside is cheaper when reads vastly outnumber writes, because only the keys actually requested are ever cached, but data can go stale between a write and the next read until the TTL expires or an explicit `@CacheEvict` fires. Write-through keeps the cache in lockstep with every write and eliminates that staleness window, but it does unnecessary work for entries nobody reads and does nothing for a cold cache, since nothing is cached until the first write happens. Most read-heavy services default to cache-aside with a short TTL and add `@CachePut` only on the specific write paths where an immediately consistent read matters.
 
 **Q: What is the difference between letting a Redis entry expire via TTL and explicitly removing it with `@CacheEvict`?**
+**Short:** TTL expiration is a passive time-based safety net, while @CacheEvict actively removes an entry the instant a write invalidates it.
+
 TTL expiration is passive and time-based, configured once on the `CacheManager`, while `@CacheEvict` is an active removal triggered by application code at a specific write. TTL guarantees an upper bound on staleness with zero code changes — if a developer forgets to evict, the entry still disappears once the TTL elapses, which is why every production cache should carry one. `@CacheEvict` closes the staleness window immediately when the underlying data changes, rather than waiting out the full TTL. Relying on TTL alone means readers can see stale data for up to the entire TTL window after every write; relying on eviction alone means an entry that is never explicitly evicted — say, after a missed code path or an out-of-band bulk DB update — is cached indefinitely with `ConcurrentMapCacheManager` or until an operator clears it by hand. Production systems should combine both: `@CacheEvict` on known write paths, TTL as the safety net for everything else.
 
 ---
