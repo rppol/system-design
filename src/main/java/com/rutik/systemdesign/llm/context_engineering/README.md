@@ -687,6 +687,7 @@ for output, especially for tasks that generate long structured responses.
 ## 12. Interview Questions with Answers
 
 **Q: What is context engineering and how does it differ from prompt engineering?**
+**Short:** Prompt engineering crafts a single prompt's wording; context engineering decides what information fills the whole window, how much, and in what order.
 Prompt engineering designs the instructions and format for a single prompt. Context engineering is
 the broader discipline of deciding what information to include in the context window, how much of
 each type, and in what order — across system prompt, tools, memory, retrieved documents, history,
@@ -694,6 +695,7 @@ and current message. Prompt engineering is about what to say; context engineerin
 include and where to put it.
 
 **Q: What is the "lost in the middle" problem and how do you address it?**
+**Short:** LLMs attend more strongly to information at the start and end of context and under-attend to the middle, so put critical chunks near the top and the query at the end.
 Liu et al. (2023) showed that LLMs reliably attend to information at the start and end of the
 context but under-attend to information in the middle. In their 20-document multi-document-QA
 setting, GPT-3.5-Turbo scored 75.8% when the answer document was first, 63.2% when it was last,
@@ -703,6 +705,7 @@ The fix is positional placement: put the most critical retrieved chunks and inst
 information between long conversation history and verbose tool outputs.
 
 **Q: Does a 1M-token context window make RAG and context engineering obsolete?**
+**Short:** No, because filling a 1M-token window costs far more, adds tens of seconds of prefill latency, and still suffers lost-in-the-middle degradation.
 No — a large window changes the tradeoff but does not remove it. Three costs remain: money
 (filling 1M tokens per request costs orders of magnitude more than retrieving a targeted 5k-token
 subset), latency (prefill time grows roughly linearly with input length, so a 500k-token prompt
@@ -712,6 +715,7 @@ performance). Treat a long context as a larger budget to allocate, not a license
 allocating.
 
 **Q: Why can adding more retrieved chunks make answers worse, not better?**
+**Short:** Every extra chunk adds a distractor competing for attention and pushes good chunks toward the middle, so reranking down to a small k beats raising k.
 Because every extra chunk adds distractors that compete for attention with the relevant one. Going
 from top-4 to top-20 chunks raises recall slightly but pushes the best chunks deeper toward the
 middle of the context and increases the chance the model quotes a near-miss passage — retrieval
@@ -720,6 +724,7 @@ rerank and keep a small k (3-8 chunks): reranking buys the recall without paying
 tax. When answers start citing the wrong document, reduce k before touching the prompt.
 
 **Q: How do you decide between RAG, long context, and fine-tuning for a knowledge-intensive task?**
+**Short:** RAG suits large, frequently updated corpora over 1M tokens; long context suits small, low-churn corpora under 200k tokens; fine-tuning changes style, not knowledge recall.
 RAG is the default for large, frequently updated knowledge bases (>1M tokens) that cannot fit in
 context. Long context is better when the corpus is small (<200k tokens), update frequency is low,
 and retrieval errors are costly — document review, contract analysis, codebase chat. Fine-tuning
@@ -729,6 +734,7 @@ factor: long context at 100k tokens per request is expensive at scale; RAG retri
 subset.
 
 **Q: How do you design a context budget for an agent with tools, memory, and RAG?**
+**Short:** Allocate hard per-zone token limits across system, tools, retrieved, history, and message, and drop the lowest-ranked retrieved chunks first when over budget.
 Define a total budget (e.g., 32k tokens) and allocate hard limits per zone: system ~10%, tools ~8%,
 retrieved ~25%, history ~20%, current message ~2%, output reserve ~15%. Enforce these limits in the
 context assembler before the LLM call. The key policy decision is drop priority: when a zone is
@@ -736,6 +742,7 @@ over budget, drop retrieved chunks from the bottom of the ranked list first (lea
 compress old history turns. Never drop the system prompt or the current user query.
 
 **Q: Why does KV cache matter for context engineering, and how do you design for it?**
+**Short:** KV cache reuses key/value tensors for an unchanged prefix, cutting latency and cost 50-90%, so stable content must stay first and byte-identical across requests.
 KV cache stores the key/value attention tensors for the prefix of a context; if the same prefix
 appears in a later request, the model skips re-computing those layers, reducing latency and cost by
 50-90% for that prefix. To maximize hit rate: keep stable content (system prompt, tool definitions,
@@ -744,6 +751,7 @@ stable prefix so it does not invalidate the cached portion. Anthropic cache_cont
 automatic prefix caching both work on this principle.
 
 **Q: How does provider prompt caching pricing change how you lay out context?**
+**Short:** A cached stable prefix bills near a 90% discount versus full price for anything placed after dynamic content, so zones should be ordered from least to most volatile.
 It makes the stable prefix literally cheaper, not just faster. Anthropic prompt caching charges
 1.25x base input to write a 5-minute cache segment (2.0x for the 1-hour TTL) and 0.1x to read it —
 a 90% discount — and OpenAI automatically caches prefixes of 1,024+ tokens, billing cached input at
@@ -755,6 +763,7 @@ time. Design rule: order zones by volatility — least-changing first — and ne
 per-request data into the cached prefix.
 
 **Q: How do you engineer context for sub-agent architectures?**
+**Short:** Give each sub-agent a fresh, minimal window and return compact summaries, not raw transcripts, avoiding the "context re-centralization" failure of forwarding full output upward.
 Give each sub-agent a fresh, minimal window and pass results back as compact summaries — context
 isolation is the point of delegating to sub-agents. The orchestrator's context holds the plan and
 each sub-agent's summarized findings (typically 200-500 tokens each), not raw transcripts: a
@@ -764,6 +773,7 @@ sub-agent transcripts upward recreates the overflow you delegated to avoid. Defi
 return-format contract (findings, citations, confidence) for every sub-agent.
 
 **Q: What is context compaction and when should you apply it?**
+**Short:** Compaction shrinks token count via summarization, entity extraction, or truncation once history exceeds its budget, with entity-centric compression preserving facts best.
 Compaction is reducing the token count of conversation history or retrieved context through
 summarization, entity extraction, or selective truncation. Apply it when conversation history
 exceeds the history budget (typically after 10-15 turns) or when a retrieved document is longer
@@ -772,6 +782,7 @@ hierarchical summarization preserves key facts; entity-centric compression (extr
 decisions, constraints) is the most faithful for long-term consistency.
 
 **Q: How do tool definitions affect context budget and what do you do with 50+ tools?**
+**Short:** Each tool definition costs 100-300 tokens, so past a few dozen tools, retrieve only the top-k most relevant tool descriptions per query instead of all of them.
 Each JSON tool definition costs 100-300 tokens. At 50 tools, that is 5,000-15,000 tokens before
 the user query is even processed — in a 32k context, 15-45% of the budget. The solution is tool
 retrieval: embed all tool descriptions, then at query time retrieve the top-k most relevant tools
@@ -779,6 +790,7 @@ retrieval: embed all tool descriptions, then at query time retrieve the top-k mo
 saves thousands of tokens per request, improving both cost and model focus.
 
 **Q: What is the difference between conversation compaction and a simple sliding window?**
+**Short:** A sliding window drops older turns verbatim and loses their facts, while compaction summarizes dropped turns first so established constraints survive.
 A sliding window keeps the last N turns verbatim and drops older turns entirely. This is simple
 but loses facts from early in the conversation (user's stated goal, agreed constraints, established
 context). Compaction preserves the semantic content of dropped turns by summarizing them before
@@ -787,6 +799,7 @@ Python solution" and turns 4-25 are problem-solving, a sliding window that drops
 agent to forget the constraint by turn 26.
 
 **Q: How do you test and measure context engineering decisions?**
+**Short:** Run position-ablation tests (critical info at start vs. middle vs. end) and track RAGAS faithfulness, answer relevancy, and task completion rate against context budget.
 Measure retrieval faithfulness (RAGAS faithfulness score), answer relevancy, and position-ablation:
 run the same query with critical information at the start vs. the middle vs. the end of context and
 compare output quality. For agents, measure task completion rate against context budget (does
@@ -794,6 +807,7 @@ success rate hold as history grows?). Track token costs per request in productio
 input tokens often signals context budget enforcement failures.
 
 **Q: What is LLMLingua and when is neural prompt compression worth the overhead?**
+**Short:** LLMLingua strips low-perplexity tokens from long documents for 3-20x compression, worth its 50-200ms latency only when verbatim inclusion would blow the retrieval budget.
 LLMLingua uses a small language model to identify and remove low-perplexity (redundant) tokens
 from retrieved documents while preserving high-information tokens. It achieves 3-20x compression
 with minimal quality loss. It is useful when retrieved documents are long and verbatim inclusion
@@ -803,6 +817,7 @@ connective tissue. For short, precise chunks (<1,000 tokens), chunking at retrie
 LLMLingua shines on long verbatim documents.
 
 **Q: Does structural formatting (XML tags, markdown headers) actually change how the model uses context?**
+**Short:** Yes, consistent delimiters like XML tags or markdown headers help the model locate and attribute sources correctly, especially in crowded multi-document prompts.
 Yes — clear delimiters help the model locate and attribute sections, which matters most in crowded
 contexts. Wrapping retrieved documents in tags like `<doc id="3">...</doc>` improves the model's
 ability to cite the right source and reduces bleed-over between adjacent chunks; Anthropic
@@ -812,6 +827,7 @@ on faithfulness in multi-document prompts. Standardize one delimiter scheme per 
 keep it byte-identical across requests so it lives inside the cached prefix.
 
 **Q: What is context rot and how do you mitigate it in long agent sessions?**
+**Short:** Context rot is quality decline as the window fills with stale tool outputs and superseded facts; fix it with proactive periodic compaction into a clean state summary.
 Context rot is the gradual quality decline in long-running sessions as the window fills with stale
 tool outputs, dead-end reasoning, and superseded facts — the model keeps attending to obsolete
 content even well below the hard token limit. Symptoms: the agent retries abandoned approaches,
@@ -822,6 +838,7 @@ eviction of superseded results rather than appending corrections after them. Sch
 proactively — every 20-30 turns or at 60-70% window fill — instead of waiting for overflow.
 
 **Q: What is context offloading, and when do you prefer it to compaction?**
+**Short:** Offloading keeps state outside the window behind a dereferenceable pointer, staying lossless unlike compaction, at the cost of a tool round trip per access.
 Offloading keeps state outside the context window and carries only a pointer to it — a file path,
 a saved query, a record ID — so the agent dereferences content on demand instead of holding it.
 Prefer it to compaction whenever the choice is available, because offloading is lossless by design
