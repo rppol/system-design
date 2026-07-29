@@ -67,7 +67,7 @@ zip_codes (zip_code, city, state)
 | determinant | The column doing the determining. Here `zip_code`, which is not a candidate key |
 | join cost added | Every query needing `city` now pays one index probe into `zip_codes` |
 
-**Walk one example.** 5,000,000 employees across 42,000 distinct US zip codes, priced with the byte widths from the type reference above (`BIGINT` 8, `CHAR(n)` n + 1 header, short `TEXT` payload + 1):
+**Walk one example.** 5,000,000 employees across 42,000 distinct US zip codes, priced with the byte widths from the type reference in Section 4 (`BIGINT` 8, `CHAR(n)` n + 1 header, short `TEXT` payload + 1):
 
 ```
   per-row width           id   name   zip   city   state      total
@@ -172,7 +172,8 @@ CREATE TABLE employee_salary (
     PRIMARY KEY (employee_id, valid_from, recorded_from)
 );
 
--- PostgreSQL 16+ has temporal table support (SQL:2011 temporal tables)
+-- PostgreSQL 18 enforces temporal keys directly: PRIMARY KEY / UNIQUE with
+--   WITHOUT OVERLAPS on a range column, and FOREIGN KEY ... PERIOD (SQL:2011)
 -- SQL Server has built-in system-versioned temporal tables
 ```
 
@@ -353,7 +354,11 @@ products:     (product_id, name, price)
 
 -- Bad:
 CREATE TABLE payments (amount DOUBLE PRECISION);
-INSERT INTO payments VALUES (0.1 + 0.2);  -- Stores 0.30000000000000004
+INSERT INTO payments VALUES (0.1::float8 + 0.2::float8);  -- Stores 0.30000000000000004
+-- Note the explicit casts: PostgreSQL treats bare 0.1 and 0.2 as exact NUMERIC
+-- literals and adds them to exactly 0.3, so the damage only appears once the
+-- values are float8 BEFORE the arithmetic -- which is what a float column
+-- guarantees for every subsequent UPDATE and SUM
 
 -- Good:
 CREATE TABLE payments (amount_cents BIGINT NOT NULL);  -- Store in cents
@@ -402,9 +407,9 @@ CREATE INDEX idx_orders_product ON orders (product_id);
 
 ## 7. Real-World Examples
 
-- **Shopify product variants**: Product attributes (size, color, material) stored in JSONB per variant. Known attributes (price, inventory_quantity, SKU) are normalized columns with indexes.
-- **Stripe events table**: Append-only. `data JSONB` stores the full event payload. Normalized columns: `id`, `type`, `created`, `livemode`. Queried by `type` and `created` — both indexed normalized columns.
-- **GitHub pull requests**: Soft delete with `deleted_at`. Partial unique index on `(repo_id, number) WHERE deleted_at IS NULL`.
+- **Product catalogs with variants**: the shape every commerce API converges on — known attributes (price, inventory quantity, SKU) as typed, indexed columns, and the open-ended per-category attributes (size, colour, material) in one JSONB column. Shopify's public product API exposes exactly this split: fixed variant fields plus free-form metafields.
+- **Event/webhook tables**: Stripe's `Event` object is the canonical published shape — a stable envelope of `id`, `type`, `created`, `livemode`, `api_version` around a `data` payload whose contents differ per event type. Modelled in PostgreSQL that is four indexed columns plus one JSONB, queried by `type` and `created`, never by reaching inside the payload.
+- **Soft delete with reuse**: any resource with a human-visible unique handle (username, repository name, invoice number) needs a partial unique index — `UNIQUE (owner_id, name) WHERE deleted_at IS NULL` — or a deleted row permanently squats on a name a user expects to be free again.
 - **Multi-tenant SaaS**: Shared schema with `tenant_id` everywhere + RLS. Tenants with large data volumes get dedicated schema or database.
 
 ---
@@ -460,11 +465,14 @@ CREATE TABLE logs (ts TIMESTAMPTZ NOT NULL DEFAULT now(), message TEXT);
 
 **Pitfall 2: Not indexing foreign key columns**
 ```sql
--- Without index on orders.customer_id:
+-- PostgreSQL creates NO index on the referencing column. Without one:
 DELETE FROM customers WHERE id = 42;
--- InnoDB: full scan of orders table to check FK constraint → table lock
+-- Full scan of orders on every parent DELETE (and on every parent key UPDATE)
+-- to prove no child row still references the row being removed
 -- Fix:
 CREATE INDEX idx_orders_customer_id ON orders (customer_id);
+-- InnoDB is the exception: it requires an index on the referencing column and
+-- creates one silently if you do not, so this pitfall is PostgreSQL-specific
 ```
 
 **Pitfall 3: Storing amounts in FLOAT/DOUBLE**
@@ -482,7 +490,7 @@ A payments system stored `amount DOUBLE PRECISION`. Over 3 years, rounding error
 **Walk one example.** The drift this pitfall describes, made arithmetic:
 
 ```
-  0.1 + 0.2  stored as DOUBLE PRECISION   ->   0.30000000000000004     (not 0.3)
+  0.1::float8 + 0.2::float8               ->   0.30000000000000004     (not 0.3)
 
   worst-case drift per transaction                     $0.01
   transactions accumulated over three years      100,000,000
@@ -545,7 +553,7 @@ The 40x is the visible failure; the 195 GB is why raising `max_connections` is n
 Denormalization is right when: (1) You've measured that a specific join is the bottleneck (EXPLAIN ANALYZE shows expensive nested loops or hash joins on hot queries). (2) The data is read far more often than written (product catalog: read 10,000 times per write). (3) The denormalized copy is maintained by exactly one service/code path (no risk of partial updates). (4) The performance gain is significant (10x+ query speedup) and cannot be achieved by indexing. Wrong reasons: "joins might be slow someday," premature optimization before measuring, or convenience.
 
 **Q: How do you model bi-temporal data and why would you need it?**
-Bi-temporal data tracks two independent time dimensions: valid time (when the fact was true in the real world) and transaction time (when the database recorded it). Needed when: correcting historical data retroactively — if a salary raise was backdated to January but recorded in March, you need to capture both the valid date (January) and the recording date (March). Schema: `valid_from DATE, valid_to DATE, recorded_from TIMESTAMPTZ, recorded_to TIMESTAMPTZ`. Queries like "what did we know in March about the January state" require checking both time ranges simultaneously. PostgreSQL 16+ adds `PERIOD FOR` syntax for temporal primary keys and foreign keys (SQL:2011).
+Bi-temporal data tracks two independent time dimensions: valid time (when the fact was true in the real world) and transaction time (when the database recorded it). Needed when: correcting historical data retroactively — if a salary raise was backdated to January but recorded in March, you need to capture both the valid date (January) and the recording date (March). Schema: `valid_from DATE, valid_to DATE, recorded_from TIMESTAMPTZ, recorded_to TIMESTAMPTZ`. Queries like "what did we know in March about the January state" require checking both time ranges simultaneously. PostgreSQL 18 enforces the valid-time half in the database: a range column can carry `PRIMARY KEY (employee_id, valid_range WITHOUT OVERLAPS)` so two rows for the same employee cannot claim overlapping validity, and `FOREIGN KEY (...) PERIOD valid_range` checks that a reference is covered for its whole span.
 
 **Q: What are the tradeoffs of schema-per-tenant vs shared schema in a SaaS product?**
 Schema-per-tenant: each tenant has a separate PostgreSQL schema (`search_path` isolation). Advantages: complete data isolation (no cross-tenant query risk), simple tenant deletion (DROP SCHEMA), per-tenant indexes. Disadvantages: connection pool complexity (different schemas need different connections), PostgreSQL handles 10,000+ schemas but planning overhead grows, cross-tenant reporting requires UNION ALL. Shared schema with tenant_id: simpler connections, but cross-tenant data risk if WHERE tenant_id is forgotten. Mitigate with RLS. Cross-tenant reports are single queries. Tenant deletion requires DELETE WHERE tenant_id=X (risk of missing tables). Recommendation: shared schema + RLS for < 10,000 tenants. Schema-per-tenant for large enterprise tenants with strict isolation requirements.
@@ -566,13 +574,13 @@ In PostgreSQL, CHAR(n), VARCHAR(n), and TEXT are all stored with the same mechan
 Store all amounts in the smallest unit of the currency (cents for USD, pence for GBP, yen for JPY — yen has no decimal). Never use FLOAT/DOUBLE — use BIGINT for amounts in minor units. Store the currency code alongside the amount: `amount_minor_units BIGINT NOT NULL, currency_code CHAR(3) NOT NULL REFERENCES currencies(code)`. The currencies table defines the minor unit exponent (USD: 2 = divide by 100, JPY: 0 = no division). For exchange rates: store as NUMERIC(20,10) (high precision rational), with a timestamp and source. For display, convert in the application, never in the database. For accounting: double-entry bookkeeping — every debit has a corresponding credit, sum of all entries = 0 at all times (enforced by application or trigger).
 
 **Q: What are the pros and cons of using JSONB columns for product attributes?**
-Pros: (1) No schema migration needed to add a new attribute. (2) GIN index supports containment and existence queries efficiently. (3) Attributes can vary per product category without sparse columns. (4) Can query nested structures (`data->'dimensions'->>'height'`). (5) Works well for user-defined custom fields. Cons: (1) No column-level constraints (NOT NULL, CHECK, foreign key) per attribute — must enforce in application. (2) Aggregations on JSONB values require CAST and are slower than typed columns. (3) GIN index is 3-5x larger than a B+tree index on a typed column. (4) Query syntax is more complex than `WHERE attribute = value`. (5) Cannot easily add a standard B+tree index on a JSONB path (can use generated columns). Best practice: known, frequently-queried attributes as typed columns; flexible/custom attributes in JSONB.
+Pros: (1) No schema migration needed to add a new attribute. (2) GIN index supports containment and existence queries efficiently. (3) Attributes can vary per product category without sparse columns. (4) Can query nested structures (`data->'dimensions'->>'height'`). (5) Works well for user-defined custom fields. Cons: (1) No column-level constraints (NOT NULL, CHECK, foreign key) per attribute — must enforce in application. (2) Aggregations on JSONB values require CAST and are slower than typed columns. (3) A GIN index over a whole JSONB document indexes every key and value in it, so it is typically far larger and slower to update than a B-tree on one extracted column; `jsonb_path_ops` shrinks it at the cost of supporting only containment. (4) Query syntax is more complex than `WHERE attribute = value`. (5) Cannot easily add a standard B+tree index on a JSONB path (can use generated columns). Best practice: known, frequently-queried attributes as typed columns; flexible/custom attributes in JSONB.
 
 **Q: When would you use a materialized view vs a regular view?**
 Regular view: logical alias for a query, always recomputed on access. Performs well when the underlying tables have good indexes and the view adds just filtering or simple joining. Zero storage overhead. Materialized view: pre-computed and stored. Fast reads regardless of underlying query complexity. Must be refreshed to see new data. Use when: the underlying query is expensive (large aggregations, complex joins across many tables) and results don't need to be real-time. `REFRESH MATERIALIZED VIEW CONCURRENTLY` (with a unique index) allows refreshing without locking reads. Use regular views for simple transformations; use materialized views for expensive aggregations that can tolerate staleness.
 
 **Q: How do you handle schema changes (adding columns, changing types) in a multi-tenant shared schema?**
-Add columns: use DEFAULT values (PostgreSQL 11+ stores DEFAULT in catalog for NOT NULL columns, making ADD COLUMN with DEFAULT instant even for large tables). `ALTER TABLE orders ADD COLUMN priority INTEGER NOT NULL DEFAULT 0` — instant on PostgreSQL 11+. Change column type: requires table rewrite unless it's a compatible upcast (e.g., VARCHAR(50) → VARCHAR(100) is instant metadata change). For incompatible type changes, use the expand-contract pattern. Drop columns: mark as unused in application first (deploy code that ignores column), then drop in a later release. This ensures rollback safety — you can revert the code without schema incompatibility.
+Add columns: PostgreSQL stores a non-volatile DEFAULT in the catalog rather than rewriting the heap, so `ALTER TABLE orders ADD COLUMN priority INTEGER NOT NULL DEFAULT 0` returns in milliseconds on a table of any size. The deciding property is the default's *volatility*, not the column's nullability — a nullable `DEFAULT 7` is equally instant, while `DEFAULT random()` or `DEFAULT now()` must materialise a distinct value per row and rewrites the whole table. Change column type: requires table rewrite unless it's a compatible upcast (e.g., VARCHAR(50) → VARCHAR(100) is instant metadata change, while narrowing to VARCHAR(60) rewrites). For incompatible type changes, use the expand-contract pattern. Drop columns: mark as unused in application first (deploy code that ignores column), then drop in a later release. This ensures rollback safety — you can revert the code without schema incompatibility.
 
 **Q: What is the purpose of CHECK constraints and when do you use them vs application-level validation?**
 CHECK constraints are database-level validation that cannot be bypassed (unlike application code which can have bugs or be bypassed by direct DB access). Use for: invariants that must always hold regardless of what code path writes the data: `CHECK (price > 0)`, `CHECK (quantity >= 0)`, `CHECK (status IN ('pending', 'active', 'cancelled'))`, `CHECK (end_date > start_date)`. Application-level validation: use for user-friendly error messages, complex business rules involving multiple tables, or async validation. The combination: validate in application for UX, enforce in database for correctness. Never rely solely on application-level validation for data integrity — direct DB writes, scripts, and bugs can bypass it.
@@ -584,7 +592,7 @@ Multiple patterns: (1) Adjacency list: `parent_id BIGINT REFERENCES table(id)`. 
 Normalization (3NF) eliminates redundancy by splitting data into separate tables with foreign keys. Ensures data consistency (one update, one place), enables flexible queries via joins, and reduces storage. Denormalization reintroduces redundancy for read performance: duplicating a frequently-read column avoids a join. Decision: start normalized, measure actual query performance in production with production data volume. If a specific join is measured to be the bottleneck (EXPLAIN ANALYZE shows expensive join on hot path) AND the data is read far more often than written, consider denormalization. Always maintain the normalized source of truth — denormalized copies are projections maintained by triggers or application logic.
 
 **Q: Why must foreign key columns be indexed even though the database doesn't require it?**
-Declaring a foreign key does not automatically index the referencing column, and without that index every DELETE on the parent table forces a full scan of the child table to verify no rows still reference it. Deleting one customer row means the database must confirm no orders point at it — with no index on `orders.customer_id`, that check scans the entire orders table, and in InnoDB the scan can escalate into a table-level lock that stalls concurrent writes. The primary key side of the relationship is indexed automatically, which is exactly why engineers assume the referencing side is too. Create an index on every foreign key column as part of the same migration that adds the constraint, so the referential-integrity check on parent deletes is an index lookup instead of a full scan.
+In PostgreSQL, declaring a foreign key does not index the referencing column, so every parent DELETE forces a full scan of the child table to verify no rows still reference it. Deleting one customer row means the database must confirm no orders point at it — with no index on `orders.customer_id`, that check scans the entire orders table, and the same scan runs on any UPDATE of the parent key. The primary key side of the relationship is indexed automatically, which is exactly why engineers assume the referencing side is too. InnoDB is the counter-example that makes the rule easy to misremember: it *requires* an index on the referencing column and creates one for you if absent, so a developer moving from MySQL to PostgreSQL inherits the scan without ever having written the index themselves. Create an index on every foreign key column as part of the same migration that adds the constraint, so the referential-integrity check on parent deletes is an index lookup instead of a full scan.
 
 **Q: What is the difference between JSON and JSONB in PostgreSQL, and when would you choose each?**
 JSON stores the raw text and re-parses it on every query, while JSONB stores a parsed binary representation that queries faster and supports GIN indexing. JSON validates syntax on insert but otherwise keeps the document byte-for-byte — preserving key order, whitespace, and duplicate keys — at the cost of a full re-parse each time a query touches the column. JSONB parses once at write time into a binary form, making containment queries like `attributes @> '{"color": "red"}'` fast and indexable, though it stores slightly larger and normalizes away key ordering and duplicates. The only reasons to prefer JSON are needing an exact byte-preserved document (audit payloads verified by signature) or preserving duplicate keys, both rare. Default to JSONB for any column you will ever query into, and add a GIN index once containment or existence queries appear on the hot path.

@@ -26,12 +26,14 @@ Text → Embedding Model → Dense Vector
 [0.023, -0.145, 0.892, ..., -0.034]  ← 1536-dimensional vector
 
 Dimensions:
-  OpenAI text-embedding-3-small:  1536 dimensions
-  OpenAI text-embedding-3-large:  3072 dimensions
-  OpenAI ada-002:                 1536 dimensions (older)
+  OpenAI text-embedding-3-small:  1536 dimensions (8192 token input limit)
+  OpenAI text-embedding-3-large:  3072 dimensions (8192 token input limit)
   Sentence-transformers/all-MiniLM-L6-v2: 384 dimensions
-  Google text-embedding-004:      768 dimensions
-  Cohere embed-v3:                1024 dimensions
+  Google gemini-embedding-2:      128-3072, recommended 768 / 1536 / 3072
+  Cohere embed-v4.0:              256 / 512 / 1024 / 1536 (default 1536)
+
+Note the newer models let you CHOOSE the dimension count rather than fixing it.
+That makes the memory arithmetic below a design decision, not a constraint.
 
 Memory per vector:
   1536 dimensions × 4 bytes (float32) = 6144 bytes ≈ 6KB per vector
@@ -58,8 +60,8 @@ count is only one of three factors — swapping a 3072-dim model for a 768-dim o
 ```
   model                       dims   bytes/vector   1M vectors
   all-MiniLM-L6-v2             384       1536         1.536 GB
-  text-embedding-004           768       3072         3.072 GB
-  Cohere embed-v3             1024       4096         4.096 GB
+  gemini-embedding-2 @ 768     768       3072         3.072 GB
+  Cohere embed-v4.0 @ 1024    1024       4096         4.096 GB
   text-embedding-3-small      1536       6144         6.144 GB
   text-embedding-3-large      3072      12288        12.288 GB
 
@@ -314,7 +316,9 @@ With `nlist=4000` and `nprobe=32`, only 32 of 4000 clusters are ever linear-scan
 ### Product Quantization (PQ) — Compression
 
 ```
-Compresses 1536-dim float32 vectors (6KB each) to ~64 bytes per vector.
+Compresses 1536-dim float32 vectors (6144 bytes each) to 96 bytes per vector -- a 64x
+ratio. Do not confuse the ratio with the code size; the two are only equal by coincidence
+at other settings.
 
 Method:
 1. Split the 1536-dim vector into M=96 sub-vectors of 16 dims each
@@ -373,6 +377,41 @@ having too few prototypes. The 5-15% recall loss quoted above is the price of th
 16-dims-to-1-ID collapse, and it is why production systems rescore PQ's top candidates
 against the full float vectors before returning results.
 
+### Scalar and Binary Quantization — the other two levers
+
+PQ is the most intricate compression scheme but rarely the first one reached for, because two
+simpler ones give most of the win with a one-line schema change and no codebook to train.
+
+| Scheme | Bytes per dim | 1536-dim vector | Typical recall cost | Mechanism |
+|--------|---------------|-----------------|---------------------|-----------|
+| float32 (none) | 4 | 6144 B | — | store the coordinate as-is |
+| float16 / `halfvec` | 2 | 3072 B | negligible | drop mantissa bits; embeddings do not use the range |
+| int8 scalar | 1 | 1536 B | small | linear map of each dim onto 256 levels |
+| binary (1 bit) | 0.125 | 192 B | large alone, small after rescore | keep only the sign of each coordinate |
+| PQ, M=96 | — | 96 B | 5-15% | replace 16 dims at a time with a learned prototype ID |
+
+Scalar quantization keeps every dimension and rounds it; PQ throws dimensions away and
+substitutes a lookalike. That is why scalar degrades gracefully and PQ has a recall floor.
+
+In pgvector all three are types or expressions rather than index options:
+
+```sql
+-- half precision: half the storage, half the index, same query syntax
+CREATE TABLE items (id bigserial PRIMARY KEY, embedding halfvec(1536));
+CREATE INDEX ON items USING hnsw (embedding halfvec_cosine_ops);
+
+-- binary quantization via an expression index, compared by Hamming distance
+CREATE INDEX ON items USING hnsw
+  ((binary_quantize(embedding)::bit(1536)) bit_hamming_ops);
+```
+
+**Binary quantization is only usable with a rescore step.** One bit per dimension discards
+magnitude entirely, so it is a *filter*, not an answer: retrieve a few hundred candidates by
+Hamming distance (fast, and 192 bytes each stays resident), then re-rank exactly that
+shortlist against the full-precision vectors. This is the same two-stage shape as IVF+PQ's
+rescore, and the reason a 32x compression can be nearly free in recall while the same
+compression applied without rescoring is not.
+
 **Visualizing PQ compression: splitting then quantizing a vector**
 
 ```mermaid
@@ -428,8 +467,11 @@ CREATE TABLE documents (
 CREATE INDEX idx_documents_embedding_ivf
 ON documents USING ivfflat (embedding vector_cosine_ops)
 WITH (lists = 100);
--- lists = number of clusters (default 100; recommend sqrt(N) for up to 1M rows)
--- After building: SET ivfflat.probes = 10 (default 1) for better recall
+-- lists = number of clusters (default 100). pgvector's own guidance is
+--   rows/1000 for up to 1M rows, and sqrt(rows) above 1M -- note the two are
+--   the other way round from the intuition that sqrt always applies
+-- After building: SET ivfflat.probes = 10 (default 1) for better recall;
+--   sqrt(lists) is the recommended starting point
 
 -- HNSW index (better recall, slower to build, more memory):
 CREATE INDEX idx_documents_embedding_hnsw
@@ -455,13 +497,13 @@ LIMIT 10;
 
 | Database | Architecture | Best For | Max Scale |
 |----------|-------------|---------|-----------|
-| pgvector | PostgreSQL extension | SQL integration, ACID, < 10M vectors | 100M+ with HNSW |
+| pgvector | PostgreSQL extension | SQL integration, ACID, < 10M vectors | 100M+ with IVFFlat |
 | Pinecone | Managed, proprietary | Serverless, no-ops | Billions |
 | Weaviate | Open-source, modular | Multi-modal, GraphQL | Billions (distributed) |
 | Qdrant | Rust-based, open-source | High performance, filtering | Billions (distributed) |
-| Milvus | Distributed, open-source | Large-scale production | Trillions |
+| Milvus | Distributed, open-source | Large-scale production | Tens of billions |
 | Chroma | Embedded, simple | Prototyping, small datasets | Millions |
-| Redis | RedisVL extension | Low-latency cache + vector | Millions |
+| Redis | Redis Query Engine + vector sets | Low-latency cache + vector | Millions |
 
 ---
 
@@ -578,40 +620,51 @@ The optional reranking hop (Cohere Rerank, BGE-Reranker) trims the k=5-10 retrie
 Pure vector search has limitations: rare entity names (product IDs, proper nouns) may not be well-represented in embedding space. Hybrid search combines vector similarity with BM25 keyword scoring.
 
 ```python
-# Hybrid search in Elasticsearch/OpenSearch:
+# Hybrid search in Elasticsearch: RRF is expressed with the RETRIEVER API.
+# A bool/should containing a knn clause is valid, but it SUMS the two scores --
+# it does not do RRF, and summing a cosine score against a BM25 score compares
+# two incomparable scales. Use an rrf retriever to fuse by RANK instead:
 {
-  "query": {
-    "bool": {
-      "should": [
+  "retriever": {
+    "rrf": {
+      "retrievers": [
         {
-          "knn": {
-            "field": "embedding",
-            "query_vector": [0.023, -0.145, ...],
-            "k": 50,
-            "num_candidates": 100
+          "standard": {
+            "query": {"match": {"content": "database B+tree indexing"}}
           }
         },
         {
-          "match": {
-            "content": "database B+tree indexing"
+          "knn": {
+            "field": "embedding",
+            "query_vector": [0.023, -0.145],
+            "k": 50,
+            "num_candidates": 100
           }
         }
-      ]
+      ],
+      "rank_window_size": 50,
+      "rank_constant": 20
     }
   }
 }
-# Result: RRF (Reciprocal Rank Fusion) merges both result lists
 ```
 
 ```python
-# Qdrant: built-in hybrid search (sparse + dense)
-client.search(
+# Qdrant: built-in hybrid search via the universal Query API. Each prefetch is
+# an independent search; the outer query fuses their RANKS.
+from qdrant_client import QdrantClient, models
+
+client.query_points(
     collection_name="documents",
-    query_vector=NamedVector(name="dense", vector=query_embedding),
-    query_sparse_vector=NamedSparseVector(
-        name="sparse",
-        vector=SparseVector(indices=[1, 2, 3], values=[0.1, 0.5, 0.3])
-    ),
+    prefetch=[
+        models.Prefetch(
+            query=models.SparseVector(indices=[1, 2, 3], values=[0.1, 0.5, 0.3]),
+            using="sparse",
+            limit=20,
+        ),
+        models.Prefetch(query=query_embedding, using="dense", limit=20),
+    ],
+    query=models.FusionQuery(fusion=models.Fusion.RRF),  # or Fusion.DBSF
     limit=10,
 )
 ```
@@ -619,14 +672,29 @@ client.search(
 ### Multi-Tenancy in Vector Databases
 
 ```sql
--- pgvector: filter by tenant_id (pre-filter, most efficient)
+-- pgvector: filter by tenant_id. READ THE ORDER OF OPERATIONS CAREFULLY --
+-- with an approximate index (HNSW or IVFFlat), the filter is applied AFTER the
+-- index is scanned, not before. The index returns its candidates, THEN
+-- tenant_id is checked, so a tenant holding 10% of rows keeps ~4 of the 40
+-- candidates hnsw.ef_search returns by default, and your LIMIT 10 silently
+-- returns 4 rows.
 SELECT id, content, embedding <=> $query_vector AS distance
 FROM documents
-WHERE tenant_id = $1  -- Filter BEFORE ANN search narrows candidates
+WHERE tenant_id = $1
 ORDER BY embedding <=> $query_vector
 LIMIT 10;
--- IMPORTANT: index must be on embedding column; tenant_id filter applied via PostgreSQL WHERE
--- For large tables: composite index or partial index per tenant
+
+-- Three real fixes, in order of preference:
+-- 1. Iterative index scans (pgvector 0.8.0+): keep scanning until LIMIT is met
+SET hnsw.iterative_scan = strict_order;   -- or relaxed_order for better recall
+SET hnsw.max_scan_tuples = 20000;         -- bound the work
+-- 2. Partial index per high-value tenant: the filter becomes free
+CREATE INDEX ON documents USING hnsw (embedding vector_cosine_ops)
+  WHERE tenant_id = 42;
+-- 3. Partition by tenant, so each tenant gets its own index and one tenant's
+--    vectors cannot degrade another tenant's recall
+CREATE TABLE documents (tenant_id BIGINT, embedding vector(1536))
+  PARTITION BY LIST (tenant_id);
 
 -- Pinecone: namespace isolation
 index.upsert(vectors=[...], namespace=f"tenant_{tenant_id}")
@@ -637,12 +705,17 @@ client.collections.create("Document", multi_tenancy_config=Configure.multi_tenan
 client.collections.get("Document").with_tenant("tenant-42").query.near_vector(...)
 
 -- Qdrant: per-tenant collections or filtered search
-client.search(
+client.query_points(
     collection_name="documents",
-    query_vector=query_embedding,
-    query_filter=Filter(must=[FieldCondition(key="tenant_id", match=MatchValue(value=tenant_id))]),
+    query=query_embedding,
+    query_filter=models.Filter(
+        must=[models.FieldCondition(
+            key="tenant_id", match=models.MatchValue(value=tenant_id))]
+    ),
     limit=10,
 )
+-- Build a payload index on tenant_id so the filter is applied during graph
+-- traversal rather than after it
 ```
 
 ---
@@ -650,7 +723,7 @@ client.search(
 ## 7. Real-World Examples
 
 - **Notion AI**: Semantic search across user notes using vector embeddings. pgvector for smaller workloads, dedicated vector DB for scale.
-- **GitHub Copilot**: Retrieves relevant code snippets from the repository using code embeddings (CodeBERT). Repository-scale vector search to provide context.
+- **Code assistants**: retrieval over a repository's own code, embedded with a model trained on code rather than prose, so that a natural-language request can surface the function that implements it. Repository-scale vector search supplying context to the generation step is the standard shape; the specific embedding model each vendor uses is generally not published.
 - **Spotify**: Audio embeddings for music recommendation — songs with similar sound are near in embedding space.
 - **Pinterest**: Image embeddings for visual similarity search (find similar products from photos).
 - **Airbnb**: Listing embeddings combining text descriptions and image features for semantic property recommendations.
@@ -663,8 +736,8 @@ client.search(
 |----------|--------|-------------|--------|-------------|---------|
 | Exact (brute force) | 100% | O(N) slow | O(N) | Instant | < 100K vectors |
 | HNSW | 95-99% | O(log N) fast | O(N × M) high | Slow | 1M-10B vectors, high recall |
-| IVF | 90-97% | O(K + nprobe×M) | O(N) medium | Fast | 1M-1B vectors, large scale |
-| IVF+PQ | 80-95% | Very fast | O(N × M/64) low | Medium | 100M+ vectors, memory-limited |
+| IVF | 90-97% | O(nlist + nprobe×N/nlist) | O(N) medium | Fast | 1M-1B vectors, large scale |
+| IVF+PQ | 80-95% | Very fast | O(N × M) bytes, 1/64 of float32 | Medium | 100M+ vectors, memory-limited |
 | Exact + GPU | 100% | Very fast (GPU) | GPU RAM | Instant | < 10M, GPU available |
 
 ---
@@ -710,7 +783,7 @@ SET ivfflat.probes = 10;  -- Search 10% of clusters, recall ~95%
 HNSW index build requires all vectors in memory simultaneously (at M connections per node). For 10M vectors at 1536 dimensions: 10M × (6KB data + 16 connections × 8 bytes) ≈ 61GB RAM just for index build. Fix: use IVFFlat (can build incrementally) or increase server RAM. In pgvector, HNSW build memory can be reduced with `maintenance_work_mem`.
 
 **Pitfall 4: No chunking strategy for long documents**
-Embedding models have token limits (8191 tokens for OpenAI ada-002). Long documents must be chunked. Naive fixed-size chunking splits mid-sentence → poor embeddings. Fix: semantic chunking (split at paragraph or sentence boundaries), sliding window chunking (chunks with 20% overlap to preserve context across boundaries).
+Embedding models have token limits (8192 tokens for OpenAI's text-embedding-3 models). Long documents must be chunked. Naive fixed-size chunking splits mid-sentence → poor embeddings. Fix: semantic chunking (split at paragraph or sentence boundaries), sliding window chunking (chunks with 20% overlap to preserve context across boundaries).
 
 **Pitfall 5: Embedding model mismatch**
 Query embedded with model A, documents embedded with model B → completely different embedding space → no meaningful similarity. Always use the same embedding model for all data in the same collection. When upgrading embedding models: re-embed ALL documents before switching query embedding.
@@ -743,16 +816,16 @@ HNSW builds a multi-layer graph where higher layers have fewer nodes and longer 
 ANN (Approximate Nearest Neighbor) algorithms sacrifice some recall (percentage of true nearest neighbors returned) for faster search. For HNSW: `ef` parameter controls this tradeoff at query time — ef=10 (fast, ~90% recall) vs ef=200 (slow, ~99% recall). For IVF: `nprobe` controls how many clusters are searched — nprobe=1 (~70% recall) vs nprobe=100 (near-exact, very slow). In practice for RAG: 95% recall is sufficient — missing 5% of relevant chunks rarely affects answer quality significantly. For medical or legal use cases requiring near-perfect recall: increase ef/nprobe or use exact search (small enough datasets). Benchmark your specific data and embedding model — recall degrades differently depending on data distribution.
 
 **Q: How do you handle multi-tenancy in a vector database?**
-Three approaches: (1) Namespace/collection isolation: each tenant gets a separate namespace or collection. Best for: strong isolation, different schemas per tenant, enterprise customers. Cost: cannot do cross-tenant queries, many collections have overhead. (2) Metadata filtering: single collection with `tenant_id` metadata field. Queries add `WHERE tenant_id = X` pre-filter. Best for: many small tenants, shared infrastructure. Risk: filter effectiveness depends on index structure — some vector DBs apply filter after ANN (post-filter, poor recall for large tenants) vs before (pre-filter, good recall). Use Qdrant or pgvector which support efficient pre-filtering. (3) Hybrid: shared collection for small tenants, dedicated collections for large enterprise tenants. Each approach has operational trade-offs.
+Three approaches: (1) Namespace/collection isolation: each tenant gets a separate namespace or collection. Best for: strong isolation, different schemas per tenant, enterprise customers. Cost: cannot do cross-tenant queries, many collections have overhead. (2) Metadata filtering: single collection with `tenant_id` metadata field. Queries add `WHERE tenant_id = X` pre-filter. Best for: many small tenants, shared infrastructure. Risk: filter effectiveness depends on index structure — a post-filtering engine applies the condition to whatever the ANN scan already returned, so a selective filter can leave you with far fewer rows than you asked for. Check which your engine does before relying on it: Qdrant applies filters during graph traversal with a filterable index, while pgvector post-filters and needs `hnsw.iterative_scan` (0.8.0+), a partial index, or table partitioning to compensate. (3) Hybrid: shared collection for small tenants, dedicated collections for large enterprise tenants. Each approach has operational trade-offs.
 
 **Q: When would you use pgvector vs a dedicated vector database?**
-Use pgvector when: (1) Vectors are joinable to relational data (products, users, documents — query: "find similar products to X that are also in stock and available in user's region" — one query in pgvector, multiple round trips in a dedicated vector DB). (2) Transactional writes: embedding a document and its metadata atomically. (3) Compliance requirements favor single database system. (4) Scale is under 10M vectors for HNSW (scalable to 100M+ with IVFFlat and tuning). (5) Team is PostgreSQL-only and doesn't want to operate another database. Use dedicated vector DB when: (1) > 100M vectors on a single node. (2) Need managed service, auto-scaling, zero-ops. (3) Need features like multi-modal search, automatic embedding, advanced similarity functions. (4) Performance at extreme scale is critical.
+Use pgvector when the vectors need to be queried alongside relational data that already lives in PostgreSQL. The decisive case is a query like "find similar products to X that are also in stock and available in the user's region" — one SQL statement in pgvector, versus a vector query plus a second lookup and an application-side intersection with a dedicated vector DB. In detail: (1) Vectors are joinable to relational data (products, users, documents). (2) Transactional writes: embedding a document and its metadata atomically. (3) Compliance requirements favor single database system. (4) Scale is under 10M vectors for HNSW (scalable to 100M+ with IVFFlat and tuning). (5) Team is PostgreSQL-only and doesn't want to operate another database. Use dedicated vector DB when: (1) > 100M vectors on a single node. (2) Need managed service, auto-scaling, zero-ops. (3) Need features like multi-modal search, automatic embedding, advanced similarity functions. (4) Performance at extreme scale is critical.
 
 **Q: What is hybrid search and when is it necessary?**
 Hybrid search combines dense vector similarity (semantic) with sparse keyword similarity (BM25). Pure vector search fails for: exact keyword matches (product IDs, proper nouns, rare technical terms — the embedding model may not represent "CUDA-12.3" vs "CUDA-12.4" as distinct), domain-specific jargon, and queries where exact term match matters more than semantic similarity. Example: query "CUDA 12.3 installation error" — vector search finds semantically related documents, but BM25 helps ensure "CUDA 12.3" is specifically matched. Implementation: (1) Run both searches, merge results using RRF (Reciprocal Rank Fusion) which weights results by their rank in each list. (2) Use a single model that produces both dense and sparse vectors (SPLADE, SparseEmbed). Weaviate and Qdrant support hybrid search natively; pgvector requires combining with tsvector for hybrid.
 
 **Q: How do embedding models affect retrieval quality in RAG systems?**
-Embedding model choice affects recall (finding relevant documents) and precision (avoiding irrelevant ones). Key factors: (1) Dimensionality: higher dims (3072 vs 384) = more information but more memory and slower search. (2) Domain match: a model fine-tuned on code embeddings (e.g., CodeBERT) dramatically outperforms general models for code retrieval. (3) Context window: sentence-transformers process up to 512 tokens; OpenAI ada-002 up to 8191 tokens — longer context = can embed entire pages instead of chunks. (4) Task: asymmetric search (short queries vs long documents) needs models designed for asymmetric pairs (E5, BGE). Evaluation: use MTEB (Massive Text Embedding Benchmark) as reference, but always evaluate on your specific domain with your actual queries.
+Embedding model choice affects recall (finding relevant documents) and precision (avoiding irrelevant ones). Key factors: (1) Dimensionality: higher dims (3072 vs 384) = more information but more memory and slower search. (2) Domain match: a model fine-tuned on code embeddings (e.g., CodeBERT) dramatically outperforms general models for code retrieval. (3) Context window: sentence-transformers process up to 512 tokens; OpenAI's text-embedding-3 models up to 8192 and Cohere embed-v4.0 up to 128k — longer context = can embed entire pages instead of chunks. (4) Task: asymmetric search (short queries vs long documents) needs models designed for asymmetric pairs (E5, BGE). Evaluation: use MTEB (Massive Text Embedding Benchmark) as reference, but always evaluate on your specific domain with your actual queries.
 
 **Q: What is product quantization and what is its recall-speed tradeoff?**
 Product Quantization (PQ) compresses high-dimensional vectors into compact codes (e.g., 1536 dims × 4 bytes = 6144 bytes → 96 bytes with 64x compression) by: (1) Splitting the vector into M sub-spaces. (2) For each sub-space, learning K centroids via k-means. (3) Replacing each sub-vector with the index of the nearest centroid (1 byte per sub-space at K=256). Distance computation between query and PQ-compressed vectors: look up precomputed distance tables (fast, integer operations). Recall-speed tradeoff: more sub-spaces (M) = less compression, better recall. More centroids (K) = larger codebook, better accuracy. Typical configuration: M=96, K=256 achieves 64x compression with ~90-95% recall vs exact search. IVF+PQ (used by FAISS, Milvus): IVF narrows to relevant clusters, PQ compresses for fast distance computation within clusters.
@@ -760,11 +833,14 @@ Product Quantization (PQ) compresses high-dimensional vectors into compact codes
 **Q: How do you measure embedding quality and which metrics matter for RAG?**
 Key metrics for RAG retrieval: (1) Recall@K: percentage of queries where the relevant document appears in the top K results. For RAG, recall@5 or recall@10 matters most. (2) MRR (Mean Reciprocal Rank): 1/rank of the first relevant result, averaged across queries. (3) NDCG@K (Normalized Discounted Cumulative Gain): accounts for graded relevance and position. Evaluation approach: create a test set of (query, relevant_document) pairs from your domain. Run retrieval, measure recall@5, MRR@10. Compare embedding models on this test set. Also measure: embedding latency (query embedding time), index build time, memory per vector, and query throughput. BEIR and MTEB are public benchmarks, but domain-specific evaluation on your own data is essential for production decisions.
 
+**Q: How do scalar and binary quantization differ from product quantization, and when do you reach for each?**
+Scalar quantization keeps every dimension and stores it in fewer bits, while product quantization discards dimensions and replaces groups of them with a learned prototype ID. That difference sets their failure modes: half precision (`halfvec`, 2 bytes per dimension) and int8 scalar quantization (1 byte) degrade gracefully because each coordinate is still individually represented, so they need no training step, no codebook, and cost almost nothing in recall — halving a 1536-dim vector from 6144 to 3072 bytes is usually free. PQ compresses far harder (96 bytes at M=96, a 64x ratio) but has an irreducible recall floor of roughly 5-15%, because the original coordinates no longer exist anywhere in the index. Binary quantization sits at the extreme: one bit per dimension, 192 bytes for a 1536-dim vector, keeping only each coordinate's sign. Alone it loses too much, but as a first-stage filter followed by an exact rescore of a few hundred candidates against the full-precision vectors, it is close to free. Reach for half precision first since it is a type change with no downside, add binary-plus-rescore when the index must fit in RAM at hundreds of millions of vectors, and reserve PQ for when even that is not small enough.
+
 **Q: What is the "lost in the middle" problem for RAG and how does vector search help?**
 When many relevant documents are injected into an LLM's context window, the LLM performs poorly on information in the middle of the context — it focuses on the beginning and end (attention sparsity for mid-context). Vector search helps by providing precisely the most relevant chunks (top-K) rather than entire documents. Best practices: (1) Use reranking after retrieval to ensure the most relevant chunk is at the beginning of the context. (2) Limit context to 3-5 chunks (not 20). (3) Use hybrid retrieval + reranking (e.g., Cohere Rerank, BGE-Reranker) to improve chunk precision. (4) For multi-document queries, structure prompts so critical information is at the beginning.
 
 **Q: How does the IVFFlat index build and what happens when vectors are added after building?**
-IVFFlat index build: (1) Run K-means on a sample of training vectors to learn `lists` centroids. K-means requires training data — pgvector requires 3×lists vectors minimum for training. (2) Each vector is assigned to its nearest centroid and stored in that centroid's inverted list. When new vectors are added after index build: they are assigned to existing centroids (centroids do NOT move — the centroids are frozen post-build). Over time, if the data distribution shifts significantly, the fixed centroids become suboptimal → recall degrades. Fix: periodically rebuild the index (`REINDEX INDEX CONCURRENTLY`) to recompute centroids on the current data distribution.
+IVFFlat index build: (1) Run K-means on a sample of training vectors to learn `lists` centroids. pgvector targets 50 samples per list with a floor of 10,000 samples, so a `lists = 100` index samples 10,000 rows and a `lists = 4000` index samples 200,000 — which is why building the index on a nearly empty table produces useless centroids and terrible recall. (2) Each vector is assigned to its nearest centroid and stored in that centroid's inverted list. When new vectors are added after index build: they are assigned to existing centroids (centroids do NOT move — the centroids are frozen post-build). Over time, if the data distribution shifts significantly, the fixed centroids become suboptimal → recall degrades. Fix: periodically rebuild the index (`REINDEX INDEX CONCURRENTLY`) to recompute centroids on the current data distribution.
 
 **Q: What is the HNSW ef_construction parameter and how does it differ from ef at query time?**
 `ef_construction` (build time): the size of the dynamic candidate list when building the HNSW graph. When inserting a new vector: start a greedy search, maintaining `ef_construction` candidates. The `M` best candidates become the new vector's connections. Larger `ef_construction` = more candidates considered during build = better connections = better recall at query time. Trade-off: slow build time (O(N × ef_construction × log N)), more memory during build. `ef` (query time): the size of the dynamic candidate list during search traversal. Larger `ef` = more candidates evaluated = better recall = slower query. Default pgvector: `ef_construction=64, hnsw.ef_search=40`. For high-recall production: `ef_construction=200, hnsw.ef_search=100`.
@@ -779,7 +855,7 @@ Similarity scores become meaningless, because each embedding model defines its o
 pgvector's `ivfflat.probes` defaults to 1, meaning each query searches only a single cluster out of all the lists the index was built with. With lists=100, probes=1 scans just 1% of the vectors, yielding roughly 70% recall — true nearest neighbors sitting in an adjacent cluster are simply never examined. Engineers often benchmark with the default, conclude vector search "doesn't work," and never realize a one-line session setting was the problem. Set `ivfflat.probes = 10` (or roughly sqrt(lists) as a starting point) via `SET` per session or `ALTER SYSTEM` globally, which lifts recall to around 95%, and tune upward from there against an offline recall benchmark on your own data.
 
 **Q: How should long documents be chunked before embedding, and what goes wrong with naive chunking?**
-Documents longer than the embedding model's token limit must be split into chunks, and naive fixed-size chunking that cuts mid-sentence produces embeddings of broken fragments that retrieve poorly. Models cap input length — OpenAI ada-002 accepts 8,191 tokens — so a long contract or manual cannot be embedded whole; but slicing at arbitrary byte offsets severs sentences and separates statements from their context, so the resulting vectors represent incoherent text. Better strategies: semantic chunking that splits at paragraph or sentence boundaries so each chunk is a self-contained thought, and sliding-window chunking with roughly 20% overlap so information near a boundary appears intact in at least one chunk. Match chunk size to both the embedding model's context window and the granularity of answers users need, since retrieval returns whole chunks.
+Documents longer than the embedding model's token limit must be split into chunks, and naive fixed-size chunking that cuts mid-sentence produces embeddings of broken fragments that retrieve poorly. Models cap input length — OpenAI's text-embedding-3 models accept 8,192 tokens — so a long contract or manual cannot be embedded whole; but slicing at arbitrary byte offsets severs sentences and separates statements from their context, so the resulting vectors represent incoherent text. Better strategies: semantic chunking that splits at paragraph or sentence boundaries so each chunk is a self-contained thought, and sliding-window chunking with roughly 20% overlap so information near a boundary appears intact in at least one chunk. Match chunk size to both the embedding model's context window and the granularity of answers users need, since retrieval returns whole chunks.
 
 **Q: Why can building an HNSW index exhaust memory, and what are the options when it does?**
 HNSW construction holds every vector plus its graph edges in memory simultaneously, so build-time memory far exceeds what the raw vectors alone suggest. For 10M vectors at 1536 dimensions, the vectors are about 6KB each and the M=16 connections add roughly 128 bytes per node — around 61GB of RAM for the build, enough to OOM a modestly sized database server. The failure is specific to index construction: query-time memory is not the problem, which surprises teams whose instance comfortably serves the data until they run CREATE INDEX. Options: switch to IVFFlat, which builds incrementally without holding the whole graph; raise `maintenance_work_mem` in pgvector and provision RAM for the build; or build on a large temporary instance and restore the index to the serving instance.
@@ -792,7 +868,7 @@ HNSW construction holds every vector plus its graph edges in memory simultaneous
 2. Set `ivfflat.probes = sqrt(lists)` as a starting point for balanced recall/speed.
 3. Use HNSW for production with < 10M vectors and high recall requirements.
 4. Use IVFFlat for initial prototyping and larger datasets (faster build).
-5. Pre-filter by metadata (tenant_id, category, date) BEFORE ANN search for multi-tenant systems.
+5. Do not assume metadata filters are applied before the ANN search — in pgvector they are applied after it, so enable iterative index scans or use a partial index / partition per tenant.
 6. Normalize embeddings before storing if using dot product similarity (pgvector: embedding / ||embedding||).
 7. Monitor recall with offline evaluation before and after index parameter changes.
 8. For RAG: use hybrid search (dense + sparse) for production — pure vector search misses exact keyword matches.
@@ -828,32 +904,47 @@ WITH (m = 16, ef_construction = 128);
 -- Full-text search index:
 CREATE INDEX idx_legal_fts ON legal_documents USING GIN (full_text_search);
 
--- Hybrid search query:
+-- Hybrid search query. The rank MUST be computed inside each CTE, over that
+-- list alone -- see the note below for what happens if you rank after the join.
 WITH vector_search AS (
-    SELECT id, 1 - (embedding <=> $1::vector) AS vector_score
+    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1::vector) AS v_rank
     FROM legal_documents
     WHERE jurisdiction = $2 AND doc_type = ANY($3)
     ORDER BY embedding <=> $1::vector
     LIMIT 50  -- Get top-50 vector candidates
 ),
 text_search AS (
-    SELECT id, ts_rank(full_text_search, plainto_tsquery('english', $4)) AS text_score
+    SELECT id, ROW_NUMBER() OVER (
+               ORDER BY ts_rank(full_text_search, plainto_tsquery('english', $4)) DESC
+           ) AS t_rank
     FROM legal_documents
     WHERE full_text_search @@ plainto_tsquery('english', $4)
       AND jurisdiction = $2 AND doc_type = ANY($3)
+    ORDER BY ts_rank(full_text_search, plainto_tsquery('english', $4)) DESC
     LIMIT 50  -- Get top-50 text candidates
 ),
 rrf AS (
-    SELECT id,
-           COALESCE(1.0/(60 + ROW_NUMBER() OVER (ORDER BY v.vector_score DESC)), 0) +
-           COALESCE(1.0/(60 + ROW_NUMBER() OVER (ORDER BY t.text_score DESC)), 0) AS rrf_score
-    FROM vector_search v FULL OUTER JOIN text_search t USING (id)
+    SELECT COALESCE(v.id, t.id) AS id,
+           COALESCE(1.0/(60 + v.v_rank), 0) +
+           COALESCE(1.0/(60 + t.t_rank), 0) AS rrf_score
+    FROM vector_search v FULL OUTER JOIN text_search t ON t.id = v.id
 )
 SELECT d.id, d.doc_id, d.content, r.rrf_score
 FROM rrf r JOIN legal_documents d ON d.id = r.id
 ORDER BY r.rrf_score DESC
 LIMIT 10;
 ```
+
+**The mistake this shape exists to avoid.** Writing the window functions in the `rrf` CTE
+instead — `ROW_NUMBER() OVER (ORDER BY v.vector_score DESC)` computed after the `FULL OUTER
+JOIN` — produces a query that runs, returns rows, and is silently wrong. `ROW_NUMBER()` is
+never NULL, so the `COALESCE(..., 0)` never fires and every document collects a contribution
+from *both* lists, including the lists it never appeared in. Worse, a document missing from
+the text side has a NULL text score, and `ORDER BY ... DESC` puts NULLs first, so it is
+awarded rank 1 on the side it did not match. The result inverts RRF exactly: documents found
+by only one retriever outrank documents both retrievers agreed on. Ranking inside each CTE,
+where the absent side is a genuine NULL row from the outer join, is what makes `COALESCE`
+meaningful and gives documents on both lists the higher score they are supposed to get.
 
 **Reranking pass** (Cohere Rerank API):
 - Send top-20 documents to reranker

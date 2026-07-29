@@ -34,7 +34,7 @@ Limit  (cost=12500..12500 rows=10 width=36) (actual time=450.2..450.2 rows=10 lo
         Sort Key: (count(o.id)) DESC
         Sort Method: top-N heapsort  Memory: 25kB
         ->  HashAggregate  (cost=10000..11000 rows=40000 width=36) (actual time=380.0..420.0 rows=40000 loops=1)
-              ->  Hash Left Join  (cost=500..8000 rows=200000 width=20) (actual time=10.0..300.0 rows=200000 loops=1)
+              ->  Hash Right Join  (cost=500..8000 rows=200000 width=20) (actual time=10.0..300.0 rows=200000 loops=1)
                     Hash Cond: (o.user_id = u.id)
                     ->  Seq Scan on orders o  (cost=0..5000 rows=200000 width=8) (actual time=0.05..100.0 rows=200000 loops=1)
                     ->  Hash  (cost=400..400 rows=40000 width=12) (actual time=9.0..9.0 rows=40000 loops=1)
@@ -47,6 +47,9 @@ Limit  (cost=12500..12500 rows=10 width=36) (actual time=450.2..450.2 rows=10 lo
 -- actual time=startup_ms..total_ms
 -- rows=actual  (vs cost= estimate — mismatch means bad stats)
 -- loops=N means this node executed N times (common in nested loop inner side)
+-- "Hash RIGHT Join" for a LEFT JOIN is not a typo: the planner put the small
+--   side (users) in the hash table and streamed the big side (orders) past it,
+--   which flips which input is "outer" and so flips the reported join direction
 -- Buffers: shared hit=N (buffer pool) read=N (disk)
 ```
 
@@ -125,13 +128,15 @@ Now shrink the outer side and watch it flip:
   outer_rows      nested loop pages      hash join pages     winner
        100        400 + 100x4 =   800         5,400          nested loop
      1,000        400 + 1,000x4 = 4,400       5,400          nested loop
-     1,350        400 + 1,350x4 = 5,800       5,400          tie-ish
+     1,250        400 + 1,250x4 = 5,400       5,400          exact tie
+     1,500        400 + 1,500x4 = 6,400       5,400          hash join
     40,000        160,400                     5,400          hash join
 
-  crossover: outer_rows = 5,400 / 4 = 1,350 rows
+  crossover: both plans pay the 400-page outer scan, so it cancels --
+             outer_rows = pages(orders) / lookup_cost = 5,000 / 4 = 1,250 rows
 ```
 
-That 1,350 is where the quoted heuristic "nested loop when outer is under ~1,000 rows" comes
+That 1,250 is where the quoted heuristic "nested loop when outer is under ~1,000 rows" comes
 from. It is not a magic constant — it is `pages(inner_table) / lookup_cost`, so it moves whenever
 the inner table grows or the index gets deeper. Double the `orders` table and the crossover
 roughly doubles too.
@@ -233,30 +238,36 @@ input propagates multiplicatively. A single join off by 10x makes a three-table 
 exceeds the `rows` estimate by more than 10x at any node, every node *above* it in the plan tree
 was chosen on fiction, and re-running `ANALYZE` is a cheaper first move than rewriting the query.
 
-### CTEs as Optimization Fences (PostgreSQL < 12)
+### CTEs and the Optimization Fence
 
 ```sql
--- PostgreSQL < 12: CTEs are always materialized (calculated once, stored)
--- This prevents the planner from pushing predicates inside the CTE
+-- A CTE referenced exactly once, with no side effects and no RECURSIVE, is
+-- INLINED: the planner folds it into the outer query and pushes predicates in.
 
 WITH active_users AS (
-    SELECT id, name FROM users WHERE status = 'active'  -- Materialized: scans ALL active users
-)
-SELECT * FROM active_users WHERE id = 42;
--- Planner CANNOT push "id = 42" inside the CTE → full scan of active users, then filter
-
--- Fix in PostgreSQL 11 and below: inline with NOT MATERIALIZED hint or use subquery
-SELECT * FROM (
-    SELECT id, name FROM users WHERE status = 'active'
-) u WHERE id = 42;
--- Planner CAN push id=42 into the subquery
-
--- PostgreSQL 12+: CTEs are automatically inlined unless MATERIALIZED keyword used
-WITH active_users AS MATERIALIZED (  -- Explicit materialization
     SELECT id, name FROM users WHERE status = 'active'
 )
 SELECT * FROM active_users WHERE id = 42;
+-- Planner pushes "id = 42" inside → index scan, same plan as a subquery
+
+-- The fence is now opt-IN, and it is a tool rather than a tax:
+WITH active_users AS MATERIALIZED (
+    SELECT id, name FROM users WHERE status = 'active'
+)
+SELECT * FROM active_users a1 JOIN active_users a2 ON ...;
+-- MATERIALIZED forces one evaluation. Use it when the CTE is expensive and
+-- referenced many times, or when it wraps a volatile function you must not
+-- have re-executed per reference.
+
+-- And opt-OUT, for the reverse case:
+WITH recent AS NOT MATERIALIZED (SELECT ... FROM huge)
+SELECT * FROM recent WHERE id = 42;
+-- NOT MATERIALIZED forces inlining even when referenced more than once.
 ```
+
+The one case that still fences automatically: a CTE referenced **more than once** is
+materialized by default, so a predicate on the outer query will not reach inside it. If a
+multiply-referenced CTE is scanning more than it should, `NOT MATERIALIZED` is the fix.
 
 ---
 
@@ -440,7 +451,7 @@ observation in an N+1 investigation.
     total       = 6 x 5.0 ms = 30 ms
 ```
 
-Note what the batch row buys: it does not remove a single row of database work, only 494 round
+Note what the batch row buys: it does not remove a single row of database work, only 495 round
 trips. That is also why the same code is fast on a developer laptop — a local socket has a
 `round_trip` near 0.2 ms, so the identical N=500 loop costs 100 ms and never gets noticed until
 the app runs across a network.
@@ -494,7 +505,10 @@ COPY events (user_id, type) FROM stdin;
 2	view
 \.
 -- COPY is 10-100x faster than INSERT for bulk loads
--- No statement parsing overhead, bypasses some constraint checking
+-- The win is entirely per-STATEMENT overhead removed: one parse, one plan, one
+-- round trip for the whole stream instead of N of each. COPY does NOT skip
+-- work per row -- CHECK constraints, NOT NULL, unique indexes, foreign keys and
+-- row triggers all still fire, and a violation aborts the COPY mid-stream.
 
 -- JDBC batch (Java):
 PreparedStatement ps = conn.prepareStatement("INSERT INTO events VALUES (?, ?)");
@@ -603,14 +617,32 @@ ALTER TABLE users ADD COLUMN email_domain TEXT GENERATED ALWAYS AS (split_part(e
 CREATE INDEX idx_email_domain ON users (email_domain);
 ```
 
-**Pitfall 2: Implicit type cast breaks index**
+**Pitfall 2: A cast on the COLUMN side breaks the index**
 ```sql
 -- Table: sessions, column: user_id INTEGER, index on (user_id)
--- ORM sends user_id as string:
-SELECT * FROM sessions WHERE user_id = '42';  -- PostgreSQL: implicit cast, may skip index
--- Fix: ensure ORM sends correct type (integer) or cast in query:
+
+-- These are FINE. A quoted literal is not the problem people think it is:
+SELECT * FROM sessions WHERE user_id = '42';   -- Index Scan. PostgreSQL resolves
+                                               -- the unknown-type literal to integer
+SELECT * FROM sessions WHERE user_id = 42;     -- Index Scan
+
+-- These are NOT. The rule is: whenever the cast lands on the COLUMN, the index
+-- on that column no longer matches the expression and is skipped:
+SELECT * FROM sessions WHERE user_id::text = '42';  -- Seq Scan
+SELECT * FROM sessions WHERE user_id = 42.0;        -- Seq Scan
+-- The second is the one that bites in production: there is no integer = numeric
+-- operator, so PostgreSQL promotes the COLUMN to numeric on every row. An ORM
+-- binding a Python Decimal or a JSON number produces exactly this.
+
+-- Fix 1: bind the parameter with the column's own type
 SELECT * FROM sessions WHERE user_id = 42::integer;
+-- Fix 2: if the expression is genuinely needed, index the expression
+CREATE INDEX idx_sessions_user_id_text ON sessions ((user_id::text));
 ```
+PostgreSQL is stricter than MySQL here, and the strictness is protective: comparing a
+`text` column to a bare number is not a silent seq scan, it is `ERROR: operator does not
+exist: text = integer`. MySQL instead coerces both sides to `DOUBLE` and quietly abandons
+the index, so the same schema mistake fails loudly on one engine and invisibly on the other.
 
 **Pitfall 3: EXISTS vs IN — different behavior with NULLs**
 ```sql
@@ -624,13 +656,66 @@ SELECT * FROM orders o WHERE NOT EXISTS (
 );
 ```
 
-**Pitfall 4: UPDATE statistics_target too low for skewed data**
-A table with a `country` column storing 99% 'US' and 1% other values. Default 100-bucket histogram cannot capture the 'US' spike. Planner estimates 1% for 'US' queries, chooses seq scan. Fix:
+**Pitfall 4: statistics_target too low for a LONG-TAILED column**
+The failure is not the dominant value — it is everything after the hundredth one. A `country`
+column that is 99% `'US'` needs no tuning at all: `'US'` is the first entry in the
+most-common-values list at the default `default_statistics_target = 100`, recorded at
+frequency 0.989, and the planner correctly picks a seq scan for it and an index scan for the
+rare codes. MCVs handle a spike; that is what they are for.
+
+The real case is a column with thousands of distinct values whose frequencies decay — a
+`tag`, `merchant_id`, `error_code`. Only the top 100 fit in the MCV list; every value below
+the cut shares one flat "average of the remainder" estimate, so genuinely frequent values
+just outside the top 100 are under-estimated and inherit nested-loop plans sized for a
+handful of rows. Measured on an 809K-row table with 3,000 skewed tags:
 ```sql
-ALTER TABLE orders ALTER COLUMN country SET STATISTICS 1000;
+-- default_statistics_target = 100  ->  100 MCVs stored
+--   WHERE tag = 'tag150'   estimate 62 rows, actual 133   (2.1x low)
+
+ALTER TABLE orders ALTER COLUMN tag SET STATISTICS 1000;
 ANALYZE orders;
--- More buckets → better estimate of 99% → planner chooses correct plan
+-- now 453 MCVs stored
+--   WHERE tag = 'tag150'   estimate 154 rows, actual 133  (1.2x, plan is now right)
 ```
+Raise the target on columns whose distinct count exceeds the MCV slots and whose frequencies
+are uneven. Do not raise it on a column that is one value 99% of the time — there is nothing
+there for the extra slots to learn, and every `ANALYZE` pays for them.
+
+**Pitfall 6: The same query, same data, two different plans — generic vs custom plans**
+This is the plan flip that survives every check the other pitfalls suggest. Statistics are
+fresh, the data has not changed, `EXPLAIN` in psql shows a perfect index scan — and the
+application is slow anyway, because the application does not send the query the way psql does.
+
+A prepared statement (which every ORM and every driver-level parameterised query creates) is
+planned twice over its life. The first five executions get a **custom plan**: PostgreSQL
+re-plans with the actual parameter values visible, so a selective value gets an index scan.
+From the sixth execution it may switch to a **generic plan**, planned once with the parameters
+unknown and reused thereafter, sized against *average* selectivity. It makes that switch only
+when the generic plan's estimated cost is no worse than the average custom plan's — a decent
+heuristic that fails exactly where it matters, on skewed columns where "average" describes no
+real query.
+
+The two plans are distinguishable at a glance by what appears in the `Index Cond`:
+
+```sql
+PREPARE q(text) AS SELECT count(*) FROM gp WHERE country = $1;
+
+-- custom plan: the value was visible to the planner
+--   Index Only Scan using gp_country_idx
+--     Index Cond: (country = 'RARE'::text)
+
+SET plan_cache_mode = force_generic_plan;
+-- generic plan: the parameter is still a parameter, sized for the average
+--   Parallel Index Only Scan using gp_country_idx
+--     Index Cond: (country = $1)
+```
+
+A literal in `Index Cond` means custom; a bare `$1` means generic. Diagnose by running
+`EXPLAIN EXECUTE` six or more times rather than once, and fix with
+`SET plan_cache_mode = force_custom_plan` for the affected statement — the extra planning cost
+per execution is trivial next to the wrong plan it prevents. Reach for it only for the specific
+skewed query; forcing custom plans globally gives up plan caching for every statement that was
+benefiting from it.
 
 **Pitfall 5: Forgetting EXPLAIN ANALYZE uses real data**
 EXPLAIN without ANALYZE shows estimated costs only. EXPLAIN ANALYZE actually executes the query. For slow queries: always use `EXPLAIN (ANALYZE, BUFFERS)`. Check: if `actual rows` >> `rows` estimate by >10x, statistics are stale.
@@ -669,10 +754,10 @@ The N+1 problem: loading N parent records, then executing one query per parent t
 Window functions compute aggregations over a sliding window of rows related to the current row, without collapsing rows (unlike GROUP BY). They replace correlated subqueries that scan the same table multiple times: `ROW_NUMBER() OVER (PARTITION BY category ORDER BY revenue DESC)` replaces "SELECT MAX(revenue) FROM products WHERE category = t.category" repeated per row. Common functions: `ROW_NUMBER()` (unique sequential number), `RANK()` (handles ties), `DENSE_RANK()` (rank without gaps), `LAG(col, n)` (value from n rows before), `LEAD(col, n)` (value from n rows after), `SUM/AVG/MAX OVER (PARTITION BY ... ORDER BY ... ROWS ...)`. A correlated subquery with N rows executes N subqueries; the equivalent window function executes one pass.
 
 **Q: What are the performance implications of CTEs in PostgreSQL?**
-PostgreSQL < 12: CTEs (WITH clauses) are always materialized — the CTE result is computed once and stored in a temporary structure. The planner cannot push predicates from the outer query into the CTE, preventing index use. A query like `WITH base AS (SELECT * FROM large_table) SELECT * FROM base WHERE id = 42` results in a full scan of `large_table` regardless of the index on `id`. PostgreSQL 12+: CTEs are automatically inlined (treated like a subquery) unless you specify `WITH ... AS MATERIALIZED (...)`. Best practice for PostgreSQL < 12: use subqueries in FROM clause instead of CTEs for queries where predicate pushdown is needed.
+A CTE referenced once is inlined and plans identically to a subquery, so predicates from the outer query are pushed inside and indexes are used. Three conditions must hold for that inlining: the CTE is referenced exactly once, it is not `RECURSIVE`, and it contains no volatile functions and no data-modifying statement. Break any of them and PostgreSQL materialises the CTE into a temporary result instead, at which point it becomes an optimization fence — `WITH base AS (SELECT * FROM large_table) SELECT * FROM base b1 JOIN base b2 ...` scans `large_table` in full despite an index on `id`, because the two references force materialisation. Both behaviours are controllable: `AS MATERIALIZED` forces the fence (useful to evaluate an expensive CTE once rather than per reference), `AS NOT MATERIALIZED` forces inlining even for a multiply-referenced CTE. Read the plan rather than guessing — a materialised CTE appears as its own `CTE Scan` node.
 
 **Q: How does the hash join use work_mem and what happens when it spills?**
-The planner allocates `work_mem` (default 4MB) for the hash table of the smaller input. If the smaller input fits in `work_mem`, all rows are in memory and the probe phase is pure memory operations. If the input exceeds `work_mem`, PostgreSQL uses "batch hashing": splits the hash table into batches that fit in memory, processes one batch at a time (requires re-reading the probe side multiple times). EXPLAIN output: `Batches: 8` means 8 rounds, which means disk I/O for 7 re-reads of the probe side. Fix: `SET work_mem = 'N MB'` for the session before the query. Warning: work_mem applies per sort/hash operation, per query. At 100 concurrent sessions, global `work_mem = 1GB` could allocate 100GB.
+The planner allocates `work_mem` (default 4MB) for the hash table of the smaller input. If the smaller input fits in `work_mem`, all rows are in memory and the probe phase is pure memory operations. If the input exceeds `work_mem`, PostgreSQL uses "batch hashing": splits the hash table into batches that fit in memory, processes one batch at a time (requires re-reading the probe side multiple times). EXPLAIN output: `Batches: 8` means the join was partitioned 8 ways; batch 1 is processed in memory while batches 2-8 of BOTH sides are written to temp files and read back once each, so roughly `(N-1)/N` = 87.5% of each input makes a round trip to disk. Fix: `SET work_mem = 'N MB'` for the session before the query. Warning: work_mem applies per sort/hash operation, per query. At 100 concurrent sessions, global `work_mem = 1GB` could allocate 100GB.
 
 **Q: What is the difference between EXISTS and IN for subqueries in performance terms?**
 For correlated subqueries: EXISTS short-circuits (returns immediately when first match found), while IN must scan all rows. `WHERE id IN (SELECT user_id FROM premium_users)` — scans all premium_users rows and builds a hash set. `WHERE EXISTS (SELECT 1 FROM premium_users WHERE user_id = o.id)` — for each outer row, stops at the first match. Modern PostgreSQL optimizes both to hash semi-joins for non-correlated cases, so the performance difference is minimal for simple cases. The critical behavioral difference: `NOT IN` with NULLs in the subquery returns no results (NULL semantics), while `NOT EXISTS` handles NULLs correctly. Always prefer NOT EXISTS over NOT IN.
@@ -703,10 +788,13 @@ ANALYZE collects statistics about column distributions and stores them in `pg_st
 Analysis steps: (1) Check if there's an index on the GROUP BY + WHERE columns. If not, add one. (2) EXPLAIN: if "HashAggregate" node shows large memory usage or "Disk: NNN bytes" → increase `work_mem`. (3) If aggregating over nearly all rows, consider a materialized view that pre-aggregates and refreshes periodically. (4) Check if a partial aggregate pushdown is possible (PostgreSQL supports parallel aggregation). (5) For real-time dashboard queries, consider moving to ClickHouse or TimescaleDB continuous aggregates for heavy OLAP. (6) Ensure statistics are up-to-date — wrong cardinality estimate causes wrong join order in GROUP BY + JOIN queries.
 
 **Q: What is the difference between seq_page_cost and random_page_cost in PostgreSQL?**
-`seq_page_cost` (default 1.0) and `random_page_cost` (default 4.0) are cost model constants in arbitrary units. They represent the planner's estimate of I/O cost: sequential I/O (reading pages in order) vs random I/O (seeking to a random page). The ratio random/sequential = 4.0 reflects HDD seek time. For SSD storage, random I/O is much cheaper (10-50x faster than HDD random I/O). Set `random_page_cost = 1.1` for SSDs, `1.5` for NVMe RAID. Impact: with `random_page_cost=4`, the planner prefers sequential scans for queries touching > ~25% of rows. With `random_page_cost=1.1`, it prefers index scans for much lower selectivities — often the right choice for column-store-cached working sets.
+`seq_page_cost` (default 1.0) and `random_page_cost` (default 4.0) are cost model constants in arbitrary units. They represent the planner's estimate of I/O cost: sequential I/O (reading pages in order) vs random I/O (seeking to a random page). The ratio random/sequential = 4.0 reflects HDD seek time. For SSD storage, random I/O is much cheaper (10-50x faster than HDD random I/O). Set `random_page_cost = 1.1` for SSDs, `1.5` for NVMe RAID. Impact: with `random_page_cost=4`, the planner prefers sequential scans for queries touching > ~25% of rows. With `random_page_cost=1.1`, it prefers index scans for much lower selectivities — the right choice whenever the working set is already resident in `shared_buffers` or the OS page cache, since a "random" page then costs no seek at all.
 
 **Q: What is partial aggregate and how does it enable parallel query?**
 Parallel query: PostgreSQL spawns N worker processes to scan table partitions in parallel. Each worker computes a partial aggregate over its data (e.g., partial SUM, partial COUNT). The gather node in the leader process merges partial aggregates into the final result (e.g., SUM all partial SUMs). This enables linear speedup for aggregation queries proportional to the number of workers (`max_parallel_workers_per_gather`). Partial aggregate is only useful if the aggregate function is associative and commutative (SUM, COUNT, MIN, MAX are; user-defined aggregates may not be). `EXPLAIN` shows `Partial Aggregate` and `Gather` nodes.
+
+**Q: Why can a query be fast in psql but slow from the application with identical data and fresh statistics?**
+Because the application sends it as a prepared statement, and PostgreSQL may be running a generic plan for it while psql runs a custom one. A prepared statement is planned with the actual parameter values for its first five executions (custom plans); from the sixth, PostgreSQL may switch to a generic plan built once with the parameters unknown and reused thereafter. It only switches when the generic plan's estimated cost is no worse than the average custom plan's, which is sound on a uniformly distributed column and wrong on a skewed one, where the "average" selectivity the generic plan is sized for matches no query anyone actually runs. Tell them apart in `EXPLAIN` output by the `Index Cond`: a custom plan shows the literal, `country = 'RARE'::text`, while a generic plan shows the unbound parameter, `country = $1`. Reproduce it by running `EXPLAIN EXECUTE` at least six times rather than once, then pin the affected statement with `SET plan_cache_mode = force_custom_plan` — never globally, since that discards plan caching for every statement it was helping.
 
 **Q: How do you analyze and fix a query that performs well in development but slowly in production?**
 Common causes: (1) Data volume: dev has 10K rows, prod has 100M. Plans that work for small data (sequential scan) are catastrophic for large data. Fix: always test with production-scale data or statistics-only clone. (2) Statistics difference: dev data is uniform, prod data is skewed. Fix: `ANALYZE` prod regularly, increase statistics target. (3) Connection pool settings: dev uses 5 connections, prod uses 200 — different `work_mem` effective usage. (4) Concurrent load: dev is single-user, prod has 500 concurrent. Lock waits, buffer contention. Fix: load test in staging with realistic concurrency. (5) Planner settings difference: dev uses defaults, prod uses custom settings. Always maintain parity.
@@ -795,4 +883,4 @@ FROM customer_spend_30d ORDER BY spend_30d DESC LIMIT 50;
 -- Time: 1ms (pure index scan on small materialized view)
 ```
 
-**Result**: 4,200ms → 1ms. The key insight was replacing correlated subqueries (exponential problem) with a single aggregation pass, then pre-computing the result with a materialized view for near-instant API responses.
+**Result**: 4,200ms → 1ms. The key insight was replacing correlated subqueries (a quadratic problem: one inner scan per outer row) with a single aggregation pass, then pre-computing the result with a materialized view for near-instant API responses.
