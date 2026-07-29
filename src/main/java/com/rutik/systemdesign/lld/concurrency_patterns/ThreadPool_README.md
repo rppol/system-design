@@ -343,17 +343,17 @@ ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
 
 ## Interview Questions
 
-1. **What is the difference between `Runnable` and `Callable`?**
-   `Runnable.run()` returns void and cannot throw checked exceptions. `Callable.call()` returns a value (`Future<V>`) and can throw checked exceptions.
+**Q: What is the difference between `Runnable` and `Callable`?**
+`Runnable.run()` returns void and cannot throw checked exceptions. `Callable.call()` returns a value (`Future<V>`) and can throw checked exceptions.
 
-2. **What happens when a thread pool's queue is full?**
-   The rejection handler is invoked. Default `AbortPolicy` throws `RejectedExecutionException`. `CallerRunsPolicy` runs the task on the submitting thread (backpressure).
+**Q: What happens when a thread pool's queue is full?**
+The rejection handler is invoked. Default `AbortPolicy` throws `RejectedExecutionException`. `CallerRunsPolicy` runs the task on the submitting thread (backpressure).
 
-3. **How do you size a thread pool for a REST service that makes DB calls?**
-   I/O-bound formula: `threads = N_CPUs × (1 + DB_wait/compute_time)`. Profile to measure actual wait ratio. Start with `2 × N_CPUs` and tune based on throughput metrics.
+**Q: How do you size a thread pool for a REST service that makes DB calls?**
+I/O-bound formula: `threads = N_CPUs × (1 + DB_wait/compute_time)`. Profile to measure actual wait ratio. Start with `2 × N_CPUs` and tune based on throughput metrics.
 
-4. **What's the difference between `shutdown()` and `shutdownNow()`?**
-   `shutdown()`: no new tasks accepted, existing tasks and queue are processed to completion. `shutdownNow()`: attempts to interrupt running tasks, returns queued tasks that were not started.
+**Q: What's the difference between `shutdown()` and `shutdownNow()`?**
+`shutdown()`: no new tasks accepted, existing tasks and queue are processed to completion. `shutdownNow()`: attempts to interrupt running tasks, returns queued tasks that were not started.
 
-5. **Why might `Executors.newFixedThreadPool()` cause OOM in production?**
-   It uses an unbounded `LinkedBlockingQueue`. If tasks are submitted faster than processed, the queue grows without bound until OOM. Always use `ThreadPoolExecutor` with a bounded queue in production.
+**Q: Why might `Executors.newFixedThreadPool()` cause OOM in production?**
+It uses an unbounded `LinkedBlockingQueue`. If tasks are submitted faster than processed, the queue grows without bound until OOM. Always use `ThreadPoolExecutor` with a bounded queue in production.

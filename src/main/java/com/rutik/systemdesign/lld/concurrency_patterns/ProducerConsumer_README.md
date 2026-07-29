@@ -218,19 +218,19 @@ Consumer A never swallows the pill — it re-`put()`s it before exiting, so Cons
 
 ## Interview Questions
 
-1. **What is the difference between `notify()` and `notifyAll()`?**
-   `notify()` wakes one random waiting thread. `notifyAll()` wakes all. Use `notifyAll()` when multiple threads are waiting on different conditions; `notify()` is only safe when all threads wait on the same condition.
+**Q: What is the difference between `notify()` and `notifyAll()`?**
+`notify()` wakes one random waiting thread. `notifyAll()` wakes all. Use `notifyAll()` when multiple threads are waiting on different conditions; `notify()` is only safe when all threads wait on the same condition.
 
-2. **What is a spurious wakeup? How do you handle it?**
-   A thread waking from `wait()` without being notified. Handle by always rechecking the condition in a `while` loop.
+**Q: What is a spurious wakeup? How do you handle it?**
+A thread waking from `wait()` without being notified. Handle by always rechecking the condition in a `while` loop.
 
-3. **How do you gracefully shut down a producer-consumer system?**
-   Option A: Poison pill — producers send a sentinel task; consumers stop on receiving it.
-   Option B: `ExecutorService.shutdown()` then `awaitTermination()`.
-   Option C: `volatile boolean running = false` flag checked in consumer loop.
+**Q: How do you gracefully shut down a producer-consumer system?**
+Option A: Poison pill — producers send a sentinel task; consumers stop on receiving it.
+Option B: `ExecutorService.shutdown()` then `awaitTermination()`.
+Option C: `volatile boolean running = false` flag checked in consumer loop.
 
-4. **What BlockingQueue would you use for a priority work queue?**
-   `PriorityBlockingQueue` — tasks implement `Comparable` or provide a `Comparator`.
+**Q: What BlockingQueue would you use for a priority work queue?**
+`PriorityBlockingQueue` — tasks implement `Comparable` or provide a `Comparator`.
 
-5. **How would you implement backpressure?**
-   Use a bounded `BlockingQueue`. `put()` blocks the producer thread when full. For async systems, use reactive streams (RxJava, Project Reactor) which have explicit backpressure signals.
+**Q: How would you implement backpressure?**
+Use a bounded `BlockingQueue`. `put()` blocks the producer thread when full. For async systems, use reactive streams (RxJava, Project Reactor) which have explicit backpressure signals.

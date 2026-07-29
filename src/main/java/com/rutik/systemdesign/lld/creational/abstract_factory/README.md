@@ -591,59 +591,59 @@ The durable point is the ratio between an in-process factory call and a network 
 
 ## 16. Interview Questions with Answers
 
-**Common Interview Questions:**
+### Common Questions
 
-1. **"When would you choose Abstract Factory over Factory Method?"**
-   **Short:** Choose Abstract Factory when multiple related product types must be created together and stay consistent.
+**Q: When would you choose Abstract Factory over Factory Method?**
+**Short:** Choose Abstract Factory when multiple related product types must be created together and stay consistent.
 
-   Answer: When you have multiple related product types that must be created together and must be consistent. Factory Method is for one product type; Abstract Factory is for a whole family. Give the platform UI example.
+A: When you have multiple related product types that must be created together and must be consistent. Factory Method is for one product type; Abstract Factory is for a whole family. Give the platform UI example.
 
-2. **"What's the biggest limitation of Abstract Factory?"**
-   **Short:** Adding a new product type requires changing the abstract interface and every concrete factory implementing it.
+**Q: What's the biggest limitation of Abstract Factory?**
+**Short:** Adding a new product type requires changing the abstract interface and every concrete factory implementing it.
 
-   Answer: Adding a new product type to the factory requires changing the abstract interface and all concrete factories — a potentially breaking change. This is why you should plan the product type set carefully.
+A: Adding a new product type to the factory requires changing the abstract interface and all concrete factories — a potentially breaking change. This is why you should plan the product type set carefully.
 
-3. **"How is JDBC related to Abstract Factory?"**
-   **Short:** Each JDBC driver is a concrete factory producing a consistent family of Connection, Statement, and ResultSet objects.
+**Q: How is JDBC related to Abstract Factory?**
+**Short:** Each JDBC driver is a concrete factory producing a consistent family of Connection, Statement, and ResultSet objects.
 
-   Answer: Each JDBC driver acts as a concrete factory. `Connection`, `Statement`, and `ResultSet` are product families. `DriverManager.getConnection()` returns a driver-specific Connection, and all subsequent objects created from it are from the same driver family.
+A: Each JDBC driver acts as a concrete factory. `Connection`, `Statement`, and `ResultSet` are product families. `DriverManager.getConnection()` returns a driver-specific Connection, and all subsequent objects created from it are from the same driver family.
 
-4. **"How do you swap families at runtime?"**
-   **Short:** Since clients depend only on AbstractFactory and AbstractProduct, passing a different ConcreteFactory swaps the family.
+**Q: How do you swap families at runtime?**
+**Short:** Since clients depend only on AbstractFactory and AbstractProduct, passing a different ConcreteFactory swaps the family.
 
-   Answer: Since clients depend only on AbstractFactory and AbstractProduct, you simply pass in a different ConcreteFactory. All product creation calls through that factory will return the new family's objects.
+A: Since clients depend only on AbstractFactory and AbstractProduct, you simply pass in a different ConcreteFactory. All product creation calls through that factory will return the new family's objects.
 
-5. **"Abstract Factory vs. Factory Method — give me a concrete example where you'd need the former but not the latter."**
-   **Short:** Abstract Factory is needed when several related objects, like a UI toolkit's Button and Checkbox, must stay consistent.
+**Q: Abstract Factory vs. Factory Method — give me a concrete example where you'd need the former but not the latter.**
+**Short:** Abstract Factory is needed when several related objects, like a UI toolkit's Button and Checkbox, must stay consistent.
 
-   Answer: Use Abstract Factory when creating an object requires *other related objects from the same family* to be consistent; use Factory Method when you're only ever creating one type of object. Concrete example: a cross-platform UI toolkit needs `Button`, `Checkbox`, and `TextField` to all be Windows-styled or all macOS-styled together — a single Factory Method (`createButton()`) on its own can't enforce that the Checkbox and TextField created elsewhere match, so you need an `AbstractFactory` with `createButton()`, `createCheckbox()`, and `createTextField()` all implemented by the same `WindowsFactory` or `MacFactory`. By contrast, a logging framework that only ever needs to produce one `Logger` instance per configuration has no "family" to keep consistent — a single Factory Method on a `LoggerFactory` is sufficient and Abstract Factory would be over-engineering.
+A: Use Abstract Factory when creating an object requires *other related objects from the same family* to be consistent; use Factory Method when you're only ever creating one type of object. Concrete example: a cross-platform UI toolkit needs `Button`, `Checkbox`, and `TextField` to all be Windows-styled or all macOS-styled together — a single Factory Method (`createButton()`) on its own can't enforce that the Checkbox and TextField created elsewhere match, so you need an `AbstractFactory` with `createButton()`, `createCheckbox()`, and `createTextField()` all implemented by the same `WindowsFactory` or `MacFactory`. By contrast, a logging framework that only ever needs to produce one `Logger` instance per configuration has no "family" to keep consistent — a single Factory Method on a `LoggerFactory` is sufficient and Abstract Factory would be over-engineering.
 
-6. **"How does Abstract Factory enable swapping entire product families at runtime — walk through the JDBC driver example."**
-   **Short:** Application code depends only on java.sql interfaces, so swapping JDBC drivers changes the whole family with zero code changes.
+**Q: How does Abstract Factory enable swapping entire product families at runtime — walk through the JDBC driver example.**
+**Short:** Application code depends only on java.sql interfaces, so swapping JDBC drivers changes the whole family with zero code changes.
 
-   Answer: The application code is written entirely against `java.sql.Connection`, `Statement`, `PreparedStatement`, and `ResultSet` — the AbstractProduct interfaces — and never imports `com.mysql.cj.jdbc.*` or `org.postgresql.*` directly. At startup, `DriverManager.getConnection(jdbcUrl, ...)` picks the registered `Driver` (the ConcreteFactory) whose `acceptsURL()` matches the URL scheme, and from that point on every `Statement`, `PreparedStatement`, and `ResultSet` created from that `Connection` belongs to the same driver family — switching from MySQL to PostgreSQL in production is a one-line change to the JDBC URL and driver dependency, with zero changes to DAO or repository code. This is the same mechanism behind Swing's `LookAndFeel`: `UIManager.setLookAndFeel(...)` swaps the entire `ButtonUI`/`TextFieldUI`/`ScrollBarUI` family in one call, and every subsequently rendered component picks up the new family automatically.
+A: The application code is written entirely against `java.sql.Connection`, `Statement`, `PreparedStatement`, and `ResultSet` — the AbstractProduct interfaces — and never imports `com.mysql.cj.jdbc.*` or `org.postgresql.*` directly. At startup, `DriverManager.getConnection(jdbcUrl, ...)` picks the registered `Driver` (the ConcreteFactory) whose `acceptsURL()` matches the URL scheme, and from that point on every `Statement`, `PreparedStatement`, and `ResultSet` created from that `Connection` belongs to the same driver family — switching from MySQL to PostgreSQL in production is a one-line change to the JDBC URL and driver dependency, with zero changes to DAO or repository code. This is the same mechanism behind Swing's `LookAndFeel`: `UIManager.setLookAndFeel(...)` swaps the entire `ButtonUI`/`TextFieldUI`/`ScrollBarUI` family in one call, and every subsequently rendered component picks up the new family automatically.
 
-7. **"How do you test code that depends on an Abstract Factory?"**
-   **Short:** Inject a test-double ConcreteFactory that returns fakes for every product, swapping the whole family atomically.
+**Q: How do you test code that depends on an Abstract Factory?**
+**Short:** Inject a test-double ConcreteFactory that returns fakes for every product, swapping the whole family atomically.
 
-   Answer: Inject a test-double `ConcreteFactory` (e.g., `InMemoryNotificationFactory`) that returns fakes/stubs for every product method — since the client (`NotificationService`) depends only on the `NotificationFactory` interface, constructing it with the in-memory factory in a unit test requires zero mocking framework setup and exercises the exact same code path as production. The key benefit over mocking each product individually with Mockito is that the *whole family* swaps atomically and consistently — you don't risk a test where `EmailSender` is mocked but `AuditLogger` accidentally hits the real CloudWatch client. As an illustrative order of magnitude from the example in this module: `InMemoryNotificationFactory.createEmailSender().send()` runs in tens of nanoseconds vs. ~120ms for a real SendGrid HTTP call — roughly seven orders of magnitude, which is what makes running thousands of test cases per second feasible.
+A: Inject a test-double `ConcreteFactory` (e.g., `InMemoryNotificationFactory`) that returns fakes/stubs for every product method — since the client (`NotificationService`) depends only on the `NotificationFactory` interface, constructing it with the in-memory factory in a unit test requires zero mocking framework setup and exercises the exact same code path as production. The key benefit over mocking each product individually with Mockito is that the *whole family* swaps atomically and consistently — you don't risk a test where `EmailSender` is mocked but `AuditLogger` accidentally hits the real CloudWatch client. As an illustrative order of magnitude from the example in this module: `InMemoryNotificationFactory.createEmailSender().send()` runs in tens of nanoseconds vs. ~120ms for a real SendGrid HTTP call — roughly seven orders of magnitude, which is what makes running thousands of test cases per second feasible.
 
-8. **"What is the 'static factory of factories' anti-pattern?"**
-   **Short:** A static FactoryProvider.getFactory() method is a hidden Service Locator with Singleton's same testability problems.
+**Q: What is the 'static factory of factories' anti-pattern?**
+**Short:** A static FactoryProvider.getFactory() method is a hidden Service Locator with Singleton's same testability problems.
 
-   Answer: This is when a class exposes a static method like `FactoryProvider.getFactory(String env)` that internally does an `if-else`/`switch` to `new` up and return the right `ConcreteFactory` — it looks like dependency injection but is actually a hidden global `Service Locator` with the same testability problems as Singleton: callers invoke the static method directly, so the dependency on "which factory" is invisible from constructors and can't be swapped per-test without static-state hacks. The fix is to let a DI container (Spring's `@Profile`-based `@Configuration` classes, or a manually-wired composition root) decide which `ConcreteFactory` implementation to instantiate and inject it as a constructor argument — the selection logic moves from a static method body to bean wiring, which is overridable per test context via `@TestConfiguration` or `@ActiveProfiles`.
+A: This is when a class exposes a static method like `FactoryProvider.getFactory(String env)` that internally does an `if-else`/`switch` to `new` up and return the right `ConcreteFactory` — it looks like dependency injection but is actually a hidden global `Service Locator` with the same testability problems as Singleton: callers invoke the static method directly, so the dependency on "which factory" is invisible from constructors and can't be swapped per-test without static-state hacks. The fix is to let a DI container (Spring's `@Profile`-based `@Configuration` classes, or a manually-wired composition root) decide which `ConcreteFactory` implementation to instantiate and inject it as a constructor argument — the selection logic moves from a static method body to bean wiring, which is overridable per test context via `@TestConfiguration` or `@ActiveProfiles`.
 
-9. **"How does Abstract Factory combine with a Dependency Injection container?"**
-   **Short:** DI containers like Spring profiles make hand-rolled Abstract Factories redundant, except when selection must happen dynamically.
+**Q: How does Abstract Factory combine with a Dependency Injection container?**
+**Short:** DI containers like Spring profiles make hand-rolled Abstract Factories redundant, except when selection must happen dynamically.
 
-   Answer: In practice, most DI containers make hand-rolled Abstract Factories partially redundant for the "family selection" use case — Spring's `@Profile("aws")` vs `@Profile("gcp")` `@Configuration` classes, each declaring `@Bean` methods for `ObjectStorage`, `MetadataStore`, and `AuditSink`, achieve the same "swap the whole family by changing one setting" outcome as an `AwsStorageFactory`/`GcpStorageFactory` pair, but with the container doing the wiring instead of application code calling `factory.createX()`. Where Abstract Factory still earns its place alongside DI is when the family must be selected *dynamically at runtime* based on data the container doesn't have at startup (e.g., per-tenant cloud provider in a multi-tenant SaaS) — there, you inject a `Map<String, CloudResourceFactory>` (Spring auto-wires all beans of a type into a map keyed by bean name) and select the factory by tenant ID at request time, combining DI's wiring with Abstract Factory's runtime family-consistency guarantee.
+A: In practice, most DI containers make hand-rolled Abstract Factories partially redundant for the "family selection" use case — Spring's `@Profile("aws")` vs `@Profile("gcp")` `@Configuration` classes, each declaring `@Bean` methods for `ObjectStorage`, `MetadataStore`, and `AuditSink`, achieve the same "swap the whole family by changing one setting" outcome as an `AwsStorageFactory`/`GcpStorageFactory` pair, but with the container doing the wiring instead of application code calling `factory.createX()`. Where Abstract Factory still earns its place alongside DI is when the family must be selected *dynamically at runtime* based on data the container doesn't have at startup (e.g., per-tenant cloud provider in a multi-tenant SaaS) — there, you inject a `Map<String, CloudResourceFactory>` (Spring auto-wires all beans of a type into a map keyed by bean name) and select the factory by tenant ID at request time, combining DI's wiring with Abstract Factory's runtime family-consistency guarantee.
 
-10. **"If you add a new product type (e.g., `ScrollBar`) to an existing Abstract Factory, what breaks, and how do you minimize the blast radius?"**
-   **Short:** A new product type breaks every existing ConcreteFactory unless the interface provides a safe default method.
+**Q: If you add a new product type (e.g., `ScrollBar`) to an existing Abstract Factory, what breaks, and how do you minimize the blast radius?**
+**Short:** A new product type breaks every existing ConcreteFactory unless the interface provides a safe default method.
 
-   Answer: Adding `createScrollBar()` to the `AbstractFactory` interface is a breaking change for every existing `ConcreteFactory` — `WindowsFactory`, `MacFactory`, `InMemoryTestFactory`, and any third-party plugin factories all fail to compile until they implement the new method. The standard mitigation in Java 8+ is a `default` method on the interface that returns a safe no-op or a sensible fallback (e.g., `default ScrollBarUI createScrollBar() { return new NullScrollBarUI(); }`), so existing factories continue to compile unchanged and only opt in to the new product type by overriding the default when ready. The deeper lesson for an interview: this asymmetry — "new families are cheap (add a ConcreteFactory), new product types are expensive (touch every ConcreteFactory)" — should drive your upfront design discussion about which dimension (families vs. product types) is more likely to grow in this particular system.
+A: Adding `createScrollBar()` to the `AbstractFactory` interface is a breaking change for every existing `ConcreteFactory` — `WindowsFactory`, `MacFactory`, `InMemoryTestFactory`, and any third-party plugin factories all fail to compile until they implement the new method. The standard mitigation in Java 8+ is a `default` method on the interface that returns a safe no-op or a sensible fallback (e.g., `default ScrollBarUI createScrollBar() { return new NullScrollBarUI(); }`), so existing factories continue to compile unchanged and only opt in to the new product type by overriding the default when ready. The deeper lesson for an interview: this asymmetry — "new families are cheap (add a ConcreteFactory), new product types are expensive (touch every ConcreteFactory)" — should drive your upfront design discussion about which dimension (families vs. product types) is more likely to grow in this particular system.
 
-**Key Phrases:**
+### Key Phrases
 - "Family of related objects"
 - "Consistency guarantee across product types"
 - "Composition over inheritance (vs. Factory Method)"

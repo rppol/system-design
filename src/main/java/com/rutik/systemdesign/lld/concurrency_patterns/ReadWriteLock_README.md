@@ -252,17 +252,17 @@ Each thread holds a read lock the other needs before it can upgrade — a circul
 
 ## Interview Questions
 
-1. **What's the difference between ReentrantLock and ReentrantReadWriteLock?**
-   `ReentrantLock` is exclusive — only one thread can hold it. `ReentrantReadWriteLock` allows multiple concurrent readers OR one writer. Use RWL when reads dominate.
+**Q: What's the difference between ReentrantLock and ReentrantReadWriteLock?**
+`ReentrantLock` is exclusive — only one thread can hold it. `ReentrantReadWriteLock` allows multiple concurrent readers OR one writer. Use RWL when reads dominate.
 
-2. **Why can't you upgrade a read lock to a write lock in ReentrantReadWriteLock?**
-   The javadoc states plainly that upgrading is not possible and that "if a reader tries to acquire the write lock it will never succeed" — the write lock waits for every reader to drain, including the thread doing the upgrade, so a lone thread blocks on itself. With two threads it is a circular wait: each waits for the other to release its read lock. The supported direction is downgrade: take the read lock while still holding the write lock, then release the write lock.
+**Q: Why can't you upgrade a read lock to a write lock in ReentrantReadWriteLock?**
+The javadoc states plainly that upgrading is not possible and that "if a reader tries to acquire the write lock it will never succeed" — the write lock waits for every reader to drain, including the thread doing the upgrade, so a lone thread blocks on itself. With two threads it is a circular wait: each waits for the other to release its read lock. The supported direction is downgrade: take the read lock while still holding the write lock, then release the write lock.
 
-3. **What is StampedLock and when would you use it?**
-   A higher-performance lock (Java 8+) that supports optimistic reads — attempt to read without locking, then validate. Use for read-heavy, performance-critical code where writes are rare.
+**Q: What is StampedLock and when would you use it?**
+A higher-performance lock (Java 8+) that supports optimistic reads — attempt to read without locking, then validate. Use for read-heavy, performance-critical code where writes are rare.
 
-4. **What is lock downgrade and why is it useful?**
-   Acquiring a read lock while holding a write lock, then releasing the write lock. Useful for writing a value and then immediately reading it, without releasing the lock entirely (which would allow another writer to change the value).
+**Q: What is lock downgrade and why is it useful?**
+Acquiring a read lock while holding a write lock, then releasing the write lock. Useful for writing a value and then immediately reading it, without releasing the lock entirely (which would allow another writer to change the value).
 
-5. **How do you prevent writer starvation?**
-   Use fair mode (`new ReentrantReadWriteLock(true)`), which grants entry by an approximately arrival-order policy so a new reader blocks while a writer is already queued. Or manually prioritize writers by making new readers wait when a writer is queued. The default non-fair mode has higher throughput but the javadoc explicitly allows it to postpone a reader or writer indefinitely.
+**Q: How do you prevent writer starvation?**
+Use fair mode (`new ReentrantReadWriteLock(true)`), which grants entry by an approximately arrival-order policy so a new reader blocks while a writer is already queued. Or manually prioritize writers by making new readers wait when a writer is queued. The default non-fair mode has higher throughput but the javadoc explicitly allows it to postpone a reader or writer indefinitely.
