@@ -6,7 +6,7 @@ Java 8 (March 2014) was the most significant Java release since Java 5. It intro
 
 The mental shift: Java 8 moved from imperative "how to do it" to declarative "what to do." A 20-line for-loop that filters, transforms, and aggregates a list becomes 3 lines of expressive stream pipeline. More importantly, it enabled composition — combining small functions into complex behavior without mutable accumulators.
 
-Java 8 is still the second-most-used Java version in production (after Java 11/17) and understanding it deeply is table stakes for any Java engineer.
+Java 8 is no longer the version most teams run — production has moved to the newer LTS releases, with Java 21 and 17 taking the bulk of deployments and Java 25 (the current LTS) climbing. But every one of those releases still compiles Java 8 source unchanged, and lambdas, streams and `Optional` are the substrate that records, virtual threads and pattern matching were layered on top of. Understanding this release deeply is table stakes for any Java engineer.
 
 ---
 
@@ -218,8 +218,12 @@ Optional<Person> firstSenior = people.stream()
     .filter(p -> p.age > 60)     // doesn't run for all elements
     .findFirst();                 // stops after first match
 
-// Without short-circuit, this would be O(n):
-// With findFirst() on a sorted stream, it's O(1) amortized
+// Worst case is still O(n) -- if no element matches, every element is tested.
+// The win is that it stops at the FIRST match: if matches are dense near the
+// head, the expected number of elements visited is far below n.
+// Caution: an upstream sorted() destroys this -- sorted() is a stateful
+// barrier that must consume the whole source before it can emit anything,
+// so findFirst() after sorted() always pays the full O(n log n).
 
 // peek() for debugging without changing pipeline
 long count = people.stream()
@@ -227,6 +231,54 @@ long count = people.stream()
     .filter(p -> p.active)
     .peek(p -> System.out.println("Passed filter: " + p.name))
     .count();
+```
+
+### Non-Interference and Stateless Behaviors
+
+The statelessness principle in Section 3 is a hard requirement of the Stream contract, not
+a style preference — the `java.util.stream` package spec states that a behavioural
+parameter must not modify the stream's data source, and that doing so "can cause
+exceptions, incorrect answers, or nonconformant behavior."
+
+```java
+List<String> names = new ArrayList<>(List.of("ann", "bob", "cy"));
+
+// INTERFERENCE: the lambda mutates the source while the pipeline is running.
+names.stream()
+     .filter(n -> n.length() < 3)
+     .forEach(names::remove);        // ConcurrentModificationException
+
+// FIX: produce a new collection; never write back into the source mid-pipeline.
+List<String> kept = names.stream()
+     .filter(n -> n.length() >= 3)
+     .collect(Collectors.toList());
+
+// LEGAL, and a useful distinction: mutating the source BEFORE the terminal op
+// is fine, because the spliterator is late-binding.
+List<String> l = new ArrayList<>(List.of("one", "two"));
+Stream<String> s = l.stream();
+l.add("three");                       // no terminal op has run yet
+String joined = s.collect(Collectors.joining(" "));   // "one two three"
+```
+
+A *stateful* behavioural parameter is the subtler failure: one whose result depends on
+state that can change while the pipeline runs. It does not throw — it silently returns
+different answers on different runs once the stream goes parallel.
+
+```java
+// STATEFUL: the result of map() depends on what other elements have been seen,
+// so the output depends on thread scheduling. Synchronizing the set does not help.
+Set<Integer> seen = Collections.synchronizedSet(new HashSet<>());
+stream.parallel().map(e -> seen.add(e) ? 0 : e);      // nondeterministic
+
+// Related rule: reduce() requires an ASSOCIATIVE accumulator, (a op b) op c ==
+// a op (b op c). Addition, min, max and string concatenation qualify; subtraction
+// does not, so a parallel reduce with (a, b) -> a - b returns a different answer
+// per run depending on how the range was split.
+
+// And: outside forEach/forEachOrdered, side-effects may be optimized away
+// entirely when the implementation can prove they do not affect the result.
+// forEach makes no encounter-order guarantee; forEachOrdered does.
 ```
 
 ### Function.andThen vs Function.compose
@@ -279,7 +331,10 @@ int[] squares = IntStream.range(0, 10)
     .map(i -> i * i)
     .toArray();  // int[] not Integer[]
 
-// Performance comparison (JMH result for 1M elements, simple map+sum):
+// Performance comparison (ILLUSTRATIVE shape, not a measurement from a published
+// run -- absolute times depend on JDK, hardware and whether escape analysis
+// removes the boxing; benchmark your own hot path with JMH).
+// 1M elements, simple map+sum:
 // Stream<Integer>.map().reduce()  ~85ms  (boxing/unboxing overhead)
 // IntStream.map().sum()           ~12ms  (7x faster — pure primitive ops)
 
@@ -341,7 +396,7 @@ The 73 ns is not spent on arithmetic — the `x * 2` is a single machine instruc
 | Stream vs for-loop | Expressive, composable, lazy | Harder to debug, overhead for small collections |
 | `Optional.orElseGet()` vs `orElse()` | `orElseGet()`: lazy (supplier) — avoids evaluating default when not needed | `orElse()` always evaluates the argument |
 | `parallelStream()` | Faster for large, CPU-bound, independent ops | Wrong for I/O, small data, non-associative ops, ordering |
-| `collect(toList())` vs `toUnmodifiableList()` | `toList()` (Java 16): always unmodifiable, more efficient | older `toList()` returns modifiable list |
+| `Stream.toList()` vs `collect(Collectors.toList())` | `Stream.toList()` (Java 16): unmodifiable, allows nulls, no collector allocation | `Collectors.toList()` gives no mutability guarantee at all (an `ArrayList` today, unspecified by contract); `Collectors.toUnmodifiableList()` (Java 10) is unmodifiable but rejects nulls |
 
 ---
 
@@ -433,7 +488,7 @@ Intermediate operations are lazy, return a new `Stream`, and don't trigger compu
 Method references compile to the same `invokedynamic` mechanism as lambdas. The four types: (1) `ClassName::staticMethod` → `args -> ClassName.staticMethod(args)`. (2) `instance::instanceMethod` → `args -> instance.method(args)` (captures `instance`). (3) `ClassName::instanceMethod` → `(instance, args) -> instance.method(args)` (receiver is first argument). (4) `ClassName::new` → `args -> new ClassName(args)` (constructor reference). The compiler infers which functional interface type the method reference matches.
 
 **Q11: Explain the Date/Time API and why it replaced Calendar.**
-`java.util.Date` and `Calendar` had three critical flaws: mutable (not thread-safe), poor API design (month is 0-indexed, confusing methods), and no separation of concepts. `java.time.*` (JSR-310): `LocalDate` (no time, no timezone), `LocalTime` (no date, no timezone), `LocalDateTime`, `ZonedDateTime` (with timezone), `Instant` (epoch milliseconds), `Duration` (time-based), `Period` (date-based). All immutable. Parseable with `DateTimeFormatter`. Operations like `plusDays()`, `minusMonths()` return new instances. Use `Instant` for timestamps, `LocalDate` for business dates, `ZonedDateTime` for user-facing times with timezone.
+`java.util.Date` and `Calendar` had three critical flaws: mutable (not thread-safe), poor API design (month is 0-indexed, confusing methods), and no separation of concepts. `java.time.*` (JSR-310): `LocalDate` (no time, no timezone), `LocalTime` (no date, no timezone), `LocalDateTime`, `ZonedDateTime` (with timezone), `Instant` (a point on the UTC timeline, stored as epoch seconds plus a nanosecond-of-second field), `Duration` (time-based), `Period` (date-based). All immutable. Parseable with `DateTimeFormatter`. Operations like `plusDays()`, `minusMonths()` return new instances. Use `Instant` for timestamps, `LocalDate` for business dates, `ZonedDateTime` for user-facing times with timezone.
 
 **Q12: What is the effectively-final requirement for lambda captures, and why does Java require it?**
 A variable captured by a lambda must be effectively final — either explicitly `final` or never reassigned after initialization. Java requires this because lambdas can outlive the method that created them (e.g., submitted to a thread pool). If a local variable could be mutated after capture, the lambda might see a stale value (the lambda gets a copy of the primitive/reference, not a live view). Making captured variables final ensures the semantics are clear: the lambda sees the value at capture time, forever. For mutable state, use `AtomicInteger`, `AtomicReference`, or an array of size 1.
@@ -442,10 +497,13 @@ A variable captured by a lambda must be effectively final — either explicitly 
 `andThen(g)` returns a function that applies `this` first, then `g`: result is `g(f(x))` where `f` is `this`. `compose(g)` returns a function that applies `g` first, then `this`: result is `f(g(x))`. Mnemonic: `andThen` reads left-to-right — "do f, AND THEN do g." `compose` reads right-to-left — mathematical function composition `f ∘ g`. Example: `trim.andThen(toUpperCase)` → trim first, then uppercase. `toUpperCase.compose(trim)` → same result. They differ in which function is "outer": `andThen` makes the argument the outer function; `compose` makes `this` the outer function.
 
 **Q14: Why prefer `IntStream` over `Stream<Integer>` in performance-critical paths?**
-`Stream<Integer>` requires boxing every primitive `int` into a heap-allocated `Integer` object. For 1M integers: 1M `Integer` allocations, GC pressure from short-lived objects, and CPU time for boxing/unboxing at every operation. `IntStream` stores elements as bare `int` primitives — no boxing, no heap allocation, cache-friendly. JMH benchmarks consistently show `IntStream` 5-10x faster than `Stream<Integer>` for numeric workloads. The standard library provides `IntStream`, `LongStream`, and `DoubleStream` for this reason. Always use `mapToInt()`/`mapToLong()`/`mapToDouble()` to convert to primitive streams when processing numbers.
+`Stream<Integer>` requires boxing every primitive `int` into a heap-allocated `Integer` object. For 1M integers: 1M `Integer` allocations, GC pressure from short-lived objects, and CPU time for boxing/unboxing at every operation. `IntStream` stores elements as bare `int` primitives — no boxing, no heap allocation, cache-friendly. The measured gap varies with JDK version, hardware, and whether escape analysis manages to scalarise the boxes, so treat any single multiplier as a benchmark of that setup rather than a constant; the direction is reliable, the magnitude is not. The standard library provides `IntStream`, `LongStream`, and `DoubleStream` for this reason. Always use `mapToInt()`/`mapToLong()`/`mapToDouble()` to convert to primitive streams when processing numbers.
 
 **Q15: What is the difference between `Optional.of()`, `Optional.ofNullable()`, and `Optional.empty()`, and what are the anti-patterns for `Optional` usage?**
 `Optional.of(value)` throws `NullPointerException` if `value` is null — use when you know the value is non-null and want to fail-fast. `Optional.ofNullable(value)` wraps null as `Optional.empty()` — use when the value may legitimately be null. `Optional.empty()` returns the canonical empty instance (a singleton). Common anti-patterns: (1) **Using `Optional.get()` without `isPresent()` check** — throws `NoSuchElementException`, defeating the purpose; use `orElse()`, `orElseGet()`, or `orElseThrow()` instead. (2) **`Optional` as a method parameter** — forces callers to wrap values; use overloading or nullable parameters. (3) **`Optional` as a field** — `Optional` is not `Serializable`, making the class non-serializable; use nullable field with a `getX()` returning `Optional`. (4) **Unnecessary `isPresent()` + `get()`** — use `map()`/`flatMap()` for transformations. The canonical use case for `Optional` is as a return type for a method that may have no result, explicitly communicating the absence to the caller.
+
+**Q16: What do "non-interfering" and "stateless" mean for stream behavioral parameters, and what breaks when you violate them?**
+Non-interfering means the lambda must not modify the stream's data source while the pipeline is running; stateless means its result must not depend on state that can change during execution. Violating non-interference on a non-concurrent source is the loud failure: `list.stream().filter(...).forEach(list::remove)` throws `ConcurrentModificationException`, because the spliterator is fail-fast. Mutating the source *before* the terminal operation is legal, since spliterators are late-binding — add to the list after calling `.stream()` but before `.collect()` and the addition is included. Violating statelessness is the quiet failure: a lambda that consults a shared `Set` of already-seen elements returns different results run to run once the stream is parallel, and synchronizing the set does not fix it because the nondeterminism is in the *split order*, not in the data structure. The same family of rules covers `reduce`, whose accumulator must be associative — `(a, b) -> a - b` gives a different answer per run in parallel because the result depends on how the range was split. Practical guidance: never write back into the source, accumulate with a `Collector` rather than a captured mutable collection, and reserve side-effects for `forEach`/`forEachOrdered`, since every other operation is allowed to optimize its behavioral parameter away when the result would not change.
 
 ---
 

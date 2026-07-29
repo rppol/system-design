@@ -290,7 +290,7 @@ List<Object> objectList = stringList;  // COMPILE ERROR
 // The consequence:
 // You can accidentally create type-unsafe code with arrays that compiles fine:
 Object[] arr = new String[5];  // compiles
-arr[0] = new Integer(1);       // compiles, but throws ArrayStoreException at runtime
+arr[0] = Integer.valueOf(1);   // compiles, but throws ArrayStoreException at runtime
 
 // With generics: the compiler catches this:
 List<String> list = new ArrayList<>();
@@ -340,13 +340,25 @@ int v = (int) getter.invoke(h);  // 42
 //   toUpper.invokeExact("hello")  // OK: exact types
 //   toUpper.invokeExact(42)       // WrongMethodTypeException (int not String)
 // invoke: slower but handles type conversions (boxing, widening)
-//   parseInt.invoke("42")  // OK: int return is auto-widened to Object
+//   parseInt.invoke("42")  // OK: the int return is boxed to Integer if the
+//                          //     call site expects a reference type
 
-// Performance:
+// Performance (ILLUSTRATIVE shape, not a published measurement -- the real
+// numbers move a lot with JDK version and with whether the handle is
+// constant-folded; benchmark your own case with JMH).
 // Method.invoke() for 1M calls: ~80ms (reflection overhead per call)
 // MethodHandle.invoke() for 1M calls: ~10ms (JIT can optimize, cache method)
 // invokeExact() for 1M calls: ~2ms (near-direct call, inlineable by JIT)
 // Direct call for 1M calls: ~1ms
+//
+// The decisive variable is constant-folding, not which API you picked.
+// Since JEP 416 (Java 18) java.lang.reflect.Method/Constructor/Field are
+// themselves implemented on method handles, so a Method held in a
+// static final field is constant-folded by the JIT and runs 43-57% faster
+// than the pre-18 bytecode-stub implementation. Held in a non-final field or
+// an array element it cannot be folded and gets slower instead -- field
+// access by 51-77%. Store your Method/MethodHandle objects in static final
+// fields or the ranking above does not hold at all.
 
 // When to use:
 // - Frameworks that need to call methods discovered at runtime but called millions of times
@@ -393,7 +405,7 @@ The 79 ns is not one cost but a stack of them: the access check that `setAccessi
 
 // Minimal annotation processor:
 @SupportedAnnotationTypes("com.myapp.Builder")  // process @Builder annotations
-@SupportedSourceVersion(SourceVersion.RELEASE_17)
+@SupportedSourceVersion(SourceVersion.RELEASE_25)
 public class BuilderProcessor extends AbstractProcessor {
 
     @Override
@@ -543,7 +555,7 @@ TypeToken exploits the fact that an anonymous class retains its superclass's typ
 Arrays are covariant (`String[]` is an `Object[]`) for historical reasons: Java 1.0 had no generics and needed to write generic array-processing methods like `Arrays.sort(Object[])`. The runtime safety net is `ArrayStoreException` — on every array element write, the JVM checks that the stored type is compatible with the array's actual component type (stored in the array header). This is a runtime check. Generics are invariant (`List<String>` is NOT `List<Object>`) because type erasure means no runtime type information exists for the generic parameter — there's no mechanism to perform the equivalent of `ArrayStoreException` at runtime for generic containers. The compiler performs all checks statically at compile time. Summary: arrays: covariant + runtime `ArrayStoreException`; generics: invariant + compile-time error.
 
 **Q12: What is a `MethodHandle` and when is it preferable to `Method.invoke()`?**
-A `MethodHandle` (Java 7, `java.lang.invoke.MethodHandles`) is a typed, executable reference to a method, constructor, or field, obtained via `MethodHandles.Lookup`. The JIT can optimize `MethodHandle` invocations much more aggressively than `Method.invoke()` — it can inline through the handle and even eliminate the call overhead entirely with `invokeExact()`. `Method.invoke()` has per-call overhead for access checking, argument boxing into `Object[]`, and dispatch overhead. Benchmark comparison: for 1M calls, `Method.invoke()` ~80ms, `MethodHandle.invoke()` ~10ms, `invokeExact()` ~2ms, direct call ~1ms. Prefer `MethodHandle` over `Method.invoke()` when the same method is called repeatedly (frameworks, serialization, DI containers). Use `invokeExact()` when you can guarantee exact type matches — it's the fastest option.
+A `MethodHandle` (Java 7, `java.lang.invoke.MethodHandle`) is a typed, executable reference to a method, constructor, or field, obtained via `MethodHandles.Lookup`. The JIT can inline through a handle and, with `invokeExact()`, compile it down to essentially a direct call, because `invokeExact` demands an exact signature match and so needs no argument adaptation. `Method.invoke()` still pays for boxing every argument into an `Object[]` and boxing the return value, which `invokeExact` avoids entirely. The gap is smaller than the old folklore suggests: since JEP 416 (Java 18) core reflection is itself implemented on method handles, and the thing that decides performance is whether the JIT can constant-fold the reflective object — a `Method`, `Constructor`, `Field` or `MethodHandle` held in a `static final` field folds and runs fast (OpenJDK measured 43-57% faster than the pre-18 implementation), while the same object in a mutable field or an array element cannot fold and is slower than the old implementation. Prefer `MethodHandle` with `invokeExact()` for repeated calls in frameworks, serializers and DI containers, and store the handle in a `static final` field — that placement matters more than the API choice.
 
 **Q13: What is the difference between `getFields()` / `getMethods()` and their `getDeclared*()` counterparts, and which do framework code use?**
 `getFields()` returns all **public** fields from the class and its entire superclass/interface hierarchy. `getDeclaredFields()` returns **all fields declared directly in that class** — any visibility — but nothing inherited. Same pattern applies to `getMethods()` vs `getDeclaredMethods()` and constructors. Framework code (serializers, ORMs, DI containers) typically uses `getDeclaredFields()` to access private fields, then calls `field.setAccessible(true)`. Traversal of the full hierarchy requires a loop up the `getSuperclass()` chain — stop at `Object.class`. With JPMS (Java 9+), `setAccessible(true)` on a field in another module requires the module to open the package (e.g., `opens com.example to com.fasterxml.jackson.databind`); failing to do so throws `InaccessibleObjectException` at runtime.

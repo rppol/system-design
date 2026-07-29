@@ -14,7 +14,7 @@ Understanding these features is critical for modern Java interviews — they sho
 
 **Mental model**: Think of Java 9–21 as Java's "maturity phase" — each feature closes a gap that required workarounds or external libraries. Records replace Lombok's `@Data`. Sealed classes make the compiler your ally for exhaustive type hierarchies. Virtual threads eliminate the performance penalty of blocking I/O without changing your existing blocking code.
 
-**Why it matters**: Java 21 (LTS) is the most capable Java ever, and its virtual threads fundamentally change how you design concurrent applications. Sealed classes + pattern matching for switch gives Java the expressiveness of ADTs from functional languages. These features appear heavily in modern Java interviews.
+**Why it matters**: Java 21 (LTS) is where virtual threads went GA and fundamentally changed how you design concurrent applications; Java 25 (LTS, September 2025) is the current baseline and inherits all of it. Sealed classes + pattern matching for switch gives Java the expressiveness of ADTs from functional languages. These features appear heavily in modern Java interviews.
 
 **Key insight**: Virtual threads do NOT change the programming model — you still write blocking code. The JVM transparently multiplexes thousands of virtual threads onto a few carrier (OS) threads, unmounting a blocked virtual thread so the carrier can run others. This gives you the throughput of async/reactive without the callback hell.
 
@@ -47,8 +47,10 @@ Understanding these features is critical for modern Java interviews — they sho
 | Sealed classes | 17 | 17 | `permits` clause |
 | Pattern matching switch | 21 | 21 | guarded patterns, exhaustive |
 | Virtual threads | 21 | 21 | `Thread.ofVirtual()` |
-| StructuredTaskScope | 21 | 21 | structured concurrency |
+| Record patterns | 21 | 21 | `case Point(int x, int y)`, nested |
 | Sequenced Collections | 21 | 21 | `SequencedCollection` interface |
+| StructuredTaskScope | preview since 21 | — | still preview in Java 25 (JEP 505) and 26 (JEP 525); needs `--enable-preview` |
+| ScopedValue | 25 | 25 | final in Java 25 (JEP 506); `ThreadLocal` alternative |
 
 ### 4.2 Record Anatomy
 
@@ -89,7 +91,7 @@ non-sealed class Triangle implements Shape { }  // allows further subclassing
 | Blocking cost | Blocks OS thread | Unmounts; carrier thread free |
 | Number practical | Thousands max | Millions |
 | Created via | `new Thread()` | `Thread.ofVirtual().start()` |
-| Pinning | N/A | Caused by `synchronized` on object or native frames |
+| Pinning | N/A | Native frames (JNI, FFM upcalls) and class loading/initialization; `synchronized` no longer pins (JEP 491, Java 24) |
 
 ---
 
@@ -206,12 +208,13 @@ var result = processData(input);  // what type is result?
 ### Virtual Thread Pinning
 
 ```java
-// PINNED: synchronized block holds carrier thread while blocked
+// NOT pinned since JEP 491 (Java 24): the monitor is tracked against the virtual
+// thread rather than its carrier, so blocking inside synchronized unmounts normally.
 synchronized (lock) {
-    Thread.sleep(Duration.ofSeconds(1));  // carrier thread is PINNED (blocked)
+    Thread.sleep(Duration.ofSeconds(1));  // virtual thread unmounts; carrier freed
 }
 
-// FIX: use ReentrantLock instead
+// Equally fine, and what you need when you want fairness, tryLock, or a timeout:
 ReentrantLock lock = new ReentrantLock();
 lock.lock();
 try {
@@ -220,25 +223,33 @@ try {
     lock.unlock();
 }
 
-// Also pinned by: JNI/native method calls, class initializers
-// Detect pinning: -Djdk.tracePinnedThreads=full
+// Still pins: a native frame on the stack (JNI method, FFM upcall) that blocks,
+// blocking inside a class initializer, and waiting for another thread to
+// initialize a class.
+// Detect pinning: the jdk.VirtualThreadPinned JFR event, which records the
+// pinning reason and the carrier thread identity.
 ```
 
 ### StructuredTaskScope
 
 ```java
-// Java 21: both sub-tasks must succeed, or scope is cancelled
-try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+// Preview API through Java 26 -- compile and run with --enable-preview.
+// The zero-parameter open() is the default policy: fail if ANY subtask fails.
+try (var scope = StructuredTaskScope.open()) {
     Subtask<String> user    = scope.fork(() -> fetchUser(id));
     Subtask<Order>  order   = scope.fork(() -> fetchOrder(id));
 
-    scope.join();           // wait for both
-    scope.throwIfFailed();  // propagate any exception
+    scope.join();           // wait for both; throws FailedException if either failed
 
     return new Response(user.get(), order.get());
 }
 // If fetchUser() fails: fetchOrder() is cancelled automatically
-// If either throws: the exception propagates to the parent
+// If either throws: join() throws and the scope cancels the rest
+
+// Other policies come from a Joiner passed to the one-arg open():
+//   Joiner.anySuccessfulResultOrThrow()  -- race: first success wins, rest cancelled
+//   Joiner.allSuccessfulOrThrow()        -- all must succeed; yields the subtasks
+//   Joiner.awaitAll()                    -- wait for everything, success or not
 ```
 
 ### JPMS Module Directives — Complete Reference
@@ -319,7 +330,7 @@ String info = switch (shape) {
 // Nested deconstruction extracts deeply nested components in one pattern.
 // No manual .start().x() chains needed.
 
-// In instanceof (Java 21 preview):
+// In instanceof (final in Java 21, JEP 440 -- no --enable-preview needed):
 if (shape instanceof Line(Point(int x1, int y1), Point(int x2, int y2))) {
     // x1, y1, x2, y2 directly in scope
 }
@@ -343,7 +354,7 @@ if (shape instanceof Line(Point(int x1, int y1), Point(int x2, int y2))) {
 |---------|---------|------------|
 | Records | Zero boilerplate, correct equality | Cannot extend classes; immutable only |
 | Sealed classes | Exhaustive compiler checks | Requires all subtypes known at compile time |
-| Virtual threads | Massive concurrency, simple code | Pinning risk; can't replace CPU-bound parallelism |
+| Virtual threads | Massive concurrency, simple code | Residual native-frame pinning; can't replace CPU-bound parallelism |
 | `var` | Less verbosity | Reduces readability when type unclear |
 | Pattern matching switch | Exhaustiveness, expressive | Java 21+ only; learning curve for teams |
 | JPMS | Strong encapsulation | Complex setup; many libraries not yet modular |
@@ -369,14 +380,14 @@ if (shape instanceof Line(Point(int x1, int y1), Point(int x2, int y2))) {
 
 **Do NOT use virtual threads when**:
 - CPU-bound work (use `ForkJoinPool` or `parallelStream()`)
-- Code uses many `synchronized` blocks that would cause pinning
+- The blocking happens inside a native frame (a JNI-backed driver, an FFM upcall) — that still pins the carrier
 
 ---
 
 ## 10. Common Pitfalls
 
-### War Story 1: Virtual thread pinning by synchronized
-A team migrated to virtual threads in Java 21. Throughput barely improved. Investigation with `-Djdk.tracePinnedThreads=full` revealed that a third-party library used `synchronized` on internal monitor objects for every DB operation, pinning the carrier thread for the entire I/O wait. **Fix**: File an issue with the library, or use `ReentrantLock` wrappers. Java 24 is addressing this by making virtual threads not pin on synchronized.
+### War Story 1: Virtual thread pinning by a native driver frame
+A team migrated to virtual threads. Throughput barely improved. The `jdk.VirtualThreadPinned` JFR event (recorded by default above a 20ms block) showed a JNI-backed database driver blocking inside a native frame, which pins the carrier for the entire I/O wait — the JVM cannot unmount a stack that has native frames on it. **Fix**: move to a pure-Java driver, or keep the native calls on a bounded platform-thread pool. Note this is the *residual* case: since JEP 491 (Java 24) blocking inside `synchronized` no longer pins, so a `synchronized` frame in a library is no longer the thing to hunt.
 
 ### War Story 2: Records with JPA
 A developer tried to use `@Entity` on a Record. JPA requires a no-arg constructor and mutable fields. Records have neither. **Fix**: Use Records for DTOs/value objects, use regular classes for JPA entities.
@@ -395,8 +406,8 @@ A `sealed interface` had 3 subtypes. A `switch` pattern matched 2 and used `defa
 |------|---------|
 | `Thread.ofVirtual()` | Create virtual threads |
 | `Executors.newVirtualThreadPerTaskExecutor()` | Thread pool backed by virtual threads |
-| `StructuredTaskScope` | Structured concurrency (Java 21) |
-| `-Djdk.tracePinnedThreads=full` | JVM flag to detect virtual thread pinning |
+| `StructuredTaskScope` | Structured concurrency (preview; `--enable-preview`) |
+| `jdk.VirtualThreadPinned` JFR event | Detect the remaining virtual-thread pinning (reason + carrier), on by default |
 | `jshell` (Java 9+) | REPL for quick experimentation |
 | `jlink` (Java 9+) | Create minimal custom runtime images with JPMS |
 
@@ -408,19 +419,19 @@ A `sealed interface` had 3 subtypes. A `switch` pattern matched 2 and used `defa
 Records eliminate the boilerplate of data carrier classes: no need to write constructors, `equals()`, `hashCode()`, `toString()`, or accessor methods. A plain POJO with 5 fields requires ~50 lines; the equivalent Record is 1 line. More importantly, Records guarantee immutability (all fields `final`) and correct equality semantics by default — developers can't forget to update `hashCode()` when adding a field.
 
 **Q2: Can you extend a Record? Can a Record extend another class?**
-No to both. Records implicitly extend `java.lang.Record` (a JDK class), and Java only allows single inheritance — so a Record cannot extend any other class. Similarly, you cannot extend a Record because all its fields are `final` and the class design is sealed by the compiler. Records *can* implement interfaces, which is how you add behavior polymorphically.
+No to both, because a record class is implicitly `final` and already extends `java.lang.Record`. Java allows only single inheritance, so a record cannot name any other superclass; and the implicit `final` means nothing can subclass a record. Records *can* implement interfaces, which is how you add behavior polymorphically.
 
 **Q3: How do sealed classes enable exhaustive pattern matching?**
 When a sealed interface/class has a `permits` clause listing all subtypes, the compiler has complete knowledge of the closed hierarchy at compile time. A `switch` expression over a sealed type that handles every permitted subtype is considered exhaustive — no `default` branch needed, and the compiler flags any missing case. This is analogous to ADTs in Haskell/Scala: the type system guarantees you handle every variant.
 
 **Q4: What is virtual thread pinning and how do you avoid it?**
-Pinning occurs when a virtual thread cannot be unmounted from its carrier thread — the carrier is "pinned" and blocked, which wastes an OS thread. Pinning is caused by: (1) `synchronized` block/method while waiting (e.g., blocking I/O inside `synchronized`); (2) native method calls (JNI). To avoid: replace `synchronized` with `ReentrantLock` in I/O-bound code. Detect with `-Djdk.tracePinnedThreads=full`. Java 24+ removes pinning for `synchronized`.
+Pinning occurs when a virtual thread cannot be unmounted from its carrier thread — the carrier is "pinned" and blocked, which wastes an OS thread. Since JEP 491 (Java 24) the JVM tracks monitor ownership against the virtual thread instead of the carrier, so `synchronized` blocks, contended monitor acquisition and `Object.wait()` all unmount normally. What still pins is a blocking operation with a native frame on the stack (a JNI method or an FFM upcall), blocking inside a class initializer, and waiting for another thread to initialize a class. To avoid it, keep JNI-backed blocking off virtual threads; detect it with the `jdk.VirtualThreadPinned` JFR event, which reports the reason and the carrier.
 
 **Q5: What is the difference between a virtual thread and a platform thread in terms of stack size and scheduling?**
 A platform thread maps 1:1 to an OS thread with a fixed stack of ~1MB (configurable via `-Xss`). A virtual thread has a dynamically-growing stack starting at ~few KB, stored on the Java heap, and is scheduled by the JVM (via a ForkJoinPool of carrier threads). Platform threads: OS scheduler (preemptive). Virtual threads: cooperative (mounted/unmounted at blocking points). Result: you can have millions of virtual threads vs thousands of platform threads.
 
 **Q6: What limitations does `var` have?**
-`var` can only be used for: local variables with an initializer, `for` loop variables, try-with-resources variables. It CANNOT be used for: instance/static fields, method parameters, method return types, lambda parameters (without a cast), catch clause variables. Also, `var x = null` is illegal (null has no type), and `var` with an unparameterized diamond `new ArrayList<>()` loses type info. `var` is a syntactic sugar — the variable is still strongly typed at compile time.
+`var` works only on local variables with an initializer, `for` loop variables, try-with-resources variables, and lambda parameters. That last one is easy to get wrong in both directions: `var` in a lambda parameter list has been legal since Java 11 (JEP 323), but it must then be used for *every* parameter or none — `(var x, var y) -> x + y` compiles, `(var x, y) -> x + y` does not. It CANNOT be used for: instance/static fields, method parameters, method return types, or catch clause variables. Also, `var x = null` is illegal (null has no type), and `var` with an unparameterized diamond `new ArrayList<>()` infers `ArrayList<Object>`. `var` is syntactic sugar — the variable is still strongly typed at compile time.
 
 **Q7: How does pattern matching for switch ensure exhaustiveness?**
 For sealed types, the compiler tracks which subtypes are covered by `case` patterns. If any permitted subtype is unhandled and there's no `default`, the compiler emits an error. For non-sealed types (e.g., `Object`), a `default` or `case null` is required. Guarded patterns `case Foo f when condition` don't count for exhaustiveness (the compiler can't prove the condition always matches), so an unguarded case for the same type is also needed.
@@ -429,10 +440,10 @@ For sealed types, the compiler tracks which subtypes are covered by `case` patte
 JPMS (Java Platform Module System) adds `module-info.java` files that declare module name, `requires` (dependencies), and `exports` (public API packages). It was created to: (1) Strongly encapsulate JDK internals (e.g., `sun.misc.Unsafe`) that were accidentally accessible via reflection; (2) Enable creation of minimal custom JRE images with `jlink`; (3) Provide reliable configuration (fail-fast on missing dependencies). Adoption is slow because many popular libraries are not yet fully modularized.
 
 **Q9: What are sequenced collections (Java 21)?**
-Sequenced collections add three new interfaces: `SequencedCollection<E>` (for collections with defined encounter order — adds `getFirst()`, `getLast()`, `addFirst()`, `addLast()`, `removeFirst()`, `removeLast()`, `reversed()`), `SequencedSet<E>`, `SequencedMap<K,V>`. Before Java 21, there was no common interface for accessing the first/last element of ordered collections like `LinkedHashMap` and `ArrayList`.
+Sequenced collections (JEP 431, Java 21) add three interfaces for collections with a defined encounter order: `SequencedCollection<E>`, `SequencedSet<E>` and `SequencedMap<K,V>`. `SequencedCollection` supplies `getFirst()`, `getLast()`, `addFirst()`, `addLast()`, `removeFirst()`, `removeLast()` and `reversed()`; `SequencedMap` adds the map-shaped equivalents (`firstEntry()`, `pollFirstEntry()`, `putFirst()`, `reversed()`). Before Java 21, there was no common interface for accessing the first/last element of ordered collections like `LinkedHashMap` and `ArrayList` — `List` had `get(0)`, `Deque` had `getFirst()`, `SortedSet` had `first()`, and none of them shared a supertype that expressed the order.
 
 **Q10: What is StructuredTaskScope and when would you use it?**
-`StructuredTaskScope` (Java 21) implements structured concurrency — ensuring that concurrent sub-tasks live within the lifetime of their parent task. `ShutdownOnFailure`: if any fork fails, cancel the others and propagate the exception. `ShutdownOnSuccess`: take the first successful result, cancel the rest. Use it when: you need to parallel-fetch two resources and need both (ShutdownOnFailure), or you want the fastest of N attempts (ShutdownOnSuccess). It prevents orphaned threads and makes cancellation automatic.
+`StructuredTaskScope` implements structured concurrency — it confines concurrent sub-tasks to the lifetime of the enclosing try-with-resources block. You open a scope with a static factory: `StructuredTaskScope.open()` gives the default policy (fail as soon as any subtask fails), and `open(Joiner)` selects another — `Joiner.anySuccessfulResultOrThrow()` for "fastest of N wins, cancel the rest", `Joiner.allSuccessfulOrThrow()` when every subtask must succeed, `Joiner.awaitAll()` to wait for all outcomes regardless. Use it when you need to parallel-fetch two resources and need both, or want the fastest of N attempts; it prevents orphaned threads and makes cancellation automatic. It is still a **preview API** (JEP 505 in Java 25, JEP 525 in Java 26), so it needs `--enable-preview` at both compile and run time.
 
 **Q11: What is a text block and how does it handle indentation?**
 A text block `"""..."""` is a multi-line string literal. The compiler strips common leading whitespace (incidental whitespace) based on the least-indented line. The trailing `"""` position controls the stripping — if it's on a new line indented by N spaces, N spaces are stripped from all lines. Backslash line continuation `\` merges lines. Text blocks support the full string API and are equivalent to regular strings at runtime.
@@ -446,8 +457,8 @@ Switch expression (Java 14+) yields a value, uses arrow labels `->` (no fall-thr
 **Q14: What is record deconstruction and how does pattern matching for switch use it?**
 Record deconstruction (Java 21) allows extracting a record's components directly in a pattern. `case Point(int x, int y)` simultaneously matches a `Point` instance AND binds its `x()` and `y()` components to local variables `x` and `y`. No explicit casting or accessor calls needed. In `switch` expressions with sealed types, this creates exhaustive, type-safe dispatch that reads like algebraic data type matching. Nested deconstruction works too: `case Line(Point(int x1, int y1), Point(int x2, int y2))` extracts components from a `Line` and both its nested `Point` components in one pattern. Guarded patterns add `when` conditions: `case Point(int x, int y) when x > 0`.
 
-**Q15: What is virtual thread "pinning" and which constructs cause it in Java 21?**
-A virtual thread is "pinned" when it cannot be unmounted from its carrier platform thread while blocked. During pinning, the underlying platform thread is held — defeating the memory efficiency benefit of virtual threads (which is that thousands of virtual threads share a small pool of platform threads). Two constructs pin the carrier thread: (1) **`synchronized` blocks/methods** — if a virtual thread blocks inside `synchronized`, the carrier thread is pinned for the duration of the block. (2) **Native method frames** (`System.loadLibrary`, JNI calls) — the JVM cannot unmount while native code is on the stack. Diagnose pinning with `-Djdk.tracePinnedThreads=full` which logs stack traces. Fix: replace `synchronized` with `ReentrantLock` in code called from virtual threads — `ReentrantLock.lock()` allows unmounting while waiting. Java 25 is expected to remove the `synchronized` pinning restriction via opaque monitors. Practical rule: in Spring Boot 3.2+ with `spring.threads.virtual.enabled=true`, audit your code (and dependencies like JDBC drivers) for heavy `synchronized` usage in hot paths.
+**Q15: What is virtual thread "pinning" and which constructs still cause it?**
+A virtual thread is "pinned" when it cannot be unmounted from its carrier platform thread while blocked, so the carrier is held and the memory-efficiency benefit is lost. On the Java 25 baseline the list is short, because JEP 491 (Java 24) reimplemented `synchronized` so the JVM records monitor ownership against the virtual thread rather than the carrier — blocking inside `synchronized`, contending for a monitor, and `Object.wait()` all unmount cleanly now. What remains: (1) **native method frames** (JNI calls, Foreign Function & Memory upcalls) — the JVM cannot unmount a stack with native frames on it; (2) **blocking inside a class initializer**; (3) **waiting for another thread to finish initializing a class**. Diagnose with the `jdk.VirtualThreadPinned` JFR event, which is enabled by default with a 20ms threshold and reports both the pinning reason and the carrier thread; the old `jdk.tracePinnedThreads` system property was removed in Java 24 and setting it does nothing. Practical rule: with virtual threads enabled for request handling, audit dependencies for *native-backed* blocking rather than for `synchronized`, and choose between `synchronized` and `java.util.concurrent.locks` on ergonomics — fairness, `tryLock`, timeouts, interruptibility — not on pinning.
 
 ---
 
@@ -457,7 +468,7 @@ A virtual thread is "pinned" when it cannot be unmounted from its carrier platfo
 2. **Use sealed classes for closed type hierarchies** — protocol messages, domain events, result types.
 3. **Switch to virtual threads for I/O-bound code** — `Executors.newVirtualThreadPerTaskExecutor()` is a one-line change.
 4. **Use `StructuredTaskScope` instead of `CompletableFuture.allOf()`** for concurrent sub-tasks with proper cancellation.
-5. **Replace `synchronized` with `ReentrantLock`** in any code that blocks while holding a lock (virtual thread pinning).
+5. **Choose `synchronized` vs `ReentrantLock` on ergonomics, not pinning** — since JEP 491 (Java 24) neither pins a virtual thread; reach for `ReentrantLock` when you need `tryLock`, a timeout, fairness, or interruptible acquisition.
 6. **Use `var` only where the type is obvious** from the right-hand side — don't sacrifice readability.
 7. **Add `when` guards** to pattern matching cases for conditional dispatch.
 8. **Use switch expressions over switch statements** in all new code — eliminate fall-through bugs.
@@ -510,15 +521,15 @@ server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
 ```
 
 ```java
-// Fan-out the 3 downstream calls with StructuredTaskScope (Java 21 preview).
+// Fan-out the 3 downstream calls with StructuredTaskScope (preview -- --enable-preview).
 record OrderView(User user, Inventory inv, Pricing price) {}
 
-OrderView assemble(String orderId) throws Exception {
-    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+OrderView assemble(String orderId) throws InterruptedException {
+    try (var scope = StructuredTaskScope.open()) {   // default policy: fail if any fails
         var user  = scope.fork(() -> userClient.fetch(orderId));
         var inv   = scope.fork(() -> inventoryClient.fetch(orderId));
         var price = scope.fork(() -> pricingClient.fetch(orderId));
-        scope.join().throwIfFailed();          // wait all; cancel siblings on first failure
+        scope.join();                          // wait all; cancel siblings on first failure
         return new OrderView(user.get(), inv.get(), price.get());
     }
 }
@@ -647,15 +658,15 @@ int httpStatus(ApiResponse<?> r) {
 
 ### Common Pitfalls (production war stories)
 
-**1. `synchronized` pinned the carrier thread.** A shared connection cache guarded a downstream call with `synchronized`. On Java 21, a virtual thread that blocks *inside* a `synchronized` block cannot unmount — it **pins** its carrier. Under load all 8 carriers got pinned and throughput collapsed back to platform-thread levels.
+**1. `synchronized` pinned the carrier thread — on the Java 21 baseline this migration started from.** A shared connection cache guarded a downstream call with `synchronized`. On Java 21, a virtual thread that blocks *inside* a `synchronized` block cannot unmount — it **pins** its carrier. Under load all 8 carriers got pinned and throughput collapsed back to platform-thread levels.
 
 ```java
-synchronized (lock) { result = blockingHttpCall(); }   // BROKEN: pins carrier on block
-// FIX: ReentrantLock releases the carrier while the VT is blocked.
+synchronized (lock) { result = blockingHttpCall(); }   // pins the carrier on Java 21-23
+// Workaround on that baseline: ReentrantLock releases the carrier while the VT is blocked.
 lock.lock();
 try { result = blockingHttpCall(); } finally { lock.unlock(); }
 ```
-(JDK 24 lifts most `synchronized` pinning, but on the Java 21 LTS baseline prefer `ReentrantLock` around blocking I/O.)
+This whole class of defect is closed from Java 24 onward: JEP 491 makes `synchronized` unmount like any other blocking construct, so on the Java 25 LTS baseline neither form pins and the surviving hazard is a *native* frame blocking on the stack.
 
 **2. Virtual threads used for CPU-bound work.** A team ran a CPU-heavy image transform on virtual threads expecting a speed-up. Virtual threads do not add cores; they help *blocked* tasks. The transform still saturated 8 carriers and just added scheduling overhead. CPU-bound work belongs on a fixed pool sized to cores.
 
@@ -707,7 +718,7 @@ record Cart(List<Item> items) {
 
 **What problem do virtual threads actually solve?** They make blocking I/O cheap by decoupling Java threads from OS threads. A blocked virtual thread unmounts its carrier, so you can have millions of them. They do not speed up CPU-bound work or add parallelism beyond the carrier count.
 
-**What is carrier pinning and when does it happen?** A virtual thread is "pinned" when it cannot unmount from its carrier OS thread while blocked — on the Java 21 baseline this happens inside `synchronized` blocks and during native calls. Pinning defeats the scalability benefit; use `ReentrantLock` around blocking sections.
+**What is carrier pinning and when does it happen?** A virtual thread is "pinned" when it cannot unmount from its carrier OS thread while blocked — on the Java 25 baseline that means a native frame (JNI or FFM upcall) blocking on the stack, blocking in a class initializer, or waiting on another thread's class initialization. `synchronized` stopped pinning in Java 24 (JEP 491); watch the `jdk.VirtualThreadPinned` JFR event for what is left.
 
 **Why are records a good fit for DTOs but not for entities?** Records are shallowly immutable data carriers with generated `equals`/`hashCode`/`toString`. That suits transfer/value objects. JPA entities need a no-arg constructor and mutable identity managed by the persistence context, which records cannot provide.
 
@@ -715,11 +726,11 @@ record Cart(List<Item> items) {
 
 **Why did p99 improve so much without adding CPU?** The old bottleneck was thread *availability*, not CPU. With 200 threads, the 201st request waited in a queue (~queueing delay added to latency). Virtual threads remove the queue: every request gets its own thread immediately, and blocked ones release their carrier, so latency reflects real downstream time, not contention.
 
-**What does `StructuredTaskScope.ShutdownOnFailure` give you over plain `CompletableFuture.allOf`?** It scopes the lifetime of the forked subtasks to the try block, cancels all siblings the moment one fails, and propagates the failure with a clean stack — no orphaned futures, no manual cancellation, and the parent cannot return before all children complete or are cancelled.
+**What does a `StructuredTaskScope` give you over plain `CompletableFuture.allOf`?** Its default policy — the one you get from `StructuredTaskScope.open()` — scopes the lifetime of the forked subtasks to the try block, cancels all siblings the moment one fails, and propagates the failure with a clean stack: no orphaned futures, no manual cancellation, and the parent cannot return before all children complete or are cancelled.
 
 **Why isn't a record a drop-in replacement for every class?** Records are shallowly immutable and final, cannot extend other classes, and expose all components. They fit value/data carriers. Anything needing mutability, inheritance, or hidden state (entities, services, builders with optional fields) should remain a regular class.
 
-**How do virtual threads interact with `ThreadLocal`?** They support `ThreadLocal`, but since you may create millions, per-thread copies can balloon memory. Prefer passing context explicitly or use `ScopedValue` (Java 21 preview), which shares an immutable binding across the structured scope without per-thread allocation.
+**How do virtual threads interact with `ThreadLocal`?** They support `ThreadLocal`, but since you may create millions, per-thread copies can balloon memory. Prefer passing context explicitly or use `ScopedValue` (final in Java 25, JEP 506), which shares an immutable binding across the structured scope without per-thread allocation.
 
 ---
 

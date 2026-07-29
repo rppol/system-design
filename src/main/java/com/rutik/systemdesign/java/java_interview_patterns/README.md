@@ -41,14 +41,14 @@ These patterns come from *Effective Java* by Joshua Bloch (the essential Java en
 | Item 2 | Builder | Telescoping constructor problem; validate in build() |
 | Item 3 | Enum singleton | Serialization + reflection safe |
 | Item 4 | Private constructor | Noninstantiable utility classes |
-| Item 15-17 | Minimize mutability | final class, final fields, defensive copy |
+| Item 17 | Minimize mutability | final class, final fields, defensive copy |
 | Item 18 | Composition > inheritance | InstrumentedSet disaster example |
-| Item 25 | Prefer lists to arrays | Type-safe, reifiable vs non-reifiable |
+| Item 28 | Prefer lists to arrays | Type-safe, reifiable vs non-reifiable |
 | Item 31 | Bounded wildcards | PECS |
 | Item 50 | Defensive copies | Date in constructor |
 | Item 55 | Return Optional | Instead of null |
 | Item 64 | Interface types | `List<E> list = new ArrayList<>()` |
-| Item 67 | Lazy initialization | Double-checked locking with volatile |
+| Item 83 | Lazy initialization | Double-checked locking with volatile |
 
 ### 4.2 Integer Cache Table
 
@@ -151,7 +151,8 @@ public enum AppConfig {
 // Why enum singleton is best:
 // 1. Serialization: enum serialization is handled by JVM; always returns existing instance
 //    (regular class singleton needs readResolve())
-// 2. Reflection-safe: Enum.newInstance() throws InstantiationException
+// 2. Reflection-safe: Constructor.newInstance() on an enum throws
+//    IllegalArgumentException("Cannot reflectively create enum objects")
 //    (regular class singleton can be broken via Constructor.setAccessible(true))
 // 3. Thread-safe: class initialization is thread-safe by JVM spec
 // 4. Simple: one line
@@ -161,9 +162,12 @@ Constructor<Singleton> c = Singleton.class.getDeclaredConstructor();
 c.setAccessible(true);
 Singleton s2 = c.newInstance();  // SECOND INSTANCE - singleton broken
 
-// Enum is immune:
-Method m = Enum.class.getDeclaredMethod("ordinal");  // can't get constructor
-// EnumConstantNotPresentException or plain fails
+// Enum is immune. Note the compiler-generated enum constructor takes the
+// implicit (String name, int ordinal) pair, so this is the signature you have
+// to ask for -- and it still refuses to run:
+Constructor<AppConfig> ec = AppConfig.class.getDeclaredConstructor(String.class, int.class);
+ec.setAccessible(true);
+ec.newInstance("EVIL", 1);  // IllegalArgumentException: Cannot reflectively create enum objects
 ```
 
 ### equals() Full Contract — Complete Recipe
@@ -257,6 +261,46 @@ private static final Comparator<Employee> COMPARATOR =
 
 The reason this ships is in the safety condition, not the failure. Real id columns are positive and bounded — with ids in `[0, 1_000_000_000]` the largest possible gap is 1e9, comfortably under `2^31 - 1` = 2.15e9, so subtraction is correct for **every** row and passes **every** test. Only about a quarter of *uniformly random* `int` pairs overflow, and essentially none of your fixture data does. The bug waits for the first negative sentinel, `hashCode()` result, or `Integer.MIN_VALUE` id to reach the comparator, at which point `TreeMap` and `Arrays.sort` start returning wrong orderings — or throw `IllegalArgumentException: Comparison method violates its general contract!` from TimSort, several layers away from the subtraction that caused it.
 
+### Auto-Unboxing NPE — the Other Half of the Boxing Trap
+
+The Integer cache makes `==` return the wrong answer. Auto-*unboxing* makes a null
+reference throw from a line with no visible method call on it — the same boxing
+machinery, the opposite failure mode, and the one that actually pages people.
+
+```java
+Map<String, Integer> counts = new HashMap<>();
+
+// BROKEN: get() returns null for an absent key; the comparison inserts
+// an implicit x.intValue() to unbox it.
+Integer x = counts.get("missing");
+if (x > 0) { ... }
+// NullPointerException: Cannot invoke "java.lang.Integer.intValue()"
+//                       because "x" is null
+
+// FIX: never let the boxed value reach an arithmetic or comparison context.
+int x = counts.getOrDefault("missing", 0);
+if (x > 0) { ... }
+```
+
+The trap that catches experienced developers is the conditional operator. When one
+branch is a primitive and the other is a boxed type, binary numeric promotion unboxes
+**both** branches — so the null branch is dereferenced even though it is the branch
+being *assigned*, and even though the target type is `Integer`:
+
+```java
+Integer maybeNull = null;
+
+Integer v = flag ? maybeNull : 0;                   // NPE -- 0 is an int, so
+                                                     // BOTH branches unbox
+Integer v = flag ? maybeNull : Integer.valueOf(0);   // fine -- both are Integer,
+                                                     // no unboxing, v == null
+```
+
+Rules that remove the whole class: prefer primitives for anything you will do
+arithmetic on; use `Map.getOrDefault` rather than `get` plus a null check; use
+`Objects.requireNonNullElse(boxed, 0)` when you must keep the wrapper type; and keep
+both branches of a ternary the same boxedness.
+
 ### String Pool and `new String("abc")`
 
 ```java
@@ -327,7 +371,7 @@ null == null                              true     null reference comparison
 
 ## 7. Real-World Examples
 
-- **Integer cache bug**: A payment system compared `amount.quantity == 1` where `amount.quantity` was `Integer`. Works for amounts ≤ 127, fails silently (returns false) for amounts > 127 even when equal. **Always use `.equals()` for object comparison.**
+- **Integer cache bug**: A payment system compared `line.quantity == order.expectedQuantity` where *both* sides were `Integer`. Works for quantities in [-128, 127] (both sides come from the same cached instance), fails silently for anything above 127 even when the values are equal. Note the trap only fires when both operands are boxed — had one side been an `int`, the comparison would have unboxed the other and been correct. **Always use `.equals()` when both sides are boxed.**
 - **Builder pattern in SDK APIs**: AWS SDK, JDBC connection pools, and OkHttpClient all use Builder — when there are 5+ optional parameters, telescoping constructors become unmanageable.
 - **Enum for status codes**: Using an `enum` for HTTP status codes provides: compile-time exhaustiveness checks in switch, serialization safety, and natural ordering.
 
@@ -436,7 +480,7 @@ Three reasons: (1) Serialization-safe — Java's enum serialization mechanism gu
 `Integer.valueOf(n)` caches `Integer` objects for values in [-128, 127]. Values outside this range always create new objects. Bug: comparing cached Integer with `==` works (same instance), but comparing larger values with `==` returns `false` even when values are equal. The fix: always use `.equals()` for `Integer` (and all boxed types). The cache exists as a performance optimization — these small integers are used very frequently (loop counters, small IDs, boolean flags).
 
 **Q5: How do you correctly implement `equals()` — what is the full contract?**
-Five properties: reflexive (`x.equals(x)` = true), symmetric (`x.equals(y)` = `y.equals(x)`), transitive (`x.equals(y)` && `y.equals(z)` implies `x.equals(z)`), consistent (repeated calls return same result if objects unchanged), null-safe (`x.equals(null)` = false always). Implementation: check `this == o` first (shortcut), then `!(o instanceof MyClass)` for type check (also handles null), cast, compare fields with `==` for primitives and `Objects.equals()` for objects. Always override `hashCode()` consistently.
+The contract has five properties: reflexive, symmetric, transitive, consistent, and null-safe. Spelled out: reflexive (`x.equals(x)` = true), symmetric (`x.equals(y)` = `y.equals(x)`), transitive (`x.equals(y)` && `y.equals(z)` implies `x.equals(z)`), consistent (repeated calls return the same result if the objects are unchanged), null-safe (`x.equals(null)` = false always). Implementation: check `this == o` first (shortcut), then `!(o instanceof MyClass)` for type check (also handles null), cast, compare fields with `==` for primitives and `Objects.equals()` for objects. Always override `hashCode()` consistently.
 
 **Q6: What is the Comparable subtraction trap?**
 Using `return this.value - other.value` in `compareTo()` can overflow. If `this.value = Integer.MAX_VALUE` (2,147,483,647) and `other.value = -1`, then `MAX_VALUE - (-1) = MAX_VALUE + 1` which overflows to `Integer.MIN_VALUE` — a large negative number. The sort now places `MAX_VALUE` before `-1`, which is backwards. Fix: always use `Integer.compare(this.value, other.value)` — no arithmetic, no overflow. Same principle applies to `Long.compare`, `Double.compare`.
@@ -460,7 +504,7 @@ A variable is effectively final if it's initialized once and never reassigned �
 Three approaches: (1) `Objects.requireNonNull(param, "name")` in constructor/method — fails fast with a clear NPE message. (2) Return `Optional<T>` from methods that may have no result — forces callers to handle the absence case. (3) Use `@NonNull`/`@Nullable` annotations (Lombok, IntelliJ, JetBrains) for static analysis documentation. Avoid: passing `null` as a sentinel value — use `Optional` or overloading instead. Never swallow `NullPointerException` — it indicates a programming error that should be fixed.
 
 **Q13: What is the Integer cache, what is its exact range, and what common bug does it cause?**
-The JVM caches `Integer` objects for values −128 to 127 (inclusive) — a fixed pool of 256 instances created at JVM startup. `Integer.valueOf(127) == Integer.valueOf(127)` is `true` (same cached object). `Integer.valueOf(128) == Integer.valueOf(128)` is `false` (two distinct heap objects). This causes real bugs when developers compare autoboxed `Integer` values with `==` instead of `.equals()`:
+The JDK caches `Integer` objects for values −128 to 127 (inclusive) — a fixed pool of 256 instances, allocated once when the private `Integer.IntegerCache` class is initialized on first boxing. `Integer.valueOf(127) == Integer.valueOf(127)` is `true` (same cached object). `Integer.valueOf(128) == Integer.valueOf(128)` is `false` (two distinct heap objects). This causes real bugs when developers compare autoboxed `Integer` values with `==` instead of `.equals()`:
 
 ```java
 // BROKEN: works for small values (returns from cache), fails for large ones
@@ -496,6 +540,9 @@ In modern Java, prefer `Instant` / `LocalDate` (immutable) over `java.util.Date`
 **Q15: When should a class implement `Comparable<T>` vs. using an external `Comparator<T>`?**
 `Comparable<T>` expresses the **natural ordering** — the single most obvious ordering for the class (e.g., `String` lexicographically, `Integer` numerically, `LocalDate` chronologically). Classes that have a natural ordering should implement `Comparable`. When the ordering is contextual, situational, or you need multiple orderings (e.g., sort people by name OR by age OR by salary), use external `Comparator` instances. Key rule from Effective Java Item 14: *The natural ordering should be consistent with `equals()`* — `a.compareTo(b) == 0` should imply `a.equals(b)`. Violating this causes subtle bugs in `TreeSet`, `TreeMap`, and `SortedSet` (which use `compareTo` for equality, not `equals`). Example violation: `BigDecimal("1.0").compareTo(BigDecimal("1.00")) == 0` but `BigDecimal("1.0").equals(BigDecimal("1.00"))` is `false` — a `TreeSet` treats them as the same element; a `HashSet` treats them as different.
 
+**Q16: Where does auto-unboxing throw a `NullPointerException`, and why does a ternary operator trigger it even when you are assigning to a wrapper type?**
+Auto-unboxing throws whenever a `null` wrapper reaches a context that needs a primitive, because the compiler inserts an invisible `intValue()` call. The common shape is `Integer x = map.get(k); if (x > 0)` — `get` returns `null` for an absent key and the comparison dereferences it, so the stack trace points at a line containing no explicit method call. The conditional operator is the version that catches experienced developers: in `Integer v = flag ? maybeNull : 0`, the `0` is an `int`, so binary numeric promotion unboxes **both** branches before the result is re-boxed into `v` — the null branch is dereferenced even though the target type is `Integer` and even though the value would have been assignable as null. Writing `Integer.valueOf(0)` in the other branch keeps both operands reference-typed, no unboxing happens, and `v` is simply `null`. Fixes that remove the class rather than the instance: use primitives for anything you do arithmetic on, use `Map.getOrDefault(k, 0)` instead of `get` plus a null check, use `Objects.requireNonNullElse` when the wrapper type must survive, and keep both ternary branches at the same boxedness.
+
 ---
 
 ## 13. Best Practices
@@ -517,7 +564,7 @@ In modern Java, prefer `Instant` / `LocalDate` (immutable) over `java.util.Date`
 
 ### A Payment Library Composing Four Canonical Patterns
 
-**Scenario.** A reusable `payments-core` library processes **5M payments/day** (~58/sec average, ~600/sec peak) across a fleet. It composes four interview-staple patterns into one coherent flow: an **immutable `Payment`** value object (Effective Java Item 17), a **Builder** for safe construction (Item 2), an **enum singleton** registry of payment gateways (Item 3), and a **factory method** that selects a processor by scheme. After replacing mutable DTOs with immutable value objects, the team logged **zero NullPointerExceptions in the payment path over 18 months** — the fail-fast `build()` validation moved every "missing field" bug to construction time, where a unit test catches it.
+**Scenario.** A reusable `payments-core` library processes **5M payments/day** (~58/sec average, ~600/sec peak) across a fleet. It composes four interview-staple patterns into one coherent flow: an **immutable `Payment`** value object (Effective Java Item 17), a **Builder** for safe construction (Item 2), an **enum singleton** registry of payment gateways (Item 3), and a **factory method** that selects a processor by scheme. The illustrative payoff in a scenario like this is that "missing field" NPEs stop reaching production entirely: the fail-fast `build()` validation moves every one of them to construction time, where a unit test catches it, instead of surfacing as a null dereference several layers into processing.
 
 ```mermaid
 flowchart TD
