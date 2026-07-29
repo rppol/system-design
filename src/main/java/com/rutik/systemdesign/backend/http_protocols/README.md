@@ -561,6 +561,14 @@ SETTINGS frames are exchanged at connection setup and can be sent anytime to upd
 2. HTTP/1.1 opened 6 connections to api.example.com. Those handshakes run **concurrently**, so the wall-clock cost is one handshake, not six — the real penalty is that each connection starts its own congestion window at the RFC 6928 initial window of 10 segments (~14.6 KB) and has to ramp from scratch, and that only 6 of the 8 requests fit in the first wave.
 3. ~1.2 KB of uncompressed headers x 8 requests = ~9.6 KB of uplink header bytes per cold start, sent on connections whose windows have not yet opened.
 
+```
+TTFB = (TCP + TLS + request) x RTT
+
+  TCP     = 1 RTT   <- three-way handshake
+  TLS 1.2 = 2 RTTs  <- full handshake before first encrypted byte
+  request = 1 RTT   <- first request/response round trip
+```
+
 **Stated plainly.** "Six parallel connections do not cost six handshakes of wall clock — they overlap. What they do cost is six cold congestion windows and six sets of uncompressed headers."
 
 That distinction is the whole lesson. The naive model — multiply the handshake by the connection count — overstates the handshake and hides where the time actually goes.

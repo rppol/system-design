@@ -367,6 +367,11 @@ def is_valid(s: str) -> bool:
 | Cache performance | Poor (pointer chasing) | Poor | Excellent | Array usually faster in practice |
 | Extra memory | 1 pointer/node | 2 pointers/node | 0 | LL has 50–100% overhead |
 
+```
+fetches = N / (cache_line / element_size)
+time    = fetches x cache_miss_latency
+```
+
 **Stated plainly.** "Both traversals are O(n), and the array still wins by more than 10x — because Big-O counts elements visited, and the hardware charges you for memory *fetches*, which is a completely different number."
 
 That framing matters because the "Cache performance" row above is the only row in the table Big-O cannot express. Two data structures with identical complexity can differ by an order of magnitude in wall-clock, and the reason is never in the complexity analysis.

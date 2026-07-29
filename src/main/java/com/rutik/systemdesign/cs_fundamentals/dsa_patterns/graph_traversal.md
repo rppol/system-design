@@ -281,6 +281,12 @@ stack** or BFS with a deque — same complexity, no recursion-depth risk.
 
 ### Decoding `O(V + E)`
 
+```
+work = V + Sigma over v of deg(v)
+     = V + 2E              <- handshake lemma: degrees sum to twice the edges
+     = O(V + E)             <- constant factor dropped
+```
+
 **Put simply.** "Touch every vertex once, and look down every
 edge once. Add the two piles of work together — you never multiply them."
 

@@ -456,6 +456,11 @@ The 29-minute value in section 6.1 is deliberately more conservative than the `-
 
 **Holding connections across external service calls**: A `@Transactional` method that calls an external HTTP API holds a database connection for the entire duration of the HTTP call. If the external call is slow (500ms), 10 active requests hold all 10 pool connections while waiting for HTTP — blocking all other database operations. Fix: minimize the code inside @Transactional to only the database operations; perform external calls outside the transaction.
 
+```
+throughput  = P / T_hold
+utilization = query_time / T_hold
+```
+
 **The idea behind it.** "Your maximum request rate through a code path is the pool size divided by how long that path *holds* a connection — including every millisecond it holds one while doing nothing."
 
 Hold time, not query time, is the denominator. A transaction that spends 5ms querying and 500ms waiting on HTTP occupies a connection for all 505ms, and the pool cannot tell the difference.

@@ -306,6 +306,10 @@ valuable in an interview.
 
 ### Decoding the complexity claim
 
+```
+total = O(n log n) + O(n) = O(n log n)     <- the sort dominates the scan
+```
+
 **What the formula is telling you.** "The scan is free; you are paying for the
 sort. Greedy costs `O(n log n)` because sorting costs `O(n log n)`, and the
 actual decision-making is a single `O(n)` pass on top of it."

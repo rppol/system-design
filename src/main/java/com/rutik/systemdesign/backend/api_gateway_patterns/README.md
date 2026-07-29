@@ -509,6 +509,10 @@ public class FallbackController {
 | BFF flexibility | Per-client tailoring possible | All clients hit same APIs |
 | Protocol translation | HTTP to gRPC, WebSocket, etc. | Each client handles protocols |
 
+```
+tax % = (gateway hop / direct p99) x 100
+```
+
 **Read it like this.** "The gateway hop costs you something on every single request — the only question is whether it saves the client more round trips than it costs."
 
 The latency row is the line the decision actually turns on. Treat the hop as a tax charged per request, then check whether aggregation refunds it. The hop cost below is a deliberately pessimistic **assumed 20ms** so the tax is not understated; measure your own before using it in a budget.

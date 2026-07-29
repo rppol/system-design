@@ -243,6 +243,14 @@ FROM pg_statio_user_indexes;
 - Partition throughput: 3000 RCU + 1000 WCU
 - DynamoDB Streams retention: 24 hours
 
+```
+RCU_per_item = ceil(size / 4KB)
+WCU_per_item = ceil(size / 1KB)
+
+reads/s  = 3000 / RCU_per_item     <- per-partition RCU ceiling / cost per read
+writes/s = 1000 / WCU_per_item     <- per-partition WCU ceiling / cost per write
+```
+
 **Put simply.** "You are not billed for requests, you are billed for 4 KB read blocks and 1 KB write blocks — and those blocks are rounded up per item, then capped per physical partition."
 
 The rounding and the per-partition cap are what turn a capacity number into a latency incident. A table can be provisioned for enormous throughput and still throttle, because the ceiling that matters is the one on a single partition, not the one on the table.
@@ -309,6 +317,10 @@ each stays under its own 3000/1000 ceiling.
 - `QUORUM`: write/read acknowledged by `floor(RF/2)+1` replicas (RF=3 → 2 nodes); balanced
 - `ALL`: all replicas; strongest consistency, lowest availability
 - `LOCAL_QUORUM`: quorum within local DC only; preferred for multi-DC to avoid cross-DC latency
+
+```
+W + R > RF
+```
 
 **What it means.** "If the set of nodes you wrote to and the set you read from are guaranteed to overlap in at least one node, then every read is guaranteed to see the latest write."
 

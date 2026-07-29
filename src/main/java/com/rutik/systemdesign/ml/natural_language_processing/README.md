@@ -86,6 +86,13 @@ See [text_representation_and_retrieval.md](text_representation_and_retrieval.md)
 
 That single difference — linear in `n` versus quadratic in `n` — is the whole latency story in this table, and it is why the cheap models never disappeared.
 
+```
+cost(LR/TF-IDF) = n x d
+cost(TextCNN)   = n x k x d
+cost(BiLSTM)    = n x h
+cost(BERT)      = n^2 x L
+```
+
 | Symbol | What it is |
 |--------|------------|
 | `n` | Sequence length in tokens (or number of documents, for the training-cost reading) |

@@ -333,6 +333,10 @@ would show the final (empty) state. This is a milder cousin of the §8 bug.
 
 ### Decoding the branching-factor formula
 
+```
+nodes(d) = b^d
+```
+
 **What it means.** "Count how many choices you face at each step
 (`b`), count how many steps deep you go (`d`), and the search tree has about
 `b^d` nodes — every extra level of depth multiplies the whole cost by `b`."

@@ -647,6 +647,12 @@ The whole reduction hinges on that lack of slack. If the budget were even one la
 
 #### Decoding the Membership-Test Column: O vs. Θ vs. Ω
 
+```
+f(n) = O(g(n))      <=>  f(n) <= c x g(n)               for some c, large n
+f(n) = Omega(g(n))  <=>  f(n) >= c x g(n)                for some c, large n
+f(n) = Theta(g(n))  <=>  f(n) = O(g(n)) AND f(n) = Omega(g(n))
+```
+
 **Stated plainly.** "Big-O is a ceiling — the cost is *at most* this. Omega is a floor — *at least* this. Theta is both at once, which is the only one of the three that actually pins down how fast something is."
 
 The table above uses `O` throughout, and that is a deliberate, weaker claim than most readers hear. `O(n³)` for PDA membership means the CYK algorithm never exceeds cubic; it does not claim cubic is required, and it does not forbid a faster algorithm on structured inputs.

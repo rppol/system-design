@@ -40,6 +40,12 @@ This module covers the two structural properties that enable DP, the two impleme
 
 ### Decoding the state / transition / base-case triple
 
+```
+dp[state] = f(dp[state'], ...)      <- transition; state' is always smaller
+dp[base]  = known constant          <- base case, not computed
+runtime   = O(states) x O(transition per state)
+```
+
 **The idea behind it.** "Every DP problem is three sentences: *what does one table cell mean*
 (state), *how do I compute a cell from cells I already have* (transition), and *which cells do I know
 without computing anything* (base cases). Write those three sentences and the code writes itself."

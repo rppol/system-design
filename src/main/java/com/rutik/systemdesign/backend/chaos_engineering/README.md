@@ -377,6 +377,12 @@ ACTION ITEMS:
 
 The runbook's "Blast radius" and "Duration" fields are not two independent choices — their product is the bill the experiment charges to the error budget, and that bill is what makes an experiment approvable or not.
 
+```
+budget = (1 - SLO) x minutes_in_period
+cost   = f x D
+burn   = cost / budget
+```
+
 **What this actually says.** "An experiment costs you blast radius times duration in error-minutes, and you may only spend what the SLO's error budget has left this month."
 
 This converts an argument about risk appetite into an arithmetic check that anyone can run before the Game Day, not after it.
@@ -441,6 +447,10 @@ Do NOT run chaos experiments without: clear steady-state metrics and monitoring,
 ## 10. Common Pitfalls
 
 **No kill switch**: A team ran a chaos experiment that injected CPU pressure on all order-service pods simultaneously. The experiment script had a bug and did not stop after 5 minutes. CPU pressure continued for 45 minutes, causing the checkout service to time out. With no kill switch, engineers had to manually SSH into each pod. Fix: always implement an automated rollback trigger (stop if error rate > threshold) and a one-command manual kill switch.
+
+```
+A = MTBF / (MTBF + MTTR)
+```
 
 **Read it like this.** "Availability is the share of time between failures that you are *not* spending on recovery — so a kill switch does not reduce how often you break things, it reduces the only term you control during the break."
 
@@ -567,6 +577,14 @@ Network-layer faults like tc netem test the real transport path including OS-lev
 3. Experiment: injected 2000ms latency to ML API using WireMock stub + traffic routing
 4. Observed: product page p99 jumped to 28000ms, error rate hit 35% — hypothesis REJECTED
 5. Root cause: recommendation service had no circuit breaker, no timeout shorter than 30s, no fallback to cached recommendations
+
+```
+cost = err_fault x D
+burn = cost / budget
+
+  err_fault  = error rate observed during the fault window
+  D          = fault window duration, in minutes
+```
 
 **What the formula is telling you.** "A rejected hypothesis is worth the price when the experiment's error-minutes are a rounding error next to the outage it predicts — and here the same failure in production would have cost 30 times more."
 

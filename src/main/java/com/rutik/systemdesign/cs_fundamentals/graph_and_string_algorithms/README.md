@@ -125,6 +125,10 @@ per-operation heap factor bolted on — still fundamentally linear-ish, still no
 
 #### Decoding naive search's `O(n x m)` — this one really is a product
 
+```
+comparisons = n x m
+```
+
 **Stated plainly.** "Try the pattern at every one of the `n` starting positions in the text,
 and at each position compare up to `m` characters before giving up — so the two counts *multiply*."
 

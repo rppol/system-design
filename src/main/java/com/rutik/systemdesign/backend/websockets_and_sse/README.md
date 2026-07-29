@@ -58,6 +58,11 @@ Long polling was the original workaround: the client sends a request and the ser
 | 32 | Masking key | Present if MASK=1 |
 | * | Payload | Application data |
 
+```
+header_bits  = FIN + RSV1-3 + Opcode + MASK + Payload_length
+header_bytes = header_bits / 8
+```
+
 **Stated plainly.** "The whole header is two bytes, and the payload-length field is only seven bits — so two of its values are reserved as escapes that say 'the real length is in the next 2 or 8 bytes instead.'"
 
 That escape trick is the reason a protocol carrying gigabyte messages still costs two bytes to frame a chat message. The header is variable-length, sized to the message rather than to the worst case.

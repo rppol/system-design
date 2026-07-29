@@ -116,6 +116,11 @@ The initiator enters TIME_WAIT to absorb delayed duplicates. RFC 9293 defines th
 
 **Flow control**: Receiver advertises a receive window (rwnd) in every ACK. Sender cannot have more than rwnd unacknowledged bytes in flight. Default: 65535 bytes (64 KB), extendable to 1 GB with window scaling option.
 
+```
+throughput = rwnd / RTT
+BDP        = bandwidth x RTT
+```
+
 **The idea behind it.** "Bandwidth is how wide the pipe is, latency is how long the pipe is, and throughput is what you actually get — which is neither, it is your window size divided by the round-trip time."
 
 Engineers conflate all three constantly, and the conflation is expensive: it produces bug reports like "we bought a 1 Gbps link and single transfers still crawl at 5 Mbps." Nothing is broken in that scenario. The window is.

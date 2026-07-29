@@ -416,6 +416,11 @@ def pipe_example() -> str:
 
 **Avoid creating thousands of OS threads**: Each OS thread has an 8 MB default stack reservation. 10,000 threads = 80 GB virtual address space reservation. Even with lazy physical allocation, the context-switch overhead (~1–10 µs × 10,000 threads = 10–100 ms just for scheduling overhead per second) dominates CPU time.
 
+```
+address_space   = n_threads x stack_reservation
+scheduling_cost = n_threads x switches/sec x context_switch_cost
+```
+
 **Stated plainly.** "Two independent budgets run out at once — address space, which is reserved per thread whether you touch it or not, and CPU time, which the scheduler burns just moving between threads before any of them does work."
 
 The address-space number scares people first, but it is the *soft* limit (Linux only commits pages you actually touch). The scheduling number is the hard one: it is real CPU, spent every second, on nothing.

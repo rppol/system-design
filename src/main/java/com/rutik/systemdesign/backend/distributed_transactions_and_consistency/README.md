@@ -95,6 +95,11 @@ A participant that has voted `VOTE_COMMIT` is in the *prepared* (uncertain) stat
 - Heterogeneous services (different databases, messaging systems) rarely expose the XA interface needed for 2PC.
 - CAP: 2PC keeps consistency and gives up availability during a partition (it is CP, not "not partition-tolerant") — a participant that cannot reach the coordinator blocks rather than deciding on its own.
 
+```
+lock_hold             = 2 x RTT
+contended_throughput  = 1 / lock_hold
+```
+
 **Read it like this.** "A participant holds its locks for up to the full width of two network round trips, because it cannot know the outcome until the slowest participant has voted and the coordinator has told everyone."
 
 The "2× latency minimum" line is doing a lot of work. It is not the coordinator's latency budget that hurts — it is that the number becomes the *lock hold time* on every row the transaction touched, and lock hold time is the denominator of contended throughput.

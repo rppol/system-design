@@ -37,6 +37,10 @@ Key insight: Dense retrieval does not outperform BM25 on all queries. For querie
 
 **TF-IDF (foundational):** Term Frequency × Inverse Document Frequency weights terms by how discriminative they are. A term appearing frequently in a document and rarely in the corpus has high TF-IDF — a signal it characterizes this document. TF-IDF is the foundation that BM25 improves upon.
 
+```
+TF-IDF(t, d) = TF(t, d) x IDF(t)
+```
+
 **The idea behind it.** "Score a term high in one document when it appears a lot *here* and almost nowhere *else* in the corpus." TF measures local prominence, IDF measures global rarity, and the product keeps only terms that are both. Either half alone is worthless: TF alone ranks every document by how often it says "the"; IDF alone ignores the document being scored entirely.
 
 The two halves are separate calculations, so decode them separately.

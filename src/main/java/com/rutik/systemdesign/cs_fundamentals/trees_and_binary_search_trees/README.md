@@ -58,6 +58,10 @@ Without balancing, a BST degenerates to a linked list on sorted input (O(n) oper
 | B+tree | O(log_t n) | O(log n) | All data in leaves; linked leaves for range scan |
 | Skip list | O(log n) expected | O(log n) | Redis sorted sets; easier than BST to implement |
 
+```
+cost = O(h)
+```
+
 **The idea behind it.** "Every row in this table is really one row — the cost of a BST operation is the height of the tree, and each family is just a different scheme for keeping that height near log n instead of letting it grow to n."
 
 That reframing matters because it collapses six structures into one question. You never tune "search speed" directly; you only ever tune height. The `O(n) worst` in row one is not a different algorithm — it is the same algorithm on a tree that was allowed to grow tall.
@@ -615,6 +619,10 @@ def is_valid_bst(root: Optional[TreeNode]) -> bool:
 | Sorted iteration | BST | O(n) in-order traversal |
 | Disk I/O minimised | B+Tree | High branching factor = few page reads |
 
+```
+lookup_steps = log2(n)
+```
+
 **In plain terms.** "A hash table wins on raw point-lookup speed and loses everything else; a BST pays about 20 comparisons for a lookup and gets ordering thrown in for free."
 
 The table is easy to misread as "hash table is faster." It is faster at exactly one operation. The row that decides most real designs is the range-query row, because that is where the two structures are not 20x apart but 50,000x apart.
@@ -700,6 +708,11 @@ Both balanced families cap rotations per insert at a small constant — the reba
 - You only need point lookups — use a hash table (O(1) vs O(log n)).
 - Data is accessed in random (non-sequential) order on disk — use a B+Tree with large pages.
 - You need a simple priority queue — use a heap (simpler, same O(log n) insert/extract-min).
+
+```
+h_degenerate = n - 1
+slowdown     = h_degenerate / h_balanced
+```
 
 **What it means.** "Do not use an unbalanced BST when you cannot promise the insertion order is unsorted — because sorted input turns the structure into a linked list and the `O(log n)` you designed around silently becomes `O(n)`."
 

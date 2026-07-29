@@ -37,6 +37,11 @@ Imagine a bank that mails a withdrawal receipt only after the money is debited. 
 - **Separate DLQ per source**: avoids DLQ processing from one topic affecting another
 - **DLQ consumer**: monitoring, alerting, root cause analysis, manual replay after fix
 
+```
+delay(n)    = 2^(n-1)                            <- n >= 1; attempt 0 has no delay
+time-to-DLQ = Sigma over n=1..max retries of delay(n)
+```
+
 **What it means.** "Wait twice as long before each retry, so a downstream service that is already struggling gets exponentially more breathing room instead of a steady hammering from every consumer at once."
 
 The doubling is the point, and so is where it stops. Both the total time-to-DLQ and the load you inflict on the failing dependency are fixed by the retry count — pick it deliberately, not by accepting a library default.

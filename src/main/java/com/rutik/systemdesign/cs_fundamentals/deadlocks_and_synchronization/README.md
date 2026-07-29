@@ -37,6 +37,10 @@ All four must hold simultaneously:
 3. **No preemption**: Resources cannot be forcibly taken from a thread; they are released only voluntarily.
 4. **Circular wait**: A set of threads T₁, T₂, ..., Tₙ exists such that T₁ waits for a resource held by T₂, T₂ waits for a resource held by T₃, ..., Tₙ waits for a resource held by T₁.
 
+```
+deadlock possible <=> ME AND HW AND NP AND CW
+```
+
 **The idea behind it.** "Deadlock is an AND, not an OR — all four conditions must be true at the same instant, so falsifying any single one of them makes deadlock structurally impossible, forever."
 
 This is why the list has exactly four entries and why the prevention table below has exactly four rows. The four conditions are not four warning signs to watch for; they are four independent switches, and deadlock needs every one of them flipped on.

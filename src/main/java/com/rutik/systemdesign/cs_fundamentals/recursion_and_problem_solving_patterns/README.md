@@ -49,6 +49,11 @@ This module teaches how recursion works (call stack, base case, recurrence), the
 
 #### Decoding the shape of a recursion tree — branching factor vs depth
 
+```
+time (nodes) = b^d
+space        = O(d)
+```
+
 **The idea behind it.** "A recursion's cost has exactly two dials: *how many calls does each call
 make* (the branching factor `b`) and *how many times can you shrink before hitting the base case* (the
 depth `d`). Time is governed by `b^d` — the node count. Space is governed by `d` alone — only one

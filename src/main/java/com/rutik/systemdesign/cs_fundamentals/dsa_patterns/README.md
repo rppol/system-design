@@ -122,6 +122,11 @@ The single highest-leverage habit: **look at the input size constraint before th
 | n ≤ 10^8 | O(n) or O(log n) | math / formula, binary search on answer |
 | n > 10^9 | O(log n) or O(1) | binary search on answer, modular arithmetic, matrix exponentiation |
 
+```
+operations(n) = value of the complexity expression at that n
+fits budget    = operations(n) <= 10^8
+```
+
 **The idea behind it.** "A judge machine does very roughly 10^8 simple
 operations per second, so pick any complexity whose operation count lands under
 that — the table is just that one division, precomputed for every `n`."

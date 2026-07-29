@@ -629,6 +629,11 @@ Regression  Tree    Forest                   |
 
 SHAP values work on tree ensembles (RF, XGBoost, LightGBM) efficiently via TreeSHAP (O(TLD^2) where T=trees, L=leaves, D=depth). Stacking adds another layer of opacity.
 
+```
+TreeSHAP   = T x L x D^2
+KernelSHAP = 2^M
+```
+
 **What it means.** `O(TLD^2)` says: "explaining one prediction costs you a walk over every leaf of every tree, with a small squared-depth penalty — which is polynomial, and therefore tractable, on ensembles of the size you actually deploy."
 
 The reason anyone quotes this complexity is the contrast: model-agnostic KernelSHAP is exponential in the number of features, `O(2^M)`, because exact Shapley values require every subset of features. TreeSHAP exploits tree structure to get the same exact values in polynomial time.

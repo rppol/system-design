@@ -637,6 +637,12 @@ Compression ratios below are directional only; the achieved ratio depends entire
 **Pitfall 1 — Consumer group imbalance causing hot partitions.**
 A team deployed 8 consumer instances but their topic had only 4 partitions. Four consumers were idle, contributing nothing. The other four each processed one partition. Throughput did not scale with additional consumers. Fix: the number of partitions is the maximum parallelism for a consumer group. Partition count can only be increased (not decreased) without repartitioning. Plan partition count based on target peak throughput divided by per-consumer throughput capacity.
 
+```
+partition count      = ceil(target peak throughput / per-consumer capacity)
+effective consumers  = min(consumer instances, partition count)
+actual capacity      = effective consumers x per-consumer capacity
+```
+
 **What the formula is telling you.** "Partitions are the only unit of parallelism a consumer group has. Adding consumers beyond the partition count adds cost and zero throughput — the extras sit assigned to nothing."
 
 The sizing rule is a ceiling function, and rounding it the wrong way is the difference between meeting your SLA and quietly falling behind.

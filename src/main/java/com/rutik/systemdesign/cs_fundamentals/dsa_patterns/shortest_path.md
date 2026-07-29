@@ -289,6 +289,10 @@ no `log V` factor at all.
 
 ### Decoding Dijkstra's `O((V + E) log V)`
 
+```
+total = (V + E) x log V
+```
+
 **What the formula is telling you.** "Do the same linear amount of work as a plain
 BFS — visit every vertex, look down every edge — but pay a `log V` surcharge
 on each of those operations, because a heap has to keep the frontier sorted."

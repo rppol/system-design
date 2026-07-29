@@ -609,6 +609,10 @@ def min_eating_speed(piles: List[int], h: int) -> int:
 | Stability | Depends on algorithm | Counting and LSD radix are stable |
 | Practical limit | Suitable for all general use | Efficient only when k ≪ n (k = key range) |
 
+```
+bits_needed = log2(n!)
+```
+
 **In plain terms.** The `Ω(n log n)` lower bound says: "there are `n!` possible orderings the input might be in, each comparison answers one yes/no question, and you cannot narrow `n!` possibilities down to one with fewer than `log2(n!)` yes/no answers."
 
 That framing matters because it is not a statement about any particular algorithm being poorly written. It is an information budget. No cleverness, no constant-factor tuning, and no future algorithm can beat it — as long as the only thing you are allowed to do is compare pairs.

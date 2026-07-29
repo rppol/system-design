@@ -498,6 +498,10 @@ The UI thread's priority is a two-state lifecycle keyed on touch activity: boost
 
 **Rule of thumb**: Quantum should be much larger than context-switch cost (~1 µs) but small enough to provide good response time. Linux's CFS min granularity is 4 ms.
 
+```
+overhead = c / (q + c)
+```
+
 **What the formula is telling you.** "Every time slice ends you burn a fixed setup cost, so the fraction of the CPU you lose to overhead is just that cost divided by the slice length — shrink the slice and the tax rate climbs."
 
 The table's "Poor (overhead)" verdict on a 1 ms quantum only makes sense once you separate the two costs a switch carries: the *direct* register-save-and-restore, and the *indirect* cache and TLB refill that follows.

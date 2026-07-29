@@ -63,6 +63,11 @@ The Master theorem determines the total complexity from (a, b, d).
 
 #### Decoding the exchange argument
 
+```
+OPT' = (OPT - {o}) union {g}
+|OPT'| >= |OPT|
+```
+
 **The idea behind it.** "Hand me *any* optimal solution. I will show that I can swap my greedy
 pick into it without making it worse — so there is always an optimal solution that agrees with me, and by
 repeating the swap, one that agrees with me everywhere."

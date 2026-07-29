@@ -83,6 +83,13 @@ Virtual address (48 bits used):
   [29:21] PMD index (9 bits) | [20:12] PTE index (9 bits) | [11:0] offset (12 bits)
 ```
 
+```
+offset_bits       = log2(page_size)
+entries_per_table = page_size / entry_size
+index_bits        = log2(entries_per_table)
+levels            = (address_bits - offset_bits) / index_bits
+```
+
 **The idea behind it.** "A virtual address is not one number — it is five numbers glued together: four table indices that say which shelf to look on at each of four levels, and one offset that says how far into the final 4 KB page to land."
 
 Every one of those bit-widths is forced by a physical constraint, not chosen for tidiness. Working out *why* each number is what it is makes the whole x86-64 paging design fall out in about six lines of arithmetic.
