@@ -344,16 +344,21 @@ ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor();
 ## Interview Questions
 
 **Q: What is the difference between `Runnable` and `Callable`?**
+**Short:** Callable.call() returns a value through a Future and may throw checked exceptions; Runnable.run() returns void and can throw neither.
 `Runnable.run()` returns void and cannot throw checked exceptions. `Callable.call()` returns a value (`Future<V>`) and can throw checked exceptions.
 
 **Q: What happens when a thread pool's queue is full?**
+**Short:** The rejection handler fires: the default AbortPolicy throws RejectedExecutionException, while CallerRunsPolicy runs the task on the submitting thread.
 The rejection handler is invoked. Default `AbortPolicy` throws `RejectedExecutionException`. `CallerRunsPolicy` runs the task on the submitting thread (backpressure).
 
 **Q: How do you size a thread pool for a REST service that makes DB calls?**
+**Short:** Size an I/O-bound pool as CPUs x (1 + wait/compute), starting near twice the CPU count and tuning against measured throughput.
 I/O-bound formula: `threads = N_CPUs × (1 + DB_wait/compute_time)`. Profile to measure actual wait ratio. Start with `2 × N_CPUs` and tune based on throughput metrics.
 
 **Q: What's the difference between `shutdown()` and `shutdownNow()`?**
+**Short:** shutdown() refuses new tasks but drains the queue to completion; shutdownNow() interrupts running tasks and returns the tasks that never started.
 `shutdown()`: no new tasks accepted, existing tasks and queue are processed to completion. `shutdownNow()`: attempts to interrupt running tasks, returns queued tasks that were not started.
 
 **Q: Why might `Executors.newFixedThreadPool()` cause OOM in production?**
+**Short:** It uses an unbounded LinkedBlockingQueue, so a sustained submission surplus grows the queue until the heap is exhausted.
 It uses an unbounded `LinkedBlockingQueue`. If tasks are submitted faster than processed, the queue grows without bound until OOM. Always use `ThreadPoolExecutor` with a bounded queue in production.

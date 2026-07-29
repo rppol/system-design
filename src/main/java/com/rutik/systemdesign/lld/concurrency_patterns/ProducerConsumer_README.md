@@ -219,18 +219,23 @@ Consumer A never swallows the pill — it re-`put()`s it before exiting, so Cons
 ## Interview Questions
 
 **Q: What is the difference between `notify()` and `notifyAll()`?**
+**Short:** notify() wakes one arbitrary waiter and notifyAll() wakes every one, so notify() is only safe when all waiting threads block on the identical condition.
 `notify()` wakes one random waiting thread. `notifyAll()` wakes all. Use `notifyAll()` when multiple threads are waiting on different conditions; `notify()` is only safe when all threads wait on the same condition.
 
 **Q: What is a spurious wakeup? How do you handle it?**
+**Short:** A spurious wakeup is a thread returning from wait() without being notified, which is why the condition must be rechecked in a while loop rather than an if.
 A thread waking from `wait()` without being notified. Handle by always rechecking the condition in a `while` loop.
 
 **Q: How do you gracefully shut down a producer-consumer system?**
+**Short:** Push a poison-pill sentinel through the queue so consumers stop on receiving it, or call ExecutorService.shutdown() followed by awaitTermination().
 Option A: Poison pill — producers send a sentinel task; consumers stop on receiving it.
 Option B: `ExecutorService.shutdown()` then `awaitTermination()`.
 Option C: `volatile boolean running = false` flag checked in consumer loop.
 
 **Q: What BlockingQueue would you use for a priority work queue?**
+**Short:** PriorityBlockingQueue, which orders tasks by their Comparable ordering or a supplied Comparator instead of FIFO arrival order.
 `PriorityBlockingQueue` — tasks implement `Comparable` or provide a `Comparator`.
 
 **Q: How would you implement backpressure?**
+**Short:** A bounded BlockingQueue provides backpressure for free, because put() blocks the producing thread as soon as the queue is full.
 Use a bounded `BlockingQueue`. `put()` blocks the producer thread when full. For async systems, use reactive streams (RxJava, Project Reactor) which have explicit backpressure signals.

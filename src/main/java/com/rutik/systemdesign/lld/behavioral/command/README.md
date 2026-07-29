@@ -700,7 +700,7 @@ A: A `BlockingQueue` (e.g., `LinkedBlockingQueue`, `ArrayBlockingQueue`) is thre
 **Short:** A serializable Command carries only primitive data, not live receiver references, and must revalidate preconditions at execution.
 A: A serializable Command must capture everything needed to execute remotely as primitive/serializable data — operation type, parameters, target identifiers — *not* live references to receivers, since `Receiver` objects (database connections, services) typically aren't serializable and wouldn't make sense on a different machine anyway. On the receiving side, a `CommandHandler` deserializes the payload, looks up the appropriate local `Receiver` by ID, and invokes the operation — this is exactly the shape of a Kafka/SQS message: `{"type": "ChargeCardCommand", "orderId": "123", "amount": 49.99}`. The danger is temporal coupling: if the command was created against `orderId: 123` when it was in state "PENDING," but by the time a consumer processes it the order has moved to "CANCELLED," blindly executing the command produces an inconsistent result — handlers must re-validate preconditions at execution time, not just at creation time, because serialized commands can sit in a queue for an arbitrarily long time before execution.
 
-**Follow-up traps:**
+### Follow-up traps
 - Be ready to implement a simple undo/redo stack.
 - Know the difference between Command (operation-focused) and Memento (state-focused) for undo.
 

@@ -579,7 +579,7 @@ A: For small, stable chains (3-5 handlers with well-understood dependencies, lik
 **Short:** CoR applies SRP to request processing, at the cost of every request traversing up to N handler hops.
 A: CoR is essentially SRP applied to request processing — each handler owns exactly one concern (auth, rate-limiting, validation), so adding or changing a concern means touching exactly one class instead of a monolithic conditional. The cost is that every request traverses up to N handlers even if only one of them actually does meaningful work, and each hop is a virtual method call plus whatever bookkeeping the handler does (logging, metric increments). For latency-sensitive chains, order handlers so the cheapest/most-likely-to-short-circuit checks (rate limiting, cache hits) run first, and keep chains under roughly 10-15 handlers — beyond that, traversal overhead and debugging cost both grow, and it's often a sign the chain is being used as a workflow engine rather than a request pipeline.
 
-**Follow-up traps:**
+### Follow-up traps
 - Be ready to draw the UML and explain the setNext() fluent chaining idiom.
 - Know the difference between `doFilter` (continues chain) vs. not calling it (stops chain) in servlet context.
 
