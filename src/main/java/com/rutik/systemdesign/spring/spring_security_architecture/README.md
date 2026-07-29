@@ -49,7 +49,7 @@ All configuration is expressed as `SecurityFilterChain` beans built with the lam
 | HTTP Basic | `BasicAuthenticationFilter` | `DaoAuthenticationProvider` |
 | Bearer token (JWT) | Custom `OncePerRequestFilter` | Custom `AuthenticationProvider` |
 | OAuth2 login (social) | `OAuth2LoginAuthenticationFilter` | `OidcAuthorizationCodeAuthenticationProvider` |
-| SAML 2.0 | `Saml2WebSsoAuthenticationFilter` | `OpenSaml4AuthenticationProvider` |
+| SAML 2.0 | `Saml2WebSsoAuthenticationFilter` | `OpenSaml5AuthenticationProvider` |
 | Remember-Me | `RememberMeAuthenticationFilter` | `RememberMeAuthenticationProvider` |
 | Anonymous | `AnonymousAuthenticationFilter` | (sets `AnonymousAuthenticationToken` if no auth yet) |
 
@@ -67,7 +67,7 @@ All configuration is expressed as `SecurityFilterChain` beans built with the lam
 | Strategy | Class Constant | Use Case |
 |---|---|---|
 | `THREAD_LOCAL` (default) | `SecurityContextHolder.MODE_THREADLOCAL` | Standard web applications; one thread per request |
-| `INHERITABLE_THREAD_LOCAL` | `SecurityContextHolder.MODE_INHERITABLETHREADLOCAL` | SecurityContext propagated to child threads (e.g., `ForkJoinPool`) |
+| `INHERITABLE_THREAD_LOCAL` | `SecurityContextHolder.MODE_INHERITABLETHREADLOCAL` | SecurityContext copied into threads the request thread creates itself; it does NOT reach pooled threads, which were created before the request — use `DelegatingSecurityContextExecutor` for those |
 | `GLOBAL` | `SecurityContextHolder.MODE_GLOBAL` | Standalone desktop applications; single shared context |
 
 ### Session Management Policies
@@ -620,7 +620,7 @@ public class AdminService {
 
 @Configuration
 @EnableWebSecurity
-@EnableMethodSecurity(prePostEnabled = true)  // enables @PreAuthorize, @PostAuthorize, etc.
+@EnableMethodSecurity  // @PreAuthorize, @PostAuthorize, @PreFilter, @PostFilter are on by default
 public class SecurityConfig {
     // ...
 }

@@ -4,7 +4,7 @@
 
 ## 1. Concept Overview
 
-Spring WebFlux is the reactive web framework introduced in Spring 5 as a non-blocking alternative to Spring MVC. It is built on Project Reactor and runs on Netty (the default) or on Servlet 3.1+ containers in non-blocking mode.
+Spring WebFlux is the reactive web framework introduced in Spring 5 as a non-blocking alternative to Spring MVC. It is built on Project Reactor and runs on Reactor Netty (the default) or on a Servlet container (Servlet 6.1 baseline in Spring Boot 4) driven in non-blocking mode.
 
 **Project Reactor** is the reactive streams implementation underneath WebFlux. It provides two primary types:
 
@@ -15,7 +15,7 @@ Both are **lazy** — no computation starts until something subscribes. This is 
 
 **The reactive streams specification** (java.util.concurrent.Flow, Reactor, RxJava, Akka Streams all implement it) defines four interfaces: `Publisher`, `Subscriber`, `Subscription`, and `Processor`. All of Reactor's behavior derives from these contracts plus backpressure — the ability for a subscriber to signal to a publisher how many items it is ready to receive.
 
-**WebFlux vs. Spring MVC:** Spring MVC uses a thread-per-request model. WebFlux uses an event-loop model (Netty's event loop threads, typically one per CPU core) where I/O completion events are handled non-blocking, allowing a handful of threads to serve thousands of concurrent connections. The performance benefit is realized for I/O-bound workloads with high concurrency. For CPU-bound work or low concurrency, Spring MVC is simpler and equally performant.
+**WebFlux vs. Spring MVC:** Spring MVC uses a thread-per-request model. WebFlux uses an event-loop model (Reactor Netty's event-loop threads, one per CPU core with a floor of 4) where I/O completion events are handled non-blocking, allowing a handful of threads to serve thousands of concurrent connections. The performance benefit is realized for I/O-bound workloads with high concurrency. For CPU-bound work or low concurrency, Spring MVC is simpler and equally performant.
 
 ---
 
@@ -58,8 +58,8 @@ threads because each one costs a megabyte of stack and a share of the scheduler'
 switching — so a slower dependency makes your server cheaper to overwhelm, not just slower.
 
 **Why 8 event-loop threads beat 200 blocking ones here.** An event loop never counts I/O wait
-against a thread at all. Netty's default is `max(2 x CPU cores, 4)` — `8` threads on a 4-core
-box — and each holds thousands of connections whose sockets are simply registered with the OS
+against a thread at all. Reactor Netty's default is `max(CPU cores, 4)` — `8` threads on an
+8-core box — and each holds thousands of connections whose sockets are simply registered with the OS
 selector while nothing is happening. `10,000 / 8 = 1,250` connections per thread costs a few
 hundred bytes of state each, not 1,250 MB of stacks. The threads are now sized to the *CPU
 work*, which is the only thing they actually do.
@@ -90,7 +90,7 @@ Each operator returns a new publisher. The original publisher is not modified. T
 Errors propagate downstream through the `onError` signal. Every operator has default error-passing semantics, and you can intercept errors with `onErrorReturn`, `onErrorResume`, `onErrorMap`, and `doOnError`. Uncaught errors terminate the subscription.
 
 **Non-Blocking Event Loop**
-Netty uses a small number of event-loop threads (default: `2 * CPU cores`, minimum 4). These threads must never block. Blocking an event-loop thread stalls all I/O operations on that loop, degrading the entire system.
+Reactor Netty uses a small number of event-loop threads (default: one per CPU core, minimum 4 — `max(availableProcessors(), 4)`, overridable with the `reactor.netty.ioWorkerCount` system property). These threads must never block. Blocking an event-loop thread stalls all I/O operations on that loop, degrading the entire system.
 
 **Context Propagation**
 Reactor provides `Context` — an immutable, read-only key-value store that flows upstream (against the data flow direction). It replaces `ThreadLocal` for per-request state (trace ID, security context) in reactive pipelines where data can flow across multiple threads.
@@ -173,7 +173,7 @@ public RouterFunction<ServerResponse> routes(OrderHandler handler) {
 
 ### 4.5 WebClient
 
-The non-blocking HTTP client for reactive applications. Replaces `RestTemplate` (which is blocking) in WebFlux applications.
+The non-blocking HTTP client for reactive applications; it replaces `RestTemplate` inside WebFlux. For plain blocking calls in a Servlet-stack service, `RestClient` (Spring Framework 6.1+) is the synchronous successor — see [Spring HTTP Clients](../spring_http_clients/README.md).
 
 ### 4.6 R2DBC (Reactive Relational Database Connectivity)
 
@@ -184,7 +184,7 @@ Reactive driver specification for relational databases. Supports PostgreSQL, MyS
 | Scheduler | Backing Pool | Use Case |
 |-----------|-------------|----------|
 | `Schedulers.parallel()` | Fixed thread pool, size = CPU cores | CPU-bound work |
-| `Schedulers.boundedElastic()` | Elastic pool, max 10x CPU cores, 60s idle timeout | Blocking I/O offloading |
+| `Schedulers.boundedElastic()` | Elastic pool, max 10x CPU cores, 100,000-task queue, 60s idle timeout | Blocking I/O offloading |
 | `Schedulers.single()` | Single reusable thread | Lightweight sequential tasks |
 | `Schedulers.immediate()` | Current thread | Testing; no thread switch |
 | `Schedulers.fromExecutor(e)` | Custom executor | Integration with existing thread pools |
@@ -274,7 +274,7 @@ flowchart TD
     classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
     classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
 
-    A["HTTP Request"] --> B["Netty EventLoop accepts connection - 1 thread per CPU core, min 4"]
+    A["HTTP Request"] --> B["Reactor Netty EventLoop accepts connection - 1 thread per CPU core, min 4"]
     B --> C["HttpHandler - Spring WebFlux entry point"]
     C --> D["WebFilter chain - reactive equivalent of Servlet filters"]
     D --> E["DispatcherHandler - routes to RouterFunction or @Controller"]
@@ -402,10 +402,10 @@ public Mono<InventoryItem> getInventory(String productId) {
     return webClient.get()
         .uri("/inventory/{id}", productId)
         .retrieve()
-        .onStatus(HttpStatus::is4xxClientError,
+        .onStatus(HttpStatusCode::is4xxClientError,
             response -> response.bodyToMono(ErrorResponse.class)
                 .flatMap(err -> Mono.error(new ClientException(err.getMessage()))))
-        .onStatus(HttpStatus::is5xxServerError,
+        .onStatus(HttpStatusCode::is5xxServerError,
             response -> Mono.error(new ServerException("inventory service error")))
         .bodyToMono(InventoryItem.class)
         .timeout(Duration.ofSeconds(3))
@@ -459,7 +459,8 @@ public Mono<Response> securedOperation() {
 ```java
 // Without backpressure control: fast source, slow consumer
 Flux.range(1, 1_000_000)
-    .flatMap(i -> slowProcess(i))   // BUG: subscribes to all 1M concurrently, OOM
+    .flatMap(i -> slowProcess(i))   // BUG: 256 concurrent inner calls (the default) hammer
+                                    // the downstream, and results queue up ahead of the subscriber
 
 // With limitRate: request 100 at a time, replenish when 75 consumed (default 75% prefetch)
 Flux.range(1, 1_000_000)
@@ -500,9 +501,11 @@ question, and choosing between them means first computing the surplus.
   after that, DROP_OLDEST discards 800 items/s
   over one minute:         800 x 60    = 48,000 items dropped
 
-  Now the unbounded version -- flatMap with no limit over Flux.range(1, 1_000_000):
-  all 1,000,000 inner subscriptions are opened at once. There is no buffer to
-  overflow and nothing to drop, so the surplus becomes heap. OOM.
+  Now the unconfigured version -- flatMap with no explicit limit over Flux.range(1, 1_000_000):
+  Reactor still caps it, at Queues.SMALL_BUFFER_SIZE = 256 concurrent inner subscriptions.
+  256 simultaneous calls is already a thundering herd for most downstreams, and each
+  inner publisher carries its own 32-element prefetch buffer, so heap grows with
+  concurrency x payload size. There is no overflow strategy here to drop anything.
 ```
 
 The 0.625 seconds is the point. A bounded buffer does not *solve* a rate mismatch, it only
@@ -520,13 +523,13 @@ ratio.
 
 ### 6.7 Concrete Numbers
 
-- Netty default event loop threads: `max(2 * CPU cores, 4)` — on a 4-core machine, 8 threads serve all connections
-- `Schedulers.boundedElastic()` max threads: `10 * CPU cores` (default), configurable; idle thread timeout 60 seconds; task queue unbounded by default
+- Reactor Netty default event loop threads: `max(CPU cores, 4)` — on an 8-core machine, 8 threads serve all connections
+- `Schedulers.boundedElastic()` max threads: `10 * CPU cores` (default), configurable; idle thread timeout 60 seconds; pending-task queue bounded at 100,000 (`reactor.schedulers.defaultBoundedElasticQueueSize`), beyond which submission is rejected
 - `WebClient` default in-memory buffer for response body: 256 KB — increase with `maxInMemorySize` for large payloads
-- Reactor's default prefetch in `flatMap`: 256 items
+- Reactor's default `flatMap` concurrency: 256 concurrent inner subscriptions (`Queues.SMALL_BUFFER_SIZE`); its per-inner prefetch is 32 (`Queues.XS_BUFFER_SIZE`)
 - `limitRate(n)` triggers replenishment at `0.75 * n` items consumed (75% prefetch ratio)
 - `Flux.interval` uses `Schedulers.parallel()` by default
-- Spring Boot 3.x WebFlux on Netty: typically handles 10,000+ concurrent connections on a 4-core machine with 256 MB heap
+- Spring Boot 4.x WebFlux on Reactor Netty: typically handles 10,000+ concurrent connections on a 4-core machine with 256 MB heap
 
 ---
 
@@ -656,11 +659,12 @@ public Mono<Order> getOrder(@PathVariable String id) {
 ```java
 public Mono<String> processOrder(String orderId) {
     return Mono.fromCallable(() -> {
-        // BUG: block() inside a reactive operator running on event-loop thread
-        // If the event-loop thread calls block(), it waits for the inner Mono
-        // The inner Mono also needs the event-loop thread to complete
-        // DEADLOCK: event-loop thread is waiting for itself
-        User user = userService.findCurrentUser().block();  // deadlock on Netty
+        // BUG: block() inside a reactive operator running on event-loop thread.
+        // Reactor marks event-loop threads NonBlocking, so this throws immediately:
+        // IllegalStateException: block()/blockFirst()/blockLast() are blocking,
+        // which is not supported in thread reactor-http-nio-3
+        // On a thread Reactor cannot recognise, it deadlocks silently instead.
+        User user = userService.findCurrentUser().block();  // rejected on Netty
         return "Processed by " + user.getName();
     });
 }
@@ -808,8 +812,8 @@ public Mono<Order> createOrder(OrderRequest request) {
 |------------|------|
 | Project Reactor (`reactor-core`) | Core reactive library: `Mono`, `Flux`, operators, schedulers |
 | Spring WebFlux (`spring-webflux`) | Reactive web framework on top of Reactor |
-| Netty | Default HTTP server for WebFlux; event-loop NIO |
-| `WebClient` | Non-blocking HTTP client replacing `RestTemplate` |
+| Reactor Netty | Default HTTP server for WebFlux; event-loop NIO |
+| `WebClient` | Non-blocking HTTP client; `RestClient` is the blocking-stack counterpart |
 | R2DBC | Reactive relational database driver specification |
 | `r2dbc-postgresql`, `r2dbc-mysql` | R2DBC driver implementations |
 | Spring Data R2DBC | Repository abstraction over R2DBC |
@@ -836,13 +840,13 @@ A `Mono` or `Flux` represents a description of a computation, not the execution 
 Backpressure is a flow-control mechanism by which a downstream subscriber signals to an upstream publisher how many items it is ready to consume, preventing the publisher from overwhelming the subscriber. Reactor implements the Reactive Streams specification: when a subscriber calls `subscription.request(n)`, the upstream publishes at most `n` items. Operators like `limitRate(n)` request `n` items at a time and replenish at 75% consumed. For sources that cannot honor backpressure (like `Flux.interval`), overflow strategies like `onBackpressureDrop()` or `onBackpressureBuffer(maxSize)` are applied.
 
 **Q: What backpressure strategies does Reactor provide when a publisher outpaces its subscriber?**
-Reactor provides five overflow strategies for backpressure: `limitRate`, buffered (bounded or unbounded), `onBackpressureDrop`, and `onBackpressureLatest`. `limitRate(n)` paces demand by requesting n items at a time and replenishing once 75% are consumed — the right default for well-behaved consumers. Unbounded `onBackpressureBuffer()` queues every item and risks an `OutOfMemoryError` under sustained overload, while bounded `onBackpressureBuffer(n)` caps the queue and errors on overflow instead. `onBackpressureDrop()` discards items the subscriber cannot keep up with, and `onBackpressureLatest()` keeps only the newest item — both are lossy but appropriate for metrics streams or live UI updates where freshness matters more than completeness. Sources that cannot honor backpressure natively, such as `Flux.interval`, must have one of these strategies applied explicitly or they will eventually exhaust memory.
+Reactor pairs one pacing operator, `limitRate`, with four overflow strategies: buffer (bounded or unbounded), error, drop, and latest. `limitRate(n)` paces demand by requesting n items at a time and replenishing once 75% are consumed — the right default for well-behaved consumers. Unbounded `onBackpressureBuffer()` queues every item and risks an `OutOfMemoryError` under sustained overload, while bounded `onBackpressureBuffer(n)` caps the queue and errors on overflow instead. `onBackpressureDrop()` discards items the subscriber cannot keep up with, and `onBackpressureLatest()` keeps only the newest item — both are lossy but appropriate for metrics streams or live UI updates where freshness matters more than completeness. Sources that cannot honor backpressure natively, such as `Flux.interval`, must have one of these strategies applied explicitly or they will eventually exhaust memory.
 
 **Q: What is the difference between flatMap and concatMap?**
 `flatMap` subscribes to all inner publishers concurrently as each item arrives from the source, emitting results as they arrive — so output order may differ from input order. `concatMap` subscribes to the next inner publisher only after the previous one completes, preserving order but sacrificing concurrency. Use `flatMap` when maximum throughput matters and order is irrelevant (parallel HTTP calls). Use `concatMap` when operations must be sequential and ordered (processing financial events where order is contractually required).
 
 **Q: Why should you never call block() inside a reactive pipeline running on a Netty event-loop thread?**
-Calling `block()` suspends the current thread until the inner publisher completes. If the current thread is a Netty event-loop thread, blocking it prevents Netty from processing any other I/O events on that loop — including the I/O completion that the inner publisher is waiting for. This creates a deadlock. Additionally, Reactor 3.x detects blocking calls on non-blocking scheduler threads and throws a `BlockingOperationError` by default when this guard is enabled. `block()` is only safe at the application boundary — in `main()`, in tests, or in code explicitly scheduled on `boundedElastic()`.
+Calling `block()` suspends the current thread until the inner publisher completes. If the current thread is a Netty event-loop thread, blocking it prevents Netty from processing any other I/O events on that loop — including the I/O completion that the inner publisher is waiting for. This creates a deadlock. Reactor also guards this directly: `block()` on a thread Reactor marks as non-blocking (event loop, `parallel()`, `single()`) throws `IllegalStateException: block()/blockFirst()/blockLast() are blocking, which is not supported in thread ...` before it ever waits. `block()` is only safe at the application boundary — in `main()`, in tests, or in code explicitly scheduled on `boundedElastic()`.
 
 **Q: What is Reactor Context, and why is it needed in reactive programming?**
 Reactor `Context` is an immutable, read-only key-value store that propagates upstream through the reactive chain (against the data flow direction). It replaces `ThreadLocal` for per-request state (trace IDs, security context, locale) in reactive pipelines where operators can execute on different threads and `ThreadLocal` values are therefore unreliable. You write to the context with `.contextWrite(Context.of(key, value))` and read it with `Mono.deferContextual(ctx -> ...)`. Spring Security Reactive uses this to propagate `Authentication` through reactive chains via `ReactiveSecurityContextHolder`.
@@ -851,13 +855,13 @@ Reactor `Context` is an immutable, read-only key-value store that propagates ups
 WebFlux pays off for I/O-bound applications with high concurrency. Good fits include API gateways, proxies, microservices that aggregate many downstream calls, streaming endpoints, and applications handling thousands of simultaneous connections. For CPU-bound work, low-concurrency services, or teams unfamiliar with reactive programming, Spring MVC is simpler with equivalent performance. A practical threshold: if your service needs to handle more concurrent connections than your Tomcat thread pool (default 200), WebFlux is worth considering. If your service uses JDBC/JPA and you cannot migrate to R2DBC, the benefit of WebFlux is significantly reduced.
 
 **Q: How do you offload blocking I/O when you must use it inside a reactive chain?**
-Use `Mono.fromCallable(() -> blockingCall()).subscribeOn(Schedulers.boundedElastic())`. The `subscribeOn` operator moves the subscription (and therefore the execution of the callable) to a thread from `boundedElastic()`, which is a pool of expandable threads designed for blocking I/O. The result is then published back to the event loop for downstream processing. `boundedElastic()` defaults to `10 * CPU cores` threads and an unbounded task queue. For latency-sensitive paths, set an explicit bound with `Schedulers.newBoundedElastic(threadCap, queueSize, name)`.
+Use `Mono.fromCallable(() -> blockingCall()).subscribeOn(Schedulers.boundedElastic())`. The `subscribeOn` operator moves the subscription (and therefore the execution of the callable) to a thread from `boundedElastic()`, which is a pool of expandable threads designed for blocking I/O. The result is then published back to the event loop for downstream processing. `boundedElastic()` defaults to `10 * CPU cores` threads with a pending-task queue capped at 100,000 — deep enough that a sustained overload piles up latency long before it is rejected. For latency-sensitive paths, set a tighter bound with `Schedulers.newBoundedElastic(threadCap, queueSize, name)`.
 
 **Q: Why does Spring WebFlux need R2DBC instead of JDBC to be fully non-blocking?**
 JDBC is fundamentally blocking, which is incompatible with WebFlux's non-blocking event-loop threads. Every JDBC `Connection`, `Statement`, and `ResultSet` call parks the calling thread until the database responds; running that call directly on a Netty event-loop thread stalls every other request sharing that loop. Wrapping JDBC in `subscribeOn(Schedulers.boundedElastic())` makes it safe but not actually non-blocking — a thread is still held per in-flight query, just from a separate elastic pool, so you avoid deadlock without gaining the event loop's concurrency benefit. R2DBC (Reactive Relational Database Connectivity) is a driver specification built on the Reactive Streams contract from the start, so a query yields the thread while waiting for I/O and Reactor resumes it via callback when data arrives — no thread is held during the wait. The tradeoff is ecosystem maturity: R2DBC drivers still lag JDBC on stored procedures, some complex transaction features, and vendor-specific behavior, which is why teams sometimes settle for the `boundedElastic` wrapper instead of a full migration.
 
 **Q: What is the WebClient alternative to RestTemplate and why is RestTemplate deprecated for WebFlux?**
-`WebClient` is the non-blocking HTTP client for reactive applications. `RestTemplate` is synchronous — it blocks the calling thread for the duration of the HTTP call. Inside a WebFlux application, using `RestTemplate` blocks the event-loop thread, serializing I/O that should be concurrent. `WebClient` returns `Mono<T>` or `Flux<T>`, integrating natively with reactive chains. In Spring MVC applications, you can also use `WebClient` and call `.block()` at the boundary, replacing `RestTemplate` uniformly. Spring has officially deprecated `RestTemplate` for new development since Spring 5.
+`WebClient` is the non-blocking HTTP client for reactive applications. `RestTemplate` is synchronous — it blocks the calling thread for the duration of the HTTP call. Inside a WebFlux application, using `RestTemplate` blocks the event-loop thread, serializing I/O that should be concurrent. `WebClient` returns `Mono<T>` or `Flux<T>`, integrating natively with reactive chains. `RestTemplate` carries `@Deprecated(since = "7.1", forRemoval = true)` and is slated for removal in Spring Framework 8, but its successor for plain synchronous code is `RestClient` (6.1+), not `WebClient` — reach for `WebClient` when you actually want reactive or streaming semantics, and for `RestClient` when you just want a blocking call with a modern API.
 
 **Q: How does WebFlux's annotated controller model differ from Spring MVC's?**
 The annotations are largely the same (`@RestController`, `@GetMapping`, `@PathVariable`, `@RequestBody`). The key difference is the return type: MVC methods return `T` (or `ResponseEntity<T>`), while WebFlux methods return `Mono<T>` (or `Flux<T>`, or `Mono<ResponseEntity<T>>`). WebFlux also supports `Flux<T>` for streaming responses (SSE, NDJson). Internally, WebFlux's `DispatcherHandler` subscribes to the returned publisher and writes items to the response as they arrive. Parameter binding, validation, and exception handling (`@ExceptionHandler`, `@ControllerAdvice`) work the same way but return reactive types.
@@ -1057,12 +1061,12 @@ at 5K req/sec:
 
 **Additional production patterns and interview Q&As:**
 
-**Backpressure war story: unbounded in-memory queue caused OOM.** A reactive pipeline consumed a Kafka topic and mapped each record through a slow external enrichment API (200ms). Without backpressure, the `Flux` buffered 100k pending records in heap, causing an OOM at peak.
+**Backpressure war story: an in-memory queue caused OOM.** A reactive pipeline consumed a Kafka topic and mapped each record through a slow external enrichment API (200ms). The whole batch was materialised into an in-memory list first and fed to `flatMap` at its default 256-way concurrency; with 200ms per call the records queued in heap far faster than they drained, causing an OOM at peak.
 
 ```java
-// BROKEN: flatMap with unlimited concurrency — 100k parallel HTTP calls buffered
+// BROKEN: flatMap at its default 256 concurrency, fed from a fully materialised list
 Flux.fromIterable(kafkaRecords)
-    .flatMap(record -> enrichmentClient.enrich(record))  // no concurrency limit!
+    .flatMap(record -> enrichmentClient.enrich(record))  // no explicit concurrency/prefetch
     .subscribe(enriched -> repo.save(enriched));
 
 // FIX: flatMap with concurrency cap and bounded prefetch
@@ -1094,7 +1098,7 @@ public Mono<Vehicle> getVehicle(@PathVariable String id) {
 // Or use R2DBC for fully non-blocking DB access
 ```
 
-**When to use WebFlux vs Spring MVC:** Use WebFlux when upstream is reactive (R2DBC, reactive MongoDB, WebClient), you need streaming (Server-Sent Events, large file transfer), or you're running at >10k concurrent connections with I/O-bound workloads. Stick with Spring MVC when the data layer is blocking JDBC/Hibernate (virtual threads in Java 21 make MVC competitive), the team is unfamiliar with reactive programming, or the codebase uses `ThreadLocal`-based patterns (Spring Security `SecurityContext`, MDC) that need special reactive adaptation.
+**When to use WebFlux vs Spring MVC:** Use WebFlux when upstream is reactive (R2DBC, reactive MongoDB, WebClient), you need streaming (Server-Sent Events, large file transfer), or you're running at >10k concurrent connections with I/O-bound workloads. Stick with Spring MVC when the data layer is blocking JDBC/Hibernate, the team is unfamiliar with reactive programming, or the codebase uses `ThreadLocal`-based patterns (Spring Security `SecurityContext`, MDC) that need special reactive adaptation. Virtual threads (`spring.threads.virtual.enabled=true`) have narrowed the gap sharply: a blocking MVC handler on a virtual thread parks the virtual thread, not a carrier, so the thread-count ceiling that motivated WebFlux largely disappears. Since JEP 491 in Java 24, even a blocking call inside `synchronized` no longer pins its carrier — the last common reason a virtual-thread MVC stack degraded under load. Native frames (JNI, FFM downcalls) still pin, so a JDBC driver with a native layer remains the case to measure.
 
 **Additional interview Q&As:**
 

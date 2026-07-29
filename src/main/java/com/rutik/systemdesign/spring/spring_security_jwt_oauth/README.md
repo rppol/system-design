@@ -52,7 +52,7 @@ Key insight: the power of JWT is also its biggest risk — once issued, a token 
 
 | Grant | Use Case | PKCE Required |
 |-------|----------|---------------|
-| Authorization Code | Server-side web apps, SPAs | Recommended for SPAs; required for public clients |
+| Authorization Code | Server-side web apps, SPAs | RFC 9700: MUST for public clients, RECOMMENDED for confidential ones |
 | Authorization Code + PKCE | Mobile apps, SPAs | Yes |
 | Client Credentials | Machine-to-machine (M2M) | No (no user involved) |
 | Refresh Token | Renewing access tokens | N/A |
@@ -179,7 +179,7 @@ Rotation turns a stolen refresh token into a detectable event rather than a sile
 <dependency>
     <groupId>com.nimbusds</groupId>
     <artifactId>nimbus-jose-jwt</artifactId>
-    <version>9.37.3</version>
+    <version>10.9.1</version>
 </dependency>
 ```
 
@@ -569,9 +569,9 @@ public Claims parseToken(String token) {
 // An attacker strips the signature and sets alg: "none"
 // Some older libraries would accept this
 JwtParser parser = Jwts.parser()
-    .setSigningKeyResolver(new SigningKeyResolverAdapter() {
+    .keyLocator(new LocatorAdapter<Key>() {
         @Override
-        public Key resolveSigningKey(JwsHeader header, Claims claims) {
+        protected Key locate(JwsHeader header) {
             if ("none".equals(header.getAlgorithm())) {
                 return null; // DANGEROUS
             }
@@ -633,12 +633,15 @@ return Jwts.builder()
 ### Pitfall 5: Clock skew between issuer and validator
 
 ```java
-// BROKEN: strict expiry validation fails when servers have 30s clock drift
-// NimbusJwtDecoder throws ExpiredJwtException even for a token that just expired
-
-// FIXED: configure clock skew tolerance (allow up to 60 seconds)
+// BROKEN: the default 60s skew is fine, but replacing the validator to add a custom
+// check silently drops the timestamp check along with its tolerance
 NimbusJwtDecoder decoder = NimbusJwtDecoder.withJwkSetUri(jwksUri).build();
-decoder.setClockSkew(Duration.ofSeconds(60));
+decoder.setJwtValidator(new JwtIssuerValidator(issuer));   // no exp check at all now
+
+// FIXED: skew lives on JwtTimestampValidator, and custom checks are COMPOSED, never substituted
+decoder.setJwtValidator(new DelegatingOAuth2TokenValidator<>(
+    new JwtTimestampValidator(Duration.ofSeconds(60)),      // explicit tolerance
+    new JwtIssuerValidator(issuer)));
 ```
 
 ### Pitfall 6: Leaking sensitive data in JWT payload
@@ -667,14 +670,14 @@ return Jwts.builder()
 
 | Tool / Library | Role | Notes |
 |---------------|------|-------|
-| Spring Security 6.x | Security filter chain, method security | Ships with Spring Boot 3.x |
+| Spring Security 7.x | Security filter chain, method security | Ships with Spring Boot 4.x (Boot 4.1 pairs with Security 7.1) |
 | spring-boot-starter-oauth2-resource-server | Resource server auto-config | Pulls in Nimbus JOSE+JWT |
 | Nimbus JOSE+JWT | JWT parsing, JWKS fetching | Default in Spring Security OAuth2 |
-| JJWT (io.jsonwebtoken) | JWT building and parsing | Fluent API; use 0.12.x+ |
+| JJWT (io.jsonwebtoken) | JWT building and parsing | Fluent API; use 0.13.x+ |
 | Keycloak | Open-source Authorization Server | Self-hosted; supports OIDC, SAML |
 | Auth0 / Okta | Managed Authorization Server | SaaS; Actions for custom claims |
 | Redis | Refresh token store, blacklist | Sub-millisecond revocation lookup |
-| Spring Authorization Server | Spring-native Authorization Server | GA since 1.0; replaces deprecated Spring Security OAuth2 |
+| Spring Authorization Server | Spring-native Authorization Server | The Spring project for issuing tokens; current GA line is 1.5.x |
 | jwt.io | Token debugging | Paste token to inspect header/payload |
 | OpenSSL | Generate RSA keypairs for RS256 | `openssl genrsa -out private.pem 2048` |
 
@@ -748,7 +751,7 @@ Signature verification runs first against the cached JWKS public key, then times
 6. Never embed PII (names, emails, SSNs) or secrets in JWT claims. The payload is only encoded, not encrypted.
 7. Include a `jti` (JWT ID) claim for audit logging and optional revocation via a compact blacklist (store only jti, not the full token).
 8. Configure clock skew tolerance (60 seconds is a reasonable value) to prevent false rejections from minor time drift between servers.
-9. Use Spring Authorization Server 1.x for new Authorization Server implementations; the legacy `spring-security-oauth2` project is end-of-life.
+9. Use Spring Authorization Server for new Authorization Server implementations, or delegate to a managed provider (Keycloak, Auth0, Okta) and run only resource servers yourself.
 10. Rotate JWKS keys periodically (every 90 days). Use the `kid` claim in the JWT header so JWKS consumers can identify which key to use.
 11. Monitor token introspection / JWKS fetch latency. A slow auth server is a denial-of-service vector on your authentication pipeline.
 12. For the client credentials flow in internal services, cache the access token and reuse it until it is close to expiry. Do not request a new token for every API call.
@@ -957,10 +960,11 @@ public JwtDecoder jwtDecoder() {
 
 // FIX: validate audience claim — each service accepts only its own audience
 @Bean
-public JwtDecoder jwtDecoder() {
+public JwtDecoder jwtDecoder(@Value("${app.issuer}") String issuer) {
     NimbusJwtDecoder decoder = NimbusJwtDecoder.withPublicKey(rsaPublicKey).build();
+    // createDefault() covers typ, exp and nbf but NOT iss — use the WithIssuer variant
     OAuth2TokenValidator<Jwt> validator = new DelegatingOAuth2TokenValidator<>(
-        JwtValidators.createDefault(),           // iss, exp, nbf
+        JwtValidators.createDefaultWithIssuer(issuer),
         new JwtClaimValidator<>("aud",
             aud -> aud != null && aud.contains("payment-service"))
     );
@@ -1027,7 +1031,7 @@ public class JwtBlocklist {
 
 **How do you implement fine-grained authorization beyond role-based access?** Use Spring Security method security with `@PreAuthorize` and Spring Expression Language to check ownership or resource-level permissions: `@PreAuthorize("@permissionEvaluator.canAccess(authentication, #orderId, 'READ_ORDER')")`. Implement a custom `PermissionEvaluator` that resolves the permission check against a policy store (database, OPA, Casbin). This keeps authorization logic out of business code.
 
-**What is PKCE and why is it required for public clients?** PKCE (Proof Key for Code Exchange) prevents authorization code interception attacks. A public client (mobile app, SPA) generates a random `code_verifier` and sends its SHA-256 hash (`code_challenge`) in the authorization request. The token endpoint verifies the original `code_verifier` — an attacker who intercepts the authorization code cannot exchange it without the `code_verifier` that never left the legitimate client. Spring Authorization Server supports PKCE natively; Spring Boot 3.x resource servers can enforce it.
+**What is PKCE and why is it required for public clients?** PKCE (Proof Key for Code Exchange) prevents authorization code interception attacks. A public client (mobile app, SPA) generates a random `code_verifier` and sends its SHA-256 hash (`code_challenge`) in the authorization request. The token endpoint verifies the original `code_verifier` — an attacker who intercepts the authorization code cannot exchange it without the `code_verifier` that never left the legitimate client. Spring Authorization Server supports PKCE natively; RFC 9700, the OAuth 2.0 Security Best Current Practice, makes PKCE a MUST for public clients and a RECOMMENDED for confidential ones.
 
 **How do you propagate the JWT to downstream microservices?** Use a `WebClient` `ExchangeFilterFunction` (or Feign `RequestInterceptor`) that reads the current `SecurityContext`, extracts the Bearer token, and adds it to the outbound `Authorization` header. Never store the token in a thread-local that spans reactive pipelines — in WebFlux, use `ReactiveSecurityContextHolder` and read the token in a `.flatMap` operator.
 

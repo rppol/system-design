@@ -12,10 +12,9 @@ This is a sub-file of [Spring WebFlux](README.md) — RSocket in Spring is built
 Project Reactor, so everything about `Mono`/`Flux`, schedulers, and "never block
 the event loop" from the parent applies here verbatim.
 
-Version baseline: RSocket support arrived in Spring Framework 5.2 / Spring Boot
-2.2 (Nov 2019). All code below targets **Spring Boot 3.x** (Spring Framework 6,
-`jakarta.*`, JDK 17+), using `spring-boot-starter-rsocket` and RSocket Java
-(`io.rsocket:rsocket-core` 1.1.x).
+Version baseline: all code below targets **Spring Boot 4.x** (Spring Framework 7,
+`jakarta.*`, Java 17+), using `spring-boot-starter-rsocket` and RSocket Java
+(`io.rsocket:rsocket-core` 1.1.5, the version Boot 4.1 manages).
 
 ---
 
@@ -255,7 +254,7 @@ public class MarketDataController {
 `@ConnectMapping` handles the connection SETUP; `@DestinationVariable` binds a
 route template segment (mirroring `@PathVariable` in MVC).
 
-### Server configuration (Spring Boot 3.x)
+### Server configuration (Spring Boot 4.x)
 
 ```yaml
 spring:
@@ -325,8 +324,8 @@ if `data(Flux)` is supplied).
 @Bean
 RSocketStrategies rSocketStrategies() {
     return RSocketStrategies.builder()
-        .encoders(e -> e.add(new Jackson2CborEncoder()))   // CBOR = compact binary JSON
-        .decoders(d -> d.add(new Jackson2CborDecoder()))
+        .encoders(e -> e.add(new JacksonCborEncoder()))    // CBOR = compact binary JSON
+        .decoders(d -> d.add(new JacksonCborDecoder()))
         .routeMatcher(new PathPatternRouteMatcher())        // "prices.{symbol}" templates
         .metadataExtractor(new DefaultMetadataExtractor())
         .build();
@@ -381,13 +380,14 @@ also works: `@PreAuthorize` on `@MessageMapping` methods.
 
 ## 7. Real-World Examples
 
-**Netflix** originated RSocket (Ben Christensen, also behind RxJava) to replace a
-sprawl of ad-hoc HTTP/gRPC/messaging inside its microservice mesh with one protocol
-that natively carries backpressure and supports bidirectional streaming.
+**Large microservice meshes** are the motivating case the protocol was designed
+for: replacing a sprawl of ad-hoc HTTP, gRPC and messaging hops with one protocol
+that natively carries backpressure and supports bidirectional streaming. RSocket is
+now an open-source project under the Linux Foundation.
 
-**Alibaba** uses RSocket in its RSocket Broker architecture for service-to-service
-communication where a broker fans messages across a mesh — a model that fits
-RSocket's symmetric, multiplexed connections better than per-request HTTP.
+**Broker-mediated meshes** use an RSocket broker for service-to-service
+communication, fanning messages across the mesh — a model that fits RSocket's
+symmetric, multiplexed connections better than per-request HTTP.
 
 **Trading and market-data platforms** use request-stream over RSocket for price
 feeds: one subscription request yields a back-pressured `Flux` of ticks, and a slow
@@ -644,7 +644,7 @@ Metadata push sends a metadata-only frame with no data payload and no response, 
 **Q: How does routing work in Spring RSocket if there are no URLs?**
 Routing metadata (MIME type `message/x.rsocket.routing.v0`) carries a route string that `RSocketMessageHandler` matches against `@MessageMapping` route patterns. On the client you set it with `requester.route("prices.AAPL")`, and route templates like `prices.{symbol}` bind segments via `@DestinationVariable`, mirroring `@PathVariable` in MVC. A `MetadataExtractor` and `PathPatternRouteMatcher` (configured in `RSocketStrategies`) perform the extraction and matching.
 
-**Q: What does `RSocketRequester` do and how do you create one in Boot 3.x?**
+**Q: What does `RSocketRequester` do and how do you create one in Spring Boot?**
 `RSocketRequester` is the fluent client that opens a connection and issues requests in any of the four models. You inject the auto-configured `RSocketRequester.Builder`, configure the connector (keepalive, resume), set a setup route/data, and terminate with `.tcp(host, port)` or `.websocket(uri)`. Then `requester.route("...").data(...).retrieveMono(T.class)` (or `retrieveFlux`, or `send()`) performs the interaction.
 
 **Q: What is `RSocketStrategies` responsible for?**

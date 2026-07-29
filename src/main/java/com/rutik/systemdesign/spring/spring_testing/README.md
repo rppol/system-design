@@ -12,7 +12,7 @@ The testing pyramid in Spring Boot has three layers:
 Spring Boot's test infrastructure provides:
 - @SpringBootTest for full context integration tests
 - Test slices (@WebMvcTest, @DataJpaTest, @WebFluxTest, @RestClientTest, @JsonTest) for narrow context loading
-- @MockBean / @SpyBean for context-level mocking
+- @MockitoBean / @MockitoSpyBean for context-level mocking
 - MockMvc for HTTP layer testing without a real server
 - TestRestTemplate and WebTestClient for end-to-end HTTP testing
 - Testcontainers integration for real external dependencies
@@ -27,9 +27,9 @@ One-line analogy: Testing a Spring Boot application is like testing a car — un
 
 Mental model: Spring Boot's test framework answers the question "how much of the application do I need running to test this?" For a controller's routing and validation logic, you do not need the database or service layer — @WebMvcTest gives you just the web layer. For a JPA repository query, you do not need HTTP or services — @DataJpaTest gives you just the JPA stack. For end-to-end flows, @SpringBootTest loads everything.
 
-Why it matters: Loading the full ApplicationContext takes 5–30 seconds depending on the application. A test suite with 200 tests that each load a fresh context is unusable. Spring Boot's context caching, slice tests, and @MockBean infrastructure exist to make large test suites run in seconds, not minutes.
+Why it matters: Loading the full ApplicationContext takes 5–30 seconds depending on the application. A test suite with 200 tests that each load a fresh context is unusable. Spring Boot's context caching, slice tests, and @MockitoBean infrastructure exist to make large test suites run in seconds, not minutes.
 
-Key insight: @MockBean is the single biggest performance enemy in test suites. Every @MockBean annotation creates a context variation that cannot be shared with other tests — it forces a new context load. Minimizing @MockBean usage (prefer constructor injection with interface types, test in isolation) is the most impactful test performance optimization.
+Key insight: @MockitoBean is the single biggest performance enemy in test suites. Every @MockitoBean annotation creates a context variation that cannot be shared with other tests — it forces a new context load. Minimizing @MockitoBean usage (prefer constructor injection with interface types, test in isolation) is the most impactful test performance optimization.
 
 ---
 
@@ -39,7 +39,7 @@ Key insight: @MockBean is the single biggest performance enemy in test suites. E
 
 **Fast feedback**: Tests should complete in seconds at the unit level and minutes at the integration level. Use the narrowest context that proves correctness.
 
-**Context caching**: Spring caches the ApplicationContext between test classes that share the same configuration signature (same @SpringBootTest properties, same @MockBeans, same active profiles). @DirtiesContext bypasses the cache — use it only when state genuinely cannot be cleaned up.
+**Context caching**: Spring caches the ApplicationContext between test classes that share the same configuration signature (same @SpringBootTest properties, same @MockitoBeans, same active profiles). @DirtiesContext bypasses the cache — use it only when state genuinely cannot be cleaned up.
 
 **Real dependencies over mocks for integration tests**: Mocking a database in an integration test provides false confidence. Use Testcontainers to run real PostgreSQL, Kafka, or Redis in Docker containers, ensuring tests reflect production behavior.
 
@@ -74,8 +74,8 @@ Key insight: @MockBean is the single biggest performance enemy in test suites. E
 
 - **Mockito.mock()**: Pure Mockito, no Spring context. Fast. Use in unit tests.
 - **@Mock**: Mockito annotation, initialized by MockitoExtension. No Spring.
-- **@MockBean**: Creates a Mockito mock AND registers it in the Spring ApplicationContext, replacing any existing bean of that type.
-- **@SpyBean**: Creates a Mockito spy wrapping the REAL bean. Real methods execute unless stubbed.
+- **@MockitoBean**: Creates a Mockito mock AND registers it in the Spring ApplicationContext, replacing any existing bean of that type.
+- **@MockitoSpyBean**: Creates a Mockito spy wrapping the REAL bean. Real methods execute unless stubbed.
 - **MockRestServiceServer**: Mocks RestTemplate calls at the HTTP client level, without a real server.
 - **WireMock**: Starts a real HTTP mock server. Use when testing HTTP client behavior including retries, timeouts.
 
@@ -98,13 +98,13 @@ flowchart TD
     subgraph SBT["@SpringBootTest — full context"]
         sbt1["All @Configuration, @Component,\n@Service, @Repository beans"]
         sbt2["Real DataSource (or Testcontainers)\nReal Kafka (or EmbeddedKafka / Testcontainers)"]
-        sbt3["@MockBean replaces specific beans"]
+        sbt3["@MockitoBean replaces specific beans"]
     end
 
     subgraph WMT["@WebMvcTest — MVC slice"]
         wmt1["@Controller, @ControllerAdvice,\nFilter, HandlerInterceptor,\nWebMvcConfigurer, Spring Security (if present)"]
-        wmt2["Services: NOT loaded — must @MockBean"]
-        wmt3["Repositories: NOT loaded — must @MockBean"]
+        wmt2["Services: NOT loaded — must @MockitoBean"]
+        wmt3["Repositories: NOT loaded — must @MockitoBean"]
     end
 
     subgraph DJT["@DataJpaTest — JPA slice"]
@@ -122,7 +122,7 @@ flowchart TD
     class djt3,djt4 lossN
 ```
 
-Every node is colored: green (`train`) marks what each slice actually loads, red (`lossN`) marks what is deliberately left out and must be filled with `@MockBean`, orange (`mathOp`) marks the explicit override mechanism.
+Every node is colored: green (`train`) marks what each slice actually loads, red (`lossN`) marks what is deliberately left out and must be filled with `@MockitoBean`, orange (`mathOp`) marks the explicit override mechanism.
 
 ### Context Caching
 
@@ -136,16 +136,16 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A["Test Class A\n@SpringBootTest\n@MockBean(ServiceX)"] -->|"creates (slow: 8s)"| C1["Context 1"]
-    B["Test Class B\n@SpringBootTest\n@MockBean(ServiceX)"] -->|"cache hit (instant: 0ms)"| C1
-    D["Test Class C\n@SpringBootTest\n@MockBean(ServiceX, ServiceY) — different signature"] -->|"different key → creates (slow: 8s)"| C2["Context 2"]
+    A["Test Class A\n@SpringBootTest\n@MockitoBean(ServiceX)"] -->|"creates (slow: 8s)"| C1["Context 1"]
+    B["Test Class B\n@SpringBootTest\n@MockitoBean(ServiceX)"] -->|"cache hit (instant: 0ms)"| C1
+    D["Test Class C\n@SpringBootTest\n@MockitoBean(ServiceX, ServiceY) — different signature"] -->|"different key → creates (slow: 8s)"| C2["Context 2"]
 
     class A,B,D req
     class C1 train
     class C2 lossN
 ```
 
-Same set of `@MockBean`s plus the same `@SpringBootTest` config produces the same context key, so Test Class B gets a free cache hit; Test Class C's extra `@MockBean(ServiceY)` changes the key and forces an expensive second context.
+Same set of `@MockitoBean`s plus the same `@SpringBootTest` config produces the same context key, so Test Class B gets a free cache hit; Test Class C's extra `@MockitoBean(ServiceY)` changes the key and forces an expensive second context.
 
 ### MockMvc Request Flow
 
@@ -162,7 +162,7 @@ flowchart TD
     T["Test Method\nmockMvc.perform(get('/orders/123'))"] --> D["DispatcherServlet\n(in-memory, no real HTTP socket)"]
     D --> H["HandlerMapping"]
     H --> OC["OrderController.getOrder(123)"]
-    OC --> OS["OrderService\n(real or @MockBean)"]
+    OC --> OS["OrderService\n(real or @MockitoBean)"]
     OS --> R["MockHttpServletResponse"]
     R --> E["andExpect(status().isOk())\nandExpect(jsonPath('$.id').value(123))"]
 
@@ -217,7 +217,7 @@ class OrderControllerIntegrationTest {
     @Autowired
     private ObjectMapper objectMapper;
 
-    @MockBean
+    @MockitoBean
     private PaymentService paymentService; // replace real bean
 
     @Test
@@ -248,14 +248,14 @@ class OrderControllerIntegrationTest {
 ### @WebMvcTest — Controller Slice
 
 ```java
-// Loads ONLY the web layer — OrderService must be @MockBean
+// Loads ONLY the web layer — OrderService must be @MockitoBean
 @WebMvcTest(OrderController.class)
 class OrderControllerTest {
 
     @Autowired
     private MockMvc mockMvc;
 
-    @MockBean
+    @MockitoBean
     private OrderService orderService; // required — not loaded by @WebMvcTest
 
     @Test
@@ -323,13 +323,13 @@ class OrderRepositoryTest {
 }
 ```
 
-### @SpyBean — Partial Mock
+### @MockitoSpyBean — Partial Mock
 
 ```java
 @SpringBootTest
 class AuditServiceTest {
 
-    @SpyBean
+    @MockitoSpyBean
     private AuditService auditService; // wraps the REAL bean
 
     @Autowired
@@ -429,7 +429,7 @@ class ReactiveOrderApiTest {
 class OrderRepositoryContainerTest {
 
     @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:15-alpine")
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine")
         .withDatabaseName("orders_test")
         .withUsername("test")
         .withPassword("test");
@@ -527,7 +527,7 @@ class OrderResponseJsonTest {
 
 ## 7. Real-World Examples
 
-**Controller validation testing**: @WebMvcTest loads only the controller layer. Tests verify that @Valid constraints on request bodies return 400 with structured error responses, and that valid requests are delegated to a @MockBean service. No database or service initialization needed — tests run in under 100ms each.
+**Controller validation testing**: @WebMvcTest loads only the controller layer. Tests verify that @Valid constraints on request bodies return 400 with structured error responses, and that valid requests are delegated to a @MockitoBean service. No database or service initialization needed — tests run in under 100ms each.
 
 **JPA repository query testing with Testcontainers**: A reporting query uses PostgreSQL window functions and jsonb operators that do not work on H2. @DataJpaTest with @AutoConfigureTestDatabase(replace=NONE) combined with a static PostgreSQLContainer in a base test class gives all repository tests a real PostgreSQL instance. Flyway migrations run automatically, matching production schema exactly.
 
@@ -545,7 +545,7 @@ class OrderResponseJsonTest {
 |-----------|-----------|----------------|
 | Context load time | ~0.5–2s | ~5–30s |
 | Context scope | Narrow (one layer) | Full application |
-| @MockBean frequency | Necessary for missing beans | Optional — real beans available |
+| @MockitoBean frequency | Necessary for missing beans | Optional — real beans available |
 | Confidence level | Medium (layer isolation) | High (cross-layer integration) |
 | Debugging complexity | Low | Higher |
 
@@ -559,9 +559,9 @@ class OrderResponseJsonTest {
 | CI dependency | None | Docker required |
 | Recommendation | Simple CRUD queries | Complex/PostgreSQL-specific queries |
 
-### @MockBean vs Interface Injection
+### @MockitoBean vs Interface Injection
 
-| Dimension | @MockBean | Interface + Constructor Injection |
+| Dimension | @MockitoBean | Interface + Constructor Injection |
 |-----------|----------|----------------------------------|
 | Context cache impact | Dirties cache (new context per variation) | No impact |
 | Test speed | Slower (new context per MockBean set) | Faster |
@@ -599,46 +599,46 @@ class OrderResponseJsonTest {
 - Prefer @Transactional rollback or @Sql cleanup for test isolation
 - Reserve @DirtiesContext for tests that mutate global Spring state (e.g., change ApplicationContext, test @ConditionalOnMissingBean behavior)
 
-### Do NOT use @MockBean in a base class shared by many test classes:
-- Every class that inherits the @MockBean declaration creates a unique context signature
-- If 50 test classes share a base class with @MockBean(ServiceA), all 50 use the same cached context — this is acceptable
-- But if 10 test classes have different @MockBean combinations, that is 10 different contexts
+### Do NOT use @MockitoBean in a base class shared by many test classes:
+- Every class that inherits the @MockitoBean declaration creates a unique context signature
+- If 50 test classes share a base class with @MockitoBean(ServiceA), all 50 use the same cached context — this is acceptable
+- But if 10 test classes have different @MockitoBean combinations, that is 10 different contexts
 
 ---
 
 ## 10. Common Pitfalls
 
-### Pitfall 1 — @MockBean causes context cache miss, tests slow (broken)
+### Pitfall 1 — @MockitoBean causes context cache miss, tests slow (broken)
 
 ```java
-// BROKEN: every test class adds @MockBean for a slightly different set of beans
-// Each unique combination of @MockBeans creates a separate ApplicationContext
-// A test suite of 50 classes with varied @MockBean combos = 50 context loads = very slow
+// BROKEN: every test class adds @MockitoBean for a slightly different set of beans
+// Each unique combination of @MockitoBeans creates a separate ApplicationContext
+// A test suite of 50 classes with varied @MockitoBean combos = 50 context loads = very slow
 
 @SpringBootTest
 class OrderServiceTest {
-    @MockBean EmailService emailService;
-    @MockBean InventoryService inventoryService;
+    @MockitoBean EmailService emailService;
+    @MockitoBean InventoryService inventoryService;
     // context key: {SpringBootTest, MockBean[EmailService, InventoryService]}
 }
 
 @SpringBootTest
 class PaymentServiceTest {
-    @MockBean EmailService emailService;
-    @MockBean InventoryService inventoryService;
-    @MockBean AuditService auditService; // one extra MockBean = NEW CONTEXT
+    @MockitoBean EmailService emailService;
+    @MockitoBean InventoryService inventoryService;
+    @MockitoBean AuditService auditService; // one extra MockBean = NEW CONTEXT
 }
 ```
 
 ```java
-// FIXED: create a shared base test class with all @MockBeans
+// FIXED: create a shared base test class with all @MockitoBeans
 // All subclasses share the same context because they have the same signature
 
 @SpringBootTest
 public abstract class BaseIntegrationTest {
-    @MockBean protected EmailService emailService;
-    @MockBean protected InventoryService inventoryService;
-    @MockBean protected AuditService auditService;
+    @MockitoBean protected EmailService emailService;
+    @MockitoBean protected InventoryService inventoryService;
+    @MockitoBean protected AuditService auditService;
     // All subclasses inherit these — same context key — one context load
 }
 
@@ -680,7 +680,7 @@ class OrderRepositoryTest {
 class OrderRepositoryTest {
 
     @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:15-alpine");
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
 
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry r) {
@@ -768,20 +768,20 @@ void placeOrder_verifyFromExternalConnection() {
 @WebMvcTest(OrderController.class)
 class OrderControllerTest {
     @Autowired MockMvc mockMvc;
-    // Missing: @MockBean UserDetailsService — SecurityConfig requires it
+    // Missing: @MockitoBean UserDetailsService — SecurityConfig requires it
     // Result: ApplicationContext fails to initialize
 }
 ```
 
 ```java
-// FIXED: @MockBean all beans required by SecurityConfig within the test slice
+// FIXED: @MockitoBean all beans required by SecurityConfig within the test slice
 
 @WebMvcTest(OrderController.class)
 class OrderControllerTest {
 
     @Autowired MockMvc mockMvc;
-    @MockBean OrderService orderService;
-    @MockBean UserDetailsService userDetailsService; // required by SecurityConfig
+    @MockitoBean OrderService orderService;
+    @MockitoBean UserDetailsService userDetailsService; // required by SecurityConfig
 
     @Test
     @WithMockUser(username = "user", roles = "USER")
@@ -833,10 +833,10 @@ class OrderServiceTest {
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| spring-boot-test | Core test support | @SpringBootTest, @MockBean, TestRestTemplate |
-| spring-test | MVC test, context management | MockMvc, @Sql, @DirtiesContext |
-| JUnit 5 (Jupiter) | Test runner | @Test, @ParameterizedTest, @BeforeEach, @ExtendWith |
-| Mockito | Mocking and verification | @Mock, @Spy, BDDMockito |
+| spring-boot-test | Core Boot test support | @SpringBootTest, test slices, TestRestTemplate |
+| spring-test | MVC test, context management, bean overrides | MockMvc, @Sql, @DirtiesContext, @MockitoBean, @MockitoSpyBean |
+| JUnit 6 (Jupiter) | Test runner | @Test, @ParameterizedTest, @BeforeEach, @ExtendWith |
+| Mockito | Mocking and verification | @Mock, @Spy, BDDMockito; the inline mock maker is the default since 5.0, so `final` classes mock with plain mockito-core |
 | AssertJ | Fluent assertions | Preferred over Hamcrest in Spring Boot tests |
 | Testcontainers | Real external services in Docker | PostgreSQLContainer, KafkaContainer, RedisContainer |
 | WireMock | HTTP mock server | Mocking external REST APIs with real HTTP |
@@ -849,23 +849,23 @@ class OrderServiceTest {
 
 ## 12. Interview Questions with Answers
 
-**Q: What is the difference between @MockBean and @Mock in Spring Boot tests?**
-@Mock is a pure Mockito annotation that creates a mock object managed by MockitoExtension — it has no interaction with the Spring ApplicationContext. @MockBean creates a Mockito mock AND registers it as a Spring bean, replacing any existing bean of that type in the ApplicationContext. Use @Mock in pure unit tests with no Spring context. Use @MockBean in integration tests where the mock must be injected into Spring-managed beans via the context. The critical side-effect of @MockBean is that it changes the ApplicationContext configuration signature, preventing the test from sharing a cached context with tests that do not have that @MockBean.
+**Q: What is the difference between @MockitoBean and @Mock in Spring Boot tests?**
+@Mock is a pure Mockito annotation that creates a mock object managed by MockitoExtension — it has no interaction with the Spring ApplicationContext. @MockitoBean creates a Mockito mock AND registers it as a Spring bean, replacing any existing bean of that type in the ApplicationContext. Use @Mock in pure unit tests with no Spring context. Use @MockitoBean in integration tests where the mock must be injected into Spring-managed beans via the context. The critical side-effect of @MockitoBean is that it changes the ApplicationContext configuration signature, preventing the test from sharing a cached context with tests that do not have that @MockitoBean.
 
 **Q: How does Spring Boot test context caching work, and what breaks it?**
-Spring caches ApplicationContext instances keyed by the set of configuration parameters: @SpringBootTest properties, @ActiveProfiles, @MockBean types, @SpyBean types, the test class's location in the source tree, and any @ContextConfiguration overrides. If two test classes have identical configuration keys, the second class reuses the first class's context — no new Spring startup. What breaks the cache: @DirtiesContext (explicitly invalidates the cached context), different @MockBean combinations (different key = different context), @ActiveProfiles differences, and adding @SpringBootTest(properties="...") with different values. In a large test suite, monitoring unique context counts (visible in test logs as "Creating shared instance of singleton bean") is a key performance optimization task.
+Spring caches ApplicationContext instances keyed by the set of configuration parameters: @SpringBootTest properties, @ActiveProfiles, @MockitoBean types, @MockitoSpyBean types, the test class's location in the source tree, and any @ContextConfiguration overrides. If two test classes have identical configuration keys, the second class reuses the first class's context — no new Spring startup. What breaks the cache: @DirtiesContext (explicitly invalidates the cached context), different @MockitoBean combinations (different key = different context), @ActiveProfiles differences, and adding @SpringBootTest(properties="...") with different values. In a large test suite, monitoring unique context counts (visible in test logs as "Creating shared instance of singleton bean") is a key performance optimization task.
 
 **Q: Explain the difference between @SpringBootTest(webEnvironment=MOCK) and RANDOM_PORT.**
 MOCK (the default) loads the full WebApplicationContext but creates a MockServletEnvironment rather than starting a real embedded Tomcat server. No TCP socket is opened. MockMvc operates directly against the DispatcherServlet in memory — no real HTTP is involved. This is faster and simpler. RANDOM_PORT starts a real embedded Tomcat on a randomly selected available port (accessible via @LocalServerPort). HTTP requests go through real TCP sockets, through real Tomcat thread pools, through real HTTP parsing. Use MOCK for most integration tests. Use RANDOM_PORT when testing HTTP-level concerns (redirect handling, HTTPS, actual HTTP headers, WebSocket upgrades, TestRestTemplate).
 
 **Q: What is the purpose of @WebMvcTest and what does it NOT load?**
-@WebMvcTest loads the Spring MVC layer: @Controller, @ControllerAdvice, @JsonComponent, Converter, Filter, and WebMvcConfigurer beans. It also loads Spring Security if present. It does NOT load @Service, @Repository, @Component beans, or auto-configuration unrelated to MVC (DataSource, JPA, Kafka, etc.). This makes @WebMvcTest contexts fast to initialize — typically under 2 seconds. Because services and repositories are not loaded, all dependencies of the controller must be provided as @MockBean. @WebMvcTest is the primary tool for testing controller routing, request validation, exception handler responses, and Spring Security rules at the HTTP layer.
+@WebMvcTest loads the Spring MVC layer: @Controller, @ControllerAdvice, @JsonComponent, Converter, Filter, and WebMvcConfigurer beans. It also loads Spring Security if present. It does NOT load @Service, @Repository, @Component beans, or auto-configuration unrelated to MVC (DataSource, JPA, Kafka, etc.). This makes @WebMvcTest contexts fast to initialize — typically under 2 seconds. Because services and repositories are not loaded, all dependencies of the controller must be provided as @MockitoBean. @WebMvcTest is the primary tool for testing controller routing, request validation, exception handler responses, and Spring Security rules at the HTTP layer.
 
 **Q: How does @DataJpaTest configure the database, and when should you override it?**
 @DataJpaTest auto-configures an embedded H2 in-memory database by default. It loads JPA auto-configuration, @Entity classes, and Spring Data JPA repositories. It does NOT load @Service or web-layer beans. Each test method is wrapped in a transaction that is rolled back at the end, ensuring isolation. Override the default database with @AutoConfigureTestDatabase(replace=NONE) when your queries use PostgreSQL-specific features (jsonb, window functions, pg_trgm, array operators) that H2 does not support. In this case, combine with Testcontainers to run a real PostgreSQL container, or configure a shared PostgreSQL test instance via DynamicPropertySource.
 
-**Q: What is @SpyBean and when should you use it instead of @MockBean?**
-@SpyBean wraps an existing real Spring bean with a Mockito spy. Unlike @MockBean (which replaces the bean with a pure mock that returns null by default), @SpyBean keeps the real implementation — only stubbed methods are intercepted, all others delegate to the real object. Use @SpyBean when you want to verify interactions on a real bean (verify it was called with specific arguments) but do not want to replace its behavior. Use it also when you want to override only one method of a complex real bean. The performance implication is the same as @MockBean — it creates a unique ApplicationContext configuration, potentially breaking context caching.
+**Q: What is @MockitoSpyBean and when should you use it instead of @MockitoBean?**
+@MockitoSpyBean wraps an existing real Spring bean with a Mockito spy. Unlike @MockitoBean (which replaces the bean with a pure mock that returns null by default), @MockitoSpyBean keeps the real implementation — only stubbed methods are intercepted, all others delegate to the real object. Use @MockitoSpyBean when you want to verify interactions on a real bean (verify it was called with specific arguments) but do not want to replace its behavior. Use it also when you want to override only one method of a complex real bean. The performance implication is the same as @MockitoBean — it creates a unique ApplicationContext configuration, potentially breaking context caching.
 
 **Q: How do you test a @Transactional service method to verify that it actually commits to the database?**
 By default, if the test method is annotated with @Transactional, it participates in the same transaction as the service method (via REQUIRED propagation), and the entire transaction is rolled back at test completion. The data appears in the EntityManager cache during the test but is never committed. To verify a real DB commit: remove @Transactional from the test method (use @Sql or @AfterEach for cleanup instead), or add @Commit to force the transaction to commit. For critical tests that verify ACID properties or trigger database constraints (unique index violations, cascades), remove @Transactional from the test and rely on explicit cleanup. Use @Transactional on tests only when you explicitly want auto-rollback isolation.
@@ -873,8 +873,8 @@ By default, if the test method is annotated with @Transactional, it participates
 **Q: How do Testcontainers containers integrate with Spring Boot's ApplicationContext startup?**
 @DynamicPropertySource is a static method annotated with @DynamicPropertySource that runs before the Spring ApplicationContext is created. It receives a DynamicPropertyRegistry where you can add properties whose values come from the container (getJdbcUrl(), getMappedPort(), etc.). Because the container is a @Container static field (lifecycle tied to the test class or suite), it starts before the @DynamicPropertySource method runs, and the Spring context starts after, using the correct container-assigned ports. For sharing containers across the entire test suite (avoiding restart per class), use a base test class with a @Container static field and inherit it. Spring Boot 3.1+ also supports a ServiceConnection abstraction that eliminates @DynamicPropertySource boilerplate.
 
-**Q: What is the risk of using @MockBean in a base test class?**
-When @MockBean is in a base class, every test class that extends that base shares the same @MockBean declaration. This is actually desirable — it means all those test classes use the same ApplicationContext key, which maximizes cache hits. The risk is that the base class's @MockBean declarations may be overly broad: mocking beans that some tests want to be real, forcing every subclass to work with mocked versions of those beans. A secondary risk is that adding @MockBean to the base class invalidates the cache for all existing tests that previously shared a context without that @MockBean. Design the base class carefully — it should contain the minimal set of @MockBeans that all subclasses require.
+**Q: What is the risk of using @MockitoBean in a base test class?**
+When @MockitoBean is in a base class, every test class that extends that base shares the same @MockitoBean declaration. This is actually desirable — it means all those test classes use the same ApplicationContext key, which maximizes cache hits. The risk is that the base class's @MockitoBean declarations may be overly broad: mocking beans that some tests want to be real, forcing every subclass to work with mocked versions of those beans. A secondary risk is that adding @MockitoBean to the base class invalidates the cache for all existing tests that previously shared a context without that @MockitoBean. Design the base class carefully — it should contain the minimal set of @MockitoBeans that all subclasses require.
 
 **Q: How do you test asynchronous behavior (e.g., @Async methods or Kafka consumers) in Spring Boot?**
 For @Async methods, inject the result as a CompletableFuture and call .get(timeout, TimeUnit) to block until completion, or use Awaitility (await().atMost(5, SECONDS).until(() -> condition)). Never use Thread.sleep() — it makes tests brittle. For Kafka consumers in @SpringBootTest with @EmbeddedKafka or Testcontainers, publish a message via KafkaTemplate and use Awaitility to poll the database or a CountDownLatch in the listener for up to a few seconds. The CountDownLatch approach: inject a test-controlled CountDownLatch into the listener bean, decrement it when a message is processed, and await it in the test. Reset the latch with @BeforeEach.
@@ -903,7 +903,7 @@ A static @Container field is started once before any test in the class runs and 
 
 **Follow the test pyramid**: Write many unit tests (no Spring context, fast), fewer slice tests (@WebMvcTest, @DataJpaTest, medium speed), and even fewer full @SpringBootTest integration tests. The majority of test runtime should be at the unit level.
 
-**Maximize context cache hits**: Design test base classes with a canonical set of @MockBeans so that all integration tests sharing the same set reuse one context. Audit test suite startup logs for "Creating shared instance" entries to count unique context loads.
+**Maximize context cache hits**: Design test base classes with a canonical set of @MockitoBeans so that all integration tests sharing the same set reuse one context. Audit test suite startup logs for "Creating shared instance" entries to count unique context loads.
 
 **Never use H2 for PostgreSQL-specific features**: Discover query compatibility issues in tests, not production. Use @AutoConfigureTestDatabase(replace=NONE) with Testcontainers whenever queries use database-specific syntax.
 
@@ -917,7 +917,7 @@ A static @Container field is started once before any test in the class runs and 
 
 **Test exception paths explicitly**: Verify that 400/404/500 responses include the correct error structure, not just the status code. Exception handlers are frequently broken silently when adding new error types.
 
-**Verify MockMvc interactions on @MockBeans**: After asserting the response, verify that the service mock was called with the expected arguments using BDDMockito.then(service).should().methodName(argCaptor.capture()). This prevents controllers from returning hardcoded responses while ignoring service delegation.
+**Verify MockMvc interactions on @MockitoBeans**: After asserting the response, verify that the service mock was called with the expected arguments using BDDMockito.then(service).should().methodName(argCaptor.capture()). This prevents controllers from returning hardcoded responses while ignoring service delegation.
 
 **Separate integration tests from unit tests**: Use Maven Failsafe plugin with a naming convention (IT suffix) to run integration tests separately from unit tests. This allows fast local feedback (unit tests in <10s) and comprehensive CI validation (integration tests in 2–5 minutes).
 
@@ -929,7 +929,7 @@ A static @Container field is started once before any test in the class runs and 
 
 A Spring Boot microservice had 180 test classes. The CI pipeline was taking 22 minutes to run the test suite, blocking developer productivity. The root causes were:
 
-1. Every test class annotated with @SpringBootTest was creating its own ApplicationContext because each had a slightly different combination of @MockBeans — 47 unique context configurations across 180 test classes.
+1. Every test class annotated with @SpringBootTest was creating its own ApplicationContext because each had a slightly different combination of @MockitoBeans — 47 unique context configurations across 180 test classes.
 2. 15 @DataJpaTest classes used H2 but the service was running on PostgreSQL. Several queries with PostgreSQL-specific operators were passing on H2 but failing in production with syntax errors.
 3. 8 test classes used @DirtiesContext to ensure clean state after tests, each forcing a context reload.
 4. Async consumer tests used Thread.sleep(2000) to wait for Kafka message processing — adding 2 seconds per test.
@@ -938,7 +938,7 @@ A Spring Boot microservice had 180 test classes. The CI pipeline was taking 22 m
 
 The team ran the test suite with JVM test logging enabled and counted ApplicationContext creation events:
 - 47 unique context keys were found
-- 12 were caused by @MockBean(EmailService.class) appearing in some classes but not others
+- 12 were caused by @MockitoBean(EmailService.class) appearing in some classes but not others
 - 8 were caused by @DirtiesContext
 - Context startup averaged 8 seconds: 47 * 8s = 376 seconds of context startup alone
 
@@ -950,7 +950,7 @@ are the entire bill.
 | Term | What it is |
 |------|------------|
 | `180` | Test classes. Does not appear in the cost formula at all |
-| `47` | Unique context keys — distinct combinations of config, profiles, and `@MockBean` sets |
+| `47` | Unique context keys — distinct combinations of config, profiles, and `@MockitoBean` sets |
 | `8s` | Measured average time to build one `ApplicationContext` |
 | `47 x 8s` | Total context-building cost; every cache *miss* pays the full 8 seconds |
 | cache hit | A class reusing an existing key pays `0s` — this is why key count is what matters |
@@ -972,21 +972,21 @@ are the entire bill.
 Note that reducing 47 keys to 3 does not delete a single test — the same 180 classes
 run, they just share three contexts. The saving is pure cache-hit rate.
 
-**Why one stray `@MockBean` costs 8 seconds.** The context cache key includes the set of
-mocked bean types, so `@MockBean(EmailService.class)` on some classes and not others
+**Why one stray `@MockitoBean` costs 8 seconds.** The context cache key includes the set of
+mocked bean types, so `@MockitoBean(EmailService.class)` on some classes and not others
 splits one key into two. That is the mechanism behind the 12 keys attributed to
 `EmailService` above: a one-line annotation difference is indistinguishable, to the
 cache, from a completely different application.
 
-### Fix 1 — Consolidate @MockBeans in a base class
+### Fix 1 — Consolidate @MockitoBeans in a base class
 
 ```java
 @SpringBootTest
 @ActiveProfiles("test")
 public abstract class BaseIntegrationTest {
-    @MockBean EmailService emailService;
-    @MockBean NotificationService notificationService;
-    @MockBean PaymentGatewayClient paymentGatewayClient;
+    @MockitoBean EmailService emailService;
+    @MockitoBean NotificationService notificationService;
+    @MockitoBean PaymentGatewayClient paymentGatewayClient;
     // All integration test classes extend this
 }
 // Result: 47 context variations reduced to 3 (base, slice tests, no-mock unit-style)
@@ -1002,7 +1002,7 @@ public abstract class BaseIntegrationTest {
 public abstract class BaseRepositoryTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:15-alpine").withReuse(true); // Testcontainers reuse
+        new PostgreSQLContainer<>("postgres:18-alpine").withReuse(true); // Testcontainers reuse
     @DynamicPropertySource
     static void props(DynamicPropertyRegistry r) {
         r.add("spring.datasource.url", POSTGRES::getJdbcUrl);
@@ -1038,7 +1038,7 @@ await().atMost(5, SECONDS)
 | Thread.sleep() wasted time | 46 seconds | ~3 seconds |
 | @DirtiesContext invocations | 8 | 2 |
 
-The key insight was that test performance is a first-class concern. Every @MockBean and @DirtiesContext annotation has a measurable cost in context load time. Treating the test architecture with the same intentional design as production code — shared base classes, canonical context configurations, realistic databases — reduced CI time by 80% without reducing test coverage.
+The key insight was that test performance is a first-class concern. Every @MockitoBean and @DirtiesContext annotation has a measurable cost in context load time. Treating the test architecture with the same intentional design as production code — shared base classes, canonical context configurations, realistic databases — reduced CI time by 80% without reducing test coverage.
 
 ---
 
@@ -1108,7 +1108,7 @@ The integration row is 60.8% of the budget on 25% of the tests — that is where
 pays. Optimizing the 350 unit tests, the layer that *looks* biggest, would buy back
 three and a half seconds.
 
-**Controller layer — @WebMvcTest with @MockBean:**
+**Controller layer — @WebMvcTest with @MockitoBean:**
 
 ```java
 @WebMvcTest(OrderController.class)
@@ -1118,11 +1118,11 @@ class OrderControllerTest {
     @Autowired
     MockMvc mockMvc;
 
-    @MockBean
+    @MockitoBean
     OrderService orderService;
 
-    @MockBean
-    SecurityConfig securityConfig;
+    @MockitoBean
+    JwtDecoder jwtDecoder;      // collaborator SecurityConfig needs; never mock the @Configuration itself
 
     @Test
     @WithMockUser(roles = "BUYER")
@@ -1161,7 +1161,7 @@ class OrderRepositoryTest {
 
     @Container
     static PostgreSQLContainer<?> postgres =
-        new PostgreSQLContainer<>("postgres:15")
+        new PostgreSQLContainer<>("postgres:18")
             .withDatabaseName("oms_test");
 
     @DynamicPropertySource
@@ -1218,33 +1218,33 @@ class OrderEventListenerTest {
 }
 ```
 
-**BROKEN→FIX: @MockBean causes ApplicationContext cache miss**
+**BROKEN→FIX: @MockitoBean causes ApplicationContext cache miss**
 
 ```java
-// BROKEN: three test classes each use @MockBean for different beans
+// BROKEN: three test classes each use @MockitoBean for different beans
 // Spring cannot reuse the same context; starts 3 full contexts = 3 × 45s = 135s
 
 @SpringBootTest
 class OrderServiceTest {
-    @MockBean InventoryClient inventoryClient;    // different mock set A
+    @MockitoBean InventoryClient inventoryClient;    // different mock set A
 }
 
 @SpringBootTest
 class ShippingServiceTest {
-    @MockBean ShippingClient shippingClient;      // different mock set B
+    @MockitoBean ShippingClient shippingClient;      // different mock set B
 }
 
-// FIX: consolidate all @MockBean declarations in a shared @TestConfiguration
-// that is loaded by all integration tests → Spring reuses ONE context
+// FIX: declare one canonical mock set on a shared base class. Bean-override annotations are
+// only honoured on test classes (and their supertypes / @Nested enclosing classes) — putting
+// them on a @TestConfiguration does nothing, so the type-level form on a base class is the
+// way to share them.
 
-@TestConfiguration
-class GlobalTestMocks {
-    @MockBean InventoryClient inventoryClient;
-    @MockBean ShippingClient shippingClient;
-    @MockBean PaymentClient paymentClient;
-}
+@SpringBootTest
+@MockitoBean(types = {InventoryClient.class, ShippingClient.class, PaymentClient.class})
+abstract class BaseIntegrationTest { }
 
-// Each test class annotates with @Import(GlobalTestMocks.class)
+class OrderServiceTest extends BaseIntegrationTest { }
+class ShippingServiceTest extends BaseIntegrationTest { }
 // Result: single context for all integration tests → 45s → 45s (not 45s × N)
 ```
 
@@ -1283,12 +1283,12 @@ class OrderServiceIntegrationTest {
 | Unit tests (350) | 7s | 7s |
 | @WebMvcTest (60) | 180s (3 contexts × 45s) | 45s (1 shared context) |
 | @DataJpaTest (40) | 120s | 60s (Testcontainers reused) |
-| @SpringBootTest (20) | 300s | 90s (1 context, @MockBean consolidated) |
+| @SpringBootTest (20) | 300s | 90s (1 context, @MockitoBean consolidated) |
 | Total CI | ~607s | ~202s |
 
 **Interview discussion points:**
 
-**What is the ApplicationContext cache in Spring tests and how do you maximize reuse?** Spring caches `ApplicationContext` instances keyed by: the set of configuration classes, active profiles, context customizers, and the set of `@MockBean`/`@SpyBean` declarations. Any difference in this key starts a new context. Consolidating all `@MockBean` into a shared `@TestConfiguration` and using the same profile everywhere maximizes cache hits.
+**What is the ApplicationContext cache in Spring tests and how do you maximize reuse?** Spring caches `ApplicationContext` instances keyed by: the set of configuration classes, active profiles, context customizers, and the set of `@MockitoBean`/`@MockitoSpyBean` declarations. Any difference in this key starts a new context. Declaring one canonical `@MockitoBean(types = {...})` set on a shared abstract base test class — bean overrides are not honoured on `@Configuration` classes — and using the same profile everywhere maximizes cache hits.
 
 **When should you use @WebMvcTest instead of @SpringBootTest for controller tests?** `@WebMvcTest` loads only the web layer: controllers, filters, `@ControllerAdvice`, message converters. It skips JPA, Kafka, scheduling, and security configuration (or lets you partial-mock it). Tests start in ~1s vs 45s for full context. Use `@WebMvcTest` whenever you're testing request mapping, serialization, validation, or authentication; use `@SpringBootTest` only when you need the full wiring.
 

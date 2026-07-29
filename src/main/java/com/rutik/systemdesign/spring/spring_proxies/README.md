@@ -40,9 +40,9 @@ Think of a proxy like a personal assistant standing in front of a celebrity. Whe
 
 ### CGLIB Proxy
 
-- Third-party library included with Spring (repackaged as `spring-cglib`)
+- Third-party library shipped inside `spring-core`, repackaged under `org.springframework.cglib`
 - Creates a subclass of the target class using bytecode generation
-- Overrides non-final methods to add advice
+- Overrides non-final methods to add advice — since Spring Framework 6.0 that includes `protected` and package-visible methods, not just `public` ones
 - **Cannot proxy `final` classes or `final` methods**
 - **Cannot proxy classes with no default (no-arg) constructor** (unless Spring uses Objenesis to bypass this)
 - Spring 4+ includes Objenesis, so no-arg constructor restriction is mostly lifted
@@ -111,7 +111,7 @@ sequenceDiagram
     deactivate Proxy
 ```
 
-Because the CGLIB proxy is a real subclass, `proxy instanceof MyService` is `true` and `proxy.getClass()` reports `MyService$$EnhancerBySpringCGLIB$$abc123`.
+Because the CGLIB proxy is a real subclass, `proxy instanceof MyService` is `true` and `proxy.getClass()` reports `MyService$$SpringCGLIB$$0`.
 
 **Self-Invocation Problem**
 
@@ -310,13 +310,13 @@ public class UserService { }
 UserService bean = ctx.getBean(UserService.class);
 
 // CGLIB proxy:
-bean.getClass()  // UserService$$EnhancerBySpringCGLIB$$abc123 — NOT UserService.class
+bean.getClass()  // UserService$$SpringCGLIB$$0 — NOT UserService.class
 bean instanceof UserService  // true (subclass relationship)
 bean.getClass() == UserService.class  // FALSE! Common mistake
 
 // JDK proxy:
 UserService bean2 = ctx.getBean(UserService.class);  // actually gets proxy for interface
-bean2.getClass()  // com.sun.proxy.$Proxy25 — NOT UserService.class
+bean2.getClass()  // jdk.proxy1.$Proxy25 — NOT UserService.class
 bean2 instanceof UserService  // depends on whether UserService is interface or class
 ```
 
@@ -328,7 +328,7 @@ bean2 instanceof UserService  // depends on whether UserService is interface or 
 
 **Spring Security method security:** `@PreAuthorize("hasRole('ADMIN')")` on a service method is implemented via CGLIB proxy. When the proxy intercepts the call, it evaluates the SpEL expression against the current `SecurityContext` before delegating to the real method.
 
-**Debugging tool:** To detect if a Spring bean is proxied, log `bean.getClass().getName()`. A CGLIB proxy has `$$EnhancerBySpringCGLIB$$` in the name; a JDK proxy starts with `$Proxy`. Use this in integration tests to verify proxy creation.
+**Debugging tool:** To detect if a Spring bean is proxied, log `bean.getClass().getName()`. A CGLIB proxy has `$$SpringCGLIB$$` in the name; a JDK proxy is named `$ProxyN` (in a `jdk.proxyN` package on modern JDKs). Use this in integration tests to verify proxy creation.
 
 ---
 
@@ -448,7 +448,7 @@ public class ReportService {
 | Component | Role |
 |-----------|------|
 | `java.lang.reflect.Proxy` | JDK proxy foundation |
-| CGLIB (`spring-cglib`) | Bytecode generation for CGLIB proxies |
+| CGLIB (repackaged in `spring-core` as `org.springframework.cglib`) | Bytecode generation for CGLIB proxies |
 | Objenesis | Creates CGLIB proxies without no-arg constructor |
 | `ProxyFactoryBean` | Programmatic Spring AOP proxy creation |
 | `AopUtils.isAopProxy()` | Utility to check if object is a Spring proxy |
@@ -470,10 +470,10 @@ When you call `this.method()` inside a Spring bean, `this` refers to the raw bea
 CGLIB cannot override `final` methods. If `@Transactional` is on a `final` method, the advice is silently skipped — no transaction is started, no exception is thrown, the method simply runs without Spring's transaction management. This is extremely dangerous because there is no indication anything is wrong at startup. Similarly, `@Cacheable` and `@Async` on `final` methods are silently ignored. Always run your tests to verify transactional behavior.
 
 **Q: What is the difference between AOP proxy behavior with JDK vs CGLIB?**
-Both proxies intercept method calls from outside the bean. The key difference: JDK proxy implements interfaces and can only be cast to those interfaces; CGLIB proxy extends the class and can be cast to the class type. With JDK proxy, calling `bean.getClass()` returns a `$Proxy` class; with CGLIB it returns `ClassName$$EnhancerBySpringCGLIB$$...`. CGLIB proxies can be used where interface-based proxies cannot (concrete class injection, casting to class type).
+Both proxies intercept method calls from outside the bean. The key difference: JDK proxy implements interfaces and can only be cast to those interfaces; CGLIB proxy extends the class and can be cast to the class type. With JDK proxy, calling `bean.getClass()` returns a `$ProxyN` class; with CGLIB it returns `ClassName$$SpringCGLIB$$0`. CGLIB proxies can be used where interface-based proxies cannot (concrete class injection, casting to class type).
 
 **Q: How would you verify that a Spring bean is proxied?**
-Check `bean.getClass().getName()`. For CGLIB proxy, the name contains `$$EnhancerBySpringCGLIB$$`. For JDK proxy, it starts with `com.sun.proxy.$Proxy`. Alternatively, use `AopUtils.isAopProxy(bean)` (returns true for both types) and `AopUtils.isCglibProxy(bean)` or `AopUtils.isJdkDynamicProxy(bean)` for specific type. In tests, use `AopTestUtils.getTargetObject(bean)` to unwrap the proxy and get the underlying bean.
+Check `bean.getClass().getName()`. For CGLIB proxy, the name contains `$$SpringCGLIB$$`. For JDK proxy, the simple name is `$ProxyN` (the JDK places it in a generated `jdk.proxyN` package). Alternatively, use `AopUtils.isAopProxy(bean)` (returns true for both types) and `AopUtils.isCglibProxy(bean)` or `AopUtils.isJdkDynamicProxy(bean)` for specific type. In tests, use `AopTestUtils.getTargetObject(bean)` to unwrap the proxy and get the underlying bean.
 
 **Q: How does Spring Boot's proxyTargetClass=true affect the application?**
 It forces CGLIB proxies for all Spring AOP-proxied beans, even those implementing interfaces. This eliminates the JDK proxy / interface requirement distinction, simplifies injection (you can always inject by class type, not just interface), and avoids `ClassCastException` when code tries to cast a bean to its concrete class. The downside: CGLIB cannot proxy `final` classes or `final` methods. Most Spring Boot applications should not change this default.
@@ -509,7 +509,7 @@ Both are `BeanPostProcessor` implementations that create AOP proxies. `Infrastru
 `AopContext.currentProxy()` retrieves the current proxy from a `ThreadLocal`, so calling the returned proxy re-enters the interceptor chain instead of calling `this` directly. It only works when `exposeProxy=true` is set on `@EnableAspectJAutoProxy` (or the XML equivalent), which makes the auto-proxy creator publish the proxy to the `ThreadLocal` before invoking the target — without it, `AopContext.currentProxy()` throws `IllegalStateException`. The cast (`(MyService) AopContext.currentProxy()`) couples business code to Spring AOP internals, so most teams prefer extracting the advised method into a separate bean instead of relying on this workaround.
 
 **Q: Can CGLIB advise `static` or `private` methods, and why not?**
-No: CGLIB proxies subclass the target and override methods, and neither static methods (resolved at compile time) nor private methods (invisible to a subclass) can be overridden this way. This is a distinct limitation from `final` methods — a `final` method exists on the instance and could in principle be dispatched dynamically, but the JVM specifically forbids overriding it, whereas `static`/`private` methods are excluded by Java's dispatch rules regardless of any modifier. Any `@Transactional`, `@Cacheable`, or `@Async` on a `static` or `private` method is silently ignored, with no warning at startup — always keep advised methods public and non-static.
+No: CGLIB proxies subclass the target and override methods, and neither static methods (resolved at compile time) nor private methods (invisible to a subclass) can be overridden this way. This is a distinct limitation from `final` methods — a `final` method exists on the instance and could in principle be dispatched dynamically, but the JVM specifically forbids overriding it, whereas `static`/`private` methods are excluded by Java's dispatch rules regardless of any modifier. `protected` and package-visible methods ARE overridable and, since Spring Framework 6.0, are advised by class-based proxies by default. Any `@Transactional`, `@Cacheable`, or `@Async` on a `static` or `private` method is silently ignored, with no warning at startup.
 
 **Q: How does a CGLIB proxy affect `equals()`/`hashCode()`, and why can that break `HashSet`/`HashMap` lookups?**
 A CGLIB-proxied bean and a plain instance of the same class are never `equal()` by default, because the proxy's runtime class differs from the original class. Unless the target overrides `equals()`/`hashCode()` based on business fields, comparisons fall back to identity semantics inherited through the generated subclass, so storing a proxied bean in a `HashSet`/`HashMap` and later probing it with a manually constructed instance silently misses. The fix is to compare by a stable identifier field or unwrap the proxy first with `AopUtils.getTargetClass()` / `AopTestUtils.getTargetObject()`, rather than relying on default object equality across proxied and non-proxied instances.
@@ -535,7 +535,7 @@ A CGLIB-proxied bean and a plain instance of the same class are never `equal()` 
 
 ### Scenario: OrderService with @Transactional and @Cacheable Both via CGLIB
 
-An order service (Spring Boot 3.2 / Java 17) annotates a read method with `@Cacheable` and a write method with `@Transactional`. Spring Boot creates a CGLIB proxy (subclass) for the bean. Scale and symptoms:
+An order service (Spring Boot 4.1 / Java 25) annotates a read method with `@Cacheable` and a write method with `@Transactional`. Spring Boot creates a CGLIB proxy (subclass) for the bean. Scale and symptoms:
 
 - 22,000 read req/sec on `getOrder`, backed by a Redis cache (expected ~95% hit rate)
 - The team observed a near-0% cache hit rate and missing transactions, despite correct annotations
@@ -683,7 +683,7 @@ public class PaymentService {
 ```
 
 ```java
-// FIX: make it public (or package-private with AspectJ) and call it through the proxy
+// FIX: make it public or package-private (both are advised by CGLIB) and call it through the proxy
 @Service
 public class PaymentService {
     @Transactional

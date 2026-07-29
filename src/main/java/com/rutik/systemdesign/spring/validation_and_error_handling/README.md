@@ -44,7 +44,7 @@ Spring Boot 3.0 / Spring Framework 6 made `ProblemDetail` the standard error res
 
 | Feature | `@Valid` (JSR-380) | `@Validated` (Spring) |
 |---|---|---|
-| Standard | JSR-380 (Jakarta Validation 3.0) | Spring Framework extension |
+| Standard | Jakarta Validation 3.1 | Spring Framework extension |
 | Validation groups | No | Yes — `@Validated(Create.class)` |
 | Usage in `@Controller` | Yes (parameter-level) | Yes (class-level for group selection) |
 | Usage in `@Service` | No (no AOP proxy) | Yes — requires `MethodValidationPostProcessor` |
@@ -365,7 +365,7 @@ A related concern to error handling: how to evolve the API contract without brea
 | No versioning (additive) | Add new fields, never remove | Zero breaking changes | Accumulates cruft; unclear deprecation |
 | Content negotiation | Media type negotiation via `Accept` | RESTful | Complex content negotiation setup |
 
-Spring MVC: use `@RequestMapping(value="/orders", produces="application/vnd.myapi.v2+json")` for media-type versioning, or separate `@RestController` classes per version for URI versioning.
+Spring MVC and WebFlux implement all of these natively rather than leaving you to hand-roll them. Pick the resolver once in `WebMvcConfigurer.configureApiVersion(...)` — `useRequestHeader("API-Version")`, `usePathSegment(n)`, `useQueryParam("v")` or `useMediaTypeParameter(...)` — then declare the version on the mapping itself: `@GetMapping(value = "/orders/{id}", version = "1.0")` for an exact match and `version = "1.2+"` for "1.2 and above". Versions are parsed semantically (`1.2` becomes major 1, minor 2, patch 0). A request naming a version no handler declares fails with `InvalidApiVersionException` and a request missing the version fails with `MissingApiVersionException` — both surface as 400, so an unknown version is a client error rather than a silent fall-through to the wrong handler. `StandardApiVersionDeprecationHandler` emits `Deprecation` (RFC 9745), `Sunset` (RFC 8594) and `Link` headers so clients learn a version is retiring from the response itself. `RestClient`, `WebClient`, HTTP service clients, MockMvc and `WebTestClient` all understand the same version, so the contract is testable end to end.
 
 ---
 
@@ -447,15 +447,16 @@ public class ProductService {
     // ConstraintViolationException is NEVER thrown even if id < 0
 }
 
-// FIX: ensure MethodValidationPostProcessor is registered (Spring Boot 3 auto-configures it;
-// in pure Spring check that @EnableMethodValidation or the MVPP bean is present)
+// FIX: ensure MethodValidationPostProcessor is registered. Spring Boot auto-configures it
+// whenever a jakarta.validation provider is on the classpath (spring-boot-starter-validation);
+// in plain Spring you must declare the MethodValidationPostProcessor bean yourself.
 ```
 
 ### Pitfall 3: Swallowing ConstraintViolationException at service layer
 If `@ControllerAdvice` only handles `MethodArgumentNotValidException` (MVC-level), `ConstraintViolationException` from `@Validated` on a service will propagate as a 500. Add a separate `@ExceptionHandler(ConstraintViolationException.class)` to map it to 400.
 
 ### Pitfall 4: Validation in @Async method — no transaction context
-If a `@Validated` service method is called via `@Async`, the validation AOP proxy runs on the async thread. If the validator needs a DB lookup (like `UniqueEmailValidator`), the transaction from the caller is not available. The validator must open its own transaction — annotate the validator's repository method with `@Transactional(readOnly=true, propagation=SUPPORTS)`.
+If a `@Validated` service method is called via `@Async`, the validation AOP proxy runs on the async thread. Spring binds transactions to the thread, so the caller's transaction is not available there. If the validator needs a DB lookup (like `UniqueEmailValidator`), it must open its own — annotate the validator's repository method `@Transactional(readOnly = true)`, which uses the default `REQUIRED` propagation and therefore starts a transaction when none is bound. `SUPPORTS` would run non-transactionally instead, which is exactly the failure you are trying to avoid.
 
 ### Pitfall 5: `@ControllerAdvice` not applying to `@Controller` beans from different packages
 `@ControllerAdvice` scans `basePackages` of `@SpringBootApplication` by default. A `@Controller` in a non-scanned package is not covered. Explicitly set `@ControllerAdvice(basePackages = "com.example")` or ensure all controllers are within the scan path.
@@ -466,8 +467,8 @@ If a `@Validated` service method is called via `@Async`, the validation AOP prox
 
 | Tool / Feature | Version | Purpose |
 |---|---|---|
-| Jakarta Bean Validation 3.0 (JSR-380) | Java EE 8 / Jakarta EE 9+ | Constraint annotation specification |
-| Hibernate Validator 8.x | Spring Boot 3.x default | JSR-380 reference implementation |
+| Jakarta Validation 3.1 | Jakarta EE 11 | Constraint annotation specification |
+| Hibernate Validator 9.x | Spring Boot 4.x default (4.1 manages 9.1.0.Final) | Jakarta Validation reference implementation |
 | `@Valid` | JSR-380 | Cascade validation trigger |
 | `@Validated` | Spring Framework | Groups support + method-level validation |
 | `MethodValidationPostProcessor` | Spring Framework | AOP proxy for service-level @Validated |
@@ -492,7 +493,7 @@ When `@Valid` / `@Validated` fails on a `@Controller` `@RequestBody` parameter, 
 Validation groups are marker interfaces (empty, by convention). Each constraint annotation has a `groups` attribute — e.g., `@NotNull(groups = OnUpdate.class)`. Using `@Validated(OnUpdate.class)` activates only constraints whose `groups` include `OnUpdate.class`. The default group is `Default.class`. Use case: a `ProductRequest` record used for both `POST /products` (create) and `PUT /products/{id}` (update). For create: `id` must be `@Null` (not provided by client). For update: `id` must be `@NotNull` (must reference existing product). Without groups, you'd need two different request classes or manual `if` checks.
 
 **Q4: How would you write a custom `ConstraintValidator` that checks a DB-level uniqueness constraint?**
-Create an annotation (e.g., `@UniqueEmail`) with `@Constraint(validatedBy = UniqueEmailValidator.class)`. The validator class implements `ConstraintValidator<UniqueEmail, String>`. Because the validator is managed by Spring (via `@Component` + Hibernate Validator's Spring integration), `@Autowired` works inside it. The `isValid()` method calls `userRepository.existsByEmail(email)` — if the email exists, return `false` (violation). Important: return `true` for null values (let `@NotNull` handle null — compose constraints rather than duplicating logic). Gotcha: the validator runs inside a request transaction if invoked via Spring MVC, but may need `@Transactional(propagation = SUPPORTS)` if called from a non-transactional context.
+Create an annotation (e.g., `@UniqueEmail`) with `@Constraint(validatedBy = UniqueEmailValidator.class)`. The validator class implements `ConstraintValidator<UniqueEmail, String>`. Because the validator is managed by Spring (via `@Component` + Hibernate Validator's Spring integration), `@Autowired` works inside it. The `isValid()` method calls `userRepository.existsByEmail(email)` — if the email exists, return `false` (violation). Important: return `true` for null values (let `@NotNull` handle null — compose constraints rather than duplicating logic). Gotcha: the validator runs inside a request transaction if invoked via Spring MVC, but from a non-transactional context (an `@Async` thread, a scheduled job) nothing is bound to the thread — mark the lookup `@Transactional(readOnly = true)` so the default `REQUIRED` propagation opens one.
 
 **Q5: What is `ProblemDetail` and why was it introduced in Spring Boot 3?**
 `ProblemDetail` (`org.springframework.http.ProblemDetail`) is Spring's implementation of RFC 9457 "Problem Details for HTTP APIs." Before Spring Boot 3, error response bodies were inconsistent — some APIs returned `{message: "..."}`, others returned `{error: "...", status: 400}`, with no standard structure. RFC 9457 defines: `type` (URI identifying the error kind), `title` (human-readable summary), `status` (HTTP status), `detail` (specific description for this occurrence), `instance` (URI of the specific request that failed), plus extensible custom properties. `ProblemDetail` lets `@ExceptionHandler` methods return a structured, machine-readable body without reinventing the format. Spring Boot 3 auto-applies it to built-in Spring exceptions (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, etc.) when `spring.mvc.problemdetails.enabled=true`.
@@ -507,7 +508,7 @@ Bean Validation is field-level and stateless — it cannot express: "If `discoun
 If the `@ExceptionHandler` method itself throws an exception, Spring falls back to the `DefaultHandlerExceptionResolver`, which typically returns a 500 Internal Server Error with a minimal response body. The exception from the handler is propagated to the container (Tomcat/Jetty). To prevent this: wrap `@ExceptionHandler` bodies in try/catch; return a safe default `ProblemDetail` with status 500 if the handler itself encounters an unexpected error. This is particularly important for database calls inside exception handlers (e.g., `UniqueEmailValidator` calling the DB in response to a validation error).
 
 **Q9: How does the HandlerExceptionResolver chain work in Spring MVC?**
-Spring MVC resolves exceptions through a chain of `HandlerExceptionResolver` implementations, consulted in order: (1) `ExceptionHandlerExceptionResolver` — processes `@ExceptionHandler` methods in `@ControllerAdvice`; (2) `ResponseStatusExceptionResolver` — processes `@ResponseStatus` annotations on exception classes; (3) `DefaultHandlerExceptionResolver` — handles Spring-specific exceptions (`NoSuchRequestHandlingMethodException`, `MethodArgumentNotValidException` in pre-Boot-3, etc.); (4) `SimpleMappingExceptionResolver` — maps exception class names to view names (MVC, rarely used in REST). If no resolver handles the exception, Spring passes it to the servlet container (`response.sendError(500)`). `ResponseEntityExceptionHandler` (extended by custom `@ControllerAdvice`) hooks into `(1)`.
+Spring MVC resolves exceptions through a chain of `HandlerExceptionResolver` implementations, consulted in order: (1) `ExceptionHandlerExceptionResolver` — processes `@ExceptionHandler` methods in `@ControllerAdvice`; (2) `ResponseStatusExceptionResolver` — processes `@ResponseStatus` annotations on exception classes; (3) `DefaultHandlerExceptionResolver` — handles Spring-specific exceptions (`NoHandlerFoundException`, `HttpRequestMethodNotSupportedException`, `HttpMediaTypeNotSupportedException`, `MethodArgumentNotValidException`, etc.) and maps them to the right status. `SimpleMappingExceptionResolver` (exception class name to view name) is not registered by default and is only useful for server-rendered views. If no resolver handles the exception, Spring passes it to the servlet container (`response.sendError(500)`). `ResponseEntityExceptionHandler` (extended by custom `@ControllerAdvice`) hooks into `(1)`.
 
 **Q10: How would you validate a `@RequestParam` or `@PathVariable` (not a request body)?**
 Request params and path variables are primitive or String types, not POJOs — `@Valid` cascade does not apply. Two approaches: (1) `@Validated` at the class level + `MethodValidationPostProcessor` — put constraints directly on the method parameters: `public ResponseEntity<User> getUser(@PathVariable @Positive long id)`. When `id <= 0`, Spring throws `ConstraintViolationException` (map to 400 in `@ControllerAdvice`). (2) Custom `@ExceptionHandler(MethodArgumentTypeMismatchException.class)` for type conversion failures (e.g., `"abc"` as a `long` path variable). Spring Boot 3 with `problemdetails.enabled=true` handles type mismatch automatically.
@@ -516,9 +517,11 @@ Request params and path variables are primitive or String types, not POJOs — `
 `@ResponseStatus(HttpStatus.NOT_FOUND)` on a custom exception class (e.g., `@ResponseStatus(HttpStatus.NOT_FOUND) class ResourceNotFoundException`) causes Spring to return the given status code automatically when that exception is thrown — no `@ExceptionHandler` needed. Limitation: the response body is the default error format (a `Map` with `timestamp`, `status`, `error`, `path`), not a `ProblemDetail`. `@ExceptionHandler` gives full control over the response body, status, and headers. For APIs that must return `ProblemDetail` or custom JSON bodies, `@ExceptionHandler` in a `@ControllerAdvice` is the correct approach. `@ResponseStatus` is useful for simple cases where only the status code matters.
 
 **Q12: How does Spring Boot's `/error` fallback endpoint work and how do you customise it?**
-When an exception escapes all `HandlerExceptionResolver` instances (or is thrown in a filter before the servlet dispatches), Tomcat/Jetty forward the request to `/error`. Spring Boot's `BasicErrorController` serves this endpoint, returning a `Map` of `{timestamp, status, error, message, path}`. Customise by: (1) extending `BasicErrorController` or implementing `ErrorController`; (2) implementing `ErrorAttributes` to change the attributes map; (3) adding a `DefaultErrorViewResolver` for HTML error pages (Thymeleaf). For REST APIs, override `errorHtmlAttributes()` and `error()` in `BasicErrorController` to return `ProblemDetail` consistently. This is the last line of defence — errors from filters (`AuthenticationException`, `AccessDeniedException`) end up here if not handled by the security filter chain.
+When an exception escapes all `HandlerExceptionResolver` instances (or is thrown in a filter before the servlet dispatches), Tomcat/Jetty forward the request to `/error`. Spring Boot's `BasicErrorController` serves this endpoint, returning a `Map` of `{timestamp, status, error, message, path}`. Customise by: (1) extending `BasicErrorController` or implementing `ErrorController`; (2) implementing `ErrorAttributes` to change the attributes map; (3) adding a `DefaultErrorViewResolver` for HTML error pages (Thymeleaf). For REST APIs, override `error()` (and `errorHtml()` if you also serve browsers) in `BasicErrorController` to return `ProblemDetail` consistently. This is the last line of defence — errors from filters (`AuthenticationException`, `AccessDeniedException`) end up here if not handled by the security filter chain.
 
 **Q13: How do you write an integration test that verifies constraint violations return proper ProblemDetail responses?**
+Post a deliberately invalid body through `MockMvc` and assert three things: the 400 status, the `application/problem+json` content type, and the individual violation entries in the body.
+
 ```java
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureMockMvc
@@ -530,7 +533,9 @@ class OrderControllerValidationTest {
     void createOrder_blankName_returns400WithProblemDetail() throws Exception {
         mockMvc.perform(post("/orders")
             .contentType(MediaType.APPLICATION_JSON)
-            .content("""{"productName": "", "quantity": 1, "price": 10.0}"""))
+            .content("""
+                {"productName": "", "quantity": 1, "price": 10.0}
+                """))
             .andExpect(status().isBadRequest())
             .andExpect(content().contentType("application/problem+json"))
             .andExpect(jsonPath("$.status").value(400))

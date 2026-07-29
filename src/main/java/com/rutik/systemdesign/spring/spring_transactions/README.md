@@ -18,7 +18,7 @@ Spring transactions encompass:
 The central abstraction is PlatformTransactionManager. Spring Boot auto-configures the appropriate implementation based on what is on the classpath:
 - JDBC only: DataSourceTransactionManager
 - JPA on classpath: JpaTransactionManager (wraps EntityManager/Session lifecycle)
-- JTA: JtaTransactionManager (delegates to container or standalone Atomikos/Bitronix)
+- JTA: JtaTransactionManager (delegates to a Jakarta EE container's transaction manager, or to a standalone coordinator such as Narayana or Atomikos wired through that vendor's own Spring Boot starter)
 
 ---
 
@@ -303,6 +303,8 @@ public void processOrder(Order order) {
     inventoryService.reserve(order); // step 3
 }
 
+// Requires savepoint support: DataSourceTransactionManager enables it by default;
+// with JpaTransactionManager you must call setNestedTransactionAllowed(true) yourself.
 @Transactional(propagation = Propagation.NESTED)
 public void sendEmail(Order order) throws EmailException {
     // if this throws, only this NESTED block rolls back to savepoint
@@ -316,7 +318,7 @@ public void sendEmail(Order order) throws EmailException {
 ```java
 // readOnly=true instructs:
 // 1. Hibernate: skip dirty checking on flush (significant CPU saving for large entity graphs)
-// 2. JpaTransactionManager: setFlushMode(NEVER/MANUAL) — Hibernate won't flush
+// 2. JpaTransactionManager: sets FlushMode.MANUAL — Hibernate won't auto-flush
 // 3. Some JDBC drivers and connection pools: mark connection read-only
 // 4. PostgreSQL/HAProxy/PgBouncer: routing hint to send to read replica
 
@@ -329,7 +331,8 @@ public Page<UserDTO> findActiveUsers(Pageable pageable) {
 // Hibernate with readOnly skips:
 // - Snapshot comparison (dirty checking) on flush
 // - Entity state tracking for managed entities
-// Benchmark result on 1000-entity transaction: ~35% faster flush phase
+// The saving scales with how many entities the persistence context holds; measure it
+// on your own workload rather than assuming a fixed percentage.
 ```
 
 ### 6.6 TransactionSynchronizationManager — afterCommit
@@ -344,7 +347,7 @@ public User registerUser(RegistrationRequest req) {
 
     // Register a callback to run AFTER this transaction commits
     TransactionSynchronizationManager.registerSynchronization(
-        new TransactionSynchronizationAdapter() {
+        new TransactionSynchronization() {          // all methods have defaults
             @Override
             public void afterCommit() {
                 // DB row is durable here; safe to publish event
@@ -454,14 +457,16 @@ public CompletableFuture<Void> processAsync(Long orderId) {
 
 ```java
 // XA spans multiple resources — DB + JMS broker atomically
-// Spring Boot supports JTA via Atomikos or Bitronix (third-party starters)
+// Spring Boot auto-configures a JtaTransactionManager when a jakarta.transaction.TransactionManager
+// bean is present. That bean comes either from a Jakarta EE container or from a coordinator's own
+// starter (e.g. narayana-spring-boot-starter, or the Atomikos-published starter), which also
+// contributes the XA DataSource and its configuration properties.
 
 @Configuration
 public class JtaConfig {
-    // Spring Boot auto-configures JtaTransactionManager when JTA provider is on classpath
-    // application.properties:
-    // spring.jta.enabled=true
-    // spring.jta.atomikos.datasource.xa-data-source-class-name=org.postgresql.xa.PGXADataSource
+    // The XA DataSource is declared by the coordinator's starter, e.g.
+    // narayana.dbcp.* / the vendor's xa-data-source-class-name property pointing at
+    // org.postgresql.xa.PGXADataSource
 }
 
 @Transactional  // uses JtaTransactionManager — spans DB + JMS atomically
@@ -498,7 +503,7 @@ public void placeOrder(Order order) {
 |---|---|---|
 | REQUIRED | Simple; minimal connection overhead | Inner failure rolls back outer |
 | REQUIRES_NEW | Complete isolation; audit always persists | Two connections held simultaneously; deadlock risk if inner accesses same rows |
-| NESTED | Partial rollback capability; one connection | Only supported by JDBC (not JTA); less known behavior |
+| NESTED | Partial rollback capability; one connection | Savepoint-based: on by default only with DataSourceTransactionManager; JpaTransactionManager and JTA reject it unless nestedTransactionAllowed is switched on |
 | SUPPORTS | Works in and out of tx context | Inconsistent behavior (may or may not be transactional) |
 
 ### Isolation Trade-offs
@@ -546,7 +551,7 @@ public void placeOrder(Order order) {
 **Use NESTED when:**
 - You want partial rollback within a larger operation
 - The sub-operation is optional (email, push notification) and should not fail the main operation
-- NESTED is JDBC-only (DataSourceTransactionManager) — not available with JTA
+- NESTED is savepoint-based and enabled by default only on `DataSourceTransactionManager`. `JpaTransactionManager` ships with `nestedTransactionAllowed=false` (savepoints apply to the JDBC connection, not the persistence context), and JTA has no savepoint concept — both raise `NestedTransactionNotSupportedException`
 
 **Use Saga over XA when:**
 - Services are deployed independently (microservices)
@@ -714,7 +719,7 @@ public void generateReport(Long reportId) {
     reportRepository.saveAndFlush(report); // flush to DB before tx commits
 
     TransactionSynchronizationManager.registerSynchronization(
-        new TransactionSynchronizationAdapter() {
+        new TransactionSynchronization() {
             @Override
             public void afterCommit() {
                 processAsync(reportId); // launched only after outer tx commits
@@ -784,13 +789,13 @@ public class OrderService {
 
 | Tool | Role |
 |---|---|
-| Spring TX 6.x | Core transaction abstraction: PlatformTransactionManager, TransactionTemplate, @Transactional |
+| Spring TX 7.x | Core transaction abstraction: PlatformTransactionManager, TransactionTemplate, @Transactional |
 | Spring AOP | Proxy creation for @Transactional interception |
 | HikariCP | Default connection pool; default max-pool-size=10 (tune for workload) |
-| Atomikos / Bitronix | JTA (XA) transaction coordinator for multi-resource transactions |
-| Narayana | Red Hat JTA implementation; used in Quarkus and WildFly |
+| Narayana | Red Hat JTA implementation; ships its own Spring Boot starter, also used in Quarkus and WildFly |
+| Atomikos | Commercial JTA (XA) coordinator; integrated through the vendor's own Spring Boot starter |
 | P6Spy / datasource-proxy | Logs SQL with parameters and transaction boundaries |
-| Spring Retry | @Retryable for handling ObjectOptimisticLockingFailureException |
+| Spring Framework resilience (`@Retryable`) | Built-in retry for ObjectOptimisticLockingFailureException; enabled with `@EnableResilientMethods` |
 | Testcontainers | Integration tests with real DB; tests actual transaction isolation behavior |
 | Micrometer | Metrics on transaction commit/rollback rates |
 | Zipkin / Jaeger | Distributed tracing that spans transaction boundaries |
@@ -808,9 +813,9 @@ spring.datasource.hikari.connection-timeout=30000
 spring.datasource.hikari.idle-timeout=600000
 spring.datasource.hikari.max-lifetime=1800000
 
-# JTA (Atomikos) — enable only when multi-resource XA is required
-spring.jta.enabled=true
-spring.jta.atomikos.datasource.xa-data-source-class-name=org.postgresql.xa.PGXADataSource
+# JTA — enable only when multi-resource XA is required. Spring Boot picks up a
+# jakarta.transaction.TransactionManager bean contributed by the coordinator's own starter
+# (e.g. narayana-spring-boot-starter); configure the XA DataSource with that starter's properties.
 
 # Transaction logging (debug only)
 logging.level.org.springframework.transaction=DEBUG
@@ -828,10 +833,10 @@ Spring creates a CGLIB (or JDK) proxy around the bean class at ApplicationContex
 Self-invocation occurs when a method in a Spring bean calls another method in the same object using this. The call goes directly to the real object, bypassing the AOP proxy entirely, so any @Transactional annotation on the called method has no effect. Fix options: (A) Extract the called method into a separate Spring bean — cleaner, preferred. (B) Inject the bean into itself using @Autowired @Lazy on the same field, then call via the injected reference (the proxy). (C) Use ApplicationContext.getBean() to retrieve the proxy reference at runtime. (D) Use AspectJ compile-time or load-time weaving instead of Spring AOP proxies — weaving modifies the bytecode directly, so internal calls are intercepted. For most production codebases, option A (extraction) is the right answer.
 
 **Q3: What is the difference between REQUIRES_NEW and NESTED propagation?**
-REQUIRES_NEW suspends the current transaction entirely and starts a completely independent new transaction with its own connection. The inner transaction commits or rolls back independently of the outer. The outer transaction resumes after the inner completes. NESTED creates a savepoint within the current transaction rather than starting a new one. If the nested block rolls back, it rolls back only to the savepoint — the outer transaction remains intact. NESTED uses the same connection and shares the outer transaction, so the inner rollback does not prevent an eventual outer commit. A critical limitation: NESTED requires JDBC savepoint support (works with DataSourceTransactionManager) but is NOT supported by JTA. REQUIRES_NEW works with JTA.
+REQUIRES_NEW suspends the current transaction entirely and starts a completely independent new transaction with its own connection. The inner transaction commits or rolls back independently of the outer. The outer transaction resumes after the inner completes. NESTED creates a savepoint within the current transaction rather than starting a new one. If the nested block rolls back, it rolls back only to the savepoint — the outer transaction remains intact. NESTED uses the same connection and shares the outer transaction, so the inner rollback does not prevent an eventual outer commit. A critical limitation: NESTED requires JDBC savepoint support, which only `DataSourceTransactionManager` enables by default — `JpaTransactionManager` defaults `nestedTransactionAllowed` to false (a savepoint rolls back the connection, not the persistence context) and JTA has no savepoint concept, so both throw `NestedTransactionNotSupportedException`. REQUIRES_NEW works everywhere, including JTA.
 
 **Q4: Why does readOnly=true improve performance and what exactly does it affect?**
-readOnly=true affects three layers. First, Hibernate: it sets FlushMode.NEVER on the session, skipping dirty checking entirely on flush — this avoids the per-entity snapshot comparison that normally runs before every commit. For a transaction loading 500 entities, dirty checking can be a significant CPU cost. Second, the JDBC driver: many drivers propagate Connection.setReadOnly(true) to the DB, which may disable certain lock acquisitions. Third, at the infrastructure level: PostgreSQL and some connection pool proxies (like PgBouncer in replica mode or AWS RDS Proxy) use the read-only hint to route the connection to a read replica. The hint is not a guarantee — a developer calling save() inside a readOnly transaction will likely get an exception from Hibernate, which is the intended behavior.
+readOnly=true affects three layers. First, Hibernate: it sets FlushMode.MANUAL on the session, skipping dirty checking entirely on flush — this avoids the per-entity snapshot comparison that normally runs before every commit. For a transaction loading 500 entities, dirty checking can be a significant CPU cost. Second, the JDBC driver: many drivers propagate Connection.setReadOnly(true) to the DB, which may disable certain lock acquisitions. Third, at the infrastructure level: PostgreSQL and some connection pool proxies (like PgBouncer in replica mode or AWS RDS Proxy) use the read-only hint to route the connection to a read replica. The hint is not a guarantee — a developer calling save() inside a readOnly transaction will likely get an exception from Hibernate, which is the intended behavior.
 
 **Q5: By default, which exceptions trigger a rollback in @Transactional?**
 By default, Spring rolls back for RuntimeException (and its subclasses) and java.lang.Error. Checked exceptions (those that extend Exception but not RuntimeException) do NOT trigger rollback by default. This default was inherited from EJB semantics and reflects the philosophy that checked exceptions represent expected business conditions, not unexpected failures. In practice, this default is dangerous for business operations. The safer pattern is to declare rollbackFor = Exception.class on any service method that performs multiple DB writes, ensuring that ANY exception — including checked ones from third-party libraries — triggers a rollback.
@@ -861,13 +866,13 @@ The Outbox Pattern solves the dual-write problem: you need to write to the DB an
 @Async causes the method to run in a separate thread pool thread, completely disconnecting from the caller's thread and its transaction context. Spring's transaction infrastructure uses ThreadLocal to bind transaction state to the current thread. When @Async spawns a new thread, the new thread has no transaction bound to it. If the async method also has @Transactional, Spring starts a NEW transaction on the async thread (Propagation.REQUIRED → no existing tx → create new). This new transaction is completely independent of the caller's. The implication: data written in the caller's uncommitted transaction is NOT visible to the async thread until it commits. This creates a race condition if the async method reads data the caller just wrote.
 
 **Q14: How do isolation levels map to database locking behavior in PostgreSQL?**
-PostgreSQL uses MVCC (Multi-Version Concurrency Control) rather than read locks. READ_UNCOMMITTED behaves the same as READ_COMMITTED in PostgreSQL — the engine never returns dirty reads. READ_COMMITTED (default) takes a new snapshot at the start of each statement; non-repeatable reads are possible. REPEATABLE_READ takes a snapshot at transaction start; the same query returns identical results within the transaction; phantom reads on aggregate queries are still theoretically possible but rare in MVCC. SERIALIZABLE uses Serializable Snapshot Isolation (SSI) — no locks for reads, but tracks read/write dependencies and aborts transactions with serialization conflicts. PostgreSQL's implementation means SERIALIZABLE has less throughput impact than traditional range-locking databases, but serialization failures (40001 error code) must be handled with retry logic.
+PostgreSQL uses MVCC (Multi-Version Concurrency Control) rather than read locks. READ_UNCOMMITTED behaves the same as READ_COMMITTED in PostgreSQL — the engine never returns dirty reads. READ_COMMITTED (default) takes a new snapshot at the start of each statement; non-repeatable reads are possible. REPEATABLE_READ takes a snapshot at transaction start; the same query returns identical results within the transaction, and PostgreSQL's implementation is stronger than the SQL standard requires — it prevents phantom reads outright, leaving only serialization anomalies. SERIALIZABLE uses Serializable Snapshot Isolation (SSI) — no locks for reads, but tracks read/write dependencies and aborts transactions with serialization conflicts. PostgreSQL's implementation means SERIALIZABLE has less throughput impact than traditional range-locking databases, but serialization failures (40001 error code) must be handled with retry logic.
 
 **Q15: How do you test transaction boundaries and rollback behavior in Spring Boot tests?**
 Use @DataJpaTest or @SpringBootTest with a real database (Testcontainers). @Transactional on the test class wraps each test in a transaction that rolls back at the end, keeping tests isolated. To test rollback behavior: remove @Transactional from the test, call the service method that should roll back, then assert the DB state using a separate non-transactional read. For testing REQUIRES_NEW (inner tx must persist even if outer rolls back), use TestTransaction.flagForRollback() programmatically. For testing afterCommit callbacks, use a TransactionSynchronizationManager test spy or verify side effects (events fired, emails sent). Testing with embedded H2 misses PostgreSQL-specific isolation behaviors — always run isolation tests against a real Postgres instance via Testcontainers.
 
 **Q16: Explain a scenario where a deadlock can occur in Spring transactions and how to prevent it.**
-Classic deadlock scenario: Thread A holds a lock on Row 1 and waits for Row 2. Thread B holds a lock on Row 2 and waits for Row 1. Both wait forever. In Spring: if two concurrent REQUIRES_NEW transactions update the same rows in different order, a deadlock is possible. For example, TransferService.transfer(A→B) locks account A then B; simultaneously, TransferService.transfer(B→A) locks account B then A — deadlock. Prevention strategies: (A) consistent lock ordering — always acquire locks in the same order (e.g., by ascending account ID). (B) timeout: spring.jpa.properties.javax.persistence.lock.timeout=5000 (ms) — Hibernate throws LockTimeoutException instead of waiting indefinitely. (C) reduce lock scope: use optimistic locking with @Version to avoid DB locks entirely at low contention. (D) narrow the transaction: hold the pessimistic lock for the shortest time possible.
+Classic deadlock scenario: Thread A holds a lock on Row 1 and waits for Row 2. Thread B holds a lock on Row 2 and waits for Row 1. Both wait forever. In Spring: if two concurrent REQUIRES_NEW transactions update the same rows in different order, a deadlock is possible. For example, TransferService.transfer(A→B) locks account A then B; simultaneously, TransferService.transfer(B→A) locks account B then A — deadlock. Prevention strategies: (A) consistent lock ordering — always acquire locks in the same order (e.g., by ascending account ID). (B) timeout: spring.jpa.properties.jakarta.persistence.lock.timeout=5000 (ms) — Hibernate throws LockTimeoutException instead of waiting indefinitely. (C) reduce lock scope: use optimistic locking with @Version to avoid DB locks entirely at low contention. (D) narrow the transaction: hold the pessimistic lock for the shortest time possible.
 
 **Q17: What is the difference between JDBC transaction management and JPA transaction management in Spring?**
 DataSourceTransactionManager manages raw JDBC transactions: it sets connection.setAutoCommit(false), binds the connection to the thread via TransactionSynchronizationManager, and calls connection.commit() or connection.rollback(). It knows nothing about entities or persistence contexts. JpaTransactionManager extends DataSourceTransactionManager and adds JPA lifecycle management: it creates and binds an EntityManager to the thread, integrates Hibernate session flushing into the commit phase, and manages the persistence context lifecycle. If you use Spring Data JPA repositories, JpaTransactionManager is required — repositories need a bound EntityManager. If you mix JDBC templates with JPA in the same transaction, JpaTransactionManager handles both by exposing the underlying connection to JdbcTemplate via DataSourceUtils.
@@ -978,8 +983,9 @@ public class Account {
     private BigDecimal balance;
 }
 
-@Retryable(value = ObjectOptimisticLockingFailureException.class, maxAttempts = 3,
-           backoff = @Backoff(delay = 50, multiplier = 2))
+// Spring Framework's built-in retry; the @Configuration class carries @EnableResilientMethods
+@Retryable(value = ObjectOptimisticLockingFailureException.class, maxRetries = 2,
+           delay = 50, multiplier = 2)
 @Transactional
 public void debit(Long accountId, BigDecimal amount) {
     Account account = accountRepository.findById(accountId).orElseThrow();
@@ -1122,12 +1128,13 @@ public class SettlementService {
 // Publish to outbox table inside tx, then poll and publish to Kafka separately
 ```
 
-**BROKEN→FIX: REQUIRES_NEW audit creates phantom reads under SERIALIZABLE**
+**BROKEN→FIX: a REQUIRES_NEW audit reads stale balances because it cannot see the suspended transaction**
 
 ```java
-// BROKEN: AuditService uses REQUIRES_NEW → suspends outer tx
-// Under SERIALIZABLE isolation, the newly started tx sees committed data
-// that the outer (suspended) tx hasn't committed — phantom read risk
+// BROKEN: AuditService uses REQUIRES_NEW → suspends the outer tx and starts an
+// independent one, which by definition cannot see the outer tx's uncommitted writes.
+// The audit therefore records the PRE-settlement balance, not the settled one.
+// Raising isolation does not help; it makes the stale snapshot stricter, not fresher.
 @Transactional(propagation = Propagation.REQUIRES_NEW, isolation = Isolation.SERIALIZABLE)
 public void auditSettlement(Payment p) {
     // reads accounts that the suspended tx hasn't committed yet
@@ -1167,8 +1174,8 @@ public class Account {
     }
 }
 
-// Caller retries on OptimisticLockException (Spring Retry or @Retryable)
-@Retryable(value = ObjectOptimisticLockingFailureException.class, maxAttempts = 3)
+// Caller retries on OptimisticLockException (Spring Framework's @Retryable + @EnableResilientMethods)
+@Retryable(value = ObjectOptimisticLockingFailureException.class, maxRetries = 2)
 public SettlementResult settle(Payment p) { ... }
 ```
 
@@ -1178,7 +1185,7 @@ public SettlementResult settle(Payment p) { ... }
 |---|---|---|
 | Debit/credit | READ_COMMITTED (default) | Sees committed balances; performance |
 | Balance check for approval | REPEATABLE_READ | Re-read must see same balance within single tx |
-| Settlement audit query | READ_UNCOMMITTED | Read-only report; dirty reads acceptable |
+| Settlement audit query | READ_COMMITTED + readOnly | Read-only report; on PostgreSQL READ_UNCOMMITTED is silently treated as READ_COMMITTED, so asking for it buys nothing |
 | Idempotency check | SERIALIZABLE | Must not allow two concurrent new records for same payment_id |
 
 **Metrics and results:**
@@ -1196,7 +1203,7 @@ public SettlementResult settle(Payment p) { ... }
 
 **How do you handle a Kafka publish failure in the outbox poller?** The `publish()` method runs in `REQUIRES_NEW`. If `kafka.send().get()` throws, the transaction rolls back — the outbox row stays `PENDING`. The next poll cycle retries it. After N retries (configurable), move the row to a `DEAD_LETTER` table and alert ops. This gives you exactly-once delivery semantics on the DB side with at-least-once on Kafka (consumers must be idempotent).
 
-**When should you use REQUIRES_NEW vs NESTED propagation?** `REQUIRES_NEW` suspends the current transaction and starts a completely independent one — fully isolated, commits and rolls back independently. Use for audit writes that must persist even if the outer tx rolls back. `NESTED` uses a savepoint within the current transaction — rolls back to the savepoint on failure but the outer tx can still commit. Use when you want partial rollback within one transaction (e.g., retry a sub-step without losing all prior work). Postgres supports `NESTED` (via savepoints); not all databases do.
+**When should you use REQUIRES_NEW vs NESTED propagation?** `REQUIRES_NEW` suspends the current transaction and starts a completely independent one — fully isolated, commits and rolls back independently. Use for audit writes that must persist even if the outer tx rolls back. `NESTED` uses a savepoint within the current transaction — rolls back to the savepoint on failure but the outer tx can still commit. Use when you want partial rollback within one transaction (e.g., retry a sub-step without losing all prior work). Postgres supports savepoints, but the gate is the transaction manager: `DataSourceTransactionManager` allows nesting by default, `JpaTransactionManager` does not until you set `nestedTransactionAllowed=true`, and JTA never does.
 
 **What is the risk of REQUIRES_NEW with high transaction volume?** Each `REQUIRES_NEW` opens a new connection from the pool. If 80 settlement threads each fire a `REQUIRES_NEW` audit, that's 160 total connections — doubling HikariCP pool pressure. Size the pool accounting for nested transactions, or use `@TransactionalEventListener(AFTER_COMMIT)` which runs after the outer connection is released.
 
