@@ -919,51 +919,83 @@ public class RateLimitService {
 ## 12. Interview Questions with Answers
 
 **Q: What is the boundary burst problem with fixed window counters and how do sliding windows solve it?**
+**Short:** A fixed window counter lets clients double their limit by bursting requests across the window boundary.
+
 A fixed window counter lets a client extract `2 * limit` requests in a very short span by straddling the window boundary. It sends `limit` requests in the last millisecond of one window and `limit` more in the first millisecond of the next, because the counter resets hard at the boundary. A sliding window tracks requests over a rolling window ending at the current moment, so the window always contains at most `limit` requests in the most recent `windowSize` duration, regardless of where the clock boundary falls.
 
 **Q: Explain the token bucket algorithm. How does it differ from a leaky bucket?**
+**Short:** Token bucket allows bursts up to capacity at a fixed refill rate; leaky bucket smooths output to a constant rate.
+
 The token bucket accumulates tokens at a fixed rate up to a maximum capacity. Each request consumes one or more tokens. Requests are allowed when tokens are available and rejected when the bucket is empty. This allows bursts up to the bucket capacity while enforcing a long-run average equal to the refill rate. The leaky bucket processes requests at a constant outflow rate regardless of input rate — it does not allow bursts, it smooths them by queueing. Token bucket: variable output, constant average, burst-friendly. Leaky bucket: constant output, no burst, smoothing-focused.
 
 **Q: How do you implement atomic rate limiting in Redis without race conditions?**
+**Short:** Wrap the check-and-update logic in a single atomic Redis Lua script to eliminate race conditions.
+
 Use a Lua script. Redis executes Lua scripts atomically in a single-threaded manner, making the entire check-and-update a single uninterruptible operation. The alternative is Redis transactions (`MULTI/EXEC`), but they do not prevent other clients from modifying keys between `WATCH` and `EXEC`, requiring retry logic. Lua scripts are the correct approach: wrap `ZREMRANGEBYSCORE`, `ZCARD`, `ZADD`, and `PEXPIRE` in a single Lua script loaded with `SCRIPT LOAD` and called with `EVALSHA`.
 
 **Q: Why is rate limiting by IP address problematic for enterprise customers?**
+**Short:** Per-IP limits punish an entire enterprise sharing one NAT IP; rate limit by API key or user ID instead.
+
 Enterprise customers often have hundreds or thousands of employees behind a shared corporate NAT or proxy, meaning all their traffic originates from a single public IP address. Applying per-IP rate limits treats the entire enterprise as a single user. The correct approach is to rate limit by API key or authenticated user ID for all authenticated traffic, and only fall back to IP-based limiting for unauthenticated endpoints as a DDoS backstop.
 
 **Q: What rate limit response headers should you return and what do each mean?**
+**Short:** Return X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, and Retry-After on every 429 response.
+
 `X-RateLimit-Limit`: the maximum requests allowed in the window. `X-RateLimit-Remaining`: how many requests the client can still make in the current window. `X-RateLimit-Reset`: Unix timestamp when the window resets and the full limit is available again. `Retry-After`: on a 429 response, the number of seconds the client must wait before retrying. These headers allow well-behaved clients to pre-emptively back off before exhausting their limit and to retry at exactly the right time rather than polling.
 
 **Q: How would you rate limit a GraphQL API where requests have variable cost?**
+**Short:** Assign each GraphQL field a cost and cap total cost points per window instead of counting raw requests.
+
 Assign a cost to each field and operation based on complexity (number of database queries it triggers, depth of nested resolvers, number of objects returned). Limit by total cost points per window rather than by request count. For example, a simple field lookup costs 1 point; a paginated list query costs 10 points per page; a query that fetches nested relationships costs multiplicatively. A client with a budget of 1,000 points per minute can make many simple queries but only a few complex ones. GitHub's GraphQL API uses this exact approach.
 
 **Q: What is the sliding window counter approximation and what is its error bound?**
+**Short:** It estimates the current rate from two adjacent fixed windows, discounting the prior one by its remaining overlap.
+
 It approximates a sliding window from two adjacent fixed-window counters, discounting the previous one by how much of it still overlaps. The formula is `estimated = prev_count * (1 - elapsed_fraction) + curr_count`, where `elapsed_fraction` is how far through the current window you are. The error comes entirely from assuming the previous window's traffic was spread evenly across it, and it over-counts when that traffic was front-loaded — so the limiter errs toward failing closed, the right direction. The only large-scale published measurement is Cloudflare's: across 400 million requests, 0.003% were wrongly allowed or wrongly limited, with an average 6% gap between the real rate and the approximated one.
 
 **Q: How does Google's adaptive throttling work and why is it superior to static rate limiting for preventing cascading failures?**
+**Short:** Clients throttle themselves based on their own request-to-accept ratio, stopping retry storms before overload.
+
 Google's adaptive throttling tracks requests and accepts on the client side. The client probabilistically skips sending requests when `throttle_probability = max(0, (requests - K * accepts) / (requests + 1))` is high. When the server starts rejecting requests, the client automatically reduces its send rate proportionally — before the server is overwhelmed with retries. Static server-side rate limiting returns 429 errors, which well-behaved clients retry after a delay. Adaptive throttling prevents the retry storm itself: clients that are already seeing rejections do not send new requests, reducing load automatically.
 
 **Q: How do you handle rate limiting for long-polling or streaming connections?**
+**Short:** Rate limit long-lived connections by bandwidth, concurrent count, or events per second, not request count.
+
 Standard request count rate limiting does not work well for long-lived connections. Instead, rate limit by bandwidth (bytes per second), by number of concurrent connections per identity, or by the number of events emitted per second. For WebSocket connections, rate limit the initial handshake (connection rate limiting) and then rate limit messages within the connection. A client that maintains 100 WebSocket connections to circumvent per-connection rate limits should be detected and limited at the identity level by tracking total concurrent connections per API key.
 
 **Q: What is the difference between rate limiting and throttling?**
+**Short:** Rate limiting hard-rejects requests past a cap; throttling delays them instead of dropping them.
+
 Rate limiting enforces a hard cap: once the limit is exceeded, requests are rejected with a 429. Throttling slows requests down: it artificially delays processing (e.g., sleeping before processing) to stay within capacity. Rate limiting is more common for API quotas because it is simple and deterministic for clients. Throttling is used in queue-based systems and leaky bucket implementations where requests are deferred rather than dropped. In practice, the terms are often used interchangeably in API contexts.
 
 **Q: How would you implement rate limiting across multiple data centers without requiring cross-DC synchronization on every request?**
+**Short:** Enforce a local share of the global limit per data center and periodically resync counts across regions.
+
 Use a two-level approach: a local Redis cluster per data center enforces a fraction of the total limit (`total_limit / num_datacenters`). Each data center enforces its local fraction without cross-DC calls. Periodically synchronize counts across data centers (every 5–10 seconds) to rebalance. This means clients can exceed the global limit by up to `(N-1) / N * limit` in the worst case during a synchronization interval, but eliminates cross-DC latency on every request. Cloudflare has published the edge version of this tradeoff: it keeps an isolated counting system inside each PoP rather than reporting every counter to one central service, because a central counter cannot meet edge latency and availability requirements — and it accepts the consequence that traffic spread across many data centers can stay under the per-data-center threshold while exceeding the aggregate.
 
 **Q: What happens to your rate limiter when Redis is unavailable?**
+**Short:** Fail open for authenticated traffic and fail closed for unauthenticated endpoints when Redis is down.
+
 You must decide: fail open (allow all requests when Redis is down) or fail closed (reject all requests when Redis is down). Fail open is typically correct for API rate limiting: a brief Redis outage should not take down the entire API. However, fail open during an extended outage may allow abuse. A good compromise: fail open for authenticated users (who have agreed to terms of service) and fail closed for unauthenticated endpoints (to prevent DDoS amplification during outages). Always alert immediately when Redis is unreachable so the outage is detected quickly.
 
 **Q: What happens when clients ignore Retry-After and retry with a fixed delay?**
+**Short:** Fixed-delay retries synchronize into a wave that reamplifies load; add jitter on top of Retry-After.
+
 Fixed-delay retries synchronize into a wave, so every throttled client hammers the API again at the same instant instead of spreading their retries out. A mobile application that retried exactly 1 second after every 429 added 20 to 30 percent extra load on top of organic traffic, pushing more clients into the rate-limited state and triggering more retries in a self-reinforcing feedback loop. The retry storm can end up costing more capacity than the traffic spike that triggered throttling in the first place. Parse the `Retry-After` header and add random jitter — wait the specified duration plus a random 0 to 10 seconds — instead of retrying on a fixed schedule.
 
 **Q: Why is observability critical for a rate limiter, and what should you alert on?**
+**Short:** Without a rejection-rate alert, a misconfigured tier limit can silently break a paying customer for weeks.
+
 Without metrics on rejections, a misconfigured or wrong-tier rate limit can silently fail a paying customer for weeks before anyone notices. One team only discovered that an enterprise account had been mistakenly capped at the free tier's limit after the customer complained — three weeks of intermittent failures had gone unnoticed because no alert existed for elevated 429 rates on a single client. Rate limit rejections are a signal worth watching in their own right, not just an error code to return: a spike can mean misconfiguration, an abusive client, or a legitimate customer who needs to upgrade tiers. Emit a `rate_limit.rejected` metric tagged by tier, endpoint, and client ID, and alert when any single client is rejected more than 5 percent of the time within a 5-minute window.
 
 **Q: How can clock skew between data centers break a fixed-window rate limiter?**
+**Short:** A few seconds of clock skew between data centers can double a fixed window's effective limit at the boundary.
+
 A fixed window counter keyed by a rounded timestamp assigns requests to the wrong window whenever two data centers' clocks disagree, doubling the effective burst at the boundary. One team saw a 3-second clock skew between two data center clocks cause requests near a minute boundary to land in different windows depending on which data center happened to serve them, doubling the effective limit for clients whose requests split across both. Application server clocks are not reliably synchronized enough for window boundaries that matter, especially across regions. Use Redis's own `TIME` command as the authoritative clock inside the Lua script rather than trusting each application server's local clock.
 
 **Q: Why can a leaky bucket rate limiter make latency worse instead of smoothing it?**
+**Short:** A leaky bucket queue deeper than the caller's timeout wastes capacity on requests that time out anyway.
+
 If the bucket's queue is deeper than the caller's own timeout allows, requests get queued, wait, and time out anyway — wasting a slot on a request that never completes. A queue tuned for a 50 requests-per-second outflow rate could make requests wait up to 4 seconds under a 200-request burst, but if the calling HTTP client has only a 2-second timeout, those requests are "successfully" queued yet still fail from the caller's perspective. This is worse than rejecting immediately, because the request consumed capacity and added latency without ever producing a usable response. Size queue depth as `outflow_rate * max_acceptable_wait_seconds` and reject with a 429 immediately once the queue is full instead of queuing indefinitely.
 
 ---

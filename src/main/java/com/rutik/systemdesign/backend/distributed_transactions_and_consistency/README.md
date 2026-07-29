@@ -953,48 +953,78 @@ Fix: transactional inbox (idempotency key insert before processing). All saga co
 ## 12. Interview Questions with Answers
 
 **Q1: What is the blocking problem in 2PC and why does it make 2PC unsuitable for microservices?**
+**Short:** A prepared 2PC participant must hold its locks until the coordinator decides, so a coordinator crash blocks other transactions indefinitely.
+
 In 2PC, once a participant votes `VOTE_COMMIT`, it cannot unilaterally abort — it must hold all its locks until it hears the coordinator's decision. If the coordinator crashes after the prepare phase, every prepared participant stays uncertain — unable to commit or abort, holding locks that block other transactions — until the coordinator or its durable decision log comes back, or until a peer that already knows the outcome can tell it. In a microservices environment, services are independently deployable and may use different datastores that do not expose an XA interface. The coordinator is a single point of failure, network partitions can leave participants waiting for minutes, and lock hold times across network round-trips degrade throughput unacceptably for most SLAs.
 
 **Q2: How does the saga pattern achieve atomicity without distributed locking?**
+**Short:** A saga chains local ACID transactions with compensating transactions to undo prior steps on failure, sacrificing isolation instead of locking.
+
 A saga replaces distributed atomic commits with a sequence of local transactions and compensating transactions. Each service performs an ACID local transaction and publishes an event or responds to a command. If any step fails, all previously completed steps are reversed by executing their compensating transactions in reverse order. There are no distributed locks; intermediate states are visible (sacrificing isolation), and compensating transactions must be idempotent to handle retries. The guarantee achieved is ACD — Atomicity, Consistency and Durability, with Isolation dropped.
 
 **Q3: What is the difference between choreography and orchestration sagas? When would you choose each?**
+**Short:** Choreography suits simple linear flows via events, while orchestration suits complex branching workflows via a central state machine.
+
 In a choreography saga, each service reacts to domain events published by the previous step, with no central coordinator. The workflow emerges from event subscriptions. In an orchestration saga, a central orchestrator explicitly sends commands to each service and receives replies, maintaining the workflow state in a persistent state machine. Choreography favors loose coupling and suits simpler linear flows with 3–4 steps. Orchestration suits complex workflows with many branches, conditional paths, and compensation sequences, because all business logic is in one place and much easier to debug and monitor. That is why complex payment and order-fulfillment workflows usually end up orchestrated — and why AWS Prescriptive Guidance publishes saga *orchestration* (on Step Functions) as its reference pattern for transactions spanning several service-owned databases.
 
 **Q4: Why is dual write dangerous and how does the transactional outbox pattern solve it?**
+**Short:** The outbox pattern writes the entity and its event in one local transaction, avoiding the inconsistency a crash between two separate writes causes.
+
 Dual write means writing to a database and publishing to a message broker in two separate operations. Any crash between them leaves the two systems inconsistent — the DB committed but the event never published, or the event was published but the DB write was rolled back. The outbox pattern solves this by writing both the domain entity and an `outbox_events` record in a single local ACID database transaction. A separate relay process reads the unpublished outbox records and publishes them to the broker, then marks them published. Because the relay publishes at-least-once and consumers are idempotent, the system achieves effectively-once processing: delivery is still at-least-once, but each event's effect is applied exactly once.
 
 **Q5: What is Change Data Capture (CDC) and how does Debezium work?**
+**Short:** Debezium tails a database's WAL or binlog to publish row-level changes to Kafka, avoiding the need to poll an outbox table.
+
 CDC captures every insert, update, and delete from a database by tailing its write-ahead log or binary log — the same log the database uses for replication. Debezium connects as a logical replication client to PostgreSQL — using `pgoutput`, which PostgreSQL 10+ ships natively, or the Protobuf-emitting `decoderbufs` plugin — or as a binlog consumer for MySQL. It reads row-level change events and publishes them to Kafka topics. This means applications do not need to poll an outbox table; Debezium sees each change as the WAL is decoded, so end-to-end lag is bounded by flush plus network rather than by a poll interval. It requires no application code changes for the outbox emit step — only the outbox table structure matters.
 
 **Q6: What makes a compensating transaction "approximately correct" rather than a true rollback?**
+**Short:** A compensating transaction reverses business effect with a new forward operation, but some side effects like a sent email cannot truly be undone.
+
 A true database rollback is a physical undo: the exact bytes written are removed, as if the operation never happened. A compensating transaction is a new forward operation with the opposite business effect. "Approximately correct" means the end business state is acceptable, but some side effects cannot be reversed. For example, if step 3 sent a confirmation email to a customer and step 4 fails, the compensation cannot "un-send" the email. The order is cancelled (compensated at the DB level), but the customer received a confirmation that is now incorrect. The business must decide whether to send a follow-up cancellation email or accept the inconsistency. Compensation design must explicitly document these irreversible side effects.
 
 **Q7: What are idempotency keys and how should they be scoped and expired?**
+**Short:** An idempotency key deduplicates retries by returning the original response, scoped per operation type with an expiry matching the retry window.
+
 An idempotency key is a client-generated unique identifier (typically UUID v4) attached to a mutating request. The server uses this key to detect and deduplicate retries, returning the original response without reprocessing. Keys should be scoped per operation type (not reused across different endpoint types). They should be stored with the operation's result in a single atomic transaction. Expiry should match the retry window: 24 hours for payment APIs (matching typical client retry timeouts), 7 days for long-running workflows. After expiry, the same key can be used for a genuinely new request. Keys stored without TTL cause unbounded table growth.
 
 **Q8: What is the difference between at-least-once, at-most-once, and exactly-once delivery, and how do you achieve each in Kafka?**
+**Short:** Kafka achieves exactly-once internally via idempotent producers and transactions, but exactly-once with external systems needs a transactional inbox.
+
 At-most-once delivery means messages may be lost but are never duplicated; achieved by committing consumer offsets before processing (`enable.auto.commit=true` with short intervals, or manual pre-processing commit). At-least-once means messages are never lost but may be duplicated; achieved with `acks=all`, `retries=MAX_INT`, and committing offsets only after successful processing. Exactly-once within Kafka is achieved with idempotent producers (`enable.idempotence=true` — enabled by default since Kafka 3.0 when no conflicting config is set; it stamps a producer ID and per-partition sequence number so the broker discards a retried duplicate) and Kafka transactions (`transactional.id`, `isolation.level=read_committed`). End-to-end exactly-once with external systems (databases) requires the transactional inbox pattern because Kafka transactions do not span external systems.
 
 **Q9: How do you handle a saga that is stuck in the compensating state?**
+**Short:** Alert on sagas stuck compensating past a threshold, give operators a console to retry or mark FAILED, and never silently drop compensation failures.
+
 First, all compensation commands must be sent to queues with configured dead-letter queues (DLQs) and retry policies (exponential backoff with max retries). A scheduled monitoring job should query for sagas in COMPENSATING state for longer than a threshold (e.g., 30 minutes) and alert an oncall engineer. The system should provide an operator console to manually trigger individual compensation commands or mark a saga as FAILED after human review. For truly unrecoverable compensations (downstream service permanently gone), the saga is marked FAILED with audit trail, and a data reconciliation report is generated for manual resolution. The key principle: never silently drop compensation failures.
 
 **Q10: What is causal consistency and when is it not sufficient?**
+**Short:** Causal consistency orders only dependent operations, so it cannot reconcile concurrent independent writes needing a global total order.
+
 Causal consistency guarantees that if operation B is causally dependent on operation A (B happened after A, and B's author saw A's result), then all observers see A before B. It is not sufficient when independent concurrent writes must be reconciled — causal consistency does not impose an order on causally unrelated operations. Example: if user A and user B both independently update their profile photos at the same time, causal consistency does not guarantee all nodes see these updates in the same order. For applications requiring a global total order of operations (financial ledgers, counter increments), linearizability or sequential consistency is required, at higher latency cost.
 
 **Q11: How does the transactional inbox prevent double-processing in a Kafka consumer?**
+**Short:** The consumer inserts the message key into an inbox table alongside the business write in one transaction, so redeliveries hit a unique-constraint skip.
+
 The consumer inserts the message's idempotency key into an `inbox_events` table inside the same transaction as the business write, so a redelivery hits the unique constraint and is skipped. The key is derived from topic + partition + offset. If the insert succeeds and the business operation succeeds, both commit atomically. If the message is redelivered (consumer rebalance, retry), the insert fails with a unique constraint violation; the consumer catches this exception and skips processing. Because the inbox insert and business operation are in the same local transaction, there is no window where one can commit without the other.
 
 **Q12: Why are sagas described as ACD, and how do microservices deal with their lack of isolation?**
+**Short:** Sagas keep Atomicity, Consistency and Durability but expose intermediate state, so services use semantic locking or optimistic versioning to compensate for lost isolation.
+
 Sagas are called ACD because they keep Atomicity, Consistency and Durability but drop Isolation. Each step is a local transaction that commits immediately, so intermediate state is visible to other requests before the saga finishes. Unlike a database transaction running at SERIALIZABLE isolation, there is no saga-level isolation. This creates anomalies: a second request might read the inventory reservation made in step 2 of a saga, but the saga later compensates step 2 (reverses the reservation). The second request made a decision based on state that no longer exists — a "dirty read" at the saga level. Mitigations include: semantic locking (reserving records with a PENDING status that other operations treat as unavailable), optimistic locking with version numbers, and commutative operations that are safe to reorder.
 
 **Q13: Compare the operational complexity of Debezium CDC outbox vs. polling outbox.**
+**Short:** Polling outbox needs only a scheduled job, while Debezium CDC needs Kafka Connect infrastructure but removes the poll interval from latency.
+
 The polling outbox is simpler to operate: one scheduled job, no external infrastructure beyond the existing DB and broker. It introduces polling latency (500ms to 5s typical), load on the DB with repeated queries, and potential for stale reads if the partial index is not properly maintained. Debezium CDC requires Kafka Connect infrastructure (at least 3 nodes for production HA), connector management, schema registry for Avro/Protobuf serialization, WAL retention configuration (PostgreSQL `wal_level=logical`, `max_replication_slots`, `max_wal_senders`), and slot lag monitoring (unbounded WAL growth if the slot consumer falls behind). In exchange, Debezium removes the poll interval from the latency budget entirely, adds no polling load on the DB, and supports any table change not just the outbox. Choose polling for simplicity and low volume; choose CDC for latency-sensitive, high-volume, or multi-table change capture.
 
 **Q14: What is semantic locking in the context of sagas, and give a concrete example?**
+**Short:** Semantic locking marks a record with a pending status field so concurrent sagas treat it as unavailable without a database-level lock.
+
 Semantic locking is an application-level lock that signals to other transactions that a record is in a pending state as part of an in-flight saga. Unlike a database lock, it is implemented by setting a status field. For example, when a saga begins an inventory reservation, the inventory record is set to `status = PENDING_RESERVATION`. Other sagas or queries that attempt to reserve the same inventory check for this status and either wait (polling) or fail fast (return "temporarily unavailable"). When the saga completes or compensates, the status changes to `RESERVED` or `AVAILABLE`. This prevents concurrent sagas from operating on the same resource simultaneously without database-level locking.
 
 **Q15: What happens to in-flight sagas during a rolling deployment of the orchestrator service?**
+**Short:** A stateless orchestrator survives a rolling deployment safely, since any instance can resume a saga by reading its persisted state.
+
 If the orchestrator is stateless (saga state persisted entirely in the database), a rolling deployment is safe: new orchestrator instances pick up saga processing by reading state from the DB. The key requirements are: (1) saga state transitions must be optimistically locked (version column) to prevent two instances from processing the same saga concurrently during overlap, (2) all commands and events must carry the saga ID so any orchestrator instance can handle replies, (3) idempotency keys prevent duplicate command dispatch if a timeout triggers a retry and a new instance also attempts the same step. Frameworks like Temporal handle this with native workflow state management and versioning to support backward-compatible changes to running workflow logic.
 
 ---

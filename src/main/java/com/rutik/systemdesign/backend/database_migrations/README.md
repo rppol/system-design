@@ -420,51 +420,83 @@ void v15MigrationAddsPhoneNumberColumn() {
 ## 12. Interview Questions with Answers
 
 **Q: What is the expand-contract pattern for zero-downtime migrations?**
+**Short:** Expand-contract adds the new schema alongside the old, backfills, then removes the old only once nothing depends on it.
+
 Expand-contract (also called parallel change) is a three-phase approach: (1) Expand: add the new schema element (new column, table) while keeping the old. Deploy code that writes to both. (2) Migrate: backfill existing data to the new schema. (3) Contract: deploy code that reads/writes only the new schema; remove the old schema. This ensures that at every point, both the old and new application code can function correctly. It eliminates the race condition where a migration removes a column before all instances of the old code are updated.
 
 **Q: How does Flyway track which migrations have been applied?**
+**Short:** Flyway records each applied migration's version, checksum, and status in a flyway_schema_history table.
+
 Flyway maintains a `flyway_schema_history` table in the target database. Each row records: version number, description, script filename, checksum (SHA-256 of the file content), whether it succeeded, and the timestamp. On application startup, Flyway reads this table, compares against the available migration files, and applies any pending migrations in version order. If a migration file's checksum does not match the stored checksum, Flyway throws an error — preventing silent script modifications.
 
 **Q: What is CREATE INDEX CONCURRENTLY and when must you use it?**
+**Short:** CREATE INDEX CONCURRENTLY builds an index without an exclusive lock, essential on busy production tables to avoid blocking writes.
+
 `CREATE INDEX CONCURRENTLY` builds an index without taking an exclusive table lock. It performs multiple passes: first scan creates the index structure without blocking writes; subsequent passes catch up with changes made during the first scan. The downside: takes significantly longer than regular CREATE INDEX. Always use CONCURRENTLY for adding indexes to production tables with significant write traffic — a regular CREATE INDEX on a busy table blocks all writes until the index builds, potentially causing timeouts and cascading failures.
 
 **Q: How do you handle a migration that fails in production?**
+**Short:** Repair the failed history entry, revert any partial change manually, and ship the fix as a new migration version, never editing the failed one.
+
 (1) Flyway marks failed migrations as failed in the history table. The application will not start until the migration is repaired. (2) Fix the issue: if the migration partially applied, manually revert the partial change and mark it repaired (`flyway repair`). (3) Create a corrected migration with a new version number (do NOT modify the failed migration file — its checksum is tracked). (4) In testing environments: `flyway clean` + remigrate is acceptable; never run `flyway clean` in production (drops all tables).
 
 **Q: What is the difference between Flyway's versioned and repeatable migrations?**
+**Short:** Versioned migrations run once in order, while repeatable migrations re-run whenever their checksum changes.
+
 Versioned migrations (V1__, V2__) are applied once, in order, and never re-applied. Repeatable migrations (R__views.sql) are re-applied whenever their checksum changes. Use repeatable for database objects that should always reflect their latest definition: views, stored procedures, functions, and seed data. Every time R__views.sql changes, Flyway re-runs it, replacing the previous version of the views.
 
 **Q: How do you safely add a NOT NULL column to a large table?**
+**Short:** Add the column nullable, backfill in batches, then add the NOT NULL constraint as NOT VALID before validating it separately.
+
 Direct ALTER TABLE ADD COLUMN NOT NULL DEFAULT X requires rewriting the entire table in older databases. PostgreSQL 11+ makes this metadata-only if there is a DEFAULT. For other databases or NULL-with-backfill scenarios: (1) Add the column as nullable: `ALTER TABLE t ADD COLUMN new_col TYPE`. (2) Backfill in batches: `UPDATE t SET new_col = default_val WHERE new_col IS NULL LIMIT 10000` (repeat until done). (3) Add NOT NULL constraint as NOT VALID (no lock): `ALTER TABLE t ADD CONSTRAINT chk_not_null CHECK (new_col IS NOT NULL) NOT VALID`. (4) Validate: `ALTER TABLE t VALIDATE CONSTRAINT chk_not_null` (ShareUpdateExclusiveLock, allows reads/writes).
 
 **Q: How would you rename a column with zero downtime?**
+**Short:** Rename via expand-contract: add the new column, dual-write, backfill, cut reads over, then drop the old column.
+
 Use expand-contract: (1) Add the new column name. (2) Update application code to write to both the old and new column. (3) Backfill: update all rows where the new column is null to copy from the old. (4) Deploy code that reads from the new column only (writes to both). (5) Deploy code that reads and writes only the new column (drop writes to old). (6) Drop the old column once no running instances reference it.
 
 **Q: What is gh-ost and how does it enable online schema changes in MySQL?**
+**Short:** gh-ost copies rows into a ghost table while replaying the binlog to sync it, then atomically swaps table names.
+
 gh-ost creates a "ghost" table with the desired new schema, copies rows from the original table to the ghost table, and simultaneously applies changes from MySQL's binary log (binlog) to keep the ghost table in sync. When the copy and sync are complete, gh-ost atomically swaps the original and ghost table names. Unlike triggers (used by pt-osc), gh-ost reads the binlog independently — no write amplification from triggers. It includes throttling mechanisms (pause on high load, replica lag) to prevent impacting production traffic.
 
 **Q: How do you test database migrations in a CI pipeline?**
+**Short:** Test migrations with a real database via Testcontainers, covering schema structure, data transformation, rollback, and performance.
+
 (1) Unit: test each migration file's SQL syntax with a real database (Testcontainers PostgreSQL/MySQL). (2) Integration: run the full migration sequence against a clean schema; verify table structure, indexes, and constraints match expectations. (3) Data migration: if the migration transforms data, load representative test data, run the migration, assert the transformed data is correct. (4) Rollback: if using Liquibase with rollback, test the rollback script. (5) Performance: for large-table migrations, test execution time on a copy of production data.
 
 **Q: What is flyway repair and when do you use it?**
+**Short:** flyway repair clears failed migration records and realigns checksums, used after manually cleaning up a partial failure.
+
 `flyway repair` does two things: (1) removes any failed migration records from the schema history table so the migration can be re-run after fixing the SQL; (2) realigns checksums for applied migrations that you have modified in place (only for resolving drift in non-production environments). Use repair when a migration failed partway and you have cleaned up the partial effects manually. Never repair checksums on production unless you fully understand the consequences.
 
 **Q: How do you run Flyway in a Kubernetes deployment without running it in every pod?**
+**Short:** Run flyway migrate in a single init container or Job so only one process applies migrations before app pods start.
+
 Use an init container that runs `flyway migrate` before the main container starts. Only the init container runs migrations. All main application pods start only after the init container succeeds. This prevents race conditions from multiple pods running migrations simultaneously. The Kubernetes Job resource is an alternative: run migrations as a one-time job before rolling out the main Deployment. Ensure the migration user has `flyway_schema_history` write permissions; the application user can have read-only schema access.
 
 **Q: What are baseline migrations in Flyway?**
+**Short:** Baseline lets Flyway adopt a pre-existing schema by marking migrations up to a version as applied without running them.
+
 Baseline is for databases that already have a schema (pre-Flyway). When `baseline-on-migrate` is true, if Flyway finds no history table and the database is not empty, it creates the history table and marks all existing migrations up to `baseline-version` as already applied — without executing them. This allows Flyway to manage a pre-existing database. All migrations after the baseline version will run normally. Never use baseline on a fresh empty database; that is the default starting scenario for Flyway.
 
 **Q: Why is Hibernate's `ddl-auto=update` risky in production, and what should you use instead?**
+**Short:** ddl-auto=update applies unreviewed DDL from entity mappings at startup; use ddl-auto=validate with versioned Flyway or Liquibase migrations instead.
+
 Hibernate's `ddl-auto=update` infers schema changes directly from your JPA entity mappings and applies them at application startup, bypassing migration history, code review, and any rollback path. Because every pod in a rolling deployment runs its own inference pass independently, two instances starting within seconds of each other can issue conflicting DDL against the same table, and a typo in an `@Column` annotation becomes a live `ALTER TABLE` the next time the service restarts. Set `ddl-auto=validate` (or `none`) in every environment above local development so Hibernate only checks entity mappings against the existing schema and fails fast on a mismatch, then drive every real schema change through a reviewed, versioned Flyway or Liquibase migration. Never let an ORM's automatic schema inference touch a database that any shared environment depends on.
 
 **Q: In a microservices architecture where each service owns its own schema, how do you coordinate a change that spans two services' data?**
+**Short:** Each service migrates only its own schema, and cross-service changes are coordinated through a versioned API or event contract, not a shared migration.
+
 In a shared-nothing microservices deployment, only the service that owns a schema runs migrations against it; no migration may touch two services' tables at once. This holds even when both schemas happen to live on the same physical database instance — ownership is a service boundary, not a storage boundary. When two services need related data to change together, coordinate through each service's own migration pipeline plus a versioned API or event contract between them, treating the boundary as the same eventual-consistency problem as any other cross-service data flow rather than a distributed transaction. Run each service's migrations inside that service's own CI/CD pipeline and deployment, so a schema change in service A never blocks or waits on service B's migration, and version the shared contract itself so a consumer can adopt a producer's change on its own release schedule. Treat cross-service data dependencies as an integration contract to version, never as a multi-schema migration to run atomically.
 
 **Q: What is the feature-flag (dual-schema) strategy for complex data migrations and when is it preferable to backfilling data?**
+**Short:** A runtime toggle lets code switch between old and new schema logic, useful when the transformation itself is complex or uncertain.
+
 The feature-flag strategy ships code that reads and writes both old and new schema shapes behind a runtime toggle, not a new deployment. This is preferable to a pure backfill-then-cutover approach when the data transformation itself is complex or uncertain enough that you need to flip back and forth between old and new logic while validating correctness in production. Because the flag is a runtime toggle, a bad migration can be reverted instantly by flipping it off, unlike expand-contract's schema changes which require another migration to undo. Use feature flags when the risk lives in the data transformation logic itself, not just in the schema change.
 
 **Q: What does Flyway's out-of-order configuration control, and why is it disabled by default?**
+**Short:** out-of-order controls whether a lower-versioned migration may run after a higher one already applied, and it is off by default to catch coordination gaps.
+
 The `out-of-order` setting controls whether Flyway will apply a migration whose version number is lower than one already applied, such as running V3 after V5 has already run. It is disabled by default because allowing out-of-order migrations can mask a coordination problem — two developers creating migrations independently on different branches, or a migration that was supposed to run earlier but was merged late. Enabling it is sometimes necessary for parallel feature branches that each add migrations concurrently, but it trades away Flyway's guarantee that migrations run in a single, predictable sequence. Leave `out-of-order` disabled unless your branching strategy specifically requires interleaved migration versions, and enable it only with strict code-review discipline around version numbering.
 
 ---

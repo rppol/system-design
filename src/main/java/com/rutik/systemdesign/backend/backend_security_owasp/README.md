@@ -646,48 +646,78 @@ The broken parser reads `alg` from the untrusted header and treats `none` as alr
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between authentication and authorization, and how does OWASP A01 relate?**
+**Short:** Authentication verifies identity while authorization verifies permissions; OWASP A01 covers authorization failures like IDOR.
+
 Authentication verifies identity — who you are. Authorization verifies what you are allowed to do. A01 (Broken Access Control) specifically covers authorization failures: a user is authenticated but can access resources or perform actions beyond their permitted scope. Examples include IDOR, privilege escalation via URL manipulation, and missing function-level access checks. In the 2025 edition A01 also absorbed SSRF and CSRF, on the reasoning that both are the application acting outside its intended authority; authentication failures live separately in A07.
 
 **Q: Explain SQL injection with an example and give two prevention strategies.**
+**Short:** SQL injection lets user input alter query logic; prevent it with parameterized queries or an ORM, never string concatenation.
+
 SQL injection occurs when user-supplied input is concatenated into an SQL query, allowing the attacker to alter the query's logic. Example: `SELECT * FROM users WHERE name = '' OR '1'='1'` returns all rows when the attacker supplies `' OR '1'='1`. Prevention: (1) use PreparedStatement with parameter binding — the driver escapes input so it is treated as data, not syntax; (2) use an ORM like Hibernate that uses parameterized queries by default. Input validation as a secondary control (allowlist characters) but never as the primary defense.
 
 **Q: What is SSRF and how do you prevent it?**
+**Short:** SSRF tricks a server into fetching attacker-chosen URLs; prevent it with host allowlists and validation of the resolved IP.
+
 SSRF (Server-Side Request Forgery) occurs when an attacker controls a URL that the server fetches, allowing requests to internal services, cloud metadata endpoints (169.254.169.254), or other restricted targets. In OWASP Top 10:2025 it no longer has its own slot — it was folded into A01 Broken Access Control as CWE-918. Prevention: (1) restrict the scheme to https before anything else; (2) allowlist of permitted target hosts; (3) resolve DNS once and reject if any returned address is private, link-local or loopback; (4) connect to that validated IP rather than re-resolving the hostname, which is what defeats DNS rebinding; (5) disable redirect following, or re-run every check on each hop; (6) use an egress proxy with an enforced allowlist; (7) set `HttpTokens=required` so the instance enforces IMDSv2, since AWS accepts IMDSv1 or IMDSv2 by default and only IMDSv2's session token stops a plain GET.
 
 **Q: Why should you use BCrypt for password hashing rather than SHA-256?**
+**Short:** BCrypt is deliberately slow and memory-hard, resisting GPU brute force far better than the fast general-purpose SHA-256 hash.
+
 SHA-256 is a fast cryptographic hash designed for high throughput, so a single modern GPU tests tens of billions of candidates per second and brute force becomes cheap. Published hashcat benchmarks put one RTX 5090 at roughly 28 billion SHA-256 hashes/sec versus about 2,400/sec against bcrypt at cost 12 — a factor of ten million. BCrypt is a deliberately slow adaptive hash: cost factor 12 means 2^12 = 4,096 rounds, roughly 200ms per hash on a current CPU. It resists GPUs because each instance needs about 4KB of constantly-rewritten Blowfish state, which thrashes the small per-core memory a GPU gives each thread; it is memory-access-bound, not merely iterated. As hardware improves, increase the cost factor. OWASP's Password Storage Cheat Sheet sets the minimum work factor at 10 and now recommends Argon2id (m=19MiB, t=2, p=1 minimum) first for new systems, with bcrypt as an acceptable alternative — note also that bcrypt truncates input at 72 bytes.
 
 **Q: What is the alg:none attack on JWT and how do you prevent it?**
+**Short:** The alg:none attack strips a JWT's signature so an unpinned verifier accepts a forged token with no real check.
+
 JWT headers contain an `alg` field. If a server accepts `alg: none`, an attacker can remove the signature, set `alg` to `none`, and modify claims (e.g., elevate role to admin). The server verifies a "signature" that is an empty string — which always passes. Prevention: when decoding a JWT, explicitly specify the expected algorithm(s) rather than reading it from the token header. Libraries like `java-jwt` and `nimbus-jose-jwt` accept an algorithm parameter; never use overloads that accept any algorithm.
 
 **Q: Explain CSRF and two ways to prevent it.**
+**Short:** CSRF forges a state-changing request from an authenticated user's browser; prevent it with a synchronizer token, not SameSite alone.
+
 CSRF (Cross-Site Request Forgery) tricks an authenticated user's browser into submitting a state-changing request to a site where the user is logged in, without the user's knowledge. Since the browser automatically includes cookies, the server cannot distinguish the legitimate user from the attacker's forged request. Prevention, in priority order: (1) a CSRF synchronizer token — a random per-session token included in every state-changing request and verified server-side — or a signed double-submit token if you need to stay stateless; (2) the SameSite cookie attribute as defense in depth. Note that SameSite compares *sites* (registrable domains), not origins, so a hostile sibling subdomain is still same-site, and Lax stops nothing if a state-changing operation is reachable by GET — OWASP is explicit that SameSite does not replace a proper CSRF defense. For REST APIs using Bearer token authentication (no cookies), CSRF is not applicable.
 
 **Q: What is the difference between SAST and DAST?**
+**Short:** SAST analyzes source code without running it, while DAST attacks a running application's live HTTP endpoints.
+
 SAST (Static Application Security Testing) analyzes source code or bytecode without executing the application. It runs in the IDE or CI pipeline against code at rest — detects SQL injection patterns, hardcoded secrets, insecure API usage. Examples: SonarQube, Semgrep. DAST (Dynamic Application Security Testing) tests a running application by sending attack payloads to HTTP endpoints. It finds runtime issues that SAST cannot — authentication bypasses, server-side logic flaws, misconfigured headers. Examples: OWASP ZAP, Burp Suite. Best practice: both in CI, with SAST on every commit and DAST on the deployed staging environment.
 
 **Q: How would you manage secrets in a Spring Boot microservice deployed to Kubernetes?**
+**Short:** Manage secrets with a dedicated secrets manager like Vault or AWS Secrets Manager, never baked into images or env vars.
+
 Mount secrets from a dedicated secrets manager — not from environment variables baked into container images. Options: (1) HashiCorp Vault with the Vault Agent Injector — injects secrets as files into the pod at startup; Spring Cloud Vault reads them via `spring.cloud.vault.kv`; (2) AWS Secrets Manager with AWS Secrets and Configuration Provider — mounts secrets as files via a CSI driver; (3) Kubernetes Secrets (encrypted at rest with KMS) — use External Secrets Operator to sync from Vault or AWS SM. Never hardcode secrets in `application.properties` and never log them. Heap dumps are a real leak path and there is no JVM flag that masks values inside one — the controls that work are turning off `-XX:+HeapDumpOnOutOfMemoryError` in production (or writing dumps to a restricted, access-audited path), holding secrets in `char[]`/`byte[]` you overwrite after use rather than in interned `String`s, and keeping short-lived dynamic credentials so a captured dump ages out fast.
 
 **Q: What is dependency confusion / supply chain attack and how do you defend against it?**
+**Short:** Dependency confusion tricks a build into pulling a higher-versioned public package instead of an internal one of the same name.
+
 In a dependency confusion attack, an attacker publishes a malicious package to a public registry (npm, PyPI, Maven Central) with the same name as an internal private package, but a higher version number. Build tools that check public registries first download the malicious package. Defense: (1) pin exact versions and verify checksums; (2) use a private artifact proxy (Nexus, Artifactory) configured to prefer internal packages; (3) publish namespace-protected packages in the public registry to claim the name; (4) use Sigstore/cosign to verify artifact provenance.
 
 **Q: Explain Content Security Policy (CSP) and when it mitigates XSS.**
+**Short:** CSP restricts which script and resource sources a browser will load, mitigating XSS when configured without unsafe-inline.
+
 CSP is an HTTP response header that specifies which sources the browser is allowed to load scripts, styles, images, and other resources from. `Content-Security-Policy: default-src 'self'; script-src 'self'` tells the browser to only execute scripts loaded from the same origin — even if an attacker injects `<script src="https://evil.com/steal.js">`, the browser refuses to load it. Because `unsafe-inline` is absent, that same policy also blocks inline `<script>` blocks and inline event handlers such as `<button onclick="...">`; adding `unsafe-inline` is what re-opens them, which is why it is the single directive value never to ship. CSP mitigates reflected, stored and some DOM XSS, but an allowlist policy is bypassable: `script-src 'self'` still trusts anything served from your own origin, so a JSONP endpoint, an open file-upload path, or an injected `<base>` tag can all get attacker-controlled script executed. Hence OWASP's current guidance is a strict policy — per-response nonces (or hashes) plus `strict-dynamic`, with `object-src 'none'`, `base-uri 'none'` and `frame-ancestors` — rather than a host allowlist.
 
 **Q: What is the principle of least privilege and give three concrete examples in a backend system?**
+**Short:** Least privilege limits every component to only the permissions its function requires, containing a compromise's blast radius.
+
 Least privilege means every entity operates with only the minimum permissions required for its function. Examples: (1) Database account for the user-service has SELECT/INSERT/UPDATE on the `users` table only — not DROP, not access to other schemas; (2) IAM role for an EC2 instance running the payments service has GetSecret on the specific Secrets Manager ARN, not `secretsmanager:*`; (3) Kubernetes service account has get/list on its own ConfigMap only, not cluster-wide access. When a component is compromised, least privilege limits the blast radius to what that component actually needed.
 
 **Q: How do you prevent log injection attacks?**
+**Short:** Log injection forges log entries from unsanitized input; prevent it with parameterized logging and structured JSON logs.
+
 Log injection occurs when unsanitized user input is logged and the logging system reads special characters as log delimiters, letting the attacker forge entries. In Log4j's case the injected text was instead read as a JNDI lookup expression, which escalated the same bug to remote code execution. Prevention: (1) use parameterized logging — `log.info("User: {}", username)` instead of `log.info("User: " + username)`; (2) sanitize newline characters from input before logging (`\n`, `\r`, `%0a`, `%0d`); (3) use a JSON-structured logging format so there is no line-delimiter concept; (4) run a current Log4j 2.x release (2.26.x) — message lookups are gone from the layout and JNDI is disabled unless explicitly enabled.
 
 **Q: What are the risks of verbose error messages and how do you handle errors securely?**
+**Short:** Verbose error messages leak stack traces and internals to attackers; return only a generic error and a correlation ID instead.
+
 Verbose error messages expose stack traces, class names, DB table names, SQL queries, framework versions, and internal hostnames — all of which aid an attacker during reconnaissance. Secure error handling: (1) catch all unhandled exceptions at a global handler (`@ControllerAdvice` with `@ExceptionHandler(Exception.class)`); (2) log the full stack trace internally with a correlation ID; (3) return only a generic error code and the correlation ID to the client (`{"error":"INTERNAL_ERROR","traceId":"abc123"}`); (4) never return raw exception messages or stack traces in API responses; (5) configure Spring to disable the `/error` Whitelabel Error Page in production.
 
 **Q: What is HTTP Strict Transport Security (HSTS) and what is HSTS preloading?**
+**Short:** HSTS forces browsers to use HTTPS for a domain, and preloading extends that protection to even the very first visit.
+
 HSTS tells browsers to only access the site over HTTPS for a specified duration. The header `Strict-Transport-Security: max-age=31536000; includeSubDomains` means: for the next year, never send HTTP requests to this domain or any subdomain — upgrade them to HTTPS automatically. HSTS preloading goes further: the domain is submitted to a browser-maintained list (hstspreload.org) that is shipped with Chrome, Firefox, and Safari. Even on first visit (before the HSTS header is received), the browser uses HTTPS. This eliminates the first-connection vulnerability. Warning: preloading is very difficult to undo — all subdomains must support HTTPS before submitting.
 
 **Q: Describe a security review checklist for a new REST API endpoint.**
+**Short:** A REST endpoint review checks authentication, authorization, input validation, parameterized queries, and rate limiting together.
+
 (1) Authentication: is a valid token required? (2) Authorization: does server-side code verify the caller owns the resource? (3) Input validation: are all parameters validated for type, length, format, and range before use? (4) Parameterized queries: no string concatenation in SQL? (5) Output encoding: are responses correctly encoded to prevent XSS if rendered in a browser? (6) Rate limiting: is there a per-user or per-IP rate limit to prevent brute force or abuse? (7) Sensitive data: does the response include fields the caller should not see (PII, hashed passwords, internal IDs)? (8) Error handling: do errors return generic messages? (9) Logging: is there an audit log entry for sensitive actions? (10) SSRF: if this endpoint fetches external URLs, is there an allowlist?
 
 ---

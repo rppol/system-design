@@ -841,48 +841,78 @@ resilience4j:
 ## 12. Interview Questions with Answers
 
 **Q: What are the three states of a circuit breaker and what triggers each transition?**
+**Short:** CLOSED trips to OPEN on high failure rate, OPEN moves to HALF_OPEN after a wait duration, and probes decide the next state.
+
 CLOSED is the normal state where all requests pass through; it transitions to OPEN when the failure rate exceeds the threshold over the minimum required calls. OPEN rejects all requests immediately without calling the downstream service; it transitions to HALF_OPEN after the `waitDurationInOpenState` expires. HALF_OPEN allows a limited number of probe calls through; it transitions back to CLOSED if the probe failure rate is below the threshold, or back to OPEN if it is still above. The most commonly forgotten transition is HALF_OPEN back to OPEN, which requires the probe calls to still be failing.
 
 **Q: Why is fixed-delay retry dangerous in distributed systems?**
+**Short:** Fixed-delay retry synchronizes every client's retry into a thundering herd against a recovering service.
+
 Fixed-delay retry causes synchronized retry storms. If 10,000 clients all encounter a failure at the same time (e.g., a brief service restart), they all retry at exactly t+1s, t+2s, t+3s. This creates a thundering herd that can overwhelm the recovering service with 10,000 simultaneous requests every second, potentially preventing it from ever recovering. The fix is exponential backoff with full jitter, which desynchronizes retries by randomizing the delay across the range [0, exponential_cap].
 
 **Q: What is the difference between COUNT_BASED and TIME_BASED sliding windows?**
+**Short:** COUNT_BASED tracks the last N calls regardless of time, while TIME_BASED ages calls out on a fixed clock.
+
 COUNT_BASED tracks the last N calls regardless of when they happened; TIME_BASED tracks all calls that occurred in the last N seconds. COUNT_BASED is simpler and treats a single failure in 1 second the same as a single failure spread over 10 minutes; an old failure keeps counting until N newer calls push it out, so a low-traffic service can stay tripped on stale evidence. TIME_BASED ages calls out on the clock instead, which suits bursty traffic. Memory is not the deciding factor: COUNT_BASED stores N individual measurements, while TIME_BASED stores N one-second partial aggregations (three ints and a long each) rather than individual call outcomes, so its footprint is nearly constant in the window length and does not grow with request rate.
 
 **Q: When should you use a semaphore bulkhead vs. a thread pool bulkhead?**
+**Short:** Use a semaphore bulkhead for non-blocking code and a thread pool bulkhead to isolate blocking synchronous calls.
+
 Use a semaphore bulkhead when your code is already non-blocking or reactive, since it only limits concurrency without adding threads. The semaphore bulkhead does not actually isolate the caller's thread — if the call blocks, the caller's thread is still tied up, just limited in count. Use a thread pool bulkhead when making blocking synchronous calls (JDBC, blocking HTTP clients) and you need full thread isolation. The thread pool bulkhead executes the call in a separate thread pool, so a hung downstream call only consumes a thread in that pool, not in the main application thread pool.
 
 **Q: Why do you need both a connect timeout and a read timeout? Is one sufficient?**
+**Short:** A connect timeout catches unreachable hosts, while a read timeout catches a connected server that stops sending data.
+
 They protect against different failure modes. A connect timeout fires if the TCP handshake takes too long — this catches firewall drops, unreachable hosts, and network partitions that prevent the connection from being established. A read timeout fires if the connection is established but the server stops sending data — this catches servers that accept connections but hang internally (e.g., during a GC pause, deadlock, or resource exhaustion). A service can connect in 100ms but then hang for 30 seconds without sending any data. Without a read timeout, this hangs the calling thread indefinitely.
 
 **Q: How does the circuit breaker's slow-call threshold interact with timeouts?**
+**Short:** The slow-call threshold must be set below the read timeout, or slow calls get classified as failures instead.
+
 The `slowCallDurationThreshold` must be set lower than the HTTP client's read timeout. If the HTTP read timeout fires at 5 seconds and throws an IOException, the call is recorded as a failure. The slow-call counter is never triggered because the call never lasted long enough to be classified as slow — it was classified as failed. To have slow-call rate protection work correctly, the slow-call threshold should be set to a value less than the read timeout (e.g., slowCallDurationThreshold=2s with readTimeout=5s).
 
 **Q: What is a retry storm and how do you prevent it?**
+**Short:** A retry storm is a feedback loop where synchronized client retries overwhelm a recovering service before it can stabilize.
+
 A retry storm occurs when a large number of clients simultaneously retry requests to a recovering service, overwhelming it before it can fully start serving traffic. The recovery attempt fails under load, which triggers more retries, creating a feedback loop. Prevention strategies: full jitter on backoff delays to desynchronize retries; circuit breakers to stop retrying once the failure rate is high enough; server-side rate limiting to shed excess retry load; and exponential backoff caps to limit maximum retry frequency.
 
 **Q: How do you make retries safe for non-idempotent operations?**
+**Short:** Idempotency keys let a server return a cached response for a repeated request instead of processing it twice.
+
 Use idempotency keys. The client generates a unique UUID per logical operation and sends it with every attempt. The server stores processed idempotency keys (in Redis or a database) with a TTL and returns the cached response if it receives a key it has already processed. This allows the client to safely retry on network errors without risk of double processing. Payment processors like Stripe, Braintree, and Adyen all support idempotency keys. A secondary approach is to make the operation idempotent by design: instead of "debit $50", send "debit $50 for order-id-123" with a unique order ID that is rejected on duplicate submission.
 
 **Q: What happens when a Resilience4j circuit breaker is OPEN and a request comes in?**
+**Short:** An OPEN Resilience4j circuit breaker throws CallNotPermittedException immediately without making any network call.
+
 The circuit breaker throws `CallNotPermittedException` immediately, without making any network call. The exception propagates up the call stack. If a fallback is configured (via `.recover(CallNotPermittedException.class, ...)` in `Try` or via `@CircuitBreaker(fallbackMethod=...)` in Spring), the fallback is invoked. If no fallback is configured, the exception propagates to the caller. Metrics are recorded: the breaker publishes a `CircuitBreakerOnCallNotPermittedEvent` (event type `NOT_PERMITTED`), which Micrometer exposes as its own counter, `resilience4j.circuitbreaker.not.permitted.calls`, tagged `kind=not_permitted`. Note this is a *separate* meter from the `resilience4j.circuitbreaker.calls` timer, whose `kind` tag only ever takes the values `successful`, `failed` and `ignored` — rejected calls never appear there, which is why dashboards built only on `.calls` go quiet exactly when the breaker is doing its job.
 
 **Q: How should you configure circuit breakers for startup and warmup scenarios?**
+**Short:** Raise minimumNumberOfCalls and extend waitDurationInOpenState so the breaker doesn't trip during service warmup.
+
 Set `minimumNumberOfCalls` high enough that the circuit breaker does not trip on the first few calls during startup. A common mistake is deliberately lowering it to 1 or 2 on the theory that faster tripping is safer, which causes the circuit to open immediately if the first health-check call to a warming-up service fails (Resilience4j's own default is 100, so this is always a hand-made mistake). For services that take 10–30 seconds to warm up, combine: a startup health gate (don't accept traffic until the service is ready), a higher `minimumNumberOfCalls` (e.g., 50), and `waitDurationInOpenState` long enough for the downstream service to fully start (e.g., 90s vs. default 60s).
 
 **Q: What is the Bulkhead pattern's relationship to Amdahl's Law?**
+**Short:** Bulkheads enforce explicit capacity partitions so one saturated integration can't become the system-wide bottleneck.
+
 Amdahl's Law states that parallelism is limited by the sequential portion of a program. In the context of bulkheads, if one integration's thread pool is saturated, the overall system throughput is limited by that bottleneck regardless of how many threads other components have. Bulkheads enforce explicit capacity partitions so that one slow integration cannot capture more than its allotted share of resources. This is directly analogous to Amdahl's sequential bottleneck — without bulkheads, one synchronous dependency can serialize all requests through a single bottleneck.
 
 **Q: What is the difference between a fallback and a compensating transaction?**
+**Short:** A fallback substitutes an immediate alternative response, while a compensating transaction undoes a previously committed operation.
+
 A fallback is an immediate alternative response that is returned when the primary call fails — it does not undo anything, it just provides a substitute result. A compensating transaction is a business-level mechanism that undoes a previously committed operation when a subsequent operation in the same saga fails (e.g., if payment succeeded but inventory reservation failed, the compensating transaction refunds the payment). Fallbacks are a resilience pattern; compensating transactions are a data consistency pattern in distributed transactions and sagas.
 
 **Q: When should circuit breaking live in the application (Resilience4j) rather than in the service mesh (Envoy/Istio)?**
+**Short:** Keep circuit breaking in the app for a real failure-rate state machine, and push it to the mesh for redeploy-free policy.
+
 Keep it in the application when you need a real failure-rate state machine and a language-level fallback; push it to the mesh when you need uniform, language-agnostic policy you can change without a redeploy. The distinction interviewers probe is that Envoy's "circuit breakers" are not failure-rate state machines at all — they are per-cluster concurrency ceilings (`max_connections`, `max_pending_requests`, `max_requests`, `max_retries`), and host ejection is a separate `outlierDetection` feature. So the mesh can shed load and eject a bad instance, but it cannot say "half of the last hundred calls failed, stop calling for sixty seconds", and it cannot return a stale cache entry — it returns 503 and the caller still needs a fallback. Most production systems run both: mesh-level ceilings and outlier ejection as an infrastructure-wide floor, plus Resilience4j on the specific calls that have a meaningful degraded response. The failure mode to avoid is shared mesh limits, where one heavy service exhausts a cluster-wide ceiling and sheds traffic for unrelated services (DoorDash, §7).
 
 **Q: How do you test circuit breaker behavior in integration tests?**
+**Short:** Drive the CircuitBreaker instance directly with its transition methods instead of manufacturing a real failure rate.
+
 Drive the state machine directly using the transition methods on the `CircuitBreaker` instance rather than manufacturing a real failure rate. Resolve the instance from the `CircuitBreakerRegistry`, then call `transitionToOpenState()`, `transitionToHalfOpenState()` or `transitionToClosedState()` to assert each fallback path. Use WireMock or MockServer to simulate downstream failures (502, 503, connection refused, slow responses via response delays). Test all three states explicitly: CLOSED with success, CLOSED with failures accumulating, OPEN with fallback, HALF_OPEN with probe failures (stays OPEN), and HALF_OPEN with probe successes (transitions to CLOSED). Use Testcontainers with Toxiproxy to simulate network failures in realistic container-to-container calls.
 
 **Q: What is adaptive throttling and when does it outperform static circuit breakers?**
+**Short:** Adaptive throttling self-throttles proportionally to the observed rejection rate, unlike a static circuit breaker's fixed threshold trip.
+
 Adaptive throttling (Google's approach) tracks the ratio of accepted to total requests from the client side and self-throttles before sending requests that are statistically likely to be rejected. The formula is: `throttle_probability = max(0, (requests - K * accepts) / (requests + 1))` where K is typically 2. When the server starts rejecting requests, the client automatically reduces its request rate proportionally. This is superior to static circuit breakers in scenarios with partial degradation — if the server is rejecting 30% of requests, adaptive throttling reduces client load by 30% proportionally, whereas a static circuit breaker only trips after the failure rate exceeds a fixed threshold (e.g., 50%).
 
 ---

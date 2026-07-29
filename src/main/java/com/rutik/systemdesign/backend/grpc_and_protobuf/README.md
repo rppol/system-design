@@ -475,48 +475,78 @@ public class RetryInterceptor implements ClientInterceptor {
 ## 12. Interview Questions with Answers
 
 **Q: What is gRPC and how does it differ from REST?**
+**Short:** gRPC uses Protocol Buffers over HTTP/2 with generated typed stubs and streaming, unlike REST's JSON request-response model.
+
 gRPC is an RPC framework using Protocol Buffers for serialization and HTTP/2 for transport. It differs from REST in: using a binary format (compact, fast) vs JSON (human-readable), having strict schema enforcement via .proto files vs optional OpenAPI, built-in streaming support (4 modes) vs REST's single request-response, and generated type-safe stubs vs manual HTTP client code. gRPC is preferred for internal service-to-service communication; REST for public/browser-facing APIs.
 
 **Q: Explain Protocol Buffers wire format and field numbering.**
+**Short:** Protobuf encodes each field as a tag combining field number and wire type, so field numbers must never be reused.
+
 Protobuf serializes each field as a tag-value pair. The tag is `(field_number << 3) | wire_type`, encoding both the field number (1–536,870,911, minus the 19,000–19,999 range protobuf reserves for itself) and the wire type (0=varint, 1=64-bit, 2=length-delimited, 5=32-bit; 3 and 4 are the deprecated group markers). The tag is itself a varint, so field numbers 1–15 cost one tag byte and 16–2047 cost two — spend the low numbers on your hottest fields. Field names are not in the wire format — only numbers. This means field numbers must never be reused after a field is removed (doing so causes old clients to misinterpret new fields). Varint encoding uses variable-length encoding: values 0–127 fit in 1 byte.
 
 **Q: What are the four gRPC RPC modes?**
+**Short:** gRPC has four RPC modes: unary, server-streaming, client-streaming, and bidirectional streaming.
+
 Unary: one request, one response (like REST). Server-streaming: one request, stream of responses (useful for real-time data, large result sets). Client-streaming: stream of requests, one response (useful for bulk uploads, aggregation). Bidirectional streaming: both sides stream independently (useful for real-time chat, collaborative editing, game state sync). All modes use HTTP/2 streams, just with different DATA frame patterns.
 
 **Q: How does deadline propagation work in gRPC?**
+**Short:** gRPC propagates a deadline as grpc-timeout metadata so any service in the chain can cancel work once it expires.
+
 The client sets a deadline (absolute timestamp). gRPC encodes the remaining deadline as `grpc-timeout` in the request metadata. The downstream service receives the deadline and propagates it to its own outbound calls. If any service in the chain exceeds the deadline, it returns DEADLINE_EXCEEDED. The parent service, on receiving DEADLINE_EXCEEDED from its child, also cancels its work and propagates the error. This prevents resource waste in partial-failure scenarios.
 
 **Q: What is a gRPC interceptor?**
+**Short:** A gRPC interceptor is middleware wrapping RPC calls for concerns like auth, tracing, logging, and metrics.
+
 An interceptor is middleware that runs before/after RPC handling. Server interceptors wrap service method invocations; client interceptors wrap outbound calls. Common uses: authentication (extract and validate JWT from metadata), distributed tracing (inject/extract trace context), logging (log request/response), metrics (record call latency and error rates), retry with backoff. Interceptors chain and each calls next.interceptCall() to pass control.
 
 **Q: How do you handle errors in gRPC?**
+**Short:** gRPC errors use Status codes returned as StatusRuntimeException, sent to the client as trailing grpc-status metadata.
+
 gRPC uses Status codes (similar to HTTP but gRPC-specific). Return a StatusRuntimeException on the server with the appropriate code (NOT_FOUND, INVALID_ARGUMENT, UNAUTHENTICATED, etc.). The gRPC framework sends it as trailing metadata grpc-status and grpc-message. For structured error details, use the google.rpc.Status type with google.rpc.ErrorInfo, google.rpc.BadRequest etc. from the googleapis/googleapis error.proto definitions. On the client, catch StatusRuntimeException and inspect the Status.
 
 **Q: What is the Health Checking Protocol in gRPC?**
+**Short:** gRPC's standard Health service exposes Check, Watch, and List RPCs reporting SERVING, NOT_SERVING, or UNKNOWN status.
+
 gRPC defines a standard health service, grpc.health.v1.Health, whose ServingStatus enum is UNKNOWN, SERVING, NOT_SERVING and SERVICE_UNKNOWN. It exposes more than one RPC: Check for a point-in-time answer, Watch for a stream of status changes, and (more recently) List for a snapshot of every registered service. SERVICE_UNKNOWN is only ever returned by Watch — Check answers an unregistered service name with a NOT_FOUND status instead. Kubernetes calls this service directly via its native `grpc` probe type (GA in 1.27); the `grpc-health-probe` exec binary is only needed outside Kubernetes or for custom metadata/TLS on the probe. Load balancers use it for backend health checks. Implement it by registering HealthStatusManager on the server and calling setStatus() when the service starts/stops.
 
 **Q: How do you evolve a protobuf schema without breaking clients?**
+**Short:** Safe protobuf changes add fields or enum values and rename fields; unsafe ones delete or reuse a field number or change type.
+
 Safe changes: add new optional fields with new numbers, add new enum values, add new RPCs, and rename a field. A rename changes the name only, not the number, so it has no wire impact — though it does break generated code and JSON/TextFormat parsing. Breaking changes: delete a field without reserving its number, reuse a field number, or change a field to an incompatible type. Type changes are not uniformly breaking — int32, uint32, int64, uint64 and bool are mutually wire-compatible, sint32 and sint64 are compatible with each other but with nothing else, fixed32 with sfixed32, fixed64 with sfixed64, and string with bytes when the bytes are valid UTF-8. Best practice: use `buf breaking --against` in CI to automatically detect breaking changes.
 
 **Q: What is the difference between proto2 and proto3?**
+**Short:** Proto3 dropped required fields and custom defaults, and gained explicit field presence via the optional label in 3.15.
+
 Proto3 is the default syntax for new .proto files and proto2 is its predecessor. Key differences: proto3 dropped `required` entirely, dropped user-specified custom defaults (the default is always the zero value), and defines a canonical JSON mapping. Proto2 had `required` fields (dangerous — adding one breaks every old sender), explicit `optional` with custom defaults, and extension ranges. Field presence is the subtle one: proto3 originally had no way to distinguish an unset scalar from one explicitly set to zero, which is why `google.protobuf.Int32Value`-style wrapper types were the old workaround — but protobuf 3.15 (February 2021) made the `optional` label generally available in proto3, and that, not a wrapper type, is now the standard way to get explicit presence. (`google.protobuf.FieldMask` is unrelated: it is a client-supplied list of paths for partial reads and updates, not a presence mechanism.) Newer still, Protobuf Editions replaces the proto2/proto3 syntax split with per-feature settings, so expect `edition = "2023"` files alongside proto3 ones.
 
 **Q: What is gRPC-Web and when do you need it?**
+**Short:** gRPC-Web lets browsers call gRPC services by encoding trailers into a data frame through a translating proxy.
+
 gRPC-Web is a variant of the gRPC protocol that browsers can use. Browsers cannot use HTTP/2 trailers (gRPC uses trailers for the grpc-status code), so gRPC-Web encodes trailing metadata in a special data frame. An Envoy sidecar or nginx gRPC-Web proxy translates between gRPC and gRPC-Web. gRPC-Web only supports unary and server-streaming; bidirectional streaming is not supported. Use gRPC-Web when browser clients need to call gRPC services directly.
 
 **Q: How does gRPC handle load balancing?**
+**Short:** gRPC load balances client-side via channel-resolved backend IPs, or through a proxy that distributes connections or RPCs.
+
 gRPC supports both client-side and proxy load balancing. Client-side: the gRPC channel resolves DNS, gets all backend IPs, and applies a load balancing policy (round-robin, pick-first). This is common with Kubernetes headless services. Proxy load balancing: a proxy (Envoy, Nginx, AWS NLB) receives all connections and distributes them. With HTTP/2, a single gRPC connection multiplexes many RPCs — L4 load balancers see one connection per client; L7 load balancers can distribute individual RPCs.
 
 **Q: What is the maximum message size in gRPC and how do you change it?**
+**Short:** gRPC's default maximum inbound message size is 4 MB, changeable via maxInboundMessageSize on the server and client builders.
+
 The default maximum inbound message size is 4 MB (4,194,304 bytes). gRPC sets no default cap on outbound (send) size, so in practice the receiving peer's 4 MB inbound limit is what actually rejects your message. Change via: server-side: `ServerBuilder.maxInboundMessageSize(50 * 1024 * 1024)` (50 MB). Client-side: `ManagedChannelBuilder.maxInboundMessageSize(50 * 1024 * 1024)`. Better approach for large payloads: stream messages to avoid sending one large message; or store data in object storage and pass a reference URI in the message.
 
 **Q: Describe a scenario where gRPC bidirectional streaming provides value REST cannot easily match.**
+**Short:** Bidirectional streaming lets both sides of a real-time order matching engine stream independently over one persistent connection.
+
 A real-time bidirectional order matching engine: traders send market orders and receive execution notifications in real-time. REST would require polling (latency), WebSocket (adds complexity and library overhead), or SSE (unidirectional only). gRPC bidirectional streaming provides full-duplex communication with protobuf efficiency and built-in flow control. Each side streams independently — the trader sends new orders, the server sends execution confirmations and market data updates — over one persistent connection with back-pressure from HTTP/2 flow control.
 
 **Q: What is the grpc reflection protocol?**
+**Short:** gRPC reflection lets clients like grpcurl discover service definitions at runtime without having the .proto files.
+
 gRPC reflection allows clients to query the server for service definitions at runtime, without having the .proto files. Tools like `grpcurl` and `evans` use reflection to discover available services and methods. In grpc-java, register `ProtoReflectionServiceV1.newInstance()`, which speaks the stable `grpc.reflection.v1` protocol. Disable in production if you do not want to expose your API schema to clients (reflection is informational only — it does not grant access, but may expose schema information to attackers).
 
 **Q: How do you implement retries in gRPC?**
+**Short:** gRPC retries are configured via a service config's retry policy and are only safe for idempotent RPCs.
+
 gRPC supports a service config JSON with retry policy: `maxAttempts` (max total attempts), `initialBackoff`, `maxBackoff`, `backoffMultiplier`, and `retryableStatusCodes` (e.g., UNAVAILABLE, DEADLINE_EXCEEDED). This is specified in the service config loaded by the name resolver. For Java, configure via ManagedChannelBuilder with a default service config. Retries are transparent to the application code — the channel handles them. Only retry idempotent RPCs or explicitly idempotent operations.
 
 ---

@@ -527,51 +527,83 @@ Benefits:
 ## 12. Interview Questions with Answers
 
 **Q: What is GraphQL and what problem does it solve?**
+**Short:** GraphQL lets clients request exactly the fields they need, eliminating REST's over-fetching and under-fetching.
+
 GraphQL is an API query language and runtime that lets clients specify exactly what data they need. It solves over-fetching (REST returns fixed response shapes with more data than needed) and under-fetching (needing multiple REST calls for a single view). Clients describe the shape of the data they want; the server returns exactly that structure. This makes GraphQL particularly useful for mobile clients and complex data models.
 
 **Q: What is the N+1 problem in GraphQL and how do you solve it?**
+**Short:** DataLoader solves GraphQL N+1 by batching all pending field loads within a request into one query.
+
 When resolving a list of objects with a related field (e.g., 10 users and their departments), each field resolver executes independently — causing 1 query for users and 10 queries for departments = 11 total. DataLoader solves this by batching all pending loads within a single request execution: after resolving all 10 users, DataLoader collects all 10 department IDs and fetches them in one SELECT IN query. DataLoader also caches within the request so duplicate IDs are fetched once.
 
 **Q: How does GraphQL handle errors differently from REST?**
+**Short:** GraphQL always returns HTTP 200 with a data field and an errors array, so status codes can't signal failure.
+
 GraphQL always returns HTTP 200, with a `data` field for results and an `errors` array for errors. Errors include a message, locations in the query, and a path to the failing field. Partial responses are possible: some fields may resolve successfully while others fail. This differs fundamentally from REST where HTTP status codes communicate success/failure. For monitoring, you must parse the errors array, not rely on HTTP status codes.
 
 **Q: What are GraphQL subscriptions and how are they implemented?**
+**Short:** GraphQL subscriptions push real-time updates to clients over WebSocket using the graphql-ws protocol.
+
 Subscriptions are real-time operations where the server pushes updates to clients. They are typically implemented over WebSocket using the `graphql-ws` protocol (`graphql-transport-ws` subprotocol), which every current server and client library speaks; GraphQL over SSE is the alternative where a plain HTTP stream is preferred. The client subscribes with a subscription operation; the server publishes events when underlying data changes (via a pub/sub system like Redis). In production, you need a stateful connection manager — WebSocket connections cannot be horizontally scaled without shared state (Redis pub/sub or similar).
 
 **Q: What is the difference between schema stitching and Apollo Federation?**
+**Short:** Schema stitching merges schemas manually at a gateway, while Apollo Federation lets services own and compose schema parts declaratively.
+
 Schema stitching merges multiple GraphQL schemas at the gateway level using shared types and remote execution. It is older, requires more manual configuration, and can create tight coupling. Apollo Federation is a specification for a distributed graph where each service owns part of the schema and can extend types defined in other services using @key and @external directives. The Apollo Router (or Gateway) composes them automatically. Federation is the modern approach for microservices.
 
 **Q: How do you prevent abuse of GraphQL with malicious queries?**
+**Short:** Guard against malicious GraphQL queries with depth limiting, complexity limiting, persisted queries, rate limiting, and disabled introspection.
+
 Bound every query before it executes, using five layers that each cap a different axis of cost. Depth limiting (MaxQueryDepthInstrumentation — reject queries deeper than N levels), complexity limiting (MaxQueryComplexityInstrumentation — reject queries with score > threshold, where each field has a weight), query whitelisting / persisted queries (only allow registered query hashes in production), rate limiting (by IP or user), and disabling introspection in production. Never run GraphQL without at least depth and complexity limits.
 
 **Q: What are persisted queries and why are they used?**
+**Short:** Persisted queries send only a query hash at runtime, shrinking requests and letting a CDN cache GET requests.
+
 Persisted queries associate a hash (SHA-256 of the query string) with the full query on the server. Clients send only the hash at runtime. Benefits: (1) reduced request size; (2) GET requests with hash + variables are cacheable by CDN (unlike POST with full query body); (3) security — reject any query not in the registry, preventing query injection; (4) performance — queries can be pre-validated and pre-analyzed. Used in production by most large GraphQL deployments.
 
 **Q: How do you implement pagination in GraphQL?**
+**Short:** Relay-style cursor connections are the GraphQL pagination standard, staying consistent under concurrent writes unlike offset pagination.
+
 Relay-style connections are the standard: a Connection type with edges (cursor + node) and pageInfo (hasNextPage, endCursor). Query: `users(first: 20, after: "cursor")`. This enables cursor-based pagination, consistent even with concurrent writes. Simple pagination: `users(limit: 20, offset: 0)` is simpler but has offset performance problems at scale. Use Relay connections for user-facing paginated lists; offset for admin interfaces.
 
 **Q: What is GraphQL introspection and should you disable it?**
+**Short:** GraphQL introspection exposes the schema itself and should be disabled in production public APIs to prevent reconnaissance.
+
 Introspection allows clients to query the schema itself: what types exist, what fields they have, what arguments each field takes. It powers GraphiQL, Apollo Sandbox, and code generators. In production, disable it for public APIs to prevent schema reconnaissance: in graphql-java call `Introspection.enabledJvmWide(false)` (or put `Introspection.INTROSPECTION_DISABLED` in the per-request `GraphQLContext`); in Spring for GraphQL set `spring.graphql.schema.introspection.enabled=false`. For internal APIs with authenticated access, it's acceptable to leave enabled. Always ensure query depth limits are set before enabling introspection to prevent introspection-based DoS.
 
 **Q: How does GraphQL handle schema evolution compared to REST?**
+**Short:** GraphQL schemas evolve additively by adding fields and deprecating old ones, since the spec has no built-in versioning.
+
 GraphQL schemas evolve additively: add new fields, types, and operations freely — existing clients are unaffected (they only request what they know about). Deprecate old fields with @deprecated. Never remove a field without checking usage metrics first. Breaking changes (removing fields, changing types, renaming arguments) require versioning. Unlike REST, GraphQL has no built-in versioning mechanism — additive evolution is the primary strategy. Apollo GraphOS Studio tracks field usage to safely identify when deprecated fields can be removed.
 
 **Q: What is the difference between queries and mutations in GraphQL execution?**
+**Short:** GraphQL queries can resolve in parallel, but the spec requires root-level mutations to execute strictly in sequence.
+
 Queries can execute root-level resolvers in parallel (the spec allows this for optimization). Mutations execute sequentially — the spec requires that each root-level mutation completes before the next starts. This ensures mutations like `createOrder` followed by `sendConfirmation` execute in order. Nested resolvers within a single mutation execute normally (DataLoader still batches). For multiple independent mutations, clients should send separate requests.
 
 **Q: How do you design a GraphQL schema for a social network feed?**
+**Short:** Feed schemas define a FeedItem interface with cursor pagination and use DataLoader to batch author and reaction lookups.
+
 Define a FeedItem interface with implementing types (Post, Story, Share, AdUnit). The feed query: `feed(userId: ID!, first: Int!, after: String): FeedConnection!` uses cursor-based pagination. FeedItems include only the fields needed for the feed list view; full post content is in a separate Post type fetched on demand. Use DataLoader for author resolution, reaction counts (batched to a counting service), and media metadata. Subscriptions for real-time new items.
 
 **Q: How do you implement file uploads in GraphQL, given it's not part of the spec?**
+**Short:** GraphQL has no native file upload spec, so uploads use multipart requests or, preferably, presigned object-storage URLs.
+
 File uploads sit outside the core GraphQL spec, handled instead by the multipart request convention or a presigned-URL pattern. The multipart approach lets a client send a mutation and binary file parts together in one `multipart/form-data` POST, supported by Apollo Server and graphql-java through community libraries, but it complicates caching and CDN behavior since the request is no longer a plain JSON POST. The presigned-URL pattern has a mutation return a signed upload URL, and the client uploads the file directly to object storage, so the binary data never passes through the GraphQL server at all. Prefer presigned URLs for production systems with large or frequent uploads, and reserve multipart requests for small, occasional file attachments.
 
 **Q: What is the difference between a GraphQL union and an interface type?**
+**Short:** A union groups unrelated types with no shared fields, while an interface requires implementers to share a common field set.
+
 A union lists a set of unrelated object types with no shared fields, while an interface requires every implementing type to share a common set of fields. `union SearchResult = User | Organization` lets a query return either type with no fields in common between them, so the client must use an inline fragment (`... on User`) to select fields from either branch. `interface Timestamped { createdAt: DateTime! }` requires every implementing type to expose `createdAt`, so a client can query that field directly on the interface without an inline fragment, and only needs fragments for fields specific to one implementation. Use a union for genuinely unrelated result types like search results, and an interface when multiple types share a meaningful common contract.
 
 **Q: What are custom scalars in GraphQL and how do you implement one?**
+**Short:** A custom scalar adds serialize, parseValue, and parseLiteral functions to validate a leaf value beyond the built-in types.
+
 A custom scalar is a leaf type beyond String, Int, Float, Boolean, and ID that adds validation and serialization rules for a specific value shape, such as `DateTime` or `EmailAddress`. You implement one by providing three functions to the runtime: `serialize` (converts the internal server value to the wire format sent to the client), `parseValue` (converts a client-supplied variable into the internal server representation), and `parseLiteral` (converts a value written inline in the query string). A `DateTime` scalar might serialize a `java.time.Instant` to an ISO-8601 string and reject any input that fails ISO-8601 parsing during `parseValue`, giving validation for free at the schema boundary instead of in every resolver. Define custom scalars for any value type that has format rules you would otherwise repeat as ad hoc validation across many fields.
 
 **Q: How do you implement field-level authorization in GraphQL?**
+**Short:** Field-level authorization checks access per field via a resolver or an @auth directive, since GraphQL queries cross domains.
+
 Field-level authorization is enforced per-field, either inside a resolver or via a directive like `@auth(role: "ADMIN")` applied in the schema. Because a single GraphQL query can traverse many types and fields owned by different parts of the domain, endpoint-level authorization — the REST model of "can this user call this URL" — does not translate directly; a `user` query might be public, but a nested `user.ssn` field might require an admin role. A custom `@auth` directive wraps the field's data-fetcher with a permission check, returning null or a field-level error for unauthorized access without failing the rest of the query. Implement authorization directives early in schema design, since retrofitting per-field checks onto an already-large schema means auditing every resolver individually.
 
 ---

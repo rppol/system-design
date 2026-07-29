@@ -486,48 +486,78 @@ Browser support from caniuse.com; site adoption from W3Techs, July 2026 (W3Techs
 ## 12. Interview Questions with Answers
 
 **Q: What are the main improvements HTTP/2 provides over HTTP/1.1?**
+**Short:** HTTP/2 adds stream multiplexing, HPACK header compression, binary framing, and per-stream flow control over HTTP/1.1.
+
 HTTP/2 adds four things HTTP/1.1 lacks: stream multiplexing, HPACK header compression, binary framing, and per-stream flow control. Multiplexing puts many concurrent streams on one TCP connection, removing the need for the ~6 parallel connections per origin browsers used to open. HPACK sends a repeated header like Authorization as a short table reference after the first request; Cloudflare measured 76% compression on ingress headers and 69% on egress headers across its edge, cutting total ingress traffic by 53%. Binary framing replaces line-oriented text parsing with fixed 9-byte frame headers. HTTP/1.1 pipelining was supposed to solve serialization but was so broken in practice it was almost never enabled.
 
 **Q: Explain the head-of-line blocking problem in HTTP/2.**
+**Short:** HTTP/2 removes application-layer head-of-line blocking, but a lost TCP segment still stalls every multiplexed stream.
+
 HTTP/2 multiplexes all streams over one TCP connection. If a TCP segment is lost, TCP's in-order delivery guarantee means no data from any stream can be delivered to the application until the lost segment is retransmitted and received. All HTTP/2 streams stall, even those whose data arrived successfully. This is TCP-level HoL blocking; RFC 9113 states outright that "TCP head-of-line blocking is not addressed by this protocol." HTTP/2 removed only the *application-layer* HoL blocking of HTTP/1.1, where a slow response blocked the whole connection. HTTP/3 removes the transport-level case by running over QUIC, where each stream is independently sequenced — though loss inside one stream still blocks that stream, and QPACK dynamic-table references can block a stream until the referenced insert arrives.
 
 **Q: How does TLS 1.3 reduce latency compared to TLS 1.2?**
+**Short:** TLS 1.3 cuts the handshake to 1 RTT and supports 0-RTT resumption, versus TLS 1.2's 2-RTT handshake.
+
 TLS 1.2 requires 2 RTTs for a full handshake (1 RTT for TCP, 2 for TLS = 3 RTTs before data). TLS 1.3 reduced this to 1 RTT for TLS (2 RTTs total). TLS 1.3 also supports 0-RTT session resumption (sending application data in the first packet). TLS 1.3 mandatory forward secrecy eliminated export-grade ciphers and simplified cipher suite negotiation, improving security alongside performance.
 
 **Q: What is ALPN and why is it needed?**
+**Short:** ALPN lets a client advertise supported protocols in the TLS ClientHello so the server can select HTTP/2 without an extra round trip.
+
 ALPN (Application-Layer Protocol Negotiation) is a TLS extension allowing the client to advertise supported application protocols (h2, http/1.1, h3) in the ClientHello. The server picks the best supported protocol and includes it in the ServerHello. Without ALPN, a client would need a separate round trip to negotiate the application protocol, or use a different port per protocol. ALPN enables HTTP/2 to be selected during the TLS handshake on port 443.
 
 **Q: What does the HTTP Cache-Control: max-age directive do, and how does it differ from Expires?**
+**Short:** Cache-Control max-age counts freshness from serving time and takes precedence over the legacy absolute-date Expires header.
+
 Cache-Control: max-age=N specifies that the response is fresh for N seconds from when it was served. Expires provides an absolute date-time. max-age takes precedence over Expires when both are present. Prefer Cache-Control because it is relative to serving time (robust to clock skew), and because Expires is a legacy header from HTTP/1.0.
 
 **Q: What is an ETag and how does it enable conditional requests?**
+**Short:** An ETag identifies a resource version so a client's If-None-Match request can get a bodyless 304 when nothing changed.
+
 An ETag is a server-generated identifier representing the version of a resource (hash, version number, or timestamp). The server includes it in the response: `ETag: "abc123"`. On subsequent requests, the client sends `If-None-Match: "abc123"`. If the resource hasn't changed, the server responds 304 Not Modified with no body — saving bandwidth. ETags must change whenever the resource changes.
 
 **Q: What is SNI and why is it necessary for modern HTTPS?**
+**Short:** SNI lets a client send the target hostname in the ClientHello so one IP can serve different certificates per hostname.
+
 SNI (Server Name Indication) is a TLS extension where the client includes the target hostname in the ClientHello (before TLS is established). This allows a server to present different certificates for different hostnames on the same IP address. Without SNI, a server could only host one certificate per IP — impractical when IPv4 addresses are scarce. CDNs, hosting providers, and cloud load balancers all depend on SNI for multi-tenant certificate management.
 
 **Q: What does the HSTS header do and what is the preload list?**
+**Short:** HSTS forces browsers to upgrade to HTTPS locally, and the preload list protects even a domain's first-time visitors.
+
 HSTS (Strict-Transport-Security) tells browsers to only connect via HTTPS for the duration specified by max-age. If a user types http://example.com, the browser upgrades to HTTPS locally before making any network request — preventing SSL stripping. The preload list is a browser-shipped list of domains that must always use HTTPS, protecting even first-time visitors before any HSTS header is received.
 
 **Q: What is the difference between HTTP 301 and 302 redirects, and how do they affect caching?**
+**Short:** A 301 redirect is cacheable and permanent, while a 302 redirect is temporary and re-checked against the original URL each time.
+
 301 (Moved Permanently) is cacheable and instructs browsers to update bookmarks. Subsequent requests go directly to the new URL. 302 (Found, temporary redirect) is not permanently cacheable — the browser asks the original URL each time (though some browsers cache 302 with a short duration). Use 301 for permanent moves (old API versions, www to non-www). Use 302 for temporary moves or feature flags. Incorrect use of 301 makes rollbacks painful (cached redirect).
 
 **Q: How does HTTP/2 server push work, and why was it deprecated in Chrome?**
+**Short:** HTTP/2 server push was deprecated because servers couldn't tell what the browser already cached, wasting bandwidth for little gain.
+
 HTTP/2 server push allowed a server to proactively send resources (CSS, JS) to the client before it requests them, using PUSH_PROMISE frames. In theory, this eliminated round trips for critical resources. In practice, servers couldn't know what was already in the browser cache — they would push resources the browser already had, wasting bandwidth. Chrome's removal notice reported push was used by only about 1.25% of HTTP/2 sites and that analysis showed no clear net performance gain, with regressions in many cases; Chrome 106 (stable September 2022) disabled HTTP/2 and gQUIC push by default. Push is still specified for HTTP/3 in RFC 9114 but no major browser implements it. Use `<link rel="preload">` or 103 Early Hints instead.
 
 **Q: What are the HTTP methods and which are idempotent?**
+**Short:** GET, HEAD, OPTIONS, TRACE, PUT, and DELETE are idempotent per RFC 9110, while POST, CONNECT, and PATCH are not.
+
 Per RFC 9110 Table 7, GET, HEAD, OPTIONS, TRACE, PUT and DELETE are idempotent — sending the request N times has the same effect as sending it once. POST and CONNECT are not idempotent, and neither is PATCH (defined separately in RFC 5789), so submitting the same POST twice creates two resources. Safe methods — GET, HEAD, OPTIONS, TRACE — do not modify server state; every safe method is also idempotent, but not the reverse (PUT and DELETE are idempotent and unsafe). Idempotency is critical for retry logic in distributed systems — safely retrying a PUT or DELETE after a network failure cannot create inconsistency.
 
 **Q: What is the Vary header and when does it cause problems?**
+**Short:** The Vary header stores a separate cached response per listed header value, and overusing it can destroy cache hit rates.
+
 The Vary header tells caches to store separate responses for different values of the listed headers. It binds any cache, shared and private alike — RFC 9111 does not restrict it to CDNs and proxies. `Vary: Accept-Encoding` causes caches to store different responses for gzip, br, and uncompressed clients. `Vary: User-Agent` causes caches to store thousands of responses per URL (one per User-Agent), destroying cache hit rates. `Vary: *` does not forbid storage — RFC 9111 §4.1 says such a stored response "always fails to match", so it can never be selected for reuse, which is a permanent miss rather than a ban on caching. Only include headers in Vary that genuinely produce different responses.
 
 **Q: What is the difference between HTTP long polling and WebSocket?**
+**Short:** Long polling holds an HTTP request open until data arrives, while WebSocket upgrades to a persistent bidirectional connection.
+
 Long polling: the client sends an HTTP request; the server holds it open until data is available (or timeout), then responds; the client immediately sends another request. It uses standard HTTP semantics but creates connection churn and overhead. WebSocket: the client upgrades the connection (101 Switching Protocols), and then both sides can send frames at any time over the persistent connection. WebSocket has lower overhead per message, better performance, but requires explicit infrastructure support (load balancers, proxies).
 
 **Q: How does HTTP/2 flow control work?**
+**Short:** HTTP/2 flow control uses per-stream and per-connection windows that grow via WINDOW_UPDATE frames as data is processed.
+
 HTTP/2 has flow control at two levels: per-connection and per-stream. Each stream has an initial window size (default 65,535 bytes). When the receiver processes DATA frames, it sends WINDOW_UPDATE frames to increase the window. The sender cannot send more data than the window allows. Connection-level flow control aggregates all streams. This prevents a fast sender from overwhelming a slow receiver's buffers, analogous to TCP's receive window but at the application layer.
 
 **Q: What is the HTTP/2 SETTINGS frame and what can it configure?**
+**Short:** The HTTP/2 SETTINGS frame configures parameters like HEADER_TABLE_SIZE, MAX_CONCURRENT_STREAMS, and INITIAL_WINDOW_SIZE at connection setup.
+
 SETTINGS frames are exchanged at connection setup and can be sent anytime to update settings. Key parameters, with the RFC 9113 §6.5.2 defaults: HEADER_TABLE_SIZE (HPACK dynamic table size, default 4096 octets), ENABLE_PUSH (server push, default 1, set 0 to disable), MAX_CONCURRENT_STREAMS (no limit initially; the RFC recommends servers advertise at least 100, and 100-1000 is typical in practice), INITIAL_WINDOW_SIZE (flow control window, default 65,535 octets, max 2^31-1), MAX_FRAME_SIZE (default 16,384 octets, valid range 2^14 to 2^24-1), MAX_HEADER_LIST_SIZE (advisory, unlimited by default). Setting these too low costs you either 431 Request Header Fields Too Large or stream-level REFUSED_STREAM resets, not 429 — 429 is application rate limiting and has nothing to do with SETTINGS.
 
 ---

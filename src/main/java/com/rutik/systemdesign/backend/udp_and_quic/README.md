@@ -432,51 +432,83 @@ The two questions that actually decide the protocol are loss tolerance and wheth
 ## 12. Interview Questions with Answers
 
 **Q: What does UDP provide that IP does not?**
+**Short:** UDP adds only port-based multiplexing and a payload checksum on top of what IP already provides.
+
 UDP adds port numbers (multiplexing — distinguishing applications on the same host) and a checksum (error detection — verifying payload integrity). That is all. IP provides addressing and routing; UDP provides nothing beyond those two additions.
 
 **Q: Why is UDP preferred for DNS?**
+**Short:** A DNS query over UDP completes in one round trip, while TCP would add a full handshake RTT first.
+
 DNS queries and responses typically fit in a single datagram. A DNS query takes 1 RTT over UDP — just the network round-trip time. TCP would add at least 1 RTT for the handshake before any data flows. For millions of DNS lookups per second, the latency and state overhead of TCP is unacceptable. Large DNSSEC responses use TCP as a fallback.
 
 **Q: What is the head-of-line blocking problem in HTTP/2 over TCP?**
+**Short:** A single lost TCP segment stalls every HTTP/2 stream on that connection until it is retransmitted.
+
 HTTP/2 multiplexes many streams over a single TCP connection. If a TCP segment is lost, TCP's in-order delivery guarantee stalls all streams — even those whose data arrived successfully — until the lost segment is retransmitted and received. HTTP/3 over QUIC solves this: each QUIC stream is independent, so a lost packet only stalls the stream it belongs to.
 
 **Q: How does QUIC achieve 0-RTT connection establishment?**
+**Short:** QUIC reuses a cached session ticket from an earlier handshake to send application data in the very first packet.
+
 On the first connection, QUIC completes a 1-RTT handshake. The server sends a session ticket containing keying material. On subsequent connections from the same client, the client uses the cached ticket to encrypt early data (0-RTT data) and sends application data in the first packet, before the handshake completes. The server can process this data immediately (with replay protection considerations).
 
 **Q: What is connection migration in QUIC and why does it matter?**
+**Short:** QUIC identifies connections by a Connection ID rather than IP:port, so a client can switch networks without reconnecting.
+
 QUIC connections are identified by a Connection ID, not by the IP:port 4-tuple. When a mobile client's IP changes (WiFi to LTE), the client sends a packet with the same Connection ID from the new address. The server validates the new path and migrates the connection without re-establishing TLS. For mobile users, this eliminates reconnect overhead on network switches.
 
 **Q: What are the security implications of 0-RTT data?**
+**Short:** 0-RTT data can be replayed by an attacker, so only idempotent requests like GET may safely use it.
+
 0-RTT data can be replayed by an attacker who captures the ClientHello and reuses it. The server must treat 0-RTT data as idempotent — only safe operations (HTTP GET, HEAD) should be accepted. HTTP/3 prohibits 0-RTT for non-idempotent requests. Applications must not process 0-RTT data for state-changing operations without idempotency guarantees.
 
 **Q: What is DTLS and where is it used?**
+**Short:** DTLS adapts TLS for UDP, adding replay protection and retransmission for lost handshake messages.
+
 DTLS (Datagram TLS) adapts TLS for UDP. It adds replay protection (sequence numbers), retransmission for lost handshake messages, and record epoch tracking for out-of-order datagrams. DTLS is used in WebRTC for peer-to-peer data channels, SRTP key negotiation, and VPN solutions over UDP.
 
 **Q: How does UDP amplification work and how does QUIC prevent it?**
+**Short:** QUIC caps server-to-client bytes at 3x what it has received until the client's address is validated, blocking amplification.
+
 UDP is connectionless, so the source IP in a packet is trivially spoofed. An attacker sends small UDP requests (e.g., DNS queries) with the victim's IP as the source. Servers respond with large replies to the victim, amplifying traffic. QUIC prevents amplification by limiting server-to-client traffic to 3x received bytes until the client's address is validated (via the handshake completing), preventing QUIC servers from being used as amplifiers.
 
 **Q: What is the difference between QUIC streams and HTTP/2 streams?**
+**Short:** HTTP/2 streams share one TCP connection and suffer TCP head-of-line blocking; QUIC streams are independently sequenced.
+
 HTTP/2 streams are application-level multiplexing inside a single TCP connection. A single TCP segment loss stalls all HTTP/2 streams (TCP HoL blocking). QUIC streams are transport-level multiplexing — each stream is independently sequenced and acknowledged at the QUIC layer. A single QUIC packet loss only stalls the stream(s) whose data was in that packet. QUIC also provides per-stream and per-connection flow control independently.
 
 **Q: When would you choose HTTP/2 over HTTP/3?**
+**Short:** Choose HTTP/2 when infrastructure blocks UDP or QUIC's engineering cost outweighs its latency benefit.
+
 Choose HTTP/2 when: (1) your infrastructure (load balancers, firewalls) does not support UDP 443 or QUIC; (2) clients are in a controlled network (not mobile); (3) the engineering cost of HTTP/3 is not justified by the marginal latency improvement. HTTP/3 wins decisively for mobile users, high-packet-loss environments, and endpoints serving many parallel resources.
 
 **Q: How does recvmmsg() improve UDP server performance?**
+**Short:** recvmmsg() receives many datagrams in one system call, cutting syscall overhead for high-rate UDP servers.
+
 recvmmsg() is a Linux system call that receives multiple datagrams in a single system call (batch receive). For high-rate UDP applications (10+ Gbps network), context switch overhead of one system call per datagram is prohibitive. recvmmsg() with batch size 64 reduces system calls by 64x, significantly improving throughput. sendmmsg() provides the same benefit for batch sends.
 
 **Q: What is selective reliability and why do game engines implement it over UDP?**
+**Short:** Game engines send stale position updates unreliably but retry critical events like damage until acknowledged.
+
 Game engines need to send high-frequency position updates (60–120 per second) where each update supersedes the previous. Reliable delivery of stale positions is useless and wasteful. But some events (player damage, item pickup, game state changes) must be delivered reliably. UDP allows game engines to implement selective reliability: unreliable delivery for frequent state updates, and a simple stop-and-wait or sliding window for critical events. This is more efficient than TCP, which would reliably deliver every stale position update.
 
 **Q: What is SO_REUSEPORT and why is it needed for high-throughput UDP servers?**
+**Short:** SO_REUSEPORT lets multiple threads each bind the same UDP port so the kernel spreads packets across them.
+
 SO_REUSEPORT lets multiple threads each bind their own socket to the same UDP port, with the kernel hashing packets across them by 4-tuple. Without it, a single UDP socket can only be read by one thread at a time, so multi-threaded receivers need external locking around `recvfrom()`, creating a serialization bottleneck at high packet rates. Each thread gets its own receive queue and can process packets independently, scaling UDP receive throughput roughly linearly with thread count on multi-core hosts. Use SO_REUSEPORT for any UDP server expected to handle more than a few hundred thousand packets per second.
 
 **Q: Why does UDP multicast-based service discovery often fail silently in cloud environments?**
+**Short:** Cloud networks often silently drop multicast traffic, so multicast-based service discovery fails without any error.
+
 Multicast delivery depends on IGMP snooping and multicast routing that most cloud environments disable or do not support across virtual networks. Tools like Hazelcast's auto-discovery and JGroups rely on multicast to find cluster members without a central registry, and when the underlying cloud network drops multicast traffic, these libraries simply never receive discovery packets rather than raising a clear error. The failure is silent because nothing in the multicast send path reports back that delivery failed — the sender has no way to know no one received the packet. Avoid multicast-based discovery in cloud deployments and use a registry-based mechanism instead, such as Kubernetes DNS, Consul, or a cloud provider's service discovery API.
 
 **Q: What is QUIC's ossification resistance and why does header encryption matter?**
+**Short:** QUIC encrypts nearly its whole packet so middleboxes cannot ossify around unencrypted header fields as TCP's did.
+
 Ossification is when middleboxes come to depend on a protocol's unencrypted header fields, making the protocol practically impossible to evolve later. TCP has ossified badly this way — new TCP options are frequently stripped or mishandled by middleboxes only ever tested against fields common decades ago. QUIC encrypts almost its entire packet, exposing only the Connection ID and packet number to the network, so middleboxes have nothing to ossify around beyond those two fields, and the protocol can keep evolving via software updates without waiting on middlebox vendors. This is also why QUIC runs over UDP rather than as a new IP-level protocol — UDP is the one transport virtually every middlebox already passes through untouched.
 
 **Q: How does QUIC's per-stream and per-connection flow control work?**
+**Short:** QUIC enforces flow control with MAX_DATA for the connection and MAX_STREAM_DATA for each stream independently.
+
 QUIC enforces flow control at two levels — MAX_DATA for the whole connection and MAX_STREAM_DATA for each individual stream. Both frame types advertise how many more bytes the sender may send before the receiver grants additional room, and a single stream hitting its MAX_STREAM_DATA limit blocks only that stream, not the connection, unless the connection-level MAX_DATA limit is also reached. This mirrors the same per-stream independence that gives QUIC its head-of-line-blocking immunity. The receiver sends updated MAX_DATA and MAX_STREAM_DATA frames as it consumes buffered data, growing the sender's allowed window incrementally, which lets an application bound both total connection memory and the memory used by any single misbehaving or slow stream.
 
 ---

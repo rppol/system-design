@@ -721,48 +721,78 @@ Rate limiting per IP allows a single malicious user with many IPs to bypass limi
 ## 12. Interview Questions with Answers
 
 **Q: What is an API gateway and what responsibilities does it typically handle?**
+**Short:** An API gateway is the single entry point for external traffic, centralizing routing, auth, and rate limiting.
+
 An API gateway is the single entry point for all external traffic in a microservices architecture. It handles routing (directing requests to the correct service), authentication and authorization offloading (JWT validation before the request reaches a service), rate limiting, SSL termination, request and response transformation, logging, and metrics collection. The key benefit is centralizing cross-cutting concerns that would otherwise be duplicated across every service.
 
 **Q: What is the BFF (Backend For Frontend) pattern and when do you use it?**
+**Short:** BFF gives each client type its own gateway instance, tailored to that client's data shape and needs.
+
 BFF creates a separate gateway instance tailored to each client type. A Mobile BFF returns compact payloads optimized for bandwidth-constrained devices; a Web BFF returns richer payloads; a Partner BFF enforces API key auth and usage metering. Use BFF when different clients have fundamentally different data shape requirements and when client teams are large enough to own their gateway tier. It prevents the single-gateway team from becoming a bottleneck, as each BFF is owned by the team that builds its corresponding client.
 
 **Q: How does Spring Cloud Gateway differ from Zuul 1?**
+**Short:** Spring Cloud Gateway is reactive and non-blocking on Netty, while Zuul 1 uses a blocking thread-per-connection model.
+
 Spring Cloud Gateway is fully reactive, built on Project Reactor and Netty, using non-blocking I/O. It handles thousands of concurrent connections with a small, fixed thread pool. Zuul 1 uses a blocking, thread-per-connection model: each request ties up a thread for the duration of the call. Under high concurrency (thousands of concurrent slow upstream services), Zuul 1 exhausts the thread pool and backs up. Spring Cloud Gateway scales better under high concurrency and integrates naturally with reactive Spring WebFlux.
 
 **Q: Explain Spring Cloud Gateway predicates and filters.**
+**Short:** Predicates decide which requests match a route, and filters transform the request or response along that route.
+
 Predicates are conditions that a request must match for a route to apply. Examples are `Path=/api/v1/users/**`, `Header=X-API-Version, 2`, `Method=GET` and `Host=api.example.com` — note that the Header predicate separates name from value-regexp with a comma, not a colon. Filters transform the request before routing or the response after: `StripPrefix` removes path segments, `AddRequestHeader` injects headers, `CircuitBreaker` wraps the route with a circuit breaker, `RequestRateLimiter` enforces rate limits via Redis, `RewritePath` transforms the URL. `GlobalFilter` beans apply to every route, while per-route filters apply only to matching routes.
 
 **Q: How do you prevent the API gateway from becoming a single point of failure?**
+**Short:** Run multiple stateless gateway instances behind a load balancer with health checks and circuit breakers on every route.
+
 Run multiple gateway instances (minimum 3) behind a load balancer (AWS ALB, Nginx). Each instance is stateless — rate limit state and session state live in Redis. Use circuit breakers on every route so a failing upstream service returns a fallback response rather than causing the gateway to hang. Health checks on each gateway instance allow the load balancer to route around a failed instance. Use rolling deployments so gateway updates do not cause downtime.
 
 **Q: How does JWT authentication work at the gateway level?**
+**Short:** The gateway validates the JWT and injects trusted internal headers like X-User-Id for downstream services.
+
 The gateway intercepts every request, extracts the Bearer token from the Authorization header, and validates the JWT signature against the authorization server's JWKS public key. It then checks expiry and claims. On success, the gateway extracts user identity from the JWT claims and injects it as trusted internal headers (X-User-Id, X-User-Roles) before forwarding to the downstream service. Downstream services trust these headers because they are inside the network perimeter and never exposed to external clients. This removes the need for each service to validate JWTs independently.
 
 **Q: What is API composition at the gateway level?**
+**Short:** API composition lets the gateway call multiple services in parallel and merge their responses into one client reply.
+
 API composition aggregates responses from multiple services into a single response for the client. For a product detail page, the gateway calls catalog, pricing, inventory, and review services in parallel using reactive composition (Mono.zip), merges the responses, and returns one JSON object to the client. This reduces client round trips from 4 to 1. The tradeoff: the gateway now calls multiple services per request, and the gateway's response time is the maximum of all upstream calls.
 
 **Q: How do you implement rate limiting in Spring Cloud Gateway?**
+**Short:** Spring Cloud Gateway rate-limits with a Redis-backed token bucket filter, keyed per request by a KeyResolver bean.
+
 Spring Cloud Gateway uses the `RequestRateLimiter` filter backed by Redis. The token bucket algorithm allows a `replenishRate` (steady-state tokens added per second) and a `burstCapacity` (maximum tokens in the bucket, allowing short bursts). A `KeyResolver` bean determines the rate limit key: by user ID for authenticated endpoints (extracted from the JWT-populated X-User-Id header), by API key for partner endpoints, or by IP for public unauthenticated endpoints. When the bucket is empty, the gateway returns 429 Too Many Requests.
 
 **Q: What is the difference between a circuit breaker at the gateway level versus at the service level?**
+**Short:** A gateway-level breaker protects the gateway itself, while a service-level breaker protects a service from a failing dependency.
+
 A gateway-level circuit breaker stops the gateway waiting on a failing downstream service and returns a fallback to the client instead. It also keeps in-flight requests from piling up and exhausting the gateway's upstream connections and heap — a reactive gateway has no per-request thread to exhaust, but its connection pools and memory are finite. A service-level circuit breaker (Resilience4j in the calling service) protects a service from a failing dependency. Both are necessary for defense in depth: gateway-level catches client-facing degradation early; service-level handles internal service-to-service failures. Configure both with appropriate timeouts and fallback behaviors.
 
 **Q: How do you handle versioning at the API gateway?**
+**Short:** Route predicates select routes by URL path or header, letting multiple API versions run side by side.
+
 Route predicates select routes based on URL path (`Path=/api/v2/**`) or headers (`Header=X-API-Version, 2`). Version 1 routes to the old service; version 2 routes to a new service or to the same service with a rewritten path. The gateway allows running multiple API versions simultaneously during migration without requiring all clients to upgrade at once. Deprecate old versions by returning a Deprecation response header with the sunset date.
 
 **Q: What is Kong and how does it differ from Spring Cloud Gateway?**
+**Short:** Kong is a plugin-based, language-agnostic gateway on Nginx, while Spring Cloud Gateway is JVM-native and Spring-integrated.
+
 Kong is an Nginx-based API gateway with a plugin architecture. Core functionality (rate limiting, JWT auth, OAuth2, request transformation, logging) is provided by plugins — the bundled ones are written in Lua, and custom plugins can also use the Go, Python or JavaScript PDKs. Configuration is declarative via YAML files managed by the decK CLI. Kong is language-agnostic — it sits in front of any backend technology. Spring Cloud Gateway is JVM-native, configured in Java and YAML, integrates deeply with the Spring ecosystem (Eureka, Spring Security, Micrometer), and is better suited for Spring Boot shops that want full programmatic control. Kong is better for polyglot environments where the gateway team wants plugin-based configuration without writing Java code.
 
 **Q: How does AWS API Gateway work with Lambda authorizers?**
+**Short:** A Lambda authorizer runs before the backend, returning a cacheable IAM policy that allows or denies access.
+
 A Lambda authorizer is a Lambda function that runs before the backend Lambda (or HTTP endpoint). It receives the request token (JWT, API key, or custom header) and returns an IAM policy document that allows or denies access to the API resource. AWS API Gateway caches the authorizer response for a configurable TTL (`authorizerResultTtlInSeconds` defaults to 300 seconds, maximum 3600; 0 disables caching). Usage plans and API keys enforce rate limits and quotas per client on REST APIs. This model is fully serverless — no always-on gateway instances to manage.
 
 **Q: How do you propagate correlation IDs through the gateway?**
+**Short:** A global filter generates or reuses an X-Correlation-ID header and propagates it through logs and downstream calls.
+
 A Global filter checks for an X-Correlation-ID header. If absent (i.e., the request originates from an external client), the filter generates a UUID and sets it. If present (internal service-to-service call relayed through the gateway), it reuses the existing ID. The filter adds the correlation ID to the outgoing request headers (forwarded to downstream services), adds it to the response headers (returned to the client for support tickets), and writes it to the MDC for structured logging. All downstream services must propagate this header to their own outbound calls.
 
 **Q: What are the security risks of an API gateway and how do you mitigate them?**
+**Short:** Key risks include DDoS, header injection, and internal header spoofing, mitigated with a WAF and header stripping.
+
 The gateway is a high-value attack target. Risks: DDoS (mitigate with rate limiting and WAF), injection via headers or query params (validate and sanitize at the gateway), internal header spoofing (strip X-User-Id and X-User-Roles from incoming external requests before JWT validation; re-set them from validated JWT claims), JWT algorithm confusion attacks (explicitly specify allowed algorithms, reject "none" alg). Always run the gateway behind a WAF (AWS WAF, Cloudflare) for layer 7 protection. Run the gateway in a private subnet; expose it only via a load balancer with HTTPS.
 
 **Q: How do you implement graceful degradation when a downstream service is unavailable?**
+**Short:** Configure a CircuitBreaker filter's fallbackUri to return a cached or degraded response instead of failing outright.
+
 Configure a `CircuitBreaker` filter with a `fallbackUri` for every route. The fallback endpoint returns either a cached response (from Redis or an in-memory cache), a degraded response (indicating reduced functionality), or a clear error message. For example, if the recommendation service is down, return an empty recommendations list rather than failing the product page. Design fallback responses with the client's user experience in mind: which features can be silently degraded versus which require explicit error messaging.
 
 ---

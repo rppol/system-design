@@ -548,48 +548,78 @@ A producer team renamed the field `customerId` to `userId` in an integration eve
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between an event, a command, and a query?**
+**Short:** Events are past-tense facts with no fixed recipient, commands target one service, and queries return data without changing state.
+
 An event is a record of something that has already happened — it is past tense, has no single intended recipient, and expects no response. A command is an instruction directed at a specific service — it expects execution. A query is a read-only request for data — it expects a data response and must not change state. This distinction is the foundation of CQS (Command-Query Separation) at the method level and CQRS at the architectural level.
 
 **Q: What are the four types of events in event taxonomy?**
+**Short:** Domain, integration, notification, and event-carried state transfer events differ by scope and payload richness.
+
 Domain events are internal to a bounded context and carry rich domain meaning. Integration events are published across service boundaries and are deliberately schema-stable for external consumers. Notification events (thin events) carry only identifiers and require consumers to call back for current state. Event-Carried State Transfer events carry the full current state of the aggregate and eliminate the need to call back, at the cost of larger payloads and potential staleness under consumer lag.
 
 **Q: What is the difference between choreography and orchestration?**
+**Short:** Choreography has services react to events autonomously with no coordinator, while orchestration uses a central saga to direct participants via commands.
+
 In choreography, services react autonomously to events with no central coordinator — each service subscribes to relevant topics and decides its reaction independently. In orchestration, a central saga orchestrator sends commands to participant services and listens for response events to drive the flow forward. Choreography is simpler for small stable flows; orchestration is preferable for complex multi-step flows where compensation logic is significant and traceability is required.
 
 **Q: What fields must an event envelope contain?**
+**Short:** An event envelope needs eventId, eventType, occurredOn, aggregateId, aggregateType, version, correlationId, causationId, and payload.
+
 An envelope must carry an identity, a type, a timestamp, the subject aggregate, a schema version, the causal trace fields, and the payload. Concretely: eventId (UUID, used for deduplication), eventType (fully qualified string), occurredOn (UTC timestamp), aggregateId (the business identifier of the aggregate that changed), aggregateType, version (schema version), correlationId (trace ID spanning the entire distributed flow), causationId (eventId of the event that caused this one to be emitted), and payload (domain-specific content). The correlationId and causationId are frequently omitted in early implementations and cause severe debugging pain in production incidents.
 
 **Q: Why must event consumers tolerate unknown fields?**
+**Short:** Tolerating unknown fields preserves forward compatibility so old consumers keep working after producers add new fields.
+
 This is the principle of forward compatibility. When a producer adds a new field to an event schema, old consumers that have not yet been deployed with the new schema must not break. Jackson's `@JsonIgnoreProperties(ignoreUnknown = true)` and Avro's schema evolution rules both support this. If consumers throw on unknown fields, every schema change requires coordinated simultaneous deployment of all consumers before the producer, which defeats the purpose of decoupled services.
 
 **Q: What is the difference between backward and forward schema compatibility?**
+**Short:** Backward compatibility lets new schemas read old data by adding only optional fields, while forward compatibility lets old consumers ignore new fields.
+
 Backward compatibility means the new version of a schema can read data written with the old schema — achieved by only adding optional fields with defaults, never removing required fields. Forward compatibility means the old version of a schema can read data written with the new schema — achieved because consumers ignore unknown fields. Full compatibility (FULL mode in Schema Registry) requires both. In practice, always aim for FULL compatibility for integration events.
 
 **Q: What is event storming and when do you use it?**
+**Short:** Event storming is a collaborative workshop where teams map domain events on a timeline using color-coded sticky notes.
+
 Event storming is a collaborative workshop technique invented by Alberto Brandolini where business and technical stakeholders collaboratively map domain events on a timeline using color-coded sticky notes. The official palette is orange for domain events, blue for commands, big yellow for aggregates, lilac for policies, wide pink for external systems, green for read models, small yellow for actors, and neon pink for hot spots. It is used when designing new services, decomposing a monolith, or aligning business and technical understanding of a complex domain. A well-run event storming session can surface bounded context boundaries and aggregate designs in a day that would take weeks of documentation-only analysis.
 
 **Q: What is the notification event pattern and when should you use it over ECST?**
+**Short:** A notification event carries only an identifier and forces the consumer to call back for the current state, unlike a full ECST payload.
+
 A notification event carries only the aggregate identifier (and event type), no payload data. The consumer must call back to the producer's API to fetch current state. Use it when the consumer always needs the absolute latest state (not the state at the time of the event), when events are high-frequency and payload size matters, or when multiple events for the same aggregate may be batched and only the final state matters. Use ECST (Event-Carried State Transfer) when you want maximum consumer autonomy and can tolerate slight staleness.
 
 **Q: How do you handle long-running choreographed flows that span many services?**
+**Short:** Add a process manager that tracks flow state via events, or refactor to an orchestrated saga once participants exceed 4 to 5 services.
+
 You add a Process Manager (also called a Saga) that listens to events and tracks the overall flow state, but still communicates via events rather than direct commands. At the point where a choreographed flow has grown beyond 4–5 services, the alternative is to refactor to an orchestrated saga with an explicit state machine. The key signal is when engineers can no longer confidently describe the full flow without reading multiple codebases — that is the tipping point for orchestration.
 
 **Q: What is the causationId and why is it important?**
+**Short:** The causationId is the eventId of the event that triggered the current one, forming a traceable causal chain.
+
 The causationId is the eventId of the event that caused the current event to be emitted. It creates a causal chain: `UserRegistered` (causationId: null) → `WelcomeEmailSent` (causationId: UserRegistered.eventId) → `EmailDeliveryConfirmed` (causationId: WelcomeEmailSent.eventId). Combined with correlationId (which spans the entire flow), this allows you to reconstruct exactly what happened and why during incident investigation. Without causationId, you know what happened but not why.
 
 **Q: How do you trace an end-to-end event flow in a choreographed system?**
+**Short:** Propagate the correlationId as the distributed trace ID so tools like Jaeger can reconstruct the entire flow across services.
+
 Inject the correlationId as the distributed trace ID in every event envelope. Configure your message consumers to extract the correlationId and set it as the active span in your distributed tracing system (Jaeger, Zipkin, OpenTelemetry). All log statements, database queries, and outgoing events in that consumer execution are tagged with the same correlationId. In Jaeger, you can then search by correlationId and see the entire trace spanning all services, topics, and time delays.
 
 **Q: What is the risk of publishing domain events as integration events directly?**
+**Short:** Publishing domain events directly as integration events couples external consumers to internal models that change frequently.
+
 Domain events are optimized for internal bounded context semantics. They may reference domain objects, use internal identifiers, carry fields meaningful only within the context, or change structure frequently as the domain evolves. Publishing them directly to external consumers creates tight coupling between your internal model and external contracts. The fix is the anti-corruption layer: internal domain events are translated to explicitly versioned, deliberately designed integration events at the boundary of the context.
 
 **Q: How do you decide event granularity — fine-grained vs coarse-grained events?**
+**Short:** Fine-grained events give consumers precise reactions at the cost of volume, while coarse-grained events simplify consumption but waste processing.
+
 Fine-grained events (`OrderItemAdded`, `ShippingAddressUpdated`) give consumers maximum flexibility to react only to what changed, but increase event volume and complexity. Coarse-grained events (`OrderUpdated` carrying full state) are simpler to consume but trigger unnecessary processing when consumers only care about specific changes. The rule of thumb: use fine-grained events for high-value business facts that many consumers react to differently; use coarse-grained ECST events when most consumers need the full state anyway.
 
 **Q: What is the difference between a policy and a reaction in event storming?**
+**Short:** A policy is a business automation rule pairing an event with a command, while a reaction is its technical implementation in consumer code.
+
 A policy (lilac sticky) is an automation rule: "When [event] THEN [command]". It is a business rule, not a technical one. "When PaymentFailed THEN NotifyCustomer AND CancelOrder." A reaction is the technical implementation of a policy — the consumer code that executes when the event arrives. The distinction matters in event storming because policies belong on the business level and should be validated with domain experts, not assumed by engineers.
 
 **Q: How does CQRS relate to events, commands, and queries?**
+**Short:** CQRS routes commands to a write model that emits events, which projectors use to build read models that serve queries.
+
 CQRS separates the write model (command side) from the read model (query side) at the architectural level. Commands flow to the write model which validates business invariants, changes state, and emits domain events. Those events are consumed by projectors that build denormalized read models optimized for specific query patterns. Queries flow only to the read models and never touch the write model. This enables the write side to be strongly consistent and the read side to be eventually consistent, independently scalable, and freely denormalized.
 
 ---

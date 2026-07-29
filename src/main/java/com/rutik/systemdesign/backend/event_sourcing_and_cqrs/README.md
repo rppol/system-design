@@ -526,51 +526,83 @@ Do NOT use event sourcing for: simple CRUD applications without complex business
 ## 12. Interview Questions with Answers
 
 **Q: What is event sourcing and how does it differ from traditional state persistence?**
+**Short:** Event sourcing stores the sequence of events that led to the current state instead of overwriting a row in place.
+
 In traditional state persistence, you store the current state of an entity and update it in-place: `UPDATE orders SET status = 'SHIPPED'`. In event sourcing, you store the sequence of events that led to the current state and never update records: you append `OrderShipped{orderId, trackingNumber, shippedAt}`. Current state is derived by replaying all events for an aggregate from the beginning. The difference is that traditional persistence answers "what is the current state?" while event sourcing answers "what happened and how did we get here?"
 
 **Q: What is CQRS and why would you use it?**
+**Short:** CQRS separates the write model that enforces invariants from a denormalized read model optimized for queries.
+
 CQRS separates the write model (command side) from the read model (query side). The command model enforces business invariants and maintains consistency. The read model is denormalized and optimized for specific query patterns — no joins, no complex aggregations at query time. You use CQRS when: reads and writes have vastly different load patterns (10:1 or higher read-to-write ratio), reads require different shapes than the write model (list view vs detail view vs reporting), or different consistency requirements exist (reads can be eventually consistent, writes must be strongly consistent).
 
 **Q: What is an aggregate in the context of event sourcing?**
+**Short:** An aggregate is the transactional consistency boundary whose root validates commands before emitting events.
+
 An aggregate is a cluster of domain objects treated as a single unit for data consistency. It is the boundary of transactional consistency — all changes within an aggregate are atomic. In event sourcing, each aggregate has its own ordered event stream. The aggregate root is the only entry point for modifying the aggregate — all commands go through it. The aggregate validates business invariants before emitting events. Examples: `Order` aggregate (contains OrderItems, ShippingAddress, PaymentDetails), `BankAccount` aggregate (contains transactions, balance).
 
 **Q: What are snapshots in event sourcing and when should you use them?**
+**Short:** A snapshot stores a point-in-time aggregate state so loading skips replaying the full event history.
+
 A snapshot is a point-in-time serialization of an aggregate's state, stored alongside the event log. When loading an aggregate, instead of replaying all events from the beginning, you load the most recent snapshot and only replay events that occurred after the snapshot's version. Use snapshots when an aggregate's stream keeps growing without bound, or when it has high event velocity. Be careful with the threshold justification: replaying 50-100 already-deserialized events in memory costs microseconds, so the real cost being avoided is the I/O and deserialization of fetching a long stream — which is why the pain shows up at thousands of events (the 5000-event cart in Section 10 took 800ms to load), not at 50. The snapshot threshold is typically 50-100 events. Snapshots trade storage space (snapshot table) for faster aggregate loading. They do not change the event log — events remain the source of truth.
 
 **Q: How do you handle schema evolution in event sourcing?**
+**Short:** Schema evolution in event sourcing uses upcasters that transform old event formats into new ones at read time.
+
 Events are immutable once written, so you cannot change their schema retroactively. Use event upcasters: a transformer that converts old event format to new format at read time. When loading events, the upcaster chain runs before the event reaches the aggregate or projection. An upcaster matches events by type and revision, transforms the payload (adds a new field with default value, renames a field, splits one event into two), and outputs the new format. Rules: adding optional fields is backward-compatible; removing or renaming fields requires an upcaster; changing semantics requires a new event type and a migration strategy.
 
 **Q: What is the difference between choreography and orchestration in event-driven systems?**
+**Short:** Choreography lets services react to events with no coordinator, while orchestration uses a central saga to direct the workflow.
+
 Choreography: each service reacts to domain events published by other services and takes action. There is no central coordinator — services are loosely coupled through events. Example: `OrderCreated` event → InventoryService reserves stock → publishes `StockReserved` → PaymentService charges → publishes `PaymentCompleted`. Orchestration: a central saga orchestrator sends commands to services and waits for replies, managing the workflow state machine. Example: `OrderSagaOrchestrator` sends `ReserveInventoryCommand` to InventoryService, receives `StockReservedEvent`, then sends `ChargePaymentCommand`. Choreography is more loosely coupled but harder to trace; orchestration makes the flow explicit and visible but introduces a coupled coordinator.
 
 **Q: How do you implement "read your own writes" consistency with CQRS?**
+**Short:** Return state directly from the command handler, or update the read model synchronously, to satisfy read-your-own-writes.
+
 By default, CQRS with async projections means a write followed immediately by a read may not see the written data. Solutions: (1) Return the new state directly from the command handler response — skip the read model for the immediate redirect. (2) Synchronous projection: update the read model in the same transaction as the command (strong consistency, same DB required). (3) Wait-for-projection: after command, poll the read model with a timeout until the new entity appears (Awaitility-style in the UI). (4) Client-side cache: the frontend holds the just-written data locally and uses it for the immediate display without a round-trip.
 
 **Q: What is event replay and what are its use cases?**
+**Short:** Event replay reprocesses historical events to build new projections, fix corrupted read models, or reconstruct past state.
+
 Event replay is re-processing historical events from the event store. Use cases: (1) Build a new projection from existing data — e.g., add a new read model for a reporting dashboard by replaying all events from the beginning. (2) Fix a corrupted projection — if a bug in an event handler caused incorrect read model state, fix the bug, delete the read model, replay all events. (3) Temporal queries — replay events up to a specific timestamp to reconstruct historical state. (4) Debugging — replay events to reproduce a specific state and investigate a bug. Event replay is one of event sourcing's most powerful capabilities — it makes the event log a complete historical record that can be re-interpreted.
 
 **Q: What is the optimistic concurrency check in an event store?**
+**Short:** An event store rejects a save when the aggregate's stored version no longer matches the version that was loaded.
+
 When a command handler loads an aggregate, it knows the current version (the version of the last event). When saving new events, it includes the expected version. The event store checks: is the current version of the aggregate in storage still equal to the expected version? If another process appended an event between load and save, the version will not match, and the save fails with an optimistic concurrency exception. The command handler then retries: reload the aggregate (now with the new event), re-validate invariants, re-apply the command. This is identical to JPA's `@Version`-based optimistic locking but for event streams.
 
 **Q: How does CQRS relate to microservices?**
+**Short:** In microservices, each service owns its write model and projects other services' events into its own read model.
+
 In a microservices architecture, each service naturally has its own write model (its aggregate) and can publish events that other services project into their own read models. Order service owns `OrderAggregate` and publishes `OrderCreated`, `OrderShipped` events. ShippingService subscribes to `OrderShipped` and maintains its own shipment read model. ReportingService subscribes to all order events and builds denormalized reporting tables. Each service owns its read model, denormalized for its specific queries. This avoids cross-service JOINs and lets each service's read model be independently scaled and optimized.
 
 **Q: What is the Axon Framework and what problems does it solve?**
+**Short:** Axon Framework provides annotations and infrastructure for CQRS and event sourcing, handling aggregate loading, concurrency, and projections.
+
 Axon Framework is a Java framework for implementing CQRS and event sourcing, currently at 5.x with 4.x still the version most production systems run. It provides (in the widely deployed 4.x model): `@Aggregate` annotation for aggregates with automatic event sourcing, `@CommandHandler` for command handling, `@EventSourcingHandler` for state reconstruction, `@EventHandler` for projections, `CommandGateway` for dispatching commands, `QueryGateway` for querying projections, and AxonServer as the event store and message routing infrastructure. It solves the boilerplate of: event serialization, aggregate loading (snapshot + replay), optimistic concurrency, event publishing, and projection catch-up. It integrates natively with Spring Boot.
 
 **Q: What is the difference between a command and an event in event sourcing?**
+**Short:** A command can be rejected, while an event is an immutable record of something that already happened.
+
 A command is a request to do something and can be rejected, while an event is a statement of fact that has already happened and can never be rejected or undone. `CreateOrderCommand` might fail validation and be refused by the aggregate, but `OrderCreatedEvent` — once emitted and persisted — is an immutable record that the order was in fact created. Commands are named in the imperative (`ShipOrder`), events are named in the past tense (`OrderShipped`), and this naming convention is a direct expression of the difference. Design your domain model so that only aggregates emit events after validating a command, never the reverse.
 
 **Q: How do you handle GDPR "right to be forgotten" requests when the event log is immutable?**
+**Short:** Crypto-shredding deletes a subject's encryption key rather than the events, leaving the log intact but unreadable.
+
 Crypto-shredding encrypts each subject's data with a per-subject key and deletes only that key to forget them, leaving the event log physically intact but unreadable. The events themselves remain present, satisfying the append-only, auditable nature of the log, but their personal-data fields become cryptographically inaccessible garbage once the key is gone. An alternative for less strict cases is to keep PII only in the read-model projections, which can be deleted normally, and reference subjects in the event log by an opaque ID instead of raw PII. Design events with PII isolated into a small, separately-encrypted payload from day one, because retrofitting crypto-shredding onto years of existing events is a major migration.
 
 **Q: What is a compensating event and when do you use it instead of modifying history?**
+**Short:** A compensating event appends a new fact that corrects an earlier one rather than editing or deleting immutable history.
+
 A compensating event is a new event appended to the stream that corrects the effect of an earlier one, rather than editing or deleting the original event. Use it whenever a past event turns out to have been wrong — a rounding bug, a duplicate charge, a bad manual data entry — because events are immutable and the only valid way to fix history is to add a new fact on top of it, not rewrite the old one. In the financial platform case study, a rounding error in `MoneyWithdrawn` was corrected by emitting `BalanceCorrectionApplied` events for affected accounts, which became part of the permanent audit trail alongside the original error. Reach for a compensating event any time the fix itself needs to be visible and auditable, not silently applied.
 
 **Q: How do you decide aggregate boundaries in event sourcing?**
+**Short:** Aggregate boundaries should enclose only the data that must change together atomically under a true business invariant.
+
 An aggregate boundary should enclose exactly the data that must change together atomically and consistently within a single transaction, and nothing more. Model the aggregate around a true invariant — an `Order` aggregate enforces that its total always equals the sum of its items, so items and total must be inside the same aggregate — while data that can tolerate eventual consistency, like a shipping carrier's tracking updates, belongs in a separate aggregate or a projection instead. Aggregates that grow too large accumulate long event streams and create contention, since every command against the aggregate is serialized through its optimistic concurrency check; splitting an overgrown aggregate into smaller ones relieves both problems. Favor small aggregates bounded by real transactional invariants over large aggregates modeled after a whole business entity.
 
 **Q: How do you make projection event handlers idempotent so replay or at-least-once delivery doesn't corrupt the read model?**
+**Short:** Make every projection handler an idempotent upsert keyed by the event's unique ID.
+
 Make every projection handler an idempotent upsert keyed by the event's unique ID, so processing the same event twice produces the same read-model state as processing it once. Store the last-processed event ID (or version) alongside the read model row and skip any incoming event whose ID has already been recorded, rather than assuming the message bus delivers each event exactly once. Use `INSERT ... ON CONFLICT DO UPDATE` (or equivalent upsert) instead of separate INSERT and UPDATE statements, since a redelivered `OrderCreatedEvent` should not throw a duplicate-key error or create a second row. This idempotency is what makes projection rebuilds and at-least-once message delivery safe, both of which are core to how event sourcing systems recover from failures.
 
 ---
