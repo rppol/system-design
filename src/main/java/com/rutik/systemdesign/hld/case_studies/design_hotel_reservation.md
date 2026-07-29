@@ -51,7 +51,7 @@
 - Each booking touches `room_type_count x nights` inventory rows — for a 3-night stay, **3 inventory-row decrements per booking**, all of which must succeed or none must (§4.2) -> ~23 bookings/sec x 3 rows ~= **~70 inventory-row writes/sec average**, ~500-600/sec at peak. This is a tiny absolute number compared to the read volume, but each write carries a correctness obligation the reads don't.
 
 ### Hold Volume
-- Not every search-to-hold conversion becomes a booking — industry abandonment rates mean roughly **3-5x more holds are created than bookings completed**. At 2M bookings/day and a conservative 4x ratio: **~8 million holds/day** -> ~93 holds/sec average, ~400-500/sec peak.
+- Not every search-to-hold conversion becomes a booking — checkout abandonment means more holds are created than bookings completed. Assume an illustrative **3-5x hold-to-booking ratio** (the real number is product-specific and not published by any operator; treat it as a modelling input to size the hold store, not a cited industry figure). At 2M bookings/day and a conservative 4x ratio: **~8 million holds/day** -> ~93 holds/sec average, ~400-500/sec peak.
 - A hold's TTL (§4.2) is typically **10-15 minutes** — at steady state, the number of *concurrently active* holds is `holds_per_sec x TTL_seconds` ~= `93 x 720` ~= **~67,000 concurrently active holds** at average load, growing to the low hundreds of thousands at peak. Each hold record is small (~150 bytes: hotel_id, room_type, date range, user/session ID, expiry) -> ~67,000 x 150 bytes ~= **~10MB** — trivial for an in-memory store, but the *operation* of placing/expiring a hold (an atomic decrement/increment, §4.2) is the operation this entire design protects.
 
 ### Cache Footprint for Search
@@ -224,6 +224,13 @@ public class InventoryService {
                 // @Transactional, throwing here rolls back ANY decrements
                 // already applied to earlier nights in this loop -- the
                 // guest is never left holding "2 of 3 nights."
+                //
+                // SoldOutException MUST extend RuntimeException. Spring's
+                // default rollback rule only marks the transaction for
+                // rollback on unchecked exceptions; a CHECKED exception
+                // thrown here would let the partial decrements COMMIT,
+                // producing exactly the "2 of 3 nights" state this loop
+                // exists to prevent. (Use rollbackFor if it must be checked.)
                 throw new SoldOutException(hotelId, roomTypeId, night);
             }
         }
@@ -321,7 +328,7 @@ Every hold starts `ACTIVE` from `reserveRoom()`'s atomic decrement (§4.2) and t
 
 Three correctness properties worth calling out explicitly:
 
-1. **All-or-nothing across nights**: the `@Transactional` boundary around the per-night loop in `reserveRoom` is what prevents the "2 of 3 nights" failure mode described in §4.1 — a `SoldOutException` on night 3 rolls back the decrements already applied to nights 1 and 2.
+1. **All-or-nothing across nights**: the `@Transactional` boundary around the per-night loop in `reserveRoom` is what prevents the "2 of 3 nights" failure mode described in §4.1 — a `SoldOutException` on night 3 rolls back the decrements already applied to nights 1 and 2. This holds **only because `SoldOutException` is unchecked**: Spring rolls back by default on `RuntimeException` and `Error` only, and its own reference explicitly states that "checked exceptions that are thrown from a transactional method do not result in a rollback in the default configuration" — so a checked `SoldOutException` here would silently commit the partial decrements.
 2. **Idempotency-key dedup**: a retried `reserveRoom` call (double-click, client timeout-and-retry) with the same `idempotencyKey` returns the *existing* hold rather than creating a second one and double-decrementing — the same pattern as [`./design_payment_system.md`](./design_payment_system.md) §4.1's `Idempotency-Key` handling, applied to inventory instead of charges.
 3. **`confirmHold` re-checks `expires_at`**: even if the hold row is still `ACTIVE` in the database, a `confirmHold` call arriving *after* `expires_at` must fail — otherwise a slow payment confirmation could "resurrect" a hold whose inventory the expiry worker already gave back to someone else, producing exactly the double-sell this design exists to prevent. The `WHERE status = 'ACTIVE' AND expires_at > now()` guard closes this window.
 
@@ -546,8 +553,8 @@ The unifying point: **the inventory decrement (§4.2) is synchronous and in the 
 
 | Company / Product | Inventory Model | Notable Characteristic |
 |---|---|---|
-| **Booking.com** | Rate-plan + allotment model across an enormous direct-connect and channel-manager network | Operates inventory for **2.3+ million properties** worldwide and processes on the order of **1.5+ million room-nights booked per day** at peak — at that volume, the per-(hotel, room_type, date) inventory row (§4.1) is the unit that every connectivity partner (hotel extranets, channel managers) ultimately writes to, making "one canonical inventory row, many writers" the central integration challenge. |
-| **Marriott's Central Reservation System (CRS)** | Pooled inventory across Marriott's ~30 brands and 8,000+ properties post-merger | Marriott's CRS underwent a **multi-year migration** after the Starwood acquisition to unify two previously-separate reservation systems (Marriott's and Starwood's) onto one platform — a real-world illustration of the "inventory model must be a shared contract" problem: two CRSs each had their own (hotel_id, room_type, date) semantics, rate-plan structures, and loyalty-point integrations, and merging them required reconciling those models property-by-property rather than a single cutover, precisely because a hard cutover risks the exact double-booking failure mode this case study's §4.2 and §9 War Story 1 are about. |
+| **Booking.com** | Rate-plan + allotment model across an enormous direct-connect and channel-manager network | As of 31 December 2025 Booking.com listed roughly **4.4 million properties** across 220+ countries — about **500,000 hotels, motels and resorts** plus ~3.9 million homes and apartments (the hotel figure is what §2's 500K-property estimate is calibrated against) — and Booking Holdings booked roughly **1.24 billion room nights in 2025**, an average of about **3.4 million room-nights per day** with peak travel days well above that. At that volume, the per-(hotel, room_type, date) inventory row (§4.1) is the unit that every connectivity partner (hotel extranets, channel managers) ultimately writes to, making "one canonical inventory row, many writers" the central integration challenge. |
+| **Marriott's Central Reservation System (CRS)** | Pooled inventory across Marriott's 30+ brands and 9,700+ properties | Marriott's CRS underwent a **multi-year migration** after the Starwood acquisition to unify two previously-separate reservation systems (Marriott's and Starwood's) onto one platform — a real-world illustration of the "inventory model must be a shared contract" problem: two CRSs each had their own (hotel_id, room_type, date) semantics, rate-plan structures, and loyalty-point integrations, and merging them required reconciling those models property-by-property rather than a single cutover, precisely because a hard cutover risks the exact double-booking failure mode this case study's §4.2 and §9 War Story 1 are about. |
 | **Airbnb's calendar/availability service** | **Per-listing calendar**, not pooled inventory | Fundamentally different model from a hotel: each listing typically has **exactly one unit** (a single apartment, room, or house), so "availability" for a given date is a boolean (open/blocked), not a count that can go from N to N-1. This means Airbnb's core concurrency problem is **"don't let two guests book the same listing for overlapping dates"** — a single-row check rather than this design's multi-row, multi-night atomic decrement across a *pool* of interchangeable rooms. The hold-with-TTL pattern (§4.2) still applies (an instant-book or request-to-book flow holds a date range briefly), but there is no equivalent of "39 rooms left, sells out at 40 bookings" — it's binary per listing. |
 | **Expedia's rate-parity and channel-manager integrations** | Multi-channel distribution against hotel PMS-managed inventory | Expedia (and OTAs generally) integrate with hotels' **Property Management Systems (PMS)** via channel managers — third-party software that synchronizes a hotel's `total_rooms`/rates/restrictions across *every* OTA the hotel sells through simultaneously. **Rate parity** clauses (common in OTA-hotel contracts) require the rate shown on Expedia to match the rate on the hotel's own site and other OTAs for the same room/date — which means a rate change pushed from the PMS must propagate to every channel's cached search results (§4.4) within a contractually-bounded window, making the short-TTL cache-invalidation discipline not just a technical nicety but a **contractual SLA** in this real-world setting. |
 
@@ -627,9 +634,14 @@ The unifying point: **the inventory decrement (§4.2) is synchronous and in the 
 
 ## 9. Common Pitfalls & War Stories
 
+Both war stories below are **composite, illustrative incidents** — recurring failure patterns
+in reservation systems, written as concrete narratives so the mechanism is visible. Their
+numbers are internally consistent with §2 and §10, but they are not accounts of specific,
+publicly-reported incidents at named companies.
+
 ### War Story 1: The Last Room Sold Twice — Broken, Then Fixed
 
-**Broken**: An early version of the booking flow implemented availability checking as a separate **read-then-write** sequence — a `SELECT available_rooms FROM inventory WHERE ...` followed, in application code, by `if (available_rooms > 0) { UPDATE inventory SET available_rooms = available_rooms - 1 WHERE ... }`. This is the textbook check-then-act race:
+**Broken**: An early version of the booking flow implemented availability checking as a separate **read-then-write** sequence — a `SELECT available_rooms FROM inventory WHERE ...` followed, in application code, by `if (available > 0) { UPDATE inventory SET available_rooms = :available - 1 WHERE ... }`. Note that the `UPDATE` writes an **absolute value computed in application code** from the earlier `SELECT`, not a relative `available_rooms - 1`. That detail is what makes the bug invisible: a relative decrement run twice would have driven the row to -1 and been caught by §4.1's `CHECK (available_rooms >= 0)`, whereas two absolute writes of the same computed `0` leave the row at a perfectly legal value while two guests both hold a confirmation. This is the textbook check-then-act race, in its most silent form:
 
 ```mermaid
 sequenceDiagram
@@ -647,10 +659,10 @@ sequenceDiagram
     Note over A: app code: room available,<br/>proceed to book
     Note over B: app code: room available,<br/>proceed to book
 
-    A->>DB: UPDATE available_rooms = 1 - 1 = 0
-    B->>DB: UPDATE available_rooms = 1 - 1 = 0
+    A->>DB: UPDATE SET available_rooms = 0<br/>value computed in app code from its SELECT
+    B->>DB: UPDATE SET available_rooms = 0<br/>same value, computed from the same stale read
 
-    Note over A,B: RESULT: available_rooms = 0 (correct final value),<br/>but BOTH users received "booking confirmed" --<br/>both SELECTs ran against the SAME value of 1<br/>before either UPDATE committed
+    Note over A,B: RESULT: available_rooms = 0, a legal value that<br/>trips no CHECK constraint -- yet BOTH users received<br/>"booking confirmed", because both SELECTs read 1<br/>before either UPDATE committed
 ```
 
 **Impact**: For New Year's Eve at a popular hotel — the single highest-demand night of the year for that property — the last available "Deluxe King" room was sold to two different guests within the same second, both of whom received confirmation emails, both of whom had been charged (this predated the hold-with-TTL design, so payment had already been captured at booking time). One guest arrived at the front desk on December 31st to find their confirmed reservation occupied by someone else. The resolution required the hotel to comp an upgrade to a suite for one guest (at the hotel's cost, with the OTA absorbing a goodwill credit) and triggered a wider audit that found the same race pattern had produced **dozens of similar double-bookings** across high-demand dates over the preceding months — most resolved quietly via upgrades or refunds, but each one a direct cost and a guest-trust incident.

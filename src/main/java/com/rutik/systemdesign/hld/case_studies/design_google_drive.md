@@ -56,6 +56,8 @@
 | 100 MB - 1 GB | Videos, design files, datasets | ~2.5% | ~25% |
 | > 1 GB | Backups, VM images, raw video, large datasets | ~0.5% | ~30% |
 
+Two numbers fall out of this table and are used throughout §10. Weighting each band's count share by a representative size in that band gives a **mean file size of roughly 25 MB** — dragged up almost entirely by the top two bands, while the *median* file is well under 100 KB. Dividing the 5 EB logical corpus by that mean gives **~200 billion files under management**, i.e. **~200 files per user** on average. That number cross-checks against the upload rate below: 50 million uploads/day sustained for roughly a decade and a half is on the order of 250 billion files created, which is the right order of magnitude for a ~200-billion-file live corpus after deletions.
+
 The practical consequence (mirrors §2 of [`./design_object_storage_s3.md`](./design_object_storage_s3.md)): the **largest 0.5% of files by count account for ~30% of total bytes**, and the **chunking pipeline** (§4.1) is what makes both ends of this distribution efficient — tiny files become single-chunk objects with near-zero overhead, while multi-GB files are split into thousands of independently-addressable, independently-resumable, independently-deduplicatable chunks.
 
 ### Operation Volume
@@ -321,6 +323,15 @@ My Drive (root)                  My Drive (root)
 
 At the scale in §2 (1B users, 200M+ metadata writes/day), the metadata tree is **sharded by a key derived from the owning account** (cross-ref [`../../database/sharding_and_partitioning/README.md`](../../database/sharding_and_partitioning/README.md)) — every node a given user owns lives in the same shard, so "list my Drive root," "list folder X's children" (where X is owned by the requester), and "get my recent files" are almost always **single-shard queries**. The hard case is **shared files**: a node owned by User A but shared with User B must be reachable from User B's "Shared with me" view without that node living in User B's shard. This is resolved by storing **share references** — lightweight pointer records, keyed by the *recipient's* shard, that point at `(ownerShard, nodeId)` — rather than copying or re-sharding the underlying node (§4.4 covers this in depth).
 
+**Search is a projection off this tree, not a query against it.** §1's search requirement — find a file by name, by content, by owner, by type, or by "shared with me" — cannot be served by the metadata DB directly: `name LIKE '%budget%'` across a user's tree is a scan, and content search needs the *bytes*, which live in chunks the metadata tree only points at. The standard shape is an **inverted index** (cross-ref [`../../database/search_engines/README.md`](../../database/search_engines/README.md)) fed from two sources:
+
+- **Metadata terms** come from the same per-account change log the sync loop reads (§4.3). Every rename, move, share, and new-version event is already being emitted for sync; a second consumer of that stream updates the search index. Search freshness therefore inherits sync freshness — a renamed file becomes findable under its new name within the same seconds-scale window, with no separate invalidation path to get wrong.
+- **Content terms** come from an asynchronous **text-extraction pipeline**: on a new manifest version (§4.5), extractable formats (PDF, DOCX, plain text, and OCR for images/scans) are queued for extraction, and the extracted text is indexed against the `nodeId`. This is deliberately off the upload critical path — §3's commit point is the manifest write, and a file is downloadable and syncable long before it is *findable by content*. Minutes of content-index lag is a normal, acceptable state.
+
+The index is **sharded by the searching account**, not by owner — the query "my files matching X" must be answerable from one shard, which is the same argument §4.2 makes for the tree itself. A file shared with a user is indexed into that user's shard as a reference (the same lightweight pointer as the "Shared with me" index above), so a shared file is findable without duplicating its terms into every recipient's index at share time — only into the indexes of recipients who actually have it surfaced.
+
+The trap worth naming: **permissions must be re-checked at query time, not baked into the index at write time.** If access is evaluated only when a document is indexed, then revoking a share (§4.6) leaves the file findable — and its *name and snippet* readable in the result list — until the next reindex. Filenames and content snippets leak real information, so the search path applies the same ACL walk (§4.6) to every candidate hit before returning it, exactly as the read path does. The index is an accelerator for *finding* candidates; the ACL check remains the security boundary.
+
 ### 4.3 Sync Protocol
 
 A sync client (desktop or mobile) maintains:
@@ -386,8 +397,6 @@ This is `SyncConflictResolver.resolve()` (below) as a decision tree: a conflicte
 
 ```java
 package com.rutik.systemdesign.hld.case_studies.drive;
-
-import java.util.Objects;
 
 /**
  * SyncConflictResolver compares a device's locally-known file state
@@ -461,11 +470,6 @@ public class SyncConflictResolver {
     }
 
     public enum Action { FAST_FORWARD_DOWNLOAD, UPLOAD_AS_NEXT_VERSION, UPLOAD_AS_CONFLICTED_COPY }
-
-    @Override
-    public String toString() {
-        return Objects.toString(this);
-    }
 }
 ```
 
@@ -663,7 +667,7 @@ Deleting a file is a **two-phase, soft-then-hard delete**, mirroring the referen
 | Google Drive (chunking column = this design's choice; Google does not publish Drive's scheme) | Content-defined, ~4MB target | File-level, "conflicted copy" for binary files; OT/CRDT for native Docs/Sheets/Slides (§5) | Drive for desktop "Stream files" — virtual drive, bytes fetched on first access, per-folder offline opt-in; "Mirror files" for a full local copy |
 | Dropbox | Blocks of up to 4MB (block server), custom storage (Magic Pocket, 2016+) | File-level, "conflicted copy" with `(user's conflicted copy DATE)` naming — the original motivating example for §4.4's model | Block-level diff sync was Dropbox's signature 2008-era innovation |
 | Box | Chunked upload via API, enterprise storage backends | File-level, with compliance overlays (legal hold, retention) on top of the base ACL model | Enterprise events API: access events (preview/download/share) plus permission changes, up to a year of history |
-| OneDrive | SharePoint/OneDrive "shredded storage" splits files into chunks (2MB shreds in OneDrive for Business); cross-tenant dedup is not publicly documented | File-level, "conflicted copy" | Files On-Demand — placeholder/virtualization, lazy chunk fetch |
+| OneDrive | SharePoint/OneDrive "shredded storage" splits files into shreds sized by `FileWriteChunkSize` (64 KB by default on-premises, tunable); Microsoft does not publish the cloud-side shred size or whether cross-tenant dedup happens | File-level, "conflicted copy" | Files On-Demand — placeholder/virtualization, lazy chunk fetch |
 | Apple iCloud Drive | Not published by Apple; iCloud Drive is end-to-end encrypted only under Advanced Data Protection (§6) | File-level, "conflicted copy" | Cross-user dedup is impossible for end-to-end-encrypted data by construction (§6) |
 
 ---
@@ -723,6 +727,11 @@ Deleting a file is a **two-phase, soft-then-hard delete**, mirroring the referen
 
 ## 9. Common Pitfalls & War Stories
 
+Both war stories below are **composite, illustrative incidents** — recurring failure patterns
+in file-sync systems, written as concrete narratives so the mechanism is visible. The
+chunking failure in War Story 1 is the publicly-stated motivation for block-level sync (§6);
+the specific users, file sizes and ticket volumes are illustrative, not a reported outage.
+
 ### War Story 1: Fixed-Size Chunking Saturates Upload Bandwidth on Every Small Edit — Broken, Then Fixed
 
 **Broken**: An early version of the sync client used **fixed-size 4MB chunking** — every file was split at exact 4MB byte boundaries, and a chunk's hash was computed over `fileBytes[i*4MB : (i+1)*4MB]`. For files under 4MB (the majority by count, §2), this was harmless — a small file is a single chunk regardless of chunking strategy. The problem was **large files edited incrementally** — design files, video projects, and database-style files (e.g., a `.accdb` or large spreadsheet) that applications routinely rewrite with small insertions near the beginning or middle of the file.
@@ -749,17 +758,17 @@ As a defense-in-depth measure, a **rate limit on conflicted-copy creation per fi
 
 ### Metadata Database Sizing
 
-- Estimate **5 billion total nodes** (files + folders) across 1B users (§2) — averaging 5 nodes/user is conservative for active users and accounts for the long tail of near-empty accounts
-- Each node record (`nodeId`, `parentId`, `name`, `type`, `ownerId`, `currentManifestId`, timestamps, `size`) is roughly **200-300 bytes** -> `5,000,000,000 x 250 bytes` ~= **~1.25 TB** of core node data
-- Manifest chain storage (§4.5): assume an average of **10 versions/file** retained (most files have few edits; some have hundreds — 10 is a conservative blended average), each manifest entry (a list of chunk references) averaging **~2KB** for a file with ~50 chunks -> `5B files x 10 versions x 2KB` ~= **~100 TB** of manifest data — an order of magnitude larger than the node table itself, reflecting that version history, not the tree structure, dominates metadata storage
-- With 3x replication for the metadata DB (favoring cheap-repair replication over erasure coding for small, latency-critical records — same rationale as [`./design_object_storage_s3.md`](./design_object_storage_s3.md) §5's metadata-index choice): `(1.25 + 100) TB x 3` ~= **~304 TB** raw metadata storage
-- At ~2TB usable capacity per metadata-DB node (fast SSDs, latency-critical): `304 TB / 2 TB` ~= **~150 metadata-DB nodes**
+- **~200 billion total nodes** (files + folders) across 1B users — the count derived in §2 from the 5 EB corpus and its ~25MB mean file size, i.e. roughly 200 nodes/user averaged over everyone from power users to near-empty accounts
+- Each node record (`nodeId`, `parentId`, `name`, `type`, `ownerId`, `currentManifestId`, timestamps, `size`) is roughly **200-300 bytes** -> `200,000,000,000 x 250 bytes` ~= **~50 TB** of core node data
+- Manifest chain storage (§4.5): assume an average of **10 versions/file** retained (most files have few edits; some have hundreds — 10 is a conservative blended average). A manifest is a list of chunk references at ~40 bytes each, and the average file is ~25MB / 4MB ~= **~6 chunks**, so an average manifest is only **~250-300 bytes** -> `200B files x 10 versions x 300 bytes` ~= **~600 TB** of manifest data — an order of magnitude larger than the node table itself, reflecting that version history, not the tree structure, dominates metadata storage
+- With 3x replication for the metadata DB (favoring cheap-repair replication over erasure coding for small, latency-critical records — same rationale as [`./design_object_storage_s3.md`](./design_object_storage_s3.md) §5's metadata-index choice): `(50 + 600) TB x 3` ~= **~2 PB** raw metadata storage
+- At ~2TB usable capacity per metadata-DB node (fast SSDs, latency-critical): `2,000 TB / 2 TB` ~= **~1,000 metadata-DB nodes**
 
 ### Chunk Hash Index Sizing
 
 - From §2: **~1 trillion unique chunks** after a ~20% cross-user dedup ratio, each index entry ~72 bytes (32-byte hash + ~40 bytes location/refcount metadata) -> `1,000,000,000,000 x 72 bytes` ~= **~72 TB**
 - With 3x replication (same latency-critical rationale as the metadata DB): `72 TB x 3` ~= **~216 TB**
-- At ~2TB/node: `216 TB / 2 TB` ~= **~108 chunk-hash-index nodes** — comparable in scale to the metadata DB fleet, confirming §2's framing that the chunk hash index is "itself a serious distributed-index problem"
+- At ~2TB/node: `216 TB / 2 TB` ~= **~108 chunk-hash-index nodes** — roughly a tenth of the metadata-DB fleet, but still a hundred-node distributed index in its own right, which is what §2 meant by "itself a serious distributed-index problem"
 
 ### Blob Storage Sizing
 
@@ -779,7 +788,7 @@ As a defense-in-depth measure, a **rate limit on conflicted-copy creation per fi
 
 | Component | Sizing Basis | Estimated Footprint |
 |---|---|---|
-| Metadata DB (nodes + manifests) | 5B nodes + 50B manifest versions, 3x replication | ~304 TB, ~150 nodes |
+| Metadata DB (nodes + manifests) | 200B nodes + 2T manifest versions, 3x replication | ~2 PB, ~1,000 nodes |
 | Chunk hash index | ~1T unique chunks x ~72 bytes, 3x replication | ~216 TB, ~108 nodes |
 | Blob storage (chunks) | ~3.75 EB unique bytes x 1.5x erasure-coding overhead | ~5.6 EB |
 | Sync-check handling fleet | ~7.5M checks/sec x ~1.5ms, mostly cache-hit | ~23 instances |
@@ -788,13 +797,13 @@ As a defense-in-depth measure, a **rate limit on conflicted-copy creation per fi
 ### Bandwidth Estimation
 
 - **Download egress** (dominant traffic): ~5,800 downloads/sec average (§2), files averaging ~2MB (weighted by the size distribution in §2, where most *downloaded* files skew toward the smaller, more-frequently-accessed end) -> `5,800 x 2MB` ~= **~11.6 GB/sec** ~= **~93 Gbps** at average, **~280-370 Gbps at peak** (3-4x)
-- **Upload ingress**: ~580 uploads/sec average, but post-dedup (§4.1) only a fraction of each upload's chunks actually transfer — assume an effective **50% reduction** from the dedup pipeline (new files contribute fully, but edits to existing files contribute only changed chunks) -> roughly `580 x 2MB x 0.5` ~= **~580 MB/sec** ~= **~4.6 Gbps** at average
+- **Upload ingress**: ~580 uploads/sec average, sized at the **~25MB fleet mean** (§2) rather than the download-skewed 2MB, because uploads are what build the corpus — a rate that must reconcile with 5 EB accumulated over the product's lifetime. Post-dedup (§4.1) only a fraction of each upload's chunks actually transfer — assume an effective **50% reduction** from the dedup pipeline (new files contribute fully, but edits to existing files contribute only changed chunks) -> roughly `580 x 25MB x 0.5` ~= **~7.3 GB/sec** ~= **~58 Gbps** at average
 - **Sync metadata traffic**: 7.5M sync-checks/sec (§2, peak) at ~200 bytes/check (cursor + small delta or "no changes" response) -> `7.5M x 200 bytes` ~= **~1.5 GB/sec** ~= **~12 Gbps** — small relative to blob egress, but latency-sensitive (§1's "a few seconds" freshness NFR) in a way raw bandwidth numbers don't capture
 
 | Traffic Type | Direction | Peak Bandwidth |
 |---|---|---|
 | Blob download egress | Outbound to clients | ~280-370 Gbps |
-| Blob upload ingress (post-dedup) | Inbound from clients | ~4.6 Gbps (avg), higher at peak |
+| Blob upload ingress (post-dedup) | Inbound from clients | ~58 Gbps (avg), 3-4x at peak |
 | Sync/cursor metadata | Bidirectional | ~12 Gbps |
 
 ---
@@ -838,7 +847,7 @@ A: Restoring to version N is implemented as **appending a new version** (say v15
 A: Chunking (§4.1) is a purely local, client-side computation — splitting bytes and computing SHA-256 hashes requires no network access. What *does* require connectivity is the **dedup lookup** against the Chunk Hash Index and the actual chunk upload. An offline client chunks its edited file locally, queues the resulting manifest (with all chunk hashes computed) in its local outgoing buffer, and on reconnect performs the dedup-check-and-upload pipeline (§4.1) for that queued manifest — exactly the same pipeline as an online edit, just deferred. The conflict-resolution check (§4.4, comparing `baseVersion` to `serverVersion`) also only happens at reconnect time, which is why the "conflicted copy" outcome is fundamentally an offline-reconnect phenomenon.
 
 **Q: At 1 billion users and 5 exabytes of logical data, what's the single biggest lever on total storage cost, and why?**
-A: Deduplication (§4.1, §10) — the difference between storing 5 EB and storing ~3.5-4 EB of unique bytes before erasure coding is even applied, which translates to roughly **1.9 EB of raw storage** saved after the 1.5x erasure-coding overhead (§10) — by far the largest single number in the capacity-planning table. This is also why the **Chunk Hash Index** (§2, §10: ~216TB with replication, ~108 nodes) — despite being "just an index" — is sized comparably to the entire metadata-DB fleet: it is the mechanism that makes the 1.9 EB savings real, and any degradation in its hit rate (§8's runbook) directly and immediately increases raw storage consumption.
+A: Deduplication (§4.1, §10) — the difference between storing 5 EB and storing ~3.5-4 EB of unique bytes before erasure coding is even applied, which translates to roughly **1.9 EB of raw storage** saved after the 1.5x erasure-coding overhead (§10) — by far the largest single number in the capacity-planning table. This is also why the **Chunk Hash Index** (§2, §10: ~216TB with replication, ~108 nodes) is worth its own hundred-node fleet despite being "just an index": it is the mechanism that makes the 1.9 EB savings real, and any degradation in its hit rate (§8's runbook) directly and immediately increases raw storage consumption.
 
 **Q: A user uploads a 2GB video on a flaky mobile connection and the app is killed by the OS halfway through — what's lost?**
 A: At most one in-flight chunk (§4.7) — typically 4-8MB, a few seconds of upload time. Because §4.1 already splits the file into independently-addressable, content-hashed chunks before upload begins, each chunk is uploaded as its own multipart-upload part (§4.7) against an **upload session** that persists server-side. On relaunch, the client calls `GET /uploads/{sessionId}` to learn which chunk hashes the session already has durably, diffs that against its local chunk list, and resumes from the first missing chunk — it never re-uploads bytes the server already acknowledged. This is the same chunk boundary doing double duty: in §4.1 it's the unit of deduplication, in §4.7 it's the unit of resumability.

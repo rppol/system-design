@@ -184,9 +184,11 @@ public final class DeleteOp extends Operation {
 }
 ```
 
-The transform function below implements `transform(opToTransform, opAlreadyApplied)`: given an operation we are about to apply, and an operation that was already applied locally (which the author of `opToTransform` had not seen), it returns an adjusted copy of `opToTransform` that, when applied AFTER `opAlreadyApplied`, produces the same final document as if the two operations had been applied in the opposite order with their roles in `transform()` swapped.
+The transform function below implements `transform(opToTransform, opAlreadyApplied)`: given an operation we are about to apply, and an operation that was already applied locally (which the author of `opToTransform` had not seen), it returns an adjusted version of `opToTransform` that, when applied AFTER `opAlreadyApplied`, produces the same final document as if the two operations had been applied in the opposite order with their roles in `transform()` swapped. It returns a *list* because one case genuinely yields two operations: a delete whose contiguous range is split in half by a concurrent insert landing inside it.
 
 ```java
+import java.util.List;
+
 public final class OperationalTransform {
 
     /**
@@ -195,8 +197,11 @@ public final class OperationalTransform {
      *
      * Both `op` and `applied` were generated against the SAME base
      * document state (i.e., they are concurrent).
+     *
+     * Returns a list: every case but one yields a single operation,
+     * but a delete split by a concurrent insert yields two.
      */
-    public static Operation transform(Operation op, Operation applied) {
+    public static List<Operation> transform(Operation op, Operation applied) {
         if (op instanceof InsertOp && applied instanceof InsertOp) {
             return transformInsertInsert((InsertOp) op, (InsertOp) applied);
         } else if (op instanceof InsertOp && applied instanceof DeleteOp) {
@@ -211,73 +216,81 @@ public final class OperationalTransform {
     /** Insert vs Insert: shift position right if the applied insert was
      *  at or before our position. Tie-break same-position inserts by
      *  siteId so all replicas pick the SAME ordering deterministically. */
-    private static Operation transformInsertInsert(InsertOp op, InsertOp applied) {
+    private static List<Operation> transformInsertInsert(InsertOp op, InsertOp applied) {
         if (applied.position < op.position
                 || (applied.position == op.position
                     && applied.siteId.compareTo(op.siteId) < 0)) {
             // The applied insert lands strictly before us, OR at the same
             // position but "wins" the tie-break -> shift our position right
             // by the length of the text it inserted.
-            return new InsertOp(op.siteId, op.position + applied.text.length(), op.text);
+            return List.of(
+                    new InsertOp(op.siteId, op.position + applied.text.length(), op.text));
         }
         // Either applied.position > op.position (no effect on us), or
         // same position and we win the tie-break (we stay put, our text
         // ends up before theirs).
-        return op;
+        return List.of(op);
     }
 
     /** Insert vs Delete: if the deletion happened entirely before our
      *  insert position, shift left. If our insert position falls INSIDE
      *  the deleted range, clamp to the start of that range (the deleted
-     *  text "around" our insert no longer exists). */
-    private static Operation transformInsertDelete(InsertOp op, DeleteOp applied) {
+     *  text "around" our insert no longer exists, but OUR text survives). */
+    private static List<Operation> transformInsertDelete(InsertOp op, DeleteOp applied) {
         long deleteEnd = applied.position + applied.length;
         if (applied.position >= op.position) {
             // Deletion starts at or after our insert point -> no shift.
-            return op;
+            return List.of(op);
         } else if (deleteEnd <= op.position) {
             // Deletion entirely before our insert point -> shift left by
             // the full deleted length.
-            return new InsertOp(op.siteId, op.position - applied.length, op.text);
+            return List.of(new InsertOp(op.siteId, op.position - applied.length, op.text));
         } else {
             // Our insert point was INSIDE the deleted range -> clamp to
             // the (now-collapsed) start of that range.
-            return new InsertOp(op.siteId, applied.position, op.text);
+            return List.of(new InsertOp(op.siteId, applied.position, op.text));
         }
     }
 
-    /** Delete vs Insert: if the insert happened before our delete's start,
-     *  shift our range right by the inserted text's length. If the insert
-     *  landed INSIDE our delete range, widen our range to also delete the
-     *  newly-inserted text (so the user's intent — "delete this region" —
-     *  still removes everything currently occupying that region). */
-    private static Operation transformDeleteInsert(DeleteOp op, InsertOp applied) {
+    /** Delete vs Insert: if the insert happened at or before our delete's
+     *  start, shift our range right by the inserted text's length. If the
+     *  insert landed INSIDE our delete range, our range SPLITS in two
+     *  around the inserted text, which survives. That split is the exact
+     *  mirror of transformInsertDelete's clamp — the two branches must
+     *  agree on this case or replicas diverge (War Story 1). */
+    private static List<Operation> transformDeleteInsert(DeleteOp op, InsertOp applied) {
         if (applied.position <= op.position) {
-            return new DeleteOp(op.siteId, op.position + applied.text.length(), op.length);
-        } else if (applied.position >= op.position + op.length) {
-            // Insert happened after our delete range entirely -> no change.
-            return op;
-        } else {
-            // Insert landed inside our delete range -> widen the delete
-            // to also cover the newly inserted text.
-            return new DeleteOp(op.siteId, op.position, op.length + applied.text.length());
+            return List.of(
+                    new DeleteOp(op.siteId, op.position + applied.text.length(), op.length));
         }
+        if (applied.position >= op.position + op.length) {
+            // Insert happened after our delete range entirely -> no change.
+            return List.of(op);
+        }
+        // Insert landed inside our delete range -> delete the characters
+        // before it, then the characters after it, leaving the
+        // concurrently inserted text in place.
+        int head = (int) (applied.position - op.position);
+        return List.of(
+                new DeleteOp(op.siteId, op.position, head),
+                new DeleteOp(op.siteId, op.position + applied.text.length(),
+                             op.length - head));
     }
 
     /** Delete vs Delete: the trickiest case. Compute the overlap between
      *  the two ranges and shrink/shift `op` so it only deletes the
      *  characters that `applied` did NOT already remove. */
-    private static Operation transformDeleteDelete(DeleteOp op, DeleteOp applied) {
+    private static List<Operation> transformDeleteDelete(DeleteOp op, DeleteOp applied) {
         long opEnd = op.position + op.length;
         long appliedEnd = applied.position + applied.length;
 
         if (appliedEnd <= op.position) {
             // applied range entirely before op range -> shift left.
-            return new DeleteOp(op.siteId, op.position - applied.length, op.length);
+            return List.of(new DeleteOp(op.siteId, op.position - applied.length, op.length));
         }
         if (applied.position >= opEnd) {
             // applied range entirely after op range -> no change.
-            return op;
+            return List.of(op);
         }
 
         // Ranges overlap: compute the portion of `op`'s range NOT
@@ -293,7 +306,7 @@ public final class OperationalTransform {
             newPosition = applied.position;
         }
         long newLength = op.length - overlapLength;
-        return new DeleteOp(op.siteId, newPosition, Math.max(0, newLength));
+        return List.of(new DeleteOp(op.siteId, newPosition, (int) Math.max(0, newLength)));
     }
 }
 ```
@@ -314,9 +327,9 @@ flowchart LR
     Dispatch{"dispatch on<br/>op type vs applied type"}
     InsIns("insert vs insert<br/>siteId tie-break<br/>at equal position")
     InsDel("insert vs delete<br/>shift or clamp into<br/>deleted range")
-    DelIns("delete vs insert<br/>shift or widen range<br/>to cover new text")
+    DelIns("delete vs insert<br/>shift, or split range<br/>around the new text")
     DelDel("delete vs delete<br/>shrink to the part<br/>applied did not remove")
-    Mirror{"do the two mirror<br/>branches agree on the<br/>equal-position case?"}
+    Mirror{"do the two mirror<br/>branches agree on<br/>insert-inside-delete?"}
     Bug("silent divergence<br/>War Story 1")
     Safe(["transformed op,<br/>safe to apply"])
 
@@ -343,9 +356,9 @@ flowchart LR
     class Safe io
 ```
 
-**Reading the diagram**: `insertInsert` and `deleteDelete` are internally self-consistent, but `insertDelete` and `deleteInsert` are *mirror* branches — each handles the same equal-position boundary from the opposite side, and if their tie-break rules disagree, replicas silently diverge. That is exactly the bug in War Story 1 below.
+**Reading the diagram**: `insertInsert` and `deleteDelete` are internally self-consistent, but `insertDelete` and `deleteInsert` are *mirror* branches — each handles the "an insert landed inside a concurrently deleted range" case from the opposite side, and if the two disagree about whether that inserted text survives, replicas silently diverge. That is exactly the bug in War Story 1 below.
 
-**The same-position insert/insert tie-break is the single most important detail**: every replica must apply the *same* deterministic rule (e.g., compare `siteId` lexicographically) so that when both A and B insert at position 6 concurrently, *every* replica decides "A's text comes first, B's text comes after" — never the reverse on some replicas and the original on others. This is the root cause analyzed in War Story 1 (§9).
+**Two rules carry all the weight here.** First, the **same-position insert/insert tie-break**: every replica must apply the *same* deterministic rule (e.g., compare `siteId` lexicographically) so that when both A and B insert at position 6 concurrently, *every* replica decides "A's text comes first, B's text comes after" — never the reverse on some replicas and the original on others. Second, the **insert-inside-delete rule**: concurrently inserted text is never swallowed by a concurrent delete — the insert clamps to the start of the deleted range, and the delete splits into the ranges before and after it. Both halves of that second rule must be written together, because implementing only one half is the root cause analyzed in War Story 1 (§9).
 
 ---
 
@@ -532,10 +545,11 @@ other users: opS1..opS7)
 
 Reconnect handling:
   for each clientOp in [opC1, opC2, opC3]:
+      pending = [clientOp]          // a list: transform() can split a delete
       for each serverOp in [opS1, opS2, ..., opS7]:
-          clientOp = transform(clientOp, serverOp)
-      apply(clientOp)               // now seq 1008, 1009, 1010
-      broadcast(clientOp)
+          pending = concat(transform(p, serverOp) for p in pending)
+      apply(pending)                // now seq 1008, 1009, 1010
+      broadcast(pending)
 ```
 
 This is exactly why **causality preservation** (an NFR from §1) matters: if `opC2` references text inserted by `opC1`, and `opC1` is transformed and applied first, `opC2`'s position references remain valid relative to the post-`opC1` document. Buffered operations must be transformed and applied **in their original relative order**, never reordered relative to each other.
@@ -606,7 +620,7 @@ Because the operation log is the system of record (§4.4), "version history" is 
 | Server role | Must be an active arbiter (runs the transform engine) | Can be a "dumb" relay/persistence layer — clients can theoretically sync peer-to-peer |
 | Production maturity for rich text | Google Docs has run production OT for over a decade | Yjs and Automerge are mature, but rich-text CRDTs are a younger field than rich-text OT |
 
-**Choice for this design**: OT, with a single collab-server-per-document as the transform arbiter — primarily because (a) per-document throughput is low (§2: tens of ops/sec even at 50 concurrent editors), so the centralization cost is negligible, and (b) the smaller per-operation metadata matters when documents have years of revision history. **However**, note in interviews that CRDTs are the *better* choice when offline-first and peer-to-peer sync are first-class requirements (Figma, Notion's underlying primitives, and most local-first software libraries like Yjs and Automerge use CRDT-family approaches).
+**Choice for this design**: OT, with a single collab-server-per-document as the transform arbiter — primarily because (a) per-document throughput is low (§2: tens of ops/sec even at 50 concurrent editors), so the centralization cost is negligible, and (b) the smaller per-operation metadata matters when documents have years of revision history. **However**, note in interviews that CRDTs are the *better* choice when offline-first and peer-to-peer sync are first-class requirements (Notion's offline data model and most local-first software libraries — Yjs, Automerge — use CRDT-family approaches; Figma's multiplayer protocol is CRDT-*inspired* but, by Figma's own account, is not a CRDT, precisely because a central server lets it skip the machinery).
 
 The same reasoning collapses into a quick decision guide for this canonical interview question:
 
@@ -645,7 +659,7 @@ flowchart LR
 
 - **Choice**: single logical owner per document (consistent-hash routed).
 - **Reason**: simplicity — one place assigns sequence numbers, one place is the "current truth" for a connected client to sync against, one place writes to the operation log.
-- **Trade-off**: that shard is a (recoverable, but real) single point of contention for the document during its lifetime — mitigated by fast crash recovery from snapshot + log replay (§4.4, §8). A fully peer-to-peer CRDT model (closer to Figma's approach, see §6) removes this central bottleneck entirely but pushes more complexity into client-side merge logic and makes "what is the current state" a fuzzier question that must be answered for persistence and version history anyway.
+- **Trade-off**: that shard is a (recoverable, but real) single point of contention for the document during its lifetime — mitigated by fast crash recovery from snapshot + log replay (§4.4, §8). A fully peer-to-peer CRDT model (the Yjs/Automerge local-first end of the spectrum, §6 — note that Figma, despite its CRDT-inspired protocol, is *not* an example here: it is as centralized as this design) removes this central bottleneck entirely but pushes more complexity into client-side merge logic and makes "what is the current state" a fuzzier question that must be answered for persistence and version history anyway.
 
 ### WebSocket vs. Polling
 
@@ -663,9 +677,9 @@ flowchart LR
 
 ## 6. Real-World Implementations
 
-- **Google Docs**: The most widely cited production OT system. Its lineage traces directly back to **Jupiter**, the operational-transformation system built for the **Google Wave** project (2009-2010). When Wave was discontinued, its collaborative-editing core was repurposed into what became Google Docs' real-time collaboration engine. Google Docs' OT implementation handles not just plain-text insert/delete but rich formatting operations (bold, italic, font changes), embedded objects (images, comments, suggestions), and structural operations (tables, lists) — each of which requires its own `transform()` rules and pairwise interactions with every other operation type, which is precisely the source of the correctness difficulty noted in §5.
-- **Figma**: Uses a custom multiplayer protocol with CRDT-like properties — every object on the canvas (shapes, layers, text) has a unique ID, and property changes are last-writer-wins per property with logical clocks for ordering, which sidesteps much of the complexity of sequence-CRDTs for text because Figma's "document" is fundamentally a tree of independently-addressable objects rather than a single linear text buffer. Figma's server acts as an **authoritative relay and persistence layer** rather than a passive message-passer — it's the source of truth for "what is the current state of this file," similar in spirit to this design's collab server, but the conflict resolution itself leans on CRDT-style commutative merges rather than OT transform functions.
-- **Notion**: Implements **block-level CRDTs** — each block (paragraph, heading, to-do item, table row) in a Notion page is its own CRDT-managed unit with its own ID and ordering metadata. This means edits to *unrelated blocks* (e.g., User A editing block 5 while User B edits block 12) never need to be transformed against each other at all — they trivially commute because they touch disjoint CRDT instances. Conflicts only need resolution *within* a single block, which keeps the per-block CRDT simple (closer to a small sequence CRDT over that block's text) while sidestepping document-wide transform complexity.
+- **Google Docs**: The most widely cited production OT system. The architecture it uses — clients hold a local copy, a **central server defines the canonical order of operations**, and each side transforms against what the other has not yet seen — comes from **Jupiter**, a Xerox PARC research system described in the 1995 UIST paper "High-Latency, Low-Bandwidth Windowing in the Jupiter Collaboration System" by David A. Nichols, Pavel Curtis, Michael Dixon and John Lamping. Jupiter's central-server simplification is what makes OT tractable in practice, and it is the acknowledged starting point for Google's own later OT work: the Google Wave OT whitepaper states outright that "the starting point for Wave OT was the paper 'High-latency, low-bandwidth windowing in the Jupiter collaboration system'." Google Docs' OT implementation handles not just plain-text insert/delete but rich formatting operations (bold, italic, font changes), embedded objects (images, comments, suggestions), and structural operations (tables, lists) — each of which requires its own `transform()` rules and pairwise interactions with every other operation type, which is precisely the source of the correctness difficulty noted in §5.
+- **Figma**: Uses a custom multiplayer protocol that is *inspired by* CRDTs but, in Figma's own words, "isn't using true CRDTs." Every object on the canvas (shapes, layers, text) has a unique ID — with the client's unique client ID baked into IDs it creates, so offline object creation can never collide — and each *property* of an object is resolved last-writer-wins. Crucially, "last writer" is decided by **the order the central server received the changes**, not by any client timestamp or logical clock: because Figma is centralized, it can drop the clock machinery a real CRDT would need. That also sidesteps most of the complexity of sequence CRDTs, because Figma's "document" is a tree of independently-addressable objects rather than a single linear text buffer. The server is an **authoritative relay and persistence layer** — the source of truth for "what is the current state of this file," similar in spirit to this design's collab server — and it actively enforces integrity (for example, rejecting a parent-property update that would create a cycle in the object tree).
+- **Notion**: Notion's published data model is **block-based** — every paragraph, heading, to-do item and table row is a separately-addressable block with its own ID, and a page is a tree of them rather than one linear buffer. Notion has separately said that pages marked available offline "are dynamically migrated to our new CRDT data model for conflict-resolution"; it has not published the CRDT's internals. The architectural payoff of block granularity is the part worth taking into an interview: edits to *unrelated blocks* (User A editing block 5 while User B edits block 12) never need to be reconciled against each other at all — they touch disjoint units and trivially commute — so merge logic only has to be correct *within* a single block's text, which is a far smaller problem than document-wide transform.
 - **Yjs**: The most widely-used open-source CRDT library for collaborative applications, implementing a YATA-like sequence CRDT (conceptually similar to the RGA in §4.2). Yjs is the engine behind many local-first collaborative apps and editor integrations (ProseMirror, CodeMirror, Monaco bindings) — its design explicitly optimizes for the metadata-overhead concern raised in §4.2 via techniques like delete-set compression and ID range compaction, since naive per-character ID storage at the scale of real documents would otherwise be prohibitive.
 - **Automerge**: Another prominent open-source CRDT library (used in local-first projects like Ink & Switch's research prototypes), notable for providing a JSON-document CRDT (not just text sequences) — useful when the "document" being collaboratively edited is structured data rather than a flat text buffer.
 
@@ -674,8 +688,8 @@ flowchart LR
 | System | Conflict-resolution model | Document model | Server's role |
 |---|---|---|---|
 | Google Docs | OT (Jupiter lineage) | Single linear rich-text buffer with format spans | Active arbiter — runs `transform()`, assigns total order |
-| Figma | Custom CRDT-like (last-writer-wins per property + logical clocks) | Tree of independently-addressable canvas objects | Authoritative relay + persistence — central source of truth, but conflict resolution is commutative by construction |
-| Notion | Block-level CRDTs | Tree of blocks, each an independent CRDT unit | Persistence + sync relay — most edits to different blocks need no coordination at all |
+| Figma | CRDT-inspired but explicitly not a CRDT — last-writer-wins per property, "last" = server receive order | Tree of independently-addressable canvas objects | Authoritative relay + persistence — central source of truth that also enforces tree integrity |
+| Notion | Block-based model; a CRDT data model for offline-enabled pages (internals unpublished) | Tree of independently-addressable blocks | Persistence + sync relay — most edits to different blocks need no coordination at all |
 | Yjs (library) | Sequence CRDT (YATA, RGA-family) | Configurable — text sequences, JSON-like trees | Often a "dumb" relay (e.g., y-websocket) — clients can in principle sync peer-to-peer |
 | Automerge (library) | JSON-document CRDT | Arbitrary nested JSON structure | Same as Yjs — sync-agnostic, works over any transport including peer-to-peer |
 
@@ -736,11 +750,15 @@ Symptoms: a document fails to deserialize from its snapshot, or replay of the op
 
 ## 9. Common Pitfalls & War Stories
 
+The four war stories below are **composite, illustrative incidents** — recurring failure
+patterns in collaborative-editing systems, written as concrete narratives so the mechanism
+is visible. They are not accounts of specific, publicly-reported outages at named companies.
+
 ### Pitfall Summary
 
 | Pitfall | Impact | Fix |
 |---|---|---|
-| `transform()` missing a tie-break for same-position insert/delete | Documents silently diverge across clients | Deterministic tie-break by `siteId`; exhaustive operation-pair regression suite |
+| `transform()`'s mirror branches disagreeing on insert-inside-delete | Documents silently diverge across clients; typed text vanishes on one replica | One stated rule ("inserted text survives"), implemented on both sides — clamp the insert, split the delete; exhaustive operation-pair regression suite |
 | Mass simultaneous reconnect after deploy | Collab servers overwhelmed, cascading failures | Jittered exponential backoff |
 | Wall-clock timestamps for CRDT ordering | "Time travel" — an edit appears before a prior edit due to clock skew | Lamport logical clocks |
 | Non-atomic snapshot writes | Crash mid-write leaves an unloadable document | Write to temp path, atomic rename |
@@ -749,30 +767,27 @@ Symptoms: a document fails to deserialize from its snapshot, or replay of the op
 
 ### War Story 1: The Insert/Delete Divergence Bug (Broken -> Fixed)
 
-**What happened**: Two users, Alice and Bob, were editing adjacent text. Alice deleted a word at position 20 (length 4) at roughly the same instant Bob inserted a new word at position 20. The `transform()` implementation handled `insert/insert` and `delete/delete` pairs correctly (both had explicit tie-break rules), but the `insert/delete` and `delete/insert` cases used an *inconsistent* boundary condition: `transformInsertDelete` treated `applied.position == op.position` as "deletion is after the insert, no shift needed," while `transformDeleteInsert` (the mirror case, run on Bob's replica for Alice's delete against Bob's insert) treated `applied.position == op.position` as "insert is before or at the delete, shift the delete right." These two rules were not mirror images of each other.
+**What happened**: Two users, Alice and Bob, were editing the same sentence. Alice selected the word `brown` (position 20, length 5) and deleted it; at roughly the same instant, Bob's cursor was sitting *inside* that word and he typed `NEWWORD` at position 22. The `transform()` implementation handled `insert/insert` and `delete/delete` pairs correctly (both had explicit tie-break rules), but the `insert/delete` and `delete/insert` cases disagreed about the "insert landed inside the deleted range" case: `transformInsertDelete` **preserved** the insert by clamping it to the start of the deleted range, while `transformDeleteInsert` (the mirror case, run on Bob's replica for Alice's delete against Bob's insert) **widened** the delete to swallow the newly inserted text. These two rules were not mirror images of each other — one kept the text, the other destroyed it.
 
 **The divergence**:
-- On Alice's replica: Bob's insert (transformed via `transformInsertDelete` against Alice's delete) landed in one position.
-- On Bob's replica: Alice's delete (transformed via `transformDeleteInsert` against Bob's insert) widened or shifted differently than the symmetric case required.
-- Result: Alice's document showed `"...quick brown NEWWORD jumps..."` while Bob's showed `"...quick NEWWORD jumps..."` — the word "brown" was present on one replica and silently deleted on the other. **No error was thrown anywhere** — both replicas believed they had successfully applied all operations.
+- On Alice's replica: her own delete applied locally, then Bob's insert arrived and was transformed via `transformInsertDelete` — clamped to position 20 and preserved. Alice saw `"...quick NEWWORD jumps..."`.
+- On Bob's replica: his own insert applied locally (`"...quick brNEWWORDown jumps..."`), then Alice's delete arrived and was transformed via `transformDeleteInsert` — widened from 5 characters to 12, deleting `brNEWWORDown` outright. Bob saw `"...quick jumps..."`.
+- Result: the word Bob had just typed **vanished from his own screen** while remaining on Alice's, and the two replicas were permanently divergent from that operation onward. **No error was thrown anywhere** — both replicas believed they had successfully applied all operations.
 
 **Broken code** (the inconsistency, simplified):
 ```java
-// transformInsertDelete: when applied.position == op.position...
-if (applied.position >= op.position) {
-    return op;  // BUG: treats "==" as "delete is at/after insert, no shift"
-}
+// transformInsertDelete: insert lands inside the deleted range...
+return new InsertOp(op.siteId, applied.position, op.text);
+// clamps to the start of the range -- the inserted text SURVIVES
 
-// transformDeleteInsert: when applied.position == op.position...
-if (applied.position <= op.position) {
-    return new DeleteOp(op.siteId, op.position + applied.text.length(), op.length);
-    // BUG: treats "==" as "insert is at/before delete, shift delete right"
-}
+// transformDeleteInsert: the same case, seen from the other side...
+return new DeleteOp(op.siteId, op.position, op.length + applied.text.length());
+// BUG: widens the delete to cover the new text -- the insert is DESTROYED
 ```
 
-Both branches fire when positions are equal — but they encode *opposite* assumptions about which operation "wins" the position, with no shared, explicit tie-break.
+Both branches fire on the same pair of concurrent operations — but they encode *opposite* answers to "does concurrently inserted text survive a concurrent delete?", so the replica that applied the delete first and the replica that applied the insert first end up with different documents.
 
-**Fix**: Define a single, explicit, symmetric tie-break rule for the `position`-equal case across *all four* `transform()` branches, and document it once: **"when an insert and a delete reference the same position, the insert is considered to occur immediately before the delete's start"** (i.e., the inserted text is preserved, and the delete's range shifts right to begin after the inserted text). This rule is then applied consistently in `transformInsertDelete` (insert wins, delete shifts) and `transformDeleteInsert` (mirror: delete shifts right by the insert's length) — both branches now agree on the outcome.
+**Fix**: Pick one answer and implement both halves of it. The rule adopted was **"concurrently inserted text is never swallowed by a concurrent delete"** — the insert clamps to the start of the deleted range (which `transformInsertDelete` already did), and the delete therefore has to **split into two ranges**, one covering the characters before the insertion point and one covering the characters after it. That is why `transform()` in §4.1 returns a `List<Operation>` rather than a single operation: this one case genuinely produces two. With both halves in place, `apply(delete, then clamped insert)` and `apply(insert, then split delete)` produce the identical document `"...quick NEWWORD jumps..."`.
 
 The lasting fix was organizational, not just code: a **regression-test suite of "operation pairs"** was built, exhaustively covering every `(insert/insert, insert/delete, delete/insert, delete/delete)` combination at every relevant position relationship (before, after, at-start, at-end, fully-overlapping, partially-overlapping), asserting that `apply(apply(base, opA), transform(opB, opA))` equals `apply(apply(base, opB), transform(opA, opB))` for every pair — i.e., **convergence is checked as a property, not just spot-tested with a few hand-picked examples**.
 

@@ -275,6 +275,9 @@ import java.util.function.Function;
  */
 public class QuorumCoordinator {
 
+    private static final System.Logger LOG =
+            System.getLogger(QuorumCoordinator.class.getName());
+
     private final int replicationFactor; // N
     private final int writeQuorum;       // W
     private final int readQuorum;        // R
@@ -285,8 +288,19 @@ public class QuorumCoordinator {
     public QuorumCoordinator(int replicationFactor, int writeQuorum, int readQuorum,
                               long timeoutMillis, ExecutorService executor,
                               ReplicaClient replicaClient) {
+        if (writeQuorum < 1 || writeQuorum > replicationFactor
+                || readQuorum < 1 || readQuorum > replicationFactor) {
+            throw new IllegalArgumentException("W and R must each be in [1, N]");
+        }
+        // W + R <= N is a LEGAL configuration -- it is the top row of §4.2's
+        // table (W=1, R=1) and §1 promises callers can tune this. It simply
+        // forfeits the read/write quorum overlap guarantee, so surface it
+        // loudly rather than refusing to construct the coordinator.
         if (writeQuorum + readQuorum <= replicationFactor) {
-            throw new IllegalArgumentException("W + R must be > N for read-your-writes guarantees");
+            LOG.log(System.Logger.Level.WARNING,
+                    "W(" + writeQuorum + ") + R(" + readQuorum + ") <= N("
+                    + replicationFactor + "): read and write quorums are not "
+                    + "guaranteed to overlap; reads may miss the latest write");
         }
         this.replicationFactor = replicationFactor;
         this.writeQuorum = writeQuorum;
@@ -306,7 +320,7 @@ public class QuorumCoordinator {
     /** Reads from all N replicas; succeeds once R responses arrive, then reconciles. */
     public ReadResult get(String key, List<String> replicas) {
         WriteResult fanout = fanOut(replicas, readQuorum,
-            replica -> replicaClient.getFromReplica(replica, key).asWriteResult(),
+            replica -> replicaClient.getFromReplica(replica, key),
             "get");
         if (!fanout.success()) {
             return ReadResult.failure(fanout.acks(), readQuorum);
@@ -358,11 +372,7 @@ public class QuorumCoordinator {
         return WriteResult.failure(acks, quorum); // fewer than `quorum` replicas responded in time
     }
 
-    public record ReplicaResponse(boolean success, VersionedValue value) {
-        public WriteResult asWriteResult() {
-            return success ? WriteResult.success(List.of(this), 1) : WriteResult.failure(List.of(), 1);
-        }
-    }
+    public record ReplicaResponse(boolean success, VersionedValue value) {}
     public record WriteResult(boolean success, List<ReplicaResponse> acks, int required) {
         public static WriteResult success(List<ReplicaResponse> acks, int required) {
             return new WriteResult(true, acks, required);
@@ -780,7 +790,7 @@ Most Dynamo-lineage systems default to sloppy quorum cluster-wide but expose a p
 
 ## 6. Real-World Implementations
 
-- **Amazon DynamoDB**: the direct commercial descendant of the 2007 Dynamo paper, now a fully managed service. DynamoDB exposes **tunable consistency** at the API level — `GetItem` defaults to eventually consistent reads (cheaper, lower latency) but supports `ConsistentRead=true` for strongly consistent reads from the partition's leader, and **Global Tables** extend the AP model across regions with last-writer-wins conflict resolution based on timestamps.
+- **Amazon DynamoDB**: the direct commercial descendant of the 2007 Dynamo paper, now a fully managed service. DynamoDB exposes **tunable consistency** at the API level — `GetItem` defaults to eventually consistent reads (cheaper, lower latency) but supports `ConsistentRead=true` for strongly consistent reads from the partition's leader, and **global tables** extend the model across regions with a per-table choice of **consistency mode**, fixed at creation: **multi-Region eventual consistency (MREC)** — the default, multi-active writes replicated asynchronously with **last-writer-wins** conflict resolution — or **multi-Region strong consistency (MRSC)**, which removes the conflict-resolution question at the cost of the coordination MREC avoids (MRSC is same-account only). MREC is the mode that maps onto this design.
 - **Apache Cassandra**: originated at Facebook (combining Dynamo's partitioning/replication model with Bigtable's wide-column data model and SSTable storage format), Cassandra is the most widely deployed open-source Dynamo-lineage system. **Netflix** runs Cassandra at a scale of thousands of nodes across multiple AWS regions for viewing history, recommendations data, and account data — explicitly choosing AP because a brief delay in "Netflix knows you finished episode 4" is acceptable, but the service being unavailable during an AWS AZ outage is not. **Apple** has historically operated some of the largest known Cassandra deployments (tens of thousands of nodes, multiple petabytes) for iCloud and related services.
 - **Riak (Basho)**: the implementation closest in spirit to the original Dynamo paper — Riak exposes vector clocks and sibling resolution directly to the application, and its `bucket`-level configuration of `N`, `W`, `R` mirrors the paper's terminology almost exactly. Basho (the company) shut down in 2017, but Riak remains in production at some long-standing deployments and is frequently cited in interviews and papers as the "textbook" Dynamo implementation.
 - **Voldemort (LinkedIn)**: built at LinkedIn specifically for read-heavy, low-latency lookups backing features like "People You May Know" — notable for pluggable storage engines (BDB, MySQL, read-only stores built from offline Hadoop jobs) layered under the same consistent-hashing/replication core described in §4.1-§4.2.
@@ -790,7 +800,7 @@ Most Dynamo-lineage systems default to sloppy quorum cluster-wide but expose a p
 
 | System | Origin | Conflict Resolution | Default Consistency Posture | Notable At-Scale Users |
 |---|---|---|---|---|
-| DynamoDB | Amazon (managed) | LWW (timestamp-based) | Eventually consistent by default, strongly consistent reads optional | Amazon retail, countless AWS customers |
+| DynamoDB | Amazon (managed) | LWW (timestamp-based) in global tables' default MREC mode | Eventually consistent by default; strongly consistent reads optional in-Region, MRSC optional across Regions | Amazon retail, countless AWS customers |
 | Cassandra | Facebook (open-source) | LWW (default), pluggable | Tunable per query (`ONE`, `QUORUM`, `ALL`) | Netflix, Apple, Instagram |
 | Riak | Basho (open-source) | Vector clocks + siblings | Tunable `N`/`W`/`R` per bucket | Comcast, legacy Riak deployments |
 | Voldemort | LinkedIn (open-source) | Vector clocks (Dynamo-derived) | Tunable per store | LinkedIn (historically) |
@@ -798,7 +808,7 @@ Most Dynamo-lineage systems default to sloppy quorum cluster-wide but expose a p
 
 ### Lessons from the Original Dynamo Paper (2007)
 
-Amazon's "Dynamo: Amazon's Highly Available Key-value Store" paper introduced the combination of techniques this entire design is built from — consistent hashing with virtual nodes, sloppy quorums with hinted handoff, vector clocks for conflict detection, and Merkle trees for anti-entropy — as a single integrated system built to keep Amazon's shopping cart service available during the holiday shopping season **even during partial datacenter failures**. The paper's central thesis, still the core argument for AP systems in this space, was that for Amazon's shopping cart, **"always writable"** mattered more than strict consistency: a customer being able to add an item to their cart, even if a stale cart later needs merging, was judged better than an error message. The paper's biggest internal controversy at the time was vector clocks and sibling resolution — exposing "multiple versions of the truth" to application developers was a significant API complexity cost, which is part of why later systems (Cassandra, and DynamoDB-the-product itself) defaulted to LWW for simplicity, accepting the data-loss tradeoff from §5 as the price of a simpler API. Two decades later, the techniques have diverged from their original integration — Cassandra kept consistent hashing and gossip but dropped vector clocks; DynamoDB-the-product kept the quorum model but is now a fully managed service with a completely different storage substrate internally — but nearly every "design a distributed cache/KV store" interview question is, at its core, asking a candidate to rediscover some subset of this paper's ideas.
+Amazon's "Dynamo: Amazon's Highly Available Key-value Store" paper introduced the combination of techniques this entire design is built from — consistent hashing with virtual nodes, sloppy quorums with hinted handoff, vector clocks for conflict detection, and Merkle trees for anti-entropy — as a single integrated system built to keep Amazon's shopping cart service available during the holiday shopping season **even during partial datacenter failures**. The paper's central thesis, still the core argument for AP systems in this space, was that for Amazon's shopping cart, **"always writable"** mattered more than strict consistency: a customer being able to add an item to their cart, even if a stale cart later needs merging, was judged better than an error message. The paper's biggest internal controversy at the time was vector clocks and sibling resolution — exposing "multiple versions of the truth" to application developers was a significant API complexity cost, which is part of why later systems (Cassandra, and DynamoDB-the-product itself) defaulted to LWW for simplicity, accepting the data-loss tradeoff from §5 as the price of a simpler API. Nearly two decades later, the techniques have diverged from their original integration — Cassandra kept consistent hashing and gossip but dropped vector clocks; DynamoDB-the-product kept the quorum model but is now a fully managed service with a completely different storage substrate internally — but nearly every "design a distributed cache/KV store" interview question is, at its core, asking a candidate to rediscover some subset of this paper's ideas.
 
 ---
 
@@ -872,7 +882,11 @@ The "smart client" referenced above is not optional polish — it materially aff
 
 ## 9. Common Pitfalls & War Stories
 
-Both war stories below share a common shape worth recognizing as a pattern: **a mechanism that is "usually redundant" (read repair given anti-entropy; clock-based timestamps given that clocks "should" be in sync) turns out to be load-bearing the moment its assumptions are violated** — and both violations (a long network partition; a slow clock drift) are exactly the kind of slow-burning, easy-to-miss condition that doesn't trigger an immediate alert on its own. The fixes in both cases are the same shape too: turn an implicit assumption ("anti-entropy will catch it eventually," "clocks are roughly synced") into an explicitly monitored, alertable invariant (§8's metrics).
+Both war stories below are **composite, illustrative incidents** — recurring failure patterns
+in Dynamo-lineage deployments, written as concrete narratives so the mechanism is visible.
+They are not accounts of specific, publicly-reported outages at named companies.
+
+They also share a common shape worth recognizing as a pattern: **a mechanism that is "usually redundant" (read repair given anti-entropy; clock-based timestamps given that clocks "should" be in sync) turns out to be load-bearing the moment its assumptions are violated** — and both violations (a long network partition; a slow clock drift) are exactly the kind of slow-burning, easy-to-miss condition that doesn't trigger an immediate alert on its own. The fixes in both cases are the same shape too: turn an implicit assumption ("anti-entropy will catch it eventually," "clocks are roughly synced") into an explicitly monitored, alertable invariant (§8's metrics).
 
 ### War Story 1: Disabled Read Repair Causes Stale-Read Amplification After a Partition Heals — Broken, Then Fixed
 
@@ -886,7 +900,7 @@ Both war stories below share a common shape worth recognizing as a pattern: **a 
 
 **Broken**: the cluster used **Last-Write-Wins** (§4.3) for conflict resolution, with timestamps assigned by each coordinator node at write time from its local system clock. NTP was configured but not actively monitored — "NTP is running" was treated as equivalent to "clocks are correct."
 
-**Impact**: one node's NTP daemon silently stopped synchronizing after a configuration change (an unrelated infrastructure update inadvertently blocked outbound NTP traffic for that node's subnet). Over the following weeks, that node's clock drifted **about 90 seconds ahead** of the rest of the cluster — small enough that no human noticed, but large enough to matter for LWW. A customer updated their account's shipping address (a `put` coordinated by a different, correctly-synced node, timestamp `T`). Forty seconds later — well within any reasonable "concurrent enough to matter" window — the customer updated it *again* with a correction (a `put` coordinated by the clock-skewed node, but because of replica placement and request routing, this write's timestamp was computed as `T - 50 seconds` relative to true time, due to the skew making the skewed node's clock appear to be in the past **relative to where it actually was at write time** — the specific direction of the bug depended on which write landed on the skewed node, but the net effect was that **the chronologically later write carried the chronologically earlier timestamp**). When the two versions were compared under LWW, the **first** address update "won" — its (incorrectly later-appearing) timestamp beat the second update's (incorrectly earlier-appearing) timestamp. The customer's correction was **silently discarded**. The customer's order shipped to the old address. This was caught only because the customer filed a support complaint — there was no system-level signal that a write had been dropped, because from the system's perspective, LWW had worked exactly as designed: it picked "the" winner and discarded "the" loser, with no record that the loser had ever existed.
+**Impact**: one node's NTP daemon silently stopped synchronizing after a configuration change (an unrelated infrastructure update inadvertently blocked outbound NTP traffic for that node's subnet). Over the following weeks, that node's clock drifted **about 90 seconds behind** the rest of the cluster — small enough that no human noticed, but large enough to matter for LWW. A customer updated their account's shipping address; that `put` was coordinated by a different, correctly-synced node and stamped `T`. Forty seconds later — well within any reasonable "concurrent enough to matter" window — the customer updated it *again* with a correction, and request routing happened to send that `put` to the **clock-skewed** node. Its true wall-clock time was `T + 40`, but its clock read 90 seconds low, so the write went out stamped `T + 40 - 90 = T - 50`. **The chronologically later write carried the chronologically earlier timestamp.** When the two versions were compared under LWW, the **first** address update won on timestamp `T` against the correction's `T - 50`. The customer's correction was **silently discarded**. The customer's order shipped to the old address. This was caught only because the customer filed a support complaint — there was no system-level signal that a write had been dropped, because from the system's perspective, LWW had worked exactly as designed: it picked "the" winner and discarded "the" loser, with no record that the loser had ever existed.
 
 **Fixed**: three changes, layered:
 1. **NTP monitoring became a first-class alert**: every node's clock offset from a trusted time source is now actively monitored, with paging alerts on drift exceeding a few hundred milliseconds — far tighter than the 90-second drift that caused the incident, giving enormous margin.
@@ -948,7 +962,7 @@ The reverse of §10's rebalance math applies when **removing** nodes (e.g., righ
 | Cross-DC replication bandwidth | 1M writes/sec x 5KB average | ~5 GB/sec (async, background) |
 | Gossip overhead | ~1 round/sec/node, O(log N) propagation (§4.5) | ~500 msgs/sec cluster-wide — negligible vs. client traffic |
 
-This table is the artifact a capacity-planning review actually produces: every row traces back to a number from §2 or §4, so when traffic projections change (say, the 10M reads/sec figure grows by 50% for next year's roadmap), the node-count and storage rows can be recomputed mechanically rather than re-derived from scratch — the read floor becomes `15M / (3 x 7,500)` ~= **667 nodes**, which then becomes the new dominant term in the `max()` and the new headroom-adjusted cluster target (~750-800 nodes).
+This table is the artifact a capacity-planning review actually produces: every row traces back to a number from §2 or §4, so when traffic projections change (say, the 10M reads/sec figure grows by 50% for next year's roadmap), the node-count and storage rows can be recomputed mechanically rather than re-derived from scratch — the read floor becomes `(15,000,000 x R=2) / 45,000` ~= **667 nodes**, which then becomes the new dominant term in the `max()` and the new headroom-adjusted cluster target (~750-800 nodes).
 
 ---
 
