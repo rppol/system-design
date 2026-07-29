@@ -46,6 +46,30 @@ This module focuses on **system-level threats and defenses** — protecting the 
 
 ## 4. Types / Architectures / Strategies
 
+The taxonomy below is organized by **attack mechanism**. The industry's shared vocabulary is the
+**OWASP Top 10 for LLM Applications 2025 (v2.0)** cited in §1, and it is worth keeping side by side:
+a security review, a vendor questionnaire, and an auditor will all be conducted in OWASP's terms,
+and three of its entries have no natural home in the mechanism-based sections that follow.
+
+| OWASP ID | Title | Where it lives in this repo |
+|----------|-------|-----------------------------|
+| `LLM01:2025` | Prompt Injection | §4.1 and §6 — direct, indirect, cross-prompt; detection mechanics |
+| `LLM02:2025` | Sensitive Information Disclosure | §4.2, plus [privacy_and_data_governance.md](privacy_and_data_governance.md) |
+| `LLM03:2025` | Supply Chain | §4.4, §10.5 — pickle payloads, model provenance, dependencies |
+| `LLM04:2025` | Data and Model Poisoning | §4.4 — training-time backdoors and triggers |
+| `LLM05:2025` | Improper Output Handling | §10.6 — LLM output fed to SQL, shell, or rendered HTML unsanitized |
+| `LLM06:2025` | Excessive Agency | §9 and §14 Decision 2 — scoped tools, tiered authorization |
+| `LLM07:2025` | System Prompt Leakage | §10.1, §4.6 — canary tokens and output scanning |
+| `LLM08:2025` | Vector and Embedding Weaknesses | [privacy_and_data_governance.md](privacy_and_data_governance.md) — inversion, cross-tenant retrieval |
+| `LLM09:2025` | Misinformation | [Safety & Alignment](../safety_and_alignment/README.md) §4.2 — hallucination |
+| `LLM10:2025` | Unbounded Consumption | §10.7 — resource and cost exhaustion |
+
+Two notes on using the mapping. `LLM09` sits in the *safety* module by this repo's split (see the
+§12 answer on security versus safety); OWASP folds it into one list because a deployer's risk
+register does not care which discipline owns a failure. And `LLM10` did not exist in the first
+edition — a threat model written against the 2023 list has no entry for it at all, which is exactly
+why §10.7 below had to be written.
+
 ### 4.1 Prompt Injection
 
 The most critical and novel LLM vulnerability. Attacker-crafted input manipulates the model into ignoring its instructions and following the attacker's instead.
@@ -881,6 +905,35 @@ An ML team downloads a popular model from HuggingFace, loads it with `torch.load
 
 A natural language-to-SQL application takes user questions, generates SQL with an LLM, and executes the query directly against the production database. An attacker asks: "Show me all users; DROP TABLE users; --" and the LLM generates syntactically valid SQL that includes the destructive statement. Even without malicious intent, the LLM sometimes generates queries that return excessive data (SELECT * with no LIMIT on a 100M-row table, causing OOM). Defense: parameterized queries, query validation, execution in a sandboxed read-only replica, result set size limits, query cost estimation before execution.
 
+### 7. Rate Limiting Requests but Not Tokens — Unbounded Consumption
+
+A team ships an LLM feature behind a per-user request rate limit and considers abuse handled. The
+attacker does not send *more* requests; they send *more expensive* ones — prompts padded to the
+context limit, `max_tokens` pinned to the ceiling, a reasoning model asked for maximum effort, or an
+agent prompt engineered to loop tool calls until the turn budget runs out. Request rate never
+changes, so no alert fires, while the bill and the GPU queue both climb. This is `LLM10:2025
+Unbounded Consumption` (§4), the one entry a requests-per-minute limiter does not touch, and it goes
+by "denial of wallet" because for a metered API the damage is financial before it is availability.
+
+```
+  Rate limit: 60 requests/minute/user — and the attacker respects it exactly.
+
+  typical request      500 in +   300 out tokens  =     800 tokens
+  maximal request  200,000 in + 8,000 out tokens  = 208,000 tokens   = 260x
+
+  60 req/min x 60 min x 208,000 = 748.8M tokens/hour from ONE compliant client.
+  The rate limiter observes a perfectly well-behaved user for the entire hour.
+```
+
+Defense: meter a **token budget, not a request budget** — input plus output tokens per user per hour
+and per day — and enforce `max_tokens` and maximum input length server-side rather than trusting the
+client-supplied value. For agents, add a hard ceiling on tool calls per turn and per session (the
+10-per-turn / 100-per-session figures in §12 exist for this reason) plus a wall-clock timeout on the
+whole run. Alert on **cost per user**, not requests per user; the two metrics track each other in
+normal traffic and diverge precisely under this attack, which is what makes cost the load-bearing
+signal. The same ceiling also constrains the model-extraction attack in §4.3 and the extraction-probe
+budget in §6, both of which need high query volume — one control, three threats.
+
 ---
 
 ## 11. Technologies & Tools
@@ -990,6 +1043,14 @@ A backdoor is a trigger pattern injected into training or fine-tuning data that 
 **Q: How do perplexity-based and dual-LLM detectors catch prompt injection, and what are their limits?**
 
 A perplexity-based detector flags inputs whose perplexity is unusually **high**, because gradient-optimized adversarial suffixes are near-gibberish token strings no human would type. Alon & Kamfonas (arXiv 2308.14132) measured "exceedingly high perplexity values" for GCG suffixes, and also found that a raw threshold produces too many false positives on ordinary prompts — they train a small classifier over perplexity plus token length instead, and Jain et al. (arXiv 2309.00614) add a windowed variant so a short high-perplexity suffix is not averaged away by a long benign prefix. The threshold must be calibrated on your own benign traffic, never copied from a paper. Its blind spot is fluent attacks: AutoDAN produces natural-language jailbreaks whose perplexity is indistinguishable from normal prompts, and they pass straight through. A dual-LLM detector routes the input to a second model that classifies adversarial intent before the main model runs, catching semantic attacks a regex cannot, at the cost of a full extra inference per request. Neither is sufficient alone — recall on attack families a classifier was trained on is always far higher than on techniques invented afterwards — so both must sit inside a defense-in-depth stack with input sanitization, output filtering, and least-privilege tool access rather than being trusted as a single gate.
+
+**Q: What is unbounded consumption (denial of wallet), and why does request rate limiting fail to stop it?**
+
+It is resource and cost exhaustion achieved by sending maximally expensive requests rather than more of them, so a requests-per-minute limiter never fires. The attacker stays inside your rate limit and inflates the cost of each call instead: prompts padded toward the context ceiling, `max_tokens` set to its maximum, a reasoning model asked for maximum effort, or an agent prompt crafted to loop tool calls until the turn budget is exhausted. Concretely, a typical 500-in/300-out request is 800 tokens while a 200,000-in/8,000-out request is 208,000 — a 260x multiplier that a per-request counter cannot see, so a compliant client at 60 requests/minute can pull roughly 750M tokens an hour without tripping anything. This is `LLM10:2025 Unbounded Consumption` in the OWASP LLM Top 10, added in the 2025 edition and therefore absent from threat models written against the older list. The controls are a token budget per user per hour and per day rather than a request budget, server-side enforcement of `max_tokens` and maximum input length instead of trusting client-supplied values, hard ceilings on tool calls per turn and per session plus a wall-clock timeout for agents, and alerting on cost per user rather than requests per user — those two metrics track each other in normal traffic and diverge exactly under this attack.
+
+**Q: Which OWASP LLM Top 10 entries are most often missing from a threat model written before the 2025 edition?**
+
+System Prompt Leakage, Vector and Embedding Weaknesses, Misinformation, and Unbounded Consumption — all four were added or substantially restructured in v2.0. The gaps are practical, not editorial. System Prompt Leakage (`LLM07`) got its own entry because teams kept treating the system prompt as a secret and shipping tenant configuration inside it; the defense is canary tokens plus output scanning and, more fundamentally, designing so that disclosure costs nothing. Vector and Embedding Weaknesses (`LLM08`) covers the RAG-layer risks that pure model-centric threat models skip: embedding inversion reconstructing source text, cross-tenant retrieval from a missing filter, and poisoned chunks as a persistent injection vector. Misinformation (`LLM09`) is a hallucination and over-reliance risk that most security teams had classified as a quality problem and therefore nobody's responsibility. Unbounded Consumption (`LLM10`) is the cost and resource exhaustion class described above, which a request rate limiter does not address. The other structural change worth knowing is that `LLM04` became Data and Model Poisoning, widening older "training data poisoning" wording to cover embedding-time and fine-tuning-time poisoning as well.
 
 ---
 

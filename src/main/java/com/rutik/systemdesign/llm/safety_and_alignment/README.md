@@ -564,6 +564,50 @@ For the full toolkit — superposition, sparse autoencoders, activation patching
 discovery, activation steering, and model editing (ROME/MEMIT) — see
 [Mechanistic Interpretability](../mechanistic_interpretability/README.md).
 
+### Capability Thresholds and Frontier Safety Frameworks
+
+Section 3's "emergent capabilities" principle — safety measures validated on a small model may not
+hold on a larger one — is operationalized at the frontier labs as a **capability threshold**: define
+in advance a level of dangerous capability at which a named set of security and deployment
+safeguards becomes mandatory, then evaluate before each release to decide whether the model crossed
+it. The evaluation is the gate; the safeguard set is the consequence. This is what the Responsible
+Scaling Policy row in §11 actually refers to.
+
+```
+Anthropic — Responsible Scaling Policy (v3.4, effective 8 July 2026)
+  AI Safety Levels (ASL). Crossing a threshold triggers the ASL-3 Security Standard
+  (protect the weights) and/or the ASL-3 Deployment Standard (constrain the product).
+  ASL-3 safeguards were activated for relevant models in May 2025.
+  Threshold domains: CBRN, AI R&D, cyber. The v3 rewrite added a Frontier Safety
+  Roadmap with public accountability metrics, separated what one lab can do alone
+  from what needs industry-wide action, and made external review of Risk Reports
+  mandatory under stated conditions.
+
+OpenAI — Preparedness Framework (v2, 15 April 2025)
+  Tracked Categories: biological and chemical, cybersecurity, AI self-improvement.
+  Two thresholds only, High and Critical (v1 had Low/Medium/High/Critical).
+  A model at High must ship with safeguards that sufficiently minimize the risk of
+  severe harm. A capability is Tracked only if it is plausible, measurable, severe,
+  net new, and instantaneous/irremediable; near-misses become Research Categories.
+
+Google DeepMind — Frontier Safety Framework (v3.1, 17 April 2026)
+  Critical Capability Levels (CCLs): the level at which severe-harm risk appears
+  absent mitigation. Domains: CBRN, cybersecurity, ML R&D, harmful manipulation,
+  plus an exploratory misalignment track. v3.1 added Tracked Capability Levels
+  (TCLs) to surface less extreme risks earlier. A safety case review precedes
+  external launch once a relevant CCL is reached.
+```
+
+Three things to take from this rather than the acronyms. First, these are **voluntary** commitments
+that each lab writes and revises itself — distinct from the statutory regime in
+[AI Regulations & Compliance](../ai_regulations_and_compliance/README.md), whose closest analogue is
+the EU AI Act's systemic-risk GPAI tier. Second, the eval-then-gate shape is portable downward: a
+company fine-tuning or deploying a frontier model can define thresholds for its own harm surface and
+gate releases identically, which is what §13's "red team before every major deployment" becomes once
+it has a number attached. Third, the thresholds are defined on **capability, not on observed
+incidents** — you do not wait for harm to be measured in production, because at deployment scale
+measuring it means it already happened.
+
 ---
 
 ## 7. Real-World Examples
@@ -697,6 +741,9 @@ Reward hacking is when a model maximizes the reward model's score without satisf
 
 **Q: How do you measure over-refusal, and why is a low attack-success-rate alone a misleading safety metric?**
 Over-refusal is measured on a dedicated benign-but-adversarial-looking eval set — requests that pattern-match to unsafe topics but are legitimate ("write a story where a character picks a lock," "explain how SQL injection works for a security course," "what household chemicals should never be mixed") — with the metric being the fraction incorrectly refused (target <1%). Attack success rate (ASR) alone is misleading because it is trivially minimized by a model that refuses everything: an ASR of 0% and a 40% benign-refusal rate is a broken product, not a safe one. Safety is a two-dimensional problem — you want low ASR AND low false-refusal — and the useful summary is a joint operating point or a curve trading the two, analogous to precision-recall. Benchmarks like WildGuard and XSTest exist specifically to catch the over-refusal axis; report both numbers together and gate deployment on neither regressing.
+
+**Q: What is a capability threshold, and how do frontier safety frameworks use one to gate a model release?**
+A capability threshold is a dangerous-capability level defined in advance, at which a named set of security and deployment safeguards becomes mandatory before the model can ship. The structure is the same across the three published frameworks even though the vocabulary differs: Anthropic's Responsible Scaling Policy (v3.4, July 2026) uses AI Safety Levels, where crossing a CBRN, AI-R&D, or cyber threshold triggers the ASL-3 Security Standard for the weights and/or the ASL-3 Deployment Standard for the product, with ASL-3 safeguards activated for relevant models since May 2025; OpenAI's Preparedness Framework v2 (April 2025) tracks biological/chemical, cybersecurity, and AI self-improvement against just two thresholds, High and Critical, with High requiring safeguards that sufficiently minimize severe-harm risk before deployment; Google DeepMind's Frontier Safety Framework (v3.1, April 2026) defines Critical Capability Levels across CBRN, cybersecurity, ML R&D, and harmful manipulation, requiring a safety case review before external launch once a CCL is reached. Two properties matter more than the naming. The thresholds are set on capability rather than on observed incidents, because at deployment scale an observed incident means the harm already happened. And these are voluntary self-governance documents that each lab writes and revises — the binding legal analogue is the EU AI Act's systemic-risk GPAI tier, not any of these. The portable lesson for a deploying company is the shape: define your own thresholds for your own harm surface, run the evals pre-release, and make crossing one trigger a pre-agreed mitigation set rather than a debate.
 
 ---
 

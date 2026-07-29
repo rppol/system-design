@@ -280,6 +280,30 @@ family** — there is no single defense that covers both ends.
 | **GPTFuzzer** | 2023 | Black-box | Fuzzing: seed templates + mutation operators (synonym swap, role-play rewrites), success-driven seed selection | Mutated natural-language templates |
 | **PAP** (Persuasive Adversarial Prompts) | 2024 | Black-box, **no optimization** | Applies social-science persuasion techniques (authority endorsement, logical appeal, foot-in-the-door, etc.) directly via prompt templates | Fully natural, persuasion-framed requests |
 | **Many-shot jailbreaking** | 2024, Anthropic | Black-box | Long-context in-context priming with many compliant examples — see [Safety & Alignment §4.1](README.md) | Long conversational context, no suffix |
+| **Crescendo** (Russinovich, Salem & Eldan, Microsoft) | 2024; USENIX Security '25 | Black-box | Multi-turn escalation: open with a benign question, then ratchet each turn by referencing the *model's own* prior replies. Automated as **Crescendomation** in PyRIT | Ordinary-looking conversation; no suffix, and often no individually harmful turn |
+
+**Every algorithm above except Crescendo and many-shot searches over a *single* prompt** — which is
+a coverage hole, not a stylistic detail. Crescendo
+([arXiv 2404.01833](https://arxiv.org/abs/2404.01833)) opens with a general question about the
+topic and escalates by referencing the model's own previous answers, so the harmful request is
+never *stated*: it is assembled out of ground the model already conceded. Its automation,
+**Crescendomation**, ships in Microsoft's PyRIT and reports 29-61% higher performance than prior
+state-of-the-art on GPT-4 and 49-71% on Gemini-Pro over an AdvBench subset.
+
+Two consequences, both about **evaluation** rather than the attack catalogue:
+
+- **Every single-turn number in §7 and §14 is silent about this family.** An ASR measured by firing
+  520 independent prompts does not estimate the success rate of an adversary allowed ten turns, and
+  reporting the former as "our jailbreak rate" overstates robustness by an unbounded margin. A
+  multi-turn run needs its own denominator — *conversations* attempted, not prompts — and its own
+  budget axis, turns per conversation, which the geometric model in §3.5 applies to unchanged.
+- **The §5.4 stack degrades unevenly against it.** A perplexity filter sees nothing, because every
+  turn is fluent and most are not individually harmful. SmoothLLM perturbs one turn of a
+  conversation whose leverage is spread across all of them. What survives is the layer that never
+  reads the input text at all — the RepE circuit breaker of §8.3, firing on the internal state at
+  the moment harmful content is about to be produced, regardless of how many turns it took to
+  arrive there. That is a second, independent argument for representation-level defenses, distinct
+  from the novel-strategy argument in §Q10.
 
 ---
 
@@ -925,6 +949,9 @@ There's no single algorithm covering both axes of §8.2 (gibberish vs. fluent) a
 
 **Q16: How does this module's threat model change when the target isn't a chatbot but an agent with tool access?**
 Everything in §3-§8 still applies to getting the *underlying model* to produce a harmful response, but for an agent, "harmful response" can mean "the model decides to call a destructive tool" rather than "the model generates harmful text" — the action surface is much larger and often higher-stakes (file deletion, financial transactions, sending messages). Attack-success-rate benchmarks designed for text generation (AdvBench-style) don't directly measure this; agentic evaluation needs action-level harm classification, and defenses need to extend beyond the text-generation pipeline to tool-call authorization (least-privilege scoping, human-in-the-loop for high-risk actions) — see [Multi-Agent Security](../multi_agent_systems/multi_agent_security.md) and [Agent Reliability](../agents_and_tool_use/agent_reliability.md) for the agentic extension.
+
+**Q17: Why does a single-turn attack-success-rate number understate a model's real jailbreak risk, and what changes for multi-turn attacks?**
+Because multi-turn attacks are never measured by it — each turn is individually benign, so an evaluation that fires independent prompts has no way to express the attack at all. Crescendo (Russinovich, Salem & Eldan, Microsoft; arXiv 2404.01833, USENIX Security '25) is the canonical case: it opens with a general question and escalates by referencing the model's own prior replies, assembling the harmful request out of ground the model already conceded rather than ever stating it. Its automation, Crescendomation, ships in PyRIT and reports 29-61% higher performance than prior state-of-the-art on GPT-4 and 49-71% on Gemini-Pro over an AdvBench subset, so this is not a marginal family. Three things change when you evaluate it. The denominator becomes conversations attempted rather than prompts, and turns per conversation becomes a second budget axis alongside queries — the geometric model in §3.5 still applies, just to a different unit. The defense stack degrades unevenly: a perplexity filter sees nothing because every turn is fluent, and SmoothLLM perturbs one turn of an attack whose leverage is distributed across all of them. And the layer that survives is the one that does not read the input text — a RepE circuit breaker fires on the internal "about to produce harmful content" state regardless of how many turns preceded it, which is an argument for representation-level defenses independent of the novel-strategy argument in Q10. The practical failure to avoid is reporting a single-turn ASR as "our jailbreak rate" and treating the gap as measured; it is unmeasured.
 
 ---
 

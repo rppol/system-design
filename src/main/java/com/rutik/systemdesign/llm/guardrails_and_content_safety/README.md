@@ -549,6 +549,22 @@ GDPR (EU):
 - Also callable standalone via the `ApplyGuardrail` API, without invoking a foundation model
 - Used by enterprise customers for compliance
 
+### Azure AI Content Safety (Microsoft)
+- The Azure-side counterpart to Bedrock Guardrails: callable standalone as an API, or wired in as the content filter behind Azure OpenAI
+- `Analyze text` / `Analyze image` — four harm categories (hate, sexual, violence, self-harm), each returned with a multi-level severity score rather than a bare boolean
+- **Prompt Shields** — a dedicated jailbreak/injection detector that scores the user prompt *and* up to five attached documents (10K characters total), so an indirect injection hidden in a retrieved file is checked, not just the chat turn
+- **Groundedness detection** (preview) — the RAG faithfulness check of §4.2 as a managed API; grounding sources up to 55,000 characters per call, and an optional correction mode that returns a rewritten, source-aligned answer instead of only a verdict
+- **Protected material detection** — flags generated text (and code) reproducing known copyrighted content; scans completions of 110+ characters, not user prompts
+- **Task adherence** (preview) — flags agent tool calls that are misaligned, unintended, or premature for the user's request. This is the agentic guardrail none of the content classifiers above can express
+- **Custom categories** — train a category on your own labelled examples (standard), or define an emerging pattern for same-day rollout (rapid)
+- Read the language footnote before designing around it: protected material, groundedness, and custom categories (standard) are **English-only**, while the text/image moderation models are trained on eight languages. One vendor does not give a multilingual product uniform coverage
+
+### Google Cloud Model Armor
+- Google's managed screen-both-sides service. Templates define a filter set, and **floor settings** enforce a minimum policy across every project in an organization — the org-wide enforcement piece the other two leave to you
+- Filters: responsible-AI safety (hate, harassment, sexually explicit, dangerous — with CSAM enforced automatically and not configurable), prompt injection and jailbreak detection, Sensitive Data Protection for PII detection and de-identification, malicious URL detection, and document/image screening (PDF, Office, JPEG/PNG/BMP up to 4 MB)
+- Model-agnostic: called over REST as an explicit sanitize step, or integrated through Vertex AI, Apigee, and Agent Gateway — so it can front non-Google models too
+- Check the caps before relying on it: URL scanning covers only the **first 40 URLs** in a prompt or response, which is precisely the kind of ceiling an attacker pads past
+
 ---
 
 ## 8. Tradeoffs
@@ -585,6 +601,20 @@ GDPR (EU):
 3. **Not logging guardrail triggers**: Essential for compliance audits and improving classifiers.
 4. **Assuming alignment = safety**: Even well-aligned models have failure modes. External guardrails are always needed.
 5. **Performance testing guardrails**: A guardrail that adds 5s of latency defeats the purpose. Benchmark guardrail overhead.
+6. **No decision for when the guardrail itself is unavailable**: Section 3's "fail-safe defaults" rule covers an *uncertain* classifier — a score sitting in the ambiguous band. It says nothing about an *absent* one, and absence is the failure teams actually hit: the moderation API returns 503, the Llama Guard pod is evicted, or p99 blows past your 200ms timeout. The code must then choose between failing open (serve the response unchecked) and failing closed (block every request). Almost nobody writes this down, so the answer becomes whatever the HTTP client's exception handler happened to do — and a bare `except: pass` around a guardrail call is a silent fail-open that no dashboard reports, because a guardrail that never ran looks identical to a guardrail that found nothing.
+
+```
+  10,000 messages/day (the §4.2 traffic).  Guardrail API at 99.9% availability
+     -> 0.1% x 10,000 = 10 requests/day take the unavailable path.
+
+  fail OPEN   : 10 unchecked responses/day. At §4.2's 2% toxic base rate that is
+                0.2 toxic responses shipped per day, indefinitely and invisibly.
+  fail CLOSED : 10 blocked legitimate messages/day = 10 / 9,800 = 0.102% FPR,
+                which on its own overruns the <0.1% target in §6 before the
+                classifier has made a single mistake.
+```
+
+   Decide per tier and per risk profile. Tier 1 rules run in-process and cannot fail independently; the Tier 2 and Tier 3 network calls are the ones needing an explicit policy. Fail closed on a children's or clinical product, where an unchecked response is unacceptable at any rate; fail open with a degraded-mode banner and a paging alert on a low-risk internal tool, where a total outage is worse than a missed toxic message. Whichever you choose, emit a distinct `guardrail_unavailable` counter separate from `guardrail_passed` — conflating the two is how a six-hour fail-open goes unnoticed.
 
 ---
 
@@ -597,6 +627,8 @@ GDPR (EU):
 | **Guardrails AI** | Output validation | Pydantic-style; code-first; validators installed from Guardrails Hub |
 | **Llama Prompt Guard 2** | Prompt injection / jailbreak detection | Meta; 86M (mDeBERTa-base) and 22M (DeBERTa-xsmall) classifiers; 512-token window, 8 languages; 97.5% recall at 1% FPR on the 86M |
 | **AWS Bedrock Guardrails** | Managed service | Console/API/CloudFormation config; enterprise-grade |
+| **Azure AI Content Safety** | Managed moderation + prompt protection | Microsoft; severity-scored text/image categories, Prompt Shields (direct + document-embedded injection), groundedness detection, task adherence for agents; several features English-only |
+| **Google Cloud Model Armor** | Managed prompt/response screening | Google; templates plus org-wide floor settings; injection/jailbreak, Sensitive Data Protection, malicious URL, document and image filters; model-agnostic over REST |
 | **OpenAI Moderation API** | Toxicity classification | Free; `omni-moderation-latest`; easy to integrate |
 | **Perspective API** | Toxicity | Google Jigsaw; granular per-attribute scores |
 | **Microsoft Presidio** | PII detection/anonymization | Open source; enterprise-grade |
@@ -654,6 +686,12 @@ A: A fail-safe default means that when a guardrail cannot confidently decide, it
 
 **Q: How do you apply an output guardrail to a streamed response without waiting for the full generation to finish?**
 A: Run the guardrail on a rolling buffer of complete units (sentences or ~20-token windows) as tokens stream, rather than blocking until generation is done. The pattern is a "streaming gate": buffer tokens until a sentence boundary, classify that chunk in parallel with continued generation, and release it to the user only once it passes; if a chunk violates policy, truncate the stream immediately and replace the tail with a safe message. This keeps perceived latency near the time-to-first-token while still catching violations before the user sees them — critical in voice or chat UIs where waiting for the full response before applying a 200-500ms output check would double the felt latency. The tradeoff is that a violation detected late still exposes the already-streamed prefix, so pair it with a conservative early-truncation policy for high-risk categories.
+
+**Q: Your moderation API times out or returns 503 — should the guardrail fail open or fail closed?**
+A: Decide it from which failure costs more, and write it down: fail closed on high-risk products, fail open with alerting on low-risk ones, never leave it to the exception handler. The trap is that this is a different question from the fail-safe-default rule for an uncertain classifier — that one is about a score in the ambiguous band, this one is about no score at all. A bare `try/except` around the guardrail call is a silent fail-open, and it is invisible in metrics because "guardrail ran and passed" and "guardrail never ran" report identically unless you separate the counters. Concretely, at 10,000 messages/day and 99.9% guardrail availability, 10 requests/day take the unavailable path: failing open ships roughly 0.2 unchecked toxic responses per day at a 2% base rate, while failing closed blocks 10 legitimate users per day, a 0.10% false-positive floor that alone consumes a typical <0.1% error budget. For a children's or clinical product fail closed; for an internal tool fail open behind a degraded-mode banner and a page; in both cases emit a distinct `guardrail_unavailable` counter and alert on it.
+
+**Q: How do the managed guardrail services from AWS, Azure, and Google differ, and how would you choose?**
+A: All three screen both prompts and responses and are callable standalone, so the choice usually comes down to which extras and which enforcement model you need. AWS Bedrock Guardrails offers six policy types including denied topics, contextual grounding, and Automated Reasoning checks, callable via `ApplyGuardrail` without invoking a model. Azure AI Content Safety adds Prompt Shields, which scores the user prompt plus up to five attached documents so document-embedded indirect injection is covered, groundedness detection with an optional correction mode, protected-material detection, and a task-adherence check that flags misaligned agent tool calls — but several of those features are English-only, which matters for a multilingual product. Google Cloud Model Armor is the most deployment-oriented: templates define the filter set and floor settings enforce a minimum policy across every project in the organization, and it is model-agnostic over REST so it can front non-Google models. Practically: pick the one native to your cloud for the IAM and audit-trail integration, and verify the specific capability you depend on — language coverage, agent-action checks, or org-wide enforcement — rather than assuming feature parity.
 
 ---
 

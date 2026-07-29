@@ -444,6 +444,42 @@ starts; you cannot claw epsilon back afterwards.
 
 Exact unlearning means retraining without the deleted data — at LLM pre-training cost, a non-starter (SISA-style sharded training, which retrains only the affected shard, helps for small models but fragments LLM training). Approximate methods — gradient ascent on the forget set, RMU-style representation corruption, unlearning-targeted fine-tunes — optimize a proxy ("don't output this") rather than true removal, and audits show: relearning the "forgotten" content takes a handful of fine-tune steps; quantizing the unlearned model can *restore* forgotten knowledge; paraphrase probes still extract it. The architectural conclusion is principle 4: keep deletable data in deletable stores.
 
+### 6.5 Confidential computing — the third option between self-hosting and a DPA
+
+Principle 6 makes provider terms part of the architecture, but that framing offers only two
+settings: trust the contract, or self-host. **Confidential computing** is the third — run inference
+inside a hardware trusted execution environment (TEE) so the machine's operator, hypervisor, and
+host OS cannot read the prompt, the response, or the weights, and can *prove* it.
+
+```
+  ordinary hosted inference   plaintext is readable by the provider's infrastructure;
+                              your privacy control is the DPA plus their internal controls
+  self-hosted                 nobody else reads it; you own the GPUs, the ops burden,
+                              and whatever model-quality ceiling your hardware imposes
+  confidential inference      the workload runs in an encrypted-memory enclave, so the
+                              operator sits OUTSIDE the trust boundary — and remote
+                              ATTESTATION returns a hardware-signed statement of exactly
+                              what code and firmware are running, which a contract cannot
+```
+
+The building blocks are current, not speculative. NVIDIA Confidential Computing is supported on the
+Hopper, Blackwell, and Rubin architectures, protecting GPU execution, memory, and register state,
+with hardware-rooted attestation through the NVIDIA Remote Attestation Service. A CPU TEE (Intel
+TDX, AMD SEV-SNP, or AWS Nitro Enclaves) covers the host side, and the two attestations compose into
+one verifiable claim about the whole machine. Anthropic and Pattern Labs published a Confidential
+Inference design (June 2025) built on encrypted memory, a TPM as root of trust, and a minimal model
+loader and invoker in an isolated VM — motivated by *both* directions of the trust problem: keeping
+user data from the operator, and keeping model weights from an attacker who has the datacenter.
+
+The reason this is not the answer to every privacy question, and the sentence to say in an
+interview: **attestation proves what code is running, not that the code is harmless.** A TEE does
+nothing about memorization, extraction, or embedding inversion (§6.1-§6.4) — the model still
+remembers whatever it was trained on, and a confidential enclave will faithfully regurgitate it. It
+removes the *operator* from the trust boundary; it does not remove the *model*. Its correct scope is
+narrow: regulated data that must reach a hosted model where a DPA alone will not satisfy the
+auditor, and protecting your own weights when you rent someone else's hardware. Everything in this
+file's PII pipeline, dedup, and canary gating still applies on top of it.
+
 ---
 
 ## 7. Real-World Examples
@@ -566,6 +602,9 @@ SISA (Sharded, Isolated, Sliced, Aggregated) trains an ensemble on disjoint data
 
 **Q16: A teammate proposes fine-tuning on last year's support transcripts tomorrow. What's your checklist?**
 (1) Legal basis and notice — did users consent/were they informed of this use; any regulated categories (health, payments) in transcripts? (2) Pseudonymize before the dataset exists — names, contacts, account numbers, free-text identifiers; benchmark detector recall on a labeled sample of *these* transcripts. (3) Deduplicate — repeated boilerplate and repeated customer messages are exactly what gets memorized. (4) Plant canaries and set an extraction release gate. (5) Deletion story — ledger mapping transcript IDs → model version; exclusion-list mechanism for the next retrain; confirm DSR fan-out covers this dataset. (6) Access — who can query the resulting model; is it tenant-shared? (7) Provider path — if fine-tuning via an API, what are retention/training terms for uploaded datasets? If most boxes can't be ticked by tomorrow, propose RAG over the transcripts as the lower-risk first ship.
+
+**Q17: What does confidential computing actually buy you for LLM inference, and what does it not?**
+It removes the machine's operator from your trust boundary: the workload runs in a hardware TEE with encrypted memory, so the hypervisor and host OS cannot read prompts, responses, or weights. The part that makes it more than a promise is remote attestation — a hardware-signed statement of exactly what code and firmware are running, which is a verifiable claim where a DPA is only a contractual one. The pieces are shipping: NVIDIA Confidential Computing on Hopper, Blackwell, and Rubin protects GPU execution, memory, and register state with attestation via the NVIDIA Remote Attestation Service, a CPU TEE (Intel TDX, AMD SEV-SNP, AWS Nitro Enclaves) covers the host, and the two attestations compose; Anthropic and Pattern Labs published a Confidential Inference design in June 2025 using encrypted memory, a TPM root of trust, and a minimal model loader in an isolated VM, motivated in both directions — user data hidden from the operator, and model weights hidden from an attacker who owns the datacenter. What it does *not* buy is anything in Q1-Q5 of this file: attestation proves what code is running, not that the code is harmless, so memorization, extraction, and embedding inversion are untouched — a confidential enclave will faithfully regurgitate a memorized SSN. The crisp framing is that it removes the operator from the trust boundary but not the model, which is why it slots in as a third option beside "trust the DPA" and "self-host" for regulated data that must reach a hosted model, and not as a replacement for pseudonymization, deduplication, or canary gates.
 
 ---
 
