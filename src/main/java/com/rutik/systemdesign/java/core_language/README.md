@@ -49,6 +49,17 @@ This module covers the foundational contracts that underpin all Java programs: t
 
 **Decision rule**: If you need shared state (fields) → abstract class. If you need to express capability on unrelated types → interface. If both → interface with default methods (but no state).
 
+Two more class kinds carry intent the table above cannot express. A `record` is a transparent
+immutable data carrier: the compiler derives `equals`/`hashCode`/`toString` from the component
+list, so it is the right choice whenever a class exists only to hold values (the `Money` case
+study below is exactly that shape). A `sealed` class or interface names its permitted
+subtypes with `permits`, turning an open hierarchy into a closed one the compiler can reason
+about — which is what makes a `switch` over the subtypes exhaustive without a `default` arm.
+The rule of thumb: `final` says "nobody extends this", `sealed` says "only these extend this",
+and plain non-final says "anybody may". Mechanics, syntax and the pattern-matching payoff live
+in [Java 9 to 21 Features](../java9_to_21_features/README.md); what matters here is that they
+are choices about *contract shape*, made at the same moment you choose class vs interface.
+
 ### 4.2 Inner Class Types
 
 | Type | `static` | Access to outer | New instance syntax | Memory risk |
@@ -83,7 +94,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     OBJ["java.lang.Object"] --> EQ["equals(Object o): boolean\ndefault: identity (==)"]
-    OBJ --> HC["hashCode(): int\ndefault: memory address (JVM-impl)"]
+    OBJ --> HC["hashCode(): int\ndefault: identity hash, JVM-generated"]
     OBJ --> TS["toString(): String\ndefault: ClassName@hexHashCode"]
     OBJ --> CL["clone(): Object\nprotected; shallow copy; needs Cloneable"]
     OBJ --> FI["finalize(): void\ndeprecated; unreliable pre-GC hook"]
@@ -201,6 +212,54 @@ public boolean equals(Object o) {
 // Note: use instanceof NOT getClass() — instanceof allows subclasses to be equal
 // Use getClass() only for strict same-type semantics (e.g., entity classes)
 ```
+
+### The Symmetry Trap: `instanceof` vs `getClass()` in a Subclass
+
+The note above ("use `instanceof`, not `getClass()`") has a sharp edge the recipe hides: once a
+subclass **adds a value component**, no `equals` can stay symmetric *and* accept the superclass.
+
+```java
+// BROKEN: ColorPoint extends Point and adds a component -> equals is not symmetric.
+public class ColorPoint extends Point {
+    private final Color color;
+    @Override public boolean equals(Object o) {
+        if (!(o instanceof ColorPoint cp)) return false;     // demands the colour match
+        return super.equals(o) && cp.color == color;
+    }
+}
+
+Point      p  = new Point(1, 2);
+ColorPoint cp = new ColorPoint(1, 2, Color.RED);
+p.equals(cp);    // true  -- Point.equals only checks x and y
+cp.equals(p);    // false -- p is not a ColorPoint
+// Symmetry violated. list.contains(p) can now depend on which element the list holds first.
+```
+
+Trying to rescue it by making `ColorPoint.equals` ignore colour when compared against a plain
+`Point` restores symmetry but breaks **transitivity** instead: two differently coloured points
+would each equal the same uncoloured point but not each other. This is Effective Java Item 10's
+central result — *there is no way to extend an instantiable class and add a value component
+while preserving the `equals` contract*. The two real fixes:
+
+```java
+// FIX A: composition instead of inheritance -- ColorPoint HAS a Point, and does not extend it.
+public final class ColorPoint {
+    private final Point point; private final Color color;
+    public Point asPoint() { return point; }
+    @Override public boolean equals(Object o) {
+        return o instanceof ColorPoint cp && cp.point.equals(point) && cp.color == color;
+    }
+    @Override public int hashCode() { return Objects.hash(point, color); }
+}
+
+// FIX B: make the type final (or a record) so the question cannot arise.
+public record ColorPointRecord(int x, int y, Color color) { }
+```
+
+`getClass()` equality is the third option, and it *is* symmetric — but it violates Liskov: a
+`Point` subclass that adds no value component (a logging or proxy subclass) stops being usable
+where a `Point` is expected, because `getClass()` equality rejects it. Use `getClass()` only for
+entities whose identity is genuinely per-concrete-type; prefer `final`/`record` types otherwise.
 
 ### Comparable vs Comparator
 
@@ -437,7 +496,7 @@ Two logically equal objects compute different hash codes (since `Object.hashCode
 An abstract class can have instance state (fields), constructors, and any mix of abstract/concrete methods. An interface can have only `static final` constants, abstract methods, `default` methods (with body), and `static` methods. The key practical difference: a class can implement many interfaces but extend only one abstract class. Use abstract class for shared state + partial implementation; use interface for capability contracts on unrelated types.
 
 **Q3: Why prefer composition over inheritance (Effective Java Item 18)?**
-Inheritance exposes implementation details — subclasses break when superclasses change internal behavior. The "fragile base class" problem: `HashSet` wrapping `AbstractSet` broke when `addAll()` internally called `add()`, causing double-counting in an overriding subclass. Composition avoids this: the wrapping class delegates to the composed object via its public API only, so superclass internal changes can't break the wrapper.
+Inheritance exposes implementation details — subclasses break when superclasses change internal behavior. Bloch's own example is `InstrumentedHashSet extends HashSet`, which overrides `add()` and `addAll()` to count insertions: because `HashSet.addAll()` is itself implemented by calling `add()`, adding three elements through `addAll` counts six. The subclass is broken by an *unspecified* internal detail of the superclass, and a future JDK could change that detail either way — that is the fragile base class problem. Composition avoids it: a wrapper (`InstrumentedSet implements Set`, forwarding to a held `Set`) delegates only through the published API, so superclass internals cannot leak into it.
 
 **Q4: Explain static dispatch vs dynamic dispatch with a concrete example.**
 Static dispatch: overloaded method resolution at compile time based on the *declared* parameter type. Dynamic dispatch: overridden method resolution at runtime based on the *actual* receiver type via vtable. Example: `Animal a = new Dog(); a.speak()` → JVM looks up `Dog.speak()` at runtime (dynamic). But `void process(Animal a)` vs `void process(Dog d)` — if you call `process(a)` where `a` is declared `Animal`, the first overload is chosen at compile time regardless of the runtime type.
@@ -494,6 +553,12 @@ set.contains(new Point(1, 2)); // false! Different hash buckets
 
 Also: never include mutable fields in `hashCode()` if the object will be stored in a `HashMap` or `HashSet` — mutating the key after insertion makes it permanently unreachable in the map.
 
+**Q16: Can you extend an instantiable class, add a value component, and still honour the `equals` contract?**
+No — there is no way to do it, which is Effective Java Item 10's central result. If `ColorPoint extends Point` and its `equals` requires the colour to match, then `point.equals(colorPoint)` is `true` while `colorPoint.equals(point)` is `false`: symmetry is violated, and a `List.contains` result starts depending on which of the two objects the list happens to hold. Relaxing `ColorPoint.equals` to ignore colour when the argument is a plain `Point` restores symmetry but breaks transitivity instead — two differently coloured points each equal the same uncoloured point but not each other. The two fixes are composition (`ColorPoint` *has* a `Point` and exposes `asPoint()`, rather than extending it) and making the type `final` or a `record` so the situation cannot arise. `getClass()`-based equality is symmetric but violates Liskov, since it rejects a value-preserving subclass that adds no component at all.
+
+**Q17: When would you reach for a `record` or a `sealed` type instead of a plain class or interface?**
+Use a `record` when the type exists only to carry values, and `sealed` when you want a hierarchy whose complete set of subtypes is known and enforced by the compiler. A record derives `equals`, `hashCode` and `toString` from its component list, so it removes exactly the boilerplate that the equals/hashCode contract keeps getting wrong; it is implicitly final, which also sidesteps the subclass-symmetry problem entirely. A `sealed` class or interface lists its subtypes with `permits`, and each subtype must declare itself `final`, `sealed` or `non-sealed` — closing the hierarchy is what lets a `switch` over the subtypes be exhaustive without a `default` arm, so adding a subtype becomes a compile error at every switch instead of a silent runtime fallthrough. Read the three modifiers as a scale of extension intent: `final` (nobody), `sealed` (only these), plain (anybody). Full mechanics live in [Java 9 to 21 Features](../java9_to_21_features/README.md).
+
 ---
 
 ## 13. Best Practices
@@ -515,7 +580,7 @@ Also: never include mutable fields in `hashCode()` if the object will be stored 
 
 ### A Shared `Money` Value Object Across 40 Microservices
 
-**Scenario.** A B2B SaaS billing platform serves 120,000 tenant organizations. A single `Money` value object is published in a shared `commons-money` JAR (Java 17 LTS) and consumed by 40 microservices: invoicing, ledger, tax, FX, dunning, reporting. It is used as:
+**Scenario.** A B2B SaaS billing platform serves 120,000 tenant organizations. A single `Money` value object is published in a shared `commons-money` JAR (Java 25 LTS) and consumed by 40 microservices: invoicing, ledger, tax, FX, dunning, reporting. It is used as:
 
 - a `HashMap<Money, LineItem>` key in the pricing engine (peak ~8,000 lookups/sec/instance),
 - a `TreeSet<Money>` member in the tiered-discount resolver (sorted ranges),

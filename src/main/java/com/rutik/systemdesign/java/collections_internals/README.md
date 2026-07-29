@@ -23,8 +23,8 @@ This module covers the internal implementation of the major collection types: th
 ## 3. Core Principles
 
 - **Hash function**: `HashMap` applies a secondary spread function to `hashCode()` to reduce clustering.
-- **Load factor**: When occupied buckets / total capacity > load factor (default 0.75), resize doubles capacity.
-- **Treeification**: A linked list bucket is converted to a red-black tree at size 8; reverts to list at size 6.
+- **Load factor**: When the *entry count* (not the number of occupied buckets) exceeds `capacity * loadFactor` (default 0.75), resize doubles capacity.
+- **Treeification**: A linked-list bucket is converted to a red-black tree when an entry is added to a bucket that already holds `TREEIFY_THRESHOLD = 8` nodes, and only if the table is at least `MIN_TREEIFY_CAPACITY = 64` buckets (otherwise the table resizes instead); a tree reverts to a list at `UNTREEIFY_THRESHOLD = 6`.
 - **Fail-fast iterators**: Collection modification during iteration (except via iterator itself) throws `ConcurrentModificationException` via `modCount`.
 - **Structural modification**: Any operation that changes the collection's *size* (add/remove) is structural; pure updates (set) are not.
 - **Null handling**: `HashMap` allows one null key (always bucket 0) and null values. `Hashtable`/`TreeMap` do not allow null keys.
@@ -82,13 +82,13 @@ HashMap:
   loadFactor: float (0.75)
   threshold: int (capacity * loadFactor = 12)
 
-Bucket layout after put("foo", 1):
-  hash("foo") = 97  -->  bucket = (16-1) & 97 = 1
+Bucket layout after put("a", 1):
+  hash("a") = 97  -->  bucket = (16-1) & 97 = 1
 
-  table[1] -> Node{key="foo", value=1, hash=97, next=null}
+  table[1] -> Node{key="a", value=1, hash=97, next=null}
 
-After collision:
-  table[1] -> Node{"foo"} -> Node{"bar"} -> null  (linked list, up to 8 nodes)
+After collision ("q".hashCode() = 113, 113 & 15 = 1 as well):
+  table[1] -> Node{"a"} -> Node{"q"} -> null  (linked list, up to 8 nodes)
 
 After 8+ collisions in same bucket:
   table[1] -> TreeNode (red-black tree)
@@ -114,7 +114,7 @@ That framing matters because both of HashMap's famous constants fall straight ou
 | `(n - 1) & hash` | The bucket index. Equals `hash % n` only because `n` is a power of two |
 | `hash & oldCap` | The single new address bit that doubling exposes; decides stay-or-move |
 
-**Walk one example.** One key, `hash = 97`, in a default table:
+**Walk one example.** One key — `"a"`, whose spread hash is 97 — in a default table:
 
 ```
   capacity   threshold = capacity x 0.75   resize fires on
@@ -260,6 +260,39 @@ synchronized (f) {  // f = head node of bucket
 // put() with CAS/sync is atomic; size() may be slightly stale (eventually consistent)
 ```
 
+### Null Keys and Null Values — Per-Implementation Rules
+
+```java
+// HashMap: ONE null key (hash(null) == 0, so it always lands in bucket 0), any null values.
+Map<String, String> hm = new HashMap<>();
+hm.put(null, "v");        // OK
+hm.put("k", null);        // OK
+hm.containsKey(null);     // true -- the only way to tell "absent" from "mapped to null"
+
+// ConcurrentHashMap / Hashtable: NEITHER null keys NOR null values -> NullPointerException.
+Map<String, String> chm = new ConcurrentHashMap<>();
+chm.put("k", null);       // NullPointerException, thrown at put time
+
+// TreeMap: null key only if the Comparator tolerates it; natural ordering does not
+// (compareTo on null throws NPE). Null VALUES are always fine.
+new TreeMap<String, String>().put(null, "v");   // NullPointerException
+
+// Map.of / Map.copyOf: null-hostile for both keys and values.
+Map.of("k", null);        // NullPointerException
+```
+
+Why `ConcurrentHashMap` forbids nulls (from its javadoc): because `get()` returns `null`
+for an absent key, a stored `null` value would make `map.get(k) == null` ambiguous. In a
+single-threaded `HashMap` you resolve the ambiguity with `containsKey(k)`; under concurrency
+that second call is a *separate* operation and the mapping may change between the two, so
+the check is unsound. Banning null makes `null` a reliable "no result" indicator, which the
+bulk `search`/`reduce` operations also depend on.
+
+The practical migration trap: swapping `HashMap` for `ConcurrentHashMap` in a codebase that
+stored `null` values turns a silent lookup into an `NullPointerException` at the `put` call
+site — often far from the code that assumed the mapping existed. Use a sentinel object or
+`Optional`-shaped values instead of `null`.
+
 ### PriorityQueue — Binary Min-Heap
 
 ```java
@@ -281,7 +314,9 @@ PriorityQueue<Task> pq = new PriorityQueue<>(
 ### Load Factor Mathematical Justification
 
 ```
-Default load factor = 0.75 is based on Poisson distribution analysis of hash collisions.
+The JDK javadoc states the choice plainly: "As a general rule, the default load
+factor (.75) offers a good tradeoff between time and space costs." The HashMap source
+comment then justifies *why the tradeoff works* with a Poisson analysis of bucket occupancy.
 
 For a hash table with load factor α = n/m (n entries, m buckets):
   Expected entries per bucket ≈ α (Poisson parameter λ = α)
@@ -303,10 +338,15 @@ At α = 0.9 (higher load factor):
   Less memory wasted → more space efficient
   More expensive lookups
 
-0.75 is the mathematical sweet spot:
-  Expected bucket load ≈ e^(-0.75) × 0 + e^(-0.75) × 0.75 ≈ 1 entry/bucket
-  On average, one comparison per lookup
-  Memory efficiency acceptable (~25% overhead for empty buckets)
+0.75 is the sweet spot:
+  Mean entries per bucket = α = 0.75 (the mean of a Poisson is its parameter)
+  Mean entries per NON-EMPTY bucket = α / (1 - e^-α) = 0.75 / 0.5276 = 1.42
+  So a successful lookup costs ~1 comparison; the table is ~47% empty slots
+
+Note the JDK source comment uses α ≈ 0.5, not 0.75: a table oscillates between
+half-full (just after a doubling) and 0.75-full (just before the next one), so 0.5
+is the time-average occupancy. Its published table therefore reads
+P(8) = 0.00000006, an order of magnitude below the at-threshold figure computed below.
 
 For known-size maps (n entries known upfront):
   initialCapacity = ceil(n / 0.75) + 1 = n * 1.334...
@@ -381,15 +421,25 @@ Two readings fall out. First, about 83 percent of buckets hold 0 or 1 entry, so 
 Spliterator<String> sp = list.spliterator();
 boolean hasOrdering = sp.hasCharacteristics(Spliterator.ORDERED);
 
-// Custom Spliterator for a database cursor (streaming rows):
-class ResultSetSpliterator implements Spliterator<Row> {
-    @Override
-    public int characteristics() {
-        return NONNULL;  // rows are non-null; not SIZED (unknown count until end)
+// Custom Spliterator for a database cursor (streaming rows).
+// AbstractSpliterator supplies trySplit()/estimateSize() so only tryAdvance is needed.
+class ResultSetSpliterator extends Spliterators.AbstractSpliterator<Row> {
+    ResultSetSpliterator() {
+        // Long.MAX_VALUE = "size unknown"; NONNULL = rows are never null.
+        super(Long.MAX_VALUE, Spliterator.NONNULL | Spliterator.ORDERED);
     }
-    // NOT SIZED: don't know row count without scanning all rows
-    // Without SIZED: parallel splitting is disabled (can't split unknown-size source)
+    @Override public boolean tryAdvance(Consumer<? super Row> action) {
+        Row row = nextRowOrNull();
+        if (row == null) return false;
+        action.accept(row);
+        return true;
+    }
+    private Row nextRowOrNull() { /* rs.next() ? map(rs) : null */ return null; }
 }
+// NOT SIZED: don't know row count without scanning all rows.
+// Without SIZED, parallel streams still work -- AbstractSpliterator's trySplit hands
+// out geometrically growing fixed-size batches (1024, 2048, ...) -- but the framework
+// cannot balance the halves, so parallel speedup is far worse than for an ArrayList.
 ```
 
 ### NavigableMap Operations Depth
@@ -430,6 +480,45 @@ Instant end   = Instant.parse("2024-02-01T00:00:00Z");
 NavigableMap<Instant, Event> january = events.subMap(start, true, end, false);
 // O(log n) to find start, then O(k) to iterate k events in range
 ```
+
+### Sequenced Collections — `SequencedCollection` / `SequencedSet` / `SequencedMap`
+
+Before Java 21 there was no common type for "a collection with a defined encounter order":
+`List` had `get(0)`, `Deque` had `getFirst()`, `LinkedHashSet` had neither, and reaching the
+*last* element meant `list.get(list.size()-1)` or an iterator drained by hand. JEP 431
+(Java 21) added three interfaces and retrofitted them into the existing hierarchy.
+
+```java
+// SequencedCollection<E>: addFirst/addLast, getFirst/getLast, removeFirst/removeLast, reversed()
+// SequencedSet<E>        extends SequencedCollection<E>, Set<E>  -> reversed() returns SequencedSet
+// SequencedMap<K,V>:     putFirst/putLast, firstEntry/lastEntry, pollFirstEntry/pollLastEntry,
+//                        reversed(), sequencedKeySet/sequencedValues/sequencedEntrySet
+
+List<Integer> list = new ArrayList<>(List.of(1, 2, 3));
+list.getFirst();            // 1   -- replaces list.get(0)
+list.getLast();             // 3   -- replaces list.get(list.size() - 1)
+List<Integer> rev = list.reversed();   // [3, 2, 1] -- a live VIEW, not a copy
+list.addLast(4);
+rev;                        // [4, 3, 2, 1] -- the view tracks the source
+
+LinkedHashSet<Integer> set = new LinkedHashSet<>(List.of(1, 2, 3));
+set.addFirst(0);            // [0, 1, 2, 3] -- was impossible before Java 21
+
+LinkedHashMap<String, Integer> lru = new LinkedHashMap<>();
+lru.putFirst("z", 0);       // insert at the head
+lru.firstEntry();           // z=0  -- the LRU entry in an access-ordered map
+lru.reversed();             // SequencedMap view in reverse encounter order
+```
+
+Retrofit map: `List` and `Deque` implement `SequencedCollection`; `LinkedHashSet` and
+`SortedSet` implement `SequencedSet`; `LinkedHashMap` and `SortedMap` implement
+`SequencedMap`. `HashMap`/`HashSet` do NOT — they have no encounter order.
+
+Two traps. The mutating methods are `default` implementations that throw
+`UnsupportedOperationException` where the operation is meaningless: `List.of(1,2).addFirst(0)`
+throws (immutable), and so does `TreeSet.addFirst(x)` (position is dictated by the
+comparator, not the caller). And `reversed()` is a view, so writing through it writes
+through to the source — copy with `List.copyOf(list.reversed())` if you need a snapshot.
 
 ---
 
@@ -551,7 +640,7 @@ Collections track structural modifications with `modCount`. The iterator capture
 Default initial capacity is 16. If you know the expected number of entries N, set initial capacity to `N / loadFactor + 1` (e.g., 100 entries: `100 / 0.75 + 1 ≈ 134`, round up to power of 2 = 256). Providing correct initial capacity avoids multiple expensive resize operations. Each resize is O(n): allocate new array, rehash/redistribute all entries. In tight loops inserting many entries, this matters — a HashMap loaded to 10,000 entries from default 16 resizes ~10 times.
 
 **Q14: Why is 0.75 the default load factor for `HashMap`?**
-The 0.75 default is based on Poisson distribution analysis of hash collision probabilities. At load factor α = 0.75, the expected number of entries per bucket approaches 1 — giving O(1) average lookup. The probability of a bucket having 8 or more entries (treeification threshold) is extremely small (~6×10⁻⁸). Too low (e.g., 0.5): more memory wasted (50% empty buckets), more frequent resizes. Too high (e.g., 0.9): more collisions, longer chains, O(n) degradation. The JDK source comment says the 0.75 value is a compromise between time and space that results in approximately 1 comparison per lookup on average with a good hash function.
+The JDK javadoc calls 0.75 "a good tradeoff between time and space costs", and the source backs it with a Poisson analysis of bucket occupancy. Under a good hash the number of entries per bucket is Poisson-distributed with mean α, so at α = 0.75 the mean is 0.75 entries per bucket and about 1.4 per *non-empty* bucket — one comparison per successful lookup, the O(1) claim quantified. The HashMap source comment uses α ≈ 0.5 (the time-average occupancy, since a table sits between half-full and 0.75-full across a resize cycle) and publishes P(bucket holds 8) = 0.00000006; evaluated at the threshold α = 0.75 it is ~1.2×10⁻⁶. Either way treeification is a hostile-input safety net, not a path a healthy hash takes. Too low (e.g. 0.5): more memory wasted, more frequent resizes. Too high (e.g. 0.9): more collisions, longer chains, O(n) degradation.
 
 **Q15: What Spliterator characteristics does `ArrayList` have, and why do they matter for parallel streams?**
 `ArrayList`'s `Spliterator` has three characteristics: `SIZED` (knows exact size via `size()` in O(1)), `SUBSIZED` (sub-spliterators after `trySplit()` also have exact known sizes), and `ORDERED` (encounter order = insertion order). These matter for parallel streams because: (1) `SIZED + SUBSIZED` allow the stream framework to split into exactly equal halves at O(1) cost — each half has known size without traversal. This enables efficient work-stealing in `ForkJoinPool`. (2) Without `SIZED`, splitting would require traversal to count elements. (3) `ORDERED` means the final result must preserve encounter order, which adds merge overhead in parallel — sometimes removing ordering (via `.unordered()`) improves parallel performance.
@@ -563,7 +652,13 @@ Java 7's `ConcurrentHashMap` used segment-level locking: the map was divided int
 `TreeMap` and `TreeSet` locate elements *solely* by the comparator/`compareTo`, never by `equals` — two keys are "the same" iff `compare` returns 0. If the ordering is inconsistent with `equals` (e.g. a `Comparator` that compares only by one field while `equals` compares more), the collection still works but *violates the `Set`/`Map` contract*: it may treat two `equals`-distinct objects as duplicates (dropping one), or `contains`/`get` may fail to find an element that is `equals` to a stored one because the comparator routes the search down a different branch. The classic bug is a `TreeSet` with a comparator on, say, length only — adding two different strings of the same length silently keeps just one. Guidance: make natural ordering consistent with `equals` (as `String`, `Integer` etc. do), and only deliberately diverge when you understand you are redefining "equal" for that sorted structure.
 
 **Q18: What is a fail-fast iterator and how does it differ from a fail-safe (weakly consistent) iterator?**
-A fail-fast iterator (on `ArrayList`, `HashMap`, etc.) tracks a `modCount` that increments on structural modification; each `next()`/`remove()` checks the iterator's expected count against the live `modCount` and throws `ConcurrentModificationException` immediately if they differ — including single-threaded cases where you modify the collection directly (not via the iterator) during iteration. It is a best-effort *bug detector*, not a thread-safety guarantee (the check is unsynchronized). A fail-safe / weakly consistent iterator (on `ConcurrentHashMap`, `CopyOnWriteArrayList`, etc.) never throws CME: it iterates over a snapshot or the live structure with no modCount check, so it may or may not reflect concurrent modifications but tolerates them. The common trap is removing from a list inside a for-each loop and getting a CME — the fix is `Iterator.remove()`, `removeIf`, or a concurrent collection.
+A fail-fast iterator throws `ConcurrentModificationException` as soon as it notices the collection was structurally modified behind its back. The mechanism is a `modCount` field on the collection that increments on every structural modification; the iterator captures it at creation and each `next()`/`remove()` compares its expected count against the live one, throwing immediately if they differ — including in single-threaded code where you modified the collection directly rather than through the iterator. It is a best-effort *bug detector*, not a thread-safety guarantee (the check is unsynchronized). A fail-safe / weakly consistent iterator (on `ConcurrentHashMap`, `CopyOnWriteArrayList`, etc.) never throws CME: it iterates over a snapshot or the live structure with no modCount check, so it may or may not reflect concurrent modifications but tolerates them. The common trap is removing from a list inside a for-each loop and getting a CME — the fix is `Iterator.remove()`, `removeIf`, or a concurrent collection.
+
+**Q19: Which collections allow null keys and null values, and why does `ConcurrentHashMap` forbid both?**
+`HashMap` allows exactly one null key plus any number of null values; `ConcurrentHashMap` and `Hashtable` reject null for both and throw `NullPointerException`. In `HashMap` the null key hashes to 0 and always lives in bucket 0. `TreeMap` accepts a null key only if its `Comparator` tolerates one — natural ordering calls `compareTo` and throws. `List.of`/`Map.of` are null-hostile entirely. The reason `ConcurrentHashMap` bans null is ambiguity: `get()` returns `null` for an absent key, so a stored null value would be indistinguishable from "not present", and the usual `containsKey()` disambiguation is unsound under concurrency because the mapping can change between the two calls. Practical consequence: swapping `HashMap` for `ConcurrentHashMap` in code that stored null values converts a silent lookup into an NPE at the `put` site — use a sentinel value instead.
+
+**Q20: What did Sequenced Collections (Java 21, JEP 431) add, and is `reversed()` a view or a copy?**
+Java 21 added `SequencedCollection`, `SequencedSet` and `SequencedMap`, giving every ordered collection one uniform first/last/reversed API. `SequencedCollection` declares `addFirst`/`addLast`, `getFirst`/`getLast`, `removeFirst`/`removeLast` and `reversed()`; `SequencedMap` adds `putFirst`/`putLast`, `firstEntry`/`lastEntry` and `pollFirstEntry`/`pollLastEntry`. `List` and `Deque` were retrofitted onto `SequencedCollection`, `LinkedHashSet` and `SortedSet` onto `SequencedSet`, `LinkedHashMap` and `SortedMap` onto `SequencedMap`; `HashMap`/`HashSet` are excluded because they have no encounter order. `reversed()` returns a live **view**, not a copy — mutating the source is visible through it and writes through it reach the source, so take `List.copyOf(list.reversed())` when you need a snapshot. The mutators are `default` methods that throw `UnsupportedOperationException` where they make no sense: on an immutable `List.of(...)` and on a `SortedSet`, whose position is dictated by the comparator.
 
 ---
 
@@ -631,7 +726,7 @@ This is correct but **not thread-safe**: even a `get` mutates the access-order l
 ```java
 // BROKEN at scale: one global lock serializes every read AND write.
 Map<K, V> cache = Collections.synchronizedMap(new LruCache<>(200_000));
-// Measured: ~12,000 ops/sec ceiling on 8 cores -- threads queue on the monitor.
+// Illustrative: ~12,000 ops/sec ceiling on 8 cores -- threads queue on the monitor.
 ```
 
 #### Stage 3 — `ConcurrentHashMap` + `ConcurrentLinkedDeque` for ordering
@@ -660,7 +755,7 @@ public final class ConcurrentLruCache<K, V> {
 }
 ```
 
-Measured **~85,000 ops/sec on 8 cores** — a 7x gain over the synchronized `LinkedHashMap`, because reads no longer contend on a single monitor. (Production systems use Caffeine, which sharded LRU with ring buffers reaches millions of ops/sec; this shows the principle.)
+Illustratively **~85,000 ops/sec on 8 cores** — a 7x gain over the synchronized `LinkedHashMap`, because reads no longer contend on a single monitor. (Figures are for this scenario; measure your own with JMH.) (Production systems use Caffeine, which sharded LRU with ring buffers reaches millions of ops/sec; this shows the principle.)
 
 #### Throughput across the three stages (8 cores, 200k-entry cache)
 
@@ -677,10 +772,16 @@ The `recency.remove(key)` on every read is the cost in stage 3 (O(n) on a deque)
 
 ```java
 // HashMap doubles its table when size > capacity * loadFactor (default 0.75).
-// For 200k expected entries, pre-size so no resize happens during fill:
-//   capacity must exceed 200_000 / 0.75 = 266_667 -> next power of two = 262_144 is too small,
-//   so request it explicitly:
-Map<K, V> map = new ConcurrentHashMap<>(350_000);   // avoids ~9 doublings during warm-up
+// For 200k expected entries the table must exceed 200_000 / 0.75 = 266_667 slots,
+// so the smallest safe power of two is 2^19 = 524_288 (2^18 = 262_144 is too small).
+//
+// The two constructors do NOT take the same argument:
+//   new HashMap<>(n)           -> n is the CAPACITY; you divide by the load factor.
+//   new ConcurrentHashMap<>(n) -> n is the EXPECTED SIZE; the constructor already
+//                                 computes tableSizeFor(1 + n / 0.75) for you.
+Map<K, V> map = new HashMap<>(524_288);             // capacity, pre-divided by hand
+Map<K, V> chm = new ConcurrentHashMap<>(200_000);   // expected size -> also 2^19 table
+// Either way: ~15 doublings and ~393k entry re-placements avoided during warm-up.
 ```
 
 **Put simply.** "Pre-sizing means picking a capacity whose 0.75 threshold already sits above the number of entries you will ever store, so the table never doubles and never re-places a single entry."
@@ -739,9 +840,11 @@ List<Chunk> out = new ArrayList<>(expectedSize); // FIX: one allocation
 
 **When is `removeEldestEntry` the right LRU mechanism?** For single-threaded or externally-synchronized caches with a hard size bound — it is the simplest correct LRU. For high-concurrency caches it forces a global lock, so you move to a concurrent structure (or Caffeine) instead.
 
-**Why does pre-sizing a HashMap matter for a cache that fills to 200k entries?** The table doubles each time `size > capacity * 0.75`, copying every entry on each resize. Filling to 200k from the default capacity 16 triggers ~14 doublings and copies, a measurable warm-up cost and GC spike. Sizing the initial capacity above `expected / loadFactor` removes the resizes entirely.
+**Why does pre-sizing a HashMap matter for a cache that fills to 200k entries?** The table doubles each time `size > capacity * 0.75`, copying every entry on each resize. Filling to 200k from the default capacity 16 triggers 15 doublings and copies, a measurable warm-up cost and GC spike. Sizing the initial capacity above `expected / loadFactor` removes the resizes entirely.
 
 **What is the cost of tracking recency in `ConcurrentLinkedDeque`?** `remove(key)` is O(n) because the deque is not indexed by key, so the read path pays a linear scan to move an element to the tail. This is the bottleneck that production caches like Caffeine eliminate by buffering reads and applying LRU updates in batches off the hot path.
+
+**Why is `ConcurrentHashMap.size()` only approximate?** Under concurrent mutation the count is maintained across striped counter cells and summed without a global lock, so `size()` reflects a recent-but-not-instantaneous view. For a capacity-bounded cache, treat the eviction check as best-effort rather than an exact invariant.
 
 ---
 
@@ -752,5 +855,3 @@ List<Chunk> out = new ArrayList<>(expectedSize); // FIX: one allocation
 - [Case Study: LRU Cache](../case_studies/design_lru_cache_java.md) — LinkedHashMap + lock pattern for a production-grade LRU cache
 - [Arrays, Strings & Hashing](../../cs_fundamentals/arrays_strings_and_hashing/README.md) — hash table fundamentals and collision strategies underlying `HashMap`
 - [Trees & Binary Search Trees](../../cs_fundamentals/trees_and_binary_search_trees/README.md) — red-black tree mechanics behind HashMap's treeified buckets
-
-**Why is `ConcurrentHashMap.size()` only approximate?** Under concurrent mutation the count is maintained across striped counter cells and summed without a global lock, so `size()` reflects a recent-but-not-instantaneous view. For a capacity-bounded cache, treat the eviction check as best-effort rather than an exact invariant.

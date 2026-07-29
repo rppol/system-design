@@ -14,7 +14,7 @@ The I/O story covers two generations: the original `java.io` stream-based API (D
 
 **Mental model**: A method call has two return paths: the normal path (return statement) and the exceptional path (throw statement). Checked exceptions encode expected failure modes in the method signature — callers must explicitly handle or re-throw them. Unchecked (runtime) exceptions represent bugs or system failures that callers typically cannot recover from.
 
-**Why it matters**: Choosing checked vs unchecked exceptions is a design decision with broad consequences for API usability. `try-with-resources` prevents resource leaks that were common with pre-Java 7 try-finally patterns. Serialization security vulnerabilities have caused multiple critical CVEs (Log4Shell involved deserialization of untrusted data).
+**Why it matters**: Choosing checked vs unchecked exceptions is a design decision with broad consequences for API usability. `try-with-resources` prevents resource leaks that were common with pre-Java 7 try-finally patterns. Deserializing untrusted data has caused a long line of critical RCEs — the Apache Commons Collections gadget chain that broke WebLogic, JBoss and Jenkins, and Log4j 1.x's `SocketServer` (CVE-2019-17571) — which is why `ObjectInputFilter` exists.
 
 **Key insight**: The `finally` block edge cases — exception thrown in `finally` *swallows* the original exception; `System.exit()` in `try` skips `finally` — are subtle but appear in interviews and production incidents.
 
@@ -256,11 +256,12 @@ Files.write(path, bytes);
 Files.copy(src, dst, StandardCopyOption.REPLACE_EXISTING);
 Files.move(src, dst, StandardCopyOption.ATOMIC_MOVE);  // atomic on same filesystem
 
-// Directory walk
-Files.walk(Paths.get("/data"))
-    .filter(Files::isRegularFile)
-    .filter(p -> p.toString().endsWith(".log"))
-    .forEach(this::processLog);
+// Directory walk -- Files.walk holds open directory handles, so CLOSE the stream
+try (Stream<Path> walk = Files.walk(Path.of("/data"))) {
+    walk.filter(Files::isRegularFile)
+        .filter(p -> p.toString().endsWith(".log"))
+        .forEach(this::processLog);
+}
 
 // Watch for changes
 WatchService watcher = FileSystems.getDefault().newWatchService();
@@ -268,6 +269,41 @@ path.register(watcher, ENTRY_CREATE, ENTRY_MODIFY, ENTRY_DELETE);
 WatchKey key = watcher.take();  // blocks until change
 for (WatchEvent<?> event : key.pollEvents()) { ... }
 ```
+
+### The Default Charset — UTF-8 Everywhere Except the Console
+
+Every byte-to-character conversion that does not name a charset uses the *default charset*,
+and until Java 18 that was derived from the OS locale — so the same code read a file
+correctly on a developer's UTF-8 laptop and produced mojibake on a `LANG=C` container.
+JEP 400 (Java 18) fixed it: `Charset.defaultCharset()` is now UTF-8 regardless of locale.
+
+```java
+// On Java 18+, with LANG=C in the environment:
+Charset.defaultCharset()                     // UTF-8  (was US-ASCII before Java 18)
+System.getProperty("file.encoding")          // UTF-8
+System.getProperty("native.encoding")        // US-ASCII -- the OS locale charset, Java 17+
+System.getProperty("stdout.encoding")        // US-ASCII -- the CONSOLE charset, not UTF-8
+
+// -Dfile.encoding=COMPAT restores the pre-18 locale-derived behaviour, for one bad
+// migration only. It is an escape hatch, not a configuration option to leave in place.
+```
+
+Three consequences worth carrying into a code review:
+
+1. **`new FileReader(f)`, `new FileWriter(f)`, `new InputStreamReader(in)`, `new PrintStream(f)`,
+   `Scanner`, `Formatter`** all take the default charset when you do not pass one, so on
+   Java 18+ they are UTF-8 on every machine. That is the fix — but it also means a system
+   that *deliberately* wrote platform-encoded files silently changed format at the upgrade.
+2. **`Files.readString`, `Files.writeString`, `Files.newBufferedReader`, `Files.lines`** were
+   never affected: they have always specified UTF-8 explicitly. Preferring them over
+   `FileReader` is why the NIO.2 rule in §13 also happens to be the charset-safe rule.
+3. **The console is the exception.** `System.out`/`System.err` still encode with the
+   terminal's charset (`stdout.encoding`/`stderr.encoding`), so a program can write correct
+   UTF-8 to a file and still print `?` characters to a Windows console. Never diagnose an
+   encoding bug from console output alone — check the bytes on disk.
+
+The durable habit is unchanged by any of this: **name the charset explicitly**
+(`StandardCharsets.UTF_8`) at every boundary you control, and the default stops mattering.
 
 ### Serialization Security Risk
 
@@ -331,7 +367,25 @@ try {
     log.error("Task failed: {}", e.getCause().getMessage(), e.getCause());
 }
 
-// FIX 2: set UncaughtExceptionHandler via custom ThreadFactory
+// FIX 2: ThreadPoolExecutor.afterExecute -- the ONLY hook that sees a submit() failure
+ExecutorService pool = new ThreadPoolExecutor(4, 4, 0L, TimeUnit.MILLISECONDS,
+        new LinkedBlockingQueue<>()) {
+    @Override protected void afterExecute(Runnable r, Throwable t) {
+        super.afterExecute(r, t);
+        if (t == null && r instanceof Future<?> f && f.isDone()) {
+            try { f.get(); }                            // surfaces the captured throwable
+            catch (CancellationException ce) { /* ignore */ }
+            catch (ExecutionException ee) { t = ee.getCause(); }
+            catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+        }
+        if (t != null) log.error("Task failed", t);
+    }
+};
+
+// FIX 3: set UncaughtExceptionHandler via custom ThreadFactory.
+// IMPORTANT: this fires only for execute(Runnable), where the throwable escapes the
+// worker thread. It NEVER fires for submit(), because FutureTask.run() catches the
+// throwable and parks it in the Future -- which is exactly the swallowing above.
 ThreadFactory factory = runnable -> {
     Thread t = new Thread(runnable);
     t.setUncaughtExceptionHandler((thread, throwable) -> {
@@ -342,15 +396,16 @@ ThreadFactory factory = runnable -> {
 };
 ExecutorService pool = Executors.newFixedThreadPool(4, factory);
 
-// FIX 3: global default for all threads not covered by a specific handler
+// FIX 4: global default for all threads not covered by a specific handler
 Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
     log.error("UNCAUGHT in {}: {}", thread.getName(), throwable.getMessage(), throwable);
 });
-// This is a catch-all; prefer per-pool handlers for finer control.
+// Same caveat as FIX 3: execute() reaches it, submit() does not.
 
-// NOTE: UncaughtExceptionHandler is NOT invoked for CHECKED exceptions
-// (they must be declared; they can't be thrown from Runnable.run())
-// It IS invoked for: RuntimeException, Error, and all unchecked Throwables.
+// SUMMARY of who sees what:
+//   execute(Runnable) + throw  -> UncaughtExceptionHandler fires, afterExecute sees t
+//   submit(Runnable/Callable)  -> throwable captured in the Future; UEH never fires;
+//                                 only Future.get() or an afterExecute override sees it
 ```
 
 ### FileChannel — Memory-Mapped Files and Zero-Copy
@@ -373,8 +428,18 @@ try (FileChannel channel = FileChannel.open(Path.of("large.bin"), READ)) {
     }
 }
 // Use cases: parsing large binary files (log files, database files), read-heavy workloads
-// Limitation: MappedByteBuffer stays mapped until GC — can't force unmap easily
-// Risk: on JVM with compressed oops, mapping > 2GB requires explicit FileChannel.position handling
+// Limitation 1: `size` must be <= Integer.MAX_VALUE, because ByteBuffer indexes with an
+//   int. A file over 2GB needs several mappings at successive offsets.
+// Limitation 2: a MappedByteBuffer stays mapped until it is garbage collected, so the file
+//   can stay locked (visibly so on Windows) long after you are done with it.
+
+// Deterministic unmapping (Java 22+): the Arena overload returns a MemorySegment whose
+// mapping is torn down when the arena closes -- no waiting for GC, and no int size limit.
+try (Arena arena = Arena.ofConfined();
+     FileChannel channel = FileChannel.open(Path.of("large.bin"), READ)) {
+    MemorySegment seg = channel.map(FileChannel.MapMode.READ_ONLY, 0, channel.size(), arena);
+    byte b = seg.get(ValueLayout.JAVA_BYTE, 0);
+}   // arena.close() unmaps here, deterministically
 
 // Zero-copy transfer between channels (sendfile(2) on Linux):
 try (FileChannel src  = FileChannel.open(Path.of("input.bin"), READ);
@@ -386,7 +451,9 @@ try (FileChannel src  = FileChannel.open(Path.of("input.bin"), READ);
 }
 // transferTo/transferFrom maps to sendfile(2) on Linux, TransmitFile on Windows
 // For large files: 2-10x faster than stream-based copy (no user-space buffer)
-// This is how Files.copy() works internally for FileChannel-to-FileChannel copies
+// transferTo may transfer FEWER bytes than requested -- loop on the returned count
+// Files.copy(Path,Path) takes a parallel route: a native copy that prefers
+// copy_file_range(2) on Linux and falls back to sendfile(2)
 
 // File locking:
 try (FileChannel channel = FileChannel.open(path, READ, WRITE);
@@ -418,8 +485,9 @@ Naming it that way makes the limit obvious: `transferTo` can only skip user spac
     syscalls  = 131,072 read + 131,072 write = 262,144
     data copies                             = 131,072 x 4  = 524,288
 
-  transferTo / Files.copy (sendfile):
-    syscalls  = 1                           <- the whole file, one call
+  transferTo (sendfile) / Files.copy (copy_file_range, sendfile fallback):
+    syscalls  = 1 per call, and 1 call suffices here -- but transferTo may return a
+                PARTIAL count, so production code loops until the residue is 0
     data copies                             = 2 (disk -> page cache -> disk)
                                             -----------------------------
     syscalls saved:  262,144 -> 1;  copies halved:  4 per chunk -> 2 total
@@ -450,7 +518,7 @@ while (true) {
             // The OS's event queue for this directory was full and events were DROPPED.
             // You CANNOT know which files changed — do a full directory rescan.
             log.warn("WatchService OVERFLOW: rescanning entire directory");
-            rescandDirectory(dir);
+            rescanDirectory(dir);
             continue;
         }
 
@@ -472,7 +540,9 @@ while (true) {
 // When OVERFLOW happens:
 // - High-frequency file writes (log rotation, build output)
 // - Producer writes faster than consumer processes events
-// - OS WatchKey event queue default size is limited (32 events on some platforms)
+// - The JDK caps pending events per WatchKey at MAX_EVENT_LIST_SIZE (512 by default,
+//   tunable with -Djdk.nio.file.WatchService.maxEventsPerPoll). On reaching the cap it
+//   DROPS the pending events and queues a single OVERFLOW in their place.
 // Production patterns: rate-limit processing, coalesce events (deduplicate same file),
 //                      handle OVERFLOW as "something changed, re-check everything"
 ```
@@ -482,7 +552,7 @@ while (true) {
 ## 7. Real-World Examples
 
 - **JDBC resource leaks**: Before Java 7, `finally` blocks to close `Connection`/`Statement`/`ResultSet` were error-prone (exception in `finally` swallowed original). `try-with-resources` eliminates this pattern.
-- **Log4Shell (2021)**: Java serialization/deserialization via Log4j's JNDI lookup executed arbitrary code from remote server. Affected virtually every Java application. Demonstrates why untrusted deserialization is critical vulnerability.
+- **Untrusted deserialization RCE**: Log4j 1.x's `SocketServer` (CVE-2019-17571) accepted serialized log events from the network and passed them to `ObjectInputStream`, giving remote code execution through a gadget chain. Note that Log4Shell (CVE-2021-44228) is a *different* bug — message-lookup substitution performing a JNDI lookup that loads a class from an attacker-controlled LDAP server, not Java serialization at all. Both end in RCE; only the first is what `ObjectInputFilter` defends against.
 - **Configuration file watching**: `WatchService` enables live-reloading of configuration files without polling, used in Hadoop, Tomcat, and custom config servers.
 
 ---
@@ -534,7 +604,7 @@ try {
 A JDBC application threw a `SQLException` in the `try` block (query failed). The `finally` block tried to close the connection, which also threw `SQLException` (connection already closed). The original meaningful exception was replaced by the less informative connection-close exception. **Fix**: Use `try-with-resources` — it handles this correctly with suppressed exceptions.
 
 ### War Story 3: Serialization breaks singleton
-A team was surprised to find their singleton getting duplicated after cache serialization. Object deserialization calls the no-arg constructor and returns a new instance — separate from the existing singleton. **Fix**: Implement `readResolve()` or switch to enum singleton.
+A team was surprised to find their singleton getting duplicated after cache serialization. Deserialization does **not** run the class's own constructor — it allocates the object and runs only the no-arg constructor of the nearest non-serializable superclass (`Object`, usually), then restores the fields from the stream. That is precisely why a private constructor cannot protect a singleton: the private constructor is never called, and a second instance appears anyway. **Fix**: Implement `readResolve()` to return the canonical instance, or switch to an enum singleton.
 
 ### War Story 4: `serialVersionUID` mismatch
 After adding a field to a serialized class without updating `serialVersionUID`, the deserialization of stored data threw `InvalidClassException`. **Fix**: Always declare `private static final long serialVersionUID = 1L;` (or IDE-generated UID) and follow versioning discipline when changing serialized classes.
@@ -556,7 +626,7 @@ After adding a field to a serialized class without updating `serialVersionUID`, 
 ## 12. Interview Questions with Answers
 
 **Q1: When should you use checked vs unchecked exceptions?**
-Checked exceptions signal *expected, recoverable* failure conditions where the caller can reasonably react differently: `FileNotFoundException` (caller may create the file), `IOException` (caller may retry), `ParseException` (caller may use a default). Unchecked exceptions signal programming errors or unrecoverable failures: `NullPointerException` (caller passed null where not allowed), `IllegalArgumentException` (bad input), `IllegalStateException` (wrong lifecycle). The controversy: many modern frameworks (Spring) prefer unchecked because checked exceptions pollute APIs and callers often just re-throw. Effective Java: "use checked exceptions for conditions from which the caller can reasonably be expected to recover."
+Use a checked exception when the caller can reasonably be expected to recover, and an unchecked one for programming errors and failures nobody can recover from. Checked exceptions signal *expected, recoverable* conditions where the caller can react differently: `FileNotFoundException` (caller may create the file), `IOException` (caller may retry), `ParseException` (caller may use a default). Unchecked exceptions signal programming errors or unrecoverable failures: `NullPointerException` (caller passed null where not allowed), `IllegalArgumentException` (bad input), `IllegalStateException` (wrong lifecycle). The controversy: many modern frameworks (Spring) prefer unchecked because checked exceptions pollute APIs and callers often just re-throw. Effective Java: "use checked exceptions for conditions from which the caller can reasonably be expected to recover."
 
 **Q2: What is exception chaining and why is it important?**
 Exception chaining preserves the original cause when wrapping exceptions: `new ServiceException("DB failed", originalCause)`. This is critical because: (1) the catch block at a higher level sees a meaningful high-level exception; (2) the stack trace includes both the wrapper's context AND the root cause, making diagnosis possible. Without chaining, catching a low-level `SQLException` and rethrowing `new ServiceException("failed")` loses the original stack trace — you only see where the wrapping occurred, not the actual DB error.
@@ -586,13 +656,13 @@ The Decorator pattern adds behavior to objects by wrapping them in objects with 
 `WatchService` provides OS-level filesystem change notifications (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows) — more efficient than polling. Use it for: hot-reloading configuration files without restart; monitoring upload directories for new files; log rotation detection; build tool file watchers (IDE hot reload). Example: `path.register(watcher, ENTRY_CREATE, ENTRY_MODIFY)` then `watcher.take()` blocks until a change, processes events, resets the key, and loops.
 
 **Q11: What is the difference between `Files.copy()` and manually copying with streams?**
-`Files.copy(src, dst, REPLACE_EXISTING)` is the idiomatic NIO.2 copy. The JVM can optimize it via OS-level copy (e.g., `sendfile(2)` on Linux), which copies data in kernel space without going through user space — zero-copy for large files. Manual stream copy: `while ((n = in.read(buf)) != -1) out.write(buf, 0, n)` — data goes through user-space buffer (typically 8KB). `Files.copy()` is also correct with respect to attributes, exceptions, and resource cleanup. Always prefer `Files.copy()` unless you need to transform data during the copy.
+`Files.copy(src, dst, REPLACE_EXISTING)` is the idiomatic NIO.2 copy. On Linux the JDK implements it with a native kernel-space copy that prefers `copy_file_range(2)` and falls back to `sendfile(2)`, so the bytes never enter the JVM's address space at all. Manual stream copy: `while ((n = in.read(buf)) != -1) out.write(buf, 0, n)` — data goes through user-space buffer (typically 8KB). `Files.copy()` is also correct with respect to attributes, exceptions, and resource cleanup. Always prefer `Files.copy()` unless you need to transform data during the copy.
 
 **Q12: How do you handle unchecked exceptions thrown inside `ExecutorService` tasks?**
-When a `Runnable` submitted to an `ExecutorService` throws an unchecked exception, it is silently swallowed — the exception is stored in the `Future` but nothing else happens unless `Future.get()` is called. Three approaches: (1) Always call `Future.get()` after `submit()` — it re-throws as `ExecutionException` wrapping the original. (2) Set a `Thread.UncaughtExceptionHandler` via a custom `ThreadFactory` — the handler is invoked with the thread and throwable for any uncaught exception. (3) Use a global default: `Thread.setDefaultUncaughtExceptionHandler(handler)`. Note: `UncaughtExceptionHandler` is NOT invoked for `Callable`-based tasks (their exceptions are captured in the `Future`), only for `Runnable`-based tasks where the exception escapes the thread completely.
+A task submitted with `submit()` never lets its exception escape: `FutureTask.run()` catches the throwable and stores it in the `Future`, so if nobody calls `Future.get()` the failure is invisible. The fix depends on which entry point you used. With `submit()` there are two options: call `Future.get()` and handle the `ExecutionException` (its `getCause()` is the original), or subclass `ThreadPoolExecutor` and override `afterExecute(Runnable, Throwable)`, unwrapping the `Future` there — `afterExecute` receives a `null` throwable for submitted tasks precisely because the exception is inside the future. With `execute(Runnable)` the throwable does escape the worker thread, so `Thread.UncaughtExceptionHandler` (installed per-pool via a custom `ThreadFactory`, or globally via `Thread.setDefaultUncaughtExceptionHandler`) fires normally. The trap worth remembering for interviews: an `UncaughtExceptionHandler` on a pool whose tasks are all `submit()`ed will never fire once, and the team concludes the pool is healthy.
 
 **Q13: What is a memory-mapped file and when would you use `FileChannel.map()`?**
-A memory-mapped file maps a region of a file into the process's virtual address space via `FileChannel.map()`, returning a `MappedByteBuffer`. The OS manages paging: reading a byte triggers a page fault that loads the 4KB OS page from disk into memory. No explicit `read()` calls needed — the buffer is accessed like a byte array. Benefits: (1) Zero-copy read — no user-space buffer, data goes from OS page cache to application directly. (2) Random access: seeking to position N is O(1) — no stream seeking needed. (3) Shared across processes — multiple JVMs mapping the same file share the OS page cache. Use when: parsing large binary files (log files, database files), implementing file-backed caches, random access to large data sets. Limitation: `MappedByteBuffer` cannot be explicitly unmapped — it relies on GC which can delay file release.
+A memory-mapped file maps a region of a file into the process's virtual address space via `FileChannel.map()`, returning a `MappedByteBuffer`. The OS manages paging: reading a byte triggers a page fault that loads the 4KB OS page from disk into memory. No explicit `read()` calls needed — the buffer is accessed like a byte array. Benefits: (1) Zero-copy read — no user-space buffer, data goes from OS page cache to application directly. (2) Random access: seeking to position N is O(1) — no stream seeking needed. (3) Shared across processes — multiple JVMs mapping the same file share the OS page cache. Use when: parsing large binary files (log files, database files), implementing file-backed caches, random access to large data sets. Two limitations: the `size` argument must fit in an `int` (`Integer.MAX_VALUE`), because `ByteBuffer` indexes with an int, so a file over 2GB needs several mappings at successive offsets; and a `MappedByteBuffer` cannot be explicitly unmapped, so the mapping (and on Windows, the file lock) survives until GC collects the buffer. Java 22 added the fix for both: `channel.map(mode, offset, size, arena)` returns a `MemorySegment` whose mapping is torn down deterministically when the `Arena` closes, and it is not limited to `Integer.MAX_VALUE`.
 
 **Q14: What happens when `try`, `catch`, and `finally` all throw exceptions, and which one propagates?**
 When `finally` throws an exception, it **suppresses** any exception from `try` or `catch` — the `finally` exception propagates and the others are silently discarded. This is a particularly dangerous failure mode: the original exception that caused the `catch` block to execute is lost:
@@ -622,6 +692,9 @@ try {
 
 **Q15: What is serialization `serialVersionUID` and what happens when it is absent or mismatched?**
 `serialVersionUID` is a 64-bit long stored in the serialized byte stream that identifies the version of the class used to serialize the object. On deserialization, the JVM compares the stream's UID with the class's UID; a mismatch throws `InvalidClassException`. When `serialVersionUID` is absent, the JVM computes a default UID from the class's structure (fields, methods, access modifiers) via a SHA-1-based algorithm. Any structural change (adding a field, renaming a method) changes the computed UID, breaking deserialization of previously serialized data. Two failure modes: (1) **Unintentional break** — adding a field to a class without declaring `serialVersionUID` silently breaks deserialization across deploys. (2) **Declared UID mismatch** — deliberately changing it signals an incompatible version change. Best practice: always declare `private static final long serialVersionUID = 1L;` in all `Serializable` classes, increment it manually only for truly incompatible structural changes.
+
+**Q16: What is the default charset on a modern JDK, and where does it still not apply?**
+Since Java 18 (JEP 400) `Charset.defaultCharset()` is UTF-8 on every platform, independent of the OS locale. Before that it was derived from the locale, which is why the same code read a file correctly on a developer laptop and produced mojibake in a `LANG=C` container. The locale-derived charset is still readable via the `native.encoding` property (Java 17+), and `-Dfile.encoding=COMPAT` restores the old behaviour as a migration escape hatch. The change reaches every API that takes the default charset implicitly: `FileReader`, `FileWriter`, `InputStreamReader`, `PrintStream`, `Scanner`, `Formatter`. It does **not** reach `Files.readString`/`Files.newBufferedReader`/`Files.lines`, which always specified UTF-8 anyway. The one place it still does not apply is the console: `System.out` and `System.err` encode with the terminal's charset (`stdout.encoding`/`stderr.encoding`), so a program can write valid UTF-8 to disk and still print question marks to a Windows console — which is why you diagnose encoding bugs from the bytes on disk, never from console output. The durable habit is to name `StandardCharsets.UTF_8` explicitly at every boundary you control.
 
 ---
 
@@ -713,7 +786,7 @@ public final class ConfigWatcher implements AutoCloseable {
     private void watchLoop() {
         while (!Thread.currentThread().isInterrupted()) {
             WatchKey key;
-            try { key = watcher.take(); }                      // try-with-resources on the key below
+            try { key = watcher.take(); }                      // blocks until an event arrives
             catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
             try {
                 Thread.sleep(200);                             // DEBOUNCE: let burst of MODIFYs settle

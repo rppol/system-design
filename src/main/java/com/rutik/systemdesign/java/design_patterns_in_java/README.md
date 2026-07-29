@@ -92,9 +92,9 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    A["InputStream (abstract)"] -->|wraps| B["FileInputStream\n(concrete source)"]
-    B -->|wraps| C["BufferedInputStream\n(adds 8KB buffer)"]
-    C -->|wraps| D["DataInputStream\n(adds readInt, readLong)"]
+    D["DataInputStream\n(adds readInt, readLong)"] -->|wraps| C["BufferedInputStream\n(adds 8KB buffer)"]
+    C -->|wraps| B["FileInputStream\n(concrete source)"]
+    B -->|"is-a"| A["InputStream (abstract)"]
 
     class A base
     class B io
@@ -386,10 +386,10 @@ Seeing it as `2^8` rather than as two arbitrary numbers is what makes the `==` t
 
 | Symbol | What it is |
 |--------|------------|
-| `[-128, 127]` | The `byte` range: `-2^7` through `2^7 - 1` |
+| `[-128, 127]` | The `byte` range: `-2^7` through `2^7 - 1`. The javadoc guarantees this range always caches; the *upper* bound alone is raisable with `-XX:AutoBoxCacheMax=N`, which makes the `==` trap machine-dependent |
 | 256 | `2^8` — how many `Integer` instances `IntegerCache` pre-allocates at class init |
 | 16 bytes | One `Integer` on a 64-bit JVM: 12-byte header + 4-byte `int` value, already 8-aligned |
-| `Integer.valueOf(v)` | Returns the cached object when `v` is in range, `new Integer(v)` otherwise |
+| `Integer.valueOf(v)` | Returns the cached object when `v` is in range, and allocates a fresh `Integer` otherwise |
 | `==` on boxed values | Reference identity — true only when both sides came from the cache |
 
 **Walk one example.** What the cache costs, and what it saves:
@@ -450,6 +450,51 @@ class DataProcessor {
 //       Strategy = "how to swap the entire algorithm at runtime"
 // Template Method uses inheritance; Strategy uses composition.
 ```
+
+### The Remaining Concurrency Patterns — Read-Write Lock, Thread-Per-Message, Active Object
+
+Immutable Object and Producer-Consumer are covered in §12; the other three from §4.4 each
+reduce to one JDK type, which is precisely why they are worth naming.
+
+```java
+// READ-WRITE LOCK: many readers OR one writer. Pays off only when reads dominate and
+// the critical section is long enough to amortise the lock's own bookkeeping.
+private final ReadWriteLock rw = new ReentrantReadWriteLock();
+public Config read() {
+    rw.readLock().lock();
+    try { return current; } finally { rw.readLock().unlock(); }
+}
+public void write(Config c) {
+    rw.writeLock().lock();
+    try { current = c; } finally { rw.writeLock().unlock(); }
+}
+// Downgrade (write -> read) is legal; UPGRADE (read -> write) deadlocks. For short reads
+// prefer StampedLock's optimistic read, or a plain volatile reference if the state is
+// one immutable object swapped wholesale -- both beat a ReadWriteLock at low contention.
+
+// THREAD-PER-MESSAGE: one thread per request, the simplest possible concurrency model.
+// It was an anti-pattern with platform threads (~1MB of stack each, so a few thousand
+// is the ceiling) and that is why thread pools existed. Virtual threads (Java 21+) make
+// the naive form correct again: create one per task and let it block.
+try (var scope = Executors.newVirtualThreadPerTaskExecutor()) {
+    for (Request r : requests) scope.submit(() -> handle(r));   // blocking I/O is fine
+}   // close() waits for every task -- the executor is AutoCloseable
+
+// ACTIVE OBJECT: decouple method INVOCATION from method EXECUTION. The caller gets a
+// Future immediately; a single owning thread executes the requests in arrival order,
+// which confines the mutable state to that thread and removes locking entirely.
+private final ExecutorService owner = Executors.newSingleThreadExecutor();
+private int balance;                       // touched ONLY by the owner thread
+public Future<Integer> deposit(int amount) {
+    return owner.submit(() -> balance += amount);
+}
+```
+
+The through-line: each pattern is a different answer to "who is allowed to touch this
+state". Read-Write Lock says many-then-one under a lock, Thread-Per-Message says nobody
+shares it, Active Object says exactly one thread forever. Pattern mechanics and UML live in
+[LLD: Concurrency Patterns](../../lld/concurrency_patterns/README.md); the primitives behind
+them are in [Concurrency](../concurrency/README.md).
 
 ---
 
@@ -569,7 +614,7 @@ Factory Method: a single factory method (usually abstract) that subclasses overr
 The String pool is a canonical registry of `String` objects. String literals are automatically interned — `"hello" == "hello"` is true because both refer to the same pooled instance. `String.intern()` manually adds a string to the pool. `Integer.valueOf()` implements Flyweight for integers in `[-128, 127]`: values in this range always return the same cached `Integer` object. The Flyweight pattern saves memory when many clients use identical fine-grained objects, at the cost of immutability (shared objects cannot be mutated per-client).
 
 **Q6: Why is the enum singleton considered the safest singleton implementation?**
-Enum singleton is safe from four singleton-breaking attacks: (1) Reflection — you cannot call `newInstance()` on an enum via reflection; the JVM throws `IllegalArgumentException`. (2) Serialization — enums serialize by name and deserialize by finding the existing constant; no new instance is created. (3) Cloning — `Enum` overrides `clone()` to throw `CloneNotSupportedException`. (4) Class loader — two different class loaders cannot produce two instances of the same enum. None of these protections hold for the `synchronized + volatile` DCL singleton, which can be broken by reflection (`setAccessible(true)`) and serialization.
+Enum singleton is safe from three singleton-breaking attacks: (1) Reflection — `Constructor.newInstance()` refuses to construct an enum and throws `IllegalArgumentException("Cannot reflectively create enum objects")`. (2) Serialization — enums serialize by name and deserialize by looking up the existing constant, so no new instance appears; `readResolve` is unnecessary. (3) Cloning — `Enum.clone()` is `final` and throws `CloneNotSupportedException`. None of these protections hold for the `synchronized + volatile` DCL singleton, which can be broken by reflection (`setAccessible(true)`) and by serialization unless you add `readResolve()`. What enum does NOT protect against is loading the class twice: two different class loaders produce two distinct `Class` objects and therefore two distinct sets of constants — a "singleton" per class loader. That is a property of the JVM's class-loading model, not of the pattern, and it bites any singleton equally (the classic symptom is a web container redeploy leaving two live copies).
 
 **Q7: How does the Command pattern relate to `Runnable` and `Callable`?**
 `Runnable` IS the Command pattern's command interface: `execute()` is `run()`. The concrete command is the lambda or anonymous class you create. The invoker is `ExecutorService` which calls `run()` at some future time, decoupling task creation from execution. `Callable<V>` extends this by making the command return a value (and declare checked exceptions). Command's "history/undo" capability is not in `Runnable` but can be added by wrapping commands in a custom class that also implements an `undo()` method.
@@ -657,6 +702,9 @@ Lambda expressions can implement single-method `Command` for simple actions. For
 
 **Q15: What is the Flyweight pattern, and where does the JDK use it concretely?**
 Flyweight shares one instance of an object among many contexts that need the same value, saving memory. The shared state (intrinsic) is stored in the flyweight; the per-context state (extrinsic) is passed on each call. JDK examples: (1) **String pool** — `String.intern()` returns the canonical instance; all string literals are interned automatically. (2) **Integer/Long/Short/Byte/Character cache** — `Integer.valueOf(n)` returns a cached instance for n ∈ [−128, 127]. (3) **`Boolean.TRUE` / `Boolean.FALSE`** — two singletons; `Boolean.valueOf(true)` never allocates. (4) **`Font` in AWT** — glyph bitmaps are shared flyweights; x/y position is extrinsic. Interview angle: the Integer cache is Flyweight in disguise — describe it in those terms and it reads much better than "it's just a cache." Limitation: Flyweights cannot have mutable intrinsic state; any mutation would affect all users simultaneously.
+
+**Q16: What are the Read-Write Lock, Thread-Per-Message and Active Object concurrency patterns, and which JDK type implements each?**
+Each is a different answer to the question "who is allowed to touch this mutable state", and each reduces to one JDK type. Read-Write Lock allows many readers or one writer (`ReentrantReadWriteLock`); Thread-Per-Message gives every request its own thread so nothing is shared (`Executors.newVirtualThreadPerTaskExecutor()`); Active Object confines the state to one owning thread that executes queued requests (`Executors.newSingleThreadExecutor()`, handing a `Future` back to the caller). Two practical notes. A `ReadWriteLock` only pays for itself when reads genuinely dominate and the critical section is long; for a short read of one immutable object, a `volatile` reference swap or `StampedLock`'s optimistic read is faster, and note that downgrading write-to-read is legal while upgrading read-to-write deadlocks. Thread-Per-Message was an anti-pattern with platform threads at roughly 1MB of stack apiece — that constraint is what created thread pools — and virtual threads (Java 21+) make the naive one-thread-per-task form correct again, because a virtual thread that blocks costs nothing but heap.
 
 ---
 

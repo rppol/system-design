@@ -340,14 +340,14 @@ long total = counter.sum();  // adds all cells
 ### CompletableFuture Composition
 
 ```java
-CompletableFuture<String> result = CompletableFuture
+CompletableFuture<Orders> result = CompletableFuture
     .supplyAsync(() -> fetchUser(id), executor)          // async
     .thenApply(user -> user.toDTO())                     // transform (sync)
-    .thenCompose(dto -> fetchOrders(dto.id()))           // flatMap (returns CF)
-    .exceptionally(ex -> new UserDTO("error"))           // handle exception
+    .thenCompose(dto -> fetchOrders(dto.id()))           // flatMap (returns CF<Orders>)
+    .exceptionally(ex -> Orders.empty());                // handle exception; type must match
 
-// Combining two futures
-CompletableFuture.thenCombine(cf1, cf2, (r1, r2) -> combine(r1, r2));
+// Combining two futures -- thenCombine is an INSTANCE method, not a static one
+CompletableFuture<R> combined = cf1.thenCombine(cf2, (r1, r2) -> combine(r1, r2));
 
 // Wait for all
 CompletableFuture.allOf(cf1, cf2, cf3)
@@ -399,6 +399,38 @@ LockSupport.parkUntil(System.currentTimeMillis() + 1000);  // absolute deadline
 Object blocker = this;
 LockSupport.park(blocker);  // jstack shows: "waiting on" the blocker object
 ```
+
+### Thread States and How to Read a Thread Dump
+
+`Thread.getState()` returns one of six values, and a `jstack` dump prints the same states —
+so reading a dump correctly is mostly a matter of knowing what each one does *not* mean.
+
+| State | Entered by | jstack line you will see |
+|-------|-----------|--------------------------|
+| `NEW` | constructed, `start()` not yet called | thread absent from the dump |
+| `RUNNABLE` | executing, waiting for a CPU, **or blocked in a native/OS call** | `java.lang.Thread.State: RUNNABLE` |
+| `BLOCKED` | contending for a monitor (`synchronized` entry, or re-entry after `wait()`) | `waiting for monitor entry` / `- waiting to lock <0x...>` |
+| `WAITING` | `Object.wait()`, `Thread.join()`, `LockSupport.park()` — no timeout | `in Object.wait()` / `parking to wait for <0x...>` |
+| `TIMED_WAITING` | the same three plus `Thread.sleep(t)`, `parkNanos`, `parkUntil` | as above, with a duration |
+| `TERMINATED` | `run()` returned or threw | thread absent from the dump |
+
+Two traps that mislead people reading a dump for the first time:
+
+1. **A thread blocked on a socket read is `RUNNABLE`, not `WAITING`.** The javadoc only
+   promises that a RUNNABLE thread "is executing in the Java virtual machine but it may be
+   waiting for other resources from the operating system"; the JVM cannot see that the OS
+   has parked it inside `read(2)`. So a dump full of RUNNABLE threads sitting in
+   `socketRead0` is an *I/O stall*, not a CPU problem — cross-check with CPU usage before
+   concluding anything.
+2. **`ReentrantLock` contention never shows as `BLOCKED`.** JUC locks park via
+   `LockSupport`, so a thread queued on a `ReentrantLock` appears as `WAITING` with
+   `parking to wait for <0x...> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)`.
+   Only intrinsic-monitor contention produces `BLOCKED`.
+
+That second point has a matching trap in programmatic detection:
+`ThreadMXBean.findMonitorDeadlockedThreads()` finds cycles among **object monitors only**,
+so a deadlock between two `ReentrantLock`s returns `null` from it. Use
+`findDeadlockedThreads()`, which covers monitors **and** ownable synchronizers.
 
 ### Priority Inversion
 
@@ -455,7 +487,8 @@ Java's `ReentrantLock(fair=true)` with FIFO ordering doesn't solve priority inve
 //   - CountDownLatch: initial count; 0 = released
 
 // CLH Queue: doubly-linked list of Node objects
-// Each Node: {thread, waitStatus, prev, next}
+// Each Node: {volatile Node prev, volatile Node next, Thread waiter, volatile int status}
+// Subclasses: ExclusiveNode (locks), SharedNode (latches/semaphores), ConditionNode
 // Nodes are added to tail when thread can't acquire; removed from head when granted
 
 // Acquire (exclusive) algorithm:
@@ -470,7 +503,7 @@ Java's `ReentrantLock(fair=true)` with FIFO ordering doesn't solve priority inve
 
 // How ReentrantLock uses AQS:
 class NonFairSync extends AbstractQueuedSynchronizer {
-    boolean tryAcquire(int acquires) {
+    @Override protected boolean tryAcquire(int acquires) {   // MUST stay protected or wider
         if (compareAndSetState(0, acquires)) {  // CAS: 0 → 1
             setExclusiveOwnerThread(Thread.currentThread());
             return true;
@@ -533,7 +566,7 @@ class NonFairSync extends AbstractQueuedSynchronizer {
 
 **Do NOT use `synchronized` when**:
 - Fine-grained locking needed (ConcurrentHashMap is faster than synchronized map)
-- Virtual threads and I/O (use `ReentrantLock` to avoid pinning)
+- You need a timeout, an interruptible acquire, or several wait sets on one lock — those are `ReentrantLock` features `synchronized` has never had. (Pinning is no longer a reason: since Java 24 a virtual thread blocked inside `synchronized` releases its carrier.)
 
 ---
 
@@ -573,7 +606,7 @@ Two threads, each trying to acquire locks A then B with `tryLock()`. Thread 1 ac
 |------|---------|
 | `java.util.concurrent.*` | All JUC classes |
 | `jstack <pid>` | Thread dump for deadlock detection |
-| `-Djdk.tracePinnedThreads=full` | Detect virtual thread pinning |
+| JFR event `jdk.VirtualThreadPinned` | Detect virtual thread pinning (Java 24+) |
 | `ThreadMXBean` | Deadlock detection via JMX |
 | async-profiler | Wall-clock profiling to find blocking threads |
 | `ThreadPoolExecutor.getQueue().size()` | Monitor queue depth |
@@ -600,8 +633,8 @@ The executor tries to create a new thread up to `maximumPoolSize`. If max is als
 **Q6: What is the ABA problem in CAS and how is it addressed?**
 ABA: Thread A reads value=A, is preempted. Thread B changes A→B→A. Thread A resumes, CAS(A,C) succeeds because the value is A again — but the state has changed in between. Example: lock-free stack where a node is popped and re-pushed; a CAS on the stack top pointer sees the same address but the stack structure changed. Fix: `AtomicStampedReference<V>` — stores both value and a version/stamp integer. CAS checks both value AND stamp, so even if value cycles back to A, the stamp increment prevents the ABA scenario.
 
-**Q7: Why is ConcurrentHashMap 10-20× faster in Java 8 than Java 7?**
-Java 7 used a striped locking design with 16 segments (each a mini-HashMap), requiring lock acquisition for every write. Java 8 redesigned: for empty buckets, insertion uses CAS (no lock); for non-empty buckets, only the bucket HEAD is `synchronized` (lock-striping at bucket level, not segment level). Also added `LongAdder` for the size counter (no global lock for `size()`). With 16 buckets in Java 7, 16 concurrent threads could run; with Java 8, hundreds of threads can write to different buckets simultaneously.
+**Q7: Why does ConcurrentHashMap's Java 8 design scale better than Java 7's?**
+Java 7 used a striped locking design with a fixed number of segments (default `concurrencyLevel` 16, each a mini-HashMap), so the write concurrency ceiling was the segment count, chosen at construction. Java 8 redesigned it: for an empty bin, insertion is a CAS with no lock at all; for a non-empty bin, only that bin's HEAD node is `synchronized`, so locking is per-bucket rather than per-segment. Reads never lock, because `Node.val` and `Node.next` are `volatile`. The size counter became a striped counter (`baseCount` plus a `CounterCell[]`, the same idea as `LongAdder`) so `size()` has no single hot field. Practical upshot: write concurrency now scales with the number of buckets rather than a fixed 16, and it grows as the table grows — but `size()` is approximate under concurrent mutation and there is no map-wide lock to hold.
 
 **Q8: When would you use `CountDownLatch` vs `CyclicBarrier`?**
 `CountDownLatch`: one-shot, counts down to zero, waiting threads released once. Use when waiting for N independent events to complete (e.g., N initialization tasks; N is known upfront). Cannot be reset. `CyclicBarrier`: reusable, all N threads wait at the barrier, then all continue together; a barrier action runs when full. Use for iterative algorithms where N threads synchronize at each phase boundary (e.g., parallel matrix computation phases). Rule: CountDownLatch for "wait for N events"; CyclicBarrier for "all N threads rendezvous at a point and continue together repeatedly."
@@ -624,8 +657,8 @@ Deadlock: threads are BLOCKED, waiting for each other indefinitely — no progre
 **Q14: How does `CompletableFuture.allOf()` work?**
 `CompletableFuture.allOf(cf1, cf2, cf3)` returns a new `CompletableFuture<Void>` that completes when ALL input futures complete. It doesn't return the individual results (use `cf1.get()` etc. after `allOf` completes). If any future completes exceptionally, the `allOf` future also completes exceptionally with that exception. The implementation installs a completion handler on each input future; when all complete, the result future is completed. Use `.thenRun()` or `.thenApply()` to collect results after `allOf`.
 
-**Q15: Explain virtual thread pinning and how to avoid it.**
-A virtual thread is "pinned" to its carrier thread when it cannot be unmounted while blocking — the OS thread is blocked too, wasting resources. Pinning occurs when: (1) the virtual thread is inside a `synchronized` block/method while waiting; (2) it's inside a native (JNI) method. To avoid: replace `synchronized` with `ReentrantLock` in I/O-bound paths. Detect with JVM flag `-Djdk.tracePinnedThreads=full`. Java 24 removes pinning for `synchronized` on non-primitive monitor objects.
+**Q15: Explain virtual thread pinning and how to avoid it on the current JDK.**
+A virtual thread is "pinned" when it cannot be unmounted while blocking, so its carrier platform thread blocks with it and is unavailable to other virtual threads. On Java 25 LTS the only remaining causes are a **native frame on the stack** — a JNI call or a Foreign Function downcall — and a few VM-internal frames such as a class initializer; a virtual thread that blocks inside a `synchronized` block or in `Object.wait()` now releases its carrier normally. That is the change JEP 491 made in Java 24: the monitor is associated with the virtual thread rather than the carrier, which is why the old advice to rewrite every `synchronized` block as a `ReentrantLock` purely to avoid pinning is obsolete. Diagnose pinning with the JDK Flight Recorder event `jdk.VirtualThreadPinned` (`-XX:StartFlightRecording=...`) — the `jdk.tracePinnedThreads` system property was removed in Java 24. `ReentrantLock` still has independent merits (`tryLock`, timeouts, multiple `Condition`s); avoiding pinning is no longer one of them.
 
 **Q16: What is a spurious wakeup and how do you handle it?**
 A spurious wakeup is when `Object.wait()` or `Condition.await()` returns without being `notify()`d or interrupted — a rare but legal JVM behavior (POSIX condition variable allows it). If you use `if (condition) wait()`, a spurious wakeup will proceed past the check even when the condition is still false, causing incorrect behavior. **Fix**: always use `while (condition) wait()` — re-check the condition after every wakeup. This is why all Java concurrency examples show a `while` loop.
@@ -637,7 +670,10 @@ A spurious wakeup is when `Object.wait()` or `Condition.await()` returns without
 Priority inversion: a high-priority thread (H) is blocked waiting for a lock held by a low-priority thread (L), while a medium-priority thread (M) preempts L and prevents it from finishing. H is effectively blocked by M, even though H has higher priority than M. In Java: if L holds `ReentrantLock`, M's CPU-bound work starves L, which never releases the lock, which starves H indefinitely. Java has no built-in priority inheritance (OS mechanism to temporarily raise L's priority to H's level). Mitigation: avoid priority differences among threads sharing locks; use lock-free data structures for high-priority code; or use equal-priority threads for all critical sections.
 
 **Q19: What is `AbstractQueuedSynchronizer` and how does `ReentrantLock` use it?**
-AQS is the framework underlying all major JUC synchronizers. Core structure: `volatile int state` + a CLH (doubly-linked) queue of waiting `Node` objects. Acquire: `tryAcquire(arg)` tries a CAS on state; if it fails, the thread is added to the CLH queue tail and parked. Release: `tryRelease(arg)` updates state; if successful, unpacks the next waiting thread. `ReentrantLock` uses AQS with `state` = 0 (unlocked) or N (lock count for reentrant holds). `tryAcquire` CAS's from 0 to 1; re-entry increments state. `tryRelease` decrements state; releases when it reaches 0. `CountDownLatch` uses shared-mode AQS where all waiters are released when state reaches 0. `Semaphore` uses state as permit count.
+AQS is the framework underlying all major JUC synchronizers. Core structure: `volatile int state` + a CLH (doubly-linked) queue of waiting `Node` objects. Acquire: `tryAcquire(arg)` tries a CAS on state; if it fails, the thread is added to the CLH queue tail and parked. Release: `tryRelease(arg)` updates state; if successful, unparks the next waiting thread. `ReentrantLock` uses AQS with `state` = 0 (unlocked) or N (lock count for reentrant holds). `tryAcquire` CAS's from 0 to 1; re-entry increments state. `tryRelease` decrements state; releases when it reaches 0. `CountDownLatch` uses shared-mode AQS where all waiters are released when state reaches 0. `Semaphore` uses state as permit count.
+
+**Q20: In a thread dump, what is the difference between `RUNNABLE`, `BLOCKED` and `WAITING`, and which one does `ReentrantLock` contention produce?**
+`BLOCKED` means contending for an intrinsic monitor, `WAITING` means parked with no timeout, and `RUNNABLE` means the JVM believes the thread is executing — including when the OS has it parked inside a native call. Two consequences dominate real diagnosis. First, a thread blocked in `socketRead0` waiting on a slow downstream is reported `RUNNABLE`, because the JVM cannot see inside the syscall; a dump full of RUNNABLE threads is therefore evidence of an I/O stall as often as of CPU burn, and you must cross-check actual CPU usage. Second, `ReentrantLock` contention shows as `WAITING`/`TIMED_WAITING` with a `parking to wait for ... ReentrantLock$NonfairSync` frame, never as `BLOCKED`, because JUC locks park through `LockSupport` rather than entering a monitor. The same split appears in `ThreadMXBean`: `findMonitorDeadlockedThreads()` sees only monitor cycles and returns `null` for a two-`ReentrantLock` deadlock, so use `findDeadlockedThreads()`, which also covers ownable synchronizers.
 
 ---
 
@@ -652,7 +688,7 @@ AQS is the framework underlying all major JUC synchronizers. Core structure: `vo
 7. **Prefer `ReadWriteLock` or `StampedLock`** for read-heavy shared data structures.
 8. **Use `CompletableFuture` with explicit executor** — never use the default `ForkJoinPool.commonPool()` for I/O.
 9. **Detect deadlocks** in production with `ThreadMXBean.findDeadlockedThreads()` in a scheduled health check.
-10. **Use virtual threads + `ReentrantLock`** for new I/O-bound code on Java 21+.
+10. **Use virtual threads** for new I/O-bound code; on Java 24+ plain `synchronized` no longer pins the carrier, so pick `synchronized` or `ReentrantLock` on their own merits.
 
 **Read it like this.** "Size the pool so that, at any instant, enough threads are blocked on I/O that the cores still have work — which means the multiplier is simply how many times longer a task waits than it computes."
 
@@ -728,7 +764,7 @@ public final class CoalescingCache<K, V> {
 
 The atomicity of `computeIfAbsent` per key is what makes this safe: even with 1,000 threads hitting the same key, the mapping function executes once, so only one `supplyAsync` (one DB query) is created. The `whenComplete` removes the entry so a *future* miss can reload — without it, the cache would serve one permanently stale value.
 
-#### Measured impact
+#### Impact (illustrative figures for this scenario, not a published benchmark)
 
 ```
             DB queries on 1000-way concurrent miss   p99 latency under stampede
