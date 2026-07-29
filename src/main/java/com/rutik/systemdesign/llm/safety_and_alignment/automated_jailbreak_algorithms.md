@@ -1019,7 +1019,7 @@ measured `20%` of mild impoliteness. Narrow error bars measure confidence, never
 
 - [Safety & Alignment README](README.md) — parent module: jailbreak taxonomy (§4.1), red-teaming process (§5, §12), AdvBench/PAIR/Garak (§11)
 - [Mechanistic Interpretability](../mechanistic_interpretability/README.md) — RepE, activation steering, circuit breakers (§6, §11) underlying the representation-level defenses in §8.3
-- [LLM Security](../../llm_security/README.md) — adversarial robustness and broader attack-surface coverage beyond jailbreaking
+- [LLM Security](../llm_security/README.md) — adversarial robustness and broader attack-surface coverage beyond jailbreaking
 - [Multi-Agent Security](../multi_agent_systems/multi_agent_security.md) — extension of this threat model to agentic/tool-using systems (§Q16)
 - [Red Team Eval Harness](../case_studies/cross_cutting/red_team_eval_harness.md) — production infrastructure for running this module's algorithms at scale
 - [AI Regulations & Compliance](../ai_regulations_and_compliance/README.md) — how attack-success-rate evaluations feed regulatory model cards and RSP gates

@@ -28,8 +28,8 @@ Each sub-file is self-contained — read it independently to understand the infr
 
 Cross-reference links within case studies point here using relative paths:
 ```
-[LLM Eval Harness](./cross_cutting/llm_eval_harness_in_production.md)
-[Multi-Region Topology](./cross_cutting/multi_region_llm_topology.md)
+[LLM Eval Harness](./llm_eval_harness_in_production.md)
+[Multi-Region Topology](./multi_region_llm_topology.md)
 ```
 
 ---

@@ -702,7 +702,7 @@ public ErrorPayload handleBadBid(IllegalBidException ex) {
 | `wscat` | Command-line raw WebSocket client | Good for poking a low-level handler directly |
 | Browser devtools (Network > WS frames) | Inspect live STOMP frames | Frames appear as plain text - easy to read without extra tooling |
 | Micrometer | `simp.*` metrics for channels and sessions | Wire into [Observability & Tracing](../observability_and_tracing/README.md) |
-| Testcontainers | Real RabbitMQ/ActiveMQ broker in integration tests | See [Testcontainers & Test Strategy](../../spring/case_studies/cross_cutting/testcontainers_and_test_strategy/README.md) |
+| Testcontainers | Real RabbitMQ/ActiveMQ broker in integration tests | See [Testcontainers & Test Strategy](../case_studies/cross_cutting/testcontainers_and_test_strategy.md) |
 
 ---
 

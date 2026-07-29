@@ -24,11 +24,11 @@ Each sub-file is self-contained — read it independently to understand the prod
 
 Cross-reference links within case studies point here using relative paths:
 ```
-[Feature Store and PIT Correctness](./cross_cutting/feature_store_and_point_in_time_correctness.md)
-[Calibration and Thresholding](./cross_cutting/model_calibration_and_thresholding.md)
-[Responsible AI, Fairness, Explainability](./cross_cutting/responsible_ai_fairness_and_explainability.md)
-[Experimentation and Online Evaluation](./cross_cutting/experimentation_and_online_evaluation.md)
-[Drift Monitoring and Retraining](./cross_cutting/drift_monitoring_and_retraining.md)
+[Feature Store and PIT Correctness](./feature_store_and_point_in_time_correctness.md)
+[Calibration and Thresholding](./model_calibration_and_thresholding.md)
+[Responsible AI, Fairness, Explainability](./responsible_ai_fairness_and_explainability.md)
+[Experimentation and Online Evaluation](./experimentation_and_online_evaluation.md)
+[Drift Monitoring and Retraining](./drift_monitoring_and_retraining.md)
 ```
 
 ---

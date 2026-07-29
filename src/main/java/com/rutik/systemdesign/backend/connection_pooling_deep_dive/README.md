@@ -577,7 +577,7 @@ Setting minimumIdle to 0 means the pool keeps no warm connections ready, so a re
 
 ## 14. Case Study
 
-See the [Java case study: design_connection_pool](../java/case_studies/design_connection_pool.md) for a full implementation from scratch. The backend production scenario:
+See the [Java case study: design_connection_pool](../../java/case_studies/design_connection_pool.md) for a full implementation from scratch. The backend production scenario:
 
 **Illustrative incident** (a composite scenario built from the arithmetic, not a published case): a payment service running 30 instances, each with a 20-connection HikariCP pool, connecting to a PostgreSQL server left at the default max_connections=100. Under normal load: 30 instances * 20 connections = 600 connections attempted. PostgreSQL refuses connections past max_connections, causing `org.postgresql.util.PSQLException: FATAL: sorry, too many clients already`.
 
