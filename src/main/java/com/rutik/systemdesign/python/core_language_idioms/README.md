@@ -169,7 +169,7 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    outerBefore(["outer scope<br/>i = 10"]) --> barrier{"enters comprehension<br/>own frame"}
+    outerBefore(["outer scope<br/>i = 10"]) --> barrier{"comprehension<br/>isolated names"}
     barrier --> innerI(["local i<br/>0, 1, 2"])
     innerI --> resultList(["result<br/>0, 2, 4"])
     barrier -.->|"i does not leak"| outerAfter(["outer scope<br/>i = 10 still"])
@@ -179,7 +179,7 @@ flowchart LR
     class innerI req
     class resultList train
 ```
-*The comprehension executes in its own frame: the `i` inside `[i*2 for i in range(3)]` never touches the outer `i`, so the outer scope's value survives unchanged — unlike Python 2 or a plain `for` loop, whose loop variable does leak into the enclosing scope.*
+*The comprehension's names are isolated: the `i` inside `[i*2 for i in range(3)]` never touches the outer `i`, so the outer scope's value survives unchanged — unlike a plain `for` loop, whose variable does leak into the enclosing scope. Since 3.12 (PEP 709) that isolation is enforced by the compiler inlining the comprehension rather than by a nested frame; generator expressions still get a real frame (Section 6.4).*
 
 ### `match`/`case` Routing by Shape [3.10]
 
@@ -338,12 +338,14 @@ def read_config_eafp(path: str) -> str:
     except FileNotFoundError:
         return ""
 
-# Performance note (rough CPython numbers):
+# Illustrative cost model (an ordering that holds; absolute numbers are I/O- and
+# machine-dependent, so measure your own before quoting these):
 # EAFP when file exists:    ~1.2 µs  (no check overhead)
 # LBYL when file exists:    ~2.1 µs  (stat() syscall + open)
-# EAFP when file missing:   ~5.0 µs  (exception construction)
+# EAFP when file missing:   ~5.0 µs  (a failed open() syscall -- NOT the exception:
+#                                     raise+catch itself is well under 1 µs)
 # LBYL when file missing:   ~1.8 µs  (stat() cheap failure)
-# → use EAFP when success is the common case (>50% of calls succeed)
+# → use EAFP when success is the common case; see the break-even solved below
 ```
 
 ```mermaid
@@ -427,6 +429,36 @@ print(cleaned)   # ['hello', 'world']
 matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
 transposed = [[row[i] for row in matrix] for i in range(3)]
 ```
+
+**Scope isolation is not the same thing as a separate frame [3.12].** The usual explanation for
+"the loop variable does not leak" is "the comprehension runs in its own function frame". That was
+literally true through 3.11, and PEP 709 changed the implementation in 3.12: list, dict and set
+comprehensions are now **inlined** into the enclosing function, with no nested code object and no
+function call per comprehension. The *semantics* are unchanged — the iteration variable is still
+isolated and still does not leak — but the mechanism is now compiler-managed name isolation rather
+than a real frame. You can see the difference directly:
+
+```python
+def f(n):
+    return [x * 2 for x in range(n)]
+
+def g(n):
+    return list(x * 2 for x in range(n))
+
+print([c.co_name for c in f.__code__.co_consts if hasattr(c, "co_name")])
+# []            <- 3.12+: inlined, no nested code object at all
+print([c.co_name for c in g.__code__.co_consts if hasattr(c, "co_name")])
+# ['<genexpr>'] <- generator expressions are NOT inlined; they still need a frame
+```
+
+Three consequences worth knowing. Comprehensions got roughly twice as fast for small iterables,
+because the per-call frame is gone. A traceback raised inside a comprehension no longer shows a
+`<listcomp>` line, so stack traces from 3.12 onward look one frame shallower than older ones.
+And generator expressions are deliberately excluded from the optimisation — a genexp must be
+suspendable, which is exactly what a frame provides — so a genexp still creates one and still pays
+for it. That last point is the practical one: the "always prefer a genexp" reflex is a memory
+argument, not a speed argument, and inlining has widened the speed gap in the comprehension's
+favour for small inputs.
 
 ### 6.5 Unpacking and starred assignment
 
@@ -642,7 +674,7 @@ def parse_db_rows(rows: list[tuple[int, str, str]]) -> list[dict[str, object]]:
 
 **Use truthiness** (`if items:`, `if not result:`) instead of explicit length or equality checks against empty literals. Exception: when you need to distinguish `None` from `[]` — both are falsy, so use `if items is not None:` then separately check `if items:`.
 
-**Use EAFP** when the operation succeeds the majority of the time — file reads, dict key access, attribute access on known-good objects. In CPython, exception raising costs roughly 3–5 µs; a successful `try` block with no exception costs essentially zero overhead.
+**Use EAFP** when the operation succeeds the majority of the time — file reads, dict key access, attribute access on known-good objects. Both halves of that trade are cheaper than the folklore suggests on a current CPython: entering a `try` block that does not raise costs **on the order of 10 ns** (3.11's zero-cost exceptions moved the setup out of the happy path entirely), and raising plus catching a `ValueError` measures **around 0.1-0.2 µs** depending on the machine, not the multi-microsecond figure often quoted. What makes a failing EAFP path expensive is almost never the exception machinery — it is the failed operation underneath it, such as a syscall that had to hit the filesystem before it could fail.
 
 **Use LBYL** when the operation is irreversible (database write, file delete), when failure is the typical case (user input validation), or when you need to give detailed feedback about which precondition failed.
 
@@ -673,7 +705,28 @@ if name == "Alice":          # always use == for value comparison
     print("Hello, Alice")
 ```
 
-Interning is a CPython implementation detail, not a language guarantee. `is` on strings fails silently in production when strings are constructed at runtime.
+Interning is a CPython implementation detail, not a language guarantee. `is` on a runtime-built
+string fails silently at *runtime* — but the compiler does not let the literal form through
+unremarked. Since 3.8 CPython emits a warning at compile time:
+
+```
+SyntaxWarning: "is" with 'str' literal. Did you mean "=="?
+```
+
+That distinction is worth carrying into an interview, because it decides how the bug is found.
+`is` against a *literal* is caught for free by the compiler and by any linter — you should never
+ship one. The version that genuinely fails silently is `is` against a *variable* that merely
+happens to hold an interned value:
+
+```python
+expected = "Alice"          # no literal at the comparison site, so no SyntaxWarning
+if name is expected:        # True while both are interned literals...
+    ...                     # ...False the moment `name` arrives from json.loads() or input()
+```
+
+Nothing warns here — not the compiler, not `ruff`, not mypy — and it passes every test written with
+literal fixtures. This is the same failure shape as the `257` case in Section 6.1: the comparison is
+reporting an allocation accident, and the accident stops happening once real data shows up.
 
 ### Pitfall 2 — Mutable default argument
 
@@ -754,7 +807,7 @@ def get_user_name(data: dict) -> str:
 | `id()` built-in | Inspect object identity (memory address in CPython) | stdlib | `id(x) == id(y)` is equivalent to `x is y` |
 | `sys.intern()` | Explicitly intern a string for identity-based dict keys | stdlib | Micro-optimisation for large symbol tables |
 | `__future__` annotations | Postponed evaluation of annotations (PEP 563) | 3.7+ | Affects `__annotations__` dict; walrus still evaluates eagerly |
-| `walrus operator :=` | Assign-and-return in expressions | 3.8 | PEP 572; not available in lambda bodies |
+| `walrus operator :=` | Assign-and-return in expressions | 3.8 | PEP 572; legal in a lambda body only when parenthesized — `lambda: (x := 5)` compiles, `lambda: x := 5` is a SyntaxError (Q15) |
 | `match`/`case` | Structural pattern matching | 3.10 | PEP 634; soft keywords, not reserved in older code |
 | `mypy` / `pyright` | Static type checking catches `is` misuse on non-singletons | — | Warns on `x is "string"` |
 | `ruff` linter | Rule `E711` flags `== None`; `E712` flags `== True/False` | — | Drop-in replacement for flake8 |
@@ -765,7 +818,7 @@ def get_user_name(data: dict) -> str:
 
 **Q1:** What is the difference between `is` and `==` in Python, and when should you use each?
 
-`is` tests object identity — whether two references point to the same object in memory (`id(a) == id(b)`); `==` tests equality by calling `__eq__`. Use `is` only for singletons: `None`, `True`, `False`, and explicitly defined sentinel objects. For all other comparisons — strings, numbers, containers, custom objects — use `==`. Using `is` to compare strings works by accident due to interning and will silently fail with runtime-constructed strings.
+`is` tests object identity; `==` tests value equality. Concretely, `is` asks whether two references point to the same object in memory (`id(a) == id(b)`), while `==` calls `__eq__`. Use `is` only for singletons: `None`, `True`, `False`, and explicitly defined sentinel objects. For all other comparisons — strings, numbers, containers, custom objects — use `==`. Using `is` to compare strings works by accident due to interning and will silently fail with runtime-constructed strings.
 
 **Q2:** Why can `a = 257; b = 257; a is b` return `False`?
 
@@ -773,7 +826,7 @@ CPython caches integers only in the range -5 to 256 as singletons. Values outsid
 
 **Q3:** List all falsy values in Python.
 
-`None`, `False`, `0`, `0.0`, `0j` (complex zero), `""` (empty string), `b""` (empty bytes), `[]` (empty list), `()` (empty tuple), `{}` (empty dict), `set()` (empty set), `frozenset()`, and any object whose `__bool__` returns `False` or whose `__len__` returns `0`. Everything else — including `"0"`, `[None]`, `0.00001` — is truthy.
+There are eleven built-in falsy values, plus any object that declares itself falsy. The built-ins: `None`, `False`, `0`, `0.0`, `0j`, `""`, `b""`, `[]`, `()`, `{}`, and `set()` — with `frozenset()` and `range(0)` behaving the same way. Any object whose `__bool__` returns `False`, or whose `__len__` returns `0`, joins them. Everything else — including `"0"`, `[None]`, `0.00001` — is truthy.
 
 **Q4:** What is the mutable-default-argument trap, and how do you fix it?
 
@@ -781,7 +834,7 @@ Default argument values are evaluated once when the `def` statement executes, no
 
 **Q5:** When is EAFP preferred over LBYL, and when is LBYL preferred?
 
-EAFP is preferred when the operation succeeds the majority of the time, because the `try` block with no exception incurs essentially zero overhead in CPython while a precondition check always costs at least one attribute lookup or syscall. LBYL is preferred when failure is the common case (making exception construction the bottleneck), when the operation has irreversible side effects, or when you need granular feedback about which precondition failed (common in form validators).
+EAFP wins when success is the common case; LBYL wins when failure is. The reason is that entering a `try` that does not raise costs on the order of 10 ns since 3.11's zero-cost exceptions, while a precondition check always costs at least one attribute lookup or syscall, on every single call including the successful ones. LBYL is preferred when failure is the common case (making exception construction the bottleneck), when the operation has irreversible side effects, or when you need granular feedback about which precondition failed (common in form validators).
 
 **Q6:** Does a list comprehension variable leak into the enclosing scope in Python 3?
 
@@ -813,15 +866,23 @@ In assignment (`first, *rest = items`), the starred variable collects zero or mo
 
 **Q13:** What makes a string literal eligible for compile-time interning in CPython, and why is relying on it dangerous?
 
-CPython interns string literals at compile time only when they look like identifiers — no spaces, no special characters, matching what could be a variable or attribute name — so `"hello"` is commonly interned but `"hello world"` is not. This is a CPython implementation detail, not a language guarantee: other implementations may intern differently or not at all, and even CPython's exact interning rules have changed across versions. Code that writes `if name is "Alice":` works by accident in a REPL where short literals get folded, then fails silently in production once `name` is built at runtime by concatenation or `.format()`. Always compare strings with `==`; reserve `is` for singletons and objects you explicitly interned yourself with `sys.intern()`.
+Only literals that look like identifiers — no spaces, no punctuation, nothing that could not be a variable name. So `"hello"` is commonly interned at compile time while `"hello world"` is not. This is a CPython implementation detail, not a language guarantee: other implementations may intern differently or not at all, and even CPython's exact interning rules have changed across versions. Code that writes `if name is "Alice":` works by accident in a REPL where short literals get folded, then fails silently in production once `name` is built at runtime by concatenation or `.format()`. Always compare strings with `==`; reserve `is` for singletons and objects you explicitly interned yourself with `sys.intern()`.
 
 **Q14:** When should you prefer a `dict` dispatch table over `match`/`case` [3.10], even though both can route on a value?
 
-Prefer a `dict` of callables when you are dispatching on a single scalar key with no need to destructure — a `dict` lookup is O(1) and reads as plain function-call syntax, while `match`/`case` compiles to a sequence of pattern tests that is not guaranteed O(1). `match`/`case` earns its keep when the routing decision depends on *structure* — nested tuples, dataclass attributes, sequence length — because a `dict` key cannot express "any 2-tuple whose second element is zero" the way a sequence pattern can. Guard clauses (`case n if n > 0:`) and OR patterns (`case 200 | 201:`) let a single `match` block layer extra conditions that a plain dict dispatch cannot express without wrapping each value in a function. Reach for `match`/`case` when you need destructuring, and a `dict` when you only need name-to-function routing.
+Prefer a `dict` of callables whenever you are routing on a single scalar key and do not need to destructure. A `dict` lookup is O(1) and reads as plain function-call syntax, while `match`/`case` compiles to a sequence of pattern tests with no O(1) guarantee. `match`/`case` earns its keep when the routing decision depends on *structure* — nested tuples, dataclass attributes, sequence length — because a `dict` key cannot express "any 2-tuple whose second element is zero" the way a sequence pattern can. Guard clauses (`case n if n > 0:`) and OR patterns (`case 200 | 201:`) let a single `match` block layer extra conditions that a plain dict dispatch cannot express without wrapping each value in a function. Reach for `match`/`case` when you need destructuring, and a `dict` when you only need name-to-function routing.
 
 **Q15:** Why can't you use the walrus operator `:=` directly inside a `lambda` body?
 
 The walrus operator `:=` [3.8] can appear inside a `lambda` body, but only when parenthesized: `lambda: (x := 5)` is legal, while the unparenthesized `lambda: x := 5` is a `SyntaxError`. Python's grammar accepts an assignment expression as a lambda's body only when parentheses turn it into a single atom; without them, `:=` is not a valid top-level lambda-body expression. In practice this rarely matters because a `lambda` that needs to assign-and-reuse a value is a sign the logic should be a named function instead, where a walrus can be used freely with or without parentheses. If you hit the unparenthesized form's `SyntaxError`, the quick fix is to add parentheses around the assignment; the more maintainable fix is to extract the lambda's body into a small named function. This is a narrow, low-frequency gotcha, but it explains why some walrus refactors that work at module level fail when moved into a `sorted(key=lambda x: ...)` call without the extra parens.
+
+**Q:** Does a list comprehension still create its own stack frame in Python 3.12+?
+
+No — PEP 709 inlined list, dict and set comprehensions into the enclosing function in 3.12, so there is no nested code object and no per-comprehension function call. The scoping guarantee is unchanged: the iteration variable is still isolated and still does not leak, but it is now enforced by compiler-managed name isolation rather than by a real frame. You can prove it by inspecting `f.__code__.co_consts` for a nested code object — a comprehension has none, while a generator expression still shows `<genexpr>`. Generator expressions are deliberately excluded because a genexp must be suspendable, and suspension is exactly what a frame provides. The two practical effects: comprehensions got roughly twice as fast on small iterables, and tracebacks raised inside one no longer show a `<listcomp>` line.
+
+**Q:** Does Python warn you when you write `is` against a string literal?
+
+Yes — CPython emits `SyntaxWarning: "is" with 'str' literal. Did you mean "=="?` at compile time, and has since 3.8. That makes the textbook form of the bug (`if name is "Alice":`) one you should never ship, because the compiler and every linter catch it for free. The dangerous variant is the one that produces no warning at all: `is` against a *variable* that merely happens to hold an interned value, such as `expected = "Alice"` followed by `if name is expected:`. That passes every test written with literal fixtures and starts returning `False` the moment `name` arrives from `json.loads()` or user input. Reserve `is` for `None`, `True`, `False`, enum members, and sentinels you created yourself.
 
 **Q16:** What is `sys.intern()` and when would you use it explicitly?
 
@@ -852,7 +913,7 @@ The walrus operator `:=` [3.8] can appear inside a `lambda` body, but only when 
 
 **Context.** A FastAPI application reads a YAML-parsed configuration dictionary and dispatches setup logic based on the `type` key. The original code was written by a developer coming from Java and uses explicit length checks, `== None`, string comparison with `is`, and LBYL precondition chains. The goal is to refactor it to idiomatic Python 3.11 without changing observable behaviour.
 
-**BROKEN — legacy version (47 lines of non-idiomatic code).**
+**BROKEN — legacy version (34 lines of non-idiomatic code, excluding comments).**
 
 ```python
 # BROKEN: legacy_config_parser.py
@@ -943,13 +1004,14 @@ def parse_database_config(config: dict | None) -> dict[str, object]:
 
 | Metric | Legacy | Idiomatic |
 |---|---|---|
-| Lines of code | 47 | 27 |
-| `== None` / `!= None` occurrences | 5 | 0 |
-| `is` on string (unreliable) | 3 | 0 |
-| `len()` checks | 3 | 0 |
+| Lines of code (non-comment, non-blank) | 34 | 27 |
+| `== None` occurrences | 2 | 0 |
+| `!= None` occurrences | 6 | 0 |
+| `is` on string literal (a real bug) | 3 | 0 |
+| `len()` checks | 2 | 0 |
 | Type hints on signature | 0 | 2 |
 | `match`/`case` used | No | Yes |
-| Walrus `:=` used | No | 3 times |
+| Walrus `:=` used | 0 | 4 times |
 
 **Stated plainly.** "Every row in that table is a count of one construct the language already had a
 shorter, safer spelling for." Read it as a defect inventory rather than a style score — the line
@@ -986,12 +1048,11 @@ parser rather than a source literal, which is exactly the `257` failure mode Sec
 through, one type up. The other 11 were merely slower or noisier. Shorter code is the side effect;
 **making the 3 bugs unrepresentable is the result.**
 
-**A note on the counts.** The metrics table's own figures do not all reconcile with the two code
-blocks as printed: counting non-comment, non-blank lines gives 34 legacy against 27 idiomatic
-(a 20.6% reduction), not 47 against 27; the None-comparisons number 8 rather than 5; `len()` checks
-number 2 rather than 3; and the rewrite uses the walrus 4 times rather than 3. Only the `is`-on-
-string count of 3 and the idiomatic line count of 27 match exactly. The direction of every row is
-right and the argument does not depend on the magnitudes — but if you quote this case study in an
-interview, quote the ratios you can point at in the code.
-
-The refactored version eliminates 43% of the lines, makes all equality checks correct by construction (no interning dependency), and uses `match`/`case` to make the dispatch structure immediately visible to any reader. The walrus operator removes the redundant `config.get()` calls that previously appeared once in the condition and once in the body.
+**Count what is on the page, not what sounds impressive.** Every figure in the table above is
+recoverable by reading the two code blocks: 34 non-comment lines down to 27 is a **20.6%** reduction,
+not the "nearly half" a line-count metric is usually stretched to claim. That modest number is the
+honest one, and it is also the point — the rewrite is not primarily a shortening exercise. It makes
+all equality checks correct by construction (no interning dependency), and uses `match`/`case` to
+make the dispatch structure visible at a glance. The walrus removes the redundant `config.get()`
+calls that previously appeared once in the condition and once in the body. If you present this
+refactor in an interview, lead with the three eliminated bugs and let the line count be a footnote.

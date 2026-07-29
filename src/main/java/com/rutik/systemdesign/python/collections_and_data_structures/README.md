@@ -21,7 +21,7 @@ This module covers:
 
 **Mental model:** Every Python collection is a tradeoff between memory layout and access pattern. Contiguous memory (list, array) wins for indexed reads and cache locality. Hash tables (dict, set) win for arbitrary-key lookup. Linked structures (deque) win for front-and-back mutations. Choosing the wrong one is the most common source of O(n) loops that should be O(1).
 
-**Why it matters:** In a FastAPI endpoint processing 50,000 requests per minute, a single `if x in mylist` check on a 10,000-element list costs 10,000 pointer dereferences per call — roughly 500ms of wasted CPU per second. Replacing it with a `set` drops that to a single hash computation.
+**Why it matters:** In a FastAPI endpoint processing 50,000 requests per minute (833 req/s), a single `if x in mylist` miss on a 10,000-element list walks all 10,000 pointers. Measured at roughly 3 ns per element scanned, that is `833 x 10,000 x 3 ns` = about 25 ms of CPU burned per wall-clock second — 2.5% of a core doing nothing but comparing. Grow the list to 100,000 and the same endpoint eats a quarter of a core. Replacing it with a `set` collapses the whole term to one hash computation per call, independent of size.
 
 **Key insight:** Python's type system encourages treating collections as interchangeable sequences, but their performance envelopes differ by orders of magnitude at the same logical operation. The algorithm is in the data structure choice, not just the loop body.
 
@@ -187,8 +187,12 @@ for i in range(20):
     if curr != prev:
         print(f"Realloc at len={i+1}, size={curr} bytes")
         prev = curr
-# Output: reallocs at 1, 5, 9, 17 — growth by ~4 each time for small lists,
-# ~12.5% for large lists (CPython listobject.c, list_resize).
+# Output: reallocs at len = 1, 5, 9, 17, 25, 33, 41, 53, ...
+# CPython listobject.c, list_resize:
+#     new_allocated = (newsize + (newsize >> 3) + 6) & ~3
+# i.e. 12.5% headroom plus a flat 6, rounded down to a multiple of 4. The flat +6 is
+# what dominates for small lists (hence the early +4 steps); the >> 3 term takes over
+# once the list is long enough for newsize/8 to exceed 6, i.e. past about 48 elements.
 ```
 
 **What this actually says.** "Never grow the pointer array by one slot — grow it by a fixed *fraction* of its current length, so the expensive copies get rarer exactly as fast as they get more expensive."
@@ -363,12 +367,15 @@ target = 999_999
 # list membership: linear scan
 t0 = time.perf_counter()
 _ = target in large_list
-print(f"list: {(time.perf_counter()-t0)*1e6:.1f} µs")   # ~50-200 µs
+print(f"list: {(time.perf_counter()-t0)*1e6:.1f} µs")   # ~3,000 µs — 1M elements x ~3 ns
 
 # set membership: hash lookup
 t0 = time.perf_counter()
 _ = target in large_set
-print(f"set:  {(time.perf_counter()-t0)*1e6:.1f} µs")   # ~0.05-0.1 µs
+print(f"set:  {(time.perf_counter()-t0)*1e6:.1f} µs")   # ~0.03 µs — independent of size
+
+# The gap here is ~100,000x, and it is not a constant: it is exactly len(large_list).
+# Halve the list and the list line halves; the set line does not move.
 
 # frozenset is hashable — can be a dict key or a set element.
 fs: frozenset[int] = frozenset([1, 2, 3])
@@ -701,7 +708,7 @@ the moment a collection is both large and single-typed.
 | Ordered key-value store | `dict` | Insertion order + O(1) lookup |
 | Top-K queries | `heapq` | O(n log k) vs O(n log n) sort |
 | Sorted insert + binary search | `bisect` on `list` | O(log n) search |
-| Numeric arrays (millions of floats) | `array.array('d')` | 8x less memory than list |
+| Numeric arrays (millions of floats) | `array.array('d')` | ~4.5x less memory than list (see the walk-through above) |
 
 ---
 
@@ -747,7 +754,7 @@ flowchart LR
 ### Do NOT use `list` when:
 - You prepend or remove from the front frequently — use `deque`.
 - You do repeated membership checks — use `set` or `dict`.
-- You store millions of floats — use `array.array('d')` (8x less memory).
+- You store millions of floats — use `array.array('d')` (about 4.5x less memory).
 
 ### Use `dict` when:
 - You map arbitrary keys to values with O(1) average lookup.
@@ -811,16 +818,16 @@ def process_event(event_id: int) -> bool:
     return True
 ```
 
-At 100,000 unique events, the list version scans ~50,000 entries on average per call (total ~5 billion pointer dereferences). The set version performs one hash computation per call. Benchmark difference: ~3 seconds vs ~0.015 seconds.
+Feed 100,000 distinct events through both. Each list call scans the whole list because the id is never present, so the loop performs `0 + 1 + 2 + ... + 99,999` = about **5 billion** pointer comparisons in total. At the ~3 ns per comparison measured above, that predicts roughly 15 seconds — and it measures at about **16 s**, against **0.004 s** for the set. Check the prediction against the measurement whenever you quote a benchmark; the two agreeing is what tells you the model is right.
 
 ```mermaid
 xychart-beta
-    title "100,000 Membership Checks: list scan vs set hash"
+    title "100,000 Membership Checks: list scan vs set hash (log scale, seconds)"
     x-axis ["list O(n)", "set O(1)"]
-    y-axis "Total time (seconds)" 0 --> 3.2
-    bar [3, 0.015]
+    y-axis "Total time (seconds)" 0 --> 18
+    bar [16, 0.004]
 ```
-*The scan's cost grows with every stored id while the hash lookup stays flat — a ~200x gap at 100,000 events that only widens as the collection grows.*
+*The scan's cost grows with every stored id while the hash lookup stays flat — a ~4,000x gap at 100,000 events, and one that widens linearly as the collection grows.*
 
 ---
 
@@ -898,11 +905,60 @@ while queue_d:
     item = queue_d.popleft()   # Constant time
 ```
 
-Total cost: `list.pop(0)` on 100,000 items = O(n^2) = ~10 billion pointer moves. `deque.popleft()` = O(n) total.
+Total cost: `list.pop(0)` on 100,000 items shifts `99,999 + 99,998 + ... + 0` pointers — `n(n-1)/2` = about **5 billion** moves, not the `n^2` = 10 billion that "O(n^2)" invites you to assume. `deque.popleft()` does O(1) work per call, O(n) total.
 
 ---
 
-### Pitfall 5: Mutable default argument (not collection-specific but affects all collection types)
+### Pitfall 5: Sequence repetition copies references, not objects
+
+Section 3's "reference semantics throughout" has one consequence that reliably surprises people:
+`*` on a list repeats the *pointers*, so every repeated slot aims at the same object.
+
+**BROKEN — one row, shown three times:**
+```python
+grid = [[0] * 3] * 3        # the OUTER * 3 repeats one list reference
+grid[0][0] = 9
+print(grid)                 # [[9, 0, 0], [9, 0, 0], [9, 0, 0]] — all three "rows" changed
+print(len({id(row) for row in grid}))   # 1 — there is only one row object
+```
+
+The inner `[0] * 3` is harmless because `int` is immutable — you can never mutate a `0`
+in place, so sharing it is unobservable. The outer `* 3` is the bug, because a `list` is
+mutable and the sharing becomes visible the moment you write through any of the three names.
+
+**FIX — a comprehension evaluates the expression once per iteration:**
+```python
+grid = [[0] * 3 for _ in range(3)]
+grid[0][0] = 9
+print(grid)                 # [[9, 0, 0], [0, 0, 0], [0, 0, 0]]
+```
+
+The same one-level-deep rule governs every copy operation in the standard library. A slice
+(`rows[:]`), `list(rows)`, `dict(d)` and `copy.copy(x)` are all **shallow**: they duplicate the
+outer container and copy the references inside it, so mutating a nested object is still visible
+through the original.
+
+```python
+import copy
+
+rows = [[1, 2], [3, 4]]
+shallow = rows[:]                 # new outer list, same inner lists
+shallow[0].append(99)
+print(rows)                       # [[1, 2, 99], [3, 4]] — the "copy" wrote through
+
+deep = copy.deepcopy(rows)        # recursively duplicates every nested object
+deep[0].append(7)
+print(rows)                       # [[1, 2, 99], [3, 4]] — unchanged this time
+```
+
+Reach for `copy.deepcopy` only when you actually have nested mutables: it walks the whole
+object graph (keeping a memo dict so cycles terminate), which is far more expensive than a
+slice. When the elements are immutable — ints, strings, tuples of those, frozensets — a shallow
+copy is already a full copy and `deepcopy` buys nothing but cost.
+
+---
+
+### Pitfall 6: Mutable default argument (not collection-specific but affects all collection types)
 
 **BROKEN:**
 ```python
@@ -946,7 +1002,7 @@ def add_item(item: str, container: list[str] | None = None) -> list[str]:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the time complexity of `list.append()` and why is it amortized O(1) rather than O(1)?**
-`list.append()` is O(1) amortized because CPython occasionally performs an O(n) reallocation when the underlying array is full. The reallocation doubles (approximately) the allocated capacity, so the total cost of n appends is O(n), giving O(1) per append on average. The growth factor is approximately 1.125 for large lists (8 + allocated // 8 new slots in CPython source). In practice, you see a realloc roughly at sizes 1, 5, 9, 17, 25, ... Never use `list.insert(0, x)` in a loop — each insert is O(n) with no amortization.
+`list.append()` is O(1) amortized because CPython occasionally performs an O(n) reallocation when the underlying array is full. The reallocation doubles (approximately) the allocated capacity, so the total cost of n appends is O(n), giving O(1) per append on average. CPython's `list_resize` computes `new_allocated = (newsize + (newsize >> 3) + 6) & ~3` — 12.5% headroom plus a flat 6 slots, rounded to a multiple of 4 — so the growth factor tends to 1.125 for large lists while the `+6` dominates for short ones. In practice you see reallocs at len 1, 5, 9, 17, 25, 33, 41, 53. Never use `list.insert(0, x)` in a loop — each insert is O(n) with no amortization.
 
 **Q2: How does Python 3.7+ guarantee dict insertion order, and does this affect performance?**
 CPython 3.6 introduced a compact dict representation using two parallel arrays: a sparse index array (maps hash slot to entry index) and a dense entries array (stores key, value, hash in insertion order). Insertion order follows the entries array, which is always appended to. Python 3.7 made this ordering part of the language specification. The performance impact is negligible — the index array lookup is O(1) and the extra memory per dict is fixed overhead. Compact dicts use 20–25% less memory than the old combined-table layout.
@@ -990,8 +1046,11 @@ CPython tracks a dict's size internally and raises `RuntimeError: dictionary cha
 **Q15: Why is `list.sort()` described as O(n) for nearly-sorted input rather than always O(n log n)?**
 `list.sort()` and `sorted()` use Timsort, a hybrid merge/insertion sort that first scans the input for existing ascending or descending "runs" and merges those runs instead of blindly dividing the array. When the input is already close to sorted, Timsort finds long runs and does close to O(n) work merging them; a fully random input has no long runs and Timsort falls back to its O(n log n) worst case. Timsort is also stable, so elements that compare equal keep their original relative order — the module's `records` example shows `alice` staying before `carol` at the same score. This stability guarantee is why chaining `sorted(data, key=...)` across multiple passes is safe for a multi-key sort.
 
+**Q: Why does `[[0] * 3] * 3` produce a grid whose rows all change together?**
+Because `*` on a list repeats references, not objects — all three "rows" are the same list. The inner `[0] * 3` is safe only because `int` is immutable, so its shared references can never be observed; the outer `* 3` is the bug, and `len({id(row) for row in grid})` returns 1 to prove it. Build the grid with `[[0] * 3 for _ in range(3)]`, which re-evaluates the inner expression on every iteration. The same one-level rule explains every shallow copy in the stdlib: a slice, `list(x)`, `dict(d)` and `copy.copy(x)` all duplicate the outer container while sharing whatever is nested inside, which is why `copy.deepcopy` exists — and why it is worth nothing when the elements are immutable.
+
 **Q16: How much memory does `array.array('d', data)` save over a `list` of the same floats, and why?**
-`array.array('d', data)` stores raw 8-byte IEEE 754 doubles in a single contiguous C buffer with no per-element Python object, so 1 million floats cost about 8 MB versus roughly 36 MB for an equivalent `list` (about 8 MB of pointers plus about 28 MB of boxed `float` objects). The savings come from eliminating "boxing" — a `list` element is a pointer to a heap-allocated `PyObject`, while an `array.array` element is the raw value packed inline. `array.array` only supports a single declared C type (`'i'` for int32, `'d'` for float64, etc.), so it cannot mix types the way a `list` can. Use `array.array` for large, single-typed numeric buffers, and reach for `numpy.ndarray` once you need vectorized math on top of that memory layout.
+About 4.5x: roughly 8 MB versus roughly 36 MB for 1 million floats. The `array` stores raw 8-byte IEEE 754 doubles in a single contiguous C buffer with no per-element Python object, whereas the `list` pays about 8 MB of pointers plus about 28 MB of separately allocated boxed `float` objects. The savings come from eliminating "boxing" — a `list` element is a pointer to a heap-allocated `PyObject`, while an `array.array` element is the raw value packed inline. `array.array` only supports a single declared C type (`'i'` for int32, `'d'` for float64, etc.), so it cannot mix types the way a `list` can. Use `array.array` for large, single-typed numeric buffers, and reach for `numpy.ndarray` once you need vectorized math on top of that memory layout.
 
 ---
 
@@ -1013,7 +1072,7 @@ CPython tracks a dict's size internally and raises `RuntimeError: dictionary cha
 
 **Never use mutable default arguments.** Use `None` as default and create a new collection inside the function. This applies to every function parameter of type `list`, `dict`, `set`, or `defaultdict`.
 
-**When building a heap from existing data, use `heapify()` not repeated `heappush()`.** `heapify()` is O(n); repeated `heappush()` is O(n log n). For 1 million elements, `heapify` runs in ~0.1s vs `heappush` loop at ~1.2s.
+**When building a heap from existing data, use `heapify()` not repeated `heappush()`.** `heapify()` is O(n); repeated `heappush()` is O(n log n). Measured on 1 million random ints (CPython 3.13): `heapify` 0.013 s versus a `heappush` loop at 0.051 s — about 4x. The gap is smaller than the O(n) vs O(n log n) headline suggests, because `heapify` is one C-level pass while the loop pays Python-level call overhead a million times; both terms shrink together, so measure rather than extrapolate from the exponents.
 
 **Use `dict.get(key, default)` for safe access without key creation.** Never use `d[key]` on a regular dict when the key might be absent in a read-only context. On a `defaultdict`, always use `.get()` for read-only checks.
 
@@ -1038,7 +1097,7 @@ A gaming platform tracks scores for up to 500,000 active users. The API must sup
 ```python
 # BROKEN: O(n log n) per leaderboard request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 @dataclass
 class ScoreEvent:
@@ -1051,7 +1110,7 @@ user_scores: dict[str, int] = {}   # user_id → latest total score
 
 def record_score(user_id: str, delta: int) -> None:
     user_scores[user_id] = user_scores.get(user_id, 0) + delta
-    all_events.append(ScoreEvent(user_id, delta, datetime.utcnow()))
+    all_events.append(ScoreEvent(user_id, delta, datetime.now(UTC)))
 
 def get_top10() -> list[tuple[str, int]]:
     # BUG: sorts the ENTIRE user_scores dict on every call
@@ -1059,7 +1118,7 @@ def get_top10() -> list[tuple[str, int]]:
     return sorted(user_scores.items(), key=lambda x: x[1], reverse=True)[:10]
 ```
 
-At 500,000 users, `sorted()` on every leaderboard call costs ~0.5 seconds per call — this endpoint would be backed up within seconds.
+At 500,000 users, `sorted()` on every leaderboard call measures at roughly 140 ms. At the stated 500 reads/second that is about 70 seconds of CPU demanded per wall-clock second, so the endpoint does not merely get slow — the backlog grows without bound from the first second.
 
 ---
 
@@ -1068,7 +1127,7 @@ At 500,000 users, `sorted()` on every leaderboard call costs ~0.5 seconds per ca
 ```python
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 import heapq
 
 @dataclass
@@ -1095,15 +1154,19 @@ class Leaderboard:
         self.scores[user_id] += delta
         self.user_history[user_id].append(delta)
         self.recent_events.append(
-            ScoreEvent(user_id, delta, datetime.utcnow())
+            ScoreEvent(user_id, delta, datetime.now(UTC))
         )
 
     def get_top_k(self) -> list[tuple[str, int]]:
         """O(n log k) — heapq.nlargest is optimal for top-K from unsorted data.
 
-        At n=500,000 users and k=10: ~500,000 * log(10) ≈ 1.66 million comparisons.
-        vs sorted(): 500,000 * log(500,000) ≈ 9.5 million comparisons — 5.7x more work.
-        Wall time: ~15ms vs ~85ms at 500,000 users on a modern CPU.
+        At n=500,000 users and k=10: ~500,000 * log2(10) ≈ 1.66 million comparisons.
+        vs sorted(): 500,000 * log2(500,000) ≈ 9.5 million comparisons — 5.7x more work.
+        Measured wall time on one 64-bit CPython 3.13 machine: ~22ms vs ~140ms per call,
+        a 6.4x gap. The measured ratio running slightly above the comparison-count ratio
+        is expected: sorted() also allocates and fills a 500,000-element result list,
+        which nlargest never does. Treat the absolute milliseconds as machine-specific
+        and the ratio as the transferable number.
         """
         return heapq.nlargest(self.top_k, self.scores.items(), key=lambda x: x[1])
 
@@ -1154,9 +1217,10 @@ elapsed_sort = time.perf_counter() - t0
 print(f"sorted() x{N_READS}:         {elapsed_sort*1000:.1f}ms total, "
       f"{elapsed_sort/N_READS*1000:.2f}ms/call")
 
-# Typical output at 500,000 users:
-# heapq.nlargest  x200: 1950ms total,  9.75ms/call
-# sorted() x200:         16200ms total, 81.00ms/call
+# Representative output at 500,000 users (64-bit CPython 3.13; absolute numbers vary
+# by machine, the ratio does not):
+# heapq.nlargest  x200:  4390ms total,  21.9ms/call
+# sorted() x200:        27970ms total, 139.9ms/call
 ```
 
 ---
@@ -1197,6 +1261,6 @@ flowchart LR
 ### Key Lessons
 
 1. `Counter` eliminates manual `dict.get(key, 0) + delta` boilerplate and is a drop-in `dict` replacement for frequency accumulation.
-2. `heapq.nlargest(k, iterable)` beats `sorted()` for top-K retrieval when k << n. At k=10, n=500,000: 8x faster.
+2. `heapq.nlargest(k, iterable)` beats `sorted()` for top-K retrieval when k << n. At k=10, n=500,000: about 6.4x faster measured, against a 5.7x comparison-count prediction.
 3. `deque(maxlen=N)` is a zero-maintenance circular buffer — the oldest element is discarded automatically on `append` when full. No manual index management needed.
 4. `defaultdict.get(key, [])` (read-only) versus `defaultdict[key]` (read-write) is a critical distinction. Using bracket access in a read-only path silently creates thousands of spurious empty-list entries, inflating memory and corrupting iteration logic.

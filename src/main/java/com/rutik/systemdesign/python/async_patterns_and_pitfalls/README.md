@@ -28,7 +28,8 @@ This module covers:
 - Circuit breaker pattern in async code
 - Common memory leaks: untracked tasks, un-closed async generators
 
-Python version baseline for this module: **3.11** (3.12 for free-threading notes).
+Python version baseline for this module: **3.11** for the async APIs themselves; runtime
+behaviour and defaults are stated for **3.14**, the current stable release.
 
 ---
 
@@ -47,9 +48,9 @@ heavy traffic gracefully.
 
 **Why it matters**: FastAPI's entire performance advantage over synchronous Flask comes from
 the event loop's ability to handle thousands of concurrent I/O-bound requests on a single
-thread. One blocking call inside a route function erases that advantage completely. At
-Stripe, a mistaken `time.sleep()` inside an async payment handler caused a 40-second outage
-affecting 12,000 merchants during a 2022 incident.
+thread. One blocking call inside a route function erases that advantage completely — and it
+erases it silently, because the code still passes every unit test. The failure only appears
+under concurrency, which is exactly where the load test is usually skipped.
 
 **Key insight**: `async def` does not make a function non-blocking. It only marks it as a
 coroutine that *can* yield. The blocking happens when you call a sync function inside it
@@ -274,31 +275,39 @@ gets 6s, and whatever the inner steps do not use is still available to the outer
 
 ### 6.1 Detecting Blocking-in-Async
 
-Python's debug mode emits a warning when a coroutine holds the event loop for more than
-100ms without yielding.
+Python's debug mode logs a warning when a callback or task holds the event loop for longer
+than `loop.slow_callback_duration`, which defaults to 0.1 seconds.
 
 ```python
 import asyncio
 import logging
+import time
 
 logging.basicConfig(level=logging.DEBUG)
 
 async def main() -> None:
-    loop = asyncio.get_event_loop()
-    loop.set_debug(True)          # enables slow-callback warnings (> 100ms)
+    loop = asyncio.get_running_loop()
     loop.slow_callback_duration = 0.05  # tighten to 50ms in production profiling
-    await asyncio.sleep(0)        # yield once to let debug hooks initialize
+    time.sleep(0.153)                   # stand-in for the blocking call under investigation
 
-asyncio.run(main())
+asyncio.run(main(), debug=True)         # debug=True is the supported switch
 ```
 
-Output when a route blocks for 150ms:
+Output when a route blocks for 150ms — note the level is WARNING, not DEBUG, so it survives
+a production log config that filters DEBUG out:
 ```
-DEBUG:asyncio:Executing <Task ...> took 0.153 seconds
+WARNING:asyncio:Executing <Task ... coro=<main() running at app.py:9> ...> took 0.158 seconds
 ```
 
-**Sentry integration** (production): `sentry_sdk.init(integrations=[AsyncioIntegration()])`.
-Sentry captures blocking-loop events as performance issues.
+**Attaching to a service that is already wedged** (3.14): `python -m asyncio ps <PID>` and
+`python -m asyncio pstree <PID>` dump the live await-graph of a running process without
+restarting it or adding instrumentation. If a task's stack sits in a synchronous frame
+rather than at an `await`, that frame is the blocking call.
+
+Sentry's `AsyncioIntegration` (`sentry_sdk.init(integrations=[AsyncioIntegration()])`)
+captures unhandled exceptions raised inside tasks and adds a span per task to the
+performance waterfall. It does not detect loop blocking on its own — a blocked loop shows up
+there only indirectly, as inflated span durations across unrelated tasks.
 
 **time.sleep vs asyncio.sleep — the canonical example**:
 
@@ -330,7 +339,10 @@ asyncio.run(demo())
 ### 6.2 asyncio.to_thread() — Bridging Sync Libraries
 
 `asyncio.to_thread()` (3.9) submits a callable to the default `ThreadPoolExecutor`.
-Thread pool size: `min(32, os.cpu_count() + 4)` (CPython default).
+Thread pool size: `min(32, (os.process_cpu_count() or 1) + 4)` (CPython default). Since 3.13
+the count comes from `os.process_cpu_count()`, not `os.cpu_count()` — it honours CPU affinity
+and the `PYTHON_CPU_COUNT` environment variable, so a container pinned to 2 CPUs gets a
+6-thread pool rather than one sized for the whole host.
 
 ```python
 import asyncio
@@ -344,8 +356,14 @@ async def fetch_with_requests(url: str) -> bytes:
     return response.content
 
 # Wrapping blocking file I/O
+def _read_text(path: str) -> str:
+    with open(path, encoding="utf-8") as fh:   # open() must run in the worker thread too
+        return fh.read()
+
 async def read_file(path: str) -> str:
-    return await asyncio.to_thread(open(path).read)
+    return await asyncio.to_thread(_read_text, path)
+# NOT to_thread(open(path).read): open() would execute on the loop thread before the call
+# is ever submitted, and the file handle would only close at GC time.
 
 # Wrapping CPU-bound work (note: still GIL-bound; use ProcessPoolExecutor for true parallelism)
 def compute_hash(data: bytes) -> str:
@@ -444,8 +462,8 @@ async def fetch_all(urls: list[str]) -> list[dict[str, Any]]:
         tasks = [fetch(client, sem, url) for url in urls]
         return await asyncio.gather(*tasks)
 
-# Concrete numbers:
-# 1000 URLs, no semaphore  → 1000 simultaneous connections → 729 × 429 errors (72.9% failure)
+# Illustrative numbers for a 100 req/s downstream limit:
+# 1000 URLs, no semaphore  → all 1000 in flight at once    → ~700 × 429 errors (~70% failure)
 # 1000 URLs, Semaphore(50) → 20 sequential batches of 50   → 0 × 429 errors (0.0% failure)
 # Throughput with limit: 50 req / avg_latency_per_req ≈ 50 / 0.1s = 500 req/s (sustained)
 ```
@@ -667,9 +685,12 @@ async def two_step_operation() -> dict[str, Any]:
     # If outer fires, TimeoutError propagates regardless of inner state
 ```
 
-Key difference: `asyncio.timeout()` raises `TimeoutError` (built-in, 3.11).
-`asyncio.wait_for()` raises `asyncio.TimeoutError` (subclass of `TimeoutError` since 3.11,
-but separate in 3.10 and earlier — catching `TimeoutError` works in 3.11+ for both).
+Key difference is composition, not the exception: both raise the built-in `TimeoutError`.
+Since 3.11 `asyncio.TimeoutError` is a plain *alias* of the built-in, not a subclass —
+`asyncio.TimeoutError is TimeoutError` evaluates to `True`, so a single
+`except TimeoutError:` catches every timeout in the module. What `asyncio.timeout()` adds is
+that it is an async context manager, so it can wrap a block containing other `async with`
+statements; `wait_for()` can only wrap a single awaitable.
 
 ### 6.8 Async Memory Leaks — Causes and Fixes
 
@@ -677,9 +698,10 @@ but separate in 3.10 and earlier — catching `TimeoutError` works in 3.11+ for 
 
 ```python
 import asyncio
-import weakref
 
-# Pattern: track all background tasks with a weakref set
+# Pattern: hold a STRONG reference to every background task until it finishes.
+# A weakref set would defeat the purpose — the loop only keeps a weak reference itself,
+# which is exactly why an untracked task can vanish mid-flight.
 _background_tasks: set[asyncio.Task] = set()
 
 def fire_and_forget(coro) -> asyncio.Task:
@@ -692,8 +714,13 @@ def fire_and_forget(coro) -> asyncio.Task:
 **Cause 2: un-closed async generators**
 
 ```python
-# If caller breaks out of async for mid-stream, generator's cleanup (finally block)
-# runs only when GC collects it — which may be delayed in CPython or never in PyPy.
+# If the caller breaks out of async for mid-stream, the generator's finally block does NOT
+# run at the break. asyncio's asyncgen finalizer hook (PEP 525) schedules aclose() as a task,
+# so cleanup lands at least one loop iteration later even in CPython — and later still on a
+# runtime without refcounting. Measured ordering with a plain `break`:
+#   after-break -> (one loop tick) -> gen-finally
+# The connection or file handle stays open across that gap, and if the loop is torn down
+# first it only closes in loop.shutdown_asyncgens().
 
 # Fix: use contextlib.aclosing()
 from contextlib import aclosing
@@ -820,9 +847,39 @@ async def call_payment_api(payload: dict) -> dict:
     return await breaker.call(_do_payment_request, payload)
 ```
 
-Cross-reference: see `../../backend/api_gateway_patterns/` for circuit breaker concepts
-at the API gateway layer. See `../asyncio_and_event_loop/README.md` for `TaskGroup` and
-structured concurrency fundamentals.
+**The trap: a timeout does not trip this breaker.** Every resilience layer in this module
+either wraps or is wrapped by a cancellation, and cancellation is not an `Exception`.
+`asyncio.CancelledError` inherits directly from `BaseException` (since 3.8), so the
+`except Exception:` arm above never sees it. Wrap `_breaker.call(...)` in
+`asyncio.timeout(8.0)` — exactly what the case study below does — and a downstream that
+hangs on every request produces this:
+
+```python
+# Measured, not asserted: the breaker's failure counter after one 50ms timeout
+async with asyncio.timeout(0.05):
+    await breaker.call(hangs_for_5s)     # raises TimeoutError to the caller
+# breaker._failures == 0    <- the failure the breaker exists to count was invisible to it
+```
+
+The service therefore times out forever and never opens: the slowest, most expensive failure
+mode is the one the breaker cannot see. Two ways to close it, and they are not equivalent:
+
+- **Put the timeout inside the breaker's protected callable**, so the `TimeoutError` is
+  raised by `fn()` and travels through the `except Exception:` arm. This is the usual choice.
+- **Catch `BaseException` in the breaker and re-raise**, counting `CancelledError` as a
+  failure. Do this only if you are certain no *deliberate* cancellation (shutdown, a
+  `TaskGroup` sibling failing) can reach it, or a clean shutdown will trip every breaker on
+  the way out.
+
+The same asymmetry governs the retry decorator: `exceptions=(Exception,)` will not retry a
+cancellation, which is the correct default — a cancelled task must die, not retry.
+
+Cross-reference: cancellation semantics themselves — `CancelledError` propagation,
+`asyncio.shield()`, cancellation scopes, and `Task.uncancel()` — are developed in
+[`../asyncio_and_event_loop/structured_concurrency.md`](../asyncio_and_event_loop/structured_concurrency.md)
+§6.2. See `../../backend/api_gateway_patterns/` for circuit breaker concepts at the API
+gateway layer, and `../asyncio_and_event_loop/README.md` for `TaskGroup` and structured
+concurrency fundamentals.
 
 ---
 
@@ -924,8 +981,8 @@ async def generate(prompt: str) -> StreamingResponse:
 | Pattern | Benefit | Cost | When to Choose |
 |---|---|---|---|
 | `asyncio.to_thread()` | Unblocks event loop; reuses existing sync library | Thread creation overhead; GIL contention for CPU work | I/O-bound sync libs (requests, psycopg2 in sync mode) |
-| `ProcessPoolExecutor` | True parallelism for CPU-bound work | Process spawn cost (50–100ms); IPC serialization overhead | SHA/RSA, image resize, numpy-heavy computation |
-| `asyncio.Semaphore` | Simple, composable rate limiting | Coroutine suspension overhead; no fairness guarantee | Third-party API rate limits, DB connection pool limits |
+| `ProcessPoolExecutor` | True parallelism for CPU-bound work | Worker start-up plus a full interpreter import; IPC pickling on every call | SHA/RSA, image resize, numpy-heavy computation |
+| `asyncio.Semaphore` | Simple, composable rate limiting; FIFO acquisition order | Coroutine suspension overhead; permit count is only meaningful next to a stated latency | Third-party API rate limits, DB connection pool limits |
 | `asyncio.Queue(maxsize)` | Bounded buffer with backpressure | Adds latency when queue is full (producer blocks) | High-volume pipeline with uneven producer/consumer speed |
 | `retry_async` decorator | Transparent retry logic | Increases tail latency; may amplify load on target | Transient network errors, 429/503 from external APIs |
 | `AsyncCircuitBreaker` | Fail fast; protects downstream | State management overhead; false trips possible | Microservice calls, external payment/email APIs |
@@ -1081,15 +1138,20 @@ async def process_item(item_id: int) -> dict:
 ### PITFALL 3: unbounded gather over thousands of URLs
 
 ```python
-# BROKEN: 10,000 concurrent connections → 429 rate-limiting, connection pool exhaustion
+# BROKEN: 10,000 coroutines all contending for one client → pool timeouts + 429s
 import asyncio, httpx
 
 async def scrape_all(urls: list[str]) -> list[bytes]:
     async with httpx.AsyncClient() as client:
-        return await asyncio.gather(          # spawns len(urls) concurrent coroutines
-            *(client.get(u).aread() for u in urls)
+        resps = await asyncio.gather(         # spawns len(urls) concurrent coroutines
+            *(client.get(u) for u in urls)
         )
-# Result with 10,000 URLs against a 100 req/s API: ~9,900 × 429 errors
+        return [r.content for r in resps]
+# httpx's default Limits are max_connections=100, so 9,900 of those coroutines queue on the
+# pool rather than opening a socket — and the default 5s pool timeout turns most of them into
+# httpx.PoolTimeout. Raise max_connections to "fix" that and the failure simply moves: now
+# you really do open 10,000 sockets, hit the process file-descriptor limit, and the API
+# starts returning 429. Neither outcome is bounded by anything you chose deliberately.
 ```
 
 ```python
@@ -1172,13 +1234,14 @@ async def safe_consumer(url: str) -> dict | None:
 |---|---|---|
 | `httpx` | Async HTTP client | Drop-in requests API; supports HTTP/2; use `AsyncClient` |
 | `aiofiles` | Async file I/O | Wraps file ops in executor; releases GIL |
-| `asyncpg` | Async PostgreSQL driver | 3–5× faster than psycopg2 for I/O-bound workloads |
-| `aioredis` | Async Redis client | Bundled into redis-py 4.2+ as `redis.asyncio` |
+| `asyncpg` | Async PostgreSQL driver | Maintainers' benchmark: ~5× faster than psycopg3 |
+| `redis.asyncio` | Async Redis client | Ships inside `redis-py`; import `redis.asyncio as redis` |
 | `tenacity` | Production retry library | More configurable than a hand-rolled decorator; async-native |
 | `circuitbreaker` (PyPI) | Circuit breaker decorator | Lightweight; wraps both sync and async callables |
 | `anyio` | Async portability layer | Works on asyncio and trio; `anyio.to_thread.run_sync()` |
 | `contextvars` | Context propagation | Carries trace IDs, auth tokens across await boundaries |
-| `Sentry AsyncioIntegration` | Blocking-loop detection | Captures slow callbacks as performance issues |
+| `Sentry AsyncioIntegration` | Task error capture + per-task spans | Captures unhandled task exceptions; does not itself detect loop blocking |
+| `python -m asyncio ps/pstree` | Live await-graph of a running PID (3.14) | Attaches to a wedged process without restarting or instrumenting it |
 | `yappi` | Async-aware profiler | Profiles coroutine wall time (not just CPU time) |
 
 **asyncio.timeout() availability**:
@@ -1205,10 +1268,13 @@ by enabling `loop.set_debug(True)` (warns when a callback takes > 100ms), by add
 with a `ProcessPoolExecutor` when you need to bypass the GIL for CPU-bound work.
 
 **Q3: How large is the default thread pool used by `asyncio.to_thread()`?**
-`min(32, os.cpu_count() + 4)` — this is the default `ThreadPoolExecutor` size in CPython.
-On a 4-core machine: `min(32, 8) = 8` threads. If all 8 are occupied with blocking calls,
-the 9th `to_thread()` call will block the event loop waiting for a thread to free up.
-For high-concurrency workloads, create a custom pool and pass it to `run_in_executor`.
+`min(32, (os.process_cpu_count() or 1) + 4)` — the default `ThreadPoolExecutor` size in
+CPython, computed from `os.process_cpu_count()` since 3.13 so it respects CPU affinity and
+`PYTHON_CPU_COUNT`. On a 4-CPU container: `min(32, 8) = 8` threads. The 9th concurrent
+`to_thread()` call does not block the loop — the work item is queued in the executor and the
+awaiting coroutine simply suspends — but its latency now includes the queue wait, which is
+invisible in traces. For high-concurrency workloads, create a custom pool and pass it to
+`run_in_executor`.
 
 **Q4: What is the difference between `asyncio.Semaphore` and `asyncio.Lock`?**
 `Lock` allows exactly 1 concurrent holder. `Semaphore(n)` allows up to `n` concurrent holders.
@@ -1216,10 +1282,13 @@ A `Lock` is a `Semaphore(1)`. Use `Semaphore` to bound concurrency (e.g., max 20
 at once); use `Lock` for mutual exclusion (e.g., protecting a shared counter or cache).
 
 **Q5: Why does unbounded `asyncio.gather()` over 10,000 URLs fail?**
-It creates 10,000 coroutines that all attempt to establish TCP connections simultaneously.
-This exhausts the OS file-descriptor limit (default 1024 on Linux), triggers 429 Too Many
-Requests from the target, and can crash the target service. Fix: wrap each coroutine with
-`async with asyncio.Semaphore(50)` to bound concurrency to 50 at a time.
+Because nothing in `gather()` bounds concurrency, so the limit that bites is whichever
+resource runs out first rather than one you chose. With `httpx.AsyncClient` defaults
+(`max_connections=100`, 5s pool timeout) the surplus coroutines queue on the connection pool
+and fail with `httpx.PoolTimeout`. Raise the pool limit and the failure relocates: you
+exhaust the process file-descriptor limit (`ulimit -n`, commonly 1024 soft on Linux) and the
+target starts returning 429. Fix: gate each coroutine on `async with asyncio.Semaphore(50)`
+so the concurrency is a reviewable constant.
 
 **Q6: What is jitter in retry logic, and why does it matter?**
 Jitter is a random delay added to the exponential backoff interval. Without jitter, N services
@@ -1229,11 +1298,12 @@ from `uniform(0, min(max_delay, base * 2^attempt))`, spreading retries across th
 and reducing load on the target by a factor of N.
 
 **Q7: What is the difference between `asyncio.timeout()` and `asyncio.wait_for()`?**
-Both cancel the operation after a specified duration. `asyncio.timeout()` (3.11) is an async
-context manager, making it composable with nested context managers and `try/except` blocks.
-`asyncio.wait_for()` wraps a coroutine and must be called at the `await` site. `asyncio.timeout()`
-raises the built-in `TimeoutError`; `asyncio.wait_for()` raises `asyncio.TimeoutError` (which
-is a subclass of `TimeoutError` in 3.11+ but distinct in earlier versions).
+The difference is composition, not the exception they raise. `asyncio.timeout()` (3.11) is an
+async context manager, so it can put one deadline over a whole block that itself contains
+`async with` statements; `asyncio.wait_for()` wraps a single awaitable at the `await` site.
+Both raise the built-in `TimeoutError` — since 3.11 `asyncio.TimeoutError` is an alias of it,
+not a subclass, so `asyncio.TimeoutError is TimeoutError` is `True` and one `except
+TimeoutError:` covers both.
 
 **Q8: What happens when you call `asyncio.create_task()` but don't store the return value?**
 The `Task` object has no strong reference, so Python's garbage collector may collect and
@@ -1262,12 +1332,13 @@ streaming: HTTP pagination, database cursor iteration, log tailing — anywhere 
 process items as they arrive without loading all into memory first.
 
 **Q12: How does `contextlib.aclosing()` prevent resource leaks in async generators?**
-When `async for` exits early (via `return`, `break`, or exception), Python schedules the
-generator's `aclose()` coroutine, but only calls it during GC (in CPython, this is immediate
-due to reference counting, but in PyPy it's non-deterministic). `aclosing()` wraps the
-generator in an `async with` block that explicitly awaits `gen.aclose()` on exit, ensuring
-the generator's `finally` block (which may hold network connections, file handles) runs
-immediately regardless of the GC implementation.
+It turns a deferred cleanup into a synchronous one at the point of exit. When `async for`
+exits early via `return`, `break` or an exception, asyncio's PEP 525 finalizer hook schedules
+`aclose()` as a *task* — so even in refcounted CPython the generator's `finally` block runs
+at least one loop iteration after the break, and if the loop is torn down first it runs only
+in `loop.shutdown_asyncgens()`. `aclosing()` wraps the generator in an `async with` that
+awaits `gen.aclose()` on exit, so the connection or file handle in that `finally` is released
+before the next line of the caller runs.
 
 **Q13: How would you debug a FastAPI service where all requests are slow but CPU usage is low?**
 Low CPU + slow requests in an async service is the classic blocking-in-async signature.
@@ -1284,6 +1355,25 @@ when all complete. Use `async for` when you need ordered, lazy streaming from on
 Use `gather()` (with a semaphore) when you want to fan out to many sources simultaneously
 and collect results. Combining both: use an async generator as a lazy source, then spawn
 bounded concurrent consumers with `gather()`.
+
+**Q: Why does a request that times out often fail to trip the circuit breaker wrapping it?**
+Because `asyncio.CancelledError` inherits from `BaseException`, not `Exception`, so a breaker
+whose failure arm is `except Exception:` never counts a timeout. `asyncio.timeout()` cancels
+the inner task and converts the cancellation to `TimeoutError` only at the context manager's
+own boundary — outside the breaker. The result is the worst case in practice: a downstream
+that hangs on every call is the one failure mode the breaker cannot see, so it times out
+forever and never opens. Fix it by moving the timeout inside the callable the breaker
+protects, so the `TimeoutError` is raised by `fn()` and travels through the `except
+Exception:` arm.
+
+**Q: Is `asyncio.Semaphore` acquisition fair, or can a coroutine be starved?**
+It is FIFO — waiters are queued in a `deque` and woken in arrival order. CPython's
+`Semaphore.acquire()` deliberately refuses the fast path whenever the semaphore is locked
+("Maintain FIFO, wait for others to start even if `_value > 0`"), so a newly arriving
+coroutine cannot jump ahead of a queued one. That means a permit count also bounds worst-case
+wait: with `Semaphore(C)` and average hold time `L`, the coroutine at queue position `k`
+waits about `(k / C) x L`. Starvation is therefore not a failure mode you need to design
+around, unlike with a naive counter-plus-Event implementation.
 
 **Q15: How do you safely propagate context (e.g., request IDs, auth tokens) across await boundaries in asyncio?**
 Use `contextvars.ContextVar`. Unlike `threading.local`, `ContextVar` values are inherited by
@@ -1318,15 +1408,23 @@ This is how Sentry and OpenTelemetry propagate trace context across async calls.
 7. **Add jitter to every retry.** Never use pure exponential backoff without jitter in
    distributed systems — it creates thundering herds at scale.
 
-8. **Set explicit timeouts on every outbound call.** Default `httpx.AsyncClient` has no
-   timeout. Set `timeout=httpx.Timeout(connect=2.0, read=10.0, write=5.0, pool=1.0)`.
+8. **Set explicit per-phase timeouts on every outbound call.** `httpx.AsyncClient` does
+   default to a timeout — 5 seconds applied to all four phases — but one number for connect,
+   read, write and pool is almost never the budget you want. Set
+   `timeout=httpx.Timeout(connect=2.0, read=10.0, write=5.0, pool=1.0)` so a slow DNS lookup
+   and a slow response body fail on different clocks.
 
 9. **Use `ContextVar` for cross-cutting data (trace IDs, tenant IDs)**, not function
    parameters or global state. It's the only safe way to propagate data across `await` chains
    in asyncio.
 
-10. **Profile async services with `yappi` (wall-clock mode), not `cProfile`** (CPU-only).
-    cProfile misses I/O wait time; yappi shows real coroutine duration including suspension.
+10. **Profile async services with `yappi` in wall-clock mode, not `cProfile`.** cProfile does
+    time in wall-clock by default, so it is not blind to I/O — its problem is attribution: it
+    aggregates per function across the whole loop thread and cannot separate one task's time
+    from another's, so a suspended coroutine's wait is charged to whatever ran next. yappi
+    is coroutine-aware, but its default `clock_type` is CPU — you must set
+    `yappi.set_clock_type("wall")` explicitly or you will measure the opposite of what you
+    wanted.
 
 11. **Test backpressure by injecting a slow consumer.** Add `await asyncio.sleep(0.1)` in
     the consumer coroutine during integration tests and verify the producer blocks rather
@@ -1356,20 +1454,31 @@ a naive `gather()` over all pending record IDs per batch cycle.
 import asyncio
 import httpx
 
+async def _get(client: httpx.AsyncClient, rid: str) -> dict:
+    resp = await client.get(f"/records/{rid}")
+    resp.raise_for_status()
+    return resp.json()
+
 async def ingest_batch(record_ids: list[str]) -> list[dict]:
     async with httpx.AsyncClient(base_url="https://billing.api.com") as client:
         results = await asyncio.gather(
-            *(client.get(f"/records/{rid}").json() for rid in record_ids),
+            *(_get(client, rid) for rid in record_ids),
             return_exceptions=True,
         )
-    # 70% are HTTPStatusError(429) or ConnectError — ignored silently
+    # most are HTTPStatusError(429) or PoolTimeout — swallowed silently by the isinstance filter
     return [r for r in results if isinstance(r, dict)]
 ```
 
-Observed in production (5,000-record batch, 2023-11-14):
+Note the shape of the bug even before the rate limiting: you cannot write
+`client.get(url).json()` inside the generator, because `client.get()` returns a coroutine and
+a coroutine has no `.json()` — that raises `AttributeError` before `gather()` is ever
+entered. Each call has to be its own `async def`, which is also where the `await` belongs.
+
+Illustrative run over a 5,000-record batch (composite of this failure mode, not a published
+incident report):
 - 3,487 × HTTP 429 errors (69.7%)
 - 112 × ConnectTimeout errors (database write skipped for those records)
-- Billing API sent abuse notice; service temporarily blocked for 10 minutes
+- Billing API applies an abuse block for 10 minutes
 
 ---
 
@@ -1404,9 +1513,10 @@ def retry_async(
                 try:
                     return await fn(*args, **kwargs)
                 except exceptions as exc:
-                    # Only retry 429 and 5xx, not 4xx client errors
+                    # Only retry 429 and 5xx; every other 4xx is the caller's bug, not transient
                     if isinstance(exc, httpx.HTTPStatusError):
-                        if exc.response.status_code < 429:
+                        code = exc.response.status_code
+                        if code != 429 and code < 500:
                             raise
                     if attempt == max_attempts - 1:
                         raise
@@ -1538,17 +1648,28 @@ async def ingest_batch_resilient(record_ids: list[str]) -> dict[str, Any]:
 | HTTP 429 errors | 3,487 (69.7%) | 0 (0.0%) |
 | ConnectTimeout errors | 112 (2.2%) | 4 (0.08%) |
 | Successfully ingested | 1,401 (28.0%) | 4,996 (99.92%) |
-| Wall-clock time for batch | 18s (then crashed) | 127s (completed) |
+| Wall-clock time for batch | 18s (then crashed) | ~22s (completed) |
 | Billing API abuse flag | Yes (10 min block) | No |
 
 **Key design decisions**:
 
-- `Semaphore(40)` keeps concurrent requests well below the 500 req/s rate limit; with 8ms
-  average latency, 40 concurrent = 5,000 req/s — so semaphore is calibrated to 40 × (1/0.08) = 500 req/s max.
+- `Semaphore(40)` is derived from the rate limit, not guessed: the billing API's measured
+  average latency is 80 ms, so by Little's Law `C = RPS x L = 500 x 0.08 = 40` permits pins
+  throughput at exactly the 500 req/s ceiling. Written the other way, `40 / 0.08 = 500`.
+  That derivation is only valid at `L = 80 ms` — if the API degrades to 200 ms the same 40
+  permits deliver 200 req/s, and if it speeds up to 8 ms they would deliver 5,000 req/s and
+  blow straight through the limit. Record the `L` beside the constant.
 - Retry skips 4xx errors (except 429) — retrying a 400 Bad Request is wasteful.
 - Circuit breaker with threshold=10 trips before a cascade failure affects the full batch.
 - `asyncio.Queue(maxsize=200)` buffers 200 IDs; with 20 workers, the producer can run ahead
   by at most 200 items before it suspends, keeping memory bounded.
+- The two concurrency knobs are not independent, and `WORKER_COUNT = 20` is the one that
+  binds: only 20 consumers ever call `fetch_record`, so at most 20 of the 40 permits are
+  ever held. Effective throughput is `20 / 0.08 = 250 req/s`, which is why 5,000 records
+  take ~20 s rather than the 10 s the semaphore alone would allow. The `Semaphore(40)` is a
+  safety ceiling for the day someone raises `WORKER_COUNT`, not the active limiter — a
+  distinction worth stating out loud, because a semaphore that never blocks reads as if it
+  were doing the work.
 - All tasks are tracked in `_tasks` to prevent silent GC cancellation.
 
 Cross-references:

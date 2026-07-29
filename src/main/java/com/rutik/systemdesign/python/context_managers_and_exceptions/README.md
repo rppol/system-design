@@ -367,7 +367,7 @@ def merge_files(paths: list[Path], output: Path) -> None:
     # All N+1 file handles closed in LIFO order; callback fires first
 ```
 
-`stack.callback(fn)` is equivalent to `__exit__` with no exception handling — the function is always called, receives no arguments, and its return value is ignored.
+`stack.callback(fn, *args, **kwargs)` registers a plain function as a teardown step. It is `__exit__` with no exception handling: the function is always called on unwind, receives whatever arguments you bound at registration time (none, in the example above), never sees the exception triple, and its return value is ignored — so a callback can never suppress an exception the way a real `__exit__` can.
 
 **Stated plainly.** "However many things you pushed onto the stack, exactly that many teardowns
 run, in exactly the reverse order." The count is not a detail — it is the guarantee that makes
@@ -582,7 +582,7 @@ app = FastAPI(lifespan=lifespan)
 
 **SQLAlchemy sessions** expose `Session` as a context manager: `with Session(engine) as session` commits on clean exit and rolls back on exception.
 
-**`tempfile.TemporaryDirectory`** is a class-based context manager that deletes the temp directory tree in `__exit__` regardless of exceptions — 7 lines of production code that have prevented countless resource leaks.
+**`tempfile.TemporaryDirectory`** is a class-based context manager that removes the temp directory tree on exit regardless of exceptions. It is worth reading in the stdlib rather than reimplementing: it registers a `weakref.finalize` so the directory is still cleaned up if the object is garbage-collected without a `with` block, and (since 3.12) takes `delete=False` for the debugging case where you want to inspect the contents afterwards.
 
 **`unittest.mock.patch`** is a context manager (and a decorator) that replaces an attribute for the duration of a `with` block and restores the original in `__exit__`.
 
@@ -820,7 +820,7 @@ Both `KeyboardInterrupt` and `SystemExit` inherit directly from `BaseException`,
 Starlette (FastAPI's ASGI foundation) wraps each `yield` dependency in `contextlib.asynccontextmanager` internally. Code before `yield` runs during request setup; code after `yield` (optionally in `try/finally`) runs during response teardown — after the route handler returns but before the response is fully flushed. This gives you deterministic resource cleanup that is scoped exactly to the HTTP request lifetime, with no risk of forgetting to release the resource.
 
 **Q10: What happens if `__exit__` itself raises an exception?**
-The new exception from `__exit__` replaces the original exception — the original is lost unless explicitly re-raised or chained. This is a common, subtle bug: a DB session's `__exit__` that raises during rollback hides the original application error. The fix is to wrap cleanup logic in `__exit__` in its own `try/except` and log the secondary failure while re-raising the original (or raising a combined exception).
+The new exception becomes the one that propagates, and the original is attached to it as `__context__` rather than being destroyed. Python is raising inside an active exception handler, so implicit chaining applies: the traceback prints the original first, then "During handling of the above exception, another exception occurred", then the cleanup failure. What is lost is not the information but the *framing* — the exception your caller catches, matches on, and alerts on is `RuntimeError("rollback failed")`, not the `ValueError` that actually broke the request, so every `except ValueError:` upstream stops firing. The fix is to wrap cleanup logic in `__exit__` in its own `try/except`, log the secondary failure, and re-raise the original so the type your callers match on is preserved.
 
 **Q11: How do you use `contextlib.AsyncExitStack` in an async FastAPI lifespan to manage multiple async resources?**
 `AsyncExitStack` (Python 3.7+) is the async equivalent of `ExitStack`. In a `lifespan` function, you `await stack.enter_async_context(SomeAsyncCM())` for each async resource. The stack ensures all resources are torn down in LIFO order when the application shuts down, even if some teardowns raise. This pattern avoids deeply nested `async with` blocks.
@@ -840,37 +840,48 @@ async def lifespan(app: FastAPI):
 ```
 
 **Q12: How would you implement a reentrant lock as a context manager in Python?**
-Use `threading.RLock` as the underlying primitive, expose it as a CM by delegating `__enter__`/`__exit__` to the lock object, and add a counter tracking reentry depth:
+You would not — `threading.RLock` already is one, and wrapping it adds nothing. `RLock` implements `__enter__`/`__exit__` directly and tracks owner thread plus recursion depth in C, so `with lock:` nested inside another `with lock:` on the same thread simply increments and decrements a counter. Writing a `ReentrantLock` class that delegates to an internal `RLock` produces a strictly worse object: one extra Python-level call on every acquire and release, and no added behaviour.
+
+The question is worth asking because it tests whether you know what "reentrant" costs. If you genuinely need to *observe* the depth — to assert an invariant, or to run a hook only at the outermost level — that is the case where a wrapper earns its place, and the counter must be per-thread:
 
 ```python
 import threading
 
-class ReentrantLock:
+class DepthTrackingLock:
     def __init__(self) -> None:
         self._lock = threading.RLock()
+        self._local = threading.local()      # depth is per-thread, not per-object
 
-    def __enter__(self) -> "ReentrantLock":
+    @property
+    def depth(self) -> int:
+        return getattr(self._local, "depth", 0)
+
+    def __enter__(self) -> "DepthTrackingLock":
         self._lock.acquire()
+        self._local.depth = self.depth + 1
         return self
 
     def __exit__(self, *args: object) -> bool:
+        self._local.depth -= 1
+        if self._local.depth == 0:
+            ...                              # outermost exit: flush, emit metric, ...
         self._lock.release()
         return False
 ```
 
-`threading.RLock` handles the reentry counting internally; the same thread can acquire it N times and must release it N times. The CM wrapper makes it safe to use with `with` without tracking acquire/release counts manually.
+A plain instance attribute instead of `threading.local()` would be the bug here: two threads can each hold the lock at different times, and a shared counter would interleave their depths.
 
 **Q13: Why does mixing `except*` and plain `except` in the same `try` block raise a `SyntaxError`?**
-Python enforces that a single `try` block uses either all plain `except` clauses or all `except*` clauses, never a mix, because the two mechanisms model fundamentally different results — a plain `except` catches one specific exception instance, while `except*` catches a subset of an `ExceptionGroup` and can leave the remainder to propagate. Allowing both in one `try` would create ambiguity about whether a caught exception is a single object or a partitioned group. The fix is to convert the whole block to `except*` clauses once any handler in it needs to process `ExceptionGroup` members. This restriction is enforced at parse time, before the code ever runs, so it surfaces immediately in code review or CI rather than as a runtime surprise.
+Because the two forms model fundamentally different results and Python refuses to guess which one a handler meant. A plain `except` catches one specific exception instance; `except*` catches a *subset* of an `ExceptionGroup` and leaves the unmatched remainder to propagate as a new group. Allowing both in one `try` would create ambiguity about whether a caught exception is a single object or a partitioned group. The fix is to convert the whole block to `except*` clauses once any handler in it needs to process `ExceptionGroup` members. This restriction is enforced at parse time, before the code ever runs, so it surfaces immediately in code review or CI rather than as a runtime surprise.
 
 **Q14: How does `contextlib.suppress(SomeError)` work internally, and how is it safer than a bare `except SomeError: pass`?**
-`contextlib.suppress` is a context manager whose `__exit__` method checks whether the exception type raised inside the `with` block matches one of the types passed to `suppress(...)`, returning `True` (swallowing it) only on a match and `False` (re-raising) otherwise. A bare `except SomeError: pass` does the same thing syntactically, but `suppress` communicates intent explicitly at the point of use — a reviewer scanning `with suppress(FileNotFoundError): os.remove(path)` immediately knows which error is expected and why, without reading a comment. Because `suppress` only matches the exact types you list, an unrelated exception still propagates normally. Reserve `suppress` for genuinely expected, benign failures; anything else should be caught and logged.
+It is a context manager whose `__exit__` returns `True` only when the raised exception matches one of the types you listed, and `False` otherwise. That single returned bit is the whole implementation: truthy swallows the exception, falsy lets it propagate. A bare `except SomeError: pass` does the same thing syntactically, but `suppress` communicates intent explicitly at the point of use — a reviewer scanning `with suppress(FileNotFoundError): os.remove(path)` immediately knows which error is expected and why, without reading a comment. Because `suppress` only matches the exact types you list, an unrelated exception still propagates normally. Reserve `suppress` for genuinely expected, benign failures; anything else should be caught and logged.
 
 **Q15: What problem does `contextlib.nullcontext` solve, and when would you reach for it?**
 `contextlib.nullcontext` is a no-op context manager that lets you apply a context manager conditionally without writing an `if/else` branch around the `with` statement. A common case is an optional lock: `ctx = lock if needs_lock else contextlib.nullcontext()` followed by a single `with ctx:` block that works whether or not locking is actually needed. Without `nullcontext`, you would need to duplicate the entire block body inside both an `if needs_lock: with lock:` branch and an `else:` branch, doubling the code to maintain. `nullcontext` optionally accepts a value to return from `__enter__`, so it can also stand in for a CM whose `as` target is sometimes `None`.
 
 **Q16: In the case study's `managed_transaction`, why does the rollback logic catch `except BaseException` instead of `except Exception`?**
-Catching `BaseException` ensures the transaction still rolls back even if the failure is a `KeyboardInterrupt` or `SystemExit`, both of which inherit directly from `BaseException` and would otherwise skip an `except Exception` clause entirely. A database transaction left open when the process receives Ctrl-C or a graceful shutdown signal can hold locks or leave partial writes uncommitted, so the case study treats "the block did not finish cleanly" as more important than "what kind of exception ended it." This is one of the few legitimate uses of `except BaseException` — general-purpose code and HTTP middleware should still catch only `Exception` (see Q7) so signals and interpreter exit are not accidentally intercepted. The trade-off is scoped narrowly to the rollback path, which re-raises immediately after cleanup rather than swallowing the signal.
+So that Ctrl-C and `sys.exit()` still roll the transaction back. `KeyboardInterrupt` and `SystemExit` inherit directly from `BaseException`, so an `except Exception` clause never sees them and the rollback would be skipped. A database transaction left open when the process receives Ctrl-C or a graceful shutdown signal can hold locks or leave partial writes uncommitted, so the case study treats "the block did not finish cleanly" as more important than "what kind of exception ended it." This is one of the few legitimate uses of `except BaseException` — general-purpose code and HTTP middleware should still catch only `Exception` (see Q7) so signals and interpreter exit are not accidentally intercepted. The trade-off is scoped narrowly to the rollback path, which re-raises immediately after cleanup rather than swallowing the signal.
 
 ---
 
@@ -964,13 +975,11 @@ def managed_transaction(conn: Any, label: str = "tx") -> Generator[Any, None, No
       TransactionError chained to the original exception.
     """
     conn.begin()
-    exc_to_raise: BaseException | None = None
     try:
         yield conn
         conn.commit()
         logger.debug("Transaction '%s' committed", label)
-    except BaseException as original:
-        exc_to_raise = original
+    except BaseException:
         logger.error(
             "Transaction '%s' failed, rolling back",
             label,
@@ -1073,8 +1082,24 @@ The LIFO unwinding means metrics are always recorded regardless of whether the t
 ```python
 from contextlib import asynccontextmanager, AsyncExitStack
 from collections.abc import AsyncGenerator
-from fastapi import FastAPI
-import httpx
+from fastapi import Depends, FastAPI
+
+
+@asynccontextmanager
+async def async_measure_transaction(label: str) -> AsyncGenerator[None, None]:
+    """Async twin of measure_transaction -- same body, awaited protocol."""
+    start = time.perf_counter()
+    status = "success"
+    try:
+        yield
+    except Exception:
+        status = "error"
+        raise
+    finally:
+        TX_LATENCY.labels(label=label, status=status).observe(
+            time.perf_counter() - start
+        )
+
 
 @asynccontextmanager
 async def async_managed_transaction(session: AsyncSession, label: str) -> AsyncGenerator[AsyncSession, None]:
@@ -1125,4 +1150,4 @@ def test_commit_on_clean_exit():
     conn.rollback.assert_not_called()
 ```
 
-**Outcome:** The composable pattern gives a 40-line transaction CM and a 15-line metrics CM that each do one thing. The `ExitStack` composes them at the call site without either CM needing to know about the other. Adding a third concern (e.g., distributed tracing span) requires zero changes to existing CMs — only one `stack.enter_context()` line at the call site.
+**Outcome:** The composable pattern gives a transaction CM and a metrics CM of roughly thirty and fifteen lines respectively, each doing one thing. The `ExitStack` composes them at the call site without either CM needing to know about the other. Adding a third concern (e.g., distributed tracing span) requires zero changes to existing CMs — only one `stack.enter_context()` line at the call site.

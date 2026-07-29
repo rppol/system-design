@@ -18,12 +18,13 @@ Python implementations:
 
 | Library | API | Minimum Python |
 |---------|-----|---------------|
-| `trio` | `trio.open_nursery()` | 3.8 |
-| `anyio` | `anyio.create_task_group()` | 3.8 |
+| `trio` 0.33 | `trio.open_nursery()` | 3.10 |
+| `anyio` 4.x | `anyio.create_task_group()` | 3.10 |
 | `asyncio` | `asyncio.TaskGroup` | 3.11 |
 
-Python version scope: this sub-file targets Python 3.11 and 3.12. All examples use `X | None`
-union syntax, `asyncio.TaskGroup`, `asyncio.timeout()`, and `ExceptionGroup`.
+Python version scope: the APIs are 3.11+ (`asyncio.TaskGroup`, `asyncio.timeout()`,
+`ExceptionGroup`, `except*`); all examples use `X | None` union syntax, and runtime behaviour is
+stated for 3.14, the current stable release.
 
 ---
 
@@ -108,14 +109,18 @@ async def main() -> None:
         tg.start_soon(fetch_user, 2)
 ```
 
-`tg.start_soon()` schedules the coroutine but does not return a handle. Use
-`tg.start(coroutine)` (awaitable) when you need to wait for the task to signal readiness before
+Note the shape: `start_soon(func, *args)` takes a *function plus its arguments*, not an already-made
+coroutine object — that is what lets anyio name and re-create the task. Since anyio 4.14 it returns
+a `TaskHandle`, and the same release added `tg.create_task()` as an asyncio-shaped alias that also
+returns one, so the old "anyio gives you no handle" limitation is gone. Use `await tg.start(func,
+*args)` when you need to wait for the task to signal readiness (via `task_status.started()`) before
 the scope continues.
 
 ### 4.3 trio.open_nursery() — the original
 
-The nursery pattern was invented in Trio by Nathaniel J. Smith (2018). asyncio TaskGroup and anyio
-both implement the same semantics. Trio's nursery has one extension not present in asyncio:
+The nursery pattern originated in Trio, by Nathaniel J. Smith; his 2018 essay "Notes on structured
+concurrency, or: Go statement considered harmful" is what gave the idea its name and its argument.
+asyncio TaskGroup and anyio both implement the same semantics. Trio's nursery has one extension not present in asyncio:
 `cancel_scope.shield`, which protects a block from external cancellation.
 
 ### 4.4 Cancellation Scopes
@@ -263,15 +268,20 @@ flowchart TD
 
 `asyncio.TaskGroup` is implemented in `Lib/asyncio/taskgroups.py`. On `__aexit__`:
 
-1. If an exception occurred in the body (before task launch), cancel all tasks and wait.
-2. Wait for all tasks: `await asyncio.wait(self._tasks)` inside an inner cancel scope.
-3. Collect exceptions from completed tasks via `task.exception()`.
+1. If the body raised, or the parent task was cancelled, call `self._abort()` to cancel every
+   still-running child.
+2. Wait for all tasks with `while self._tasks: await self._on_completed_fut` — a single Future the
+   group re-creates each pass, resolved when the last child finishes.
+3. Collect exceptions the child done-callbacks accumulated in `self._errors`.
 4. If any tasks raised, build an `ExceptionGroup` and raise it.
 5. If the group itself was cancelled externally, re-raise `CancelledError`.
 
-The internal wait uses `asyncio.wait` with `return_when=ALL_COMPLETED` in a loop that re-cancels
-stragglers if a new exception arrives while waiting — ensuring fail-fast semantics even when a
-second task fails after the first.
+Step 2 is a `while` loop rather than a single await for a specific reason spelled out in the CPython
+comment: `_on_completed_fut` can be cancelled more than once if the parent task is cancelled
+repeatedly. Each time that happens the group calls `_abort()` again and loops, which is what gives
+fail-fast semantics even when a second task fails after the first. Note that it does *not* use
+`asyncio.wait(..., return_when=ALL_COMPLETED)` — a common guess, but the group needs to react to a
+new failure the instant a done-callback records it, not at a `wait()` boundary.
 
 ```mermaid
 flowchart TD
@@ -353,7 +363,7 @@ async def safe_commit(session) -> None:
 Both enforce a deadline but differ in composability:
 
 ```python
-# asyncio.wait_for() [3.1+] — functional, wraps a single coroutine
+# asyncio.wait_for() [3.4+] — functional, wraps a single coroutine
 # Problem: wraps only one coroutine; not composable with TaskGroup
 result = await asyncio.wait_for(fetch_data(), timeout=2.0)
 
@@ -367,10 +377,14 @@ async with asyncio.timeout(2.0):
 # TaskGroup cancels the other task automatically.
 ```
 
-`wait_for` re-cancels the wrapped coroutine if cancellation arrives during timeout cleanup, which
-can cause double-cancellation in some edge cases. `asyncio.timeout()` avoids this because it is
-a proper cancel scope — it intercepts `CancelledError` and translates it to `TimeoutError` only
-when it was the scope that triggered the cancellation, not the parent.
+Their cancellation semantics are now identical, because they are the same code: since 3.12
+`wait_for` is implemented as `async with timeouts.timeout(timeout): return await fut`, with only a
+special case for `timeout <= 0`. Both are therefore proper cancel scopes — each intercepts
+`CancelledError` and translates it to `TimeoutError` only when its own deadline caused the
+cancellation, letting a parent's cancellation pass through untouched. The remaining difference is
+purely one of shape: `wait_for` takes exactly one awaitable, so it cannot wrap a `TaskGroup`, an
+`async with`, or a multi-step block. That is the reason to reach for `asyncio.timeout()`, not any
+correctness gap.
 
 ### 6.4 BROKEN → FIX: fire-and-forget task leaks
 
@@ -433,8 +447,8 @@ class FirstResultFound(Exception):
 
 async def race(*coros: Coroutine[Any, Any, T]) -> T:
     """Return the result of the first coroutine to succeed."""
-    outer_task = asyncio.current_task()
-    assert outer_task is not None
+    missing = object()
+    winner: Any = missing
 
     async def _wrapper(coro: Coroutine[Any, Any, T]) -> None:
         result = await coro
@@ -447,9 +461,13 @@ async def race(*coros: Coroutine[Any, Any, T]) -> T:
             for coro in coros:
                 tg.create_task(_wrapper(coro))
     except* FirstResultFound as eg:
-        return eg.exceptions[0].result
+        # `return` is a SyntaxError inside an except* block -- so is `break` and
+        # `continue`. Assign here and return after the handler instead.
+        winner = eg.exceptions[0].result
 
-    raise RuntimeError("All coroutines completed without a result")
+    if winner is missing:
+        raise RuntimeError("All coroutines completed without a result")
+    return winner
 
 # Usage:
 async def search_all(query: str) -> dict:
@@ -600,8 +618,8 @@ async def parallel_queries(queries: list[str]) -> list[list[dict]]:
 | Dimension | `asyncio.TaskGroup` | `anyio.create_task_group()` |
 |-----------|--------------------|-----------------------------|
 | Backend | asyncio only | asyncio + Trio |
-| `start_soon` semantics | `create_task` returns handle | `start_soon` does not return handle |
-| `start()` for initialization | Not built-in | `await tg.start(coro)` — waits for `task_status.started()` |
+| Spawn call | `create_task(coro)` — takes a coroutine object | `start_soon(func, *args)` / `create_task(...)` — takes a function; both return a `TaskHandle` since anyio 4.14 |
+| `start()` for initialization | Not built-in | `await tg.start(func, *args)` — waits for `task_status.started()` |
 | Cancel scope | `asyncio.timeout()` | `anyio.CancelScope`, `move_on_after`, `fail_after` |
 | Shield | `asyncio.shield()` | `CancelScope(shield=True)` |
 | Library compatibility | asyncio ecosystem only | httpx, FastAPI, SQLAlchemy |
@@ -623,7 +641,9 @@ async def parallel_queries(queries: list[str]) -> list[list[dict]]:
 **Use `asyncio.TaskGroup` when:**
 - Running 2+ I/O-bound coroutines that should all complete before proceeding.
 - You need guaranteed exception propagation — no silent failures acceptable.
-- Python 3.11+ is available (production is already 3.11 for most teams as of 2026).
+- Python 3.11+ is available. Only 3.10 remains below the `TaskGroup` floor among CPython versions
+  still receiving security fixes, and it reaches end-of-life in October 2026 — so for anything with
+  a lifetime beyond that, 3.11 is a floor rather than a constraint.
 - Cancellation of the outer task (e.g., HTTP request timeout) must propagate to all children.
 - Building FastAPI endpoints that fan out to multiple services.
 
@@ -746,9 +766,13 @@ original scope — effectively becoming a fire-and-forget task if the TaskGroup 
 `asyncio.shield` only for short critical sections (DB commits, cleanup), never for long operations.
 
 **Pitfall 4: Creating TaskGroup tasks after the group body exits.**
-`tg.create_task()` raises `RuntimeError: This TaskGroup is not active` if called after the `async
-with` block exits. This happens when a callback or thread tries to submit work to a TaskGroup that
-has already collected results. Cache task handles before the group closes.
+`tg.create_task()` raises `RuntimeError: TaskGroup <...> is finished` once the `async with` block
+has exited, and `RuntimeError: TaskGroup <...> is shutting down` if the group has begun cancelling
+because a sibling failed. (Two more guard the other end: `has not been entered` and `has already
+been entered`.) The distinction is useful when reading a traceback — "is shutting down" means you
+raced a failure, not that you outlived the scope. This happens when a callback or thread tries to
+submit work to a TaskGroup that has already collected results. Cache task handles before the group
+closes.
 
 **Pitfall 5: TaskGroup in wrong scope causes deadlock on shutdown.**
 A FastAPI application that creates a `TaskGroup` inside an endpoint handler but then tries to
@@ -756,10 +780,15 @@ gracefully drain tasks on shutdown will deadlock if the shutdown signal arrives 
 handler is blocked waiting for its TaskGroup. Always match TaskGroup lifetime to the corresponding
 work scope (request → request handler, application → lifespan).
 
-**Pitfall 6: anyio `start_soon` vs asyncio `create_task` return values.**
-`anyio.TaskGroup.start_soon()` does not return a handle. There is no way to get the task's result
-after the group exits with `start_soon`. If you need results, collect them via a shared list
-(thread-safe within a single-threaded event loop) or use `tg.start()` with `task_status`.
+**Pitfall 6: anyio `start_soon` takes a function, not a coroutine object.**
+`tg.start_soon(_fetch(item))` is wrong — anyio wants `tg.start_soon(_fetch, item)`. Passing an
+already-constructed coroutine is the single most common anyio mistake for people arriving from
+asyncio's `create_task(coro())`, and it fails at call time rather than producing a subtle bug. On
+results: `start_soon()` has returned a `TaskHandle` since anyio 4.14 (and `tg.create_task()` was
+added in the same release as an asyncio-shaped alias), so the older "collect results in a shared
+list because there is no handle" workaround is no longer forced. The shared-container pattern below
+still reads well and remains safe, because a single-threaded event loop only runs one task at a
+time between `await` points.
 
 ```python
 import anyio
@@ -786,7 +815,7 @@ async def collect_results(items: list[str]) -> list[dict]:
 |------|------|---------------------------|-------|
 | `asyncio` (stdlib) | Event loop + tasks | `asyncio.TaskGroup` [3.11], `asyncio.timeout` [3.11] | No external dependency; asyncio only |
 | `anyio` 4.x | Backend-agnostic async | `anyio.create_task_group()`, `CancelScope`, `move_on_after` | Works on asyncio + Trio; recommended for libraries |
-| `trio` 0.25 | Alternative async framework | `trio.open_nursery()`, `trio.CancelScope` | Origin of structured concurrency in Python; strict nursery model |
+| `trio` 0.33 | Alternative async framework | `trio.open_nursery()`, `trio.CancelScope` | Origin of structured concurrency in Python; strict nursery model; requires 3.10+ |
 | `asyncio.TaskGroup` | Stdlib SC | Built-in | No pip install needed; Python 3.11+ |
 | `taskiq` | Distributed task queue | Uses asyncio internals | Structured dispatch per worker cycle |
 | `aiormq` / `aio-pika` | AMQP client | Per-message TaskGroup | Combine with TaskGroup for parallel message processing |
@@ -811,10 +840,12 @@ exception raised by the Task is only logged to stderr via a warning — it is ne
 caller. Use `TaskGroup` or explicitly store and await task handles to avoid this.
 
 **Q: What does `asyncio.TaskGroup` do when one task raises an exception?**
-It immediately schedules cancellation of all remaining tasks, waits for each to acknowledge
-cancellation (`CancelledError`), then raises an `ExceptionGroup` containing all exceptions (the
-original one plus any raised by tasks that failed before cancellation). If exactly one task failed,
-the `ExceptionGroup` contains one exception.
+It cancels every remaining sibling, waits for all of them to finish, then raises an `ExceptionGroup`.
+The wait is not optional — `__aexit__` loops on an internal completion Future until `self._tasks` is
+empty, so the group never propagates while a child is still unwinding. The group carries the original
+exception plus any raised by tasks that failed before cancellation reached them, and it is still an
+`ExceptionGroup` when exactly one task failed, which is why `except ValueError:` will not catch it
+and `except* ValueError:` will.
 
 **Q: What is `ExceptionGroup` and how do you handle it with `except*`?**
 `ExceptionGroup` [3.11] is a new built-in that wraps multiple exceptions into a single value.
@@ -849,8 +880,8 @@ while the TaskGroup ensures all tasks complete before the scope exits. Do not us
 semaphore in conjunction with `gather`; that pattern does not propagate exceptions reliably.
 
 **Q: What is the `tg.start()` pattern in anyio and when is it needed?**
-`anyio.TaskGroup.start(coro)` is an awaitable that starts `coro` and waits until the coroutine
-calls `task_status.started(value)`. This is the standard pattern for servers and background workers
+`await anyio.TaskGroup.start(func, *args)` starts the task and does not return until that task calls
+`task_status.started(value)`. This is the standard pattern for servers and background workers
 that need to signal "I am ready and listening" before the caller proceeds. `asyncio.TaskGroup` does
 not have a direct equivalent; the closest is using an `asyncio.Event` to synchronize readiness.
 
@@ -873,10 +904,14 @@ if scope.cancelled_caught:
 ```
 
 **Q: What is the difference between `start_soon` and `create_task` return values?**
-`asyncio.TaskGroup.create_task()` returns an `asyncio.Task` handle; call `.result()` after the
-group exits to get the return value. `anyio.TaskGroup.start_soon()` returns `None` — there is no
-handle. To collect results with anyio, use a shared container (list, dict) mutated from inside
-each task, which is safe because asyncio is single-threaded and tasks only run one at a time.
+Both return a handle today; the real difference is what they take as an argument.
+`asyncio.TaskGroup.create_task(coro)` accepts an already-constructed coroutine object and returns an
+`asyncio.Task`, whose `.result()` you read after the group exits. `anyio.TaskGroup.start_soon(func,
+*args)` accepts the function plus its arguments — passing `func(args)` is the classic porting bug —
+and since anyio 4.14 it returns a `TaskHandle`; that release also added `anyio.TaskGroup.create_task()`
+as an asyncio-shaped alias. Before 4.14 `start_soon` returned `None`, which is why so much anyio code
+still collects results into a shared list; that pattern is still safe, because a single-threaded event
+loop runs one task at a time between `await` points, but it is no longer required.
 
 **Q: How does TaskGroup interact with `asyncio.timeout()` when both are nested?**
 `asyncio.timeout()` creates a cancel scope that, when its deadline expires, cancels the current
@@ -930,7 +965,8 @@ tracker. Never silently swallow an `ExceptionGroup` with `except Exception`.
 each task's coroutine (as `async with sem`) is the correct pattern. Placing it outside the
 TaskGroup startup loop does not limit concurrency — it only serializes task creation.
 
-**Test cancellation explicitly.** Use `pytest-anyio` or `asyncio.wait_for(coro, timeout=0)` to
+**Test cancellation explicitly.** Use anyio's built-in pytest plugin (`@pytest.mark.anyio`, no
+extra package to install) or `asyncio.wait_for(coro, timeout=0)` to
 confirm your coroutines handle `CancelledError` cleanly: run cleanup, do not suppress the error,
 release acquired resources. A task that does `except BaseException: pass` is broken; it swallows
 cancellation and prevents the TaskGroup from exiting.
@@ -1033,33 +1069,49 @@ async def enrich_company(domain: str) -> EnrichmentResult:
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(6.0)) as client:
         # Total SLA: 700 ms (leaves 100 ms for serialization + overhead)
+        #
+        # NOTE the two nested try statements. A single try may carry either except*
+        # clauses or plain except clauses, never both -- "cannot have both 'except'
+        # and 'except*' on the same 'try'" is a SyntaxError, not a runtime error, so
+        # flattening these two handlers would stop the module from importing at all.
         try:
-            async with asyncio.timeout(0.7):
-                async with asyncio.TaskGroup() as tg:
-                    firm_task = tg.create_task(fetch_clearbit(client, domain))
-                    tech_task = tg.create_task(fetch_builtwith(client, domain))
-                    conn_task = tg.create_task(fetch_graph_connections(domain))
-            firmographics = firm_task.result()
-            tech_stack = tech_task.result()
-            connections = conn_task.result()
+            try:
+                async with asyncio.timeout(0.7):
+                    async with asyncio.TaskGroup() as tg:
+                        firm_task = tg.create_task(fetch_clearbit(client, domain))
+                        tech_task = tg.create_task(fetch_builtwith(client, domain))
+                        conn_task = tg.create_task(fetch_graph_connections(domain))
+                firmographics = firm_task.result()
+                tech_stack = tech_task.result()
+                connections = conn_task.result()
+
+            except* httpx.HTTPStatusError as eg:
+                for e in eg.exceptions:
+                    if e.response.status_code == 429:
+                        raise HTTPException(
+                            status_code=503, detail="Rate limited by upstream provider"
+                        )
+                    if e.response.status_code >= 500:
+                        raise HTTPException(status_code=502, detail="Upstream provider error")
+                raise
 
         except TimeoutError:
-            # Overall deadline exceeded; return whatever completed
-            # (TaskGroup cancelled all tasks; .result() raises on incomplete tasks)
-            if not firm_task.cancelled():
-                firmographics = firm_task.result() if not firm_task.exception() else None
-            if not tech_task.cancelled():
-                tech_stack = tech_task.result() if not tech_task.exception() else None
-            if not conn_task.cancelled():
-                connections = conn_task.result() if not conn_task.exception() else None
-
-        except* httpx.HTTPStatusError as eg:
-            for e in eg.exceptions:
-                if e.response.status_code == 429:
-                    raise HTTPException(status_code=503, detail="Rate limited by upstream provider")
-                if e.response.status_code >= 500:
-                    raise HTTPException(status_code=502, detail="Upstream provider error")
-            raise
+            # Overall deadline exceeded. Every task is done by now (TaskGroup.__aexit__
+            # has already awaited them), so .exception() is safe -- but a cancelled task
+            # would raise CancelledError from .result(), hence the two guards.
+            for task, name in (
+                (firm_task, "firmographics"),
+                (tech_task, "tech_stack"),
+                (conn_task, "connections"),
+            ):
+                if task.cancelled() or task.exception() is not None:
+                    continue
+                if name == "firmographics":
+                    firmographics = task.result()
+                elif name == "tech_stack":
+                    tech_stack = task.result()
+                else:
+                    connections = task.result()
 
     return EnrichmentResult(
         domain=domain,
@@ -1108,8 +1160,11 @@ alternative discussed in Section 12 changes this materially — there, one slow 
 instead of cancelling its siblings.
 
 **Results after migration.**
+(Illustrative composite, not a published incident report — the arithmetic is what transfers.)
 - p99 latency: 540 ms (down from 1,100 ms sequential; comparable to `gather` but with correct error semantics).
-- Silent data-loss incidents: 0 (previously ~3 per week from swallowed `gather` exceptions).
+- Silent data-loss incidents driven to zero: with `gather(return_exceptions=True)` a swallowed 429
+  is indistinguishable from "no data", so the failure rate was whatever the upstream's 429 rate
+  happened to be; with `except*` it is a 503 the caller can see.
 - Connection leak on client disconnect: eliminated — `asyncio.timeout` triggers `CancelledError`,
   TaskGroup cancels all three sub-requests, `httpx.AsyncClient` closes the underlying connections
   in its `__aexit__`.

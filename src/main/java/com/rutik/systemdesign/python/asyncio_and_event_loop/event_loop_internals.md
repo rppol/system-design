@@ -45,22 +45,25 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    P1(["Phase 1<br/>drain _ready"]) --> P2(["Phase 2<br/>compute poll timeout"])
-    P2 --> P3(["Phase 3<br/>selector.select(timeout)"])
-    P3 --> P4(["Phase 4<br/>fire I/O callbacks"])
+    P1(["Phase 1<br/>compute poll timeout"]) --> P2(["Phase 2<br/>selector.select(timeout)"])
+    P2 --> P3(["Phase 3<br/>_process_events +<br/>move expired timers"])
+    P3 --> P4(["Phase 4<br/>drain _ready"])
     P4 -.->|"next tick"| P1
 
-    class P1 train
-    class P2 mathOp
-    class P3 frozen
-    class P4 req
+    class P1 mathOp
+    class P2 frozen
+    class P3 req
+    class P4 train
 ```
 
-*The four-phase `_run_once()` cycle repeats forever; Phase 3's `selector.select()` is the only OS-blocking call, and a flooded `_ready` queue in Phase 1 is what starves it.*
+*The four-phase `_run_once()` cycle repeats forever. `_ready` is drained LAST, not first — the
+docstring in `base_events.py` calls the drain "the only place where callbacks are actually
+*called*". Phase 2's `selector.select()` is the sole OS-blocking call.*
 
-**Why it matters.** CPU-bound work that never yields blocks Phase 1 indefinitely — the selector is
-never reached and I/O starves. Knowing this lets you fix it: insert `await asyncio.sleep(0)` every
-N iterations to release Phase 3.
+**Why it matters.** The `_ready` drain is where your code runs, so CPU-bound work that never yields
+holds Phase 4 open indefinitely and the next tick's `select()` is never reached — I/O starves.
+Knowing this lets you fix it: insert `await asyncio.sleep(0)` every N iterations, which ends the
+current handle and lets the loop reach Phase 2 again.
 
 **Key insight.** `asyncio.Task` is just a coroutine driver built on `call_soon`. Every time a Task
 resumes, it calls `send()` on its coroutine inside a `call_soon` callback. `Future.set_result()`
@@ -171,20 +174,24 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    S1(["1. Move expired timers<br/>_scheduled to _ready"]) --> S2(["2. Compute poll timeout<br/>0, next deadline, or 3600s"])
+    S1(["1. Purge cancelled<br/>TimerHandles"]) --> S2(["2. Compute poll timeout<br/>0, next deadline, or None"])
     S2 --> S3(["3. selector.select(timeout)<br/>only blocking syscall"])
     S3 --> S4(["4. _process_events()<br/>append ready FDs to _ready"])
-    S4 --> S5(["5. Drain _ready<br/>ntodo snapshot, run handles"])
-    S5 -.->|"next _run_once() tick"| S1
+    S4 --> S5(["5. Move expired timers<br/>_scheduled to _ready"])
+    S5 --> S6(["6. Drain _ready<br/>ntodo snapshot, run handles"])
+    S6 -.->|"next _run_once() tick"| S1
 
     class S1 mathOp
     class S2 mathOp
     class S3 frozen
     class S4 req
-    class S5 train
+    class S5 mathOp
+    class S6 train
 ```
 
-*Five sub-steps per tick, run in a cycle: Phase 3's `selector.select()` is the sole blocking syscall, and the `ntodo` snapshot in Phase 5 defers any callback spawned mid-drain to the next tick.*
+*Six sub-steps per tick, in this order: timers are moved into `_ready` AFTER the poll, not before,
+and `_ready` is drained last. Step 3's `selector.select()` is the sole blocking syscall, and the
+`ntodo` snapshot in step 6 defers any callback spawned mid-drain to the next tick.*
 
 ### Task / Future / Coroutine interaction
 
@@ -241,7 +248,30 @@ CPython `Lib/asyncio/base_events.py`, method `BaseEventLoop._run_once()`:
 ```python
 # Simplified conceptual reconstruction — not verbatim source
 def _run_once(self) -> None:
-    # --- Phase 1: move due timer handles to _ready ---
+    # --- Step 1: drop cancelled TimerHandles off the heap ---
+    #     (compacts the whole heap when cancelled entries exceed a threshold)
+    while self._scheduled and self._scheduled[0]._cancelled:
+        handle = heapq.heappop(self._scheduled)
+        handle._scheduled = False
+
+    # --- Step 2: compute selector timeout ---
+    timeout = None                        # None == block until something happens
+    if self._ready or self._stopping:
+        timeout = 0
+    elif self._scheduled:
+        timeout = self._scheduled[0]._when - self.time()
+        if timeout > MAXIMUM_SELECT_TIMEOUT:
+            timeout = MAXIMUM_SELECT_TIMEOUT
+        elif timeout < 0:
+            timeout = 0
+
+    # --- Step 3: OS I/O poll (only blocking call) ---
+    event_list = self._selector.select(timeout)
+
+    # --- Step 4: translate I/O events → callbacks in _ready ---
+    self._process_events(event_list)
+
+    # --- Step 5: NOW move due timer handles to _ready (after the poll, not before) ---
     end_time = self.time() + self._clock_resolution
     while self._scheduled:
         handle = self._scheduled[0]
@@ -251,22 +281,7 @@ def _run_once(self) -> None:
         handle._scheduled = False
         self._ready.append(handle)
 
-    # --- Phase 2: compute selector timeout ---
-    if self._ready:
-        timeout = 0
-    elif self._scheduled:
-        timeout = min(MAXIMUM_SELECT_TIMEOUT,
-                      max(0, self._scheduled[0]._when - self.time()))
-    else:
-        timeout = MAXIMUM_SELECT_TIMEOUT  # 3600 s
-
-    # --- Phase 3: OS I/O poll (only blocking call) ---
-    event_list = self._selector.select(timeout)
-
-    # --- Phase 4: translate I/O events → callbacks in _ready ---
-    self._process_events(event_list)
-
-    # --- Phase 5: drain _ready (snapshot length to avoid infinite loop) ---
+    # --- Step 6: drain _ready (snapshot length to avoid infinite loop) ---
     ntodo = len(self._ready)
     for _ in range(ntodo):
         handle = self._ready.popleft()
@@ -275,45 +290,58 @@ def _run_once(self) -> None:
     handle = None  # avoid reference cycles
 ```
 
-Key detail: `ntodo = len(self._ready)` is snapshotted before the loop. Any callbacks added to
-`_ready` *during* Phase 5 (e.g., a done-callback calling `call_soon`) are deferred to the *next*
-tick. This prevents a single tick from running indefinitely if callbacks keep spawning callbacks.
+Two details are easy to get backwards and both are load-bearing.
 
-**What this actually says.** The three-branch Phase 2 expression is the loop deciding how long it is
-allowed to sleep, and it reads as one sentence: "if I have work right now, do not sleep at all; if
-the only thing coming is a timer, sleep exactly until that timer; if nothing at all is pending,
-sleep as long as I am permitted to." Every latency property of asyncio follows from those three
-branches.
+**The timer sweep happens after the poll, not before.** Steps 3-5 are ordered `select` →
+`_process_events` → move expired timers. That is why the timeout in step 2 is computed from
+`self._scheduled[0]._when` while the heap is still full: the loop is asking "how long may I sleep
+before the earliest timer is due", and only converts timers into runnable handles once it wakes up.
+Reversing them would make the timeout computation meaningless, because every due timer would
+already have landed in `_ready` and forced `timeout = 0`.
+
+**`ntodo = len(self._ready)` is snapshotted before the drain.** Any callbacks added to `_ready`
+*during* step 6 — a done-callback calling `call_soon`, a Task rescheduling itself after a bare
+`yield` — are deferred to the *next* tick. This is what prevents a single tick from running forever
+when callbacks keep spawning callbacks.
+
+**What the timeout expression actually says.** The three branches are the loop deciding how long it
+is allowed to sleep, and they read as one sentence: "if I have work right now, do not sleep at all;
+if the only thing coming is a timer, sleep exactly until that timer; if nothing at all is pending,
+sleep until the kernel wakes me." Every latency property of asyncio follows from those branches.
 
 | Symbol | What it is |
 |--------|------------|
 | `self._ready` | Deque of callbacks runnable *this instant*. Non-empty means zero sleep is allowed |
+| `self._stopping` | Set by `loop.stop()`. Also forces `timeout = 0` so the loop exits promptly |
 | `self._scheduled[0]._when` | Absolute deadline of the earliest timer, in the loop's monotonic clock |
 | `self.time()` | Now, same clock. `_when - time()` is "seconds until that timer is due" |
-| `max(0, ...)` | Floor at zero — an already-overdue timer must not produce a negative sleep |
-| `MAXIMUM_SELECT_TIMEOUT` | The idle cap, `3600` s. Only reached when nothing is queued or scheduled |
-| `timeout` | What gets handed to `epoll_wait`. It is a *maximum*, cut short by any arriving I/O |
+| `timeout < 0 -> 0` | An already-overdue timer must not produce a negative sleep |
+| `MAXIMUM_SELECT_TIMEOUT` | `86400` s (24 h). A *cap on a timer deadline*, not the idle value |
+| `timeout = None` | The idle case: `select(None)` blocks indefinitely, no cap, no polling |
 
-**Walk one example.** Three loop states, same code path, wildly different sleeps:
+**Walk one example.** Four loop states, same code path, wildly different sleeps:
 
 ```
   state                                   branch taken            timeout passed to select()
   --------------------------------------- ----------------------- --------------------------
   2 callbacks in _ready                   if self._ready          0        (poll, never block)
   _ready empty, timer due in 0.25 s       elif self._scheduled    0.25 s
-  _ready empty, no timers, idle server    else                    3600 s   (= 60 minutes)
+  _ready empty, timer due in 40 hours     elif, then capped       86400 s  (= 24 h ceiling)
+  _ready empty, NO timers at all          neither branch taken    None     (block indefinitely)
 
   overdue timer, _when - time() = -0.004
-    max(0, -0.004)                                                0        (fires immediately)
+    timeout < 0 -> 0                                              0        (fires immediately)
 ```
 
 **Why the `0` branch is the one that bites.** A non-empty `_ready` forces `timeout = 0`, so the
-selector performs a non-blocking poll and Phase 5 immediately drains more callbacks. Keep `_ready`
+selector performs a non-blocking poll and step 6 immediately drains more callbacks. Keep `_ready`
 permanently non-empty — which is exactly what a `call_soon` storm or a tight `sleep(0)` loop does —
 and the loop spins at `timeout = 0` forever: I/O is still *checked* every tick, but the process
 burns 100% CPU and every tick's `select()` returns instantly with no chance to wait for slower file
-descriptors. The `3600 s` cap at the other extreme is why a fully idle loop costs no CPU at all: it
-is genuinely asleep in the kernel until either a socket or `_write_to_self()` wakes it.
+descriptors. The `None` case at the other extreme is why a fully idle loop costs no CPU at all: it
+is genuinely asleep in the kernel, with no timeout to expire, until either a socket becomes ready or
+`_write_to_self()` wakes it. The `86400 s` cap never applies to an idle loop — it only trims a timer
+deadline that is more than a day out.
 
 ### 6.2 The `await` Bytecode Protocol
 
@@ -330,7 +358,7 @@ value) into it. Three objects implement `__await__`:
 |---|---|
 | `asyncio.Future` | yields `self` (suspends until `set_result`); `__await__` is a `generator`-based method in `futures.py` |
 | `asyncio.Task` | inherits Future; Task itself is never directly awaited except via its future interface |
-| Coroutine object (`async def`) | implements `__await__` by returning `self`; the coroutine's own frame is the iterator |
+| Coroutine object (`async def`) | `__await__` returns a `coroutine_wrapper` that delegates to the coroutine's own frame — not `self`, though it drives the same frame |
 
 `Future.__await__` in CPython (`Lib/asyncio/futures.py`):
 
@@ -387,9 +415,12 @@ class Task(Future):
             _leave_task(self._loop, self)
 ```
 
-`coro.send(None)` drives the coroutine until it either returns (`StopIteration`) or yields a
-`Future`. If it yields `None` (from `asyncio.sleep(0)` which yields an already-resolved
-Future-like), the Task reschedules itself via `call_soon`, giving other tasks a chance to run.
+`coro.send(None)` drives the coroutine until it either returns (`StopIteration`) or yields a value.
+There are exactly two interesting yields. A `Future` carrying `_asyncio_future_blocking` means "park
+me until this resolves", so the Task registers `__wakeup` and leaves `_ready` entirely. A bare
+`None` — which is what `asyncio.sleep(0)`'s `__sleep0()` produces, and it is a plain `yield`, not a
+resolved Future — means "I have nothing to wait for, just let someone else run", so the Task
+reschedules itself via `call_soon` and lands back in `_ready` for the next tick.
 
 ```mermaid
 flowchart LR
@@ -509,11 +540,12 @@ extension that wraps libuv's `uv_run()`:
 | DNS resolution | blocking `getaddrinfo` via executor | libuv `uv_getaddrinfo` (truly async) |
 | GIL release | only during `select()` syscall | released during entire libuv loop iteration |
 
-Benchmark (wrk, 10,000 connections, echo server, CPython 3.12):
+Illustrative echo-server figures at 10,000 connections, chosen to sit inside uvloop's own published
+2-4x claim (treat the absolute RPS as a shape, not a measurement of your hardware):
 
 - `asyncio.SelectorEventLoop`: ~60,000 RPS
 - `uvloop.EventLoop`: ~150,000 RPS
-- `nginx` (C, baseline): ~180,000 RPS
+- a C server such as `nginx` (baseline): ~180,000 RPS
 
 ```mermaid
 xychart-beta
@@ -594,7 +626,8 @@ HTTP connections; the selector wakes precisely when data arrives, not on a timer
 `aiohttp`'s `Server` creates one `asyncio.Protocol` per TCP connection. Request parsing happens
 inside a coroutine `Task`. The event loop's `add_reader` fires when a full HTTP request arrives,
 the Task is rescheduled, the handler coroutine runs, and the response is written via `add_writer`.
-Peak throughput on a single core exceeds 40,000 RPS for small JSON payloads.
+On a single core this design reaches the tens of thousands of RPS for small JSON payloads; the
+exact figure is entirely hardware- and payload-dependent, so measure rather than quote.
 
 ### 7.3 Redis client (redis-py async)
 
@@ -605,9 +638,15 @@ all within one event loop tick (~50 µs round-trip on localhost).
 
 ### 7.4 Celery / Dramatiq (threading model contrast)
 
-Celery workers use OS threads — each task gets a dedicated thread. At 1,000 concurrent tasks,
-Celery spawns 1,000 threads, each consuming ~1 MB stack = 1 GB RSS. An equivalent asyncio worker
-(ARQ, taskiq) handles 1,000 concurrent I/O-bound tasks on one thread using ~50 MB RSS.
+Celery's default pool is prefork — one OS *process* per worker slot — with a `threads` pool
+available as an alternative. Either way the unit of concurrency is an OS-scheduled one: 1,000
+concurrent tasks means 1,000 processes or 1,000 threads. The usual "1 MB per thread" figure is the
+default stack *reservation* (virtual address space), and resident memory is far smaller than that
+because stack pages are faulted in on demand — so quoting 1,000 threads as 1 GB of RSS overstates
+it badly. The real cost is elsewhere: kernel scheduling, per-worker interpreter state, and (for the
+prefork pool) a full copy of the application per process. An equivalent asyncio worker (ARQ,
+taskiq) carries 1,000 concurrent I/O-bound tasks as ~2-5 KB Task objects on a single thread, which
+is why the memory gap is orders of magnitude even when the thread-stack figure is quoted honestly.
 
 ---
 
@@ -770,7 +809,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-### Pitfall 3: Forgetting to await `asyncio.gather` results are ordered
+### Pitfall 3: Forgetting to await `asyncio.gather`
 
 ```python
 # BROKEN: treating gather as fire-and-forget
@@ -778,14 +817,27 @@ import asyncio
 
 async def fetch(url: str) -> str:
     await asyncio.sleep(0.1)
+    print("fetch ran", url)
     return f"data from {url}"
 
 async def main() -> None:
-    asyncio.gather(fetch("a"), fetch("b"))  # BROKEN: not awaited — Tasks created but results lost
-    # No warning is emitted; the tasks run but results and exceptions are lost
+    asyncio.gather(fetch("a"), fetch("b"))  # BROKEN: not awaited
+    # main() returns immediately; asyncio.run() then cancels every pending task.
+    # "fetch ran" NEVER prints -- the work does not merely lose its results, it
+    # does not happen. Measured output:
+    #   _GatheringFuture exception was never retrieved
+    #   future: <_GatheringFuture finished exception=CancelledError()>
 
 asyncio.run(main())
 ```
+
+Two things people expect here are both wrong. The tasks do **not** quietly run to completion in the
+background — `asyncio.run()` cancels anything still pending during teardown, so a coroutine with a
+0.1 s sleep never reaches its second line. And the failure is **not** silent: the abandoned
+`_GatheringFuture` ends up holding a `CancelledError` nobody retrieved, and its `__del__` routes
+that through the loop's exception handler, printing `_GatheringFuture exception was never
+retrieved` plus a traceback. It looks like noise in the log rather than a bug report, which is the
+only reason it gets ignored.
 
 ```python
 # FIX: always await gather; prefer TaskGroup for error propagation
@@ -835,7 +887,7 @@ async def inner() -> None:
 | `asyncio` (stdlib) | Event loop, Tasks, Futures, transports | Zero deps; `asyncio.run()` entry point |
 | `uvloop` | Drop-in high-perf event loop | 2-4x faster via libuv; enable with `uvloop.run(main())` |
 | `anyio` 4.x | Backend-agnostic async abstraction | Runs on asyncio or trio; `TaskGroup`, structured cancel scopes |
-| `trio` 0.25+ | Alternative event loop (structured concurrency) | Nurseries; strict cancel scope semantics; not compatible with raw asyncio code |
+| `trio` 0.33 | Alternative event loop (structured concurrency) | Nurseries; strict cancel scope semantics; not compatible with raw asyncio code |
 | `aiofiles` | Async file I/O | Wraps `ThreadPoolExecutor`; `async with aiofiles.open()` |
 | `aiodebug` / `asyncio.set_debug(True)` | Debug slow callbacks | Logs callbacks taking >100ms; traces Future creation; enables `ResourceWarning` |
 | `aiomonitor` | Live asyncio introspection | REPL over telnet; shows `_ready` queue length, running tasks |
@@ -855,8 +907,8 @@ asyncio.run(main(), debug=True)
 
 ## 12. Interview Questions with Answers
 
-**Q1: What is `_run_once()` and what are the four phases it executes?**
-`_run_once()` is the inner loop body in `BaseEventLoop`; the loop calls it in a `while True`. Phase 1 drains expired `TimerHandle`s from the min-heap into `_ready`. Phase 2 computes a poll timeout (0 if `_ready` is non-empty, otherwise time to next timer). Phase 3 calls `selector.select(timeout)` — the only blocking syscall. Phase 4 translates returned I/O events into `Handle` objects appended to `_ready` and then drains `_ready` up to the pre-snapshot count.
+**Q1: What is `_run_once()` and in what order does it execute its phases?**
+`_run_once()` is the inner loop body in `BaseEventLoop`, called in a `while True` by `run_forever()`. The order matters and is not the intuitive one: it first purges cancelled `TimerHandle`s from the heap, then computes a poll timeout (`0` if `_ready` is non-empty or the loop is stopping, else the time until the earliest timer capped at `MAXIMUM_SELECT_TIMEOUT`, else `None`), then calls `selector.select(timeout)` — the only blocking syscall — then `_process_events()` to turn ready file descriptors into handles, then moves expired timers from the heap into `_ready`, and only then drains `_ready` up to a pre-snapshot `ntodo` count. The two counter-intuitive parts: timers are swept into `_ready` *after* the poll, not before, and `_ready` is drained *last* — the source comments that drain as "the only place where callbacks are actually called".
 
 **Q2: Why does `asyncio` process the entire `_ready` deque before calling `selector.select`?**
 Callbacks in `_ready` represent work that is already known to be runnable (either explicitly scheduled or awoken by a past I/O event). Skipping to the selector before draining them would mean re-entering the kernel unnecessarily and potentially missing an already-enqueued done-callback. The cost is that a burst of `call_soon` callbacks can starve the selector — there is no preemption.
@@ -883,7 +935,7 @@ uvloop replaces the Python-level `_run_once` with a Cython extension calling lib
 Both register their `Task.__wakeup` as done-callbacks via `add_done_callback`. When `Future.set_result(v)` fires, the loop calls `call_soon` for each callback in `self._callbacks`, appending all waiting Tasks to `_ready`. All awaiting Tasks will resume in the next (or same, depending on snapshot) tick. The Future stores one result; all awaiters receive the same value. This is the mechanism behind `asyncio.Event` — multiple Tasks wait on a single Future (the event's internal future).
 
 **Q10: What is the `_asyncio_future_blocking` flag and why does it exist?**
-It is a bool attribute set on a yielded object inside `Future.__await__` (`self._asyncio_future_blocking = True`) to signal to `Task.__step` that this yielded object is an asyncio Future that should be used for scheduling, not an arbitrary generator value. `Task.__step` checks `getattr(result, '_asyncio_future_blocking', None)` — if truthy, it registers the done-callback; if `None` or falsy and result is not `None`, it logs a warning about an unexpected yield value.
+It is the marker that tells `Task.__step` a yielded object is a schedulable asyncio Future rather than an arbitrary generator value. `Future.__await__` sets `self._asyncio_future_blocking = True` immediately before `yield self`. `Task.__step` checks `getattr(result, '_asyncio_future_blocking', None)` — if truthy, it registers the done-callback; if `None` or falsy and result is not `None`, it logs a warning about an unexpected yield value.
 
 **Q11: How does `asyncio.timeout(seconds)` work at the loop level?**
 `asyncio.timeout(n)` (3.11+) returns a context manager. On entry, it schedules a `call_later(n, cancel_task)` callback in `_scheduled`. If the inner coroutine finishes before the deadline, it calls `h.cancel()` on the `TimerHandle` (marks it cancelled so `_run_once` skips it when dequeued). If time expires, `cancel_task` fires `task.cancel()` which raises `CancelledError` into the task via `Task.__step(exc=CancelledError())`.
@@ -892,13 +944,13 @@ It is a bool attribute set on a yielded object inside `Future.__await__` (`self.
 It calls `self._selector.register(fd, selectors.EVENT_READ, (cb, None))` (or `modify` if already registered for write). The key–data pair maps the file descriptor to `(reader_handle, writer_handle)`. In Phase 4 of `_run_once`, `_process_events` iterates the list returned by `selector.select`, looks up the key data, and appends the appropriate handle to `_ready`.
 
 **Q13: How do you run asyncio code from a synchronous context when a loop is already running?**
-In Jupyter notebooks or libraries that cannot own the loop, use `asyncio.ensure_future(coro)` or `loop.create_task(coro)` to schedule without blocking the current thread. To *get a result synchronously* from outside a running loop, use `nest_asyncio.apply()` (patches the loop to allow re-entry) or run the coroutine in a new thread with its own loop: `asyncio.run_coroutine_threadsafe(coro, loop).result()`.
+You cannot re-enter the loop, so you either schedule without blocking or hand the work to a different thread. Inside async code that cannot own the loop, `asyncio.ensure_future(coro)` or `loop.create_task(coro)` schedules it and returns immediately. From a genuinely synchronous thread, `asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=...)` submits to the running loop and blocks *that* thread, not the loop's. In a Jupyter cell the answer is simpler than either: the cell body is already async, so write `await coro()` directly. Do not reach for a loop-reentrancy monkey-patch — the well-known one was archived in 2024 and does not work on 3.14, and re-entrancy breaks the `ntodo` snapshot invariant that keeps a tick finite.
 
 **Q14: What is the `asyncio` debug mode and what does it catch?**
-Enabled via `asyncio.run(main(), debug=True)` or `PYTHONASYNCIODEBUG=1`. It: (1) logs all callbacks taking longer than 0.1 s with a traceback; (2) records the source traceback when Futures and Tasks are created (expensive but invaluable for "Task was destroyed but it is pending" warnings); (3) enables `ResourceWarning` for unclosed transports and event loops; (4) checks that coroutines are awaited (warns on unawaited coroutines). Performance overhead is ~10-15%.
+Enabled via `asyncio.run(main(), debug=True)` or `PYTHONASYNCIODEBUG=1`. It: (1) logs at WARNING level any callback taking longer than `loop.slow_callback_duration`, default 0.1 s; (2) records the source traceback when Futures and Tasks are created (expensive, but it is what makes "Task was destroyed but it is pending" actionable); (3) enables `ResourceWarning` for unclosed transports and event loops; (4) warns on unawaited coroutines. The overhead is not a fixed percentage and can be severe: it scales with how many Tasks and callbacks you create, because the traceback capture is per object. On a task-creation-heavy microbenchmark it measured over 3x slower. That is why it is a development and CI switch, not a production one — in production, set `loop.slow_callback_duration` without full debug mode.
 
 **Q15: Why can `asyncio` not parallelize CPU-bound work with threads, and what is the fix?**
-The GIL ensures only one Python thread runs bytecode at any instant. Two threads running pure Python are serialized — one waits while the other holds the GIL. `loop.run_in_executor(ThreadPoolExecutor)` is only effective for I/O-bound work that releases the GIL during the syscall (file read, network read). For CPU-bound work (NumPy with GIL held, regex, JSON parsing), the fix is `ProcessPoolExecutor` — separate processes have independent GILs. In CPython 3.13+ with `PYTHON_GIL=0` (PEP 703 free-threading), multiple threads can run Python bytecode concurrently, but asyncio itself is still single-threaded by design.
+The GIL ensures only one Python thread runs bytecode at any instant. Two threads running pure Python are serialized — one waits while the other holds the GIL. `loop.run_in_executor(ThreadPoolExecutor)` is only effective for I/O-bound work that releases the GIL during the syscall (file read, network read). For CPU-bound pure-Python work (regex, JSON parsing, attribute-heavy loops), the fix is `ProcessPoolExecutor` — separate processes have independent GILs. Free-threading is the other route: PEP 703 landed as an experimental build in 3.13 and became officially supported in 3.14 (PEP 779), and on a free-threaded interpreter multiple threads do run Python bytecode concurrently. Two caveats keep it from being a drop-in answer here: it requires the free-threaded build, not a flag on a normal one, and asyncio's own event loop is still single-threaded by design, so free-threading widens what a `run_in_executor` thread pool can do rather than changing how the loop schedules.
 
 **Q16: How does structured concurrency in `asyncio.TaskGroup` differ from `asyncio.gather`?**
 `TaskGroup` is a context manager that owns its child tasks. If any child raises an unhandled exception, `TaskGroup` cancels all remaining siblings and re-raises as an `ExceptionGroup`. The parent waits for all siblings to finish cancellation before propagating the exception. `asyncio.gather` re-raises only the first exception and leaves the other awaitables running; with `return_exceptions=True` it raises nothing at all and you must inspect the returned list yourself. `TaskGroup` follows the structured concurrency principle: tasks cannot outlive the scope that created them.
@@ -913,43 +965,52 @@ The GIL ensures only one Python thread runs bytecode at any instant. Two threads
 
 **Never block the event loop thread.** Audit all synchronous calls: database ORM queries (use async drivers), file I/O (use `aiofiles` or `run_in_executor`), `time.sleep` (use `asyncio.sleep`), `subprocess.run` (use `asyncio.create_subprocess_exec`).
 
-**Use `asyncio.sleep(0)` sparingly for cooperative yields.** Insert in CPU-heavy loops every 10,000–100,000 iterations, not every iteration — the overhead of a `call_soon` + selector pass is ~2–5 µs.
+**Use `asyncio.sleep(0)` sparingly for cooperative yields.** Insert in CPU-heavy loops every 10,000–100,000 iterations, not every iteration. A yield is not free: it costs a `call_soon` plus a full `_run_once` tick including a selector syscall.
 
-**The idea behind it.** The "every N iterations" advice is a division: yielding costs a fixed
-`~3.5 µs`, so spreading that cost over `N` iterations makes the per-iteration tax `3.5 / N`
-microseconds. Picking `N` simultaneously chooses your CPU overhead *and* your worst-case I/O stall —
-the two trade directly against each other.
+**The idea behind it.** The "every N iterations" advice is a division: yielding costs a roughly fixed
+`c`, so spreading that cost over `N` iterations makes the per-iteration tax `c / N`. Picking `N`
+simultaneously chooses your CPU overhead *and* your worst-case I/O stall — the two trade directly
+against each other.
+
+The size of `c` depends on something people rarely account for: whether your yield gets a whole
+selector pass to itself. Measured on CPython 3.13, a lone task looping on `await asyncio.sleep(0)`
+paid about **66 µs per yield**, because every single yield forced its own `select()` syscall. The
+same total number of yields spread across 50 concurrent tasks cost about **7 µs each**, since one
+selector pass then serves many task-steps. Use the amortised figure only if the loop is genuinely
+busy; a background job yielding into an otherwise idle loop pays the high end.
 
 | Symbol | What it is |
 |--------|------------|
 | `N` | Iterations of real work between two `await asyncio.sleep(0)` calls |
-| `c` | Fixed cost of one yield: `call_soon` plus a tick of `_run_once`, ~2–5 µs (take 3.5) |
+| `c` | Cost of one yield: `call_soon` plus a tick of `_run_once`. ~7 µs amortised, ~66 µs alone |
 | `c / N` | Overhead tax per iteration. Falls as `N` grows |
 | `N x w` | Worst-case I/O stall, where `w` is the wall time of one iteration of your own work |
 | `(ops / N) x c` | Aggregate cost of every yield across the whole loop |
 
-**Walk one example.** Pitfall 2's 10,000,000-iteration accumulator, at `c = 3.5 us`:
+**Walk one example.** Pitfall 2's 10,000,000-iteration accumulator, at the optimistic `c = 7 us`:
 
 ```
   N (yield every ...)   yields fired      total yield cost      tax per iteration
   --------------------- ----------------- --------------------- ------------------
-  1  (every iteration)  10,000,000         35.0 s               3.5 us      absurd
-  1,000                     10,000          0.035 s             0.0035 us
-  100,000  (the fix)           100          0.00035 s           0.000035 us
+  1  (every iteration)  10,000,000         70.0 s               7.0 us      absurd
+  1,000                     10,000          0.07 s              0.007 us
+  100,000  (the fix)           100          0.0007 s            0.00007 us
 
   the other side of the trade, at ~50 ns per accumulator iteration
     (Pitfall 2's own figures: 10M iterations in ~0.5 s)
     N = 100,000  ->  worst-case stall  =  100,000 x 50 ns  =  5 ms
-    N = 1        ->  worst-case stall  =  50 ns, but the job now takes 35 s
+    N = 1        ->  worst-case stall  =  50 ns, but the job now takes 70 s
 ```
 
 **Why `N = 1` is the classic wrong answer.** Yielding on every iteration looks maximally cooperative
-and is catastrophic: the fixed `3.5 µs` yield dwarfs the ~50 ns of real work by roughly **70x**, so a
-job that took 0.5 s now takes 35 s and the process spends about 99% of its life in scheduling
-overhead. `N = 100,000` costs 0.35 ms of yield overhead *in total* while capping any single stall
-near 5 ms — comfortably under the 100 ms slow-callback warning threshold. Tune `N` so `N x w` lands
-near your acceptable stall, then confirm `(ops / N) x c` is negligible; if both cannot hold at once,
-the work belongs in a `ProcessPoolExecutor`, not in the loop.
+and is catastrophic: a `7 µs` yield dwarfs the ~50 ns of real work by **140x**, so a job that took
+0.5 s now takes 70 s and the process spends over 99% of its life in scheduling overhead — and that
+is the *favourable* estimate, since a job hogging the loop this way is exactly the case where each
+yield gets its own selector pass and `c` climbs toward 66 µs. `N = 100,000` costs 0.7 ms of yield
+overhead *in total* while capping any single stall near 5 ms — comfortably under the 100 ms
+slow-callback warning threshold. Tune `N` so `N x w` lands near your acceptable stall, then confirm
+`(ops / N) x c` is negligible; if both cannot hold at once, the work belongs in a
+`ProcessPoolExecutor`, not in the loop.
 
 **Profile before switching to uvloop.** uvloop adds a C extension dependency and complicates debugging. Measure first; most applications are not I/O-throughput-limited.
 
@@ -1191,7 +1252,7 @@ async def check_url_fixed(url: str) -> CheckResult:
     # ... rest of check
 ```
 
-### Observed metrics (single core, 5,000 URLs, 200 concurrent)
+### Illustrative metrics (single core, 5,000 URLs, 200 concurrent) — shape, not a benchmark
 
 | Loop implementation | Wall time per cycle | Peak RSS | CPU% during I/O wait |
 |---|---|---|---|
