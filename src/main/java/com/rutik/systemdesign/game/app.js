@@ -1858,7 +1858,7 @@ async function openTopics(section) {
   // one file (README + deep-dives). No extract.py change — sourceFile and the counts
   // already live in the bank and module ids are never re-keyed, so spaced-repetition
   // state is untouched. Serves BOTH quiz and flashcard mode (one shared picker).
-  const subLabel = (f) => titleize(f.replace(/\.md$/i, ""));
+  const subLabel = (f) => fileLabel(f);
   const subMap = new Map();                          // module -> [{ file, name, count }] (README first)
   {
     const per = new Map();                            // module -> Map<file, count>
@@ -6528,6 +6528,33 @@ function closeReaderFind() {
   const m = el("#readerMain"); if (m) readerFindClear(m);
 }
 
+// [SD] Resolve a reader path to its owning module + module-relative file name.
+// Module ids are always "<section>/<module>" (book adds a third segment), but a
+// module may hold files one level deeper — the lld pattern folders, e.g.
+// "lld/creational/prototype/README.md" belongs to module "lld/creational" with
+// sourceFile "prototype/README.md", which is exactly what extract.py emits.
+// Longest-prefix match against the real module list; null for non-module pages.
+function splitModulePath(path) {
+  const files = (state.index && state.index.files) || {};
+  let mod = path.replace(/\/[^/]+$/, "");
+  while (mod && !files[mod]) {
+    const cut = mod.lastIndexOf("/");
+    if (cut < 0) return null;
+    mod = mod.slice(0, cut);
+  }
+  return mod ? { mod, file: path.slice(mod.length + 1) } : null;
+}
+
+// Display name for a module-relative file. "instruction_tuning.md" -> "Instruction
+// Tuning"; a nested "prototype/README.md" is named for its folder -> "Prototype",
+// since every one of those is named README.md and the folder carries the meaning.
+function fileLabel(f) {
+  const parts = f.split("/");
+  const base = parts.pop();
+  if (!/^readme\.md$/i.test(base)) return titleize(base.replace(/\.md$/i, ""));
+  return parts.length ? titleize(parts[parts.length - 1]) : "Readme";
+}
+
 // Populate the left module-list sidebar from the current navCtx.
 // Renders a VS Code-style file tree: single-file modules are plain links;
 // multi-file modules show a collapsible folder with each file listed beneath.
@@ -6557,7 +6584,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
     const subItems = mFiles.map((fn) => {
       const filePath = `${mKey}/${fn}`;
       const isFileCurrent = filePath === currentPath;
-      const label = fn === "README.md" ? "Readme" : titleize(fn.replace(".md", ""));
+      const label = fileLabel(fn);
       return `<li><a href="#" class="mod-file${isFileCurrent ? " active" : ""}${isModuleRead(filePath) ? " read" : ""}" data-path="${esc(filePath)}" title="${esc(label)}">${esc(label)}</a></li>`;
     }).join("");
 
@@ -6780,13 +6807,16 @@ function applyRecallPref() {
 // pages that aren't a bank module (section roots, case studies).
 function appendEvalBlock(main, path) {
   if (state.inQuiz) return;
-  const dir = path.replace(/\/[^/]+$/, "");
-  const base = path.slice(dir.length + 1);         // this page's file basename (e.g. instruction_tuning.md)
-  const files = (state.index && state.index.files) || {};
+  // [SD] A module id is always 2 segments, so resolve by prefix — a page can live
+  // one level deeper than its module (lld/creational/prototype/README.md) and its
+  // module-relative name IS the sourceFile the bank carries.
+  const loc = splitModulePath(path);
+  const dir = loc ? loc.mod : path.replace(/\/[^/]+$/, "");
+  const base = loc ? loc.file : path.slice(path.lastIndexOf("/") + 1);
   // [CS] Case-study pages are quizzable too, but from the SEPARATE case pool
   // (loadCaseBank) — never the main bank. Everything else below is shared.
   const isCase = /\/case_studies\//.test(path);
-  if (!isCase && !files[dir]) return;              // module page OR case-study page only
+  if (!isCase && !loc) return;                     // module page OR case-study page only
   const section = dir.split("/")[0];
   const loadPool = isCase ? loadCaseBank : loadBank;
   // [SF] On a deep-dive sub-file, scope the quiz to THAT file only (its own
@@ -6794,7 +6824,7 @@ function appendEvalBlock(main, path) {
   // carries sourceFile, so this is a pure filter — module ids/SR state untouched.
   const isReadme = /^readme\.md$/i.test(base);
   const csName = isCase ? (caseStudiesFromIndex(section).find((c) => c.file === path) || {}).name : null;
-  const name = csName || (isReadme ? titleize(dir.split("/").pop()) : titleize(base.replace(/\.md$/i, "")));
+  const name = csName || (isReadme ? titleize(dir.split("/").pop()) : fileLabel(base));
   const inScope = isReadme
     ? (q) => q.module === dir
     : (q) => q.module === dir && (q.sourceFile || "README.md") === base;
@@ -6849,9 +6879,9 @@ function appendEvalBlock(main, path) {
 // end — see revealClosure().
 async function appendWhatNext(main, path) {
   if (state.inQuiz) return;
-  const dir = path.replace(/\/[^/]+$/, "");
-  const files = (state.index && state.index.files) || {};
-  if (!files[dir] || !reader.nav) return;            // needs a module page + nav context
+  const loc = splitModulePath(path);                 // [SD] pages can sit below their module
+  const dir = loc && loc.mod;
+  if (!dir || !reader.nav) return;                   // needs a module page + nav context
   // sd_last_read still holds the PREVIOUS page here (this render pass overwrites
   // it after us) — but read it before the graph await can lose that race.
   let last = null;
@@ -6967,7 +6997,7 @@ function navFromIndex(path) {
     return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi);
   });
   const list = mods.map((m) => ({ path: `${m}/README.md`, title: titleize(m.split("/").pop()) }));
-  const dir = path.replace(/\/[^/]+$/, "");
+  const dir = (splitModulePath(path) || {}).mod || path.replace(/\/[^/]+$/, "");
   const idx = list.findIndex((m) => m.path.replace("/README.md", "") === dir || m.path === path);
   return { list, idx: idx === -1 ? 0 : idx };
 }

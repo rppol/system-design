@@ -454,7 +454,7 @@ The initial renderer allocated a fresh `Glyph` object per character per frame â€
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: Explain the Flyweight pattern with a real example.**
 A: Use Java's `Integer.valueOf()` cache â€” it is concrete, well-known, and perfectly illustrates intrinsic state (the int value) that is shared. Then explain the text editor scenario for depth.

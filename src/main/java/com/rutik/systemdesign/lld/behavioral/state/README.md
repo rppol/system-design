@@ -575,7 +575,7 @@ flowchart LR
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: Explain the State pattern.**
 A: An object (Context) delegates state-dependent behavior to a current State object. When state changes, the Context swaps to a different State implementation. Classic example: vending machine or TCP connection — behavior for "insert coin" or "send packet" depends entirely on what state the system is in.

@@ -476,7 +476,7 @@ The two axes that decide Visitor's fit — operation count and element-hierarchy
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: What problem does Visitor solve?**
 A: Explain the "operations vs types" problem: when you have a fixed class hierarchy and need many unrelated operations, Visitor lets you add operations without modifying the element classes. The classic example is a compiler AST with multiple analysis passes.

@@ -458,7 +458,7 @@ Facade is the fallback when none of the more specific relationships apply: you s
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: What is the Facade pattern and when would you use it?**
 A: Explain the intent (simplified interface to a complex subsystem) and give a concrete example — JdbcTemplate or SLF4J are ideal because interviewers know them.

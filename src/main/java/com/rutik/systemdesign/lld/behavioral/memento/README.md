@@ -412,7 +412,7 @@ public final class Order {
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: Explain the Memento pattern.**
 A: Lead with the intent — capturing and externalizing state for rollback without breaking encapsulation. Describe the three roles (Originator, Memento, Caretaker), explain the wide vs. narrow interface insight, and give a concrete example (text editor undo).

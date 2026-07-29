@@ -434,7 +434,7 @@ Month 1: introduce `AuthProvider` interface; ship `LdapAuthProviderAdapter` as t
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 ### Common Questions
 

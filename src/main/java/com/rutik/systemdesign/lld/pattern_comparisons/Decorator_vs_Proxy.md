@@ -367,7 +367,7 @@ The expensive `HighResolutionImage` construction — and its `loadFromDisk()` ca
 
 ---
 
-## Interview Answer Template
+## Interview Questions with Answers
 
 **Q: Both Decorator and Proxy wrap an object with the same interface. What's the difference?**
 

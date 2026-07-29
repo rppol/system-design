@@ -177,11 +177,15 @@ def make_short(text):
     return (cut[:idx] if idx >= 80 else cut).rstrip() + "…"
 
 
-def parse_md(path, section, module, hdr=INTERVIEW_HDR):
+def parse_md(path, section, module, hdr=INTERVIEW_HDR, source_file=None):
     """Yield per-question dicts from one .md file (a module README or deep-dive
     sub-file). Each dict carries both the stripped text (used for ids, options,
-    and distractors) and, when they differ, markdown-preserving display variants."""
-    source_file = os.path.basename(path)
+    and distractors) and, when they differ, markdown-preserving display variants.
+
+    source_file is module-relative, so a file in a sub-directory of the module
+    (lld/creational/prototype/README.md) carries "prototype/README.md" and the
+    reader still resolves module + "/" + sourceFile to the real path."""
+    source_file = source_file or os.path.basename(path)
     with open(path, encoding="utf-8") as fh:
         lines = fh.readlines()
     n = len(lines)
@@ -245,7 +249,11 @@ def parse_md(path, section, module, hdr=INTERVIEW_HDR):
             while j < end:
                 if is_question_line(lines[j].strip()) or lines[j].strip() == "---":
                     break
-                answer_lines.append(lines[j])
+                # Drop a leading blockquote marker. Some answers are written as a quoted
+                # "say it like this" block; the lines are flattened into one string below,
+                # so the marker could never render as a blockquote anyway -- it would only
+                # leak a literal "> " into the MCQ option.
+                answer_lines.append(re.sub(r"^\s*>\s?", "", lines[j]))
                 j += 1
             answer_raw = " ".join(answer_lines)
             answer_full = re.sub(r"^A\s*[:.]\s*", "", strip_markdown(answer_raw))  # drop a leading "A:" label
@@ -590,12 +598,20 @@ def main():
             continue
         if SKIP_PATH_PARTS.intersection(parts):
             continue  # exclude case studies etc.
-        module = rel.replace(os.sep, "/")  # parent dir -> README + its deep-dive sub-files share a module
+        # A module key is ALWAYS "<section>/<module>" -- exactly two segments. A file living
+        # deeper (lld/creational/prototype/README.md) folds into its parent module the same
+        # way a deep-dive sub-file does, carrying the extra path inside source_file. `book`
+        # is the one section that genuinely nests three deep (book/<book>/<chapter>) and is
+        # the only section STUDY_ORDER expects to be 3-segment.
+        depth = 3 if section == "book" else 2
+        module = "/".join(parts[:depth])
+        sub = "/".join(parts[depth:])          # "" when this directory IS the module
         md_files = order_md_files(root, [fn for fn in files if fn.endswith(".md") and fn != "CLAUDE.md"])
+        rel_names = [f"{sub}/{fn}" if sub else fn for fn in md_files]
         if md_files and len(parts) >= 2:      # skip section root dirs (depth==1)
-            file_tree[module] = md_files
-        for fn in md_files:
-            raw.extend(parse_md(os.path.join(root, fn), section, module))
+            file_tree.setdefault(module, []).extend(rel_names)
+        for fn, rel_name in zip(md_files, rel_names):
+            raw.extend(parse_md(os.path.join(root, fn), section, module, source_file=rel_name))
 
     questions = build_questions(raw, rng)
     if not questions:

@@ -394,7 +394,7 @@ One `watchMovie("Inception")` call fans out to seven calls across four subsystem
 
 ---
 
-## Interview Answer Templates
+## Interview Questions with Answers
 
 **Q: What is the difference between Adapter and Facade?**
 

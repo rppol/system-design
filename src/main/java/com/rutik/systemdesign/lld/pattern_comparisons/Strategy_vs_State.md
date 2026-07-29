@@ -348,7 +348,7 @@ sequenceDiagram
 
 ---
 
-## Interview Answer Template
+## Interview Questions with Answers
 
 **Q: What is the difference between Strategy and State?**
 

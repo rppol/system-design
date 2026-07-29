@@ -517,7 +517,7 @@ Composite doesn't appear as a leaf here because it isn't a competing choice — 
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: What is the Interpreter pattern?**
 A: Describe it as "grammar rules mapped to classes." Each rule in the grammar becomes a class; parsing a sentence produces an AST of those classes; evaluating the sentence means calling `interpret()` on the root. Give a concrete example: SQL WHERE clause, SpEL, or a boolean filter expression.

@@ -613,7 +613,7 @@ flowchart LR
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: What is the Template Method pattern and when would you use it?**
 A: Describe the pattern as "algorithm skeleton in base class, steps in subclasses." Use a concrete example like `HttpServlet.service()` calling `doGet()`/`doPost()`. Emphasize it's about code reuse and enforcing a process.

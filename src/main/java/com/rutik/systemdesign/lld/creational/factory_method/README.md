@@ -508,7 +508,7 @@ Phase 4 (move to DI framework): Once the team has Spring Boot 4.x, `@Bean` metho
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Common Interview Questions:**
 

@@ -439,7 +439,7 @@ class Button {
 
 ---
 
-## Interview Answer Template
+## Interview Questions with Answers
 
 **Q: When would you use Mediator over Observer?**
 

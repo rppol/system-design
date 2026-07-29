@@ -535,7 +535,7 @@ order.get(0).setNext(order.get(1)).setNext(order.get(2));
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Common interview questions:**
 

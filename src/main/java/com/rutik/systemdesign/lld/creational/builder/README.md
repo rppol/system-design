@@ -735,7 +735,7 @@ System.out.println(deluxe);     // Pizza{size='XL', crust='Stuffed', extraCheese
 
 ---
 
-## 17. Interview Tips
+## 17. Interview Questions with Answers
 
 ### Common Questions
 

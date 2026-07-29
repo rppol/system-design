@@ -474,7 +474,7 @@ A monolith was being decomposed into services. The legacy `BillingFacade` had `@
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: What is the Proxy pattern and what are its types?**
 A: Give the one-line intent, then list the 5 types: Virtual, Remote, Protection, Caching, Logging. Give one concrete example per type. Spring AOP covers Logging/Caching/Protection; Hibernate covers Virtual; RMI/gRPC covers Remote.

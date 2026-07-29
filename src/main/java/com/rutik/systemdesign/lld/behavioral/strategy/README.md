@@ -510,7 +510,7 @@ public class PaymentController {
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: Explain the Strategy pattern.**
 A: Define a family of algorithms (e.g., payment methods, sorting approaches, compression codecs), put each in its own class behind a common interface, and make them interchangeable. The Context holds a reference to a Strategy and delegates the algorithmic work. The client selects which strategy to use. Classic example: `Comparator` in Java's sort.

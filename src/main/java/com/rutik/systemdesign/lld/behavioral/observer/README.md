@@ -941,7 +941,7 @@ flowchart TD
 
 ---
 
-## 16. Interview Tips
+## 16. Interview Questions with Answers
 
 **Q: Explain the Observer pattern.**
 A: One Subject maintains a list of Observers. When the Subject changes state, it notifies all Observers by calling their `update()` method. This decouples the Subject from knowing which specific objects depend on it. Classic example: MVC where the Model is the Subject and Views are Observers.
