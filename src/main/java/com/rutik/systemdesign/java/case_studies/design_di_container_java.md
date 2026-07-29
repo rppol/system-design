@@ -42,10 +42,12 @@ foundation. Understanding the foundation demystifies every Spring behaviour from
 **Startup overhead analysis:**
 ```
 Graph size: 500 classes (typical medium Spring app has 200–800 beans)
-Reflection calls: 500 classes × ~5 constructor params avg = 2,500 reflection lookups
-Reflection cost: ~200 ns per getDeclaredConstructors() = 500 µs total
-Object creation: 500 instances × ~1 µs avg = 500 µs
-Total startup: ~1ms for pure reflection + instantiation
+Reflection: getDeclaredConstructors() runs ONCE PER CLASS, not per parameter
+            500 classes × ~200 ns = 100 µs
+Parameter resolution: 500 × ~3 params = 1,500 map lookups × ~30 ns = 45 µs
+Object creation: 500 × newInstance() + @PostConstruct ≈ 1–5 µs each = 0.5–2.5 ms
+Total startup: ~1–3 ms for pure reflection + instantiation
+  (dominated by instantiation, not reflection — see §10)
 
 Memory per class entry in container:
   ConcurrentHashMap<Class, Object> entry: ~100 bytes + object size
@@ -136,7 +138,7 @@ public class ContainerBuilder {
     private final Map<String, Binding<?>> bindings = new LinkedHashMap<>();
 
     // Register interface → implementation (constructor injection)
-    public <T, I extends T> BindingBuilder<T> bind(Class<T> type) {
+    public <T> BindingBuilder<T> bind(Class<T> type) {
         return new BindingBuilder<>(type, this);
     }
 
@@ -165,19 +167,25 @@ public class ContainerBuilder {
             return this;
         }
 
-        public void to(Class<? extends T> impl) {
+        // Each terminal returns the parent builder, NOT void — otherwise the
+        // fluent chain in §4.5 (.bind(A).to(B).bind(C)...) does not compile:
+        // "void cannot be dereferenced".
+        public ContainerBuilder to(Class<? extends T> impl) {
             String key = type.getName() + ":" + name;
             parent.register(key, new Binding<>(type, impl, null, null, true));
+            return parent;
         }
 
-        public void toInstance(T instance) {
+        public ContainerBuilder toInstance(T instance) {
             String key = type.getName() + ":" + name;
             parent.register(key, new Binding<>(type, null, instance, null, true));
+            return parent;
         }
 
-        public void toProvider(Supplier<T> supplier) {
+        public ContainerBuilder toProvider(Supplier<T> supplier) {
             String key = type.getName() + ":" + name;
             parent.register(key, new Binding<>(type, null, null, supplier, true));
+            return parent;
         }
     }
 }
@@ -230,10 +238,15 @@ public class DependencyResolver {
                 String.join(" → ", cycle));
         }
 
-        // 4. Resolve the instance
+        // 4. Resolve the instance.
+        // The cast is required: binding is a Binding<?>, so createInstance infers
+        // its own capture variable and the result cannot be assigned to T without
+        // it ("inference variable T has incompatible bounds"). It is safe because
+        // the key encodes the type.
         inProgress.add(key);
         try {
-            T instance = createInstance(binding);
+            @SuppressWarnings("unchecked")
+            T instance = (T) createInstance(binding);
 
             // 5. @PostConstruct lifecycle
             invokePostConstruct(instance);
@@ -303,6 +316,10 @@ public class DependencyResolver {
             clazz.getName() + " has " + constructors.length +
             " constructors but none is annotated with @Inject. " +
             "Annotate exactly one constructor with @Inject.");
+    }
+
+    Map<String, Object> getSingletonCache() {
+        return singletonCache;   // package-private accessor used by Injector's constructor
     }
 
     private void invokePostConstruct(Object instance) {
@@ -521,9 +538,9 @@ Spring's `@Qualifier` works identically; JSR-330's `@Named` is the standard.
 
 Guice (2007) popularised constructor injection with annotations. Guice uses `Binding<T>` objects
 identical to the above design, but adds: Interceptors (AOP via `MethodInterceptor`), scopes
-(Singleton, PerRequest, custom), and `Provider<T>` for lazy injection. The same `@Inject` and
-`@Named` annotations we defined above are actually from JSR-330 (`javax.inject`) which Guice
-co-created. Guice's `Injector.getInstance()` is semantically identical to our `getBean()`.
+(Singleton, PerRequest, custom), and `Provider<T>` for lazy injection. The same `@Inject` and `@Named` annotations we defined above come from JSR-330, which Guice
+co-created; the artifact is now `jakarta.inject` (Guice 7 and later use the Jakarta namespace,
+and Guice also honours its own `com.google.inject.Inject`). Guice's `Injector.getInstance()` is semantically identical to our `getBean()`.
 
 ### Spring Framework — BeanDefinition + BeanFactory
 
@@ -620,10 +637,12 @@ in a DI container; don't add workarounds that mask architectural problems.
 ### Pitfall 3 — Reflection performance at startup for 2,000-class graphs
 
 A financial platform with 2,000 Spring beans experienced 8-second startup time, largely from
-reflection-based `BeanDefinition` scanning and CGLIB proxy generation. Migration to Spring Native
-(Ahead-of-Time compilation) reduced startup to 400ms. **Quantified impact:** In Kubernetes
-rolling deploys, 8s startup meant 8s of reduced capacity per pod restart; 50 pods restarting
-in parallel = 400s of degraded capacity during each deploy. With 400ms startup: 20s total.
+reflection-based `BeanDefinition` scanning and CGLIB proxy generation. Migration to a GraalVM native image, using Spring Boot's built-in AOT processing,
+reduced startup to 400ms. **Quantified impact:** In Kubernetes
+rolling deploys, 8s startup meant 8s of reduced capacity per pod restart. Across 50 pods
+that is 400 pod-seconds of lost capacity per deploy — the wall-clock impact depends on the
+rollout's maxUnavailable, but the integral is what the remaining pods must absorb. At 400ms
+startup the same deploy costs 20 pod-seconds.
 
 ### Pitfall 4 — Singleton scope in a multi-tenant environment
 
@@ -648,16 +667,21 @@ and fully creates `CacheManager` (including its `@PostConstruct`) before creatin
 
 **Container build time scaling:**
 ```
-T_build = N_classes × T_reflection + N_edges × T_instantiation
+T_build = N_classes × (T_reflection + T_instantiation) + N_edges × T_lookup
 
 where:
-  T_reflection ≈ 200 ns per class (getDeclaredConstructors)
-  T_instantiation ≈ 1-5 µs per class (newInstance + init)
+  T_reflection    ≈ 200 ns per CLASS (getDeclaredConstructors, once per class)
+  T_instantiation ≈ 1-5 µs per CLASS (newInstance + @PostConstruct)
+  T_lookup        ≈ 30 ns per EDGE   (cache/binding map hit per constructor param)
   N_classes = number of registered classes
-  N_edges = total constructor parameter count across all classes
+  N_edges   = total constructor parameter count across all classes
 
-For N=500, avg_params=3:
-  T_build = 500 × 200ns + 1500 × 3µs = 100µs + 4.5ms ≈ 5ms
+Instantiation is per class, NOT per edge — each class is constructed once and
+cached, however many other beans depend on it. Multiplying the µs-scale
+instantiation cost by the edge count overstates build time ~3x.
+
+For N=500, avg_params=3 (N_edges=1500):
+  T_build = 500 × (200ns + 3µs) + 1500 × 30ns = 1.6ms + 45µs ≈ 1.6ms
 
 Spring Boot adds:
   Classpath scanning: +50–500ms (scans all JARs)
@@ -735,8 +759,10 @@ flushing buffers, deregistering from service registries). In our implementation,
 is called immediately after `createInstance()` completes, within the `resolve()` method — before
 the instance is added to the singleton cache. This means dependent beans' `@PostConstruct`
 methods can safely call methods on their dependencies (which are fully initialised by this point).
-Spring's ordering: dependencies' `@PostConstruct` runs before dependents', because dependencies
-are resolved first in `addWorker()`.
+Spring gives the same ordering for the same structural reason: `populateBean()` resolves and
+fully initialises each dependency — including running its `@PostConstruct` via
+`CommonAnnotationBeanPostProcessor` — before `initializeBean()` invokes the dependent's own
+callback.
 
 **Q7. How would you add support for `@Scope("request")` to this container?**
 Request scope requires a per-request context. Implement: (1) a `ThreadLocal<Map<BeanKey, Object>>`

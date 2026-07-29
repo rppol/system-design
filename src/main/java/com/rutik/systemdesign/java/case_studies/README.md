@@ -10,9 +10,13 @@ primitives, design patterns and wiring, and distributed systems patterns. Readin
 order shown in the Dependency Map section below will give you the most transfer of knowledge
 between studies.
 
-All code in the studies targets Java 17+ (LTS). Concurrency examples use the java.util.concurrent
-package exclusively — no sun.misc.Unsafe and no raw synchronized blocks except where demonstrating
-a broken pattern before the fix.
+All code in the studies targets Java 21+ and is written against the Java 25 LTS baseline.
+Concurrency examples use the java.util.concurrent package and `VarHandle` — never
+`sun.misc.Unsafe`, which is no longer reachable from application code. `synchronized` appears
+where it is genuinely the right primitive as well as in broken-then-fixed pairs; since JEP 491
+(Java 24) it no longer pins virtual threads, so it is not something to avoid on Loom's
+account. What still pins a carrier is a native frame — a JNI call or a Foreign Function &
+Memory API downcall.
 
 ---
 

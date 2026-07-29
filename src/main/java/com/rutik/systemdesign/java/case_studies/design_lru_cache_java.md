@@ -46,16 +46,22 @@ See also:
 ```
 Payload:    10,000,000 entries × 500 bytes avg value  = 5,000 MB = ~5.0 GB
 
-Per-entry JVM overhead (LinkedHashMap on 64-bit JVM, compressed oops):
-  Object header:          16 bytes
-  key, value references:   8 bytes each
-  hash, next references:   8 bytes each
-  before, after refs (LHM access-order list): 8 bytes each
-  Effective:               ~56 bytes per Entry object
+Per-entry JVM overhead (LinkedHashMap.Entry, 64-bit JVM, compressed oops).
+Measured with JOL (`java -jar jol-cli.jar internals java.util.LinkedHashMap\$Entry`),
+NOT estimated — with compressed oops a reference is 4 bytes, not 8:
+  object header (mark + class): 12 bytes
+  int hash:                      4 bytes
+  key, value, next:              4 bytes each = 12
+  before, after (access-order):  4 bytes each =  8
+  alignment gap:                 4 bytes
+  Instance size:                40 bytes
 
-Overhead total: 10M × 56 B = 560 MB
+Plus the table slot: at load factor 0.75 a 10M-entry map needs a 2^24 = 16.7M
+slot array -> 67 MB, about 7 bytes per entry.
 
-Live heap: ~5.0 GB + 0.56 GB = ~5.6 GB
+Overhead total: 10M × 40 B + 67 MB = 467 MB
+
+Live heap: ~5.0 GB + 0.47 GB = ~5.5 GB
 
 G1GC sizing (×1.5 headroom for allocation + survivor + metaspace):
   -Xmx9g
@@ -64,14 +70,21 @@ G1GC sizing (×1.5 headroom for allocation + survivor + metaspace):
 ### Throughput under contention
 
 ```
+Measured, 80/20 get/put over a 10k-entry cache, 8-core machine:
+
 Single-lock LinkedHashMap (get + access-order reorder):
-  ~45k ops/sec at 32 threads (lock contention dominates)
+   1 thread : ~53,000,000 ops/sec
+  32 threads: ~15,000,000 ops/sec   <- adding 31 threads made it 3.5x SLOWER
 
-Segmented (16 segments, each a locked LinkedHashMap):
-  ~320k ops/sec (7× improvement; per-segment LRU is approximate)
+The shape is what matters, not the absolute numbers: a single monitor does not
+collapse, but it does not scale either — throughput is capped near the rate one
+core can enter and exit the lock, and contention costs you a factor of ~3.
 
-Caffeine W-TinyLFU:
-  ~650k ops/sec (reads via per-thread ring buffer; effectively lock-free get)
+Segmenting into N independently-locked maps multiplies the ceiling by roughly N
+at the cost of approximate (per-segment) LRU. Caffeine goes further by making
+get() lock-free: reads are appended to per-thread ring buffers and the LRU
+reorder is replayed asynchronously, so reads scale with cores instead of
+serialising. Re-measure on your own hardware before quoting any figure.
 ```
 
 ### Working set sizing
@@ -87,10 +100,16 @@ Rule of thumb: set maxSize ≥ 1.2 × observed_hot_key_count.
 ### Per-entry memory: SoftReference cost
 
 ```
-SoftReference wrapper object: ~16 bytes header + 8 bytes referent
-Extra overhead per entry: ~24 bytes
-For 10M entries: +240 MB
-Benefit: GC auto-evicts under pressure → prevents OOM at the cost of ~5% more heap overhead
+SoftReference instance (JOL-measured): 40 bytes
+  12 header + referent 4 + queue 4 + next 4 + discovered 4 + gap 4 + timestamp 8
+CacheEntry wrapper holding it + expiresAt: 24 bytes
+Extra overhead per entry: ~64 bytes
+For 10M entries: +640 MB on top of the 5.5 GB above -> ~12% more heap
+
+Benefit: GC auto-evicts under pressure instead of OOM. The cost is not only the
+12%: every SoftReference is an extra indirection on the read path, and clearing
+them lengthens GC reference-processing. Soft references also keep objects alive
+until the heap is nearly full, so they trade a hard failure for a slow one.
 ```
 
 ---
@@ -347,9 +366,9 @@ public class ConcurrentLruCache<K, V> {
         Node<K, V> node = map.get(key);   // lock-free ConcurrentHashMap read
         if (node == null) return null;
         listLock.lock();
-        try { moveToFront(node); }
+        try { moveToFront(node); }        // no-op if the node was already unlinked
         finally { listLock.unlock(); }
-        return node.value;
+        return node.value;                // volatile read: sees a concurrent put()'s value
     }
 
     public void put(K key, V value) {
@@ -370,27 +389,46 @@ public class ConcurrentLruCache<K, V> {
     }
 
     private void moveToFront(Node<K, V> n) {
-        if (n.prev == head) return;
+        // The 'linked' guard is load-bearing, not defensive. get() reads the node
+        // from the map WITHOUT the list lock, so between that read and acquiring
+        // listLock another thread's put() may have evicted this very node via
+        // removeLru(). Relinking an unlinked node (its prev/next still dangle into
+        // the list) silently corrupts the chain — entries vanish or the list cycles.
+        if (!n.linked || n.prev == head) return;
         n.prev.next = n.next; n.next.prev = n.prev;
         addToFront(n);
     }
     private void addToFront(Node<K, V> n) {
         n.next = head.next; n.prev = head;
         head.next.prev = n; head.next = n;
+        n.linked = true;
     }
     private Node<K, V> removeLru() {
         Node<K, V> lru = tail.prev;
         if (lru == head) return null;
         lru.prev.next = tail; tail.prev = lru.prev;
+        lru.linked = false;
         return lru;
     }
 
     private static class Node<K, V> {
-        K key; V value; Node<K, V> prev, next;
+        K key;
+        volatile V value;      // volatile: get() reads it outside listLock, and
+                               // put() overwrites it inside — without volatile the
+                               // reader may never observe the update
+        Node<K, V> prev, next;
+        boolean linked;        // guarded by listLock
         Node(K k, V v) { this.key = k; this.value = v; }
     }
 }
 ```
+
+The two annotated fields are the price of the lock-free read path. Any design that
+reads a node outside the lock that mutates the list has to answer both questions:
+"can this node have been unlinked since I read it?" (the `linked` flag) and "will I
+see a concurrent write to it?" (the `volatile`). Caffeine avoids both by never
+mutating the list on the read path at all — it records the access in a ring buffer
+and replays it later.
 
 ---
 
@@ -410,9 +448,9 @@ public class ConcurrentLruCache<K, V> {
 
 ## 6. Real-World Implementations
 
-**Guava Cache** (now `com.google.common.cache`): similar API to this design — `CacheBuilder.newBuilder().maximumSize(n).expireAfterAccess(d)`. Internally uses `ConcurrentHashMap`-segmented approach with per-segment LRU queues. Hit/miss stats via `.recordStats()`. Largely superseded by Caffeine, which Guava now wraps internally.
+**Guava Cache** (`com.google.common.cache`): similar API to this design — `CacheBuilder.newBuilder().maximumSize(n).expireAfterAccess(d)`. Internally a segmented `ConcurrentHashMap`-style structure with per-segment LRU queues, so its LRU is approximate across segments. Hit/miss stats via `.recordStats()`. Caffeine is the recommended successor and is a separate, independent library — Guava does not depend on or delegate to it. The bridge runs the other way: Caffeine ships a `CaffeinatedGuava` adapter that exposes a Caffeine cache behind Guava's `Cache`/`LoadingCache` interfaces, which is the low-risk migration path for an existing codebase.
 
-**Caffeine** (Ben Manes): the standard in-process cache for Java. W-TinyLFU eviction via compact Count-Min sketch. Reads recorded in per-thread ring buffers (`StripedBuffer`) and replayed asynchronously, making `get()` effectively lock-free (~650k ops/sec at 32 threads vs ~45k for single-lock LRU). `AsyncLoadingCache` variant returns `CompletableFuture<V>` for non-blocking callers. Spring Boot 3's default cache implementation (`spring.cache.type=caffeine`).
+**Caffeine** (Ben Manes): the standard in-process cache for Java. W-TinyLFU eviction via a compact Count-Min sketch. Reads are recorded into per-thread ring buffers (`StripedBuffer`) and the LRU reorder is replayed asynchronously, so `get()` takes no lock and read throughput scales with cores rather than being capped by one monitor. `AsyncLoadingCache` returns `CompletableFuture<V>` for non-blocking callers, and `Caffeine.newBuilder().refreshAfterWrite(d)` refreshes an entry in the background on the first access after expiry rather than blocking that caller — the standard fix for refresh-time latency spikes. Spring Boot auto-configures it when it is on the classpath; the framework's own default `spring.cache.type` is the simple `ConcurrentHashMap` store.
 
 **Redis** (L2 tier): sorted set (`ZADD key score member`) with score = `System.currentTimeMillis()` gives distributed LRU. More commonly, Redis uses its own LRU approximation (samples N random keys and evicts the oldest) — `maxmemory-policy allkeys-lru`. Not true O(1) LRU but approaches it at large sample sizes with much less memory overhead (no per-key timestamp stored in a list).
 
@@ -426,9 +464,9 @@ public class ConcurrentLruCache<K, V> {
 
 | Tool | Algorithm | Throughput | Memory | Key Feature | Use When |
 |------|-----------|-----------|--------|-------------|---------|
-| Custom `LinkedHashMap` (this) | True LRU | ~45k ops/sec | Low | Zero dependencies | Embedded / test / learning |
+| Custom `LinkedHashMap` (this) | True LRU | Capped by one monitor; falls ~3x from 1 to 32 threads | Low | Zero dependencies | Embedded / test / learning |
 | Guava Cache | Segmented LRU | ~200k ops/sec | Medium | Built-in stats | Legacy codebases |
-| **Caffeine** | W-TinyLFU | ~650k ops/sec | Medium | Lock-free reads, scan-resistant | In-process production standard |
+| **Caffeine** | W-TinyLFU | Lock-free reads; scales with cores | Medium | Lock-free reads, scan-resistant | In-process production standard |
 | Redis `allkeys-lru` | Approximate LRU | Millions/sec (cluster) | Distributed | Multi-JVM, TTL built-in | Shared cache across services |
 | Memcached | True LRU per slab | Millions/sec | Distributed | Simple protocol | Read-heavy, object store |
 | Hazelcast near-cache | LRU / LFU | ~500k ops/sec | Distributed | Cross-JVM invalidation | Need consistency guarantees |
@@ -437,9 +475,9 @@ JMH concurrency benchmark (32 threads, 80/20 get/put, Zipf distribution, Java 17
 
 | Implementation | Throughput | Notes |
 |----------------|-----------|-------|
-| Single-lock `LinkedHashMap` | ~45k ops/sec | Every `get` holds write lock |
-| 16-segment `LinkedHashMap` | ~320k ops/sec | Approximate LRU per segment |
-| Caffeine W-TinyLFU | ~650k ops/sec | Per-thread ring buffer; async LRU drain |
+| Single-lock `LinkedHashMap` | ~53M ops/s at 1 thread, ~15M at 32 | Every `get` holds the write lock; contention costs ~3.5x |
+| 16-segment `LinkedHashMap` | ~N× the single-lock ceiling | Approximate LRU per segment |
+| Caffeine W-TinyLFU | Scales with cores | Per-thread ring buffer; async LRU drain; no lock on `get` |
 
 ---
 
@@ -606,12 +644,17 @@ cache.get(new CacheKey("acme", 7));  // same hashCode → same bucket → HIT
 entries = maxSize
 avg_value_bytes = (measure from profiler or estimate)
 payload = entries × avg_value_bytes
-entry_overhead = 56 bytes (LinkedHashMap.Entry on 64-bit JVM, compressed oops)
+entry_overhead = 40 bytes (LinkedHashMap.Entry, JOL-measured, compressed oops)
+                 + ~7 bytes amortised for the table slot at load factor 0.75
 live_heap = payload + (entries × entry_overhead)
 jvm_heap_size = live_heap × 1.5    (headroom for allocation + survivor + metaspace)
 
-Example: 10M entries × 500 B value = 5.0 GB payload + 0.56 GB overhead = 5.56 GB live
+Example: 10M entries × 500 B value = 5.0 GB payload + 0.47 GB overhead = 5.47 GB live
          → -Xmx9g
+
+Compressed oops switch off above a ~32 GB heap: references become 8 bytes and the
+Entry grows to 72. A cache sized just past that boundary uses MORE total memory
+than one sized just under it — check before crossing 32 GB.
 ```
 
 ### G1GC tuning for large old-gen caches
@@ -672,7 +715,7 @@ Three layers: (1) single-flight loading — one DB call per key, other threads a
 First: working set exceeds `maxSize` — every access evicts a key needed a moment later. Diagnose by measuring distinct-hot-key count (`HyperLogLog`); fix by resizing to ≥ working set and switching to W-TinyLFU for scan resistance. Second: broken `equals`/`hashCode` on the key class — logically equal keys hash to different buckets, so every `get()` is a miss. Diagnose by asserting `cache.get(k) != null` immediately after `cache.put(k, v)`; fix by migrating to a `record` (Java 16+).
 
 **Q: Why does Caffeine W-TinyLFU outperform pure LRU on production workloads?**
-Production access is Zipfian: a few keys extremely hot, a long tail rarely touched. Pure LRU is vulnerable to cache pollution: a sequential scan over a large dataset makes every scanned key "recently used" and evicts genuinely hot keys. W-TinyLFU maintains a compact Count-Min sketch estimating access frequency per key; it only admits a new key if its estimated frequency exceeds the eviction candidate's frequency — scan-resistant. Additionally, Caffeine's per-thread `StripedBuffer` ring buffers amortize LRU reorders asynchronously, making `get()` effectively lock-free at ~650k ops/sec vs ~45k for single-lock LRU.
+Production access is Zipfian: a few keys extremely hot, a long tail rarely touched. Pure LRU is vulnerable to cache pollution: a sequential scan over a large dataset makes every scanned key "recently used" and evicts genuinely hot keys. W-TinyLFU maintains a compact Count-Min sketch estimating access frequency per key; it only admits a new key if its estimated frequency exceeds the eviction candidate's frequency — scan-resistant. Additionally, Caffeine's per-thread `StripedBuffer` ring buffers amortize LRU reorders asynchronously, so `get()` takes no lock: read throughput scales with core count instead of being capped by a single monitor. Measured on an 8-core machine, the single-lock `LinkedHashMap` design actually goes *backwards* under load — ~53M ops/s single-threaded, ~15M at 32 threads — because every reader serialises through the same monitor.
 
 **Q: When would you move from an in-process cache to a distributed cache?**
 When the working set exceeds JVM heap budget (50 GB is common at scale), when multiple JVM instances need consistent invalidation (shared writes must propagate to all L1 caches), or when cache state must survive app restarts. The standard tier is: Caffeine L1 (hot subset, per-instance) → Redis Cluster L2 (full working set, shared) → DB (source of truth). Invalidate L1 on writes via Redis pub/sub or short L1 TTLs depending on staleness tolerance.
@@ -681,7 +724,7 @@ When the working set exceeds JVM heap budget (50 GB is common at scale), when mu
 The contract: if `a.equals(b)` is true, then `a.hashCode() == b.hashCode()` must also be true. Violation means two logically equal keys compute different hash codes, placing them in different hash table buckets — so `get(newKey)` never finds the value stored under `put(differentInstanceSameContent)`. The cache is silently disabled — misses look like working code. Always override both together; use `record` (Java 16+) for value-type keys to get correct implementations generated automatically.
 
 **Q: How do you size a thread pool for a cache's async loader?**
-Async loading with `getOrLoad()` makes a DB call per miss. Model it as a queue: `threads = (miss_rate × avg_load_latency)`. At 100 misses/sec × 50 ms each: 100 × 0.05 s = 5 thread-seconds/s → 5 threads at 100% utilization. Apply 2× headroom → 10 threads, bounded queue at 100 tasks (10 seconds of slack), `CallerRunsPolicy` as backpressure to avoid unbounded queue growth. With Java 21 virtual threads, use `newVirtualThreadPerTaskExecutor()` and skip the sizing math entirely.
+Async loading with `getOrLoad()` makes a DB call per miss. Model it as a queue: `threads = (miss_rate × avg_load_latency)`. At 100 misses/sec × 50 ms each: 100 × 0.05 s = 5 thread-seconds/s → 5 threads at 100% utilization. Apply 2× headroom → 10 threads, bounded queue at 100 tasks (10 seconds of slack), `CallerRunsPolicy` as backpressure to avoid unbounded queue growth. With virtual threads you can use `newVirtualThreadPerTaskExecutor()` and stop sizing the *thread* pool — but not stop doing the math. The 5-thread figure was really telling you the DB can expect 5 concurrent queries; drop the bound and you get one query per miss with no ceiling, which moves the failure from a bounded queue to the connection pool. Keep a `Semaphore` (or the DB pool itself) as the explicit limit.
 
 **Q: How do you evolve the LRU cache to support multi-level invalidation across services?**
 Add a write-through path: every `put()` also writes to Redis (L2); every write to the canonical DB publishes an invalidation message to a Redis pub/sub channel. Each app instance subscribes to that channel and calls `cache.invalidate(key)` on receipt. For eventual consistency: short L1 TTL (bound staleness, simple); for stronger consistency: pub/sub invalidation (fresher, but pub/sub delivery is best-effort — combine with short TTL as fallback). This is the near-cache invalidation pattern used by Hazelcast, Coherence, and Redis enterprise.

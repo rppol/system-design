@@ -39,30 +39,35 @@ over-full heap or objects that live far longer than intended.
 
 ### G1GC (Garbage First, Java 9+ default)
 
-- Heap divided into equal-size regions (1–32 MB each), dynamically assigned to Eden,
+- Heap divided into equal-size regions (ergonomically 1–32 MB each; settable up to 512 MB),
+  dynamically assigned to Eden,
   Survivor, or Old Gen.
 - Collects the regions with the most garbage first (hence "Garbage First").
 - Target pause: `-XX:MaxGCPauseMillis=200` (default) — G1 attempts to stay under this.
 - Mixed collections periodically reclaim both Young and Old Gen concurrently.
 - Best for: heaps 4–32 GB with pause targets of 100–200ms.
 
-### ZGC (Java 15 production, Java 21 generational ZGC)
+### ZGC (generational; `-XX:+UseZGC`)
 
 - Concurrent compaction — GC runs while application threads execute.
 - STW pauses < 1ms regardless of heap size (tested to TB heaps).
-- Throughput cost: ~5–15% vs G1 in throughput-optimized benchmarks.
-- Java 21: generational ZGC (`-XX:+UseZGC -XX:+ZGenerational`) — further reduced throughput cost.
+- Generational by default: young objects are collected separately, so the barrier and
+  marking cost falls on a much smaller live set than the whole heap.
+- Throughput cost vs G1 is workload-dependent — barrier overhead is real, but the
+  generational collector recovers most of it on allocation-heavy services.
 - Best for: services requiring sub-1ms pause SLOs, large heaps.
 
 ### Shenandoah (Red Hat, non-Oracle JDKs)
 
-- Similar concurrent approach to ZGC; available in OpenJDK 11+ (via backport) and 15+.
+- Similar concurrent approach to ZGC; production-ready in OpenJDK 15+, absent from Oracle JDK builds.
 - Sub-10ms pauses; slightly different throughput profile than ZGC.
 - Best for: latency-sensitive services on non-Oracle JDKs.
 
 ### SerialGC / ParallelGC
 
-- SerialGC: single-thread stop-the-world. For CLIs and small heaps (< 256 MB).
+- SerialGC: single-thread stop-the-world. For CLIs and small heaps. Ergonomics selects it
+  automatically on a machine (or container) with fewer than 2 CPUs or under ~1792 MB of
+  memory — a common surprise in small Kubernetes pods where you expected G1.
 - ParallelGC: multi-thread stop-the-world. Highest throughput; unsuitable for latency SLOs.
 - Use in services: never (unless batch job with no latency requirement).
 
@@ -137,15 +142,16 @@ Tuning goal: prevent t3→t4 by ensuring object lifetime < 2 survivor copies.
 -XX:G1NewSizePercent=20   # minimum young gen (default 5% — may be too small)
 -XX:G1MaxNewSizePercent=40  # cap young gen (default 60%)
 -XX:InitiatingHeapOccupancyPercent=45  # start concurrent marking when heap is 45% full
-                                       # (default 45%; lower to start marking earlier
-                                        # and avoid Full GC on large allocations)
+                                       # (initial value 45%; G1UseAdaptiveIHOP is on by
+                                        # default, so G1 tunes the real trigger from
+                                        # observed marking duration and allocation rate.
+                                        # Set G1UseAdaptiveIHOP=false to pin this value.)
 ```
 
-### ZGC tuning (Java 21)
+### ZGC tuning
 
 ```bash
--XX:+UseZGC
--XX:+ZGenerational  # Java 21: generational ZGC, lower throughput cost
+-XX:+UseZGC        # generational ZGC; no extra flag needed
 -Xms8g -Xmx32g     # ZGC needs larger heap headroom than G1 (uncommitted pages are fine)
 -XX:SoftMaxHeapSize=28g  # ZGC elastic reserve; will uncommit pages below this
 # No -XX:MaxGCPauseMillis needed — ZGC is designed to be < 1ms regardless
@@ -170,8 +176,10 @@ Tuning goal: prevent t3→t4 by ensuring object lifetime < 2 survivor copies.
 -XX:MaxMetaspaceSize=512m       # hard cap; safeguard against class loader leak
 
 # Stack size (per thread):
--Xss256k  # default 512k–1m is wasteful for high-concurrency services;
-           # 256k sufficient for most business logic; save ~256k per thread
+-Xss256k  # HotSpot default ThreadStackSize is 1 MB on 64-bit Linux/x86 (2 MB on macOS/AArch64)
+           # and is wasteful for high-concurrency services; 256k is enough for most business
+           # logic. Verify the default on your platform: java -XX:+PrintFlagsFinal -version |
+           # grep ThreadStackSize (the value printed is in KB).
 ```
 
 ---
@@ -182,13 +190,22 @@ Tuning goal: prevent t3→t4 by ensuring object lifetime < 2 survivor copies.
 GC spikes during peak traffic when the Old Gen grew faster than concurrent marking could
 reclaim it. Result: Full GCs eliminated; Mixed GC pauses stayed under 50ms.
 
-**Netflix:** Migrated latency-sensitive services to ZGC in 2022; reported P99 GC pauses
-dropping from ~150ms (G1GC) to < 1ms. Noted a ~7% throughput reduction, acceptable for
-their latency SLOs.
+**Netflix:** Made Generational ZGC the default collector on JDK 21 for their streaming
+services, and reported it in "Bending pause times to your will with Generational ZGC"
+(Netflix TechBlog, March 2024). More than half of their critical streaming video services
+run on it. Their headline finding: GC pauses had been a significant source of tail latency
+in gRPC and DGS Framework services — timeouts during a pause triggered cancellations,
+retries and hedged requests — and moving to sub-millisecond pauses removed that whole
+class of error. Contrary to the usual "ZGC costs throughput" expectation, they measured a
+net improvement of roughly 10% on their capacity metric, because the avoided retries were
+costing more than the barrier overhead.
 
-**Discord:** Moved from JVM to Rust for their Go-live service specifically to eliminate GC
-pauses during high-traffic events. The JVM's G1GC pauses caused latency spikes during
-concurrent collection that were unacceptable for real-time messaging.
+**Discord:** A useful counter-example for when GC tuning is not the answer. Discord's Read
+States service showed 10–40 ms latency spikes every two minutes, traced to the language
+runtime's garbage collector, and they rewrote the service in Rust rather than tune the
+collector — a decision that only makes sense when the pause budget is measured in
+microseconds and the service is small enough to rewrite. On the JVM the equivalent move is
+to a concurrent collector, not to a different language.
 
 ---
 
@@ -197,7 +214,7 @@ concurrent collection that were unacceptable for real-time messaging.
 | GC | Pause (P99) | Throughput | Heap sizing | Use when |
 |---|---|---|---|---|
 | G1GC (default) | 50–200ms | High | Moderate | General services, 4–32 GB heap |
-| ZGC (generational) | < 1ms | 5–15% lower than G1 | Needs extra headroom (~150%) | Latency-critical, large heap |
+| ZGC (generational) | < 1ms | Workload-dependent; barrier cost often repaid by fewer timeouts | Needs extra headroom (~150%) | Latency-critical, large heap |
 | Shenandoah | < 10ms | Similar to ZGC | Similar | Non-Oracle JDK, latency-sensitive |
 | ParallelGC | 100ms–1s | Highest | Compact | Batch jobs, no latency SLO |
 
@@ -244,9 +261,10 @@ actual longevity warrants — inflating Old Gen. Fix: increase Young Gen size
 (`-XX:G1NewSizePercent`) or increase `-Xmx` to provide more region budget.
 
 **Pitfall 5: GC logs rotated away before investigation**
-`-Xlog:gc*` with default `filecount=1` means the GC log is overwritten after ~24h. During
-a weekend incident, GC logs from Friday's spike are gone Monday morning. Fix: always set
-`filecount=10,filesize=20m` for at least 2 weeks of GC history per instance.
+`-Xlog:gc*:file=gc.log` with no rotation options writes one file that is truncated on every
+JVM restart, and `filecount=0` disables rotation entirely so the active file is overwritten.
+During a weekend incident, GC logs from Friday's spike are gone Monday morning. Fix: always
+set `filecount=10,filesize=20m` explicitly for at least 2 weeks of GC history per instance.
 
 ---
 
@@ -304,12 +322,14 @@ visible on CPU profiles.
 
 **Q: How does ZGC achieve sub-1ms pause times?**
 
-ZGC is a concurrent, non-generational (non-generational before Java 21) collector that
-performs compaction while application threads run. It uses load barriers — small JIT-
-inserted code snippets on every object reference read — to transparently fix references
-that point into relocated objects. The only STW phases are root scanning and reference
-processing, which are sub-millisecond even on TB heaps because the work does not scale
-with heap size. The tradeoff is ~5–15% throughput reduction from barrier overhead.
+ZGC is a concurrent, generational collector that performs compaction while application
+threads run. It uses load barriers — small JIT-inserted code snippets on every object
+reference read — to transparently fix references that point into relocated objects. The
+only STW phases are root scanning and reference processing, which are sub-millisecond even
+on TB heaps because the work does not scale with heap size. The tradeoff is barrier
+overhead on every reference load; whether that shows up as a net throughput loss depends
+on the workload, and on allocation-heavy services the generational young collection
+usually pays it back.
 
 **Q: What is a "humongous allocation" and why is it a GC problem?**
 
@@ -338,8 +358,7 @@ Use `-XX:MaxRAMPercentage=75.0` to let the JVM use 75% of container memory (3 GB
 Reserve the remaining 25% for OS page cache, JVM code cache (~256 MB), Metaspace
 (~256 MB), direct buffers (NIO/Netty), and native thread stacks (~256 KB × thread count).
 Enable G1GC (default) with GC logging, deploy, and observe. If pauses exceed SLO, switch
-to ZGC (`-XX:+UseZGC -XX:+ZGenerational`). Never set `-Xmx` equal to container limit —
-OOM-kill is the result.
+to ZGC (`-XX:+UseZGC`). Never set `-Xmx` equal to container limit — OOM-kill is the result.
 
 **Q: What is the relationship between object allocation rate and GC pause frequency?**
 
@@ -406,7 +425,7 @@ free regions to copy live objects into. Both indicate the heap is too small or O
 objects are not being collected fast enough. Prevention: (1) lower
 `-XX:InitiatingHeapOccupancyPercent` to start marking earlier; (2) increase `-Xmx` to
 provide more region budget; (3) identify and fix object retention causing Old Gen bloat;
-(4) increase `-XX:ConcGCThreads` (default = 1/4 of GCThreads) to speed up concurrent
+(4) increase `-XX:ConcGCThreads` (ergonomic default `(ParallelGCThreads + 2) / 4`) to speed up concurrent
 marking. Monitor `jvm.gc.pause{action=end_of_major_GC}` counter in Prometheus — any
 occurrence is a severity-2 incident signal.
 

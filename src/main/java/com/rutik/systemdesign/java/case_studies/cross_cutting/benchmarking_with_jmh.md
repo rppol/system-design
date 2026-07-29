@@ -46,21 +46,27 @@ and benchmark inputs should come from `@State` fields so the JIT cannot fold the
 ## 3. Core Principles
 
 ### Warm-up before measurement
-The JVM's tiered compilation (C1 → C2) needs ~10,000 invocations before C2-compiled code is
-stable. JMH's default 5 warm-up iterations (1 second each) ensure you measure C2-optimised
-throughput, not interpreter or C1 speed.
+Under tiered compilation a method climbs from the interpreter through C1 to C2; the C2
+trigger is `Tier4InvocationThreshold` (5,000 by default, with a separate back-edge counter
+for loops), not the old non-tiered `CompileThreshold` of 10,000. JMH's defaults — 5 warm-up
+iterations of 10 seconds each — put any realistic hot method far past that, so you measure
+C2-optimised throughput rather than interpreter or C1 speed.
 
 ### Isolate the unit
 One benchmark = one hypothesis. Don't benchmark `parseAndValidateAndPersist()` — that mixes
 I/O with parsing and tells you nothing actionable. Benchmark the parser alone.
 
 ### Fork between benchmarks
-JMH runs each benchmark in a fresh forked JVM (`@Fork(1)` default). This prevents JIT profile
-pollution: if benchmark A trains the JIT to expect `int` paths, benchmark B's `long` path may
-be mis-optimised. Forks reset all JIT decisions.
+JMH runs each benchmark in fresh forked JVMs — **five of them by default**
+(`Defaults.MEASUREMENT_FORKS = 5`), not one. This prevents JIT profile pollution: if
+benchmark A trains the JIT to expect `int` paths, benchmark B's `long` path may be
+mis-optimised. Forks reset all JIT decisions, and running several of them also exposes
+run-to-run variance that a single JVM hides — two forks of the same code can land on
+different inlining decisions and differ by more than the effect you are measuring.
 
 ### Trust the confidence interval, not the point estimate
-JMH reports mean ± error. An improvement is real only if the confidence intervals don't overlap.
+JMH reports mean ± error at the **99.9%** confidence level (printed literally as
+`±(99.9%)`). An improvement is real only if the confidence intervals don't overlap.
 A 3% mean improvement with ±5% error is noise.
 
 ---
@@ -141,11 +147,11 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     bm(["@Benchmark method"]) --> harness["JMH harness\n(generated at annotation-process\ntime; calls your method in a loop)"]
-    harness --> warmup["Warm-up phase\n5 × 1s iterations\nJIT reaches C2 tier"]
-    harness --> fork["Fork JVM\n(clean JIT profile)"]
-    warmup --> measure["Measurement phase\n10 × 1s iterations\nBlackhole consumes result"]
+    harness --> warmup["Warm-up phase\ndefault 5 × 10s iterations\nJIT reaches C2 tier"]
+    harness --> fork["Fork JVM\ndefault 5 forks\n(clean JIT profile each)"]
+    warmup --> measure["Measurement phase\ndefault 5 × 10s iterations\nBlackhole consumes result"]
     fork --> measure
-    measure --> report["Statistical reporter\nmean ± 99% CI (Student t); ops/s or ns/op"]
+    measure --> report["Statistical reporter\nmean ± 99.9% CI (Student t); ops/s or ns/op"]
 
     class bm io
     class harness frozen
@@ -306,14 +312,16 @@ public class LruCacheBenchmark {
         }
     }
 
-    @Setup(Level.Invocation)
+    @Setup(Level.Iteration)
     public void resetIndex() {
-        index = 0;    // reset sequence pointer before each invocation
+        index = 0;    // reset sequence pointer once per iteration, NOT per invocation:
+                      // Level.Invocation here would pin index at 0 and every call would
+                      // read keySequence[0], turning the benchmark into a single-key hit
     }
 
     @Benchmark
     public String getOrEvict() {
-        int key = keySequence[index++ % keySequence.length];
+        int key = keySequence[(index++) % keySequence.length];
         String val = cache.get(key);
         if (val == null) {
             val = "value-" + key;
@@ -335,12 +343,14 @@ per-call setup is unavoidable AND fast (< 1% of benchmark time). Prefer `Level.I
 
 ## 7. Real-World Examples
 
-### LinkedIn — Connection pool throughput regression detection
+### Performance-gated CI — the pattern, not a vendor anecdote
 
-LinkedIn's `rest.li` framework uses JMH to guard `D2LoadBalancer.getClient()` performance.
-A 2018 change to the ring-buffer implementation caused a 3× regression in P99 latency that
-passed code review but failed the JMH CI check (> 5% mean regression → block merge).
-Reference: LinkedIn Engineering blog, "Automated Performance Testing with JMH" (2019).
+The generalisable use of JMH is as a merge gate: keep a baseline `results.json` from the
+main branch, run the benchmark suite on each PR, and block the merge when a benchmark's
+mean regresses beyond a threshold *and* its confidence interval no longer overlaps the
+baseline's. Both halves matter — a threshold alone flags noise, and an overlap test alone
+never fires on a small but real regression. The failure mode this catches is the change
+that is obviously correct in review and quietly 3× slower on the hot path.
 
 ### Oracle/OpenJDK — JDK internal benchmarking
 
@@ -349,23 +359,32 @@ JMH was created by Alexey Shipilev at Oracle specifically to benchmark JDK inter
 of JMH benchmarks under `test/micro/org/openjdk/bench/`. Any JDK performance claim in JEP
 proposals is backed by JMH numbers.
 
-### Twitter — Finagle Scala benchmarks (JVM-compatible technique)
+### Scala and other JVM languages — `sbt-jmh`
 
-Twitter's Finagle framework used JMH via the `jmh-scala` plugin to benchmark their
-`Future.flatMap()` combinator. Discovered that `Promise` allocation (not computation) dominated
-at 4-6 ns/op, leading to object-pool optimisations that cut allocation 40%.
+JMH is a bytecode-level harness, so it works for any JVM language; the annotation processor
+just needs to run. For Scala the standard integration is the `sbt-jmh` plugin, which wires
+the generator into the sbt build. The recurring finding in this kind of work is that
+allocation, not computation, dominates combinator-heavy code — a `flatMap` chain that looks
+like pure arithmetic spends most of its time creating the intermediate objects, which is
+why `-prof gc` belongs on every such run.
 
 ### Google — Guava collections
 
-The `guava-testlib` module publishes JMH benchmarks for every major collection (`ImmutableList`,
-`ImmutableMap`, `ArrayDeque`). These benchmarks run in CI and prevent accidental regressions
-in hotspot collection code that underlies Google's internal monorepo.
+Guava's own microbenchmarks live in `guava-tests/benchmark` and are written against
+**Caliper**, Google's benchmarking harness, not JMH — a useful reminder that "the JDK
+standard" is not the only harness you will meet in real codebases. Caliper predates JMH and
+takes a different approach to warm-up and DCE prevention; for new JVM work JMH is the
+better-supported choice, but do not assume an existing benchmark suite is JMH just because
+it is Java.
 
 ### Apache Kafka — Message processing throughput
 
-Kafka uses JMH in `clients/src/jmh/java/` to benchmark `RecordAccumulator.append()`,
-`Selector.poll()`, and compression codecs. Results feed capacity-planning math: "with LZ4,
-Kafka producers sustain 1.2M msgs/sec per CPU core on m5.2xlarge."
+Kafka keeps its benchmarks in a dedicated top-level module,
+`jmh-benchmarks/src/main/java/org/apache/kafka/jmh/`, covering producer record accumulation,
+the network `Selector` path, compression codecs and metadata handling. The module exists
+precisely so benchmarks are not scattered through the production source trees — a layout
+worth copying, because it lets you build and run the suite without pulling benchmark-only
+dependencies into the shipped artifacts.
 
 ---
 
@@ -494,18 +513,27 @@ public class FalseSharingState {
 
 **Fixed:**
 ```java
-@State(Scope.Benchmark)
+// Give each thread its own state object — JMH pads state instances, so counters
+// in separate @State(Scope.Thread) objects cannot land on the same cache line.
+@State(Scope.Thread)
 public class PaddedState {
-    @sun.misc.Contended          // JVM adds 128-byte padding on each side
-    volatile long counter1 = 0;
-    @sun.misc.Contended
-    volatile long counter2 = 0;
-    // Run with -XX:-RestrictContended to honour @Contended in user classes
+    volatile long counter = 0;
+
+    @Benchmark
+    @Threads(2)
+    public void increment(Blackhole bh) { bh.consume(counter++); }
 }
 ```
 
-False sharing inflates measured latency 3–10× for volatile writes, making your concurrent
-data structure look slower than it actually is.
+False sharing inflates measured latency for volatile writes, making your concurrent data
+structure look slower than it actually is. Note that `@sun.misc.Contended` — the padding
+annotation most blog posts reach for — does not compile on any current JDK: it was removed
+in Java 9 and now lives at `jdk.internal.vm.annotation.Contended`, unexported from
+`java.base`. Using it from application code requires
+`--add-exports java.base/jdk.internal.vm.annotation=ALL-UNNAMED` at compile *and* run time
+plus `-XX:-RestrictContended` (default `true`, meaning the JVM ignores the annotation
+outside boot classes). In a benchmark, `@State(Scope.Thread)` gets you the same isolation
+with no flags.
 
 ---
 
@@ -535,8 +563,8 @@ reset-between-iterations state.
 ### Pitfall 6 — Ignoring fork count
 
 `@Fork(0)` runs the benchmark in the same JVM that is running JMH infrastructure. The JIT
-profile is polluted by JMH's own compiled code. Always use `@Fork(1)` minimum; use `@Fork(3)`
-for publication-quality results.
+profile is polluted by JMH's own compiled code. Never go below `@Fork(1)`; JMH's default is
+5, and 3 or more is what you want for publication-quality results.
 
 ---
 
@@ -548,9 +576,9 @@ for publication-quality results.
 | `jmh-visualizer` | Browser chart of JMH JSON output | Upload `results.json` at jmh.morethan.io |
 | async-profiler | CPU/allocation profiler | Pairs with JMH via `-prof async`; shows flamegraphs |
 | JFR (Java Flight Recorder) | Low-overhead production profiler | `java -jar benchmarks.jar -prof jfr` |
-| `jmh-junit5` | Run JMH in JUnit 5 test | Enables IDE green-button execution |
+| `org.openjdk.jmh.Main` from a `main()` / `Runner` API | Run a benchmark from an IDE | Build an `OptionsBuilder().include(...)` and call `new Runner(opts).run()`; forking still applies |
 | `gradle-jmh-plugin` | Gradle integration | `me.champeau.jmh` plugin |
-| GraalVM `native-image` | Benchmark native executable | Use `@Fork` with `-jvmArgs "-Dnative.benchmark=true"` |
+| `sbt-jmh` | Scala/sbt integration | Wires the annotation processor into the sbt build |
 | `perf` (Linux) | Hardware counters | `java -jar benchmarks.jar -prof perf` for IPC, cache miss |
 
 ---
@@ -569,9 +597,13 @@ production decision.
 **Q2. What is dead code elimination and how does JMH prevent it?**
 Dead code elimination (DCE) is a JIT optimisation where the compiler removes code whose output
 is provably never observed — for example, `String s = new String("hello"); // s never used`.
-JMH prevents DCE two ways: (1) the generated harness assigns benchmark return values to a
-`Blackhole` accumulator, forcing the JIT to treat them as observable; (2) `Blackhole.consume(x)`
-internally performs a fake volatile write that the JIT cannot optimise away.
+JMH prevents DCE two ways: (1) the generated harness feeds benchmark return values into a
+`Blackhole`, forcing the JIT to treat them as observable; (2) `Blackhole.consume(x)` compares
+the value against `volatile` fields chosen so the comparison is never true in practice but
+the JIT cannot prove it, so the producing computation must still run. On modern JDKs JMH
+prefers a *compiler* blackhole instead — an empty method the JIT is told to treat as opaque
+via `-XX:CompileCommand=blackhole` — which removes even the residual comparison cost, and
+JMH enables it automatically when the running JVM supports it.
 The practical rule: either return the benchmark result or pass it to `bh.consume()`.
 
 **Q3. Explain the difference between `@BenchmarkMode(Mode.Throughput)` and `Mode.SampleTime`.**
@@ -603,13 +635,16 @@ concurrency testing because there is no contention.
 
 **Q6. What is false sharing and how does `@Contended` address it in a benchmark?**
 False sharing occurs when two threads modify logically independent variables that happen to
-reside on the same CPU cache line (64 bytes). Every write invalidates the line for the other
-CPU, causing cache-miss traffic even though the variables are independent. In benchmarks this
-inflates measured latency 3–10× for `volatile` writes. `@sun.misc.Contended` (combined with
-`-XX:-RestrictContended`) pads the annotated field with 128 bytes on each side, ensuring it
-occupies its own cache line. Without padding, a multi-threaded benchmark of two counters may
-report 3× worse throughput than the real-world scenario where the fields are naturally
-separated.
+reside on the same CPU cache line (64 bytes on x86; 128 bytes on Apple silicon). Every write
+invalidates the line for the other CPU, causing cache-miss traffic even though the variables
+are independent. In benchmarks this inflates measured latency for `volatile` writes, so a
+two-counter benchmark can report several times worse throughput than the real-world scenario
+where the fields are naturally separated. The fix inside a benchmark is `@State(Scope.Thread)`,
+which gives each thread its own padded state object. The `@Contended` annotation does the
+same job by inserting `-XX:ContendedPaddingWidth` (default 128) bytes around a field, but it
+is not reachable from application code on a modern JDK — it moved to
+`jdk.internal.vm.annotation` in Java 9 and needs `--add-exports` plus
+`-XX:-RestrictContended` to have any effect.
 
 **Q7. What does `@Fork(1)` do and why should you never use `@Fork(0)` for production benchmarks?**
 `@Fork(1)` spawns a fresh child JVM for each benchmark method, ensuring it starts with a clean
@@ -617,8 +652,10 @@ JIT profile uncontaminated by other benchmarks or by the JMH infrastructure itse
 runs benchmarks in the same JVM as JMH, meaning earlier benchmarks may have compiled code
 paths that bias the JIT profile for later ones — a benchmark for `ArrayList.get()` run after
 a benchmark heavy on `LinkedList` traversal may see different JIT decisions than in isolation.
-Use `@Fork(1)` as the minimum for any result you report; use `@Fork(3)` for publication-quality
-measurements where statistical confidence across JVM instances matters.
+Note that `@Fork(1)` is a *reduction* from JMH's default of 5 forks: writing `@Fork(1)` to
+make a suite run faster trades away the cross-JVM variance estimate, so treat it as the
+minimum for a quick check and leave the default (or `@Fork(3)`) for any number you publish
+or gate CI on.
 
 **Q8. How would you benchmark a rate limiter under concurrent load and interpret the concurrency scaling curve?**
 Use `@State(Scope.Benchmark)` for the shared `RateLimiter` instance and run the same benchmark
@@ -642,14 +679,14 @@ data size and confirm the improvement holds at production-realistic sizes. Fourt
 `-prof async` to compare flamegraphs before and after to see where time is actually spent.
 
 **Q10. How do you integrate JMH benchmarks into CI to prevent performance regressions?**
-Run `java -jar benchmarks.jar -rf json -rff results.json` in CI, then use the `jmh-compare`
-tool or a custom script to compare the new `results.json` against the baseline stored in the
-repo or artifact store. A common threshold is: fail CI if any benchmark's mean regresses by
-> 5% and its confidence intervals don't overlap with the baseline. For connection pools and
-rate limiters, also track P99 from `SampleTime` mode, not just mean. LinkedIn's approach:
-capture baseline on the `main` branch, run benchmarks on every PR, block merge if any
-throughput regresses > 5% or any P99 regresses > 10%. Store the JSON as a build artifact
-so trends are visible over releases.
+Run `java -jar benchmarks.jar -rf json -rff results.json` in CI, then compare the new
+`results.json` against a baseline stored in the repo or artifact store — there is no official
+comparison tool, so this is a short script over the JSON (each result carries `primaryMetric`
+with `score`, `scoreError` and `scoreConfidence`). A common threshold is: fail CI if any
+benchmark's mean regresses by > 5% **and** its 99.9% confidence interval no longer overlaps
+the baseline's — requiring both keeps noise from failing the build. For connection pools and
+rate limiters, also track P99 from `SampleTime` mode, not just mean. Store the JSON as a
+build artifact so trends are visible over releases.
 
 **Q11. What is the difference between `@Setup(Level.Trial)`, `Level.Iteration`, and `Level.Invocation)`?**
 `Level.Trial` runs once before all warm-up and measurement iterations combined — use it for
@@ -684,8 +721,11 @@ when: (a) your method returns `void` but produces intermediate results that coul
 (b) you need to consume multiple independent results in one benchmark method
 (`bh.consume(a); bh.consume(b)`), or (c) you are benchmarking side effects of a `void` method
 where a return-value style would require changing the method signature. Both styles are equally
-effective at preventing DCE; the `Blackhole.consume()` signature is not magic — the JMH
-harness itself is what prevents elimination, not the `Blackhole` object per se.
+effective at preventing DCE, because both end at the same sink: the generated harness routes
+your return value into a `Blackhole` exactly as `bh.consume()` does. What actually defeats the
+JIT is the sink's implementation — a comparison against `volatile` fields the compiler cannot
+fold, or, on JVMs that support it, the `-XX:CompileCommand=blackhole` intrinsic JMH enables
+automatically.
 
 **Q14. Describe how you would validate that a Spring `@Cacheable` optimisation actually improves throughput.**
 Create two JMH state objects: one with a real `ConcurrentHashMap`-backed cache (simulating
@@ -704,9 +744,12 @@ Annotate a `@State` field with `@Param({"100", "1000", "10000", "100000"})` and 
 the benchmark once for each value, reporting a separate row in the output. This is the standard
 way to plot algorithmic complexity curves: if throughput halves when data size doubles, the
 algorithm is O(n); if it stays flat, it's O(1). For the `LRU cache` benchmark, vary capacity
-to find where `LinkedHashMap.get()` starts showing cache-miss penalty as the map overflows the
-CPU L2 cache (~256 KB); the inflection point appears around 32,000–64,000 map entries on
-modern hardware. Always test at the production-realistic size — a benchmark showing O(1) at
+to find where `LinkedHashMap.get()` starts showing a cache-miss penalty as the live map
+overflows a cache level. Do the division rather than quoting a number: a `LinkedHashMap.Entry`
+is about 40 bytes with compressed oops, plus ~4 bytes of table slot, so a 1 MB L2 holds on the
+order of 20,000 entries and the inflection sits near there — on a machine with a 256 KB L2 it
+arrives around 5,000. Measure your own cache sizes (`lscpu`, `sysctl hw.l2cachesize`) and
+divide. Always test at the production-realistic size — a benchmark showing O(1) at
 1,000 entries may show O(log n) degradation at 10,000,000 entries due to cache-miss patterns.
 
 ---
@@ -723,7 +766,8 @@ modern hardware. Always test at the production-realistic size — a benchmark sh
 - **Use `SampleTime` to catch tail latency** — mean latency benchmarks can hide P99 spikes
   that breach SLAs.
 - **Pin JMH to a specific CPU** — use `taskset -c 0-3 java -jar benchmarks.jar` on Linux to
-  reduce OS scheduling noise; disables Turbo Boost for more consistent results.
+  reduce OS scheduling and cross-socket migration noise. Pinning does not touch clock speed;
+  disabling Turbo Boost is a separate step (below).
 - **Disable Turbo Boost / frequency scaling** — `cpupower frequency-set -g performance` on
   Linux; prevents dynamic clock speed from inflating measured throughput.
 - **Integrate into CI** — store JSON output as artifact; diff against baseline; fail on > 5%
@@ -765,25 +809,30 @@ public class RateLimiterScaling {
 }
 ```
 
-**Expected result on a 16-core machine:**
+**Shape of the result (measured on an 8-core machine; absolute numbers are machine-specific,
+the shape is not):**
 ```
 Threads   Throughput (ops/s)    Interpretation
-      1   ~95,000,000           Near-zero CAS contention; pure CAS loop speed
-      2   ~120,000,000          Light contention; still super-linear (both CPUs active)
-      4   ~80,000,000           Contention visible; CAS failure rate ~20%
-      8   ~45,000,000           Heavy contention; CAS failure ~40%
-     16   ~25,000,000           CAS failure dominates; >50% retries
-     32   ~18,000,000           Hyper-threading pressure + contention
+      1   ~215,000,000          No contention; pure uncontended CAS speed
+      2   ~ 82,000,000          Two cores now fight for one cache line
+      4   ~ 31,000,000          Retry rate climbing steeply
+      8   ~  8,500,000          Line ping-pongs across all cores; retries dominate
+     16   ~ 10,000,000          Flat — already saturated at the cache-coherence limit
+     32   ~  7,600,000          Flat/slightly worse
 ```
 
-**Finding:** Peak throughput is at 2 threads (2× cores working independently). Beyond 4 threads,
-the `compareAndSet` failure-and-retry cost dominates. The fix (from the case study) is to use
-a `Striped<AtomicLong>` or per-key limiters so different users' tokens are on different atomic
-variables.
+**Finding:** peak throughput is at **1 thread**, and every added thread makes it worse. A
+single hot `AtomicLong` does not scale at all — the bottleneck is cache-line ownership, not
+CPU. Between 1 and 8 threads throughput falls ~25×, then flattens because the line can only
+change hands so fast. The fix (from the case study) is a `Striped<AtomicLong>` or per-key
+limiters so different users' tokens live on different cache lines.
 
-**Benchmark proves the design decision:** Without this JMH evidence, the `AtomicLong` single-CAS
-design "looks correct" in code review. The benchmark quantifies the 5× throughput drop from 2→32
-threads and justifies the architectural change.
+**Benchmark proves the design decision:** without this evidence the `AtomicLong` single-CAS
+design "looks correct" in code review — it *is* correct, it just does not scale. Note the
+counter-intuitive corollary you should also measure: past ~4 threads a plain `synchronized`
+block on the same counter can beat the CAS loop, because a monitor queues contenders instead
+of letting them all spin on the same line. "Lock-free" is a progress guarantee, not a
+throughput guarantee.
 
 See also: [jvm_tuning_and_gc_for_services.md](./jvm_tuning_and_gc_for_services.md) for GC
 considerations when benchmarks show high allocation rates.

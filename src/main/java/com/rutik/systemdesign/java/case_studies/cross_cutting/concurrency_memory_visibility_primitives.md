@@ -18,7 +18,10 @@ values in registers, and delay writes to main memory.
 - **Happens-before (HB)**: A partial order over memory operations. If action A *happens-before*
   action B, then the effects of A are guaranteed visible to B.
 - **Data race**: Two threads access the same variable, at least one writes, and there is no
-  HB ordering between them. Data races produce undefined (not random) behaviour.
+  HB ordering between them. Java has no undefined behaviour: a racy read still returns some
+  value that some thread actually wrote (or the default), never a fabricated one. What you
+  lose is ordering and freshness — arbitrarily stale values, and writes observed out of
+  program order.
 - **Sequential consistency**: The illusion that all memory operations execute in the order the
   program text specifies, and that all threads observe the same total order. JMM provides SC
   only for *data-race-free* (DRF) programs.
@@ -54,7 +57,7 @@ The JMM defines HB by the following rules (each is transitive and composable):
 | Rule | What establishes HB |
 |------|-------------------|
 | **Program order** | Action A before action B in the same thread → A HB B |
-| **Monitor lock** | `monitorenter` (unlock) → next `monitorexit` (lock) of the same monitor |
+| **Monitor lock** | `monitorexit` (unlock) → next `monitorenter` (lock) of the same monitor |
 | **Volatile write** | Volatile write to `v` → next volatile read of `v` by any thread |
 | **Thread start** | `Thread.start()` in T1 → any action in T2 |
 | **Thread join** | Any action in T2 → `Thread.join(T2)` returns in T1 |
@@ -249,14 +252,19 @@ class Node<V> {
 |------|-----------|------|
 | `get` / `set` (plain) | No memory ordering — may be reordered freely | Cheapest |
 | `getOpaque` / `setOpaque` | Coherence per variable, no cross-variable ordering | Slightly cheaper than volatile on ARM |
-| `getAcquire` / `setRelease` | Acquire/release pairing — prevents reordering across the pair | ~50% cheaper than volatile on ARM |
+| `getAcquire` / `setRelease` | Acquire/release pairing — prevents reordering across the pair | Never more expensive than volatile; the gap is real only where a StoreLoad fence would be needed |
 | `getVolatile` / `setVolatile` | Full sequential consistency (= volatile keyword) | Most expensive |
 | `compareAndSet` | CAS with full SC semantics | HW atomic instruction |
 | `weakCompareAndSet` | CAS may spuriously fail; weaker ordering | Allowed to be cheaper |
 
 `VarHandle` replaced `sun.misc.Unsafe` field access in JDK internals (`ConcurrentHashMap`,
-`ForkJoinPool`) in Java 9+. Use it when you need acquire/release semantics without the full
-cost of `volatile` (primarily relevant on ARM; x86 fences are cheap regardless).
+`ForkJoinPool`) in Java 9+. Use it when acquire/release is the semantics you actually mean
+and you do not need the global ordering that `volatile` (sequential consistency) implies.
+The cost difference is narrower than folklore suggests: on AArch64 HotSpot compiles both a
+volatile load and `getAcquire` to `ldar`, and both a volatile store and `setRelease` to
+`stlr`. The place the modes genuinely diverge is a store followed by a load of a *different*
+variable — seq-cst must forbid that reordering (an `mfence`/`lock`-prefixed op on x86),
+acquire/release need not.
 
 ---
 
@@ -359,14 +367,17 @@ reference before the constructor body finishes initialising fields.
 ### CopyOnWriteArrayList — safe publication without volatile on reads
 
 ```java
-// Simplified CopyOnWriteArrayList internals (Java 17)
+// Simplified CopyOnWriteArrayList internals (matches the current JDK source)
 public class CopyOnWriteArrayList<E> {
     // 'array' is volatile: guarantees that after a write, all subsequent reads
     // see the freshly copied array
     private transient volatile Object[] array;
+    // A dedicated lock object, NOT 'this' — so a caller that synchronizes on the
+    // list cannot deadlock against, or interfere with, the internal writer lock.
+    final transient Object lock = new Object();
 
     public boolean add(E e) {
-        synchronized (this) {            // single writer at a time
+        synchronized (lock) {            // single writer at a time
             Object[] elements = getArray();
             int len = elements.length;
             Object[] newElements = Arrays.copyOf(elements, len + 1);
@@ -406,17 +417,27 @@ public class ContendedCounters {
 ```
 
 ```java
-// FIXED: @Contended forces 128-byte padding
-@State(Scope.Group)
+// FIXED: give each counter its own object so it lands on its own cache line.
+// JMH does this for you: @State(Scope.Thread) allocates one state instance per
+// thread, and the harness pads state objects, so independent counters cannot
+// share a line.
+@State(Scope.Thread)
 public class UncontendedCounters {
-    @sun.misc.Contended public long counter0 = 0;
-    @sun.misc.Contended public long counter1 = 0;
-    // Run JVM with -XX:-RestrictContended
+    public long counter = 0;
+
+    @Benchmark
+    public void write() { counter++; }
 }
 ```
 
-On a 16-core machine, the broken version shows ~25% of the true throughput when 2 threads
-write to counter0 and counter1 simultaneously. The fix eliminates the false sharing penalty.
+The annotation route exists but is not application-callable. `sun.misc.Contended` was
+removed in Java 9; the annotation now lives at `jdk.internal.vm.annotation.Contended` inside
+`java.base`, which does not export that package. Using it outside the JDK needs
+`--add-exports java.base/jdk.internal.vm.annotation=ALL-UNNAMED` at both compile and run
+time *plus* `-XX:-RestrictContended` (the flag defaults to `true`, meaning the JVM honours
+`@Contended` only on boot-classpath classes). When honoured, the padding width is
+`-XX:ContendedPaddingWidth`, default 128 bytes. For application code prefer explicit spacer
+fields or separate objects — both work with no VM flags at all.
 
 ---
 
@@ -450,8 +471,11 @@ public class SpinLock {
 }
 ```
 
-On x86, `compareAndSet` and `setRelease` are both full fences anyway (MFENCE or LOCK prefix),
-so the gain is semantic clarity and forward compatibility with weakly-ordered CPUs (ARM).
+On x86 the CAS compiles to a `lock cmpxchg`, which is a full fence, but `setRelease`
+compiles to a plain `mov` — x86's TSO already forbids the store-store and load-store
+reorderings a release store must prevent, so no fence instruction is emitted. That is
+exactly why `setRelease` is the right mode here and a `setVolatile` would not be: a
+sequentially-consistent store would force a StoreLoad fence that this unlock does not need.
 
 ---
 
@@ -468,10 +492,13 @@ ensures that a thread that observes the table array after a resize sees all the 
 ### OpenJDK `ForkJoinPool` — work-stealing with `getAcquire`
 
 `ForkJoinPool`'s `WorkQueue` uses `VarHandle` with `getAcquire`/`setRelease` to read and write
-the deque top/base indices. This is cheaper than `volatile` on ARM64 (no full memory barrier,
-only a load-acquire which is a `DMB ISH` on ARMv8) while still preventing the critical
-reorderings. LinkedIn's Kafka consumer thread-pool measured a 6% throughput increase on AWS
-Graviton (ARM) after migrating queue indices from `volatile` to acquire/release mode.
+the deque `top`/`base` indices. The choice is about stating the exact ordering the algorithm
+needs, not about shaving a fence: a stealer must see the slot contents that were published
+before the index was advanced (release/acquire is precisely that guarantee), and nothing in
+the protocol depends on a global total order across both indices. On AArch64 those modes
+compile to `ldar`/`stlr` — the same instructions HotSpot emits for `volatile` — so the win
+is that the code documents its own memory contract and does not silently rely on
+sequential consistency it never needed.
 
 ### Java `String` — `hash` field lazy init with racy but correct pattern
 
@@ -497,23 +524,28 @@ are atomic per JLS §17.7; (2) all threads compute the same result; (3) the wors
 recomputing the hash twice. This is a rare case where an intentional data race is justified
 by immutability of the input.
 
-### Twitter Snowflake — ID generator with `volatile` clock guard
+### Snowflake ID generator — why a `volatile` clock guard is not enough
 
-Twitter's Snowflake (reproduced in many systems) uses a `volatile long lastTimestamp` to detect
-clock skew across calls from multiple threads. The volatile ensures that a thread seeing a
-decreased `currentTimestamp < lastTimestamp` always sees the *actual* last timestamp, not a
-stale register-cached value. Without `volatile`, on a multi-socket server, thread A's write to
-`lastTimestamp` might not be visible to thread B, causing duplicate IDs. See
+A snowflake generator keeps a `lastTimestamp` and a `sequence` and must decide, per call,
+whether the clock advanced. Twitter's original implementation guarded this with a
+`synchronized nextId()`, and that is the correct choice: making `lastTimestamp` `volatile`
+instead fixes visibility but not atomicity. Reading `lastTimestamp`, comparing it to `now`,
+incrementing `sequence`, and writing `lastTimestamp` back is a compound check-then-act — two
+threads can both read the same millisecond and both increment `sequence` from the same value,
+producing identical IDs. This is the standard "volatile is not a lock" trap in its most
+expensive form: a duplicate primary key. See
 [../design_rate_limiter_java.md](../design_rate_limiter_java.md) for a similar pattern in the
 sliding-window counter.
 
-### Apache Cassandra — lock-free ring buffer
+### Ring-buffer publication — the general acquire/release shape
 
-Cassandra's commit log uses a lock-free ring buffer with VarHandle CAS on segment boundaries.
-A `setRelease` publishes a completed segment; readers use `getAcquire` to consume it. This
-acquire/release pairing on ARM (AWS Graviton 2) reduces memory barrier overhead 40% vs full
-`volatile` fence, contributing to the ~15% commit log throughput improvement reported in the
-Cassandra 4.1 release notes.
+The commit-log / journal pattern found in Cassandra, Kafka and the LMAX Disruptor is the
+canonical acquire/release use: a producer fills a slot, then does one `setRelease` of the
+sequence number; a consumer does one `getAcquire` of that sequence and, if it has advanced,
+reads the slot with plain loads. The single release/acquire pair carries every preceding
+plain write in the producer across to the consumer, so no field inside the slot needs to be
+`volatile`. Getting this wrong in the other direction — plain stores on both sides — is the
+classic "the consumer saw the new sequence but the old payload" bug.
 
 ---
 
@@ -677,7 +709,7 @@ Singleton DCL example in §6 for the production pattern.
 | async-profiler | CPU flame graph showing lock contention | `-e lock` mode shows blocked-on-monitor hotspots |
 | JFR (Java Flight Recorder) | Thread synchronisation events | `jdk.JavaMonitorWait`, `jdk.JavaMonitorEnter` events |
 | jcstress | Conformance testing of concurrent code | OpenJDK tool; runs millions of interleaved executions |
-| ThreadSanitizer (via GraalVM) | Data race detection at runtime | Instruments bytecode to detect unsynchronised access |
+| ThreadSanitizer (OpenJDK integration, JDK-8208520) | Data race detection at runtime | Needs a TSan-enabled JVM build; Valgrind-class overhead — debugging builds only |
 | Error Prone `@GuardedBy` | Compile-time annotation checking | Enforces that annotated fields are only accessed under the specified lock |
 
 ---
@@ -730,9 +762,13 @@ False sharing occurs when two logically independent variables reside on the same
 line (64 bytes on x86/ARM). Every write by thread A to its variable invalidates the cache
 line in all other CPUs — even if thread B's variable on the same line was not written. This
 causes cache-miss traffic proportional to write frequency, inflating measured latency 3–10×
-for `volatile` writes. The canonical fix is padding: either declare spacer fields to push
-the two variables apart, or annotate with `@sun.misc.Contended` (combined with
-`-XX:-RestrictContended`) to have the JVM add 128-byte padding automatically. JMH
+for `volatile` writes. The fix available to application code is padding by hand: declare
+spacer fields, or give each contended value its own object so the allocator separates them.
+The JVM's automatic 128-byte padding is `jdk.internal.vm.annotation.@Contended`, and it is
+not application-callable — `java.base` does not export that package, so using it needs
+`--add-exports java.base/jdk.internal.vm.annotation=ALL-UNNAMED` at both compile and run
+time *and* `-XX:-RestrictContended` (which defaults to `true`, ignoring the annotation
+outside the JDK). Treat it as a JDK-internal tool, not a design option. JMH
 `@State(Scope.Thread)` avoids false sharing between thread-local state objects because each
 thread gets its own object at a separate allocation address.
 
@@ -770,14 +806,17 @@ modified after start.
 **Q9. Explain the `VarHandle` access modes and when you would use acquire/release instead of volatile.**
 `VarHandle` exposes four memory ordering modes: plain (no ordering), opaque (coherence per
 variable), acquire/release (ordered relative to each other but not globally), and
-volatile/sequential-consistent (full global ordering). On x86, all four modes map to the same
-hardware instruction (MFENCE or LOCK prefix for writes), so the performance difference is
-negligible. On ARM64 (AWS Graviton), acquire/release maps to `DMB ISH LD`/`DMB ISH ST` (cheaper
-one-sided barriers) while volatile maps to a full `DMB ISH` (both sides). For a producer–consumer
-queue where the producer does `setRelease(item)` and the consumer does `getAcquire()`, the
-acquire/release pairing is semantically sufficient and up to 20–40% cheaper per operation on
-ARM. Use acquire/release in JDK-level data structures targeting heterogeneous hardware; use
-volatile in application code where clarity matters more than ARM-specific gains.
+volatile/sequential-consistent (full global ordering). The real difference is semantic, not
+a fixed percentage. On x86, a release store compiles to a plain `mov` while a volatile store
+needs a StoreLoad fence (`mfence` or a `lock`-prefixed op) — that is the one place the modes
+cost different instructions. On AArch64, HotSpot emits `ldar` for both `getAcquire` and a
+volatile load, and `stlr` for both `setRelease` and a volatile store, so on that target they
+are usually identical machine code. Choose by meaning: for a producer–consumer queue where
+the producer does `setRelease(seq)` after filling a slot and the consumer does
+`getAcquire(seq)` before reading it, acquire/release is exactly the guarantee the algorithm
+needs, and using `volatile` there quietly asserts a global total order the code never relies
+on. Use `volatile` in application code where the simpler mental model is worth more than the
+precision.
 
 **Q10. How do you safely publish a mutable object to multiple threads?**
 Safe publication requires that the reference to the object is made visible through a
@@ -794,14 +833,20 @@ synchronisation because the `ArrayList` itself is not thread-safe.
 A data race occurs when two threads access the same variable, at least one access is a write,
 and there is no happens-before relationship between the accesses. Data races are not
 "undefined behaviour" in the C/C++ sense — the JMM guarantees that reads will return some value
-written by some thread, never a value that was never written (except default zero). However, the
-JMM also allows word tearing for `long`/`double` reads (though HotSpot prohibits it in practice)
-and allows stale reads for non-volatile fields. Runtime detection: (1) Use the OpenJDK `jcstress`
-framework for conformance testing of concurrent data structures. (2) Use the GraalVM
-ThreadSanitizer (TSan) port which instruments bytecode to detect concurrent accesses.
-(3) Enable JFR `jdk.JavaMonitorWait`/`jdk.JavaMonitorEnter` events to find uncontested but
-racy monitor patterns. In production: sanitise shared variable access at code-review time using
-Error Prone's `@GuardedBy` annotation.
+written by some thread, never a value that was never written (except default zero). Word
+tearing is explicitly *forbidden* (JLS §17.6): updating one field or array element must never
+disturb a neighbour. What the JMM does permit (JLS §17.7) is treating a non-volatile
+`long`/`double` write as two separate 32-bit writes, so a racy reader can observe a half-written
+64-bit value — declaring the field `volatile` removes that. Non-volatile fields may also be
+read arbitrarily stale. Detection: (1) the OpenJDK `jcstress` harness, which runs millions of
+interleavings and classifies the outcomes — this is the only tool that reliably finds JMM bugs;
+(2) `java.util.concurrent` conformance tests plus stress tests with `-XX:+StressLCM
+-XX:+StressGCM` to shake loose reorderings the JIT normally does not perform; (3) Error Prone's
+`@GuardedBy` at compile time, which catches the large class of races that are simply "someone
+forgot the lock". A runtime detector does exist — the OpenJDK ThreadSanitizer integration
+(JDK-8208520) instruments both Java and JNI accesses — but it needs a specially built
+TSan-enabled JVM and carries Valgrind-class overhead, so it is a debugging build, not
+something you run in production.
 
 **Q12. Explain the `ThreadLocal` memory model and the leak risk in thread-pool applications.**
 `ThreadLocal` values are stored in a `ThreadLocalMap` held by the `Thread` object itself
@@ -837,18 +882,21 @@ actions in any thread that subsequently reads the modified reference (via `get()
 pointer of a linked queue both atomically updates the pointer and publishes all prior writes
 (to `next`, `value`, etc.) to the next thread that reads the head.
 
-**Q15. Describe the Dekker-like broken pattern where two volatiles appear sufficient but aren't.**
-Consider a mutual-exclusion protocol where Thread 1 writes `volatile flag1 = true` and then
-reads `volatile flag2`, while Thread 2 writes `volatile flag2 = true` and then reads
-`volatile flag1`. Intuitively, "one of them must see the other's flag." Under SC, this holds.
-However, the JMM only guarantees sequential consistency for data-race-free (DRF) programs. If
-Thread 1's read of `flag2` observes `false` (reading from the initial write) and Thread 2's
-read of `flag1` also observes `false`, both enter the critical section simultaneously — the
-protocol fails. The JMM allows this because: the volatile write to `flag1` does not
-happen-before the volatile read of `flag2` unless `flag2`'s value was written after
-`flag1` was set. Two independent `volatile` fields do not create a cross-field ordering. The
-correct fix is to use a single `AtomicReference` for both state transitions, or use
-`synchronized` on a common monitor.
+**Q15. Describe the Dekker-like pattern, and say which memory mode makes it break.**
+Thread 1 writes `flag1 = true` then reads `flag2`; Thread 2 writes `flag2 = true` then reads
+`flag1`. The question is whether both can read `false` and both enter the critical section.
+With `volatile` fields the answer is no, and this is the key thing to get right about Java:
+volatile accesses are *synchronization actions* and the JMM places all of them in a single
+total synchronization order (JLS §17.4.4). A program whose shared accesses are all volatile
+is data-race-free, so it gets sequential consistency, and under SC "both read false" is not a
+legal execution. This guarantee is exactly why a volatile store is expensive — the compiler
+must emit a StoreLoad fence (`mfence` or a `lock`-prefixed op on x86) after it, precisely to
+stop the store from being reordered past the following load. Where the pattern genuinely
+breaks is with weaker modes: swap the fields for `VarHandle` `setRelease`/`getAcquire` and
+both threads *can* read `false`, because acquire/release orders each thread's own accesses
+but imposes no global order across the two independent variables. Same for plain fields.
+The lesson is not "two volatiles are not enough" — they are — but "acquire/release is not
+volatile", and reaching for the cheaper mode silently deletes the property Dekker depends on.
 
 ---
 

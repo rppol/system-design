@@ -171,14 +171,23 @@ public class MeteredRejectionHandler implements RejectedExecutionHandler {
 ### 4.3 `Semaphore` — concurrent in-flight limit
 
 ```java
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpResponse.BodyHandler;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 // Limit concurrent outbound HTTP calls to 50
 public class RateLimitedHttpClient {
     private final Semaphore inFlight = new Semaphore(50);
     private final HttpClient client = HttpClient.newHttpClient();
 
-    public <T> CompletableFuture<T> sendAsync(HttpRequest request, BodyHandler<T> handler) {
+    // Note the return type: sendAsync yields CompletableFuture<HttpResponse<T>>,
+    // not CompletableFuture<T> — the BodyHandler's T is the *body* type.
+    public <T> CompletableFuture<HttpResponse<T>> sendAsync(
+            HttpRequest request, BodyHandler<T> handler) {
         // Acquire before sending; release in completion callback
         try {
             if (!inFlight.tryAcquire(5, TimeUnit.SECONDS)) {
@@ -309,16 +318,23 @@ pauses Kafka polling (by not calling `poll()`, consumer lag grows but OOM is pre
 
 ```
 # Scenario: order-processing service
-# Average processing time W = 200ms (0.2s)
+# Average time in the system W = 200ms (0.2s), including DB wait
 # Target throughput λ = 500 req/s
 
-threads_needed = λ × W = 500 × 0.2 = 100 threads (for CPU-bound work)
+# Little's Law gives CONCURRENCY, and W already includes I/O wait,
+# so this IS the thread count for a blocking, thread-per-request model.
+# Do not then multiply by (1 + wait/service) — that double-counts the wait.
+concurrency = λ × W = 500 × 0.2 = 100 in-flight requests -> 100 threads
 
-# For I/O-bound work (50% waiting for DB):
-# Effective processing time = 200ms; CPU actually used = 100ms
-# threads_needed = λ × W_cpu = 500 × 0.1 = 50 threads + I/O wait capacity
-# Practical formula for I/O-bound: threads = target_concurrency × (1 + wait/service)
-# = 100 × (1 + 100ms/100ms) = 200 threads
+# The separate question is whether the CPU can keep up. Split W:
+#   W = 10ms CPU + 190ms DB wait
+#   CPU demand = λ × W_cpu = 500 × 0.010 = 5 cores
+# 100 threads on an 8-core box is fine: 5 of 8 cores busy (63%), the other
+# 95 threads are parked on socket reads and cost only their stacks.
+
+# Sanity check the other direction — if W_cpu were 100ms instead of 10ms:
+#   CPU demand = 500 × 0.1 = 50 cores. No thread count saves you;
+#   the box is 6x too small. Little's Law sizes the pool, not the machine.
 ```
 
 **Queue depth sizing:**
@@ -343,8 +359,13 @@ spring:
       idle-timeout: 300000        # 5min: return idle connections
       max-lifetime: 600000        # 10min: recycle connections to avoid server-side timeout
       # Key: pool-size is NOT "set it high for safety" — DB has its own connection limit
-      # Rule: maxPoolSize = (core_count * 2) + effective_spindle_count (PgBouncer formula)
-      # For 8-core server with SSD: maxPoolSize = 8 * 2 + 1 = 17 → round to 20
+      # Rule: maxPoolSize = (db_core_count * 2) + effective_spindle_count
+      #   This is the PostgreSQL wiki's "Number Of Database Connections" formula, which
+      #   HikariCP's "About Pool Sizing" page adopts. The core count is the DATABASE
+      #   server's, not the app server's.
+      # For an 8-core DB host with SSD: maxPoolSize = 8 * 2 + 1 = 17 → round to 20
+      # connection-timeout floor: HikariCP silently resets any value below 250 ms back
+      #   to the 30 s default, so "fail fast" means 250-5000 ms, not 30 ms.
 ```
 
 **The HikariCP bounded resource chain:**
@@ -431,30 +452,39 @@ Netflix's Hystrix popularised the bulkhead pattern: each downstream dependency g
 bounded `ThreadPoolExecutor`. If the payment service is slow, its thread pool saturates and
 its rejection handler returns a fallback response — the recommendation service thread pool
 is unaffected. Without bulkheads, a slow dependency starves the shared thread pool, causing
-cascading failure across all services. Netflix reported that this isolation pattern prevented
-5 complete outage incidents during 2014 Black Friday. Resilience4j's `BulkheadModule` provides
-the same capability with configurable semaphore-based or thread-pool-based isolation.
+cascading failure across all services. Resilience4j is the maintained successor and provides
+the same capability two ways: `Bulkhead` (semaphore-based, configured with
+`BulkheadConfig.custom().maxConcurrentCalls(n).maxWaitDuration(d)`) and `ThreadPoolBulkhead`
+(configured with `ThreadPoolBulkheadConfig`, giving a genuinely separate pool and queue).
 See also: [../design_rate_limiter_java.md](../design_rate_limiter_java.md) for the rate limiter
 component that works alongside the bulkhead.
 
-### LinkedIn — Connection pool tuning for Kafka consumers
+### Kafka consumer + undersized connection pool — how backpressure becomes a rebalance
 
-LinkedIn's Kafka team discovered in 2017 that connection pool exhaustion was the primary cause
-of consumer group rebalances on high-throughput topics. Each consumer's DB write path was using
-HikariCP with the default pool size of 10. At 2,000 msgs/s per consumer instance with 50ms
-average DB write time, Little's Law gives: L = 2000 × 0.050 = 100 concurrent writes needed,
-but only 10 pool slots available → 90 threads queuing at HikariCP → `connectionTimeout` (30s
-default) → tasks timing out → consumer rebalance. Fix: pool size = 100, timeout = 1s.
-Reference: LinkedIn Engineering blog, "Kafka Consumer Tuning" (2017).
+The most instructive failure shape in a Kafka consumer is that a *downstream* bound
+manifests as a *consumer group* problem. Suppose each consumer instance handles 2,000
+msgs/s and each message triggers a 50 ms DB write. Little's Law: L = 2000 × 0.050 = 100
+concurrent writes. Run that against HikariCP's default `maximumPoolSize` of 10 and 90
+records' worth of work is queued at the pool at any instant. With the default
+`connectionTimeout` of 30 s, that queueing is invisible as an error — it just inflates
+per-record latency until the processing loop stops calling `poll()` inside
+`max.poll.interval.ms`, at which point the broker declares the consumer dead and rebalances
+the group. The rebalance then redistributes the same load onto fewer working consumers and
+the failure accelerates. Two independent fixes are needed: size the pool from Little's Law,
+and drop `connectionTimeout` to a value (250 ms is HikariCP's floor; 1-2 s is typical) that
+turns pool exhaustion into a visible exception rather than latency.
 
-### Shopify — `CallerRunsPolicy` as HTTP throttle
+### `CallerRunsPolicy` as an HTTP throttle — and its precondition
 
-Shopify's Flash Sales infrastructure uses `CallerRunsPolicy` on their order-processing thread
-pool. When the pool saturates (>500ms queue wait), the Tomcat connector thread itself executes
-the task — which means the connector cannot accept new TCP connections, naturally throttling
-inbound HTTP. This emergent throttling prevented OOM crashes during Black Friday 2019, at the
-cost of increased P99 latency (200ms → 2.1s) but zero dropped orders. Reference: Shopify
-Engineering blog, "Surviving Black Friday" (2020).
+The classic use of `CallerRunsPolicy` in a servlet stack: the connector thread submits work
+to a bounded pool, and when the pool and queue are both full the connector thread runs the
+task itself. While it is doing that it is not accepting connections, so inbound TCP backs up
+in the accept queue and the client feels the throttle. Nothing is dropped, which is why it
+suits order and payment flows. The precondition is that the submitting thread is a *scarce*
+resource — the throttle is the exhaustion of the connector pool. That precondition
+disappears under a thread-per-request virtual-thread server, where the runtime will simply
+create another virtual thread for the next request no matter how many are blocked; see
+Pitfall 6.
 
 ### Apache Kafka — consumer-side backpressure via `poll()` delay
 
@@ -471,9 +501,13 @@ flow control.
 Amazon's SQS uses the `visibility timeout` (default 30s) as an implicit backpressure mechanism.
 If a consumer receives a message but does not delete it within the timeout, SQS makes it
 visible again for another consumer. A slow consumer with a large in-flight message count simply
-exhausts its `maxNumberOfMessages` budget (max 10 per `ReceiveMessage` call), naturally
-self-throttling. Amazon recommends setting `visibility timeout = 6 × average processing time`
-to avoid spurious reprocessing while still detecting stalled consumers.
+exhausts its `MaxNumberOfMessages` budget (max 10 per `ReceiveMessage` call), naturally
+self-throttling. AWS's guidance is to set the visibility timeout to the *maximum* time your
+application needs to process and delete a message — too short and the message is redelivered
+while still being processed (duplicate work), too long and a crashed consumer's messages stay
+invisible. The "6×" rule of thumb that circulates is specific to Lambda-triggered queues,
+where AWS documents setting the queue's visibility timeout to at least six times the
+function's timeout to leave room for retries.
 
 ---
 
@@ -530,8 +564,11 @@ ExecutorService exec = new ThreadPoolExecutor(
 ```
 
 **Impact:** On a service handling 10k ops/s with 8 threads at 100ms processing time, the
-default unbounded queue grows at 10,000 − (8/0.1) = 9,920 items/s. At 1KB per task object,
-that's ~10 MB/s → heap exhaustion in seconds during a spike.
+default unbounded queue grows at 10,000 − (8/0.1) = 9,920 items/s. At 1 KB per task object
+that is ~10 MB/s, so a 2 GB heap is gone in roughly 3 minutes of sustained overload — and
+much sooner if each task retains a request body. The point is not the exact deadline: an
+unbounded queue converts a throughput problem, which degrades gracefully, into an
+`OutOfMemoryError`, which does not.
 
 ---
 
@@ -611,10 +648,20 @@ Always call `request(n)` in `onSubscribe` and `request(1)` (or batch) in `onNext
 
 ### Pitfall 6 — CallerRunsPolicy with virtual threads
 
-With Project Loom virtual threads (Java 21+), `CallerRunsPolicy` loses its backpressure effect:
-virtual threads are extremely cheap, so the "submitter runs the task" path merely creates another
-concurrent task rather than blocking anything. For virtual-thread-based servers, use a
-`Semaphore` at the request-entry filter level to cap total concurrent requests explicitly.
+`CallerRunsPolicy` does still block its caller under virtual threads — running the task
+inline blocks whichever thread submitted it, virtual or not. What breaks is the *chain* that
+made that blocking into ingest throttling. In a platform-thread server the submitter is a
+connector thread from a fixed pool, so blocking one removes 1/200th of the accept capacity.
+In a virtual-thread-per-request server there is no fixed pool: the runtime mints a fresh
+virtual thread for the next request regardless of how many are blocked, so blocking the
+submitter throttles exactly one request and nothing upstream ever notices. Requests keep
+arriving until some other resource (heap, the DB pool) fails.
+
+The fix is to make the bound explicit rather than emergent: a `Semaphore` at the
+request-entry filter capping total in-flight requests, sized from Little's Law against the
+scarcest downstream resource. That is the general rule for virtual threads — they remove the
+accidental backpressure that thread pools provided as a side effect, so every bound you were
+relying on implicitly has to be restated.
 
 ---
 
@@ -626,11 +673,11 @@ concurrent task rather than blocking anything. For virtual-thread-based servers,
 | `java.util.concurrent.Semaphore` | Permit-based concurrency limit | General-purpose concurrent-operation limiter |
 | `ThreadPoolExecutor` + `RejectedExecutionHandler` | Thread pool with bounded queue | CallerRunsPolicy is the best default backpressure policy |
 | HikariCP | JDBC connection pool | `maximum-pool-size` + `connection-timeout` are the key backpressure knobs |
-| Resilience4j Bulkhead | Thread-pool or semaphore isolation | See [../../../spring/case_studies/cross_cutting/resilience4j_patterns.md] |
+| Resilience4j `Bulkhead` / `ThreadPoolBulkhead` | Semaphore or thread-pool isolation | See [resilience4j_patterns.md](../../../spring/case_studies/cross_cutting/resilience4j_patterns.md) |
 | Project Reactor / RxJava | Reactive streams backpressure | `Flux.onBackpressureBuffer(n)`, `Flux.onBackpressureDrop()` |
 | `java.util.concurrent.Flow` | JDK standard reactive streams API | Java 9+; Reactor/RxJava implement this interface |
 | Micrometer `ExecutorServiceMetrics` | Monitor executor queue depth | `executor.queued`, `executor.active`, `executor.rejected` |
-| JFR `ThreadPool` events | Executor health in production | `jdk.VirtualThreadPinned`, `jdk.ThreadSleep` for backpressure analysis |
+| JFR events | Executor and virtual-thread health in production | `jdk.VirtualThreadPinned` (fires when a virtual thread blocks inside a native frame), `jdk.VirtualThreadSubmitFailed`, `jdk.ThreadSleep` |
 
 ---
 
@@ -672,11 +719,14 @@ Little's Law states that the average number of items in a stable system (L) equa
 arrival rate (λ) times the average time each item spends in the system (W): L = λW. For thread
 pools: if a service handles 500 req/s and each request takes 200ms, L = 500 × 0.2 = 100
 concurrent requests are needed, so the thread pool needs ≥ 100 threads. For connection pools
-(I/O-bound DB calls): if 100 threads each make a DB call taking 20ms, L = 100 × 0.020 × 50
-(calls/thread/sec) — but more practically, concurrent DB calls = requests_concurrently_waiting_for_DB.
-With 100 threads and 40% DB wait time: 40 connections needed. HikariCP's formula is simpler:
-`maxPoolSize = (core_count × 2) + effective_spindle_count`, derived empirically by the HikariCP
-author for typical OLTP workloads.
+(I/O-bound DB calls) apply the same law to the DB stage alone: concurrent connections =
+λ_db × W_db. At 500 req/s with one 20 ms query per request, that is 500 × 0.020 = 10
+connections — note this is far below the 100 application threads, because each thread only
+holds a connection for a tenth of its request. Cross-check against the ceiling formula
+`maxPoolSize = (db_core_count × 2) + effective_spindle_count` from the PostgreSQL wiki
+(adopted by HikariCP's pool-sizing guide): if Little's Law demands more connections than that
+formula allows, the database is the bottleneck and a bigger pool will make throughput worse,
+not better.
 
 **Q5. What is the difference between a `Semaphore` and a bounded `BlockingQueue` for backpressure?**
 A `Semaphore(n)` limits the number of *concurrent* operations in-flight — at most n callers
@@ -686,8 +736,11 @@ controls queuing but allows any number of concurrent consumers to drain it. Use 
 when limiting concurrent outbound calls (e.g., max 50 HTTP requests to a payment API in-flight),
 because the concern is downstream capacity, not processing order. Use `BlockingQueue` when
 decoupling a producer thread from a consumer thread, where the queue's order and depth matter.
-For a connection pool, `Semaphore` is the right primitive — HikariCP internally uses a
-`SemaphoreMPMC` or similar structure to limit concurrent connection holders.
+A connection pool is really both: the bound is a concurrency bound (at most `maxPoolSize`
+borrowers), while the connections themselves sit in a container. HikariCP implements this with
+`ConcurrentBag`, which gives each borrowing thread a thread-local list of connections it
+recently used (so the common case is contention-free), falls back to a shared
+`CopyOnWriteArrayList`, and hands off connections between threads through a `SynchronousQueue`.
 
 **Q6. How does `BlockingQueue.put()` vs `offer(timeout)` affect system behaviour under backpressure?**
 `put()` blocks the producer thread indefinitely until queue space is available — this is
@@ -738,9 +791,13 @@ A typical incident pattern: a metrics-collection service uses `Executors.newFixe
 to flush metrics to an analytics DB. During a load spike, the analytics DB response time
 rises from 10ms to 2s. Little's Law: L = 100 metrics/s × 2s = 200 concurrent writes needed,
 but only 10 threads available → `LinkedBlockingQueue` grows at 100 − (10/2.0) = 95 items/sec.
-After 90 seconds, 8,550 items are queued at ~500 bytes each = 4.3 MB of queue + executor
-overhead → heap pressure → GC pressure → stop-the-world GC pauses → metrics-collection thread
-blocking → application health endpoint times out → Kubernetes kills the pod (OOM). Resolution:
+That is only ~48 KB/s at 500 bytes per item, so the queue is not what kills the process — after
+an hour it is still under 200 MB. The kill comes from what each queued item *retains*: every
+task holds its metric payload and, through the enclosing lambda, the request-scoped objects
+captured when it was created. Once the analytics DB stays slow for hours the retained graph,
+not the queue nodes, fills the heap → GC pressure → stop-the-world pauses → the health endpoint
+times out → Kubernetes restarts the pod. The lesson is that queue-depth-in-bytes understates the
+damage; measure retained size, not task count. Resolution:
 (1) Replace `newFixedThreadPool` with bounded `ArrayBlockingQueue(200)` + `CallerRunsPolicy`.
 (2) Set `connectionTimeout` on the analytics DB pool to 1s.
 (3) Add Micrometer `executor.queued` alert at 80% capacity.
@@ -762,9 +819,10 @@ its own thread pool or semaphore, so one slow dependency cannot exhaust the shar
 and starve all other dependencies. It is related to but distinct from backpressure: backpressure
 slows the producer relative to the consumer; the bulkhead limits resource *sharing* between
 independent consumers. Resilience4j `BulkheadConfig` supports two modes: (1) thread-pool
-bulkhead — a separate `ThreadPoolExecutor` per service; (2) semaphore bulkhead — a `Semaphore`
-limiting concurrent in-flight calls per service. The semaphore mode is lower overhead
-(no extra threads) and works with virtual threads (Java 21+); the thread-pool mode provides
+bulkhead — a separate `ThreadPoolExecutor` per service (`ThreadPoolBulkheadConfig`);
+(2) semaphore bulkhead — a `Semaphore` limiting concurrent in-flight calls per service
+(`BulkheadConfig`). The semaphore mode is lower overhead
+(no extra threads) and is the one to use with virtual threads; the thread-pool mode provides
 full isolation of slow-response queuing but doubles memory per service. Use semaphore bulkheads
 for services with consistent response times; thread-pool bulkheads for services with highly
 variable response times where queue growth must be bounded independently.
@@ -780,19 +838,25 @@ Monitor `executor.queued` in production and adjust capacity based on 99th-percen
 during peak hours. A queue that never exceeds 10% capacity may be oversized (wasted heap); one
 that regularly hits 80%+ needs either more threads or a larger bound.
 
-**Q14. How does virtual threads (Project Loom) change backpressure design in Java 21+?**
-Virtual threads are cheap (few KB stack vs ~1MB for platform threads), so the "create a thread
-per request" model becomes feasible — thousands of concurrent virtual threads replacing a fixed
-thread pool. However, this shifts the backpressure concern from *thread pool saturation* to
-*other resource saturation* (DB connections, downstream API rate limits). With virtual threads,
-you no longer need `CallerRunsPolicy` to throttle HTTP ingest (the Tomcat connector runs
-each request on a virtual thread anyway). Instead, use a `Semaphore` at the application layer
-to cap concurrent DB connections (HikariCP's pool size is still finite) and a rate limiter to
-cap concurrent downstream API calls. The `ScopedValue`-based context propagation (Java 21+)
-replaces `ThreadLocal` for per-request context in virtual-thread-based services. Note that
-virtual threads pinned to a carrier thread during `synchronized` blocks can still cause carrier
-thread starvation — a new form of backpressure failure that manifests as `VirtualThreadPinned`
-JFR events. See [../../../java/structured_concurrency_and_loom/README.md] for details.
+**Q14. How do virtual threads change backpressure design?**
+Virtual threads remove the bound you were accidentally relying on. A fixed thread pool was
+never *intended* as an admission controller, but it was one: 200 connector threads meant at
+most 200 requests in flight. Virtual threads are cheap (a few KB of heap for the stack vs
+~1 MB of native stack for a platform thread), so the runtime happily creates a fresh one per
+request and that ceiling silently disappears. The backpressure concern shifts from thread
+pool saturation to whatever is actually finite — DB connections, downstream API quotas,
+heap. `CallerRunsPolicy` stops working as an ingest throttle for the same reason: it still
+blocks the submitting virtual thread, but the server just makes another one. Replace it with
+explicit bounds: a `Semaphore` at the request-entry filter capping total in-flight requests,
+HikariCP's still-finite pool sized by Little's Law, and a rate limiter on outbound calls.
+Use `ScopedValue` (final in Java 25) rather than `ThreadLocal` for per-request context, since
+per-request `ThreadLocal` entries no longer amortise across a pooled thread. One pinning
+hazard remains: a virtual thread inside a **native frame** — a JNI call, or an FFM API
+downcall — cannot unmount and holds its carrier until it returns. Watch the
+`jdk.VirtualThreadPinned` JFR event. Ordinary `synchronized` blocks are not a concern; they
+no longer pin. See
+[../../../java/structured_concurrency_and_loom/README.md](../../../java/structured_concurrency_and_loom/README.md)
+for details.
 
 **Q15. How would you add observable backpressure metrics to a production service?**
 Instrument four key signals: (1) Queue depth gauge: `executor.getQueue().size()` via Micrometer

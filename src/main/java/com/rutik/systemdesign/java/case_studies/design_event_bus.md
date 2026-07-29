@@ -50,12 +50,16 @@ Events/sec:        50,000
 Avg subscribers:   8 per event type
 Handler calls/s:   50,000 × 8 = 400,000 calls/sec
 
-Per-handler work:  0.1 ms (50% CPU, 50% I/O)
-Service demand:    400,000 × 0.0001 s = 40 handler-seconds/wall-clock-second
+Per-handler latency L: 0.1 ms, of which 0.05 ms CPU and 0.05 ms I/O wait
 
-Threads needed at 100% utilization: 40
-With I/O multiplier (wait/service = 1):
-  threads = 40 × (1 + 1) = 80 threads
+Concurrency (Little's Law): 400,000 × 0.0001 s = 40 handlers in flight
+  -> 40 threads. L already INCLUDES the I/O wait, so do not then multiply
+     by (1 + wait/service); that double-counts and doubles the pool.
+
+CPU is the separate budget:
+  CPU demand = 400,000 × 0.00005 s = 20 cores
+  So 40 threads is right, but this needs a 20+ core machine to keep up.
+
 Bounded queue for 1-second burst: 50,000 × 8 = 400,000 tasks in queue
 ```
 
@@ -326,11 +330,17 @@ public record DeadLetter(Object event, Object handler, Exception cause, Instant 
 ```java
 // When one slow subscriber must not starve others:
 public class BulkheadEventBus extends EventBus {
-    // Each handler gets its own bounded single-thread executor
+    // Each handler gets its own single-thread executor with an explicitly bounded queue
     private final Map<Consumer<?>, ExecutorService> channels = new ConcurrentHashMap<>();
 
     public <T> Subscription subscribeIsolated(Class<T> type, Consumer<T> handler) {
-        ExecutorService channel = Executors.newSingleThreadExecutor();
+        // NOT Executors.newSingleThreadExecutor(): that uses an unbounded
+        // LinkedBlockingQueue, so a slow handler trades thread starvation for
+        // an OOM — the bulkhead would bound concurrency but not memory.
+        ExecutorService channel = new ThreadPoolExecutor(
+            1, 1, 0L, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<>(1_000),
+            new ThreadPoolExecutor.AbortPolicy());
         channels.put(handler, channel);
         return subscribe(type, event -> {
             if (!channel.isShutdown()) {
@@ -352,26 +362,26 @@ This is the bulkhead pattern: a 200 ms fraud-check handler can lag without affec
 | Handler storage | `CopyOnWriteArrayList` | `List + ReadWriteLock` | COWAL: lock-free reads for publish (hot path); write (subscribe) copies the array — acceptable since subscribe is rare (startup) |
 | Memory safety | `WeakReference<Consumer>` | Strong reference | WeakRef: subscriber naturally GC'd when its scope ends; no explicit unsubscribe required in most cases |
 | Exception isolation | Per-handler `try-catch` + DLQ | Propagate to publisher | Isolation: other handlers run even if one is buggy; risk: silent failures — mitigated by DLQ and logging |
-| Async executor | `VirtualThreadPerTaskExecutor` (Java 21) | Fixed `ThreadPool` | Virtual threads: no pool sizing, no thread starvation on I/O, no carrier-thread pinning from short blocking ops |
+| Async executor | `VirtualThreadPerTaskExecutor` | Fixed `ThreadPool` | Virtual threads: no pool sizing, no thread starvation on blocking I/O. Note the flip side — it has no queue and no rejection policy, so the bound must come from elsewhere (see §10) |
 | Supertype dispatch | Walk full type hierarchy | Exact type only | Hierarchy: `subscribe(DomainEvent.class, h)` captures all subtypes — powerful for cross-cutting concerns (audit, metrics); cost: slightly slower dispatch for deep hierarchies |
 | Async ordering | Sequential (single `CompletableFuture` wraps all handlers) | Parallel (one CF per handler) | Sequential preserves priority order in async path; parallel maximizes throughput but loses ordering |
 
 **Sync vs async selection guide**:
 - Audit / financial / stateful event flows → synchronous (`post()`) — order guaranteed, failure visible
 - Notifications / metrics / independent flows → asynchronous (`postAsync()`) — decoupled from publisher latency
-- Ultra-high throughput → LMAX Disruptor ring buffer (~6M events/sec) — zero allocation, single-writer principle
+- Ultra-high throughput → LMAX Disruptor ring buffer (25M+ messages/sec, sub-100ns hop latency) — zero allocation, single-writer principle
 
 ---
 
 ## 6. Real-World Implementations
 
-**Guava EventBus**: annotation-driven (`@Subscribe`), uses reflection to discover handler methods. Strong references by default — callers must explicitly `unregister()` to avoid leaks. Synchronous dispatch only via `EventBus`; asynchronous via `AsyncEventBus`. Hierarchy dispatch supported. Widely used but unmaintained since 2023; Guava teams recommend alternatives for new projects.
+**Guava EventBus**: annotation-driven (`@Subscribe`), uses reflection to discover handler methods. Strong references by default — callers must explicitly `unregister()` to avoid leaks, which is precisely the leak this design's `WeakReference` avoids. Synchronous dispatch via `EventBus`, asynchronous via `AsyncEventBus`. Hierarchy dispatch supported. Its own javadoc now opens with "We recommend against using EventBus. It was designed many years ago, and newer libraries offer better ways to decouple components and react to events", pointing instead at dependency-injection frameworks and reactive-streams libraries. Guava itself remains maintained; it is this class that is discouraged for new code.
 
 **Spring's `ApplicationEventPublisher`**: the `@EventListener` annotation on any Spring bean method auto-registers as a handler. `@Async @EventListener` dispatches on a separate executor pool. `@TransactionalEventListener(AFTER_COMMIT)` waits for the current transaction to commit before dispatching — the most important Spring-specific feature for domain events (prevents a handler from seeing uncommitted data). See `spring/spring_events_and_scheduling/README.md` for the complete pattern.
 
 **Akka EventStream**: `system.eventStream.publish(msg)` / `subscribe(ref, classOf[T])`. Weak references via actor lifecycle — an actor's subscription is automatically removed when the actor stops, eliminating the leak problem structurally. Fan-out parallelism is natural (each subscriber actor processes independently in its mailbox). Heavyweight dependency for a simple in-process bus.
 
-**LMAX Disruptor**: ring buffer pre-allocated at startup; producers claim slots via CAS (`sequencer.next()`); consumers follow a dependency chain. Zero allocation in the steady state, no GC pressure, cache-line-padded slots prevent false sharing. Throughput ~6M events/sec at sub-millisecond latency — the benchmark target for mechanical-sympathy-level hot paths (trading, telemetry ingestion). Not suitable for general application use: no weak refs, fixed ring size, requires up-front dependency graph.
+**LMAX Disruptor**: ring buffer pre-allocated at startup; producers claim slots via CAS (`sequencer.next()`); consumers follow a dependency chain. Zero allocation in the steady state, no GC pressure, cache-line-padded slots prevent false sharing. LMAX's published figures are over 25 million messages per second with mean latency around 50 nanoseconds per hop — three orders of magnitude below "sub-millisecond", and the reason it is the reference point for mechanical-sympathy hot paths (trading, telemetry ingestion). Not suitable for general application use: no weak refs, fixed ring size, requires an up-front dependency graph.
 
 **Apache Kafka (distributed)**: the natural evolution of an in-process bus when events must cross JVM boundaries. Partitioned, replicated topics replace the in-memory `ConcurrentHashMap`. Consumer groups replace subscribers. At-least-once delivery replaces synchronous dispatch — handlers must be idempotent (same `event_id` de-duplication). Schema registry enforces `AvroSchema` compatibility rules — the analog of Java's compile-time type-safety for the event contract.
 
@@ -384,7 +394,7 @@ This is the bulkhead pattern: a 200 ms fraud-check handler can lag without affec
 | Custom (this design) | Sync + async | ~50–400k/sec | WeakReference | Zero dependencies | Need persistence |
 | Guava EventBus | Sync / Async class | ~300k/sec | Strong (manual unregister) | Annotation-driven | New projects (unmaintained) |
 | Spring ApplicationEventPublisher | Sync / Async / TransactionalListener | ~200k/sec | Strong (managed by container) | AFTER_COMMIT, @Async | Non-Spring apps |
-| LMAX Disruptor | Ring buffer, preallocated | ~6M/sec | Strong | Zero GC, cache-line padding | General use — specialized |
+| LMAX Disruptor | Ring buffer, preallocated | 25M+/sec, ~50ns/hop | Strong | Zero GC, cache-line padding | General use — specialized |
 | Akka EventStream | Actor mailboxes | ~1M/sec | Via actor lifecycle | Actor integration | Non-Akka apps |
 | Kafka | Durable log, consumer groups | Millions/sec (cluster) | N/A | Cross-process, durable | In-process only |
 
@@ -394,7 +404,7 @@ JMH dispatch strategy benchmark (fan-out = 8, Java 21, 16-core):
 |----------|-----------|---------|---------|
 | Synchronous COWAL | ~80k events/sec | 0.01 ms | Strict per-publisher |
 | Async bounded ExecutorService | ~400k events/sec | 0.5 ms | None across handlers |
-| LMAX Disruptor ring buffer | ~6M events/sec | 0.05 ms | Strict (single-writer) |
+| LMAX Disruptor ring buffer | 25M+ events/sec | ~50 ns/hop | Strict (single-writer) |
 
 ---
 
@@ -403,17 +413,24 @@ JMH dispatch strategy benchmark (fan-out = 8, Java 21, 16-core):
 ### a) Key metrics
 
 ```java
-// On each publish():
-eventPublished.increment(Tags.of("type", event.getClass().getSimpleName()));
+// On each publish() — Counter.increment() takes a double amount, not tags;
+// the tags belong on the meter, so look it up (or cache it) per event type:
+registry.counter("event.published", "type", event.getClass().getSimpleName())
+        .increment();
 
-// On each handler:
-Timer.record(() -> handler.accept(event),
-    registry, "event.handler.duration",
-    Tags.of("handler", handler.getClass().getSimpleName()));
+// On each handler — Timer.record(Runnable) is an INSTANCE method on a Timer:
+registry.timer("event.handler.duration",
+               "handler", handler.getClass().getSimpleName())
+        .record(() -> handler.accept(event));
 
 // DLQ depth gauge:
-Gauge.builder("event.dlq.size", deadLetterQueue, BlockingDeque::size).register(registry);
+Gauge.builder("event.dlq.size", deadLetterQueue, BlockingDeque::size)
+     .register(registry);
 ```
+
+Meter lookup is a map hit, but on a hot dispatch path resolve the `Counter` and
+`Timer` once per (event type, handler) pair and cache them rather than looking
+them up per event.
 
 Alert thresholds:
 - `event.dlq.size > 100` for > 60 s → handler failures accumulating; investigate
@@ -462,7 +479,7 @@ Mitigation: deploy per-handler bulkhead executors (see §4.4). Each handler gets
 
 Symptom: payment captured 4× for one order; audit log has 4 entries per event.
 
-Diagnosis: check `bus.handlerCount(OrderPlaced.class)` — should equal number of intended subscribers. If higher, find the constructor being called repeatedly.
+Diagnosis: expose a `handlerCount(Class<?>)` accessor over the `handlers` map and compare it to the number of intended subscribers. If higher, find the constructor being called repeatedly.
 
 Mitigation: add identity-based de-duplication in `subscribe()` (see war story §9). Structural fix: subscribe singletons once at application startup, not per-request objects.
 
@@ -533,7 +550,12 @@ FIX — bulkhead: each handler on its own bounded executor:
 ```java
 // FIX: isolated per-handler channel; slow handler falls behind its own queue only
 class SubscriberChannel {
-    final ExecutorService exec = Executors.newSingleThreadExecutor(); // bounded queue: 1,000
+    // Executors.newSingleThreadExecutor() would be WRONG here: its queue is an
+    // unbounded LinkedBlockingQueue, so submit() never throws
+    // RejectedExecutionException and the catch below would be dead code.
+    // Construct the executor explicitly to get a real bound.
+    final ExecutorService exec = new ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(1_000));
     void submit(Object event, Consumer<Object> h) {
         try {
             exec.submit(() -> h.accept(event));
@@ -568,20 +590,30 @@ class SubscriberChannel {
 ```
 Events/sec:      E
 Avg fan-out:     F
-Handler latency: L seconds (CPU + I/O)
-I/O ratio:       r  (0 = pure CPU, 1 = all I/O)
+Handler latency: L seconds, MEASURED END TO END (CPU + I/O wait)
+CPU fraction:    c  (share of L that is actual CPU work)
 
-Worker threads needed:
-  T = E × F × L × (1 + r)
+Worker threads needed (Little's Law):
+  T = E × F × L
+Cores needed (a separate budget, not a multiplier on T):
+  C = E × F × L × c
 
 Example:
-  E = 50,000, F = 8, L = 0.0001 s, r = 1 (50% I/O)
-  T = 50,000 × 8 × 0.0001 × 2 = 80 threads
+  E = 50,000, F = 8, L = 0.0001 s, c = 0.5
+  T = 50,000 × 8 × 0.0001       = 40 threads
+  C = 50,000 × 8 × 0.0001 × 0.5 = 20 cores
 
-With Java 21 virtual threads:
-  VirtualThreadPerTaskExecutor handles 80 in-flight virtual threads with
-  ~1 carrier thread per CPU core. No explicit sizing needed.
-  Pinning risk: ensure handlers do not hold synchronized blocks during I/O.
+Because L already contains the I/O wait, multiplying it by (1 + wait/service)
+is the classic double-count: it would say 80 threads for a workload that
+Little's Law puts at 40.
+
+With virtual threads:
+  VirtualThreadPerTaskExecutor handles the 40 in-flight handlers on a carrier
+  pool sized to availableProcessors(). No explicit thread sizing needed — but
+  it also imposes no bound, so cap concurrency with a Semaphore instead.
+  Pinning risk is NOT synchronized blocks (those no longer pin) — it is native
+  frames: a handler that calls into JNI or makes an FFM downcall holds its
+  carrier until it returns.
 ```
 
 ### Bounded queue sizing
@@ -639,7 +671,7 @@ Apply the bulkhead pattern: give each subscriber its own bounded single-thread e
 Kafka and most message buses guarantee at-least-once delivery — a handler can legitimately receive the same event twice (consumer rebalance, redelivery after failed offset commit). If the handler captures a payment or writes a row without idempotency, you get duplicates — exactly the in-process war story, now structurally unavoidable. De-duplicate by a stable event ID stored in the handler's write-target (e.g., `INSERT ... ON CONFLICT DO NOTHING WHERE event_id = ?`).
 
 **Q: How do you calculate thread pool size for async dispatch?**
-Formula: `T = E × F × L × (1 + r)` where E = events/sec, F = fan-out, L = per-handler latency (seconds), r = I/O ratio. At 50k events/sec, 8 subscribers, 0.1 ms each, 50% I/O: `T = 50,000 × 8 × 0.0001 × 2 = 80 threads`. With Java 21 virtual threads, sizing becomes automatic — the executor creates one virtual thread per task and the JVM schedules them on available CPU cores, eliminating I/O blocking from the carrier thread.
+Little's Law: `T = E × F × L`, where E = events/sec, F = fan-out and L = per-handler latency measured end to end. At 50k events/sec, 8 subscribers and 0.1 ms each: `T = 50,000 × 8 × 0.0001 = 40 threads`. The trap is multiplying by `(1 + wait/service)` on top of that — because L already includes the I/O wait, doing so double-counts it and gives 80. The `(1 + W/C)` factor belongs to the *other* formulation, `threads = cores × utilisation × (1 + W/C)`, which starts from core count rather than from arrival rate; use one or the other, never both. Size the CPU budget separately: `cores = E × F × L × cpu_fraction` = 20 here. With virtual threads you stop sizing a pool, but the arithmetic still tells you what concurrency to cap with a `Semaphore` and how many cores the box needs.
 
 **Q: When should an in-process event bus graduate to Kafka?**
 When events must cross JVM boundaries (multiple services), when durability is required (crash should not lose in-flight events), or when consumer independence is required (one consumer falling behind should not block others). The migration protocol: first make all handlers idempotent (required for Kafka's at-least-once delivery), add a stable event ID field to every event, then route through Kafka topics instead of the in-memory map. The handler logic is unchanged.

@@ -50,7 +50,7 @@ Hot-path overhead analysis:
 
   OPEN state fast-reject:
     CAS read of state + timestamp compare: ~10 ns
-    vs. normal call (~100ms for HTTP): 10,000× faster
+    vs. normal call (~100ms for HTTP = 100,000,000 ns): 10,000,000× faster
 
 State machine memory:
   Sliding window (20 calls): int[20] = 80 bytes
@@ -162,7 +162,10 @@ public class CountBasedSlidingWindow {
 
     public synchronized void record(int outcome) {
         // outcome: 0=success, 1=failure, 2=slow
-        int idx = writeIndex.getAndIncrement() % capacity;
+        // Math.floorMod, NOT %: getAndIncrement wraps to Integer.MIN_VALUE after
+        // 2^31 calls (about 2.5 days at 10k calls/sec), and a plain % on a negative
+        // value yields a negative index -> ArrayIndexOutOfBoundsException.
+        int idx = Math.floorMod(writeIndex.getAndIncrement(), capacity);
         int previous = outcomes[idx];
 
         // Remove contribution of the slot we're overwriting
@@ -199,10 +202,14 @@ public class CountBasedSlidingWindow {
 }
 ```
 
-**Note:** The `synchronized` on `record()` is intentional — the read-modify-write on the ring
-buffer slot requires atomicity between reading the old slot value and writing the new one.
-For a production implementation without synchronization, use a `StampedLock` or the
-`VarHandle`-based CAS approach from Resilience4j's internal `SlidingWindowMetrics`.
+**Note:** The `synchronized` on `record()` is intentional and matches what a production
+implementation does — the read-modify-write on the ring slot must be atomic with the
+adjustment of the running aggregate, or the counts drift from the buffer contents.
+Resilience4j's `FixedSizeSlidingWindowMetrics` takes exactly this approach with a
+`ReentrantLock`; there is no lock-free version to aspire to here. The critical section is a
+few field updates on a per-breaker object and contention is bounded by the call rate to one
+dependency, so the lock is not the cost — an O(n) rate recomputation would be, which is why
+the aggregate is maintained incrementally rather than scanned.
 
 ---
 
@@ -418,7 +425,8 @@ CircuitBreaker cb = new CircuitBreaker("payment-service",
     new CircuitBreakerConfig(20, 10, 0.5f, 0.8f,
         Duration.ofSeconds(2), Duration.ofSeconds(10), 3));
 
-RetryPolicy retry = RetryPolicy.of(maxAttempts=2, backoff=Duration.ofMillis(500));
+// Java has no named arguments — positional only.
+RetryPolicy retry = RetryPolicy.of(2, Duration.ofMillis(500));   // maxAttempts, backoff
 
 // Execution: CB wraps Retry
 PaymentResult result = cb.execute(
@@ -451,20 +459,38 @@ suffices; no CAS needed. The state itself uses `AtomicInteger` for CAS-based tra
 
 `permittedCallsInHalfOpenState = 3` (default) means only 3 calls are allowed through before
 the CB decides. Too few (1) means one flaky call re-trips the CB; too many (10) means 10 calls
-hit a still-degraded service. Rule: `3–5` probes at 50% threshold = need ≤1 failure in 3 probes.
+hit a still-degraded service. Note that the probe count only buys you tolerance if you
+*evaluate a rate* over the probes (Decision 4): our immediate-trip implementation requires
+0 failures no matter how many probes are permitted, so raising the count alone does not make
+recovery more forgiving — it only lengthens the exposure. Under rate evaluation at a 50%
+threshold, 3 probes tolerate 1 failure and 5 probes tolerate 2.
 
 ### Decision 4: Any HALF_OPEN failure → immediately back to OPEN
 
-Our implementation trips immediately on any probe failure. An alternative is to wait for all
-`permittedCalls` probes to complete and evaluate the rate — allowing 1-in-3 failures.
-The immediate-trip approach is simpler and more conservative (fail-safe): any sign of continued
-failure extends the OPEN window. Resilience4j's default is immediate-trip.
+Our implementation trips immediately on any probe failure. Resilience4j does the opposite: it
+admits all `permittedNumberOfCallsInHalfOpenState` calls, records them in a window of exactly
+that size, and only then evaluates — "if the failure rate or slow call rate is then equal or
+greater than the configured threshold, the state changes back to OPEN." With its defaults
+(10 permitted calls, 50% threshold) a recovering dependency is allowed up to 4 failures out
+of 10 and still closes.
+
+The tradeoff is real in both directions. Immediate-trip is fail-safe and cheap — one bad
+probe and you stop bothering a sick dependency — but it is fragile against a service that is
+genuinely recovering with a residual error rate, and it can leave the breaker oscillating
+OPEN→HALF_OPEN→OPEN indefinitely (see Runbook (d)). Rate-evaluation costs up to
+`permittedCalls` real requests against a possibly-still-broken dependency, but it is the only
+one of the two that can distinguish "recovered" from "recovered, mostly". Pick immediate-trip
+when a failed call is expensive (a 30 s timeout); pick rate-evaluation when it is cheap and
+you care about closing promptly.
 
 ### Decision 5: Synchronised vs lock-free sliding window
 
-We used `synchronized` for simplicity. A production implementation would use a
-`StampedLock` (read/write separation) or VarHandle CAS per slot. The synchronisation is on the
-per-CB window object, not a global lock — contention is bounded by calls to one dependency.
+We used `synchronized`; Resilience4j uses a `ReentrantLock` for the same operation. Either is
+fine, and the choice is not the interesting part — the synchronisation is on the per-breaker
+window object, not a global lock, so contention is bounded by the call rate to one dependency.
+What matters far more is that the aggregate counters are updated incrementally inside that
+critical section, keeping `failureRate()` O(1); a lock-free ring buffer that then scans the
+window to compute the rate would be strictly worse.
 
 ---
 
@@ -478,37 +504,46 @@ rejection counts per bucket. At each window evaluation, Hystrix summed the last 
 computed failure rate. The key metric: `error percentage = (failures + timeouts) / total`.
 Hystrix is no longer maintained; Resilience4j is the successor.
 
-### Resilience4j — Lock-free sliding window using `AtomicLong` bitfields
+### Resilience4j — the reference implementation, and what it actually does
 
-Resilience4j's `SlidingWindowMetrics` packs outcome into a `64-bit AtomicLong` per ring buffer slot
-(high 32 bits = success count, low 32 bits = failure count) and uses a `LongAdder`-backed
-aggregate for O(1) rate computation. The ring buffer uses a `VarHandle` CAS for lock-free slot
-updates. This achieves < 50 ns per record even at 1M ops/sec. Reference: Resilience4j source
-`io.github.resilience4j.core.metrics.SlidingWindowMetrics`.
-
-### Amazon — Cell-based CB for S3 control plane
-
-Amazon's S3 uses circuit breakers at each cell boundary. When the metadata service for a
-cell shows >5% error rate over a 30-second count window (COUNT_BASED: 1,000 minimum calls),
-the circuit breaker routes new requests to a fallback cell. This is not fail-fast for the
-caller but fail-over: traffic redirected rather than rejected. Reference: Amazon Builder's
-Library, "Avoiding overload in distributed systems" (2020).
+Resilience4j's `io.github.resilience4j.core.metrics.FixedSizeSlidingWindowMetrics` is the
+count-based window. Two things about it are worth internalising because they contradict the
+usual assumption that a production library must be lock-free here. First, `record()` is
+guarded by a plain `ReentrantLock` — the whole read-modify-write of the ring slot plus the
+running aggregate happens under it. Second, it maintains a `TotalAggregation` incrementally:
+overwriting a slot subtracts that slot's old contribution and adds the new one, so
+`failureRate()` is O(1) rather than a scan of the window. The lock is acceptable because the
+critical section is a handful of field updates on a per-CB object, and contention is bounded
+by the call rate to *one* dependency. `SlidingTimeWindowMetrics` is the time-based sibling
+with the same locking approach over partial-second aggregations. The design lesson: optimise
+the aggregate to O(1) first; the lock is rarely what costs you.
 
 ### Google — Adaptive throttling as a CB alternative
 
-Google's SRE Book (2016) describes "adaptive throttling" as an alternative to hard circuit
-breakers for high-throughput services: the client measures its own accept rate vs request rate
-and self-throttles when the ratio drops below a threshold. `K * requests_accepted / requests_total < threshold`
-(where K=2 is Google's recommended multiplier). This is a softer CB that degrades gradually
-rather than flipping to full OPEN. Used in Stubby (internal gRPC). No binary open/closed;
-more stable under high concurrency.
+The Google SRE book's "Handling overload" chapter describes client-side *adaptive throttling*
+as an alternative to a hard circuit breaker for high-throughput RPC. Each client tracks two
+counters over a rolling window: `requests` (what it attempted) and `accepts` (what the backend
+actually served). It issues requests freely until `requests` reaches `K × accepts`, and past
+that point rejects locally with probability
+`p_reject = max(0, (requests − K × accepts) / (requests + 1))`.
 
-### LinkedIn — Per-method circuit breakers
+Google reports generally preferring `K = 2`. The behaviour is what makes it interesting: at
+exactly the cutoff `p_reject` is 0, and it rises smoothly as the backend's accept rate falls,
+so the client sheds progressively rather than snapping to fully-open. It also self-heals
+without a probe mechanism — as `accepts` recovers, `p_reject` falls back to 0 on its own.
+The cost is that "is the client throttling?" is now a continuous quantity, which is harder to
+alert on than a binary state.
 
-LinkedIn's `rest.li` framework applies circuit breakers at method granularity: `/api/payment/charge`
-and `/api/payment/refund` have separate circuit breakers. This prevents a slow `/refund`
-endpoint from tripping the CB and blocking `/charge` — the higher-value operation.
-Reference: LinkedIn Engineering blog (2018).
+### Per-operation circuit breakers — the right granularity
+
+A common design error is one circuit breaker per *service*. If `/payment/charge` and
+`/payment/refund` share a breaker, a slow refund path trips it and takes revenue-generating
+charges down with it. The unit of a circuit breaker should be the unit of failure isolation
+you actually want, which is usually the operation, sometimes the (operation, shard) pair —
+never "the host we happen to be calling". The counter-argument is dilution: split too finely
+and no single breaker sees enough calls to reach `minimumNumberOfCalls`, so nothing ever
+trips. Size the split so each breaker sees at least tens of calls per window at your P5
+traffic level, not your peak.
 
 ---
 
@@ -516,7 +551,7 @@ Reference: LinkedIn Engineering blog (2018).
 
 | Tool | Role | Notes |
 |------|------|-------|
-| Resilience4j | Production CB for Spring/non-Spring | Count-based + time-based; VarHandle lock-free; Micrometer integration |
+| Resilience4j | Production CB for Spring/non-Spring | Count-based (`FixedSizeSlidingWindowMetrics`) + time-based (`SlidingTimeWindowMetrics`); `ReentrantLock` around an O(1) incremental aggregate; Micrometer integration |
 | `java.util.concurrent.atomic.AtomicInteger` | CAS state machine | Ordinal-based state encoding |
 | `java.util.concurrent.atomic.AtomicLong` | Lock-free counters | Failure/success counts |
 | Micrometer | CB state + rate metrics | Export to Prometheus; alert on state gauge |
@@ -611,17 +646,25 @@ fallbacks. 800 requests were served incorrect data during the first 10 seconds o
 # 10 CB instances (10 downstream services): 800 bytes
 
 # OPEN state fast-reject at 10,000 calls/sec:
-# CB saves: 10,000 × 200ms (avg call time when broken) = 2,000 CPU-seconds/sec
-# vs CB overhead: 10,000 × 10ns = 100 µs/sec
-# Benefit ratio: 20,000,000×
+# CB saves: 10,000 × 200ms (avg call time when broken) = 2,000 THREAD-seconds/sec
+#   (this is blocked wall-clock time, not CPU — a thread waiting on a socket burns
+#    almost no CPU. The resource reclaimed is threads and connections, not cycles.)
+# vs CB overhead: 10,000 × 10ns = 100 µs/sec of actual CPU
+# Practical reading: without the breaker you would need 2,000 concurrent threads
+# just to absorb the failing calls; with it, zero.
 
 # Appropriate sliding window size:
-# windowSize = min_calls_for_statistical_significance × safety_factor
-# At 10,000 calls/sec: 100 calls/10ms → window fills in 0.2ms (too fast, churn)
-# At 100 calls/sec: 100 calls in 1 second → good window fill rate
-# Rule: window fills in 1-10 seconds at nominal call rate
-# For 10,000 calls/sec: use TIME_BASED window (10s × 1000 calls = 100k minimum)
-# For 100 calls/sec: COUNT_BASED windowSize=20 (fills in 0.2s) is fine
+# The window should span 1-10 seconds of traffic: long enough that one unlucky
+# call cannot trip it, short enough to react within an SLO.
+# COUNT_BASED windowSize = call_rate × target_window_seconds
+#   At   100 calls/sec: windowSize 20  fills in  20/100   = 0.2 s  -> too twitchy;
+#                       windowSize 200 fills in 200/100   = 2 s    -> good
+#   At 10,000 calls/sec: windowSize 20 fills in  20/10000 = 2 ms   -> far too twitchy;
+#                       you would need windowSize ~20,000 for a 2 s span, and the
+#                       ring buffer memory and per-call bookkeeping stop being free.
+# Above roughly 1,000 calls/sec, switch to TIME_BASED: it aggregates into per-second
+# buckets, so a 10 s window costs 10 buckets regardless of call rate — O(1) memory
+# in the traffic level, which is the whole reason the time-based variant exists.
 ```
 
 ---
@@ -676,10 +719,16 @@ count-based for services with < 1,000 calls/sec; time-based for higher-throughpu
 where you want time-based SLA alignment (e.g., "5% failure rate in the last 10 seconds").
 
 **Q6. How would you implement a circuit breaker that fails gradually rather than all-at-once?**
-Replace the binary OPEN/CLOSED state with a continuous probability:
-`P(reject) = clamp(0, 1, (failures / total - threshold) / (1 - threshold))`. At exactly the
-threshold: 0% rejection; at 2× threshold: 100% rejection. Each request is accepted/rejected
-based on `Math.random() < P(reject)`. This is Google's "adaptive throttling" model. Advantages:
+Replace the binary OPEN/CLOSED state with a continuous probability. Google's adaptive
+throttling (SRE book, "Handling overload") is the canonical formulation: track `requests` and
+`accepts` over a rolling window and reject locally with
+`p_reject = max(0, (requests - K × accepts) / (requests + 1))`, `K = 2`. Rejection starts at
+zero exactly when `requests = K × accepts` and climbs as the backend's accept rate falls, so
+a backend serving nothing drives `p_reject` toward 1. A simpler failure-rate variant is
+`p_reject = clamp(0, 1, (failureRate - threshold) / (1 - threshold))` — 0% at the threshold,
+rising linearly to 100% only at a 100% failure rate (with `threshold = 0.5` that happens to be
+2× the threshold; with `threshold = 0.2` it is 5×, so do not memorise the multiple). Either
+way, each request is admitted on `Math.random() >= p_reject`. Advantages:
 no sudden cliff; the service degrades smoothly; P99 latency rises gradually instead of snapping
 to "all fallback". Disadvantages: harder to reason about; harder to monitor ("what fraction of
 traffic is being throttled?"); harder to set recovery thresholds. Standard circuit breakers
@@ -700,9 +749,11 @@ These probes go through the normal call path (including timeouts). If the config
 of probes succeed → CLOSED. Any probe failure → OPEN (reset `openedAt`). The probe count
 should be: large enough for statistical confidence (1 probe is too noisy; 1 failure could be
 a transient blip), small enough to limit damage if the downstream is still broken (10 probes
-at 5s each = 50s of load on an unhealthy service). Recommended: 3–5 probes. With `threshold=0.5`
-and 5 probes: need ≤2 failures to stay CLOSED. With 3 probes: need 0 failures (all probes
-must succeed). Choose 3 for conservative recovery (prefer staying OPEN); choose 5 for faster
+at 5s each = 50s of load on an unhealthy service). Recommended: 3–5 probes. Note the count
+only buys tolerance under rate evaluation — with `threshold=0.5`, 3 probes tolerate 1 failure
+and 5 probes tolerate 2. Under the immediate-trip policy used in §4.4, any single probe
+failure re-opens regardless of the count, so raising it lengthens exposure without loosening
+the recovery criterion. Choose 3 for conservative recovery (prefer staying OPEN); choose 5 for faster
 recovery acceptance.
 
 **Q9. How would you test a circuit breaker implementation?**

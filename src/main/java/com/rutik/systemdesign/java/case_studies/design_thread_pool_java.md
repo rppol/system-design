@@ -1,9 +1,11 @@
 # Design a Custom Thread Pool (Java)
 
 > **A thread pool is a pre-paid workforce.**  
-> Creating a thread for every task pays a ~1ms recruitment fee every time. A pool pre-hires
-> N workers who wait for assignments. The design challenge: how many workers to hire, how
-> large a waiting room to maintain, and what to do when both are full.
+> Creating a platform thread costs tens of microseconds of CPU (~35 µs measured for
+> create + start + join on a modern machine) plus a fresh ~1 MB native stack. A pool
+> pre-hires N workers who wait for assignments, so a task pays neither. The design
+> challenge: how many workers to hire, how large a waiting room to maintain, and what to do
+> when both are full.
 
 **Key insight:** Java's `ThreadPoolExecutor` grows beyond `corePoolSize` only when the work
 queue is *full* — not when all core threads are busy. This surprises most engineers.
@@ -24,7 +26,7 @@ Understanding this counter-intuitive queueing model is the foundation of correct
 ### Non-functional requirements
 - **Submit latency**: <10 µs for a successful `submit()` under no contention
 - **Throughput**: 1M+ task submissions/second on a 16-core machine (limited by CAS contention)
-- **Memory**: predictable; no unbounded growth; each platform thread ~1MB stack
+- **Memory**: predictable; no unbounded growth; each platform thread ~1MB of *native* stack (outside `-Xmx`)
 - **Thread safety**: all public methods must be safe for concurrent callers
 
 ### Out of scope
@@ -40,24 +42,32 @@ Understanding this counter-intuitive queueing model is the foundation of correct
 ```
 Target throughput:  500 requests/sec
 Average task time:  200ms (DB write + business logic)
-Concurrency needed: L = λ × W = 500 × 0.2 = 100 threads (Little's Law)
+Concurrency needed: L = λ × W = 500 × 0.2 = 100 in-flight requests (Little's Law)
+                    → 100 threads for a blocking, thread-per-request model.
+  W already includes I/O wait, so do NOT then multiply by (1 + wait/service):
+  that double-counts the wait and doubles the pool for no reason.
 
-For I/O-bound tasks (40% CPU, 60% waiting for DB):
-  threads = λ × W = 500 × 0.2 = 100
-  CPU cores needed: 100 × 0.4 = 40 CPUs
-  On 8-core machine: 100 threads share 8 cores (12.5× over-subscription) → normal for I/O-bound
+CPU is a separate budget. Split W = 10ms CPU + 190ms DB wait:
+  CPU demand = λ × W_cpu = 500 × 0.010 = 5 cores
+  On an 8-core machine: 5 of 8 cores busy (63%), and the other 95 threads
+  are parked on socket reads costing only their stacks. This works.
+  If W_cpu were 100ms instead, CPU demand = 500 × 0.1 = 50 cores and no
+  thread count would help — Little's Law sizes the pool, not the machine.
 
 Queue size for 2-second burst absorption:
   queue = (λ_burst - μ) × T_burst = (1000 - 500) × 2 = 1000 items
   Memory: 1000 × ~500 bytes/task object ≈ 500 KB — negligible
 
 Thread memory (platform threads):
-  100 threads × 1MB stack = 100MB → reserve this in -Xss and total JVM heap budget
+  100 threads × 1MB stack = 100MB of NATIVE memory (HotSpot's default
+  ThreadStackSize on 64-bit Linux; 2MB on macOS/AArch64). This is outside
+  -Xmx, so budget it separately in the container memory limit.
 
-Submit() throughput at 100 core threads, no queue:
-  CAS on AtomicInteger (worker count): ~50M ops/sec single-threaded
-  At 16 threads: ~8M ops/sec (CAS contention)
-  Well above 1M submission/sec requirement
+Submit() throughput — is the pool's own bookkeeping ever the bottleneck?
+  Uncontended AtomicInteger CAS measured at ~1.9 ns/op (~500M ops/sec);
+  under contention on one line it settles near ~8M ops/sec.
+  Either figure is far above the 1M submissions/sec requirement, so the
+  ctl CAS is never the limit — the queue and the tasks are.
 ```
 
 ---
@@ -284,10 +294,15 @@ private Runnable getTask() {
 }
 ```
 
-**Why Worker extends AQS:** The `Worker` uses itself as an AQS-backed non-reentrant lock.
-This allows the pool to distinguish idle workers (lock not held) from active workers (lock held)
-without a separate flag — useful for `shutdownNow()` which only interrupts workers that are
-actively running a task (not blocked on `workQueue.take()`).
+**Why Worker extends AQS:** The `Worker` uses itself as an AQS-backed non-reentrant lock,
+acquired around `task.run()` and released after. This gives the pool a lock-free way to ask
+"is this worker mid-task?" — `tryLock()` succeeds only on an idle worker. The consumer is
+`shutdown()`, which calls `interruptIdleWorkers()`: it walks the worker set, `tryLock()`s each
+one, and interrupts only those it can lock, i.e. only workers parked in `workQueue.take()`.
+That is what makes `shutdown()` non-destructive — a worker in the middle of a task is left
+alone to finish. `shutdownNow()` does the opposite: `interruptWorkers()` calls
+`interruptIfStarted()` on **every** worker regardless of the lock, which is precisely why it
+can abort in-flight work. Getting these two backwards is a common misreading of the source.
 
 ---
 
@@ -413,7 +428,10 @@ slight memory overhead (idle threads at ~1MB stack each).
 ### Decision 5: `keepAliveTime` and thread churn
 
 Setting `keepAliveTime` too short (e.g., 1s) with bursty traffic causes threads to be created
-and destroyed repeatedly — each creation is ~1ms. For services with predictable burst patterns,
+and destroyed repeatedly. Each creation is tens of microseconds of CPU (~35 µs measured for
+create + start + join) plus the kernel work to map and later unmap a ~1 MB stack — cheap once,
+expensive at hundreds per second, and it shows up as system CPU rather than in your profiler's
+Java frames. For services with predictable burst patterns,
 set `keepAliveTime = 60s–300s` (1–5 min). For services with long idle periods between bursts,
 allow `allowCoreThreadTimeOut(true)` with a shorter timeout.
 
@@ -429,36 +447,43 @@ allow `allowCoreThreadTimeOut(true)` with a shorter timeout.
 
 ### Tomcat — `NioEndpoint.Executor`
 
-Tomcat's default HTTP connector uses a bounded `ThreadPoolExecutor` (`org.apache.tomcat.util.threads.ThreadPoolExecutor`
-— a custom subclass) with `maxThreads=200` (configurable), `minSpareThreads=25` (= corePoolSize),
-and a bounded `TaskQueue` that only accepts tasks when worker threads are available at the
-time of submission — otherwise the caller gets rejected and creates a new thread (up to max).
-This custom queue reverses the standard "fill queue then grow" behaviour, making the pool
-grow eagerly instead of lazily. Reference: Tomcat 10 source, `org.apache.tomcat.util.threads`.
+Tomcat's HTTP connector uses its own `ThreadPoolExecutor` subclass
+(`org.apache.tomcat.util.threads.ThreadPoolExecutor`) with connector defaults
+`maxThreads=200` and `minSpareThreads=10` — note the standalone `<Executor>` element defaults
+`minSpareThreads` to 25 instead, a discrepancy worth checking before you quote a number. The
+interesting piece is `TaskQueue`, whose `offer()` returns `false` when no worker is idle and
+the pool has not reached `maxThreads`. Since `ThreadPoolExecutor` grows only when the queue
+refuses a task, refusing on "no idle worker" instead of "queue full" inverts the JDK's
+behaviour: the pool grows eagerly to `maxThreads` and only then starts queueing. This is worth
+studying because it is the standard workaround for the JDK growth model described in §4.4 —
+you cannot change `ThreadPoolExecutor`, but you can lie to it from the queue. Its
+`maxQueueSize` defaults to `Integer.MAX_VALUE`, so the queue is unbounded unless you set it.
 
 ### Jetty — `QueuedThreadPool`
 
-Jetty's `QueuedThreadPool` uses a `BlockingArrayQueue` with a fixed size and an adaptive
-max-thread growth algorithm. It distinguishes between "reserved" threads (pre-allocated for
-latency-sensitive tasks) and "regular" threads. When a reserved thread is not available, the
-queue fills; when the queue fills, a new thread is created — same grow-on-queue-full semantics
-as `ThreadPoolExecutor`. Jetty's default: 8 min threads, 200 max threads, 60s idle timeout.
+Jetty's `QueuedThreadPool` is not a `ThreadPoolExecutor` and reaches the same conclusion by a
+different route: `execute()` offers the job to the queue and then starts a thread if there
+are no idle threads and the pool is below `maxThreads` — "insufficient idle threads to meet
+demand", not "queue full". The queue is deliberately unbounded so jobs are never rejected;
+admission control is expected to live upstream. It also keeps a pool of *reserved* threads
+for latency-sensitive work so those tasks never wait on thread creation. Defaults:
+`minThreads=8`, `maxThreads=200`, `idleTimeout=60000` ms.
 
-### LinkedIn — Per-dependency thread pools for isolation
-
-LinkedIn's `rest.li` framework assigns each downstream service dependency its own
-`ThreadPoolExecutor` (10–50 threads per dependency, bounded queue). This is the bulkhead pattern:
-if the payment service becomes slow, its thread pool saturates and rejects — the recommendation
-service pool is unaffected. Reference: LinkedIn Engineering blog, "Service Isolation with
-Thread Pools" (2018).
+The pattern across both servers: neither production HTTP server wanted the JDK's
+grow-only-when-the-queue-is-full rule, and both replaced it with grow-when-no-worker-is-idle.
+If you find yourself surprised by §4.4, you are in good company.
 
 ### Netflix Hystrix (legacy) — `HystrixThreadPool`
 
-Netflix's Hystrix used a fixed-size `ThreadPoolExecutor` per command group. Default: 10 threads,
-no queue (`SynchronousQueue`) — any overflow immediately hits `CallerRunsPolicy` or rejection.
-This design prioritised strict isolation over throughput: if the pool is full, fail fast rather
-than queue. The `SynchronousQueue` removes the "build up queue then grow" ambiguity entirely —
-there is no queue, just 10 threads. Reference: Netflix Engineering blog (2012).
+Hystrix used a fixed-size `ThreadPoolExecutor` per command group: `coreSize` defaulted to 10,
+and `maxQueueSize = -1` selected a `SynchronousQueue`, i.e. no buffer at all. Overflow is
+rejected outright and the command falls back — never `CallerRunsPolicy`, which would have run
+dependency work on the calling thread and defeated the isolation the bulkhead exists for. The
+`SynchronousQueue` removes the "fill queue then grow" ambiguity entirely: there is no queue,
+just 10 threads and a fallback. Netflix has since put Hystrix in maintenance mode and the
+pattern lives on in Resilience4j's `ThreadPoolBulkhead`, but the sizing decision is the
+durable lesson — for a bulkhead, a queue is a liability, because queued work on a dead
+dependency is just latency you have promised to pay.
 
 ### Java `ForkJoinPool` — work-stealing design
 
@@ -466,8 +491,9 @@ there is no queue, just 10 threads. Reference: Netflix Engineering blog (2012).
 architecture: each worker thread has its own deque (double-ended queue). Submitters push to the
 front; idle workers steal from the back of other workers' queues. This eliminates the single
 shared queue's contention bottleneck and is optimal for recursive divide-and-conquer (fork-join)
-workloads. For independent tasks (typical service workloads), a standard `ThreadPoolExecutor`
-with a single `ArrayBlockingQueue` outperforms `ForkJoinPool` due to simpler cache behaviour.
+workloads. For independent tasks with a bounded-queue requirement, `ThreadPoolExecutor` is
+still the right choice — not because it is faster, but because `ForkJoinPool` gives you no
+way to bound the submission queue and therefore no rejection policy to hang backpressure on.
 
 ---
 
@@ -543,13 +569,24 @@ order status updates — resulting in orders stuck in `PROCESSING` state. Downst
 **Fix:** Always `awaitTermination(30, SECONDS)` after `shutdown()` before falling back to
 `shutdownNow()`.
 
-### Pitfall 4 — `CallerRunsPolicy` with virtual threads (Java 21+)
+### Pitfall 4 — losing your bound when you migrate to virtual threads
 
-A team migrated from platform threads to virtual threads (`Executors.newVirtualThreadPerTaskExecutor()`)
-and expected `CallerRunsPolicy` to throttle the submitting thread. With virtual threads, the
-submitting thread IS a virtual thread — it executes the task (another virtual thread creation)
-with near-zero cost, providing no backpressure. The queue grew unbounded. **Fix:** Use a
-`Semaphore` at the request-entry point to cap concurrent tasks when running with virtual threads.
+A team swaps a bounded `ThreadPoolExecutor` for
+`Executors.newVirtualThreadPerTaskExecutor()` and expects the `CallerRunsPolicy` backpressure
+to carry over. It cannot: that executor is not a `ThreadPoolExecutor`, has no work queue and
+accepts no `RejectedExecutionHandler` at all — every `submit()` simply starts a new virtual
+thread. Every bound in the old configuration (`maximumPoolSize`, `queueCapacity`, the
+rejection policy) silently evaporates in one line of diff, and the service now admits
+unlimited concurrent work until the DB pool, downstream quota or heap gives way.
+
+Even where `CallerRunsPolicy` does still apply, its *mechanism* changes. It still blocks the
+submitting thread — virtual threads block fine. What it no longer does is throttle ingest,
+because in a thread-per-request server the runtime just creates another virtual thread for
+the next request; blocking one submitter costs the system nothing.
+
+**Fix:** restate the bound explicitly — a `Semaphore` at the request-entry point sized from
+Little's Law against the scarcest downstream resource. Treat "which component was enforcing
+my concurrency limit?" as a required question in any Loom migration review.
 
 ### Pitfall 5 — Thread starvation deadlock
 
@@ -590,12 +627,14 @@ Memory budget:
 **Worked example (order service on 8-core, 16GB heap):**
 ```
 λ = 500 req/s
-W = 200ms average (100ms CPU + 100ms DB wait)
-target_threads = 500 × 0.2 = 100
+W = 200ms average (10ms CPU + 190ms DB wait)
+target_threads = λ × W = 500 × 0.2 = 100
 
-For 8-core machine:
-  CPU utilisation = 100 threads × (100ms CPU / 200ms total) = 50% = 4 CPUs busy
-  Fits on 8-core machine; 50% headroom for bursts
+CPU check (the separate budget):
+  CPU demand = λ × W_cpu = 500 × 0.010 = 5 cores of 8 = 63% utilised
+  Fits, with headroom for bursts. Note this is NOT "100 threads × 5%" —
+  compute demand from arrival rate and CPU time per request, not from
+  thread count, or you will silently scale it with the pool size.
 
 corePoolSize = 120 (100 × 1.2 buffer)
 maximumPoolSize = 120 (= corePoolSize for simplicity)
@@ -603,12 +642,17 @@ queueCapacity = 1000
 keepAliveTime = 120s
 
 Memory:
-  120 threads × 1MB = 120MB stack
-  1000 tasks × 500 bytes = 500KB queue
-  Total: ~121MB → acceptable
+  120 threads × 1MB = 120MB of native stack (not heap; budget it in the
+    container limit alongside -Xmx)
+  1000 tasks × 500 bytes = 500KB of heap for the queue
 
 JVM flag:  -Xss1m (1MB stack per thread, explicit)
-HikariCP:  maximumPoolSize = 120 (pool thread:DB connection 1:1)
+
+DB pool: do NOT mirror the thread count. Each request holds a connection for
+  only its 10ms of query time, so by Little's Law the DB stage needs
+  500 × 0.010 = 5 concurrent connections; round to 10 for jitter. Sizing
+  HikariCP at 120 to "match" the threads would push a 4-core database past
+  its 2×cores+1 ceiling and reduce throughput — see design_connection_pool.md.
 ```
 
 ---
@@ -632,14 +676,18 @@ count simultaneously, avoiding a two-lock design. `runStateOf(ctl)` masks out th
 atomically, ensuring no inconsistency between state and count under concurrent updates.
 
 **Q3. Explain the `Worker extends AQS` design choice.**
-Each `Worker` is both a thread wrapper and a non-reentrant lock (it extends `AbstractQueuedSynchronizer`).
-The lock is acquired before running a task and released after. This allows `shutdownNow()` to
-distinguish idle workers (lock not held, blocked on `queue.take()`) from active workers (lock held,
-running a task). `shutdownNow()` only interrupts active workers (those holding the lock) — idle
-workers are interrupted via thread interrupt, which causes `queue.take()` to throw
-`InterruptedException`, causing `getTask()` to return null, causing `runWorker()` to exit.
-The non-reentrant design prevents tasks from re-acquiring the worker lock (preventing
-`beforeExecute` hooks from accidentally blocking shutdown logic).
+Each `Worker` is both a thread wrapper and a non-reentrant lock (it extends `AbstractQueuedSynchronizer`),
+acquired before running a task and released after — so "lock held" means "mid-task" and
+"lock free" means "parked in `queue.take()`". The consumer of that distinction is
+`shutdown()`, not `shutdownNow()`. `shutdown()` calls `interruptIdleWorkers()`, which
+`tryLock()`s each worker and interrupts only the ones it can lock — the idle ones — so their
+`queue.take()` throws `InterruptedException`, `getTask()` returns null and `runWorker()`
+exits, while workers mid-task are untouched and run to completion. `shutdownNow()` skips the
+lock entirely: `interruptWorkers()` calls `interruptIfStarted()` on every worker, which is
+exactly why it can abort in-flight tasks. The non-reentrant design matters because a task
+must not be able to re-acquire its own worker lock — if it could, a `beforeExecute` hook or a
+task that recursively re-entered would make an active worker look idle to a concurrent
+`shutdown()`.
 
 **Q4. What is the difference between `shutdown()` and `shutdownNow()` semantics?**
 `shutdown()` transitions to SHUTDOWN state: no new tasks are accepted; previously queued tasks
@@ -659,17 +707,20 @@ active task completions for 60+ seconds. Prevention: (1) Separate pools for pare
 tasks (bulkhead). (2) Use `ForkJoinPool.managedBlock()` which creates a new thread when all
 workers are blocked, breaking the deadlock at the cost of an extra thread. (3) Use
 `CompletableFuture.thenCompose()` (continuation-based) so no thread blocks — the parent
-task's continuation runs when the child completes, freeing the original thread. (4) Structured
-concurrency (`StructuredTaskScope` in Java 21+) prevents this by design — parent cannot block
-on children in the same thread pool.
+task's continuation runs when the child completes, freeing the original thread. (5) Run the
+subtasks on virtual threads: the parent still blocks on `join()`, but each child gets its own
+virtual thread rather than competing for a fixed pool slot, so the circular wait cannot form.
+`StructuredTaskScope` (a preview API, JEP 525 in Java 26) packages this — `scope.fork()`
+starts each subtask on its own virtual thread and `scope.join()` waits for all of them.
 
 **Q6. How does `CallerRunsPolicy` create natural backpressure and when does it break down?**
 `CallerRunsPolicy` executes the rejected task in the submitting thread. For an HTTP-serving
 architecture where the Tomcat connector thread submits tasks to the pool: when the pool rejects,
 the Tomcat thread executes the task synchronously — preventing it from accepting new connections
 during execution. This naturally throttles inbound connection rate to match processing capacity.
-It breaks down with virtual threads (Java 21+): virtual threads are cheap to create, so
-running a task in the "caller" virtual thread creates no effective backpressure. It also
+It breaks down under a thread-per-request virtual-thread server — not because the caller
+stops blocking (it does block), but because the caller is no longer scarce: the runtime mints
+a fresh virtual thread for the next request regardless, so nothing upstream slows down. It also
 breaks down when the submitter has critical real-time obligations that cannot be blocked
 (event loop threads, Netty I/O threads) — `CallerRunsPolicy` in these contexts causes event loop
 starvation. For those cases, use `AbortPolicy` + explicit retry, or a `Semaphore` before submission.
@@ -705,16 +756,21 @@ by `rate × elapsed_time`. Wire the `RejectedExecutionHandler` to also decrement
 counter on rejection to avoid double-counting. This creates a two-tier throttle: rate limiter
 prevents excessive submissions; bounded queue absorbs bursts; CallerRunsPolicy handles overflow.
 
-**Q10. What happens to in-flight tasks when `shutdownNow()` is called with `cancelRunningFutures`?**
-`shutdownNow()` interrupts all worker threads. In-flight tasks receive an interrupt; their
-behaviour depends on interrupt responsiveness: (1) Tasks in blocking I/O (`InputStream.read()`,
-`Thread.sleep()`, `BlockingQueue.take()`) throw `InterruptedException` immediately and terminate.
-(2) Tasks in non-blocking CPU loops ignore interrupts unless they explicitly check
-`Thread.currentThread().isInterrupted()`. (3) Tasks returning `Future<T>` — the `FutureTask`
-catches `CancellationException` if `cancel(true)` was called; otherwise the task runs to
-completion. The unstarted queued tasks are returned as a `List<Runnable>` by `shutdownNow()`.
-To handle these gracefully: persist them to a durable store (DB, Kafka) in the shutdown hook
-before calling `shutdownNow()`.
+**Q10. What actually happens to in-flight tasks when `shutdownNow()` is called?**
+`shutdownNow()` moves the pool to STOP, drains the queue and returns the unstarted tasks as a
+`List<Runnable>`, then interrupts **every** started worker — unlike `shutdown()`, it does not
+spare workers that are mid-task. What each in-flight task does then depends entirely on its
+own interrupt responsiveness: (1) a task parked in an interruptible blocking call
+(`Thread.sleep()`, `BlockingQueue.take()`, `Object.wait()`, NIO interruptible channels) throws
+`InterruptedException` and unwinds promptly; (2) a task in a CPU loop, or blocked on a socket
+`InputStream.read()` from `java.net`, ignores the interrupt entirely and runs to completion —
+interruption is cooperative, not preemptive; (3) note that the interrupt does *not* cancel the
+`Future`. If the task swallows the `InterruptedException` and returns normally, the `Future`
+completes normally; if it lets the exception propagate, `FutureTask` stores it and `get()`
+throws `ExecutionException`. Only an explicit `future.cancel(true)` makes `get()` throw
+`CancellationException`. To handle the returned unstarted tasks gracefully, persist them to a
+durable store (DB, Kafka) in the shutdown hook — and give in-flight tasks a chance first with
+`shutdown()` + `awaitTermination()` before escalating.
 
 **Q11. Design a thread pool that supports task priorities without a `PriorityBlockingQueue`.**
 Use two `ThreadPoolExecutor` pools with different capacities — a "high priority" pool and a

@@ -46,20 +46,33 @@ See also:
 
 ```
 20 app instances × pool_size 10    = 200 logical connections
-PostgreSQL default max_connections  = 100  (RDS db.t3.medium: 170)
+PostgreSQL compiled default max_connections = 100
 => 200 > 100 => "FATAL: sorry, too many clients already"
+
+On RDS PostgreSQL the parameter-group default is not a constant but a formula:
+  LEAST({DBInstanceClassMemory/9531392}, 5000)
+so a 4 GiB db.t3.medium lands near 450 and a 32 GiB db.r6g.xlarge near 3,400.
+That is a much higher ceiling than the compiled default — and a trap, because
+Postgres throughput peaks near 2 x cores and DEGRADES long before either number
+(see §10). Treat max_connections as a safety limit, not a target.
 ```
 
-### Correct per-instance pool size (HikariCP formula)
+### Correct per-instance pool size (PostgreSQL wiki / HikariCP formula)
 
 ```
 pool_size = (DB_core_count × 2) + effective_spindle_count
 
+This is the PostgreSQL wiki's "Number Of Database Connections" formula, which
+HikariCP's pool-sizing guide adopts. Note DB_core_count is the DATABASE server's
+core count, not the application server's — a common misreading that scales the
+pool with the wrong machine.
+
 4-core DB host on SSD  (effective_spindle ≈ 1):
 pool_size = (4 × 2) + 1 = 9
 
-20 instances × 9 = 180 connections  — at the ceiling of a 200-limit host.
-> 50 instances × 9 = 450 connections  — must add PgBouncer proxy.
+Against a host configured with max_connections = 200:
+  20 instances × 9 = 180 connections  — at the ceiling.
+  50 instances × 9 = 450 connections  — must add PgBouncer proxy.
 ```
 
 ### Throughput from Little's Law
@@ -76,7 +89,12 @@ Throughput = Pool_size / Avg_query_latency
 SLA = 50 ms end-to-end
 Query time = 5 ms
 Borrow budget = SLA − query − serialize = 50 − 5 − 5 = 40 ms
-→ set connectionTimeout = 30 ms (fail fast, not pile up)
+→ set this pool's acquireTimeout = 30 ms (fail fast, not pile up)
+
+Porting this to HikariCP? It clamps: any connectionTimeout below 250 ms
+(SOFT_TIMEOUT_FLOOR) is silently reset to the 30-SECOND default with only a
+WARN log. Setting 30 there gives you 30,000 — the exact opposite of fail-fast.
+Use 250 ms as the floor, or keep the tight budget in a custom pool like this one.
 ```
 
 ### Memory overhead per connection object
@@ -296,11 +314,17 @@ public class ConnectionPool implements AutoCloseable {
         this.acquireTimeout = timeout;
         this.available = new ArrayBlockingQueue<>(maxSize, true); // fair = FIFO waiters
 
-        // Pre-warm with min connections (25% of max)
+        // Pre-warm with min connections (25% of max).
+        // poolSize MUST be incremented here: acquire() CAS-increments before it calls
+        // createConnection(), so createConnection() itself does not. Omitting this
+        // leaves the pre-warmed connections uncounted and the pool can grow to
+        // maxSize + minSize physical connections — an invariant break that only shows
+        // up as "too many clients already" from the database under load.
         int minSize = Math.max(1, maxSize / 4);
         for (int i = 0; i < minSize; i++) {
             try {
                 PooledConnection conn = createConnection();
+                poolSize.incrementAndGet();
                 available.offer(conn);
             } catch (SQLException e) {
                 throw new RuntimeException("Failed to initialize pool", e);
@@ -357,10 +381,24 @@ public class ConnectionPool implements AutoCloseable {
     }
 
     private void healthCheck() {
-        List<PooledConnection> toCheck = new ArrayList<>();
-        available.drainTo(toCheck);
-        for (PooledConnection conn : toCheck) {
-            available.offer(validateOrReplace(conn));
+        // Every exception MUST be swallowed here. scheduleAtFixedRate silently cancels
+        // the task forever if the run throws — the pool would then stop validating with
+        // no log line and no metric, and the failure would only surface as stale-socket
+        // errors hours later.
+        try {
+            List<PooledConnection> toCheck = new ArrayList<>();
+            available.drainTo(toCheck);
+            for (PooledConnection conn : toCheck) {
+                try {
+                    available.offer(validateOrReplace(conn));
+                } catch (RuntimeException e) {
+                    // Could not re-establish (DB down): drop the slot, let acquire() recreate
+                    poolSize.decrementAndGet();
+                }
+            }
+        } catch (Throwable t) {
+            // Never rethrow: log and count, but let the schedule survive.
+            log.error("pool health check failed", t);
         }
     }
 
@@ -442,13 +480,13 @@ try (PooledConnection conn = pool.acquire()) {
 | Leak detection | `ConcurrentHashMap<PooledConnection, LeakInfo>` with caller stack trace | `WeakReference` | Stack trace identifies the call site; `WeakReference` loses the reference and can't tell you who forgot to release |
 | Shutdown | `closed = true` then drain all | Timeout-based drain | Simple; connections are stateless resources; no user data loss from immediate physical close |
 
-**Throughput vs fairness**: `ArrayBlockingQueue(fair=true)` uses a single `ReentrantLock` with a condition queue — ~620k borrow+release ops/sec at 100 threads. `ConcurrentLinkedDeque` (lock-free) achieves ~850k ops/sec but has no fairness guarantee and requires a separate `AtomicInteger` for size bounding. Choose `ArrayBlockingQueue` when fairness matters (shared multi-tenant pools); choose `ConcurrentLinkedDeque` + MRU-ordering when raw throughput dominates.
+**Throughput vs fairness**: `fair=true` is far more expensive than it looks. Measured on an 8-core machine at 100 threads doing borrow+release, `ArrayBlockingQueue(fair=true)` managed ~170k ops/sec while the same queue with `fair=false` did ~54M and `ConcurrentLinkedDeque` ~9M — a ~300× gap, not the modest penalty usually assumed. Fairness forces a strict FIFO handoff: every release must wake a specific parked thread and wait for it to be scheduled, so each operation costs a context switch instead of an uncontended lock acquire. That cost is worth paying only when starvation is a real risk (a shared multi-tenant pool where one tenant could monopolise connections). For a single-tenant pool, `fair=false` plus a borrow-timeout is the better trade: barging is possible but the timeout bounds the worst case, and you keep two orders of magnitude of throughput. Re-measure on your own hardware before choosing — these ratios are machine-specific, though the ordering is not.
 
 ---
 
 ## 6. Real-World Implementations
 
-**HikariCP** (the standard): uses `ConcurrentBag` — a custom lock-free structure with thread-local lists that gives each borrower thread an affinity slot, eliminating contention entirely for the common case. Result: ~1.4M borrow+release ops/sec. Adds clock-move detection (handles VM pause / NTP jumps resetting `System.nanoTime()`), keepalive pings, and `minimumIdle` housekeeping. HikariCP is what this custom pool evolves into at production scale.
+**HikariCP** (the standard): uses `ConcurrentBag` — each borrowing thread keeps a thread-local list of the connections it recently used, so the common borrow path touches no shared structure at all; a `CopyOnWriteArrayList` holds the full set for stealing, and a `SynchronousQueue` hands a released connection directly to a waiting borrower. The design goal is not raw ops/sec but *avoiding the handoff cost* measured above — the thread-local hit skips both the lock and the context switch. Adds clock-move detection (handles VM pause / NTP jumps resetting `System.nanoTime()`), keepalive pings, and `minimumIdle` housekeeping. HikariCP is what this custom pool evolves into at production scale.
 
 **c3p0**: uses `synchronized` throughout — significantly slower than HikariCP. Notable for its `testConnectionOnCheckout` option, which maps to validate-on-borrow above. Largely superseded by HikariCP.
 
@@ -456,7 +494,7 @@ try (PooledConnection conn = pool.acquire()) {
 
 **Vitess** (MySQL sharding + pooling): maintains per-shard connection pools and implements backpressure by rejecting queries when pool queues exceed a depth threshold. This is the same bounded-queue backpressure pattern from this design applied at fleet scale. See [Backpressure & Bounded Resources](cross_cutting/backpressure_and_bounded_resources.md) for the general pattern.
 
-**AWS RDS Proxy**: managed proxy that sits between the app and RDS, handles connection multiplexing, failover routing, and IAM auth. Removes the need for a PgBouncer layer for AWS-native workloads; adds ~0.5 ms latency per query.
+**AWS RDS Proxy**: managed proxy that sits between the app and RDS, handling connection multiplexing, failover routing and IAM auth — the PgBouncer role without running PgBouncer. It adds a network hop, so it costs latency per query and is priced per vCPU of the database instance; measure the added latency for your workload rather than assuming a figure, since it depends on whether the proxy pins the session (transactions using session state force pinning, which destroys the multiplexing benefit).
 
 ---
 
@@ -464,20 +502,21 @@ try (PooledConnection conn = pool.acquire()) {
 
 | Tool | Pool Type | Throughput (100 threads) | Key Feature | Avoid When |
 |------|-----------|--------------------------|-------------|------------|
-| **HikariCP** | JDBC connection pool | ~1.4M ops/sec | ConcurrentBag, clock-move protection | Never — use it |
-| **Custom (this design)** | JDBC connection pool | ~620k ops/sec | Minimal dependencies, embedded use | Production fleet > 5 instances |
-| **c3p0** | JDBC connection pool | ~200k ops/sec | testConnectionOnCheckout | New projects — superseded |
+| **HikariCP** | JDBC connection pool | Thread-local fast path avoids the handoff entirely | ConcurrentBag, clock-move protection | Never — use it |
+| **Custom (this design)** | JDBC connection pool | Bounded by the queue choice (see table above) | Minimal dependencies, embedded use | Production fleet > 5 instances |
+| **c3p0** | JDBC connection pool | Coarse `synchronized`; slowest of the three | testConnectionOnCheckout | New projects — superseded |
 | **PgBouncer** | Proxy-level connection multiplexer | 10K–100K clients → 100 server | Transaction-mode multiplexing | Apps relying on session state |
 | **Vitess** | MySQL sharding + pooling | Horizontal scale | Sharded pools, backpressure | Non-MySQL, simpler workloads |
 | **AWS RDS Proxy** | Managed proxy | Scales with RDS | IAM auth, failover routing | Self-hosted / non-AWS stacks |
 
-Internal queue benchmark (JMH, 100 threads, borrow+release, Java 17, 16-core):
+Internal queue benchmark (measured, 100 threads, borrow+release, 8-core machine — absolute
+numbers are machine-specific; the ordering and the size of the fairness penalty are not):
 
-| Queue | Throughput | P99 latency | Notes |
-|-------|-----------|-------------|-------|
-| `ConcurrentLinkedDeque` | ~850k ops/s | 0.9 µs | Lock-free CAS; MRU cache-warm via `pollFirst/offerFirst` |
-| `LinkedTransferQueue` | ~780k ops/s | 1.2 µs | Lock-free; per-offer node allocation (GC pressure) |
-| `ArrayBlockingQueue(fair)` | ~620k ops/s | 3.1 µs | Single `ReentrantLock`; fairness adds handoff cost |
+| Queue | Throughput | Notes |
+|-------|-----------|-------|
+| `ArrayBlockingQueue(fair=false)` | ~54M ops/s | Single `ReentrantLock`, barging allowed; by far the fastest |
+| `ConcurrentLinkedDeque` | ~9M ops/s | Lock-free CAS; MRU cache-warm via `pollFirst/offerFirst`; needs a separate `AtomicInteger` to bound size |
+| `ArrayBlockingQueue(fair=true)` | ~170k ops/s | Strict FIFO handoff — a context switch per operation, ~300× slower than the unfair variant |
 
 ---
 
@@ -583,10 +622,10 @@ BROKEN — each order request opens a new connection per line item while still h
 
 ```java
 // BROKEN: nested borrow inside a loop -> re-entrant acquisition
-try (Connection outer = pool.acquire(50, MILLISECONDS)) {
+try (PooledConnection outer = pool.acquire(50, MILLISECONDS)) {
     List<Order> orders = loadOrders(outer);           // 1 connection held
     for (Order o : orders) {                           // 50 orders
-        try (Connection inner = pool.acquire(50, MILLISECONDS)) {  // +1 each!
+        try (PooledConnection inner = pool.acquire(50, MILLISECONDS)) {  // +1 each!
             o.setLines(loadLines(inner, o.id()));      // N+1 pattern
         }
     }
@@ -599,7 +638,7 @@ FIX — batch the inner query; one connection per request:
 
 ```java
 // FIX: one connection, one round trip, IN-list batch fetch
-try (Connection c = pool.acquire(50, MILLISECONDS)) {
+try (PooledConnection c = pool.acquire(50, MILLISECONDS)) {
     List<Order> orders = loadOrders(c);
     Map<Long, List<Line>> linesByOrder =
         loadLinesForOrders(c, orders.stream().map(Order::id).toList());
@@ -621,7 +660,7 @@ BROKEN — if `rs.close()` throws, the connection is never returned:
 
 ```java
 // BROKEN: if rs.close() throws, conn.close() (return-to-pool) never runs
-Connection conn = null; PreparedStatement ps = null; ResultSet rs = null;
+PooledConnection conn = null; PreparedStatement ps = null; ResultSet rs = null;
 try {
     conn = pool.acquire(50, MILLISECONDS);
     ps = conn.prepareStatement("SELECT ...");
@@ -638,7 +677,7 @@ FIX — try-with-resources guarantees each resource closes independently:
 
 ```java
 // FIX (Java 7+): each resource closed in reverse declaration order
-try (Connection conn = pool.acquire(50, MILLISECONDS);
+try (PooledConnection conn = pool.acquire(50, MILLISECONDS);
      PreparedStatement ps = conn.prepareStatement("SELECT ...");
      ResultSet rs = ps.executeQuery()) {
     process(rs);
@@ -705,7 +744,10 @@ rather than stacking behind each other and making the problem worse.
 ### Worked hardware example (PostgreSQL on db.r6g.xlarge, 4 vCPUs, 32 GB RAM)
 
 ```
-DB max_connections: 500 (RDS parameter group default for r6g.xlarge)
+DB max_connections: capped at 500 in the parameter group. (The RDS default formula
+                    LEAST({DBInstanceClassMemory/9531392}, 5000) would allow ~3,400 on
+                    a 32 GiB r6g.xlarge — but throughput collapses far below that, so
+                    the useful ceiling is one you SET, not the one RDS permits.)
 Recommended server-side pool: 9 connections per app instance
 Instances supportable without proxy: 500 × 0.9 / 9 ≈ 50 instances
 At 50 instances and above: add PgBouncer in transaction mode
@@ -752,4 +794,4 @@ Use a bulkhead pattern: give each large tenant its own `ConnectionPool` instance
 In-flight requests holding connections to the dead primary get `SQLException` (TCP reset or read timeout) — they cannot be saved and must be retried by the caller (idempotent operations) or surfaced as 503. The pool recovers by: (1) validating on borrow drains dead sockets within one borrow cycle, and (2) the JDBC URL includes a failover list (`jdbc:postgresql://primary,standby/db?targetServerType=primary`) so new connections land on the promoted standby. Total pool recovery time is dominated by replica promotion (Patroni: 2–15 s), not by pool internals.
 
 **Q: When would you replace this custom pool with HikariCP in production?**
-Immediately for any production workload beyond embedded/testing use. HikariCP's `ConcurrentBag` achieves ~1.4M borrow+release ops/sec (vs ~620k for `ArrayBlockingQueue(fair)`) via thread-local affinity slots that eliminate contention for the common case. It also handles clock-move detection (VM pause resets `System.nanoTime()`), keepalive pings, `minimumIdle` housekeeping, and configurable leak detection with stack traces — all production edge cases this custom pool leaves unhandled.
+Immediately for any production workload beyond embedded/testing use. HikariCP's `ConcurrentBag` gives each borrowing thread a thread-local list of recently-used connections, so the common borrow neither takes a lock nor pays the FIFO handoff that makes `ArrayBlockingQueue(fair=true)` ~300× slower than the unfair variant (see §5). It also handles clock-move detection (VM pause resets `System.nanoTime()`), keepalive pings, `minimumIdle` housekeeping, and configurable leak detection with stack traces — all production edge cases this custom pool leaves unhandled.

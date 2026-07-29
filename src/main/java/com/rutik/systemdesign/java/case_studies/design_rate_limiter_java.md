@@ -83,12 +83,15 @@ At 2,000 checks/sec:         2,000 × 0.5 ms = 1 s/s → limiter becomes the bot
 ### Memory per key (in-process)
 
 ```
-TokenBucketRateLimiter object: 5 fields × 8 bytes = 40 bytes object header
-AtomicLong × 2: 16 bytes each
-ReentrantLock + Condition: ~80 bytes
-Total: ~200 bytes per key
-1M keys: ~200 MB — set a max-key limit and evict inactive keys (last-used > 1 h).
+TokenBucketRateLimiter instance:  16 B header + 6 fields ≈ 48 B
+AtomicLong × 2 (tokens, lastRefillNanos): ~24 B each          =  48 B
+ReentrantLock + its Sync + Condition object:                  ≈  80 B
+ConcurrentHashMap.Node + key String for the map entry:        ≈  64 B
+Total: ~240 bytes per live key (round to 250 B for planning)
+1M keys: ~250 MB — set a max-key limit and evict inactive keys (last-used > 1 h).
 ```
+The `ReentrantLock` is a third of that and exists only for blocking `acquire()`. If a key
+only ever calls `tryAcquire()`, a lock-free-only variant drops to ~160 B/key.
 
 ---
 
@@ -159,10 +162,10 @@ flowchart TD
 
 ### 4.1 Lock-free `tryAcquire()` with lazy refill
 
-BROKEN — using `synchronized` serializes all callers through one lock; becomes the bottleneck:
+BROKEN — a blocking `tryAcquire()` can park the caller on a monitor, so a thread descheduled while holding it stalls every other caller, and the method can no longer honour a "non-blocking" contract:
 
 ```java
-// BROKEN: synchronized tryAcquire serializes all threads -> 2M ops/sec ceiling
+// BROKEN for a non-blocking API: callers can park on the monitor
 public synchronized boolean tryAcquire() {
     refillSynchronized();                 // also synchronized: double lock cost
     if (tokens >= 1) { tokens--; return true; }
@@ -171,10 +174,10 @@ public synchronized boolean tryAcquire() {
 // 100 threads call tryAcquire() simultaneously -> all but one park on the monitor
 ```
 
-FIX — `AtomicLong` + CAS loop handles concurrent access without blocking:
+FIX — `AtomicLong` + CAS loop: every caller makes progress without ever parking:
 
 ```java
-// FIX: lock-free tryAcquire — ~8M ops/sec
+// FIX: lock-free tryAcquire — no park/unpark, no priority inversion
 public boolean tryAcquire() {
     refill();                                 // lazy refill: compute elapsed time, CAS lastRefill
     while (true) {
@@ -197,16 +200,20 @@ private void refill() {
     long now = System.nanoTime();
     long last = lastRefillNanos.get();
     long elapsed = now - last;
-    if (elapsed <= 0) return;                // time went backwards (VM pause): skip
+    if (elapsed <= 0) return;                // nanoTime is monotonic within a JVM; this
+                                             // guards only its documented wraparound
 
     long tokensToAdd = elapsed * refillRatePerNano;
     if (tokensToAdd <= 0) return;            // not enough time for even one scaled token
 
     // CAS on lastRefillNanos: exactly one thread wins the refill for this interval
     if (lastRefillNanos.compareAndSet(last, now)) {
-        long current = tokens.get();
-        long newValue = Math.min(maxTokens, current + tokensToAdd);
-        tokens.set(newValue);                // set is fine: we're the only refiller now
+        // MUST be an atomic read-modify-write. A get()/set() pair is a lost-update bug:
+        // tryAcquire() decrements with its own CAS, and any decrement landing between
+        // our get() and set() is silently erased — tokens already handed out get handed
+        // out again, violating the "no over-granting" requirement in §1.
+        long newValue = tokens.accumulateAndGet(
+            tokensToAdd, (current, add) -> Math.min(maxTokens, current + add));
         if (newValue >= SCALE) {
             lock.lock();
             try { tokenAvailable.signalAll(); }  // wake blocking acquirers
@@ -217,7 +224,7 @@ private void refill() {
 }
 ```
 
-**Key correctness invariant**: the CAS on `lastRefillNanos` means only one thread can be in the `tokens.set()` critical section at a time for any given elapsed-time interval. Losers skip; they'll pick up the next interval on their next call.
+**Key correctness invariant**: winning the CAS on `lastRefillNanos` claims one elapsed interval, so no interval is ever counted twice — losers skip and pick up the next interval on their next call. That CAS does *not* exclude concurrent `tryAcquire()` decrements, which is why the accumulate must be atomic in its own right. Two independent races, two CASes; conflating them is the classic way this implementation over-grants under load.
 
 ### 4.3 Blocking `acquire()` with `Condition`
 
@@ -251,7 +258,10 @@ private long waitTimeForNextToken() {
 
 ```java
 public class TokenBucketRateLimiter {
-    private static final long SCALE = 1_000_000L;
+    // SCALE must be >= 1e9 so that refillRatePerNano is non-zero for rates below
+    // 1000 tokens/sec. With SCALE = 1e6, refillRatePerNano = tps * 1e6 / 1e9
+    // truncates to 0 for every tps < 1000 and the bucket never refills at all.
+    private static final long SCALE = 1_000_000_000L;
 
     private final long maxTokens;
     private final long refillRatePerNano;
@@ -308,12 +318,15 @@ public class TokenBucketRateLimiter {
         long now = System.nanoTime();
         long last = lastRefillNanos.get();
         long elapsed = now - last;
-        if (elapsed <= 0) return;
+        if (elapsed <= 0) return;            // nanoTime is monotonic; guards the documented wrap
         long tokensToAdd = elapsed * refillRatePerNano;
         if (tokensToAdd <= 0) return;
         if (lastRefillNanos.compareAndSet(last, now)) {
-            long newValue = Math.min(maxTokens, tokens.get() + tokensToAdd);
-            tokens.set(newValue);
+            // accumulateAndGet, NOT get()+set(): a plain set() would overwrite any
+            // decrement a concurrent tryAcquire() performed in between, handing out
+            // tokens that were already spent.
+            long newValue = tokens.accumulateAndGet(
+                tokensToAdd, (current, add) -> Math.min(maxTokens, current + add));
             if (newValue >= SCALE) {
                 lock.lock();
                 try { tokenAvailable.signalAll(); }
@@ -329,6 +342,7 @@ public class TokenBucketRateLimiter {
     }
 
     public double getCurrentTokens() { return (double) tokens.get() / SCALE; }
+    public double getMaxTokens()     { return (double) maxTokens / SCALE; }
 }
 
 // Per-key variant
@@ -357,7 +371,7 @@ public class MultiKeyRateLimiter {
 
 | Decision | Chosen | Alternatives | Rationale |
 |----------|--------|-------------|-----------|
-| Token counter | `AtomicLong` + CAS loop | `synchronized long`, `Semaphore` | Lock-free on hot path; ~8M ops/sec vs ~2M for `synchronized` |
+| Token counter | `AtomicLong` + CAS loop | `synchronized long`, `Semaphore` | Lock-free progress: no caller can be descheduled holding a lock. Note this is a latency/progress win, not a throughput win — on one hot key a monitor actually scales better (see §7) |
 | Refill strategy | Lazy (compute on each `tryAcquire`) | Scheduled background thread | No background thread; sub-millisecond accuracy; CAS guards concurrent refill |
 | Blocking wait primitive | `ReentrantLock` + `Condition.awaitNanos()` | `Thread.sleep()`, `LockSupport.parkNanos()` | `Condition` can be signaled early; `sleep()` always waits full duration |
 | Token precision | `long × SCALE (1_000_000)` | `double`, integer tokens | Integer CAS is atomic; `double` CAS is not directly supported; scaling preserves fractional-token accuracy |
@@ -369,15 +383,15 @@ public class MultiKeyRateLimiter {
 
 ## 6. Real-World Implementations
 
-**Guava `RateLimiter`**: implements a token bucket with a warm-up period (slowly builds to full rate from zero, preventing burst on startup). Uses a single `synchronized` block for correctness; throughput is ~2M checks/sec — sufficient for most single-JVM workloads. Its `tryAcquire(timeout)` returns the wait time in seconds, enabling smooth permit scheduling (callers sleep their allocated wait rather than spinning).
+**Guava `RateLimiter`**: a token bucket with an optional warm-up period — created via `RateLimiter.create(permitsPerSecond, warmupPeriod, unit)`, it starts at a reduced rate after a period of under-use and ramps to the configured rate, modelling a resource (cache, connection pool) that is cold on startup. Synchronises on a single monitor. Note the return types, which are easy to get backwards: `acquire()` and `acquire(int permits)` **block** and return a `double` — the time actually spent sleeping, in seconds — while `tryAcquire()`, `tryAcquire(timeout, unit)` and `tryAcquire(permits, timeout, unit)` return a `boolean`. If you want the "sleep your allocated slot" behaviour, that is `acquire()`, not `tryAcquire()`. It is also marked `@Beta`, so it has never been API-frozen.
 
-**Resilience4j `RateLimiter`**: provides both `AtomicRateLimiter` (CAS-based, ~8M calls/sec, no lock) and `SemaphoreBasedRateLimiter` (for integration tests). Configurable via `RateLimiterConfig.custom()`. Integrates with Micrometer for `rate_limiter.available_permissions` and `rate_limiter.waiting_threads` metrics. See [Resilience4j Patterns](../../spring/case_studies/cross_cutting/resilience4j_patterns.md) for the Spring integration.
+**Resilience4j `RateLimiter`**: two implementations behind one interface — `AtomicRateLimiter` (the default, CAS on a packed state record, no lock) and `SemaphoreBasedRateLimiter` (a `Semaphore` refilled by a scheduler). Configured via `RateLimiterConfig.custom()` with `limitForPeriod`, `limitRefreshPeriod` and `timeoutDuration` — note this is a *fixed-window* refresh, not a continuously-dripping bucket, so it permits a full `limitForPeriod` burst at each boundary. Micrometer publishes `resilience4j.ratelimiter.available.permissions` and `resilience4j.ratelimiter.waiting_threads`. See [Resilience4j Patterns](../../spring/case_studies/cross_cutting/resilience4j_patterns.md) for the Spring integration.
 
 **NGINX `limit_req` module**: implements a leaky bucket (smooth output) rather than token bucket (burst-friendly). `burst` parameter sets the queue size; `nodelay` converts the queue into burst-then-drop behavior (equivalent to a token bucket). Per-IP and per-URI limits via shared memory zones (`limit_req_zone`). Rate math is computed using millisecond-resolution timestamps stored in shared memory — same one-clock principle as Redis `TIME`.
 
-**Kong Gateway rate limiting plugin**: uses Redis sliding window counter (weight current and previous fixed windows by overlap fraction). Redis key TTL automatically expires inactive keys. Configurable to fail-open when Redis is unavailable — same fail-open vs fail-closed policy decision described in §9. Their Lua script runs inside Redis atomically, avoiding race conditions between read and write.
+**Kong Gateway rate limiting plugins**: worth knowing there are two. The open-source `rate-limiting` plugin uses **fixed** windows (per second/minute/hour/day/month/year) with a `local`, `cluster` or `redis` policy — so it carries the fixed-window boundary-burst weakness described in §11. The sliding-window algorithm (weighting the current and previous windows by overlap fraction) is in the Enterprise `rate-limiting-advanced` plugin, selected with `window_type=sliding`. Both push the counter update into a Redis-side script so the read and write are atomic, and both can be configured to fail open when Redis is unavailable — the same policy decision described in §9.
 
-**Stripe API rate limiter**: published engineering post describes a two-tier design matching §3 — a generous in-process bucket sheds obvious abuse in ~40 ns, and Redis enforces precise per-API-key quotas cluster-wide. Burst allowances are per-endpoint (the `/v1/charges` endpoint gets a larger burst than `/v1/refunds` to absorb payment batches). Identity is API key (not IP — Stripe's customers are behind NAT, and IP rotation is common).
+**Stripe API rate limiter**: their engineering post "Scaling your API with rate limiters" describes *four* cooperating limiters, all backed by Redis, which is a more useful decomposition than a single bucket. (1) A **request rate limiter** — a token bucket per user, the algorithm in this case study. (2) A **concurrent requests limiter**, which bounds how many of a user's requests may be in flight simultaneously rather than how fast they arrive; it uses a Redis sorted set of in-flight request IDs scored by timestamp, so stalled requests age out. This catches the caller who sends few but very expensive requests — a rate limit alone will not. (3) A **fleet usage load shedder**, the same mechanism keyed globally instead of per-user, reserving capacity for critical traffic when the fleet as a whole is saturated. (4) A **worker utilization load shedder**, which sheds by request importance based on how loaded the workers are. The lesson to take: "rate limiting" is not one control. Arrival rate, concurrency, and global saturation are three distinct failure modes and each needs its own limiter.
 
 ---
 
@@ -385,20 +399,26 @@ public class MultiKeyRateLimiter {
 
 | Tool | Algorithm | Throughput | Scope | Key Feature | Avoid When |
 |------|-----------|-----------|-------|-------------|------------|
-| Custom `AtomicLong` (this) | Token bucket | ~8M checks/sec | Per-JVM | Zero dependencies | Multi-instance shared limit |
-| Guava `RateLimiter` | Token bucket + warm-up | ~2M checks/sec | Per-JVM | Smooth scheduling, warm-up period | High-throughput hot paths |
-| Resilience4j `AtomicRateLimiter` | Token bucket | ~8M checks/sec | Per-JVM | Micrometer integration | Distributed enforcement needed |
+| Custom `AtomicLong` (this) | Token bucket | Millions/sec on one key; scales only by sharding | Per-JVM | Zero dependencies | Multi-instance shared limit |
+| Guava `RateLimiter` | Token bucket + warm-up | Monitor-bound, same order | Per-JVM | Smooth scheduling, warm-up period; `@Beta` | You need a stable API surface |
+| Resilience4j `AtomicRateLimiter` | Token bucket | CAS-based, same order | Per-JVM | Micrometer integration | Distributed enforcement needed |
 | Redis Lua token bucket | Token bucket | ~2K checks/sec/key | Cluster-wide | Atomic, clock from Redis | > 2K checks/sec per key |
 | NGINX `limit_req` | Leaky bucket | Millions (kernel) | Per-instance | No app code | Need burst tolerance |
 | Kong/API Gateway plugin | Sliding window counter | Millions (kernel) | Cluster-wide | Per-endpoint policies | Custom auth needed |
 
-JMH benchmark (single key, 100 threads, Java 17, 16-core):
+Measured, single hot key, 8-core machine (absolute numbers are machine-specific; the shape
+is the point — re-run it on your own hardware before quoting any of these):
 
-| Implementation | Throughput | P99 latency | Notes |
-|----------------|-----------|-------------|-------|
-| `AtomicLong` + CAS (lock-free) | ~8M ops/sec | ~125 ns | Retries on CAS conflict; rare in practice |
-| `synchronized` token bucket | ~2M ops/sec | ~500 ns | Single monitor; serializes all callers |
-| Redis Lua (RTT 0.5 ms) | ~2K ops/sec/key | ~0.5 ms | Network-bound; must pipeline for higher throughput |
+| Implementation | 1 thread | 8 threads | 100 threads | Notes |
+|----------------|----------|-----------|-------------|-------|
+| `AtomicLong` + CAS (lock-free) | ~215M ops/sec | ~8.5M ops/sec | ~8.5M ops/sec | Collapses 25× under contention: every retry is a cache-line transfer |
+| `synchronized` token bucket | ~220M ops/sec | ~34M ops/sec | ~36M ops/sec | Queues contenders instead of spinning; scales *better* past ~4 threads |
+| Redis Lua (RTT 0.5 ms) | — | — | ~2K ops/sec/key sequentially | Network-bound; pipeline or shard for more |
+
+The counter-intuitive row is the second one. Neither in-process design scales on a single
+key, because both are bounded by exclusive ownership of one cache line — and when the line is
+that hot, a monitor's queueing beats a CAS retry storm. Choose CAS for its progress and
+latency properties, then shard the key space to actually get throughput.
 
 ---
 
@@ -588,8 +608,8 @@ At 1M checks/sec: 20 Redis shards (shard key = rate-limit key hash % 20).
 ```
 Users: 10M accounts; daily actives: 500K (5%)
 In-window keys at any moment: ~500,000
-Memory per key: ~200 bytes
-Total: 500,000 × 200 B = 100 MB heap — acceptable.
+Memory per key: ~250 bytes (see §2)
+Total: 500,000 × 250 B = 125 MB heap — acceptable.
 
 Evict keys inactive > 1 hour:
   At 500K actives with 1-hour window: steady-state ~500K entries.
@@ -610,8 +630,8 @@ For a blocking acquire() call:
 
 ## 11. Interview Discussion Points
 
-**Q: Why use `AtomicLong` + CAS instead of `synchronized` for the token counter?**
-`tryAcquire()` is on the hot path — called for every request. `synchronized` serializes all callers through one monitor, creating a bottleneck at high QPS; throughput caps at ~2M ops/sec because only one thread can enter at a time. `AtomicLong.compareAndSet()` is a single hardware `LOCK CMPXCHG` instruction (~5 ns) — lock-free, allows all threads to make progress. The CAS loop retries on conflict but conflicts are rare; in the common case (not rate-limited) the first CAS succeeds, giving ~8M ops/sec.
+**Q: Why use `AtomicLong` + CAS instead of `synchronized` for the token counter — and when is that the wrong call?**
+Lock-free is a *progress* guarantee, not a throughput guarantee, and the distinction decides the answer. `AtomicLong.compareAndSet()` is one hardware `lock cmpxchg` (~2 ns uncontended), so no caller can be descheduled while holding a lock and no caller can block another indefinitely — that is worth having on a hot path called for every request. But throughput is a different question, and measuring it is uncomfortable: on a single hot key both designs collapse, because the bottleneck is exclusive ownership of one cache line, not the synchronisation primitive. Measured on an 8-core machine, the CAS loop runs ~215M ops/sec single-threaded and falls to ~8.5M at 8+ threads, while a `synchronized` block on the same counter starts at ~220M and plateaus around ~36M — the monitor *wins* past about four threads, because it queues contenders instead of letting them all spin on the same line and re-fail. So: use CAS for the latency and progress properties, but do not claim it scales. The only fix that actually scales is to stop sharing the line — per-key limiters or a striped counter, which is exactly what §9 and §10 recommend.
 
 **Q: What is the ABA problem, and does it affect this implementation?**
 ABA: a CAS succeeds when a value returns to its original after intermediate changes. In `tryAcquire()`, if `current = 100×SCALE`, another thread decrements to 99×SCALE then the refill path adds back to 100×SCALE, a stale CAS would fire. The effect: we consume a token that was just refilled — acceptable, because token bucket semantics require only that "a token exists and we consumed it." The ABA problem is harmful when you care about *which specific* transition occurred; here only existence matters.
@@ -622,8 +642,8 @@ The CAS on `lastRefillNanos.compareAndSet(last, now)` means exactly one thread c
 **Q: Why use `Condition.awaitNanos()` instead of `Thread.sleep()` for blocking `acquire()`?**
 `Thread.sleep(ms)` always waits the full duration with only millisecond precision. `Condition.awaitNanos()` can be woken early by a `signalAll()` from `refill()` when new tokens arrive — no thread waits longer than necessary. Additionally, `awaitNanos` is interruptible in the standard way (throws `InterruptedException`), while `sleep` requires manual interrupt-flag propagation.
 
-**Q: What does the `SCALE` factor do, and why is it needed?**
-`AtomicLong` stores integers. At 1 token/nanosecond or fractional rates, pure integer arithmetic loses precision — you'd grant fewer tokens than earned or never grant a token at low rates. Scaling all token counts by `SCALE = 1_000_000` represents fractional tokens as integers. At 1 token/second: `refillRatePerNano = 1 × 10⁶ / 10⁹ = 1` (one scaled unit per nanosecond), so tokens accumulate correctly even over sub-millisecond intervals.
+**Q: What does the `SCALE` factor do, and how do you pick its value?**
+`AtomicLong` holds integers, but the natural refill unit is fractional: at 11.6 tokens/sec a nanosecond earns 0.0000000116 tokens. `SCALE` represents fractional tokens as integers — one whole token is `SCALE` units — so a CAS on a `long` stays exact. Picking the value is the part people get wrong. `refillRatePerNano = tokensPerSecond × SCALE / 1_000_000_000` is integer division, so it truncates to **zero** whenever `tokensPerSecond × SCALE < 1e9`. With `SCALE = 1_000_000` that means every rate below 1,000 tokens/sec produces `refillRatePerNano = 0`, `tokensToAdd` is always 0, and the bucket silently never refills — the limiter drains once and then rejects everything forever. The rule is `SCALE ≥ 1_000_000_000 / min_supported_rate`; using `SCALE = 1_000_000_000` makes `refillRatePerNano == tokensPerSecond` exactly, correct for any integer rate ≥ 1/sec. Range still bounds you: `elapsed × refillRatePerNano` must not overflow, so a 1e6/sec limiter left idle for an hour (3.6e12 ns × 1e6 = 3.6e18) is near `Long.MAX_VALUE` — clamp `elapsed` to the time needed to reach `maxTokens` if that is reachable.
 
 **Q: Should a rate limiter fail open or fail closed when Redis is unavailable?**
 Default to fail-open behind a circuit breaker: the limiter's purpose is to protect backends from overload, but rejecting 100% of traffic because the limiter died is usually a worse incident than briefly under-limiting. The circuit breaker stops hammering dead Redis and automatically retries (half-open) when Redis recovers, restoring enforcement within seconds. Fail-closed is the right policy only when the protected resource has hard external quotas (a paid third-party API) where exceeding the limit has financial or contractual consequences — make this a deliberate per-limiter policy choice.

@@ -209,7 +209,7 @@ public final class SnowflakeIdGenerator {
 
 **Key bit-packing mechanics:**
 - `~(-1L << N)` creates a bitmask of N ones without a lookup table.
-- `(now - EPOCH_MS) << TIMESTAMP_SHIFT` positions timestamp in bits [63..22]; the custom epoch pushes useful ID life to 2089.
+- `(now - EPOCH_MS) << TIMESTAMP_SHIFT` positions the 41-bit timestamp in bits [62..22], leaving the sign bit (63) clear so every ID is a positive signed `long`; the custom epoch pushes useful ID life to 2089.
 - `sequence = (sequence + 1) & SEQUENCE_MASK` rolls the counter from 4095 back to 0 without branching.
 
 ### 4.2 Broken Pattern: Unsynchronized Generator
@@ -237,33 +237,49 @@ high-throughput scenarios (see §4.3).
 
 ### 4.3 Lock-Free Variant for High Concurrency
 
-For services generating > 500k IDs/sec across many threads, `synchronized` becomes a contention
-bottleneck. A striped lock-free approach assigns one generator per thread using `ThreadLocal`:
+For services generating > 500k IDs/sec across many threads, the single monitor becomes a
+contention bottleneck. Striping gives each stripe its own generator — and therefore its own
+worker ID, which is the constraint that governs the whole design:
 
 ```java
 public final class StripedSnowflakeIdGenerator {
 
-    private static final int STRIPE_COUNT = 64;  // must be ≤ workers per datacenter (31)
+    // HARD CONSTRAINT: each stripe consumes one worker ID, and two generators
+    // sharing a worker ID collide. With a 5-bit worker field there are only 32
+    // worker IDs in a datacenter, and they must be divided among every PROCESS
+    // in that datacenter — so a per-process stripe count of 8 already caps you
+    // at 4 processes. Do not raise this without widening the worker field.
+    private static final int STRIPE_COUNT = 8;
 
     private final SnowflakeIdGenerator[] stripes;
 
     public StripedSnowflakeIdGenerator(int baseWorkerId, int datacenterId) {
+        if (baseWorkerId < 0 || baseWorkerId + STRIPE_COUNT > 32) {
+            throw new IllegalArgumentException(
+                "workers " + baseWorkerId + ".." + (baseWorkerId + STRIPE_COUNT - 1) +
+                " exceed the 32 available in datacenter " + datacenterId);
+        }
         stripes = new SnowflakeIdGenerator[STRIPE_COUNT];
         for (int i = 0; i < STRIPE_COUNT; i++) {
-            stripes[i] = new SnowflakeIdGenerator(datacenterId, (baseWorkerId + i) % 32);
+            // No modulo: wrapping would give two stripes the same worker ID and
+            // reintroduce exactly the collision striping is meant to avoid.
+            stripes[i] = new SnowflakeIdGenerator(datacenterId, baseWorkerId + i);
         }
     }
 
     public long nextId() {
-        // Thread ID hashing avoids ThreadLocal allocation while distributing evenly
-        int stripeIndex = (int) (Thread.currentThread().getId() % STRIPE_COUNT);
+        // threadId() is monotonic and dense, so a plain modulo distributes evenly
+        // without the allocation a ThreadLocal generator would need.
+        int stripeIndex = (int) (Thread.currentThread().threadId() % STRIPE_COUNT);
         return stripes[stripeIndex].nextId();
     }
 }
 ```
 
-**Trade-off:** Uses 64 worker IDs instead of 1; the stripe count must not exceed the number of
-worker IDs available in the layout (32 with 5-bit worker field).
+**Trade-off:** the process now burns `STRIPE_COUNT` worker IDs instead of 1, and worker IDs
+are the scarcest resource in the layout. Striping trades cluster size for per-process
+throughput, so allocate the ranges centrally (a ConfigMap or a coordination service) rather
+than letting each process pick its own base.
 
 ### 4.4 ID Parser / Decoder
 
@@ -314,12 +330,15 @@ epoch value is baked into the generator at construction and must never change fo
 
 | Approach | Throughput (single node) | Complexity | ID gap risk |
 |----------|--------------------------|------------|-------------|
-| `synchronized nextId()` | ~2M IDs/s (32 threads) | Low | None |
-| `ThreadLocal` stripe | ~4M IDs/s (32 threads) | Medium | Stripe IDs not interleaved by time |
-| `AtomicLong` CAS loop | ~3M IDs/s | Medium | Retry waste under contention |
+| `synchronized nextId()` | ~4.1M IDs/s (layout ceiling, not lock-bound) | Low | None |
+| Striped, N generators | ~4.1M × N IDs/s | Medium | Consumes N worker IDs; stripe IDs not interleaved by time |
+| `AtomicLong` CAS loop | Same ~4.1M ceiling | Medium | Retry waste under contention, no ceiling gain |
 
-**Decision:** Use `synchronized` as the default. The bottleneck is almost never the ID generator
-at < 500k IDs/s, and `synchronized` is simpler to reason about for correctness.
+**Decision:** Use `synchronized` as the default. Note what the table shows: no in-process
+synchronisation choice raises the ceiling, because the ceiling is 4,096 sequence values per
+millisecond per worker ID, not the lock. Only striping (more worker IDs) buys headroom. Since
+the bottleneck is almost never the ID generator at < 500k IDs/s, take the primitive that is
+simplest to reason about for correctness.
 
 ### Decision 2: Custom Epoch vs Unix Epoch
 
@@ -360,21 +379,33 @@ Twitter's 41+10+12 split is the industry default; it balances cluster size and t
 Each generator was a separate process; IDs assigned atomically via ZooKeeper sequential ephemeral
 nodes. The original 64-bit format established the 41+10+12 split now replicated everywhere.
 
-**Discord (2015):** Same bit layout as Twitter but with a different epoch (Discord's first message,
-2015-01-01). Discord encodes "shard ID" in the worker field, letting ops engineers decode which
-database shard holds any row from the ID alone. Public engineering post: "Snowflake IDs."
+**Discord:** Documented publicly in their developer docs as "Snowflakes". Epoch is
+2015-01-01 (`1420070400000`). The split is 42 + 5 + 5 + 12: timestamp in bits 63–22,
+internal *worker* ID in 21–17, internal *process* ID in 16–12, and a per-process increment in
+11–0. Note this is 42 timestamp bits, not Twitter's 41 — because Discord IDs are unsigned in
+their API contract, they can use the top bit. The practical consequence for anyone consuming
+them: a Discord snowflake does not always fit a signed 64-bit integer's positive range, and
+their docs require IDs be serialised as JSON strings.
 
-**Instagram:** Uses PostgreSQL sequences per shard instead of a standalone service. Their
-approach stores the shard ID in the low 13 bits and achieves the same K-ordering guarantee
-entirely inside the database via a stored procedure.
+**Instagram:** Generates IDs inside PostgreSQL rather than in a service, using a stored
+procedure per shard. Split: 41 bits of milliseconds, then **13 bits of logical shard ID**,
+then **10 bits of an auto-increment sequence taken modulo 1024** — so the shard ID sits in the
+middle and the sequence occupies the low bits, giving 1,024 IDs per shard per millisecond. The
+attraction of doing it in the database is that no separate ID service can be down when a write
+needs an ID.
 
-**Baidu (UidGenerator):** Ring-buffer pre-generation: a background thread fills a lock-free ring
-buffer one slot ahead; callers consume from the ring without blocking. Peak throughput: 6M IDs/s
-on a 4-core machine by eliminating `System.currentTimeMillis()` from the hot path.
+**Baidu (UidGenerator):** Its `CachedUidGenerator` pre-fills a ring buffer from a background
+thread so callers never touch the clock or the sequence arithmetic on the hot path — a
+consumer just advances an index. The project reports throughput in the millions of IDs/sec on
+commodity hardware. The tradeoff is that IDs are minted *before* they are handed out, so a
+parsed timestamp can sit slightly ahead of the wall clock, and a burst that drains the ring
+faster than the filler refills it degrades to waiting.
 
-**Sonyflake (Sony):** 39-bit timestamp (10 ms resolution, 174 years), 8-bit sequence (255 IDs per
-10 ms), 16-bit machine ID (65535 nodes). Trades throughput for larger cluster size — useful for
-IoT deployments with tens of thousands of edge nodes.
+**Sonyflake (Sony):** 39-bit time unit of **10 ms** (2^39 × 10 ms ≈ 174 years), 8-bit sequence
+(256 IDs per 10 ms per machine), 16-bit machine ID (65,536 nodes). It deliberately inverts
+Twitter's tradeoff: coarser time and a far smaller per-node rate in exchange for 64× the
+cluster size — the right shape when you have very many nodes each generating very few IDs,
+such as edge or IoT fleets.
 
 ---
 
@@ -386,8 +417,9 @@ IoT deployments with tens of thousands of edge nodes.
 | `java-snowflake` (mtakaki) | Java port | Simple; no striping; MIT license |
 | UidGenerator (Baidu) | Ring-buffer Java impl | Spring integration; 6M IDs/s; adds ring-buffer GC pressure |
 | `sequence` (Meituan Leaf) | ZooKeeper + DB segments | Hybrid: ZK for coordination, segment buffer for throughput |
-| PostgreSQL `gen_random_uuid()` | UUID v4 alternative | Random, not K-ordered; poor B-tree insertion pattern at scale |
-| ULID (Universally Unique Lexicographically Sortable ID) | UUID alternative | 48-bit ms + 80-bit random; string-encoded; no node ID |
+| PostgreSQL `gen_random_uuid()` | UUID v4 | Random, not K-ordered; the exact B-tree insertion pattern this design avoids |
+| **UUID v7** (RFC 9562) | K-ordered UUID | 48-bit Unix ms prefix + 74 random bits, so it sorts by time like a Snowflake but needs no worker-ID coordination at all. In Java: `Generators.timeBasedEpochGenerator()` (`com.fasterxml.uuid:java-uuid-generator`); in PostgreSQL 18+, the built-in `uuidv7()` |
+| ULID | UUID alternative | 48-bit ms + 80-bit random; Crockford base32 string form; effectively UUID v7's predecessor, now largely superseded by it |
 
 **Recommendation:** Custom `SnowflakeIdGenerator` (20–50 lines) beats adding a dependency.
 Only introduce Leaf/UidGenerator when operating > 500 k IDs/s across > 32 nodes per datacenter.
@@ -494,27 +526,44 @@ in JSON APIs.
 
 ---
 
-**Pitfall 4: Virtual Thread Pinning in `synchronized nextId()` (Spring Boot 3.2 migration)**
-After migrating to virtual threads (`spring.threads.virtual.enabled=true`), `synchronized nextId()`
-pinned carrier threads during the sequence-exhaustion spin loop. Under 500 virtual threads, all
-8 carrier threads pinned, stalling the entire application. Observed as: throughput dropped 90%,
-no CPU saturation, `jstack` showed all virtual threads `WAITING` in `waitForNextMs`.
-Fix: replace `synchronized` with `ReentrantLock`, which parks the virtual thread rather than
-pinning the carrier. Or use `StripedSnowflakeIdGenerator` to eliminate the shared lock.
+**Pitfall 4: The busy-spin in `waitForNextMs` starves carriers under virtual threads**
+Move a service to a virtual-thread-per-request model and `nextId()` becomes a carrier-thread
+hazard — but not for the reason usually assumed. `synchronized` is not the problem: since
+JEP 491 a virtual thread blocking on a monitor releases its carrier normally, so swapping in
+a `ReentrantLock` changes nothing here.
+
+The problem is `waitForNextMs`, which is a **busy-spin**. A spinning virtual thread never
+reaches a yield point, so the scheduler cannot unmount it. It
+occupies its carrier for the full remainder of the millisecond. With sequence exhaustion under
+load, enough generators spin simultaneously to occupy every carrier in the `ForkJoinPool`, and
+unrelated work across the whole JVM stalls — visible as throughput collapse with no CPU
+saturation and threads parked in `waitForNextMs`. This generalises: **any unbounded spin loop
+is unsafe on a virtual thread**, lock or no lock.
+
+Fix: make the wait a yield point, so the virtual thread unmounts and gives the carrier back.
 
 ```java
-// Virtual-thread-safe version
-private final ReentrantLock lock = new ReentrantLock();
+// BROKEN: tight loop, never yields -> holds its carrier for the rest of the ms
+private long waitForNextMs_broken(long lastTs) {
+    long ts = currentTimeMs();
+    while (ts <= lastTs) { ts = currentTimeMs(); }
+    return ts;
+}
 
-public long nextId() {
-    lock.lock();
-    try {
-        // ... same logic as synchronized version
-    } finally {
-        lock.unlock();
+// FIXED: Thread.sleep unmounts a virtual thread (and parks a platform thread),
+// so the carrier is free for other work while this generator waits out the ms
+private long waitForNextMs(long lastTs) throws InterruptedException {
+    long ts = currentTimeMs();
+    while (ts <= lastTs) {
+        Thread.sleep(Duration.ofNanos(200_000));
+        ts = currentTimeMs();
     }
+    return ts;
 }
 ```
+
+`LockSupport.parkNanos` works equally well. Better still, use `StripedSnowflakeIdGenerator` so
+sequence exhaustion is rare enough that the wait path is not hot.
 
 ---
 
@@ -563,9 +612,26 @@ P99 latency during skew recovery: 5 ms (acceptable for non-real-time write paths
 
 ### B-Tree Index Benefits of K-Ordering
 ```
-Random UUID insertions:  ~1 page split per 100 inserts (PostgreSQL default 8KB pages, ~80 rows/page)
-Snowflake ID insertions: ~1 page split per 4000 inserts (tail-append pattern)
-Write amplification reduction: ~40× for clustered primary key indexes
+With PostgreSQL's 8 KB pages and ~100-byte index tuples, a leaf page holds ~80 entries,
+so BOTH orderings split roughly once per 80 inserts. Splits are not where the win is.
+The win is which page you touch and how full it ends up:
+
+Random UUID v4 key:
+  - each insert lands on a uniformly random leaf, so the working set of dirty pages
+    is the whole index; past shared_buffers every insert is a read-then-write
+  - random splits leave both halves ~50% full -> index roughly 2x larger than needed
+  - every first write to a page after a checkpoint emits a full-page image to WAL,
+    and with random access that is nearly every insert
+
+K-ordered (Snowflake) key:
+  - inserts append to the rightmost leaf, which stays resident regardless of index size
+  - PostgreSQL detects the monotonic pattern and packs the left half ~100% full
+    instead of 50/50, so the index is about half the size
+  - one page absorbs ~80 inserts before the next split, and only that page is dirtied
+
+Net: the reduction is in buffer misses, index size and WAL volume — not split count.
+Quantify it on your own schema with pg_stat_statements and pg_relation_size before
+promising a number.
 ```
 
 ---
@@ -613,10 +679,14 @@ is always 0 so IDs are positive signed longs in Java.
 
 **Q: What is the maximum throughput of the synchronized implementation across N threads?**
 The `synchronized` block is a single lock; all N threads queue for it. Maximum sustained throughput
-is bounded by the single-threaded throughput (~4M IDs/s) because the critical section is O(1)
-but the lock itself serializes. In practice, with 32 threads and 200 µs call overhead, you observe
-~2M IDs/s due to lock handoff cost. The `StripedSnowflakeIdGenerator` scales linearly up to the
-stripe count × 4M IDs/s per stripe, limited by worker ID count (32 per datacenter).
+is capped by the *layout*, not the lock: 4,096 sequence values per millisecond means 4.096M
+IDs/s per worker ID, full stop — beyond that `waitForNextMs` throttles every caller to the
+clock. Below that ceiling the monitor is not the constraint either; an uncontended
+`synchronized` block costs single-digit nanoseconds and even at 32 threads a short critical
+section sustains tens of millions of entries per second. So a single generator gives ~4M IDs/s
+and adding threads cannot help. `StripedSnowflakeIdGenerator` raises the ceiling to
+`STRIPE_COUNT × 4.096M`, bounded by the worker IDs you are willing to spend — with 8 stripes,
+~33M IDs/s and 8 of the datacenter's 32 worker IDs consumed.
 
 **Q: How does the Baidu UidGenerator ring-buffer approach improve throughput?**
 Instead of calling `System.currentTimeMillis()` on every `nextId()` call, a background thread
@@ -641,12 +711,19 @@ Lexicographic sort of VARCHAR also diverges from numeric sort for 20-digit strin
 correctness bug that corrupts range queries on the ID column.
 
 **Q: How does K-ordering reduce database write amplification?**
-A UUID v4 primary key is uniformly random — inserts land at random B-tree leaf pages, requiring
-almost every insert to load a non-resident page, split it, and flush it. With 8KB pages and ~100
-byte rows, that's ~80 rows/page, ~1 split per 80 inserts. A Snowflake ID primary key is
-monotonically increasing within a millisecond — inserts append to the last leaf page, which is
-already in the buffer pool. Splits occur only when a page fills: ~4000 rows before the next split.
-In practice this reduces write amplification by 40× and cuts I/O 60–80% for write-heavy tables.
+Not by reducing page splits — with 8 KB pages and ~100-byte index tuples both orderings split
+about once per 80 inserts. It wins on three other axes. (1) **Locality:** a UUID v4 key lands
+on a uniformly random leaf, so the set of pages being dirtied is the entire index; once that
+exceeds `shared_buffers` every insert becomes a read-then-write. A monotonic key appends to
+the rightmost leaf, which stays resident no matter how large the index grows. (2) **Density:**
+PostgreSQL detects the monotonic insert pattern and packs the left half of a split ~100% full
+rather than the usual 50/50, so the index ends up roughly half the size of the random-key
+equivalent — fewer pages to cache and to scan. (3) **WAL:** the first write to a page after a
+checkpoint emits a full-page image; random inserts trigger that on nearly every row, while
+appends amortise it across the ~80 rows that share a page. The correct interview answer is
+"buffer-pool misses, index bloat and WAL volume", not "fewer splits" — and the magnitude is
+schema-dependent, so measure with `pg_relation_size` and `pg_stat_statements` rather than
+quoting a multiplier.
 
 ---
 
