@@ -277,6 +277,58 @@ Solution: Externalize all state.
 3. Application or a shard router determines which shard to query
 4. Cross-shard queries are expensive — design queries to stay within one shard
 
+### Why Throughput Stops Tracking Node Count
+
+The Tradeoffs table calls horizontal scaling's upper bound "theoretically unlimited," and the
+word doing the work is *theoretically*. Real fleets stop scaling, and then get **slower** as you
+add nodes. Neil Gunther's Universal Scalability Law (1993) puts a name and a shape on why:
+
+```
+C(N) = N / (1 + a(N - 1) + b * N * (N - 1))
+```
+
+- `N` — nodes, cores, or threads you added
+- `C(N)` — throughput relative to one node (`C(1) = 1`)
+- `a` (**contention**) — the fraction of work that must serialize: a lock, the single database
+  primary, a shared queue. Grows **linearly** with `N`
+- `b` (**coherency**) — the cost of keeping `N` copies of state agreed: cache invalidation
+  chatter, gossip, cross-shard reads, distributed locks. Grows **quadratically**, because every
+  node may have to talk to every other one
+
+Set `b = 0` and this collapses to Amdahl's Law, whose ceiling is `1/a` — with 3% serial work you
+never exceed 33x however many machines you buy. The coherency term is the part distributed
+systems add, and it does something Amdahl's Law cannot: the curve turns over. Throughput peaks
+at `N* = sqrt((1 - a) / b)` and **declines past it** — the retrograde region, where the honest
+capacity action is to remove nodes.
+
+Worked, with `a = 0.03` and `b = 0.0001`:
+
+```
+  C(10)  =  10 / (1 + 0.03x9   + 0.0001x10x9)   =  10 / 1.279  =  7.8x
+  C(50)  =  50 / (1 + 0.03x49  + 0.0001x50x49)  =  50 / 2.715  = 18.4x
+  C(100) = 100 / (1 + 0.03x99  + 0.0001x100x99) = 100 / 4.960  = 20.2x
+  C(200) = 200 / (1 + 0.03x199 + 0.0001x200x199)= 200 / 10.95  = 18.3x   <- worse than 100
+
+  peak at N* = sqrt((1 - 0.03) / 0.0001) = sqrt(9,700) = 98.5 nodes
+  Amdahl ceiling if coherency were free (b = 0): 1 / 0.03 = 33x
+```
+
+```mermaid
+xychart-beta
+    title "Relative throughput vs node count (a = 0.03, b = 0.0001)"
+    x-axis ["10 nodes", "50 nodes", "100 nodes", "200 nodes"]
+    y-axis "Throughput vs 1 node" 0 --> 25
+    bar [7.8, 18.4, 20.2, 18.3]
+```
+
+Twenty times the throughput for two hundred times the hardware, and the last hundred nodes made
+it worse. Practically: this is the model behind "we doubled the fleet and p99 got worse." The
+lever is never more nodes — it is shrinking `a` (remove the serialization: shard the write
+primary, drop the distributed lock) and shrinking `b` (remove the chatter: partition so nodes
+need not agree, accept eventual consistency, stop broadcasting invalidations). Fit `a` and `b`
+from two or three real load tests before buying capacity, because the fit tells you whether you
+are short of nodes or short of independence.
+
 ---
 
 ## Real-World Examples
@@ -301,7 +353,7 @@ Solution: Externalize all state.
 - GKE (Google Kubernetes Engine) auto-scales containers based on CPU/memory/custom metrics
 
 ### Twitter
-- In 2012, Twitter had the "Fail Whale" — the service was not horizontally scalable
+- Through the late 2000s Twitter was famous for the "Fail Whale" — the Rails monolith and its single MySQL primary were not horizontally scalable, and the re-architecture ran through roughly 2010-2013
 - Rewrote core systems to be stateless, moved sessions to Memcached
 - Sharded MySQL by user ID to scale the database tier
 - Moved to a timeline fanout architecture with Redis sorted sets to scale feed reads
@@ -466,6 +518,9 @@ Discord fans out to currently connected sessions, not to all members, because pu
 **Q16: Discord's architecture went through four distinct scaling phases — why not build the final actor-model architecture from day one?**
 Each architecture was the right one for its scale, and the bottleneck that forces the next phase can't be reliably predicted before you hit it. The case study's inflection table shows the progression: a single Go server sufficed to 25k users, sharding the gateway by user_id carried it to 100k (the C10K file-descriptor wall), the Elixir actor model solved per-guild fan-out cost at 100k-5M, and moving member lists to ScyllaDB fixed Cassandra's GC-driven read latency beyond 5M. Building the BEAM actor fleet on day one would have been the "premature optimization" pitfall (Common Pitfall 1) — enormous operational complexity (the tradeoff table rates BEAM ops "Hard") purchased years before any bottleneck justified it, slowing feature development the whole time. Scale architecture in response to measured bottlenecks, but keep the cheap early options open — statelessness and clean sharding keys from day one are what made each of Discord's migrations possible without a rewrite.
 
+**Q17: You doubled the fleet from 100 to 200 nodes and throughput went DOWN — how is that possible?**
+You entered the retrograde region of the Universal Scalability Law, where the cost of keeping nodes coherent grows faster than the capacity they add. Gunther's model, `C(N) = N / (1 + a(N-1) + b*N*(N-1))`, has two drag terms: contention `a` — work that must serialize, like a single write primary or a shared lock — which grows linearly with N, and coherency `b` — the cost of keeping N copies of state agreed, like cache invalidation chatter, gossip or cross-shard reads — which grows quadratically because every node may have to talk to every other one. With `a = 0.03` and `b = 0.0001`, throughput peaks at `N* = sqrt((1-a)/b) = 98.5` nodes at about 20.2x, and 200 nodes deliver 18.3x — measurably worse than 100 for twice the money. Set `b = 0` and the formula collapses to Amdahl's Law, which merely flattens at `1/a` (33x here); the turn-downward is what distributed coordination adds on top. The fix is never more nodes: shrink `a` by removing the serialization point and shrink `b` by partitioning so nodes do not need to agree, and fit both parameters from two or three real load tests before approving the next capacity purchase.
+
 ---
 
 ## Best Practices
@@ -530,17 +585,34 @@ Each architecture was the right one for its scale, and the bottleneck that force
 
 ---
 
-**Cross-references:** [database/replication_and_high_availability](../../database/replication_and_high_availability/) (read replicas, leader election, failover), [backend/distributed_system_operational_patterns](../../backend/distributed_system_operational_patterns/) (autoscaling, capacity planning), [devops/kubernetes_scheduling_and_autoscaling](../../devops/kubernetes_scheduling_and_autoscaling/) (HPA/VPA, cluster autoscaling).
+**Cross-references:** Core Principle 5 (Caching) is developed in [hld/caching](../caching/README.md) (cache-aside, write-through, TTL and eviction, CDN as cache) and Core Principle 4 (Partitioning / Sharding) in [hld/database_sharding](../database_sharding/README.md) and [hld/consistent_hashing](../consistent_hashing/README.md) (shard-key selection, resharding cost, virtual nodes) — this module states them as principles and points there for the mechanics rather than duplicating them. Also [database/replication_and_high_availability](../../database/replication_and_high_availability/) (read replicas, leader election, failover), [backend/distributed_system_operational_patterns](../../backend/distributed_system_operational_patterns/) (autoscaling, capacity planning), [devops/kubernetes_scheduling_and_autoscaling](../../devops/kubernetes_scheduling_and_autoscaling/) (HPA/VPA, cluster autoscaling).
 
 ---
 
-## Case Study: Scaling Discord to 1M Concurrent Users per Channel
+## Case Study: Scaling Discord's Real-Time Gateway to Millions of Concurrent Users
+
+> **How to read this case study.** The architecture and its rationale come from Discord's
+> public record: one Elixir/BEAM `GenServer` process per guild, session processes per
+> WebSocket connection, publish fanned out from the guild process to every connected
+> session, and the Manifold library added because a single process doing all the sends
+> made large-guild publishes take 900 ms to 2.1 s. Two figures are also published: the
+> platform reached **~5 million concurrent users** on that architecture (July 2017), and
+> the **message store moved off Cassandra to ScyllaDB in May 2022**, going from 177
+> Cassandra nodes to 72 ScyllaDB nodes holding trillions of messages. Note what Discord
+> published about guild size: its largest servers at the time, such as /r/Overwatch, ran
+> to about **30,000 concurrent users**, not a million. Everything below that is a
+> **design exercise** — the per-channel targets, node counts, latency percentiles and
+> costs are chosen so the arithmetic is legible and the scaling *shape* is realistic, not
+> because Discord published them. Cite the architecture and the two figures above as
+> Discord's; treat the rest as a worked example.
 
 ### Problem Statement
 
-Discord scaling its real-time messaging platform for major gaming events (game launches, esports tournaments):
+A design exercise: size a real-time messaging platform of Discord's shape for major gaming
+events (game launches, esports tournaments). Design targets:
 
-- **Peak concurrent users per channel:** 1M (single Pokemon Go community server)
+- **Peak concurrent users on one hot channel:** 1M (a design target; Discord's published
+  largest-guild figure is ~30k concurrent)
 - **Total daily message volume:** 2.5 billion messages/day
 - **Active servers (guilds):** 19M servers, 6.7M of which have > 100 members
 - **Latency SLA:** p99 message delivery < 100ms in-region, < 250ms cross-region
@@ -658,11 +730,12 @@ The 190 MB-per-node figure is the one that makes the design work: guild state fi
 
 2. **Guild sharding by `guild_id % N`.** Each guild lives on exactly one shard; all members of that guild connect to that shard. Eliminates cross-shard fan-out for in-guild messages. *Alternative rejected:* random sharding — every message would require N-way fan-out lookup.
 
-3. **Presence-aware fan-out.** Messages are pushed only to currently connected WebSocket sessions (from in-memory presence map), not to all guild members. *Alternative rejected:* broadcast to all members — a message to 500k-member guild would trigger 500k Cassandra writes; only ~50k are online at any time.
+3. **Presence-aware fan-out.** Messages are pushed only to currently connected WebSocket sessions (from in-memory presence map), not to all guild members. *Alternative rejected:* broadcast to all members — a message to a 500k-member guild would trigger 500k WebSocket writes (the message itself is a single Cassandra write either way); only ~30k of those members are online at any time, so 94% of the writes would go nowhere.
 
 4. **WebSocket sticky routing via `Sec-WebSocket-Key` hash.** Gateway LB hashes by user_id to keep the user on the same gateway node, preserving the connection and avoiding session migration. *Alternative rejected:* round-robin WS — every reconnect rebuilds presence state from Cassandra (50ms cold start).
 
-5. **Cassandra for messages, ScyllaDB for members.** Cassandra optimized for write-heavy append (messages); ScyllaDB (C++ rewrite) for the high-read member-list workload that bottlenecked on Cassandra's JVM GC. *Alternative rejected:* single store — Cassandra's read p99 at 200k QPS exceeded 50ms during compaction.
+5. **Cassandra for messages, ScyllaDB for the member list.** Messages are an append-heavy, partition-ordered workload a Cassandra-family store fits well; the member-list read path is latency-sensitive and is the first thing to suffer when JVM GC pauses land, so in this exercise it gets its own C++-based store. *Alternative rejected:* a single store — Cassandra's read p99 at 200k QPS exceeded 50ms during compaction.
+   - *What Discord actually did was more decisive, and is the published fact worth memorising:* they moved the **message store itself** off Cassandra to ScyllaDB in **May 2022**, going from **177 Cassandra nodes to 72 ScyllaDB nodes** holding trillions of messages (about 9 TB of disk per ScyllaDB node against roughly 4 TB per Cassandra node). ScyllaDB reimplements Cassandra's data model and wire protocol in C++ with a shard-per-core design and no JVM garbage collector, which is exactly the class of latency problem this decision is reacting to. If GC pauses are what is hurting you, replacing the runtime beats tuning it.
 
 6. **Backpressure-aware push.** Each WS session has a 1024-message bounded queue; if a client cannot drain (slow network), additional messages are dropped from queue head with `MISSED_MESSAGES_RESYNC` signal. *Alternative rejected:* unbounded buffer — slow clients cause OOM on gateway nodes.
 
@@ -810,7 +883,7 @@ quadrantChart
 
 ### Metrics & Results
 
-- **Peak concurrent users (single channel):** 1.05M (Pokemon Go community, July 2016)
+- **Peak concurrent users (single channel):** 1.05M against the 1M design target (an exercise figure — Discord's published record is ~5M concurrent platform-wide in July 2017, with its largest single guild around 30k concurrent)
 - **Message delivery p99:** 78ms in-region, 220ms cross-region
 - **Daily messages:** 2.5B sent, 14B delivered (with fan-out)
 - **Gateway nodes:** 850 instances handling 11M concurrent WS connections
@@ -825,7 +898,7 @@ Connection capacity is the clearest case where horizontal scaling is bounded by 
 | fleet connections | Total concurrent WebSocket connections carried: `11,000,000` |
 | gateway nodes | Machines sharing that load: `850` instances |
 | per-node capacity | `fleet / nodes` — connections one machine actually holds |
-| C10K ceiling | The per-process limit that ended Phase 2: `~100,000` connections per box |
+| per-box ceiling | The single-process connection limit that ended Phase 2: `~100,000` per box |
 | headroom | `per-node capacity / ceiling` — how close the fleet runs to the wall |
 
 **Walk one example.** The stated fleet, then the earlier 200-node configuration:
@@ -848,7 +921,7 @@ Connection capacity is the clearest case where horizontal scaling is bounded by 
       850 - (11,000,000 / 100,000) = 850 - 110 = 740 nodes of slack
 ```
 
-The 13%-utilization figure looks like massive over-provisioning until you read it as failure-domain sizing rather than capacity sizing: at 12,941 connections per node, losing one node drops 0.1% of connections, and the surviving fleet absorbs them without any node approaching the C10K wall. Running at 50,000 per node would need 3.9x fewer nodes and would turn every single node failure into a reconnect storm — which is precisely the failure the backoff formula above exists to survive.
+The 13%-utilization figure looks like massive over-provisioning until you read it as failure-domain sizing rather than capacity sizing: at 12,941 connections per node, losing one node drops 0.1% of connections, and the surviving fleet absorbs them without any node approaching the ~100,000-per-box wall. Running at 50,000 per node would need 3.9x fewer nodes and would turn every single node failure into a reconnect storm — which is precisely the failure the backoff formula above exists to survive.
 - **Reconnect storm recovery:** previously 8 min downtime; now 95% reconnected within 45s
 
 ### Common Pitfalls / Lessons Learned

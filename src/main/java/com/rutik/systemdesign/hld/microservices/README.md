@@ -121,9 +121,9 @@ A microservices architecture is built from five recurring mechanisms: services n
 
 In a dynamic environment (containers, auto-scaling), service instances have ephemeral IP addresses. Service discovery solves: "How does Service A find Service B?"
 
-#### Client-Side Discovery (Eureka + Ribbon)
+#### Client-Side Discovery (Eureka / Consul + a client-side load balancer)
 
-The client queries a service registry directly and performs load balancing.
+The client queries a service registry directly and performs load balancing. On the JVM this is Spring Cloud LoadBalancer reading the registry; the pattern is the same whatever library implements it.
 
 ```mermaid
 sequenceDiagram
@@ -133,7 +133,7 @@ sequenceDiagram
 
     A->>E: 1. Where is Order Service?
     E-->>A: 2. Instance list 10.0.0.1-3 on 8080
-    Note over A: 3. Ribbon picks instance<br/>round-robin / least-conn
+    Note over A: 3. Client LB picks instance<br/>round-robin / least-conn
     A->>O: 4. Call 10.0.0.2:8080
 ```
 
@@ -245,13 +245,13 @@ Every cross-cutting concern is handled once at the gateway instead of duplicated
 
 ```mermaid
 xychart-beta
-    title "Per-call Latency: gRPC vs REST (Service A to Service B)"
+    title "Per-call Latency: gRPC vs REST (small payload, same service pair)"
     x-axis ["gRPC (HTTP/2 + Protobuf)", "REST (HTTP/1.1 + JSON)"]
-    y-axis "Latency (microseconds)" 0 --> 5000
-    bar [100, 3000]
+    y-axis "Relative latency (REST = 100)" 0 --> 110
+    bar [52, 100]
 ```
 
-gRPC's binary framing and HTTP/2 multiplexing cut typical per-call latency roughly 30x versus REST's text-based JSON over HTTP/1.1.
+Published head-to-head benchmarks put gRPC's per-call latency roughly 45-50% below REST/JSON on small payloads (and only ~15% below on large ones, where serialization stops dominating). The win comes from HTTP/2 multiplexing removing per-call connection setup, HPACK header compression, and protobuf decoding being several times cheaper than JSON parsing — a solid ~2x, not an order of magnitude. Payload size is where the gap is dramatic: roughly 10x smaller on the wire.
 
 #### Asynchronous (Event-Driven)
 
@@ -464,6 +464,46 @@ Key properties:
 
 See [§7.4](#74-e-commerce-platform-migration-strangler-fig-in-practice) for a worked example of this pattern end-to-end.
 
+### 4.6 Keeping Contracts Compatible Across Independent Deploys
+
+Independent deployment is the headline benefit of §2's Loose Coupling, and the mechanism that
+actually delivers it is contract compatibility. During any rolling deploy, canary, or
+blue/green cutover, the old and new versions of a service run **simultaneously** — so a
+producer's new message format must be readable by consumers that have not been deployed yet,
+and a new consumer must tolerate the old format still on the wire. Both are the "version skew"
+pitfall in §10, and both are checkable in CI rather than discovered in production.
+
+**Expand and contract (the parallel-change rule).** Never change a field in place. Ship the
+change as three separate deploys: (1) *expand* — add the new field alongside the old one and
+write both; (2) *migrate* — update every consumer to read the new field; (3) *contract* —
+stop writing the old field and remove it, only once no consumer reads it. Each step is
+independently deployable and independently reversible; the rename in §10's War Story 2
+(`order_total` -> `total_amount`) is precisely what happens when steps 1 and 3 are collapsed
+into one deploy.
+
+**Schema registries enforce it for events.** Confluent Schema Registry rejects an
+incompatible schema at publish time rather than at consume time. Its default mode is
+`BACKWARD`: a consumer on the new schema can read data written with the old one, which permits
+adding optional fields (with defaults) and removing optional fields, and forbids adding a
+required field or renaming one. Under `BACKWARD` you upgrade **consumers first**; `FORWARD`
+inverts that (old consumers read new data, so producers go first) and `FULL` demands both, at
+the cost of allowing almost no change beyond optional fields. The `_TRANSITIVE` variants check
+against every prior version rather than only the immediately previous one — worth the strictness
+when consumers replay history.
+
+**Consumer-driven contract testing enforces it for synchronous APIs.** With Pact, each consumer
+records the requests it actually makes and the responses it depends on; the provider replays
+those recorded expectations in its own CI. A provider that removes a field nobody uses ships
+freely; a provider that removes a field one consumer relies on fails its build. The deployment
+gate is `can-i-deploy`, which queries the broker for a successful verification between the
+version about to be deployed and every version of the integrated applications already live in
+that environment, exiting non-zero when there isn't one. That turns "is this deploy safe?" from
+a coordination meeting into a CI step.
+
+For gateway-facing external contracts, the versioning strategy in §13 (URL or header versioning,
+support N-1) is the coarser complement: it is what you fall back on when a breaking change is
+genuinely unavoidable and expand-and-contract cannot absorb it.
+
 ---
 
 ## 5. Architecture Diagrams
@@ -547,7 +587,7 @@ flowchart TD
     o2 <-->|"mTLS"| p2
     p2 <-->|"mTLS"| i2
 
-    o2 -.-> cp("Istio Control Plane<br/>Pilot · Citadel · Galley · Telemetry")
+    o2 -.-> cp("istiod Control Plane<br/>xDS config · CA · telemetry")
     p2 -.-> cp
     i2 -.-> cp
 
@@ -598,7 +638,7 @@ While Open, calls fail fast with a fallback and never reach the downstream servi
 - Return an error with a user-friendly message.
 - Redirect to a degraded mode.
 
-Implementations: Netflix Hystrix (deprecated), Resilience4j (JVM), Polly (.NET), pybreaker (Python).
+Implementations: Resilience4j (JVM), Polly (.NET), pybreaker (Python), or the sidecar itself if you run a service mesh.
 
 For the full circuit-breaker state machine, bulkhead sizing, and retry/backoff/jitter mechanics, see [Resilience Patterns](../resilience_patterns/README.md).
 
@@ -725,7 +765,7 @@ flowchart TD
     end
 
     proxyA <-->|"mTLS"| proxyB
-    proxyA -.-> cp("Control Plane: Istio<br/>certs · policies · traffic rules · observability")
+    proxyA -.-> cp("Control Plane: istiod<br/>certs · policies · traffic rules · observability")
     proxyB -.-> cp
 
     class appA,appB train
@@ -747,7 +787,7 @@ Every service presents a certificate to prove its identity. The other service ve
 - Unauthorized services from calling protected services.
 - Man-in-the-middle attacks on internal traffic.
 
-Certificates are issued by a Certificate Authority (Istio's Citadel / SPIFFE/SPIRE).
+Certificates are issued by a Certificate Authority — `istiod` itself acts as the CA and mints the workload certificates, or an external SPIFFE/SPIRE deployment does. (Istio consolidated the old Pilot, Citadel, Galley and sidecar-injector processes into the single `istiod` binary; there is no separate certificate component to run.)
 
 For authentication/authorization patterns beyond service-to-service traffic (OAuth2, JWT, API keys, RBAC), see [Spring Security Architecture](../../spring/spring_security_architecture/README.md) and [Auth & Authorization Systems](../../backend/auth_and_authorization_systems/README.md).
 
@@ -838,7 +878,7 @@ Common sidecar uses:
 
 ### 7.1 Netflix — 700+ Microservices
 
-Netflix migrated from a monolith to microservices between 2008–2012 following a major database corruption incident. Key contributions to the ecosystem:
+Netflix migrated from a monolith to cloud-native microservices between 2008 and January 2016, following a major database corruption incident. Key contributions to the ecosystem:
 - **Eureka**: service registry (open-sourced).
 - **Hystrix**: circuit breaker (open-sourced, now in maintenance; superseded by Resilience4j).
 - **Zuul**: API gateway.
@@ -847,7 +887,7 @@ Netflix migrated from a monolith to microservices between 2008–2012 following 
 
 Netflix runs 700+ microservices handling 2+ billion API requests per day. Every service is independently deployable; the company does hundreds of deployments per day.
 
-See [§14](#14-case-study-netflix-monolith-to-microservices-migration-20082012) for the full case study.
+See [§14](#14-case-study-netflix-monolith-to-microservices-migration-20082016) for the full case study.
 
 ### 7.2 Amazon — From Monolith to 2-Pizza Teams
 
@@ -857,9 +897,9 @@ This led to the creation of AWS — internally built primitives (EC2, S3, SQS) w
 
 ### 7.3 Uber — Domain-Oriented Microservice Architecture (DOMA)
 
-Uber grew to thousands of microservices and encountered the opposite problem: too many services causing ownership ambiguity. They introduced DOMA — grouping related services into domains with clear ownership, and using a "gateway" service per domain to reduce cross-domain coupling.
+Uber grew to around 2,200 critical microservices and encountered the opposite problem: too many services causing ownership ambiguity. They introduced DOMA — grouping related services into domains with clear ownership (they classified those 2,200 services into roughly 70 domains), and using a "gateway" service per domain to reduce cross-domain coupling.
 
-Key insight: at Uber's scale (5000+ engineers), microservice granularity must be balanced against cognitive overhead. Not every function needs its own service.
+Key insight: at Uber's scale (an engineering org that grew from hundreds to thousands), microservice granularity must be balanced against cognitive overhead. Not every function needs its own service.
 
 ### 7.4 E-Commerce Platform Migration (Strangler Fig in Practice)
 
@@ -904,7 +944,7 @@ flowchart TD
     class notif,analytics req
 ```
 
-The recommendation engine (the Black Friday bottleneck) and product catalog were extracted first, each behind Kong, so they could scale and cache independently of the still-shrinking monolith.
+This is the end state, after the recommendation engine (the Black Friday bottleneck) was extracted first, folded into the search/recommendation tier behind Kong, and the product catalog followed — each able to scale and cache independently of the monolith that has since been retired.
 
 **Key outcomes:**
 - Recommendation service scaled independently during Black Friday (10x replicas).
@@ -1094,12 +1134,12 @@ Notice that the latency number and the saturation number come from the same mult
 |----------|-------|-------|
 | Service Discovery | Eureka, Consul, Kubernetes DNS / kube-proxy, etcd, Apache ZooKeeper | Kubernetes DNS is the default in any K8s deployment; Eureka/Consul are common in non-K8s or hybrid environments |
 | API Gateway | Kong, AWS API Gateway, Envoy, Apigee, Zuul (legacy) | Envoy doubles as a gateway and a service-mesh data plane |
-| Circuit Breaker | Resilience4j (current JVM standard), Hystrix (deprecated), Polly (.NET), pybreaker (Python) | Resilience4j is lightweight and uses semaphore-based isolation by default, not thread pools — tune accordingly |
-| Service Mesh | Istio, Linkerd, AWS App Mesh, Consul Connect | Istio is the most feature-rich but operationally heaviest; Linkerd is simpler to run |
+| Circuit Breaker | Resilience4j (current JVM standard), Polly (.NET), pybreaker (Python) | Resilience4j is lightweight and uses semaphore-based isolation by default, not thread pools — tune accordingly |
+| Service Mesh | Istio, Linkerd, Cilium Service Mesh, Consul service mesh; on AWS, Amazon ECS Service Connect (ECS) and VPC Lattice (EKS) | Istio is the most feature-rich but operationally heaviest; Linkerd is simpler to run; Cilium does it in eBPF with no per-pod sidecar |
 | Distributed Tracing | Jaeger, Zipkin, OpenTelemetry (instrumentation standard), AWS X-Ray, Datadog APM | OpenTelemetry is the vendor-neutral instrumentation layer; Jaeger/Zipkin/X-Ray/Datadog are backends it can export to |
 | Container Orchestration | Kubernetes, Amazon ECS/Fargate, Docker Swarm, Nomad | Kubernetes is the de-facto standard; ECS/Fargate is simpler if fully AWS-committed |
 | Messaging / Event Bus | Apache Kafka, RabbitMQ, AWS SNS/SQS, Google Pub/Sub | Kafka for high-throughput event streams with replay; SQS/RabbitMQ for simpler point-to-point queues |
-| Saga Orchestration | Temporal, Camunda, AWS Step Functions, Netflix Conductor | Temporal/Camunda are general workflow engines often repurposed for sagas; Step Functions if AWS-native |
+| Saga Orchestration | Temporal, Camunda, AWS Step Functions, Conductor OSS (maintained by Orkes) | Temporal/Camunda are general workflow engines often repurposed for sagas; Step Functions if AWS-native |
 | Configuration & Secrets | Spring Cloud Config, Consul KV, AWS Parameter Store / Secrets Manager, HashiCorp Vault | Vault adds dynamic secrets and auto-rotation, useful with the Vault Agent sidecar from §6.5 |
 
 ---
@@ -1154,6 +1194,9 @@ ZooKeeper prioritizes consistency over availability, so losing its quorum makes 
 **Q16: A single API request chains 8 sequential service calls, each 50ms at p99 — what's the latency cost and how do you cut it?**
 Sequential chaining sums every hop's latency, so the chain's p99 approaches 8 x 50ms = 400ms or worse — Netflix measured 1200ms for exactly this shape. Its fourth migration pitfall traced the chain User → Auth → Profile → Recs → Catalog → Pricing → DRM → Logging. The fix decomposed the chain along dependency lines: calls that don't depend on each other run in parallel (`CompletableFuture.allOf`), non-critical work like logging moves off the request path entirely via Kafka, frequently-needed context like auth and profile is pre-fetched once into the request, and slowly-changing data like pricing is cached. This is the "chatty synchronous chains" pitfall from the module's pitfall table, and it's also why the When-NOT-to-Use section lists tight latency budgets as a reason to avoid microservices — every extracted service adds a network hop that an in-process call didn't have. Draw the dependency graph of a request's downstream calls before writing the handler; only genuinely sequential dependencies should ever be awaited in sequence.
 
+**Q17: During a rolling deploy, old and new versions of a service run at the same time — how do you stop that from breaking consumers?**
+Make every schema change additive and ship it as three separate deploys — expand, migrate, contract — so no single release ever removes something a live consumer still reads. In the expand step you add the new field beside the old one and write both; in migrate you move every consumer onto the new field; only in contract do you stop writing and then delete the old one. Enforce it mechanically rather than by review: a schema registry rejects an incompatible event schema at publish time (Confluent's default `BACKWARD` mode allows adding or removing optional fields and forbids adding a required one, and requires you to upgrade consumers before producers), and consumer-driven contract testing does the same for synchronous APIs — Pact replays each consumer's recorded expectations against the provider's CI, and `can-i-deploy` blocks the release until a successful verification exists against every version already live in the target environment. §10's War Story 2 is the failure mode when neither gate exists: a `order_total` -> `total_amount` rename that produced no errors at all, just six hours of `null` revenue in three downstream systems.
+
 ---
 
 ## Cross-Perspective: LLD Connections
@@ -1198,13 +1241,25 @@ Identify critical vs non-critical features. If the recommendation service is dow
 
 ---
 
-## 14. Case Study: Netflix Monolith-to-Microservices Migration (2008–2012)
+## 14. Case Study: Netflix Monolith-to-Microservices Migration (2008–2016)
+
+> **How to read this case study.** The narrative spine is Netflix's public record: the
+> August 2008 database corruption that stopped DVD shipments for three days, the decision
+> to rebuild cloud-native on AWS rather than lift-and-shift, and the completion of that
+> migration in January 2016 — "after seven years of hard work" — when the last data-centre
+> components serving streaming were shut down. The named building blocks (Eureka, Zuul,
+> Hystrix, Ribbon, Chaos Monkey, Cassandra, EVCache) and their design rationale are also
+> public, through Netflix's open-source projects and tech blog. The **operating
+> percentiles, deploy counts, failover timings and instance counts below are illustrative
+> design targets** chosen to make the arithmetic legible — Netflix has never published a
+> per-endpoint latency SLA or a regional-evacuation stopwatch figure. Cite the story and
+> the mechanisms as Netflix's; treat the numbers as a worked example.
 
 ### Problem Statement
 
-In August 2008, Netflix suffered a 3-day outage when database corruption took down its monolithic Oracle deployment. DVD shipments stopped; streaming was in its infancy. The incident forced a rethink. By 2012, Netflix had migrated to 700+ microservices on AWS and was serving:
+In August 2008, Netflix suffered a 3-day outage when database corruption took down its monolithic Oracle deployment. DVD shipments stopped; streaming was in its infancy. The incident forced a rethink. Over the following years Netflix rebuilt the streaming platform on AWS as a fleet of independently deployable services — 700+ of them by the mid-2010s — against a workload of roughly:
 
-- 30M+ subscribers (today 250M+)
+- 30M+ subscribers at the start of the migration (325M+ paid memberships as of Netflix's most recent disclosure, for Q4 2025)
 - 500M+ API requests/day
 - 30% of North American internet traffic at peak
 - 99.99% availability target (≤52 min downtime/year)
@@ -1357,8 +1412,9 @@ recommendation-service:
 Eureka registration (Spring Boot):
 
 ```java
+// spring-cloud-starter-netflix-eureka-client on the classpath is enough —
+// registration is auto-configured; no @EnableEurekaClient annotation exists any more.
 @SpringBootApplication
-@EnableEurekaClient
 public class PlaybackServiceApplication {
     public static void main(String[] args) {
         SpringApplication.run(PlaybackServiceApplication.class, args);
@@ -1385,7 +1441,7 @@ public class PlaybackServiceApplication {
 - Regional failover (US-East → US-West): 6 min 30 sec measured (target: 7 min)
 - Chaos Monkey-induced incidents: 0 customer-facing in production (resilience worked)
 - Infrastructure: ~100k EC2 instances at peak
-- Migration duration: 4 years (2008–2012); some legacy continued past 2014
+- Migration duration: seven years — begun after the August 2008 incident, declared complete in January 2016 when the last data-centre components serving streaming were shut down
 
 ### Common Pitfalls / Lessons Learned
 
@@ -1439,7 +1495,7 @@ Each of the four fixes attacks a different term. Parallelising converts `sum()` 
 ### Interview Discussion Points
 
 **Q1: What forced Netflix to abandon the monolith?**
-The August 2008 database corruption incident — 3 days of downtime for DVD shipments. The monolithic Oracle database was a single point of failure: corruption blast-radius was the entire business. The move to microservices on AWS (announced 2009, completed 2012) was both a technical decoupling and a removal of single-vendor dependency.
+The August 2008 database corruption incident — 3 days of downtime for DVD shipments. The monolithic Oracle database was a single point of failure: corruption blast-radius was the entire business. The move to microservices on AWS (begun 2008-2009, declared complete in January 2016) was both a technical decoupling and a removal of single-vendor dependency; Netflix chose to rebuild cloud-native rather than lift-and-shift, which is why it took seven years rather than a migration window.
 
 **Q2: Why did Netflix build its own service discovery (Eureka) instead of using DNS or ZooKeeper?**
 DNS TTLs make instance churn slow (30s+ to propagate dead hosts). ZooKeeper prioritizes consistency over availability — a quorum loss makes it unavailable, which would cascade to every service. Eureka prioritizes availability (AP): clients can still call cached registrations even if Eureka itself is partitioned, matching Netflix's "stay up at all costs" philosophy.

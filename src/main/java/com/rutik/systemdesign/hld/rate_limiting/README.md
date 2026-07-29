@@ -746,6 +746,48 @@ checks = [
 
 ---
 
+### Concurrency Limiting — the Second Axis
+
+Every algorithm in §3 meters **arrival rate**: requests per unit of time. A concurrency limiter
+meters something different — how many of a client's requests are **in flight simultaneously**.
+Stripe runs both, which is why its `Stripe-Rate-Limited-Reason` header can come back as
+`global-concurrency` or `endpoint-concurrency` rather than `global-rate`/`endpoint-rate` (§7).
+Its own engineering post describes the concurrent-requests limiter as "you can only have 20 API
+requests in progress at the same time", and reports it firing on the order of 12,000 requests a
+month against millions for the rate limiter — rare, but catching a failure mode the rate limiter
+structurally cannot see.
+
+Why a rate limit alone does not cover it: Little's Law ties the two together as
+`concurrency = rate x latency`. A 100 req/s limit means 10 concurrent requests when the endpoint
+runs at 100 ms, but 1,000 concurrent requests when the same endpoint degrades to 10 s. The rate
+limiter is perfectly satisfied in both cases while the second one has silently claimed 100x the
+server-side resources. Slow, expensive, long-running endpoints (report generation, bulk export,
+search over a large corpus) are exactly where this bites.
+
+The implementation is a counter, not a bucket: increment on entry, decrement in a `finally`, and
+reject when the count is already at the limit.
+
+```lua
+-- KEYS[1] = "cc:{api_key}:{endpoint}"   ARGV[1] = max in flight   ARGV[2] = ttl seconds
+local n = tonumber(redis.call('GET', KEYS[1]) or "0")
+if n >= tonumber(ARGV[1]) then return 0 end
+redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))   -- leak guard for crashed callers
+return 1
+```
+
+The `EXPIRE` is load-bearing. A rate-limit counter self-heals because the window rolls over; a
+concurrency counter does not — every caller that dies between increment and decrement leaks a
+permanently held slot, and enough leaks lock the client out forever. Always pair the counter with
+a TTL comfortably longer than the endpoint's timeout, and derive the decrement from a `finally`
+block rather than the success path.
+
+This is the server-side mirror of the bulkhead in
+[Resilience Patterns §4.2](../resilience_patterns/README.md) — same mechanism (bounded concurrent
+slots, fast rejection when full), applied to inbound callers rather than outbound dependencies.
+
+---
+
 ## 7. Real-World Examples
 
 ### X (Twitter) API
@@ -979,6 +1021,10 @@ Unauthenticated requests are keyed only by IP, an identity cheap to rotate and o
 
 A: One misbehaving sub-merchant exhausts the shared bucket and blocks all 999 innocent siblings, because the limiter's unit of isolation doesn't match the actual unit of independent behavior. Common Pitfall 5 describes the general failure and the §14 case study makes it concrete: a large platform customer issues an API key per merchant, and a single merchant's runaway integration consumes the parent account's shared quota, throttling every other merchant under that account. The fix is to key the rate limiter at the real unit of isolation — per sub-merchant or per integration — while keeping an optional higher-level aggregate limit for billing visibility only, never for throttling. When designing rate-limit keys, ask "whose bad behavior should be able to affect whom?" — the answer defines the key granularity, and it's usually finer than the billing relationship.
 
+**Q17: A client is comfortably inside its 100 req/s rate limit and still exhausts the server — what did the limiter miss?**
+
+A: It missed concurrency — how many of that client's requests are in flight at the same instant, which is a different quantity from how many arrive per second. A rate limiter meters only arrivals, and Little's Law (`concurrency = rate x latency`) means the same 100 req/s is 10 simultaneous requests at 100 ms latency but 1,000 at 10 s. Slow or degraded endpoints therefore let a perfectly compliant client claim orders of magnitude more server-side resources than the rate limit implies. The fix is a second, independent control — a concurrency limiter that caps in-flight requests per key, which is why Stripe runs one alongside its token bucket and returns `global-concurrency`/`endpoint-concurrency` in the `Stripe-Rate-Limited-Reason` header. Implement it as an INCR-on-entry / DECR-in-`finally` counter with a TTL longer than the endpoint timeout, because unlike a windowed rate counter it never self-heals: every caller that dies mid-request leaks a slot permanently. Apply it to the expensive, variable-latency endpoints (export, report generation, search) where rate alone is a poor proxy for cost.
+
 ---
 
 ## Cross-Perspective: LLD Connections
@@ -1185,7 +1231,7 @@ else
     retry_after_ms = math.ceil((requested - tokens) / rate * 1000)
 end
 
-redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now_ms)
+redis.call('HSET', key, 'tokens', tokens, 'last_refill', now_ms)
 redis.call('PEXPIRE', key, 120000)  -- evict idle keys after 2 min
 
 return {allowed, math.floor(tokens), retry_after_ms}
@@ -1232,8 +1278,9 @@ public RateLimitResult check(String apiKey, String endpoint) {
     String key = "rl:" + apiKey + ":" + endpoint;
     EndpointPolicy p = policies.get(endpoint);
 
-    long[] time = jedis.time();  // Redis server time for clock-skew safety
-    long nowMs = time[0] * 1000L + time[1] / 1000L;
+    List<String> time = jedis.time();  // Redis server time for clock-skew safety
+    long nowMs = Long.parseLong(time.get(0)) * 1000L
+               + Long.parseLong(time.get(1)) / 1000L;
 
     List<Long> result = (List<Long>) jedis.evalsha(
         SCRIPT_SHA,
@@ -1276,7 +1323,7 @@ location /v1/ {
 - Throughput: 8k checks/sec sustained per Redis shard; 48k cluster-wide
 - Target 429 rate for legitimate (non-abusive) traffic: well under 0.1% — worth stating as an explicit SLO, since a limiter that throttles good clients is a product bug, not a security win. No public vendor figure is cited here because none of the major payment APIs publish one
 - At the 600 req/sec holiday peak the limiter is the cheap part of the request: 0.9 ms p99 against a ~30 ms API call is 3% of the budget
-- Memory per active key: ~80 bytes; 500k keys × 80 = 40 MB per shard
+- Memory per active key: ~80 bytes; 500k keys × 80 = 40 MB cluster-wide, so under 7 MB on each of the 6 shards (the ~50 MB figure in the scale estimate above rounds the per-key cost up to 100 bytes)
 - Cost: 6 × `cache.r6g.large` at the current us-east-1 on-demand list price of ~$0.206/node-hour is ~$150/node-month, so ~$900/month before reserved-node discounts. Re-price before quoting it: ElastiCache list prices change, and AWS now recommends the Valkey engine for new clusters, which is priced ~20% below the Redis OSS engine for node-based deployments
 - Mean time to detect abuse (post-rate-limit alert): 8 min
 
@@ -1284,7 +1331,7 @@ location /v1/ {
 
 1. **Rate limiting at the app layer instead of the edge** — Broken: early implementation ran rate limit checks inside the Java API server. A 100k req/sec DDoS still hit the app servers (and the Redis check itself), driving CPU to 100%. Fix: moved the rate-limit check into NGINX/OpenResty at the edge; bad traffic gets 429 before reaching app servers. App CPU during attacks dropped 95%.
 
-2. **Shared bucket across all of a customer's API keys** — Broken: a large platform customer generates a key per merchant (~1M keys). A single misbehaving merchant's integration consumed the shared bucket, blocking all other merchants for the parent account. Fix: per-key limits by default, with optional account-level shared quota for billing/visibility but not throttling.
+2. **Shared bucket across all of a customer's API keys** — Broken: a large platform customer generates a key per merchant (~1,000 keys under one parent account). A single misbehaving merchant's integration consumed the shared bucket, blocking all other merchants for the parent account. Fix: per-key limits by default, with optional account-level shared quota for billing/visibility but not throttling.
 
 3. **Clock skew between rate-limit nodes** — Broken: API servers in 3 datacenters each used their local clock when computing the bucket refill. Clock drift of 500 ms caused buckets to "refill in the past" on some nodes, granting extra tokens. Effective limit became ~1100/min instead of 1000. Fix: always pass `redis.call('TIME')` as the timestamp; Redis is the single source of time truth for all buckets.
 
