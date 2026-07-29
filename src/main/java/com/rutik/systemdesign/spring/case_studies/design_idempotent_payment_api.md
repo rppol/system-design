@@ -243,11 +243,17 @@ public class PaymentService {
             return deserialize(existing.get().getResponseBody());
         }
 
-        // Mark IN_PROGRESS — visible to other transactions only after commit
+        // Mark IN_PROGRESS. Note this row is invisible to other transactions until commit,
+        // so within THIS design the advisory lock is what excludes the concurrent retry --
+        // IN_PROGRESS only earns its keep if written in its own REQUIRES_NEW transaction,
+        // which is exactly what creates the stale-record problem in §9 Pitfall 1.
         IdempotencyRecord inProgress =
             idempotencyService.saveInProgress(clientId, idempotencyKey, requestHash);
 
-        // Call payment provider (external; not in DB transaction — idempotent by key at Stripe too)
+        // The provider call sits INSIDE the transaction, which means the DB connection and the
+        // advisory lock are both held for the full external round trip. §8 Runbook 4 shows how
+        // to hoist it out; keep it here only while provider latency is well under the lock
+        // contention you can tolerate. Always pass a provider-side idempotency key too.
         PaymentResult result = providerClient.charge(request);
 
         // Write payment record
@@ -284,6 +290,10 @@ public class OutboxPoller {
     @Scheduled(fixedDelay = 100)  // every 100 ms
     @Transactional
     public void pollAndPublish() {
+        // findUnpublished MUST be "... ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT ?".
+        // Without SKIP LOCKED every pod selects the same rows and publishes every event N
+        // times; with it, each pod claims a disjoint batch and the others move on rather
+        // than blocking behind the row locks.
         List<OutboxEvent> events = outboxRepo.findUnpublished(BATCH_SIZE);
         for (OutboxEvent event : events) {
             try {
@@ -291,7 +301,7 @@ public class OutboxPoller {
                     "payments." + event.getEventType().toLowerCase(),
                     event.getAggregateId().toString(),
                     event.getPayload()
-                ).get(5, TimeUnit.SECONDS);         // block for ACK from Kafka broker
+                ).get(5, TimeUnit.SECONDS);         // CompletableFuture — block for broker ACK
                 outboxRepo.delete(event);           // delete only after broker ACK
             } catch (Exception e) {
                 log.error("Failed to publish outbox event id={}", event.getId(), e);
@@ -351,7 +361,7 @@ drop the partition after 25 hours. Spring Data JPA's `@Query` for lookup is simp
 
 ### Decision 4: 24-Hour vs 7-Day Idempotency Window
 
-Payment providers like Stripe use a 24-hour window. A 7-day window increases storage 7× and creates
+Stripe documents that keys may be purged once at least 24 hours old, and this design matches it. A 7-day window increases storage 7× and creates
 a larger attack surface for replay attacks with stale keys. 24 hours covers realistic retry patterns
 (mobile apps retrying for hours) without excessive storage cost.
 
@@ -360,7 +370,7 @@ a larger attack surface for replay attacks with stale keys. 24 hours covers real
 | Approach | Latency | Complexity | DB load |
 |----------|---------|------------|---------|
 | `@Scheduled` polling (chosen) | ~100 ms | Low | 1 SELECT + N DELETEs per 100 ms |
-| Debezium CDC (WAL-based) | < 10 ms | High (Kafka Connect + Zookeeper) | Reads WAL; no query overhead |
+| Debezium CDC (WAL-based) | < 10 ms | High (a Kafka Connect cluster to run and monitor) | Reads the WAL; no polling query at all |
 
 **Decision:** Polling for payments (100 ms latency is acceptable; simpler ops). Debezium for
 high-frequency events (> 1000 events/s) where polling lag is unacceptable.
@@ -369,25 +379,28 @@ high-frequency events (> 1000 events/s) where polling lag is unacceptable.
 
 ## 6. Real-World Implementations
 
-**Stripe:** Idempotency keys on all mutation endpoints; 24-hour window; keys stored per-customer in
-a distributed KV store. Stripe's implementation detects "locking conflicts" (concurrent requests
-with the same key) and returns HTTP 409 with `type: idempotency_replayed_differently` if the
-request body differs. Public API docs describe the exact behavior.
+**Stripe:** the reference implementation of the client-facing contract. An `Idempotency-Key` header
+on every mutating endpoint; keys removable after 24 hours, which is where this design's window comes
+from. Two details are worth copying exactly. Stripe stores and compares the original *parameters*,
+not just the key, and errors when a key returns with different ones — the `request_hash` check in
+§4.7 is the same guard. And a second request that arrives while the first is still in flight gets a
+**409 Conflict** rather than being queued behind it, which is a real alternative to this design's
+advisory lock: reject the concurrent duplicate and let the client retry, instead of making it wait
+out the provider round trip.
 
-**Braintree:** Similar to Stripe; `X-Idempotency-Key` header; 7-day window. Braintree also enforces
-that the same payment amount must be submitted with each retry (no partial retry allowed).
+**Shopify — "Building Resilient GraphQL APIs Using Idempotency":** the closest published account of
+the design in this file, and it differs in two instructive ways. First, Shopify made the idempotency
+key a **first-class field in the GraphQL mutation** rather than an HTTP header, so it is validated by
+the same schema machinery as every other argument and cannot be silently omitted by a client that
+forgot the header. Second, and more interesting, their handler does not just replay a stored
+response — it records which *steps* an attempt completed, and a retry runs recovery steps to rebuild
+that state before continuing. That is the answer to the failure this design leaves open in §11: a
+crash between the provider call and the commit. Like this design, they take a lock keyed on client
+plus idempotency key, and reject a concurrent duplicate with a 409.
 
-**Adyen (payments processor):** Uses a `reference` field (unique per merchant per payment) as the
-idempotency identifier. Duplicate references within 24 hours return the original response. Their
-engineering blog describes their outbox + polling approach for downstream reconciliation events.
-
-**Shopify:** Idempotent order creation via `X-Request-Id` header. The engineering team's 2020 blog
-post ("Resiliency in payment processing") describes their use of PostgreSQL advisory locks for
-concurrent duplicate prevention — the same approach described in §4.3.
-
-**Netflix (billing):** Uses a hybrid: in-database idempotency records for high-value billing events
-(idempotency window = 72 hours) and Kafka Exactly-Once Semantics (EOS) transactions for low-value
-notification events. Public engineering blog describes the two-tier approach.
+**Adyen:** identifies payments by a merchant-supplied `reference` in addition to an idempotency key,
+which gives a second, business-level deduplication axis that survives the idempotency window — worth
+having when reconciliation happens days later and the 24-hour keys are long gone.
 
 ---
 
@@ -511,8 +524,8 @@ Added validation: reject keys that don't match UUID v4 format.
 ---
 
 **Pitfall 4: Outbox Poller Deleted Events Before Consumer Acknowledged (message bus migration, 2022)**
-The `OutboxPoller` called `outboxRepo.delete()` after `kafkaTemplate.send()` completed, but `send()`
-returned a `ListenableFuture` that was never `.get()`-ed. The future completed asynchronously;
+The `OutboxPoller` called `outboxRepo.delete()` after `kafkaTemplate.send()` returned, but `send()`
+hands back a `CompletableFuture<SendResult<K,V>>` that was never `.get()`-ed. The future completed asynchronously;
 if the broker was slow, `delete()` ran before the message was durably written to Kafka.
 On broker restart, 2,400 payment events were lost (deleted from outbox but not written to Kafka).
 Impact: 2,400 unfulfilled orders. Fix: call `kafkaTemplate.send().get(5, SECONDS)` to block
@@ -522,11 +535,16 @@ until the broker ACKs before deleting the outbox row.
 
 **Pitfall 5: Hash Collision in Advisory Lock Key Computation (load test finding, 2023)**
 The advisory lock ID was computed as `clientId.hashCode() << 32 | key.hashCode()`. Java's
-`String.hashCode()` is 32-bit — two different `(clientId, key)` pairs with the same hash would
-share a lock, serializing unrelated requests. Under load with 10,000 concurrent distinct keys,
-~23 lock collisions per second (birthday problem: ~0.023% collision rate for 10k values in 2^32
-space) caused phantom serialization. Fix: use `MurmurHash3.hash128()` (64-bit, near-zero collision
-rate) or compute the advisory lock from a UUID column, not Java's `hashCode()`.
+`String.hashCode()` is 32-bit, so within a single client only the key's 32 bits vary — two
+different keys that hash alike share a lock and serialize unrelated payments. Do the birthday
+arithmetic before deciding whether this matters: for 10,000 live keys under one client in a
+2^32 space, the expected number of colliding pairs is `C(10000,2) / 2^32 = 0.012`, i.e. about a
+1.2% chance that *any* two of them collide at all. It takes ~77,000 concurrent keys per client
+to reach even odds. So this is a latency curiosity, not a correctness bug — a collision costs
+one request a wait, never a double charge, because the lock is only ever too coarse and never
+too fine. Fix if you care: derive the lock id from a 64-bit hash of the concatenated pair
+(`Hashing.murmur3_128().hashString(clientId + '\0' + key).asLong()`), which pushes even odds out
+past five billion keys.
 
 ---
 
@@ -537,9 +555,9 @@ rate) or compute the advisory lock from a UUID column, not Java's `hashCode()`.
 ```
 Write throughput:
   New payments:       134 TX/s × 3 INSERTs = 402 row writes/s
-  Retry reads:         33 SELECT/s
+  Idempotency lookup: 167 SELECT/s (EVERY request does one; 33/s of them are hits)
   Outbox deletes:     134 DELETE/s
-  Total IOPS:         ~569 IOPS (within AWS db.t3.medium capability of 3000 IOPS)
+  Total:              ~703 ops/s (comfortable on a gp3 volume's 3,000 IOPS baseline)
 
 Storage growth:
   Idempotency table:  134 rows/s × 86,400 s × 500 bytes = 5.8 GB/day (partitioned; drop after 25h)
@@ -573,7 +591,10 @@ The advisory lock + re-check pattern is a double-check with mutual exclusion. Wi
 two concurrent requests both pass the initial `findExisting` check (key not found), both proceed
 to charge the payment provider, and both insert — causing a duplicate charge. The advisory lock
 ensures that only one thread can proceed past the check. The second thread waits for the lock,
-re-checks, finds the IN_PROGRESS or COMPLETED record, and returns the stored response.
+re-checks, and finds the COMPLETED record — COMPLETED specifically, because the first thread's
+IN_PROGRESS write was never visible to it: an uncommitted row is invisible under any isolation
+level, and by the time the lock is released that same transaction has already committed the
+terminal status. The second thread returns the stored response.
 This is the distributed equivalent of DCL (double-checked locking) with the advisory lock as
 the synchronization primitive.
 

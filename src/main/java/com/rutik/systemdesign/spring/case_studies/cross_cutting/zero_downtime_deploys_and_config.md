@@ -108,7 +108,7 @@ flowchart TD
 
     sigterm(["SIGTERM received"]) --> s1["1. Kubernetes removes pod from Service endpoint\ntraffic stops coming"]
     s1 -->|"2s grace period for endpoint removal to propagate"| s2["2. Spring Boot sets readiness probe to REFUSING (HTTP 503)"]
-    s2 --> s3["3. Spring Boot waits for in-flight requests to complete\nserver.shutdown.timeout"]
+    s2 --> s3["3. Spring Boot waits for in-flight requests\nspring.lifecycle.timeout-per-shutdown-phase"]
     s3 --> s4["4. Spring Boot closes Kafka consumers\ncommits outstanding offsets"]
     s4 --> s5["5. Spring Boot closes DB connection pool\nHikariCP drains"]
     s5 --> s6["6. Spring context closes (beans destroyed)"]
@@ -126,10 +126,13 @@ flowchart TD
 
 ```yaml
 server:
-  shutdown: graceful                        # Spring Boot 2.3+; waits for in-flight requests
+  shutdown: graceful                        # the DEFAULT since Boot 4.0 (was 'immediate'
+                                            # through 3.x, so 3.x configs had to set it)
 spring:
   lifecycle:
-    timeout-per-shutdown-phase: 30s         # max time to wait per phase (Tomcat drain, etc.)
+    timeout-per-shutdown-phase: 30s         # the drain budget. NOTE: there is no
+                                            # 'server.shutdown.timeout' property -- this is
+                                            # the only knob, and it applies per phase.
 
 management:
   endpoint:
@@ -181,20 +184,27 @@ at the pod after it starts shutting down, causing connection-refused errors.
 
 ### 4.3 Flyway backward-compatible migration examples
 
-```java
-// FLYWAY MIGRATION: V2__add_email_verified_column.sql
+```sql
+-- V2__add_email_verified_column.sql
 -- SAFE: nullable column is backward compatible with old code that doesn't know about it
-ALTER TABLE users ADD COLUMN email_verified BOOLEAN;  -- nullable → old code ignores it
-
--- SAFE: create index concurrently (no table lock)
-CREATE INDEX CONCURRENTLY idx_users_email_verified ON users(email_verified);
+ALTER TABLE users ADD COLUMN email_verified BOOLEAN;  -- nullable, old code ignores it
 
 -- NOT SAFE (deploy later, after all instances on new code):
 -- ALTER TABLE users ALTER COLUMN email_verified SET NOT NULL;
+
+-- V3__index_email_verified.sql   <- a SEPARATE migration, and a non-transactional one
+-- flyway:executeInTransaction=false
+CREATE INDEX CONCURRENTLY idx_users_email_verified ON users(email_verified);
 ```
 
-```java
-// FLYWAY MIGRATION: V3__rename_status_column.sql
+`CREATE INDEX CONCURRENTLY` is the reason V3 is split out and carries that directive:
+PostgreSQL refuses to run it inside a transaction block, and Flyway wraps every migration in one
+by default — so leaving it in V2 fails with `CREATE INDEX CONCURRENTLY cannot run inside a
+transaction block`. The consequence of running non-transactionally is that a failure leaves an
+INVALID index behind: check `pg_index.indisvalid`, `DROP INDEX` the invalid one, and re-run.
+
+```sql
+-- V4__rename_status_column.sql
 -- WRONG: renames the column; old code that reads 'status' will fail immediately
 -- ALTER TABLE orders RENAME COLUMN status TO order_status;  -- BREAKING!
 
@@ -278,7 +288,7 @@ t=5s    preStop completes; SIGTERM delivered to JVM
 t=5s    Spring sets readiness = REFUSING (503)
 t=5s    Tomcat stops accepting new connections
 t=5s    In-flight requests continue processing
-t=20s   All in-flight requests complete (or server.shutdown.timeout reached)
+t=20s   All in-flight requests complete (or timeout-per-shutdown-phase reached)
 t=20s   Kafka consumers commit offsets + close
 t=22s   HikariCP drains + closes all connections
 t=25s   Spring context destroys all beans
@@ -322,6 +332,12 @@ Deployment C (v2.1 cleanup, after v2.0 fully deployed):
 ---
 
 ### 6.2 Custom readiness indicator that checks business dependencies
+
+A plain `HealthIndicator` lands in the *default* health group, not the readiness group — so on
+its own the class below has no effect whatsoever on the readiness probe. It must be named in
+`management.endpoint.health.group.readiness.include`, alongside the built-in `readinessState`
+(the id is the bean name minus the `HealthIndicator` suffix, i.e. `orderServiceReadiness`).
+Omit that one line and the probe keeps returning UP while the database is unreachable.
 
 ```java
 @Component
@@ -393,15 +409,17 @@ public class OrderServiceLivenessIndicator implements HealthIndicator {
 spring:
   cloud:
     gateway:
-      routes:
-        - id: order-service-canary
-          uri: lb://order-service-canary    # canary deployment (v2, separate K8s Deployment)
-          predicates:
-            - Weight=group1, 5             # 5% of traffic to canary
-        - id: order-service-stable
-          uri: lb://order-service           # stable deployment (v1)
-          predicates:
-            - Weight=group1, 95            # 95% to stable
+      server:
+        webflux:                            # Gateway 5 namespaces routes by server flavour
+          routes:
+            - id: order-service-canary
+              uri: lb://order-service-canary  # canary deployment (v2, separate K8s Deployment)
+              predicates:
+                - Weight=group1, 5          # 5% of traffic to canary
+            - id: order-service-stable
+              uri: lb://order-service         # stable deployment (v1)
+              predicates:
+                - Weight=group1, 95         # 95% to stable
 ```
 
 Monitor canary error rate and P99 latency via Micrometer gauges (see

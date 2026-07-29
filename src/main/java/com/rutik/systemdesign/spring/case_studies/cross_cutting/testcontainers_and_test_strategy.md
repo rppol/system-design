@@ -78,7 +78,7 @@ development-time feedback speed.
 
 ## 4. Setup and Configuration
 
-### 4.1 Maven dependencies (Spring Boot 3.1+)
+### 4.1 Maven dependencies (versions managed by the Spring Boot BOM)
 
 ```xml
 <dependency>
@@ -96,11 +96,8 @@ development-time feedback speed.
     <artifactId>kafka</artifactId>
     <scope>test</scope>
 </dependency>
-<dependency>
-    <groupId>org.testcontainers</groupId>
-    <artifactId>redis</artifactId>    <!-- community module -->
-    <scope>test</scope>
-</dependency>
+<!-- There is no org.testcontainers:redis artifact. Use a GenericContainer on the
+     redis image (as below), or the community module com.redis:testcontainers-redis. -->
 <dependency>
     <groupId>org.springframework.boot</groupId>
     <artifactId>spring-boot-starter-test</artifactId>
@@ -126,24 +123,28 @@ class OrderServiceIntegrationTest {
     @Container
     @ServiceConnection
     static PostgreSQLContainer<?> postgres =
-        new PostgreSQLContainer<>("postgres:16-alpine");
+        new PostgreSQLContainer<>("postgres:18-alpine");
 
-    // Auto-configures spring.kafka.bootstrap-servers
+    // Auto-configures spring.kafka.bootstrap-servers.
+    // org.testcontainers.kafka.KafkaContainer runs the official apache/kafka image in
+    // KRaft mode. The old org.testcontainers.containers.KafkaContainer is deprecated;
+    // for the Confluent image use org.testcontainers.kafka.ConfluentKafkaContainer.
     @Container
     @ServiceConnection
-    static KafkaContainer kafka =
-        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"));
+    static KafkaContainer kafka = new KafkaContainer("apache/kafka:4.0.0");
 
-    // @DynamicPropertySource still needed for Redis (no @ServiceConnection in 3.1 for Redis)
+    // Redis works with @ServiceConnection too -- spring-boot-data-redis ships a
+    // RedisContainerConnectionDetailsFactory. A plain GenericContainer needs the name
+    // hint, because the factory matches on it rather than on a container subclass.
     @Container
+    @ServiceConnection(name = "redis")
     static GenericContainer<?> redis =
-        new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
+        new GenericContainer<>("redis:8-alpine").withExposedPorts(6379);
 
-    @DynamicPropertySource
-    static void redisProperties(DynamicPropertyRegistry registry) {
-        registry.add("spring.redis.host", redis::getHost);
-        registry.add("spring.redis.port", () -> redis.getMappedPort(6379));
-    }
+    // If you do hand-wire it, the properties are spring.data.redis.*:
+    // spring.redis.host/port were deprecated at ERROR level in Boot 3.0 and bind to
+    // nothing now, so a @DynamicPropertySource using them fails silently and the test
+    // quietly talks to localhost:6379 instead of the container.
 
     @Autowired
     private OrderService orderService;
@@ -164,7 +165,7 @@ class OrderRepositoryTest {
     @Container
     @ServiceConnection
     static PostgreSQLContainer<?> postgres =
-        new PostgreSQLContainer<>("postgres:16-alpine")
+        new PostgreSQLContainer<>("postgres:18-alpine")
             .withInitScript("test-data.sql");  // seed reference data
 
     @Autowired
@@ -269,12 +270,11 @@ class OrderSagaIntegrationTest {
 
     @Container
     @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
 
     @Container
     @ServiceConnection
-    static KafkaContainer kafka =
-        new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.0"));
+    static KafkaContainer kafka = new KafkaContainer("apache/kafka:4.0.0");
 
     @Autowired
     private TestRestTemplate restTemplate;
@@ -283,17 +283,15 @@ class OrderSagaIntegrationTest {
     private OrderRepository orderRepository;
 
     @Autowired
-    private EmbeddedKafkaAdmin kafkaAdmin;  // Testcontainers Kafka needs no EmbeddedKafkaAdmin
+    private TestKafkaConsumer testConsumer;   // the @TestConfiguration bean from §6.2
 
     @Test
     void createOrder_shouldPublishEvent_andConsumerProcessesPayment()
             throws InterruptedException {
-        // Arrange: pre-wire a consumer to capture Kafka events
-        CountDownLatch latch = new CountDownLatch(1);
-        AtomicReference<OrderEvent> captured = new AtomicReference<>();
-
-        @KafkaListener(topics = "order.created", groupId = "test-group")
-        // (In practice: use a @TestConfiguration class with a @KafkaListener test bean)
+        // Arrange: the capturing consumer is a BEAN (see §6.2) -- a @KafkaListener
+        // annotation cannot be written inside a method body; it only applies to a method
+        // on a Spring bean, and the code below would not compile.
+        testConsumer.reset();
 
         // Act: create order via REST endpoint
         CreateOrderRequest request = new CreateOrderRequest("customer-123", List.of("item-1"));
@@ -306,10 +304,11 @@ class OrderSagaIntegrationTest {
         Order savedOrder = orderRepository.findById(orderId).orElseThrow();
         assertThat(savedOrder.status()).isEqualTo(OrderStatus.PENDING);
 
-        // Assert: Kafka event was published (wait up to 10s)
-        boolean eventReceived = latch.await(10, TimeUnit.SECONDS);
-        assertThat(eventReceived).isTrue();
-        assertThat(captured.get().orderId()).isEqualTo(orderId.toString());
+        // Assert: Kafka event was published (poll up to 10s). Awaitility rather than a
+        // bare sleep -- it returns as soon as the condition holds.
+        await().atMost(Duration.ofSeconds(10))
+               .untilAsserted(() -> assertThat(testConsumer.getMessages("order.created"))
+                   .anySatisfy(m -> assertThat(m).contains(orderId.toString())));
     }
 }
 ```
@@ -360,7 +359,7 @@ class InventoryTransactionTest {
 
     @Container
     @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
 
     @Autowired
     private DataSource dataSource;
@@ -404,7 +403,7 @@ class InventoryTransactionTest {
 @Testcontainers
 class OrderRepositoryTest_Broken {
     @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
 
     @Test
     void test_A_insertsOrder() {
@@ -451,7 +450,7 @@ class PaymentServiceTest {
 
     @Container
     @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
 
     // WireMock as a Testcontainers GenericContainer
     @Container
@@ -492,40 +491,34 @@ and configures the corresponding Spring Boot auto-configuration. No more manual
 `@DynamicPropertySource` for supported containers — this was the primary friction point in the
 3.0 era. Reference: Spring Boot 3.1 release notes (2023).
 
-### Airbnb — Testcontainers in 1,000+ microservice CI pipeline
+### Reusing containers across runs — what `withReuse(true)` actually costs
 
-Airbnb uses Testcontainers in their microservice CI pipeline with a shared Docker daemon per
-CI node. Key optimisation: `withReuse(true)` for PostgreSQL and Redis containers — the same
-container is reused across all test classes in a JVM session, reducing test suite startup
-from 45s to 8s per CI job. They maintain a central `AbstractIntegrationTest` base class that
-starts all containers once as `static @Container` fields, ensuring containers are shared
-across all test classes in the suite. Reference: Airbnb Engineering blog (2022).
+Reuse is the single biggest wall-clock win available, and it is opt-in on both sides: the
+container must call `.withReuse(true)` **and** the developer must set
+`testcontainers.reuse.enable=true` in `~/.testcontainers.properties`. Without the second, the
+flag is ignored — which is exactly the behaviour you want, because reuse deliberately disables
+Ryuk's cleanup so the container survives JVM exit. That is why reuse is a local-development
+feature and not a CI one: on a build agent the container would outlive the job, leaking state
+into the next build on the same node. In CI, keep a single `static` container in an
+`AbstractIntegrationTest` base class and let Ryuk reap it at JVM exit.
 
-### Zalando — Testing Kafka consumer idempotency
+### Pin the image version, and pin it to what production runs
 
-Zalando's event-driven services use Testcontainers Kafka to test consumer idempotency: a test
-publishes the same event twice (simulating at-least-once delivery) and asserts the business
-outcome appears exactly once in PostgreSQL. This test category (idempotency tests) is run in
-CI on every PR to the `event-consumer` layer. Without real Kafka, the `EmbeddedKafkaBroker`
-does not replicate the exactly-once semantics and partition-rebalance behaviour of the real
-broker — idempotency bugs that pass `EmbeddedKafkaBroker` tests appear in production.
-Reference: Zalando Engineering blog (2021).
+Testcontainers makes the database version a line of code, which cuts both ways. `postgres:latest`
+means a silently different engine between two runs of the same test. Pinning to the production
+minor version is the point of the exercise — a query plan validated against 18.1 tells you
+nothing if production runs 15. In regulated environments this becomes the argument for
+Testcontainers rather than a nice-to-have: you can demonstrate that the tested engine and the
+production engine are byte-identical images, which no in-memory substitute can claim.
 
-### Netflix — Contract tests with Testcontainers + Pact
+### The idempotency test that only a real broker can run
 
-Netflix runs consumer-driven contract tests using Pact + Testcontainers: the consumer service
-defines the API contract; the provider service runs a Pact verifier inside a `@SpringBootTest`
-with a real PostgreSQL container. This catches breaking API changes before deployment, replacing
-a 30-minute end-to-end test suite with a 5-minute contract verification per service.
-Reference: Netflix Engineering blog (2022).
-
-### Goldman Sachs — Compliance: production-identical test databases
-
-Goldman's regulatory reporting service (MiFID II) requires that test environments run
-identical database versions to production (PostgreSQL 15.x). Testcontainers with
-`postgres:15.4-alpine` pins the exact version, and CI verifies that SQL queries produce
-identical execution plans in both test and production (via `EXPLAIN ANALYZE`). This ensures
-that index hints and query plans validated in test are valid in production.
+The highest-value test this makes possible is publishing the same event twice and asserting the
+business outcome appears once. `EmbeddedKafkaBroker` will happily pass a naive version of that
+test because it does not reproduce consumer-group rebalancing or offset-commit timing — the two
+mechanisms that actually generate duplicates in production. Real broker, two identical sends,
+assert one row: three lines that catch the whole class of at-least-once bugs described in
+[../design_event_driven_microservice.md](../design_event_driven_microservice.md).
 
 ---
 
@@ -575,7 +568,7 @@ that index hints and query plans validated in test are valid in production.
 @Testcontainers
 class UserRepositoryTest {
     @Container @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
     // PROBLEM: Spring replaces the datasource with H2; postgres container is never used
 }
 ```
@@ -597,7 +590,7 @@ class UserRepositoryTest { /* ... */ }
 @Testcontainers
 class OrderTest {
     @Container  // instance field → container starts/stops for each test METHOD → very slow
-    PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
 }
 ```
 
@@ -606,7 +599,7 @@ class OrderTest {
 @Testcontainers
 class OrderTest {
     @Container  // static → container starts once per test CLASS
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
 }
 ```
 
@@ -637,7 +630,7 @@ When each test class starts its own `PostgreSQLContainer`, CI with 50 test class
 public class SharedPostgresContainer {
     public static final PostgreSQLContainer<?> INSTANCE;
     static {
-        INSTANCE = new PostgreSQLContainer<>("postgres:16-alpine");
+        INSTANCE = new PostgreSQLContainer<>("postgres:18-alpine");
         INSTANCE.start();
     }
 }
@@ -653,14 +646,19 @@ static void configureDb(DynamicPropertyRegistry registry) {
 
 ---
 
-### Pitfall 5 — Testing with `@MockBean` for repository in `@SpringBootTest`
+### Pitfall 5 — Mocking the repository inside a `@SpringBootTest`
 
-`@MockBean` in a `@SpringBootTest` replaces the real repository with a Mockito mock, causing
-`@Transactional` on the service layer to commit to a real DB but read from a mock. This
-creates inconsistent state between the DB and the mock's return values. When using
-Testcontainers, avoid `@MockBean` for repository/DB components — let the real repository hit
-the real container. Use `@MockBean` only for external HTTP clients (Stripe, Twilio) and
-Kafka template when not testing Kafka.
+`@MockitoBean` in a `@SpringBootTest` replaces the real repository with a Mockito mock, so
+`@Transactional` on the service layer commits to a real database while the service reads from
+the mock — the two diverge and the test asserts on state that was never persisted. When using
+Testcontainers, do not mock repository/DB components; let the real repository hit the real
+container. Reserve `@MockitoBean` for things you genuinely cannot run locally: external HTTP
+clients (Stripe, Twilio) and, when Kafka is not under test, the `KafkaTemplate`.
+
+Note the annotation itself: `@MockBean` and `@SpyBean` were deprecated in Boot 3.4 and
+**removed in Boot 4.0**. The replacements are `@MockitoBean` and `@MockitoSpyBean`, and they
+live in `org.springframework.test.context.bean.override.mockito` — Spring Framework's
+bean-override support, not Boot's.
 
 ---
 
@@ -668,11 +666,11 @@ Kafka template when not testing Kafka.
 
 | Tool | Role | Notes |
 |------|------|-------|
-| `org.testcontainers:postgresql` | PostgreSQL container | Use `postgres:16-alpine` for small image size |
-| `org.testcontainers:kafka` | Kafka container | Use `confluentinc/cp-kafka:7.6.0` for KRaft mode (no ZK) |
-| `org.testcontainers:redis` | Redis container | `redis:7-alpine`; no native @ServiceConnection in 3.1; use @DynamicPropertySource |
-| `spring-boot-testcontainers` | @ServiceConnection auto-wiring | Spring Boot 3.1+; auto-configures datasource from container |
-| WireMock | HTTP mock server | `com.github.tomakehurst:wiremock-jre8-standalone` or `WireMockContainer` |
+| `org.testcontainers:postgresql` | PostgreSQL container | Pin to the production minor (`postgres:18-alpine`), never `latest` |
+| `org.testcontainers:kafka` | Kafka container | `org.testcontainers.kafka.KafkaContainer` on `apache/kafka` (KRaft, no ZooKeeper); `ConfluentKafkaContainer` for `cp-kafka`. The old `containers.KafkaContainer` is deprecated |
+| Redis | Redis container | No official module — `GenericContainer` on `redis:8-alpine` with `@ServiceConnection(name = "redis")`, or `com.redis:testcontainers-redis` |
+| `spring-boot-testcontainers` | `@ServiceConnection` auto-wiring | Auto-configures datasource, Redis, Kafka, RabbitMQ, Mongo and more from the running container |
+| WireMock | HTTP mock server | `org.wiremock:wiremock-standalone`, or `org.wiremock.integrations.testcontainers:wiremock-testcontainers-module` for `WireMockContainer` |
 | `spring-security-test` | `@WithMockUser`, `SecurityMockMvcRequestPostProcessors` | Test secured endpoints without real auth |
 | Awaitility | Async assertions | `Awaitility.await().atMost(10, SECONDS).until(...)` — polls for async Kafka events |
 | `@Sql` | Seed SQL before test | `@Sql("test-data.sql")` on test class/method; runs before test, can run cleanup after |
@@ -742,8 +740,8 @@ from a cached image. Without optimisation, 50 test classes × 1.5s = 75s of cont
 Minimise with: (1) `static @Container` fields — container starts once per JVM session (not per
 test method). (2) `withReuse(true)` in `~/.testcontainers.properties testcontainers.reuse.enable=true`
 — container persists between JVM runs; Docker Ryuk detects old containers; most useful in
-developer local loops (saves 5–10s per test run). (3) Alpine images — `postgres:16-alpine` is
-~80 MB vs `postgres:16` at ~400 MB; faster to pull and start. (4) Testcontainers Cloud — offloads
+developer local loops (saves 5–10s per test run). (3) Alpine images — `postgres:18-alpine` is
+~100 MB vs the Debian-based `postgres:18` at ~450 MB; faster to pull and start. (4) Testcontainers Cloud — offloads
 container startup to a remote daemon; removes the Docker requirement from CI agents.
 
 **Q7. How do you test optimistic locking behaviour with Testcontainers?**
@@ -809,7 +807,7 @@ fields in a base test class; each test class inherits them. Total test suite: <5
 - **Test idempotency explicitly** — publish the same Kafka event twice; assert the business
   outcome appears exactly once in the DB.
 - **Use Awaitility for async assertions** — never `Thread.sleep(n)` in tests.
-- **Pin Docker image versions** — `postgres:16-alpine` not `postgres:latest`; prevents
+- **Pin Docker image versions** — `postgres:18-alpine` not `postgres:latest`; prevents
   unexpected behaviour changes between CI runs.
 - **Test circuit breaker and resilience patterns** with Testcontainers + WireMock timeout
   simulation; verify that the CB trips and the fallback fires correctly.
@@ -841,17 +839,12 @@ class TwoLevelCacheIntegrationTest {
 
     @Container
     @ServiceConnection
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine");
+    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:18-alpine");
 
     @Container
+    @ServiceConnection(name = "redis")
     static GenericContainer<?> redis =
-        new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
-
-    @DynamicPropertySource
-    static void redisProps(DynamicPropertyRegistry r) {
-        r.add("spring.redis.host", redis::getHost);
-        r.add("spring.redis.port", () -> redis.getMappedPort(6379));
-    }
+        new GenericContainer<>("redis:8-alpine").withExposedPorts(6379);
 
     @Autowired private ProductService productService;
     @Autowired private CacheManager caffeineCacheManager;

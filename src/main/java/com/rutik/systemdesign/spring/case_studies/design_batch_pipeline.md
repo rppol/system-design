@@ -45,12 +45,15 @@ validation API, schema inference from CSV.
 Target:             10,000,000 records / 3 hours = 3,333,333 rec/hr = 926 rec/sec
 Safety margin:      926 × 1.2 = 1,111 rec/sec target throughput
 
+Measured single-thread rate (§10 benchmark): 1,200 rec/sec at chunk size 1,000
 Chunk size = 1,000: 10,000,000 / 1,000 = 10,000 total chunks
-Per-chunk latency:  ~200ms (read 1,000 lines + process + JDBC batchUpdate)
-Single-threaded:    10,000 × 200ms = 2,000s = 33.3 min (well within 3h)
-8 partitions (parallel): 10,000 / 8 = 1,250 chunks/partition
-  1,250 × 200ms = 250s = 4.2 min per partition (ideal)
-  Real-world (6× speedup due to DB contention): ~6 min total
+Per-chunk latency:  1,000 / 1,200 = ~830ms (read 1,000 lines + process + JDBC batchUpdate)
+
+Single-threaded:    10,000,000 / 1,200 = 8,333s = 2h 19m
+  -> inside the 3h window, but with only 40 minutes of slack. One slow night and
+     the SLA is missed. THIS is why the job is partitioned, not raw speed.
+8 partitions (parallel): 8 × 1,200 = 9,600 rec/sec ideal -> 10,000,000 / 9,600 = 17 min
+  Real-world (6× not 8×, DB write contention): 7,200 rec/sec -> 23 min
 ```
 
 **DB connection budget:**
@@ -75,8 +78,9 @@ JVM heap:              6-8 GB (-Xmx8g -Xms4g); most is free; G1GC default 200ms 
 **Disk I/O budget:**
 ```
 5 GB total CSV input: 8 partitions read in parallel = ~625 MB per partition
-Sequential read rate: typical SSD 500 MB/s -> 1.25s to read all files
-Bottleneck is NOT I/O — it is database write throughput
+Sequential read rate: ~500 MB/s on one SSD, SHARED by all 8 partitions
+  -> 5 GB / 500 MB/s = 10s aggregate (not 1.25s — the 8 readers contend for one device)
+10s of I/O against 23 min of runtime: the bottleneck is database write throughput
 ```
 
 ---
@@ -147,7 +151,10 @@ public class CustomerEtlJobConfig {
     public Job customerEtlJob(JobRepository jobRepository, Step masterStep,
                                JobCompletionListener jobCompletionListener) {
         return new JobBuilder("customerEtlJob", jobRepository)
-            .incrementer(new RunIdIncrementer())  // for fresh runs only; restart uses same JobInstance
+            // No .incrementer(...) here. RunIdIncrementer is applied by JobOperator
+            // .startNextInstance(), and its whole purpose is to force a NEW JobInstance --
+            // the exact behaviour §4.5 and §9 War Story 2 identify as what destroys restart.
+            // This job's identity comes from the run.date parameter the scheduler passes in.
             .listener(jobCompletionListener)
             .start(masterStep)
             .build();
@@ -426,7 +433,7 @@ public void runNightly() throws Exception {
 | DB insert strategy | `JdbcBatchItemWriter` with UPSERT | PostgreSQL `COPY` command | COPY is 3–5× faster but cannot do `ON CONFLICT DO UPDATE`; UPSERT enables idempotent reruns without pre-truncate |
 | Skip vs fail-fast | `.skipLimit(100_000)` for `ValidationException` | Fail the whole job on first bad record | Business requirement: 1% malformed records are expected; silent skip with audit log is the correct tradeoff |
 | ItemProcessor enrichment | Pre-load country cache (250 entries) at startup | DB lookup per record | 250 countries × 10M lookups = 250M DB reads if not cached; pre-load at startup adds ~50ms, saves ~500s |
-| Partition strategy | File-per-partition | Line-range within a single file | Simpler (no byte-offset seeking); `FlatFileItemReader` does not support range-based reads natively |
+| Partition strategy | File-per-partition | Line-range within a single file | File-per-partition is simpler and needs no line counting. Line-range partitioning IS supported — `FlatFileItemReader` inherits `setCurrentItemCount()`/`setMaxItemCount()`, so each partition can be given a start/end offset — and is the fallback when the drop is one large file instead of many |
 
 ### @JobScope vs @StepScope lifecycle
 
@@ -458,7 +465,7 @@ public void runNightly() throws Exception {
 
 | Tool | Restart support | Parallel processing | Skip/retry | Spring integration | When to choose |
 |---|---|---|---|---|---|
-| **Spring Batch 5.x** | `JobRepository` + checkpoint | `TaskExecutorPartitioner` / remote | `.faultTolerant().skip().retry()` | Native | Default for Spring Boot ETL; single or multi-machine batch |
+| **Spring Batch 6.x** | `JobRepository` + checkpoint | partitioned steps (local `TaskExecutor` or remote) | `.faultTolerant().skip().retry()` | Native (Boot 4.1) | Default for Spring Boot ETL. Note Batch 6 relocated the item packages to `org.springframework.batch.infrastructure.item.*` and `RunIdIncrementer` to `org.springframework.batch.core.job.parameters` |
 | **Spring Integration** | Via message store + polling | Message channels | Error channel routing | Native | When processing needs to be reactive/streaming rather than checkpoint-based |
 | **Apache Spark** | Checkpointing + stage retry | Native (distributed) | Custom accumulator | Via spark-java | When data volume requires multiple machines; for 10M records, Spark is overkill |
 | **Apache Flink** | Savepoints | Native (distributed) | Via side outputs | Via Flink-Spring | Real-time streaming with windowed batch semantics; excessive for nightly-file ETL |
@@ -478,12 +485,11 @@ public void runNightly() throws Exception {
 
 ### (b) Job Status Inspection
 
-```
-# Check if job is running or in which state partitions are:
-GET /actuator/batch/jobs/customerEtlJob
-GET /actuator/batch/jobs/customerEtlJob/{jobInstanceId}
+Spring Boot ships no `/actuator/batch` endpoint — the `JobRepository` tables are the API, so
+query them directly or expose your own read-only controller over `JobExplorer`.
 
-# Useful DB query for current step execution state:
+```
+# Current step execution state, per partition:
 SELECT step_name, status, read_count, write_count, skip_count, start_time
 FROM BATCH_STEP_EXECUTION
 WHERE job_execution_id = (
@@ -555,13 +561,14 @@ After a job ran twice due to a scheduling misconfiguration, a developer added `.
 
 ```
 10,000,000 records, chunk 1,000 = 10,000 total chunks
-Per-chunk time:    200ms (read + process + write 1,000 items)
-Single-threaded:   10,000 × 200ms = 2,000s = 33 min (1 instance)
-8 partitions:      Ideal 8× = 4.2 min; real-world 6× speedup = ~6 min
+Per-chunk time:    ~830ms (1,000 items at the measured 1,200 rec/sec/thread below)
+Single-threaded:   10,000,000 / 1,200 = 8,333s = 2h 19m (1 instance)
+8 partitions:      ideal 8× -> 17 min; real-world 6× -> 23 min
 
-Throughput verification:
-  8 partitions × 1,000 records/chunk / 0.200s = 40,000 records/sec (ideal)
-  With 6× speedup: ~30,000 records/sec = 1.8M records/min (well within 3h budget)
+Throughput verification (must agree with the benchmark table below):
+  8 threads × 1,200 rec/sec  = 9,600 records/sec ideal
+  6× real-world speedup      = 7,200 records/sec = 432k records/min
+  10,000,000 / 7,200         = 1,389s = 23 min, comfortably inside the 3h window
 ```
 
 ### Partition and connection sizing formula
@@ -626,7 +633,7 @@ A: Spring Batch identifies a `JobInstance` by its identifying parameters. A uniq
 
 **Q: How would you implement a progress API for the running job?**
 
-A: Spring Boot Actuator with Spring Batch provides `/actuator/batch/jobs/{name}` and `/actuator/batch/jobs/{name}/{instanceId}` endpoints that query the `JobRepository` for current `StepExecution` read/write/skip counts. For real-time Grafana dashboards, expose the step execution write count via a Micrometer gauge (`Gauge.builder("batch.write.count").register(registry)`) updated in a `ChunkListener.afterChunk()` — Prometheus scrapes it every 15 seconds, giving a live throughput view.
+A: Build it on `JobExplorer` — there is no batch actuator endpoint in Spring Boot, so a small read-only `@RestController` that calls `JobExplorer.getJobExecution(id)` and sums `StepExecution` read/write/skip counts is the supported path. For Grafana, register a Micrometer gauge per step (`Gauge.builder("batch.write.count", stepExecution, StepExecution::getWriteCount)`) and update it from a `ChunkListener.afterChunk()`; Prometheus scrapes it on its normal interval, giving a live throughput view without polling the database from the dashboard. Spring Batch also publishes its own `spring.batch.job` and `spring.batch.step` timers through Micrometer automatically, which covers duration and status without any custom code.
 
 **Q: How do you handle the case where CSV files arrive late?**
 

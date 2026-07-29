@@ -51,7 +51,8 @@ Channels:      500,000 (one per user with active connections)
 Events/sec:    50,000 published
 Subscribers:   average 1.2 pods per channel (a user connected to one or two pods)
 Messages relayed by Redis: 50,000 × 1.2 = 60,000 msg/s
-Redis throughput: 1 MB/s (60,000 × ~17 bytes message) — within r6g.large capacity (~100k msg/s)
+Pub/Sub payload: ~300 bytes (compact JSON — the full ~500-byte record lives in the ZSET)
+Redis bandwidth: 60,000 × 300 bytes = 18 MB/s — see §10 for the headroom calculation
 ```
 
 ### Notification Storage
@@ -105,8 +106,10 @@ sequenceDiagram
 @Component
 public class NotificationWebSocketHandler extends TextWebSocketHandler {
 
-    // userId → set of active sessions (multiple devices)
-    private final ConcurrentHashMap<String, CopyOnWriteArraySet<WebSocketSession>> sessions =
+    // userId -> set of active sessions (multiple devices).
+    // ConcurrentHashMap.newKeySet(), not CopyOnWriteArraySet: a reconnect storm mutates this
+    // set 25,000 times in seconds, and COW copies the whole array on every add (§9 Pitfall 4).
+    private final ConcurrentHashMap<String, Set<WebSocketSession>> sessions =
         new ConcurrentHashMap<>();
 
     private final RedisSubscriptionManager subscriptionManager;
@@ -116,7 +119,7 @@ public class NotificationWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) {
         String userId = extractUserId(session);
 
-        sessions.computeIfAbsent(userId, k -> new CopyOnWriteArraySet<>()).add(session);
+        sessions.computeIfAbsent(userId, k -> ConcurrentHashMap.newKeySet()).add(session);
 
         // Subscribe to Redis channel for this user if this pod is now the first session holder
         subscriptionManager.subscribeIfAbsent(userId);
@@ -223,33 +226,26 @@ public class RedisSubscriptionManager {
     private final RedisConnectionFactory connectionFactory;
     private final NotificationWebSocketHandler wsHandler;
 
-    // Channel → subscription (one subscription per active user on this pod)
-    private final ConcurrentHashMap<String, RedisMessageListenerContainer> subscriptions =
-        new ConcurrentHashMap<>();
+    // ONE container for the whole pod, not one per user. A container owns a task executor
+    // and a dedicated Redis connection; 25,000 of them would mean 25,000 Redis connections
+    // and 25,000 thread pools on a pod budgeted at 250 MB. addMessageListener/
+    // removeMessageListener on a single running container is the intended API.
+    private final RedisMessageListenerContainer container;   // singleton bean
+    private final ConcurrentHashMap<String, MessageListener> listeners = new ConcurrentHashMap<>();
 
     public void subscribeIfAbsent(String userId) {
-        String channel = "user:" + userId;
-        subscriptions.computeIfAbsent(channel, ch -> {
-            RedisMessageListenerContainer container = new RedisMessageListenerContainer();
-            container.setConnectionFactory(connectionFactory);
-            container.addMessageListener(
-                (message, pattern) -> {
-                    Notification notification = parseNotification(message.getBody());
-                    wsHandler.deliverToUser(userId, notification);
-                },
-                new ChannelTopic(channel)
-            );
-            container.start();
-            return container;
+        listeners.computeIfAbsent("user:" + userId, channel -> {
+            MessageListener listener = (message, pattern) ->
+                wsHandler.deliverToUser(userId, parseNotification(message.getBody()));
+            container.addMessageListener(listener, new ChannelTopic(channel));
+            return listener;
         });
     }
 
     public void unsubscribe(String userId) {
-        String channel = "user:" + userId;
-        RedisMessageListenerContainer container = subscriptions.remove(channel);
-        if (container != null) {
-            container.stop();
-            container.destroy();
+        MessageListener listener = listeners.remove("user:" + userId);
+        if (listener != null) {
+            container.removeMessageListener(listener, new ChannelTopic("user:" + userId));
         }
     }
 }
@@ -290,30 +286,34 @@ public class NotificationRepository {
 Without backpressure, a slow WebSocket client blocks the thread delivering messages, eventually
 causing memory overflow from a build-up of queued messages.
 
+`WebSocketSession` has no `isWritePossible()` — its whole API is `sendMessage`, `isOpen` and
+`close`, so there is nothing to poll for writability. Spring's answer is a decorator that owns the
+buffer for you:
+
 ```java
-// Add per-session send buffer with size limit
-private void sendToSessionWithBackpressure(WebSocketSession session, Notification notification) {
-    if (!session.isOpen()) return;
-    if (!session.isWritePossible()) {
-        // Session's send buffer is full — drop the message or close the session
-        log.warn("Session buffer full, dropping notification for userId={}",
-            extractUserId(session));
-        session.close(CloseStatus.SESSION_NOT_RELIABLE);
-        return;
-    }
-    try {
-        session.sendMessage(new TextMessage(toJson(notification)));
-    } catch (IOException e) {
-        log.warn("Send failed", e);
-        sessions.get(extractUserId(session)).remove(session);
-    }
+// Wrap every session at registration time; the decorator is what goes in the sessions map.
+@Override
+public void afterConnectionEstablished(WebSocketSession rawSession) {
+    WebSocketSession session = new ConcurrentWebSocketSessionDecorator(
+        rawSession,
+        /* sendTimeLimit  */ 10_000,   // ms a single send may take
+        /* bufferSizeLimit*/ 512 * 1024 // bytes of queued outbound messages
+    );
+    sessions.computeIfAbsent(extractUserId(session), k -> ConcurrentHashMap.newKeySet())
+            .add(session);
 }
 ```
 
-For virtual threads (Spring Boot 3.2+), set `spring.threads.virtual.enabled=true`. Each
-WebSocket session is backed by a virtual thread; blocking on slow network I/O parks the virtual
-thread rather than the platform thread, supporting 25,000 connections with ~25,000 virtual threads
-instead of requiring 25,000 platform threads (~25 GB of stack memory).
+The decorator does three jobs the hand-rolled version cannot. It serialises concurrent
+`sendMessage` calls — required, because the WebSocket spec forbids interleaving partial messages
+and two pods delivering to the same session would otherwise corrupt the frame stream. It queues
+messages when a send is already in progress. And when either limit is breached it closes the
+session with `SESSION_NOT_RELIABLE` instead of growing the queue forever, which is the actual
+backpressure: a slow client is disconnected and reconnects to replay from the ZSET.
+
+Set `spring.threads.virtual.enabled=true` so a session blocked on a slow network write parks its
+virtual thread instead of holding a platform thread — 25,000 connections cost ~25,000 virtual
+threads rather than 25,000 platform threads (~25 GB of stack).
 
 ---
 
@@ -372,26 +372,26 @@ fan-out are simpler, more resilient, and balance load naturally.
 
 ## 6. Real-World Implementations
 
-**Slack:** Uses a proprietary channel abstraction (similar to Redis Pub/Sub channels) to route
-messages from their Kafka event bus to WebSocket connections. Each user's connection is registered
-in a distributed session store; the message router queries the store and sends to the hosting pod.
-Engineering blog: "Real-Time Messaging at Slack" (2019) describes the presence service that tracks
-which WebSocket pod hosts each user.
+**Discord — "How Discord Scaled Elixir to 5,000,000 Concurrent Users" (2017):** the canonical
+account of this problem, and it solves the routing step without Redis at all. Discord's gateways are
+Elixir/Erlang processes and cross-node fan-out rides the BEAM's own distribution rather than a
+broker. Two findings transfer directly. First, the bottleneck they actually hit was not connection
+count but the *fan-out* message rate into a single process — the same reason §5 Decision 3 rejects a
+broadcast channel. Second, their fix was to shard the fan-out across a pool of workers, which is the
+per-user-channel idea here expressed as processes instead of Redis channels.
 
-**Discord:** WebSocket gateways (stateful pods) handle connections. Events arrive via internal
-message bus. Each gateway subscribes to a Redis Pub/Sub channel per user guild. With 10M concurrent
-users, Discord shards connections across ~10,000 gateway pods. Engineering blog: "How Discord
-Scaled Elixir to 5,000,000 Concurrent Users" (2017).
+**The presence problem is the hard part, not the sockets.** Every design in this space converges on
+the same two-layer split this file uses: a durable store of what should be delivered, plus an
+ephemeral routing layer that knows *where* a user currently is. Redis Pub/Sub is one implementation
+of the second layer; a session registry keyed by user with the owning pod's address is another, and
+it trades Redis fan-out for a directory lookup plus a direct pod-to-pod call. Pick by fan-out ratio:
+Pub/Sub wins when a message goes to many connections, a directory wins when it goes to one.
 
-**GitHub (notifications):** Uses SSE (`text/event-stream`) for repository event notifications.
-The SSE endpoint holds the connection open; events are forwarded from an internal queue.
-GitHub's architecture relies on SSE rather than WebSocket because notifications are server-to-client
-only (no bidirectional need).
-
-**Uber (trip updates):** WebSocket connections from the mobile app are maintained by stateful pods.
-Redis Pub/Sub channels per driver/rider ID deliver GPS updates. Each trip status update is also
-persisted to Cassandra for the trip history API. Public engineering post: "Uber's Real-Time
-Push Platform" (2019).
+**SSE is the underrated option.** For a server-to-client-only feed, `text/event-stream` gives you
+automatic browser reconnection with `Last-Event-ID` replay for free — the reconnect-and-replay logic
+that §4.1 hand-writes against the ZSET. This design keeps WebSocket as primary only because read
+receipts flow client-to-server; drop that one requirement and SSE removes the upgrade handshake, the
+proxy incompatibility, and the custom reconnect protocol in a single stroke.
 
 ---
 
@@ -442,8 +442,7 @@ never decreases even after traffic drops.
 
 **Resolution:** WebSocket sessions that close abnormally (network drop without clean close handshake)
 trigger `afterConnectionClosed` with `CloseStatus.NO_STATUS_CODE`. Verify this path removes
-the session from the `CopyOnWriteArraySet`. Add a periodic cleanup job that removes sessions where
-`!session.isOpen()`.
+the session from the set. Add a periodic cleanup job that sweeps sessions where `!session.isOpen()`.
 
 ---
 
@@ -497,14 +496,20 @@ subscriptions must be explicitly re-registered in the `onMessage` error handler.
 
 ---
 
-**Pitfall 2: Virtual Thread Pinning on `synchronized` in Spring WebSocket (Spring Boot 3.2, 2024)**
-After enabling `spring.threads.virtual.enabled=true`, message delivery latency spiked intermittently.
-Investigation showed `TextWebSocketHandler.sendMessage()` internally synchronized on the session
-object, pinning the carrier thread for the duration of the send (including slow network writes).
-With 25,000 virtual threads competing for 8 carrier threads, carrier exhaustion caused 200+ ms P99.
-Fix: use Spring WebFlux `WebSocketHandler` (reactive) instead of Servlet WebSocket for reactive
-virtual thread compatibility. Alternatively, wrap sends in `Thread.ofVirtual().start()` to isolate
-the blocking call to its own virtual thread.
+**Pitfall 2: Reaching for the Pinning Explanation That No Longer Applies**
+On Spring Boot 3.2 with an early virtual-thread JDK, a `synchronized` block that blocked on network
+I/O pinned its carrier thread, and a WebSocket send path full of `synchronized` could starve the
+small carrier pool. That failure mode is gone: **JEP 491 (Java 24) reimplemented monitors so a
+virtual thread blocking inside `synchronized` unmounts and releases its carrier**, and the
+`-Djdk.tracePinnedThreads` flag people used to diagnose it was removed in the same release. On this
+design's Java 25 baseline, blaming `synchronized` for latency is a dead end — and "rewrite it in
+WebFlux" is an expensive answer to a problem the JDK already solved.
+
+What still pins a virtual thread is a native or VM frame on the stack — a JNI call, or a class
+initializer. Diagnose it with the JFR event `jdk.VirtualThreadPinned`, which was expanded to cover
+park, monitor-enter and `Object.wait` while pinned, not with the deleted flag. If P99 spikes under
+load, look first at the actual culprit here: an unbounded outbound queue on a slow session, which
+is what the `ConcurrentWebSocketSessionDecorator` limits in §4.6.
 
 ---
 
@@ -522,13 +527,16 @@ ZRANGE reads with a Semaphore(500) in the reconnect handler.
 `CopyOnWriteArraySet.add()` copies the internal array on every mutation. At 25,000 connection
 events per deploy (reconnects after rolling restart), the GC was collecting 25,000 temporary
 arrays of growing sizes. G1GC paused for 800 ms every 30 seconds during reconnect storms.
-Fix: replace `CopyOnWriteArraySet` with `ConcurrentHashMap.newKeySet()` (same semantics,
-O(1) add/remove, no array copy).
+Fix: replace `CopyOnWriteArraySet` with `ConcurrentHashMap.newKeySet()` — same set semantics and
+still safe for concurrent iteration, but O(1) add/remove with no array copy. §4.1 uses the fixed
+form. `CopyOnWriteArraySet` is for read-mostly sets; a session registry is write-heavy by nature.
 
 ---
 
 **Pitfall 5: SSE Connection Leak on Client Timeout (customer portal, 2021)**
-`SseEmitter` has a configurable timeout (default 30 seconds in Spring). After the timeout, the
+`SseEmitter` created with the no-arg constructor sets no timeout of its own — it inherits the MVC
+async timeout, which falls through to the servlet container's default (30 s on Tomcat) unless
+`spring.mvc.async.request-timeout` is set. After the timeout fires, the
 `SseEmitter` is "completed" internally, but the `HttpServletRequest` connection is only closed
 when the client disconnects or when the server sends a completion event. Corporate proxies that
 buffer responses kept the TCP connection open for 300 seconds after the SSE emitter expired.
@@ -610,8 +618,10 @@ reason virtual threads enable WebSocket servers to handle orders of magnitude mo
 connections than traditional thread-per-connection models.
 
 **Q: How would you prevent a slow consumer from causing OOM on the notification server?**
-Three layers of backpressure: (a) WebSocket session-level: check `session.isWritePossible()`
-before sending; close sessions that are not writable (their send buffer is full). (b) Pod-level:
+Three layers of backpressure: (a) WebSocket session-level: wrap each session in
+`ConcurrentWebSocketSessionDecorator` with a `sendTimeLimit` and `bufferSizeLimit` — there is no
+`isWritePossible()` on `WebSocketSession` to poll, so the decorator's bounded queue is the
+mechanism, and it closes the session once either limit is breached. (b) Pod-level:
 cap the number of queued outbound messages per user session at N; drop oldest if full (notifications
 are low-value; dropping is preferable to OOM). (c) Kafka consumer-level: `max.poll.records=500`
 and `max.poll.interval.ms=30000` ensure the consumer doesn't pull faster than it can deliver.

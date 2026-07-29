@@ -33,8 +33,8 @@ See also: [Resilience4j patterns](./cross_cutting/resilience4j_patterns.md),
 - End-to-end saga latency ≤ 5 seconds at P99 (order placed to CONFIRMED).
 - Recovery from broker partition outage within 30 seconds; consumer lag SLO < 60 seconds.
 
-**Constraints:** Spring Boot 3.x, Apache Kafka 3.x, PostgreSQL, choreography-based Saga
-(no orchestrator service).
+**Constraints:** Spring Boot 4.1 / spring-kafka 4.1, Apache Kafka 4.x (KRaft — no ZooKeeper),
+PostgreSQL, choreography-based Saga (no orchestrator service).
 
 **Out of scope:** Payment gateway integration details, inventory management UI, A/B testing
 of routing strategies, multi-currency orders.
@@ -340,8 +340,10 @@ public class OutboxEventPublisher {
     @Scheduled(fixedDelay = 100)
     @Transactional
     public void publishPendingEvents() {
-        List<OutboxEvent> pending = outboxEventRepository
-            .findTop100ByPublishedFalseOrderByCreatedAtAsc();
+        // Must be the FOR UPDATE SKIP LOCKED query below -- a plain derived finder
+        // (findTop100ByPublishedFalseOrderByCreatedAtAsc) takes no locks, so every
+        // instance selects the same rows and publishes every event N times.
+        List<OutboxEvent> pending = outboxEventRepository.findAndLockUnpublished(BATCH_SIZE);
 
         if (pending.isEmpty()) return;
 
@@ -446,7 +448,7 @@ public class InventoryEventConsumer {
         // Creates: inventory.failed-retry-0, -retry-1, -retry-2, inventory.failed-dlt
         topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE,
         dltTopicSuffix = "-dlt",
-        include = {RetriableKafkaException.class}
+        include = {org.apache.kafka.common.errors.RetriableException.class}
     )
     @KafkaListener(topics = "inventory.failed", groupId = "order-service-inventory-consumer")
     @Transactional
@@ -469,8 +471,12 @@ public class InventoryEventConsumer {
 
     @DltHandler
     public void handleDlt(ConsumerRecord<String, String> record,
-                          @Header(KafkaHeaders.RECEIVED_TOPIC) String topic) {
-        log.error("Exhausted retries, routed to DLT topic={} key={}", topic, record.key());
+                          @Header(KafkaHeaders.DLT_ORIGINAL_TOPIC) String originalTopic,
+                          @Header(KafkaHeaders.DLT_EXCEPTION_MESSAGE) String failure) {
+        // RECEIVED_TOPIC here would just say "...-dlt". DLT_ORIGINAL_TOPIC is the topic the
+        // message actually failed on, which is what you need to replay it.
+        log.error("Exhausted retries; originalTopic={} key={} cause={}",
+                  originalTopic, record.key(), failure);
         // persist to dead_letter_events table + fire PagerDuty alert
     }
 }
@@ -523,8 +529,15 @@ public class KafkaProducerConfig {
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         props.put(ProducerConfig.ACKS_CONFIG, "all");
         props.put(ProducerConfig.RETRIES_CONFIG, Integer.MAX_VALUE);
-        props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5);
-        props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, "order-service-producer-1");
+        props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5);  // max with idempotence
+
+        // Do NOT set TRANSACTIONAL_ID_CONFIG here. It makes the factory transaction-capable,
+        // and KafkaTemplate.send() outside a transaction then fails fast:
+        //   IllegalStateException: No transaction is in process; possible solutions: ...
+        // The outbox publisher in §4.3 sends plainly, so every publish would throw and the
+        // outbox would silently never drain. Idempotence alone gives the dedup-on-retry
+        // guarantee this design needs; transactions would only add value for a
+        // consume-transform-produce loop entirely inside Kafka.
         return new DefaultKafkaProducerFactory<>(props);
     }
 
@@ -570,7 +583,7 @@ public class KafkaConsumerConfig {
 
 | Decision | Choice | Alternative | Rationale |
 |---|---|---|---|
-| Event delivery guarantee | At-least-once + idempotent consumer | Exactly-once (Kafka EOS) | EOS ~20–30% throughput cost; cannot cross external gateway boundary; idempotency key at gateway achieves the same correctness |
+| Event delivery guarantee | At-least-once + idempotent consumer | Exactly-once (Kafka EOS) | EOS cannot cross the payment-gateway boundary at any price, so the throughput cost (commonly cited around 10-20%, versus near-zero for idempotence alone) buys nothing the gateway idempotency key does not already give |
 | Saga coordination | Choreography | Orchestrator service | No central bottleneck; services stay independent; tradeoff is that full saga history requires correlating logs by order ID |
 | Event write mechanism | Transactional outbox | Direct Kafka publish / CDC Debezium | Outbox is atomic with business write; CDC simpler to operate but requires Debezium connector deployment |
 | Consumer failure handling | `@RetryableTopic` with DLT | Simple retry in listener | Keeps poison messages from blocking the partition; exponential backoff (1s→10s→60s×3) avoids thundering herd |
@@ -593,15 +606,36 @@ Kafka EOS (`enable.idempotence=true`, transactional producer, `read_committed` c
 
 ## 6. Real-World Implementations
 
-**Netflix:** Uses choreography saga across microservices for streaming entitlement workflows (subscription activate → content unlock → billing). The transactional outbox is implemented against their Cassandra-backed event store rather than PostgreSQL; CDC via internal tooling publishes to Kafka. Consumer idempotency is enforced by a Redis SET with TTL used as a bloom filter before hitting the database.
+**The Saga pattern (Garcia-Molina & Salem, 1987)** predates microservices by three decades. The
+original paper's subject was long-lived database transactions: split one into a sequence of
+sub-transactions, each with a compensating transaction that semantically undoes it, and accept that
+the whole is *not* isolated. That last part is the concession this design inherits and the one most
+often forgotten — an order sitting in `PAYMENT_CONFIRMED` while inventory is still deciding is a
+partial state genuinely visible to everyone. Compensation is not rollback: a refund is a second
+fact, not the erasure of the first, which is exactly why §4.5 transitions to
+`COMPENSATION_IN_PROGRESS` rather than back to `PENDING`.
 
-**Uber Eats:** Order processing uses a transactional outbox written to MySQL and published via a proprietary CDC system (similar to Debezium) that tails the MySQL binary log. Each downstream service (restaurant assignment, payment, dispatch) consumes the `order.created` topic and publishes its own domain event. Saga state is stored as a state machine in a Redis sorted set for fast lookups during compensation.
+**Debezium** is the outbox pattern productised, and it ships an `EventRouter` transformation
+designed for exactly the table in §4.1 — it reads the WAL, routes each outbox row to a topic from
+its `aggregatetype` column, uses `aggregateid` as the message key, and unwraps the payload so
+consumers never see the envelope. Adopting it deletes the `@Scheduled` poller, the `published`
+column and the `SKIP LOCKED` query in one move. The cost is a Kafka Connect cluster to operate and
+a replication slot to watch: a slot whose consumer has stopped pins the WAL, and PostgreSQL will
+fill the disk rather than drop it.
 
-**Amazon:** DynamoDB Streams serve as the outbox in many internal services — a DynamoDB write triggers a Lambda that publishes to EventBridge. Consumer idempotency is enforced using a `ConditionalExpression` on a DynamoDB item (equivalent to `INSERT ... ON CONFLICT DO NOTHING`). Choreography is preferred for simpler workflows; AWS Step Functions (orchestration) is used when the saga has more than 5 steps or requires human approval gates.
+**AWS**: the same shape without any of the parts. A DynamoDB write is atomic with the stream record
+it emits, so DynamoDB Streams *are* the outbox — no table, no poller, no dual write — and a Lambda
+relays to EventBridge or SNS. Consumer idempotency uses a conditional write on a dedup item, the
+DynamoDB equivalent of the `processed_events` UNIQUE constraint here. AWS's own guidance is the one
+worth internalising: choreography for short flows, Step Functions (orchestration) once the flow is
+long enough that "which step is it on?" stops being answerable from logs — which is precisely the
+weakness §5's comparison table concedes.
 
-**Shopify:** Order fulfillment uses a Kafka-based event bus. The dual-write problem was solved early by migrating to a transactional outbox — the original dual-write approach caused ~0.01% of orders to have phantom events that triggered duplicate fulfillment. The outbox added ~100ms median latency but eliminated the phantom event class entirely.
-
-**Axon Framework (Java OSS):** Purpose-built framework for CQRS + event sourcing + saga. The event store IS the outbox; Axon Server ships events from the store to subscribers. Sagas are first-class citizens (`@Saga`, `@SagaEventHandler`, `@StartSaga`, `@EndSaga`). Used by ABN AMRO, bol.com, and other financial systems where event sourcing is a compliance requirement.
+**Axon Framework** takes the opposite bet: make sagas a first-class runtime concept
+(`@Saga`, `@StartSaga`, `@SagaEventHandler`, `@EndSaga`), with saga state persisted and correlated
+for you, and the event store itself acting as the outbox. You trade the freedom of §4.5's hand-rolled
+state machine for the framework's model of one — worth it when event sourcing is already a
+requirement, over-large when you only needed four topics and a status column.
 
 ---
 
@@ -753,13 +787,21 @@ Fix: add a `processed_at` column, create a partial index on `(event_id, consumer
 ### Partition sizing formula
 
 ```
-partitions_needed = ceil(peak_events_per_sec / per_partition_throughput)
-                  = ceil(70 / 5)            // 5 events/sec per partition conservative
-                  = 14 -> round up to 16 (power of 2 for even distribution)
+Throughput does NOT size partitions here. A single partition sustains tens of MB/s;
+at 280 events/sec x 2 KB = 560 KB/s the whole peak fits on one. Partitions are sized by
+consumer parallelism, because a group can run at most one consumer thread per partition:
+
+partitions = peak_concurrent_consumers x headroom
+           = (8 threads/instance x 2 HA instances) x 1
+           = 16          // matches §2; raise later if you add instances, never lower it
 
 consumer_instances = ceil(partitions / concurrency_per_instance)
                    = ceil(16 / 8)
                    = 2 instances per consumer group for full parallelism
+
+Over-provisioning partitions is not free either: each one costs open file handles, memory
+on every broker, and longer leader elections, so 16 is a ceiling on parallelism you have
+committed to, not a spare-capacity purchase.
 ```
 
 ### Throughput and thread math
@@ -781,8 +823,9 @@ Consumer instances needed: ceil(100 / 8) = 13 instances across all 5 services
 Poll interval:   100ms
 Batch per poll:  100 events
 Per instance:    1,000 events/sec
-For 70 orders/sec × peak 5×: 350 events/sec -> 1 poller instance sufficient at 35% utilization
-Safety headroom: 2 poller instances using SKIP LOCKED to avoid double-publishing
+At the 70 orders/sec peak: 70 x 4 fanout = 280 events/sec -> 1 instance at 28% utilization
+  (70 orders/sec is ALREADY the 5x peak from §2 — do not apply the multiplier twice)
+Safety headroom: 2 poller instances using SKIP LOCKED so neither publishes the other's rows
 ```
 
 ### Memory and lag budget
@@ -798,13 +841,15 @@ Alert threshold:        50% of SLO = 2,100 events per consumer group
 
 ```
 Kafka cluster: 3 brokers, each 16 vCPU / 64 GB RAM / 2 TB SSD
-  -> sustains 1 GB/s aggregate, 30 days retention for 47 GB/day
+  -> 47 GB/day x 7 days retention (§2) x replication factor 3 = 987 GB of stored log,
+     i.e. ~330 GB per broker against 2 TB — room to extend retention to ~30 days if
+     replay windows need it
 
 Order Service: 2 instances, each 4 vCPU / 8 GB RAM
   -> 2 outbox pollers + 8 consumer threads each; JVM heap 4 GB with G1GC
 
 PostgreSQL: r6g.2xlarge (8 vCPU, 64 GB RAM), 1 TB gp3 storage
-  -> outbox + orders + processed_events; connection pool 20 (HikariCP default)
+  -> outbox + orders + processed_events; HikariCP maximumPoolSize raised to 20 (default is 10)
   -> add read replica for heavy saga-state queries
 ```
 
@@ -826,7 +871,7 @@ A: In choreography, both `payment.failed` and `inventory.failed` events arrive i
 
 **Q: Why prefer at-least-once plus idempotency over Kafka exactly-once for payment events?**
 
-A: Kafka EOS only works end-to-end within Kafka (topic-to-topic via transactional producers and `read_committed` consumers). A payment gateway call is external — it can time out with unknown outcome regardless of Kafka guarantees. The correct solution is passing a stable idempotency key (payment intent ID) to the gateway so redelivery returns the original result instead of charging twice. At-least-once plus gateway idempotency is simpler, avoids the ~20–30% EOS throughput cost, and is actually correct across the external boundary.
+A: Kafka EOS only works end-to-end within Kafka (topic-to-topic via transactional producers and `read_committed` consumers). A payment gateway call is external — it can time out with unknown outcome regardless of Kafka guarantees, so EOS does not make the charge exactly-once; it only makes the *event* exactly-once. The correct solution is passing a stable idempotency key (payment intent ID) to the gateway so redelivery returns the original result instead of charging twice. Separate the two knobs when reasoning about cost: `enable.idempotence=true` is essentially free and you should always have it on (it deduplicates producer retries), while transactions add per-commit coordinator round trips and are commonly measured in the 10-20% throughput range. Here you pay that for a guarantee the gateway has to provide anyway.
 
 **Q: How do you implement `SELECT FOR UPDATE SKIP LOCKED` and why is it needed for the outbox poller?**
 
@@ -847,7 +892,7 @@ A: During the outage, offsets stop advancing for partitions whose leaders are lo
 
 **Q: How do you handle schema evolution without breaking consumers?**
 
-A: Use JSON (or Avro with Schema Registry) and follow consumer-driven contract testing. JSON consumers must ignore unknown fields (`@JsonIgnoreProperties(ignoreUnknown=true)` — Jackson's default for `ObjectMapper`). Producers may freely add new optional fields. Removing or renaming a field requires a two-phase migration: (1) add new field as optional and deploy all consumers that handle it; (2) once all consumers are on the new version, drop the old field from producers. Avro with `BACKWARD` compatibility enforcement automates this check in CI.
+A: Use JSON (or Avro with Schema Registry) and follow consumer-driven contract testing. JSON consumers must ignore unknown fields. On Jackson 3 (Spring Boot 4's default) that is already the behaviour — `FAIL_ON_UNKNOWN_PROPERTIES` defaults to **false**; on Jackson 2 it defaulted to true and Spring Boot turned it off for you. Do not rely on either: annotate the DTO `@JsonIgnoreProperties(ignoreUnknown = true)` so the contract survives a hand-built `ObjectMapper`. Producers may freely add new optional fields. Removing or renaming a field requires a two-phase migration: (1) add new field as optional and deploy all consumers that handle it; (2) once all consumers are on the new version, drop the old field from producers. Avro with `BACKWARD` compatibility enforcement automates this check in CI.
 
 **Q: Why is message key choice critical for Kafka partitioning?**
 

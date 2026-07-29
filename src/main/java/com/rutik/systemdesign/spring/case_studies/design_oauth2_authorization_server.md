@@ -46,12 +46,18 @@ Active users:                      100,000
 Average sessions per user per day: 3
 Average token refreshes per session: 4 (15-min tokens, 1-hour sessions)
 Token requests per day:            100,000 × 3 × 4 = 1,200,000
-Peak multiplier (10×):             12,000,000 req/day → 139 req/s sustained, 1,390 req/s peak
+Sustained:                         1,200,000 / 86,400 = 13.9 req/s
+Peak multiplier (10×):             139 req/s
 ```
+
+That peak is what §1's "10,000 token requests/min" non-functional target provisions for
+(10,000/60 = 167 req/s), leaving ~20% headroom above the modelled peak. Note the daily total is
+1.2M requests, not 12M — the 10x multiplier applies to the instantaneous rate, not to the day.
 
 ### Storage
 ```
-Authorization codes: TTL = 60 seconds; at 139 req/s: 139 × 60 = 8,340 active codes in Redis
+Authorization codes: TTL = 60 s; at the 139 req/s peak: 139 × 60 = 8,340 concurrent codes
+                     (an upper bound — refresh-token grants mint no code)
 Refresh tokens:      TTL = 7 days; 100,000 users × 3 sessions = 300,000 active refresh tokens
 Refresh token size:  ~200 bytes each → 300,000 × 200 = 60 MB in Redis
 JWKS keys:           2–3 RSA-2048 or EC P-256 keys; ~5 KB total in config/database
@@ -60,7 +66,8 @@ JWKS keys:           2–3 RSA-2048 or EC P-256 keys; ~5 KB total in config/data
 ### Pod Sizing
 ```
 JWT signing (RSA-2048): ~2,000 signatures/s per CPU core
-139 req/s at P50 utilization: 1 core sufficient; 2 pods × 2 cores = 4× headroom
+Peak 139 req/s needs 0.07 of a core; 2 pods × 2 cores = 8,000 sig/s = 58× headroom
+  -> pods are sized by availability (survive losing one), never by signing throughput
 Memory per pod: 256 MB (Spring Authorization Server is not memory-hungry)
 ```
 
@@ -88,7 +95,7 @@ sequenceDiagram
     AuthServer->>Redis: verify code_challenge, delete code
     AuthServer-->>ClientApp: access token + refresh token
     ClientApp->>ResourceServer: API request with access token
-    ResourceServer->>ResourceServer: validate JWT locally (JWKS cached 1 hour)
+    ResourceServer->>ResourceServer: validate JWT locally (JWKS cached 5 min)
 ```
 
 ### Data Flow (Authorization Code + PKCE)
@@ -258,20 +265,21 @@ with TTL enforcement.
 @Configuration
 public class TokenStoreConfig {
 
+    // Spring Authorization Server ships exactly two OAuth2AuthorizationService
+    // implementations: InMemory and Jdbc. There is no Redis one on the classpath -- the
+    // project publishes a Redis *sample* you adapt, so this is code you own and test.
     @Bean
     public OAuth2AuthorizationService authorizationService(
             RegisteredClientRepository clients,
-            RedisConnectionFactory redisConnectionFactory) {
-        // RedisOAuth2AuthorizationService from spring-authorization-server community
-        // stores authorizations as JSON; TTL matches token lifetime
-        return new RedisOAuth2AuthorizationService(redisConnectionFactory, clients);
+            RedisTemplate<String, OAuth2Authorization> redisTemplate) {
+        return new RedisOAuth2AuthorizationService(redisTemplate, clients);
     }
 
     @Bean
     public OAuth2AuthorizationConsentService authorizationConsentService(
             RegisteredClientRepository clients,
-            RedisConnectionFactory redisConnectionFactory) {
-        return new RedisOAuth2AuthorizationConsentService(redisConnectionFactory, clients);
+            RedisTemplate<String, OAuth2AuthorizationConsent> redisTemplate) {
+        return new RedisOAuth2AuthorizationConsentService(redisTemplate, clients);
     }
 }
 ```
@@ -288,7 +296,10 @@ public class ResourceServerConfig {
         http.oauth2ResourceServer(oauth2 -> oauth2
             .jwt(jwt -> jwt
                 .jwkSetUri("https://auth.example.com/oauth2/jwks")
-                // JWKS is cached locally; re-fetched on cache miss (unknown kid) or 1-hour TTL
+                // Nimbus caches the key set for 5 minutes (JWKSourceBuilder
+                // DEFAULT_CACHE_TIME_TO_LIVE = 300_000 ms), refreshes 30 s ahead of expiry,
+                // and re-fetches on an unknown kid -- but rate-limits that to once per 30 s
+                // so an unknown-kid flood cannot be turned into a DoS on the JWKS endpoint.
             )
         );
         http.authorizeHttpRequests(auth -> auth
@@ -338,9 +349,9 @@ PKCE mandatory for all clients. Spring Authorization Server's `requireProofKey(t
 
 | Store | Suitable for | Limitation |
 |-------|-------------|-----------|
-| `InMemoryOAuth2AuthorizationService` | Single-pod dev/test | Lost on restart; no cross-pod sharing |
-| `JdbcOAuth2AuthorizationService` | Production multi-pod | DB write on every token operation |
-| Redis (community `RedisOAuth2AuthorizationService`) | Production high-throughput | Redis dependency; data loss on Redis failure |
+| `InMemoryOAuth2AuthorizationService` (ships) | Single-pod dev/test | Lost on restart; no cross-pod sharing |
+| `JdbcOAuth2AuthorizationService` (ships) | Production multi-pod | DB write on every token operation; needs a job to reap expired rows |
+| Redis (you write it, from the project's sample) | Production high-throughput | Not a supported artifact — your code, your bugs; data loss on Redis failure |
 
 **Decision:** Redis for authorization codes (60-second TTL; fast reads) + PostgreSQL for refresh
 tokens (7-day lifetime; need durability; survive Redis restart).
@@ -359,25 +370,32 @@ support ES256. Use EC P-256 for new deployments; keep RSA-2048 for compatibility
 
 ## 6. Real-World Implementations
 
-**Okta / Auth0:** Fully managed authorization servers built on OAuth 2.0/OIDC. They use RS256 JWT
-access tokens, refresh token rotation, and expose JWKS endpoints with key rotation built in.
-Auth0's documentation explicitly describes their 5-minute rolling JWKS cache at resource servers,
-requiring resource servers to re-fetch on unknown `kid` before rejecting a token.
+**Google:** publishes its signing keys at `https://www.googleapis.com/oauth2/v3/certs` and rotates
+them on a rolling basis, which is the reason the dual-key design in §4.3 is not optional for anyone
+consuming Google tokens: you cannot pin a key, and you must handle a `kid` you have never seen by
+re-fetching rather than rejecting. Google's published guidance is to respect the `Cache-Control`
+max-age on that endpoint rather than hard-coding a refresh interval — the fix §9 Pitfall 3 arrives
+at the hard way.
 
-**Google OAuth 2.0:** Uses JWT access tokens for Google APIs. The JWKS endpoint
-(`https://www.googleapis.com/oauth2/v3/certs`) is publicly cached. Google rotates signing keys
-every few days; resource servers are expected to re-fetch JWKS on `invalid_signature` errors or
-on `kid` miss. Google's token introspection endpoint (`tokeninfo`) allows opaque-token verification
-for legacy integrations.
+**Spring Authorization Server:** the official successor to the long-retired Spring Security OAuth2
+project, now versioned in lockstep with Spring Security (7.1 alongside Spring Security 7.1 and
+Spring Boot 4.1). Worth knowing what it deliberately is *not*: it is an authorization server
+library, not an identity provider. There is no user store, no admin UI, no MFA and no user
+federation in the box — §1 puts all of that out of scope precisely because the framework does too.
+If you want those, you want Keycloak, and the comparison below is really "library you embed" versus
+"product you operate".
 
-**Spring Authorization Server (Broadcom):** The official Spring OAuth2 server (GA since 2023,
-Spring Security 6.x). Used by enterprises building private OAuth2/OIDC infrastructure. LinkedIn,
-Pivotal, and major banking clients use it as the backend for internal API authorization. It ships
-with JDBC stores for production use and supports custom token customizers via `OAuth2TokenCustomizer`.
+**Keycloak:** the open-source alternative that inverts that trade — a full IdP with user federation,
+MFA, an admin console and live key rotation through the UI, at the cost of running a separate
+product with its own database, upgrade cadence and operational surface. Choose Spring Authorization
+Server when identity already lives somewhere else and you need to mint tokens against it; choose
+Keycloak when you need the identity system itself.
 
-**Keycloak (Red Hat):** Open-source IdP + authorization server. Uses Postgres-backed token store;
-implements refresh token rotation; supports key providers (RSA, EC, HMAC). Used by 1000+ enterprises.
-Keycloak's key management UI allows live key rotation with graceful expiry of old keys.
+**OAuth 2.1** remains an IETF draft (`draft-ietf-oauth-v2-1`) rather than a published RFC, but the
+substantive changes are already settled and already implemented by the major providers: PKCE
+required for all clients, the implicit and password grants removed, and exact string matching on
+redirect URIs. Building to it today is not early adoption; it is what §4.1's
+`requireProofKey(true)` and the absence of any implicit-grant configuration reflect.
 
 ---
 
@@ -385,10 +403,10 @@ Keycloak's key management UI allows live key rotation with graceful expiry of ol
 
 | Technology | Role | Notes |
 |------------|------|-------|
-| Spring Authorization Server 1.x | OAuth2 / OIDC server | Production GA; Spring Boot 3.x; replaces legacy Spring Security OAuth2 |
+| Spring Authorization Server 7.1 | OAuth2 / OIDC server | Versioned with Spring Security 7.1 / Spring Boot 4.1; successor to the retired Spring Security OAuth2 |
 | Nimbus JOSE+JWT | JWT encoding / JWKS | Bundled with Spring Authorization Server; handles RS256, ES256, PS256 |
-| Spring Security 6.x | Resource server filter chain | `oauth2ResourceServer()` DSL; JWKS auto-fetch + cache |
-| Redis (Lettuce) | Authorization code + consent store | Community `RedisOAuth2AuthorizationService` |
+| Spring Security 7.1 | Resource server filter chain | `oauth2ResourceServer()` DSL; JWKS auto-fetch + 5-min cache |
+| Redis (Lettuce) | Authorization code + consent store | Hand-written `OAuth2AuthorizationService`, adapted from the project's Redis sample |
 | PostgreSQL | Refresh token + client registration store | `JdbcOAuth2AuthorizationService`; survives Redis restart |
 | `spring-security-oauth2-jose` | JWT validation at resource server | Bundled; `NimbusJwtDecoder` with JWKS cache |
 
@@ -402,7 +420,7 @@ Keycloak's key management UI allows live key rotation with graceful expiry of ol
 
 **Steps:**
 1. Generate new key with new `kid` (e.g., `key-2024-09`).
-2. Add new key to `jwkSource()` alongside current key — resource servers cache JWKS for 1 hour.
+2. Add new key to `jwkSource()` alongside current key — resource servers cache JWKS for 5 minutes.
 3. Deploy auth server with both keys: new key is the default signer; old key retained in JWKS for verification.
 4. Wait 15 minutes (access token TTL) — all outstanding tokens signed by old key expire.
 5. Remove old key from `jwkSource()` and redeploy.
@@ -415,9 +433,10 @@ active key before removing the old key.
 
 ### Runbook 2: Refresh Token Reuse Attack Detected
 
-**Symptom:** `OAuth2AuthorizationService.save()` throws `OAuth2AuthorizationException` with
-`error=invalid_token, description=refresh token already invalidated`; authorization server revokes
-all tokens in the affected session family.
+**Symptom:** the token endpoint returns `400` with `error=invalid_grant` — Spring Authorization
+Server's response for a refresh token that is no longer active, which is what a rotated-away token
+becomes. Note that SAS invalidates the tokens of that authorization; it does not implement
+family-wide revocation across a user's other sessions, so that is a policy you add.
 
 **Diagnosis:**
 1. Check auth server logs for `principal_name` and `client_id` of the attacked session.
@@ -440,13 +459,13 @@ Require re-authentication.
 **Diagnosis:**
 1. Check auth server health: `GET /actuator/health`.
 2. Verify JWKS is reachable: `curl https://auth.example.com/oauth2/jwks`.
-3. Check if resource server's JWKS cache expired: default cache TTL in `NimbusJwtDecoder` is 5 minutes
-   for re-fetch; tokens already verified before the outage continue to work until cache expires.
+3. Check whether the resource server's JWKS cache has expired — the Nimbus default TTL behind
+   `NimbusJwtDecoder` is 5 minutes, with a refresh attempted 30 s before expiry.
 
-**Mitigation:** Resource servers using `NimbusJwtDecoder` with `jwkSetUri` cache the JWKS in memory.
-They only re-fetch when they encounter a `kid` they don't recognize or after the TTL. Tokens issued
-before the outage continue to be verified from cache — no immediate user impact if the JWKS endpoint
-goes down for < 5 minutes.
+**Mitigation:** Resource servers using `NimbusJwtDecoder` with `jwkSetUri` hold the JWKS in memory
+for 5 minutes and re-fetch either on an unknown `kid` or when the TTL lapses. So a JWKS outage
+shorter than ~5 minutes is invisible: existing tokens keep verifying from cache. Past that the
+cache goes cold and every request 401s, which is why this is a 5-minute budget, not an hour.
 
 **Resolution:** Deploy auth server in at least 2 pods behind a load balancer with `minReadySeconds=30`
 and readiness probe on `/actuator/health/readiness`. The JWKS endpoint must be available before
@@ -471,12 +490,20 @@ Use `@ConfigurationProperties` bound to `SPRING_SECURITY_OAUTH2_CLIENT_*` enviro
 
 ## 9. Common Pitfalls & War Stories
 
-**Pitfall 1: Clock Skew Between Auth Server and Resource Server (financial SaaS, 2022)**
-A resource server's clock ran 45 seconds ahead of the authorization server. JWT `iat` (issued-at)
-claims appeared to be in the future, causing the resource server's `NimbusJwtDecoder` to reject
-tokens with `Token was issued in the future`. Affected 100% of login attempts for 3 hours.
-Impact: $800K in lost transactions. Fix: add `clockSkew(Duration.ofSeconds(30))` to `JwtDecoder`
-configuration; ensure NTP sync across all nodes.
+**Pitfall 1: Clock Skew Beyond the Default Tolerance (financial SaaS, 2022)**
+Know what Spring actually validates before you debug this. `JwtTimestampValidator` — the only
+timestamp validator `JwtValidators.createDefault()` installs — reads exactly two claims, `exp`
+and `nbf`, and allows a **60-second** default skew in both directions (`DEFAULT_MAX_CLOCK_SKEW`).
+It never looks at `iat`, so a token that appears to have been *issued* in the future is not
+rejected by Spring, and a skew of a few tens of seconds is silently absorbed.
+
+What actually broke: a VM whose clock had drifted **four minutes** behind after NTP stopped, well
+past the 60-second allowance. Every token the auth server issued looked not-yet-valid, and the
+resource server returned 401 with `Jwt used before <nbf>` — the literal message from the validator,
+which is what to grep for. Fix: NTP is the fix. Widening the skew with
+`new JwtTimestampValidator(Duration.ofSeconds(90))` buys headroom but also extends the life of
+every expired token by the same amount, so it treats the symptom and weakens `exp` to do it.
+Alert on host clock offset instead.
 
 ---
 
@@ -524,10 +551,11 @@ Fix: enable `requireProofKey(true)` on all clients; mandated by OAuth 2.1 for al
 ### Token Signing Throughput
 
 ```
-RSA-2048 signing:  ~2,000 signatures/s per CPU core (Java 17, no HSM)
+RSA-2048 signing:  ~2,000 signatures/s per CPU core (no HSM)
 EC P-256 signing:  ~10,000 signatures/s per CPU core
-Peak token demand: 1,390 req/s (including token refresh)
-Cores needed (EC): ceil(1,390 / 10,000) = 1 core; 2 pods × 2 cores = 8× safety margin
+Peak token demand: 139 req/s (including token refresh)
+Cores needed (EC): 139 / 10,000 = 0.014 core; 2 pods × 2 cores = 40,000 sig/s = 288× margin
+  -> signing is never the constraint here; an HSM would be, at ~1,000 ops/s
 ```
 
 ### Redis Load (Authorization Codes)
@@ -541,9 +569,9 @@ Total Redis ops:  ~417 ops/s (negligible for a single r6g.small)
 ### PostgreSQL Load (Refresh Tokens)
 ```
 Active refresh tokens: 300,000 (100k users × 3 sessions)
-Writes per minute:     100 refreshes/min (at steady state)
-Reads per minute:      100 reads/min
-Postgres IOPS:         < 10 IOPS (far below even db.t3.micro capacity)
+Refreshes:             1,200,000/day / 1,440 min = 833/min = 13.9/s at steady state
+Each rotation:         1 read + 1 delete + 1 insert = ~42 ops/s
+Postgres IOPS:         well under 100 — the refresh-token store is never the bottleneck
 ```
 
 ---
@@ -573,7 +601,8 @@ endpoint at startup and cache it locally. To verify a JWT, the resource server r
 (key ID) claim from the JWT header, finds the matching public key in the cached JWKS, and verifies
 the JWT signature cryptographically. No network call is needed per request. If the `kid` is not
 in the cache (e.g., after a key rotation), the resource server re-fetches JWKS once to handle the
-rotation. Typical JWKS cache TTL is 1 hour; Spring's `NimbusJwtDecoder` re-fetches on unknown `kid`.
+rotation. The Nimbus default behind `NimbusJwtDecoder` is a 5-minute cache TTL with a refresh 30 s ahead
+of expiry, plus an on-demand re-fetch when an unknown `kid` appears, rate-limited to once per 30 s.
 
 **Q: What is refresh token rotation and how does it detect token theft?**
 With rotation, every successful token refresh consumes the current refresh token and issues a new
@@ -588,9 +617,10 @@ attacker a week-long access window.
 Maintain at least two keys in the JWKS endpoint simultaneously: the new active key (used for
 signing new tokens) and the previous key (retained for verifying existing tokens). Resource
 servers cache the full JWKS with both keys. Tokens signed by the old key include the old `kid`
-in their header; resource servers verify against the matching key. After one full access token
-TTL (15 minutes for a 15-minute token), all tokens signed by the old key have expired naturally.
-Only then should the old key be removed from the JWKS response.
+in their header; resource servers verify against the matching key. Wait for two things before
+removing the old key: one full access-token TTL (15 minutes), so every token it signed has expired,
+plus one JWKS cache TTL (5 minutes), so no resource server is still serving the old key set from
+cache. Removing it earlier produces 401s for up to that window.
 
 **Q: What is the difference between `OAuth2AuthorizationService` backed by Redis vs JDBC?**
 Redis: stores authorization codes, access tokens, and refresh tokens as hash values with TTL-based
@@ -604,9 +634,10 @@ long-lived refresh tokens where durability matters.
 Run at least 2 pods behind a load balancer. The authorization server is mostly stateless for
 JWT verification (keys loaded from config). State (codes, tokens) must be centralized in Redis
 or JDBC — not in-memory. For multi-region HA: deploy an authorization server per region with
-a shared token store (Redis Global Datastore or Aurora Global Database). JWKS endpoints are
-cached at resource servers for up to 1 hour, so a brief auth server outage (< 1 hour) doesn't
-invalidate existing tokens.
+a shared token store (ElastiCache Global Datastore or Aurora Global Database). Resource servers
+cache the JWKS for 5 minutes, so an auth-server outage shorter than that is invisible to already-
+issued tokens — a real but much smaller cushion than an hour, and worth widening deliberately with
+`NimbusJwtDecoder.withJwkSetUri(uri).cache(cache)` if you want a longer grace period.
 
 **Q: How do you implement per-resource fine-grained authorization using OAuth2 scopes?**
 Scopes defined at authorization time (`read:orders`, `write:payments`) are embedded as JWT claims

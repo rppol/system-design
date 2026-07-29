@@ -25,8 +25,11 @@ since 2018) and integrates directly with Spring Boot Actuator for metrics and he
 ```
 Retry( CircuitBreaker( RateLimiter( TimeLimiter( Bulkhead( Function ) ) ) ) )
 ```
-The circuit breaker must be outside the retry: if the CB is open, there is no point retrying.
-The bulkhead is innermost: it limits actual concurrent calls, independent of retries.
+This is Resilience4j's documented **default aspect order**, not a suggestion — Retry is the
+outermost aspect, so a retried call gets a fresh circuit-breaker decision each attempt. Override it
+per aspect with `resilience4j.retry.retry-aspect-order`,
+`resilience4j.circuitbreaker.circuit-breaker-aspect-order` and the matching properties for the
+other three. The bulkhead is innermost: it limits actual concurrent calls, independent of retries.
 
 ---
 
@@ -44,7 +47,13 @@ Think of each pattern as a layer of electrical protection:
 **Key insight:** A retry without a circuit breaker amplifies load on a failing downstream. If
 50 callers each retry 3 times, a failing service receives 150 calls instead of 50 — making
 recovery harder. The circuit breaker's open state is what makes retry safe: once the CB trips,
-retries stop and a fallback is served instantly.
+the inner call is rejected instantly and a fallback is served without touching the network.
+
+But that only holds if you tell Retry to stop. Retry sits *outside* the circuit breaker in the
+default order, and its default exception set is "retry everything" — so an open circuit produces
+`CallNotPermittedException`, and Retry dutifully burns its whole budget re-asking a breaker that is
+guaranteed to say no. Put `CallNotPermittedException` in the retry's `ignoreExceptions` and the
+combination behaves the way people assume it already does.
 
 ---
 
@@ -226,34 +235,46 @@ public class PaymentService {
 
 ### 4.4 Broken pattern — Retry amplifying load on an open circuit
 
+The real defect is not the nesting — Retry outside CircuitBreaker is Resilience4j's shipped
+default and cannot be changed by reordering annotations. It is that Retry, by default, retries
+*every* exception, including the `CallNotPermittedException` an open breaker throws.
+
 **Broken:**
-```java
-// BROKEN: Retry wraps CircuitBreaker
-// When CB is OPEN, Retry keeps retrying — every retry immediately gets CallNotPermittedException
-// but retry counts it as a failure and re-tries → rapid fire of 3 failed attempts
-@Retry(name = "payment-service")           // outermost — retries CB failures too
-@CircuitBreaker(name = "payment-service")  // innermost
-public PaymentResult charge(Order order) {
-    return paymentClient.charge(order);
-}
+```yaml
+# BROKEN: retryExceptions unset means "retry anything". When the CB is OPEN, each of the 3
+# attempts gets an instant CallNotPermittedException and Retry fires again -- three rejections
+# in microseconds, zero recovery value, and the retry metrics report failures that never
+# reached the network.
+resilience4j:
+  retry:
+    instances:
+      payment-service:
+        maxAttempts: 3
 ```
 
 **Fixed:**
-```java
-// CORRECT: CircuitBreaker wraps Retry
-// CB is outer: if CB is OPEN, the call is rejected before Retry even tries
-// If CB is CLOSED: Retry retries the actual call (transient failures only)
-@CircuitBreaker(name = "payment-service", fallbackMethod = "chargeFallback")  // outermost
-@Retry(name = "payment-service")                                               // innermost
-public PaymentResult charge(Order order) {
-    return paymentClient.charge(order);
-}
+```yaml
+# CORRECT: an open circuit ends the attempt immediately; only genuinely transient
+# failures consume the retry budget.
+resilience4j:
+  retry:
+    instances:
+      payment-service:
+        maxAttempts: 3
+        retryExceptions:
+          - java.net.ConnectException
+          - java.util.concurrent.TimeoutException
+        ignoreExceptions:
+          - io.github.resilience4j.circuitbreaker.CallNotPermittedException
+          - io.github.resilience4j.bulkhead.BulkheadFullException
 ```
 
-Annotation order in Resilience4j-Spring corresponds to the AOP proxy stack: the first annotation
-is the innermost decorator. The recommended composition is CB outer, Retry inner — but in
-annotations, list CB first because Spring's AOP wraps in reverse annotation order.
-**Verify with a test** — log the state machine state to confirm order.
+**Swapping the annotation lines changes nothing.** Spring AOP advice order comes from each
+aspect's `Ordered` value, not from the order annotations appear on the method. If you genuinely
+need a different nesting, set the `*-aspect-order` properties — and note that the default exists
+for a reason: with Retry outermost, an attempt that fails transiently is re-evaluated by the
+breaker as a separate call, which is what keeps the breaker's failure-rate window honest.
+**Verify with a test** — assert the breaker's state and the retry metrics together.
 
 ---
 
@@ -381,50 +402,55 @@ so the overhead of a dedicated `ThreadPoolBulkhead` is rarely justified. See
 
 ## 7. Real-World Examples
 
-### Netflix — Hystrix to Resilience4j migration
+### Netflix Hystrix — what it got right, and why the successor looks different
 
-Netflix open-sourced Hystrix in 2012, which popularised the circuit breaker pattern. They
-placed Hystrix in maintenance mode in 2018, recommending Resilience4j as the successor.
-The key difference: Hystrix used a `ThreadPoolBulkhead` for every dependency (mandatory),
-adding ~5–10 ms thread-switch overhead per call. Resilience4j's `SemaphoreBulkhead` adds
-~50 ns. Netflix's own migration on their API gateway from Hystrix to Resilience4j reduced
-per-request overhead from ~8ms to <0.1ms. Reference: Netflix Engineering blog (2019).
+Netflix open-sourced Hystrix in 2012 and it is the reason this pattern is a household name. It
+went into maintenance mode in November 2018, with Resilience4j named in its own README as the
+recommended alternative. The design difference worth understanding: Hystrix isolated every
+dependency behind a **dedicated thread pool** by default, so a slow dependency could not consume
+the caller's threads — real isolation, paid for with a thread hand-off on every single call.
+Resilience4j makes that opt-in (`ThreadPoolBulkhead`) and defaults to a semaphore, which counts
+concurrent calls without moving work between threads. On virtual threads the case for the thread
+pool weakens further still: the thing it was protecting — a scarce platform thread — is no longer
+scarce.
 
-### Zalando — Spring Cloud Gateway with Resilience4j circuit breakers
+### AWS — the arguments against blanket fallbacks and static retry
 
-Zalando's API gateway routes 500M+ requests/day to 200+ downstream services. Each route has
-its own Resilience4j circuit breaker instance configured in Spring Cloud Gateway's
-`ResilienceCircuitBreakerFilter`. When a downstream service trips its circuit breaker (>50%
-failures over 30 calls), the gateway immediately returns a cached last-known-good response
-(stored in Redis) for read endpoints, and a 503 with a `Retry-After` header for write endpoints.
-This eliminated cascading failures during the 2021 Black Friday sale when 3 services degraded
-simultaneously. Reference: Zalando Engineering blog (2022).
+Two pieces from the Amazon Builders' Library reshape how these patterns get configured. "Timeouts,
+retries and backoff with jitter" is the origin of the jitter advice below, and its central
+finding is that backoff alone does not fix a thundering herd — it merely moves the spike, because
+every client backs off by the *same* amount. Randomness is what spreads it, and full jitter
+(`random(0, min(cap, base × 2^attempt))`) spreads it best. Its second point is subtler and often
+missed: retries multiply load exactly when the system is least able to absorb it, so a retry
+budget matters more than a retry count — cap retries as a *fraction of total traffic*, not per
+call site.
 
-### Shopify — Retry with jitter preventing thundering herd
+The companion piece on fallbacks argues something genuinely counterintuitive: a fallback path is
+the code you exercise least and therefore trust least, and it fails at precisely the moment the
+primary path already has. That is a direct warning about §4.2's `PaymentResult.pending()` — it is
+safe only because it does nothing but return a value. A fallback that reads a replica, hits a
+different region, or writes a queue is a second system in the failure path, and needs the same
+load testing as the primary.
 
-During Shopify's 2020 Black Friday, a database node became temporarily unavailable (30s). All
-services retrying with fixed 500ms backoff created a thundering herd: at t=500ms, all retries
-fired simultaneously, overloading the recovered node. Fix: `fullJitter` retry: each retry waits
-between 0 and `min(waitDuration × 2^attempt, maxBackoff)` — spreading retries across the
-backoff window. With 1,000 concurrent retriers and maxBackoff=10s, the retry rate drops from
-1,000/500ms burst to ~100/sec spread. Reference: Shopify Engineering blog (2020).
+### Cell-based architecture — the bulkhead at infrastructure scale
 
-### Amazon — Cell-based architecture with bulkheads
+The `Bulkhead` in this library limits concurrent calls inside one JVM. The same idea at the fleet
+level is cell-based architecture: partition the fleet into independent cells, route each customer
+to exactly one, and a failure — a poison request, a bad deploy, an overloaded dependency — is
+contained to the fraction of customers in that cell rather than taking the service down. Same
+principle, three orders of magnitude apart in granularity, and worth naming in an interview
+because it shows the pattern is about blast radius, not about semaphores.
 
-Amazon's Cell-Based Architecture divides the order processing fleet into isolated "cells" of
-~1,000 servers. Resilience4j-style bulkheads between cells ensure that a failure in Cell A
-(e.g., a dependent microservice becoming slow) does not consume all threads in Cell B.
-This limits the blast radius of any single failure to <5% of total capacity. Reference:
-Amazon Builder's Library, "Avoiding cascading failures in distributed systems" (2019).
+### Time limiter — the arithmetic that makes it non-optional
 
-### LinkedIn — Time limiter preventing zombie threads
-
-LinkedIn's Feed service experienced a production incident where a downstream user-activity API
-returned responses after 45 seconds (a silent slowdown caused by a database index contraction).
-Without a time limiter, threads accumulated in `WAITING` state — 200 threads tied up waiting
-for 45s responses at 50 req/s = 9,000 zombie threads in 3 minutes → OOM → pod crash.
-Fix: `TimeLimiter(timeoutDuration=3s)` converts the 45s response to a `TimeoutException` after
-3s, freeing the thread immediately. Reference: LinkedIn Engineering blog (2020).
+A downstream that fails fast is easy. A downstream that *succeeds slowly* is what kills services,
+because nothing errors and nothing alerts. Take a 200-thread pool, a dependency that degrades from
+100 ms to 45 s, and 50 req/s of demand: threads are all consumed in 200/50 = **4 seconds**, and
+from then on the service's effective throughput is 200/45 = **4.4 req/s** against 50 arriving —
+the queue grows by 45 requests every second until something bursts. No exception is thrown at any
+point. A `TimeLimiter` at 3 s converts the slow success into a `TimeoutException`, which caps
+thread occupancy at 3 s and lets the circuit breaker's `slowCallRateThreshold` see the degradation
+and open. Time limiter and slow-call detection are the pair that make slow failures visible.
 
 ---
 
@@ -545,11 +571,11 @@ A single `payment-service` circuit breaker instance counts failures from ALL end
 
 | Tool | Role | Notes |
 |------|------|-------|
-| resilience4j-spring-boot3 | Spring Boot 3 auto-configuration | Includes all 5 patterns + Actuator integration |
+| resilience4j-spring-boot3 | Spring Boot auto-configuration | Still the artifact name on Boot 4 (it targets Spring Framework 6+); includes all 5 patterns + Actuator integration |
 | resilience4j-micrometer | Metrics integration | Publishes CB state, call metrics to Micrometer |
 | resilience4j-reactor | Reactive support | Decorates `Mono`/`Flux` with CB/Retry for WebFlux |
-| Spring Cloud Circuit Breaker | Abstraction over R4j and Hystrix | `CircuitBreakerFactory` for portability |
-| Spring Cloud Gateway `ResilienceCircuitBreakerFilter` | Gateway-level CB | Per-route circuit breaker with `fallbackUri` |
+| Spring Cloud Circuit Breaker | Vendor-neutral abstraction (Resilience4j is the reference implementation; the Hystrix binding was dropped) | `CircuitBreakerFactory` for portability |
+| Spring Cloud Gateway `CircuitBreaker` filter | Gateway-level CB | `SpringCloudCircuitBreakerResilience4JFilterFactory`; per-route breaker with `fallbackUri` |
 | `io.github.resilience4j:resilience4j-all` | Core library | Include all patterns; Spring Boot starter auto-configures them |
 | Chaos Monkey for Spring Boot | Test CB/Retry under failure | `chaos.monkey.enabled=true` injects latency/errors |
 | Testcontainers + WireMock | Integration tests for R4j patterns | Simulate downstream failures; verify CB state transitions |
@@ -579,16 +605,19 @@ the CB returns to CLOSED. If probes still fail at the threshold rate, the CB ret
 This state machine prevents both perpetual failure (open never closes) and premature recovery
 (half-open is cautious about declaring recovery).
 
-**Q3. Why must the circuit breaker be placed outside (around) the retry decorator?**
-If retry is outside the circuit breaker, every retry attempt hits the circuit breaker — when
-the CB is OPEN, each retry gets an instant `CallNotPermittedException`. The retry sees this as
-a retriable exception and fires again immediately, creating a rapid sequence of N failures in
-rapid succession where N is `maxAttempts`. This adds zero recovery benefit (the downstream is
-not called) but wastes CPU and creates misleading failure metrics. With circuit breaker outside
-retry, the CB catches the result of all retry attempts as a single decision: if all retries
-fail, the CB counts it as one failure. If the CB trips open, the outer CB rejects the call
-immediately without any retry attempts. In Resilience4j annotations, list CB annotation
-first (it wraps outermost) and Retry annotation second (it wraps innermost).
+**Q3. In what order does Resilience4j compose its aspects, and what breaks if you ignore it?**
+Retry is the outermost aspect by default: `Retry( CircuitBreaker( RateLimiter( TimeLimiter(
+Bulkhead( Function ) ) ) ) )`. So each retry attempt makes a fresh trip through the circuit
+breaker rather than the breaker seeing one aggregate outcome — which is what keeps the breaker's
+failure-rate window measuring actual calls. The trap is that Retry's default exception set is
+"everything", so once the breaker is OPEN each attempt gets an instant `CallNotPermittedException`
+and Retry immediately fires again, burning `maxAttempts` rejections in microseconds for zero
+recovery benefit and polluting the retry metrics with failures that never reached the network.
+The fix is exception classification, not reordering: put `CallNotPermittedException` (and
+`BulkheadFullException`) in the retry's `ignoreExceptions`. Reordering the annotations on the
+method does nothing at all — Spring AOP orders advice by each aspect's `Ordered` value, which
+Resilience4j exposes as `resilience4j.retry.retry-aspect-order` and its siblings, so that is the
+only knob that actually changes the nesting.
 
 **Q4. When should you use `SemaphoreBulkhead` vs `ThreadPoolBulkhead`?**
 `SemaphoreBulkhead` limits concurrent calls by blocking the calling thread in the semaphore
@@ -701,7 +730,7 @@ For a payment service with 100ms typical response, 500ms P99, and 5,000 req/min 
 
 ## 13. Best Practices
 
-- **Use correct composition order**: Retry( CircuitBreaker( RateLimiter( TimeLimiter( Bulkhead( fn ) ) ) ) )
+- **Keep the default composition order** — Retry( CircuitBreaker( RateLimiter( TimeLimiter( Bulkhead( fn ) ) ) ) ) — and add `CallNotPermittedException`/`BulkheadFullException` to the retry's `ignoreExceptions` so an open circuit ends the attempt instead of consuming the retry budget
 - **Define fallbacks for every exception type** that Resilience4j can throw:
   `CallNotPermittedException`, `BulkheadFullException`, `RequestNotPermitted`, `TimeoutException`
 - **Use separate CB instances per logical operation** — not one per downstream service
@@ -732,23 +761,25 @@ The key configuration from that study:
 spring:
   cloud:
     gateway:
-      routes:
-        - id: payment-service
-          uri: lb://payment-service
-          predicates:
-            - Path=/api/payment/**
-          filters:
-            - name: CircuitBreaker
-              args:
-                name: payment-service
-                fallbackUri: forward:/fallback/payment
-            - name: Retry
-              args:
-                retries: 1
-                methods: GET         # Only retry idempotent methods
-                backoff:
-                  firstBackoff: 50ms
-                  maxBackoff: 500ms
+      server:
+        webflux:                          # Gateway 5 namespaces routes by server flavour
+          routes:
+            - id: payment-service
+              uri: lb://payment-service
+              predicates:
+                - Path=/api/payment/**
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: payment-service
+                    fallbackUri: forward:/fallback/payment
+                - name: Retry
+                  args:
+                    retries: 1
+                    methods: GET          # Only retry idempotent methods
+                    backoff:
+                      firstBackoff: 50ms
+                      maxBackoff: 500ms
 ```
 
 **Production incident prevented (from §9 of that case study):**

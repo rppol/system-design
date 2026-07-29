@@ -39,11 +39,16 @@
 
 ### Traffic and Redis Load
 ```
-50,000 req/s (peak) × 1 Redis command (Lua script) = 50,000 Redis ops/s
+50,000 req/s (peak) = 50,000 EVALSHA round trips, but the server does more work than that:
+  each script body runs TIME + HMGET + HSET + EXPIRE = 4 internal commands
+  -> 50,000 × 4 = 200,000 Redis ops/s of actual server work
 Redis single-node throughput:  ~100,000 ops/s (AWS ElastiCache r6g.large)
 Redis Cluster (3 shards):      ~300,000 ops/s
-Safety headroom at 50k req/s:  50% utilization on 3-shard cluster
+Utilization at 50k req/s:      200,000 / 300,000 = 67% on a 3-shard cluster
 ```
+
+Count the *internal* commands, not the round trips. Sizing off "one EVALSHA per request"
+would have read 17% and undersized this cluster by 4x.
 
 ### Redis Memory per Rate-Limit Key
 ```
@@ -120,14 +125,17 @@ time, decrement, and return — all as one unit.
 -- ARGV[1]: refill rate (tokens per second, float)
 -- ARGV[2]: bucket capacity (max tokens, float)
 -- ARGV[3]: requested tokens (usually 1)
--- ARGV[4]: current time (epoch seconds, float — from Lua time() would be simpler but
---           we pass from the app to avoid RANDOMKEY restrictions in cluster mode)
+--
+-- Time comes from the SERVER, not the caller. Redis has replicated scripts by effects
+-- since 5.0, which lifted the ban on non-deterministic commands, so TIME is legal here --
+-- and using it removes every pod's clock from the refill math (see Pitfall 3).
 
 local key = KEYS[1]
 local rate = tonumber(ARGV[1])
 local capacity = tonumber(ARGV[2])
 local requested = tonumber(ARGV[3])
-local now = tonumber(ARGV[4])
+local t = redis.call("TIME")
+local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
 
 local bucket = redis.call("HMGET", key, "tokens", "last_refill")
 local tokens = tonumber(bucket[1])
@@ -153,11 +161,23 @@ end
 
 -- Store updated state; TTL = ceiling(capacity / rate) * 2 for auto-expiry of idle keys
 local ttl = math.ceil(capacity / rate) * 2
-redis.call("HMSET", key, "tokens", tokens, "last_refill", now)
+redis.call("HSET", key, "tokens", tokens, "last_refill", now)
 redis.call("EXPIRE", key, ttl)
 
-return {allowed, math.floor(remaining), math.ceil(last_refill + capacity / rate)}
+-- Reset = when the caller will next have a whole token. Compute it from NOW; deriving it
+-- from last_refill returns a timestamp in the past for any idle key, which the filter then
+-- turns into a negative Retry-After.
+local reset = now
+if allowed == 0 then
+    reset = now + (requested - tokens) / rate
+end
+
+return {allowed, math.floor(remaining), math.ceil(reset)}
 ```
+
+Note `HSET`, not `HMSET` — `HMSET` has been deprecated since Redis 4.0 in favour of variadic
+`HSET`. Note also that Lua numbers are truncated to integers on the way back to the client,
+which is why `remaining` is floored explicitly rather than left to chance.
 
 ### 4.2 Broken Pattern: Non-Atomic Redis Check-and-Decrement
 
@@ -192,7 +212,8 @@ public class RedisRateLimiter {
         local rate = tonumber(ARGV[1])
         local capacity = tonumber(ARGV[2])
         local requested = tonumber(ARGV[3])
-        local now = tonumber(ARGV[4])
+        local t = redis.call("TIME")
+        local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
         local bucket = redis.call("HMGET", key, "tokens", "last_refill")
         local tokens = tonumber(bucket[1])
         local last_refill = tonumber(bucket[2])
@@ -210,9 +231,13 @@ public class RedisRateLimiter {
             allowed = 1
         end
         local ttl = math.ceil(capacity / rate) * 2
-        redis.call("HMSET", key, "tokens", tokens, "last_refill", now)
+        redis.call("HSET", key, "tokens", tokens, "last_refill", now)
         redis.call("EXPIRE", key, ttl)
-        return {allowed, math.floor(remaining), math.ceil(last_refill + capacity / rate)}
+        local reset = now
+        if allowed == 0 then
+            reset = now + (requested - tokens) / rate
+        end
+        return {allowed, math.floor(remaining), math.ceil(reset)}
         """;
 
     private final RedisScript<List<Long>> script =
@@ -225,15 +250,13 @@ public class RedisRateLimiter {
     }
 
     public RateLimitResult tryAcquire(String key, double tokensPerSecond, double capacity) {
-        String nowSeconds = String.valueOf(System.currentTimeMillis() / 1000.0);
         try {
             List<Long> result = redisTemplate.execute(
                 script,
                 List.of(key),
                 String.valueOf(tokensPerSecond),
                 String.valueOf(capacity),
-                "1",
-                nowSeconds
+                "1"
             );
             boolean allowed   = result.get(0) == 1L;
             long remaining    = result.get(1);
@@ -252,7 +275,15 @@ public class RedisRateLimiter {
 
 ```java
 @Component
-@Order(-100)  // Run before Spring Security
+@Order(-101)  // Spring Security's chain sits at spring.security.filter.order = -100.
+              // -100 here would be a TIE, and relative order between two beans of equal
+              // order is undefined — the limiter would run before Security only by luck.
+              //
+              // The cost of running first: getUserPrincipal() is still null, so the key
+              // resolver can only use the API key header or the IP. That is the right
+              // trade for a public API — an unauthenticated flood is rejected before it
+              // reaches JWT parsing and a user lookup. If you need per-USER buckets,
+              // move this to @Order(0) and accept that every request pays for auth first.
 public class RateLimitFilter extends OncePerRequestFilter {
 
     private final RedisRateLimiter rateLimiter;
@@ -278,9 +309,13 @@ public class RateLimitFilter extends OncePerRequestFilter {
         response.setHeader("X-RateLimit-Reset",     String.valueOf(result.resetAtEpochSeconds()));
 
         if (!result.allowed()) {
-            response.setHeader("Retry-After",
-                String.valueOf(result.resetAtEpochSeconds() - System.currentTimeMillis() / 1000));
-            response.sendError(HttpServletResponse.SC_TOO_MANY_REQUESTS, "Rate limit exceeded");
+            // Retry-After is a non-negative delta-seconds (RFC 9110 10.2.3) — clamp it.
+            long retryAfter = Math.max(1,
+                result.resetAtEpochSeconds() - System.currentTimeMillis() / 1000);
+            response.setHeader("Retry-After", String.valueOf(retryAfter));
+            // jakarta.servlet.http.HttpServletResponse has no SC_TOO_MANY_REQUESTS constant
+            // (its SC_* set predates RFC 6585) — use Spring's HttpStatus enum.
+            response.sendError(HttpStatus.TOO_MANY_REQUESTS.value(), "Rate limit exceeded");
             return;
         }
 
@@ -360,7 +395,7 @@ rate-limit:
 |-----------|---------------|----------|------------------|----------------|
 | Fixed Window | Allows 2× at boundary | Low | 1 INCR + EXPIRE | ~50 bytes |
 | Sliding Window Log | Exact | High | ZADD + ZCARD + ZREMRANGEBYSCORE | O(requests) |
-| Token Bucket (chosen) | Smooth burst up to capacity | High | HMSET (2 fields) | ~100 bytes |
+| Token Bucket (chosen) | Smooth burst up to capacity | High | HSET (2 fields) | ~100 bytes |
 | Leaky Bucket | No burst | Exact | LPUSH + LLEN | O(requests) |
 
 **Decision:** Token bucket. It allows burst up to `capacity` tokens but refills smoothly,
@@ -413,10 +448,13 @@ The TTL auto-expiry prevents memory leaks for inactive clients.
 
 ## 6. Real-World Implementations
 
-**Stripe (public API platform):** Token bucket per API key; limits published in documentation
-(100 req/s for most endpoints, 25 req/s for search). Response headers include `Retry-After`
-and `X-RateLimit-*`. Redis Cluster backs the counters; the Lua script is the same token bucket
-pattern described here. Degraded mode falls back to per-pod in-memory counters.
+**Stripe (public API platform):** publishes hard numbers — 100 requests/second in live mode,
+25/second in a sandbox, and a separate 20 read/second budget for the Search API. Two things are
+worth copying. The separate, much tighter Search budget is the same reasoning as the
+`/api/v1/export` override in §4.6: expensive endpoints get their own bucket, not a share of the
+global one. And Stripe's own guidance to callers is to run a *client-side* token bucket rather
+than retry into a 429 — the limiter on each side of the wire, which is why §11's thundering-herd
+answer matters as much as the server-side script.
 
 **GitHub API:** Fixed window (5000 requests per hour per token for authenticated requests, 60 for
 unauthenticated). Returns `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` in
@@ -427,15 +465,21 @@ clients to compute exact retry timing.
 Supports fixed window and sliding window; the Redis backend uses the same Lua atomic pattern. Kong
 exposes the plugin via declarative config, which is equivalent to the `RateLimitProperties` approach.
 
-**Spring Cloud Gateway:** Built-in `RequestRateLimiter` GatewayFilter uses `ReactiveRedisRateLimiter`
-— which implements token bucket via a Lua script almost identical to the one above, documented in
-the Spring Cloud Gateway source code. The filter is configured per route via `application.yml`
-or programmatically with `RouteLocatorBuilder`.
+**Spring Cloud Gateway:** the built-in `RequestRateLimiter` filter is backed by
+`org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter`, which runs a token-bucket
+Lua script over a `ReactiveStringRedisTemplate` — the same algorithm as above, configured with
+`replenishRate`, `burstCapacity` and `requestedTokens` per route in `application.yml` or via
+`RouteLocatorBuilder`. If your stack is already Gateway, use it rather than the filter here; the
+custom version earns its place only when you need per-endpoint keys the filter cannot express.
 
-**Cloudflare Rate Limiting:** Operates at the edge (PoP level); distributed across 250+ cities.
-Uses a sliding window log stored in a sharded key-value store — not Redis. Their 2022 engineering
-blog describes how they handle clock skew across PoPs by accepting ±50 ms drift as a precision
-trade-off in exchange for zero coordination between PoPs.
+**Cloudflare Rate Limiting:** the interesting counter-design, because it refuses to store a log.
+Rather than keeping a timestamp per request, each key holds just two counters — this window and
+the previous one — and the current rate is estimated by weighting the previous window by how far
+into the current one you are: with a 50 req/min limit, 42 requests last minute and 18 so far in
+this minute at the 15-second mark gives `42 × (60-15)/60 + 18 = 49.5`. Cloudflare's published
+measurement over 400 million requests from 270,000 sources put the average gap between the real
+and approximated rate at 6%, with 0.003% of requests wrongly allowed. That is the trade this
+design does not take: exact accounting per key, at the cost of state per key.
 
 ---
 
@@ -446,8 +490,8 @@ trade-off in exchange for zero coordination between PoPs.
 | Redis (AWS ElastiCache) | Shared counter store | Lua script atomicity; 100k ops/s per r6g.large node |
 | `spring-data-redis` | `RedisTemplate` + `RedisScript` | DefaultRedisScript caches SHA1 digest; avoids re-sending script every call |
 | Spring Cloud Gateway | `RequestRateLimiter` filter | Production-grade; built-in token bucket via Lua |
-| Resilience4j RateLimiter | Per-pod in-process limiter | Complements Redis limiter as local fallback; `SemaphoreBulkhead` mode |
-| Bucket4j | Java token bucket library | Redis-backed via `JCache` or `RedisProxyManager`; alternative to custom Lua |
+| Resilience4j RateLimiter | Per-pod in-process limiter | Complements the Redis limiter as the fail-open fallback; permits-per-period semantics, no Redis dependency |
+| Bucket4j | Java token bucket library | Distributed via a `ProxyManager` (Lettuce, Redisson or JCache backends); alternative to hand-written Lua |
 | Micrometer | Rate-limit metrics | `Counter` for allowed/denied; `Timer` for Lua execution time |
 
 ---
@@ -558,20 +602,22 @@ The Lua script's `now` argument was generated by the application pod via `System
 Two pods with a 500 ms NTP clock skew computed different elapsed times since last refill. One pod
 always refilled 0.5 × `rate` tokens more than the other, allowing that pod's clients 5% more
 requests. Over 24 hours, select clients consistently received 108 req/s against a 100 req/s limit.
-Fix: use `redis.call("TIME")` (returns server time) inside the Lua script, eliminating the
-dependency on application-side clock. (Note: Redis TIME command is non-deterministic so normally
-not allowed in EVAL, but since Redis 7.0 it's allowed with `allow-unsafe-lua-time=yes`, or
-use `Instant.now()` normalized to the Redis server's reported time on first call.)
+Fix: call `redis.call("TIME")` inside the script (§4.1 does). There is exactly one clock in the
+system then, and it is the one the bucket state was written against. The old objection — that
+`TIME` is non-deterministic and therefore banned before a write — applied to *verbatim* script
+replication, where replicas re-executed the script body. Redis has replicated scripts by their
+effects since 5.0 (the default) and dropped verbatim replication entirely in 7.0, which lifted
+the restriction: `TIME` and `SRANDMEMBER` may be called freely anywhere in a script.
 
 ---
 
 **Pitfall 4: RedisTemplate ConnectionPool Exhausted During Lua Execution (e-commerce, 2023)**
 At 10x normal traffic, the `Lettuce` connection pool exhausted under `RedisRateLimiter` load.
-The pool had `maxTotal=8` (default); at 5,000 concurrent requests, all 8 connections were
+The pool had `max-active=8` (the commons-pool2 default that Boot applies once Lettuce pooling is switched on); at 5,000 concurrent requests, all 8 connections were
 executing Lua scripts concurrently, and new requests waited 2 seconds for a connection.
-Application latency spiked to 2.3 s P99. Fix: increase `lettuce.pool.max-active=50` in
-application properties; or switch to a non-blocking `ReactiveRedisTemplate` that uses a single
-connection per event-loop thread.
+Application latency spiked to 2.3 s P99. Fix: raise `spring.data.redis.lettuce.pool.max-active`,
+or better, turn pooling off and let Lettuce do what it does by default — multiplex every command
+over one shared connection, which is what it was designed for and needs no pool at all.
 
 ---
 
@@ -591,11 +637,11 @@ not the full URI.
 
 ```
 ops_per_second = peak_req_per_second × average_Lua_ops_per_call
-                 (HMGET=1, HMSET=1, EXPIRE=1 → 3 Redis ops per Lua call)
+                 (TIME=1, HMGET=1, HSET=1, EXPIRE=1 → 4 Redis ops per Lua call)
 
-Redis throughput needed = 50,000 req/s × 3 = 150,000 Redis ops/s
+Redis throughput needed = 50,000 req/s × 4 = 200,000 Redis ops/s
 ElastiCache r6g.large capacity: ~100,000 ops/s
-Required nodes: ceil(150,000 / 100,000) = 2 nodes (3-node cluster for HA)
+Required nodes: ceil(200,000 / 100,000) = 2 nodes (3-node cluster for HA)
 ```
 
 ### Memory per Key
@@ -607,10 +653,13 @@ Memory: 50,000 × 70 bytes = 3.5 MB (trivial)
 
 ### Connection Pool Sizing
 ```
-Concurrent requests per pod:    500 (Tomcat default threads)
-Redis call duration P99:         2 ms
-Concurrent Redis connections: 500 × 0.002 = 1 active at any moment + 10× headroom = 10 connections
-lettuce.pool.max-active = 20 (2× headroom over calculated peak)
+Per-pod arrival rate:           50,000 / 20 pods = 2,500 req/s
+Redis call duration P99:        2 ms
+Concurrent Redis calls in flight (Little's Law): 2,500 × 0.002 = 5
+  spring.data.redis.lettuce.pool.max-active = 20 (4x headroom over the P99 steady state)
+
+Tomcat's own default max-threads is 200, not 500 — so the pod tops out at 200 concurrent
+requests regardless, and 20 Redis connections is comfortably above anything it can generate.
 ```
 
 ---
@@ -670,7 +719,7 @@ calls use `EVALSHA <sha1>` instead of `EVAL <script>`. If Redis doesn't have the
 bandwidth by ~500 bytes per call (the script body) at 50k req/s — saving 25 MB/s of Redis traffic.
 
 **Q: How would you test that the rate limiter correctly rejects the N+1st request?**
-Use Testcontainers with a `RedisContainer` (or `@ServiceConnection` with `GenericContainer<>("redis:7")`).
+Use Testcontainers with a `RedisContainer` (or `@ServiceConnection` with `GenericContainer<>("redis:8")`).
 Write a parameterized integration test: send N requests and assert `allowed=true` for all N;
 send the N+1st and assert `allowed=false` with `remaining=0`. Test the boundary exactly — this
 is the most likely place for off-by-one bugs in the Lua refill math. Also test that after sleeping
@@ -678,7 +727,7 @@ is the most likely place for off-by-one bugs in the Lua refill math. Also test t
 
 **Q: What changes if you need cross-region rate limiting (e.g., a global limit across US + EU)?**
 Cross-region requires either: (a) a single global Redis cluster with cross-region replication
-(active-active using Redis Enterprise / Konflux), adding ~60–80 ms for cross-ocean RTT on every
+(Redis Enterprise Active-Active, whose CRDT counters converge rather than serialize), adding ~60-80 ms for cross-ocean RTT on every
 check — unacceptable for P99; or (b) approximate counters: each region enforces `global_limit / regions`
 locally, accepting ±N% over-admission; or (c) periodic global reconciliation — counters are local
 and a background job pushes deltas to a central store every second, letting the system tolerate
@@ -696,7 +745,7 @@ in the `Retry-After` header by returning a value slightly above the true reset t
 
 ## Cross-Cutting References
 
-- [Resilience4j Patterns](cross_cutting/resilience4j_patterns.md) — circuit breaker wrapping the Redis rate limiter call; SemaphoreBulkhead limiting concurrent Redis connections.
+- [Resilience4j Patterns](cross_cutting/resilience4j_patterns.md) — circuit breaker wrapping the Redis rate limiter call; bulkhead limiting concurrent Redis calls.
 - [OTel Observability for Spring](cross_cutting/otel_observability_for_spring.md) — distributed tracing across the rate-limit filter; `@Observed` on `tryAcquire()`.
 - [Zero-Downtime Deploys and Config](cross_cutting/zero_downtime_deploys_and_config.md) — hot-reloading rate-limit configurations via `@RefreshScope` without losing Redis key state.
-- [Testcontainers and Test Strategy](cross_cutting/testcontainers_and_test_strategy.md) — integration tests using `GenericContainer<>("redis:7")` to verify Lua script correctness end-to-end.
+- [Testcontainers and Test Strategy](cross_cutting/testcontainers_and_test_strategy.md) — integration tests using `GenericContainer<>("redis:8")` to verify Lua script correctness end-to-end.

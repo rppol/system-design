@@ -19,8 +19,8 @@ OpenTelemetry (OTel) is a CNCF project that defines:
 In the Spring ecosystem, observability is layered:
 - **Micrometer** — metrics abstraction (timers, counters, gauges) — maps to OTel metrics
 - **Micrometer Tracing** — tracing abstraction — wraps OTel SDK or Brave (Zipkin)
-- **Micrometer Observation API** (Spring Boot 3.2+) — unified API that emits metrics + traces +
-  log events from a single `Observation` object
+- **Micrometer Observation API** (Micrometer 1.10 / Spring Boot 3.0+) — unified API that emits
+  metrics + traces + log events from a single `Observation` object
 - **Spring Boot Actuator** — exposes `/actuator/metrics`, health endpoints, and wires
   Micrometer into the app
 
@@ -76,7 +76,7 @@ any P99 spike — jumping directly from the aggregate metric anomaly to the spec
 
 ## 4. Dependencies and Configuration
 
-### 4.1 Maven dependencies (Spring Boot 3.2+)
+### 4.1 Maven dependencies (versions managed by the Spring Boot BOM)
 
 ```xml
 <!-- Micrometer Observation + OTel bridge -->
@@ -97,11 +97,15 @@ any P99 spike — jumping directly from the aggregate metric anomaly to the spec
     <artifactId>micrometer-registry-prometheus</artifactId>
 </dependency>
 
-<!-- Logback structured logging with traceId/spanId in MDC -->
+<!-- Structured logging: only needed if you want the logstash encoder's extra features.
+     Spring Boot has shipped structured logging since 3.4 and needs no dependency at all:
+       logging.structured.format.console=ecs      # or gelf, or logstash
+     which emits JSON with traceId/spanId already in it. Reach for the encoder below only
+     when you need custom providers it does not cover. -->
 <dependency>
     <groupId>net.logstash.logback</groupId>
     <artifactId>logstash-logback-encoder</artifactId>
-    <version>7.4</version>
+    <version>8.1</version>
 </dependency>
 ```
 
@@ -320,28 +324,25 @@ public class AsyncConfig implements AsyncConfigurer {
         executor.setMaxPoolSize(32);
         executor.setQueueCapacity(500);
         executor.setThreadNamePrefix("async-");
-        executor.initialize();
 
-        // Wrap the executor to propagate OTel context to async threads
-        return new ContextPropagatingTaskDecorator(executor);
-    }
-}
+        // Spring ships this: org.springframework.core.task.support
+        // .ContextPropagatingTaskDecorator. It is a TaskDecorator, so it is SET on the
+        // executor -- returning it from getAsyncExecutor() would not even compile, since
+        // TaskDecorator is not an Executor.
+        executor.setTaskDecorator(new ContextPropagatingTaskDecorator());
 
-// ContextPropagatingTaskDecorator (available in Micrometer Tracing 1.2+):
-public class ContextPropagatingTaskDecorator implements TaskDecorator {
-    @Override
-    public Runnable decorate(Runnable runnable) {
-        // Capture current OTel context (traceId, spanId, Baggage) in calling thread
-        Context currentContext = Context.current();
-        return () -> {
-            // Restore context in the async thread
-            try (Scope ignored = currentContext.makeCurrent()) {
-                runnable.run();
-            }
-        };
+        executor.initialize();   // must come AFTER the decorator is set
+        return executor;
     }
 }
 ```
+
+The decorator captures a `ContextSnapshot` on the submitting thread and restores it around
+`run()` on the worker — which covers the OTel span context, the SLF4J MDC and Micrometer
+baggage in one mechanism, because all three register with `io.micrometer.context`. Do not
+hand-roll a version that only copies `Context.current()`: it restores the span but leaves the
+MDC empty, so traces reconnect while log lines stay orphaned — the harder half of the bug to
+notice.
 
 ---
 
@@ -457,40 +458,39 @@ to "the specific slow request".
 
 ## 7. Real-World Examples
 
-### Netflix — Unified observability with OTel Collector
+### W3C Trace Context — why `traceparent` is a standard and not a convention
 
-Netflix migrated from vendor-specific tracing libraries (Zipkin) to OpenTelemetry in 2022,
-routing all signals (traces, metrics, logs) through an OTel Collector gateway. The collector
-applies sampling decisions, enriches spans with fleet metadata (region, AZ, instance type),
-and fans out to Jaeger for traces and Prometheus for metrics. Key benefit: a single
-`traceparent` header in each gRPC call across 1,000+ microservices enables end-to-end request
-attribution. Reference: Netflix Engineering blog, "Netflix's Journey to OTel" (2023).
+The reason cross-vendor tracing works at all is that `traceparent` is a **W3C Recommendation**,
+not a library's header. Its format is fixed and worth reading off byte by byte, because most
+propagation bugs are format bugs: `00` version, a 32-hex-char trace-id, a 16-hex-char parent-id
+(the *caller's span*, not the request), and 2 hex flags whose lowest bit is `sampled`. Two
+consequences fall out. An all-zero trace-id or parent-id is invalid and must be rejected rather
+than propagated. And the sampled bit travels with the request — so a downstream service that
+makes its own independent sampling decision, rather than honouring the flag, produces traces
+with holes in the middle. `ParentBasedSampler` exists precisely to respect that bit.
 
-### Shopify — Structured logging with traceId correlation
+### The OpenTelemetry Java Agent — what zero-code instrumentation actually buys
 
-Shopify's payment platform uses structured JSON logging with `traceId` from W3C `traceparent`
-as a mandatory field on every log line. During their 2020 Black Friday incident (payment
-processing slowdown), engineers correlated P99 latency spikes in Prometheus to specific
-`traceId` values appearing in slow Kafka consumer log lines — finding the root cause
-(a single hot partition) in 4 minutes instead of the typical 45-minute search through
-unstructured logs. Reference: Shopify Engineering blog, "Surviving Black Friday 2020" (2021).
+The agent (`-javaagent:opentelemetry-javaagent.jar`) instruments Spring MVC, JDBC, Kafka clients,
+Redis clients and HTTP clients by bytecode manipulation, with no code change and no dependency.
+The honest trade: you get broad, consistent coverage immediately, and you give up control of
+span boundaries — the agent's spans are drawn where the library boundary is, not where your
+domain boundary is, so "process order" never appears as a span unless you add it. The two
+compose, and that is the usual answer: run the agent for the plumbing, add `@Observed` for the
+handful of business operations you actually reason about.
 
-### Zalando — OTel Java Agent for zero-code instrumentation
+### Head-based vs tail-based sampling — the distinction that decides your architecture
 
-Zalando uses the OpenTelemetry Java Agent (`-javaagent:opentelemetry-javaagent.jar`) for
-automatic instrumentation of Spring Boot services without code changes. The agent auto-instruments
-Spring MVC, JDBC, Kafka consumers/producers, and HTTP clients via bytecode manipulation.
-This zero-code approach reduced instrumentation effort from "2 days per service" to "3 minutes"
-during their 2021 observability platform migration. Reference: Zalando Engineering blog (2022).
-
-### Stripe — Sampling strategy for high-volume services
-
-Stripe's payment API handles 1M+ requests/minute; recording every span would overwhelm storage.
-They implement head-based sampling with `tracestate` priority hints: 100% sampling for error
-requests (status >= 500), 100% for slow requests (>500ms, detected via dynamic sampler), and
-1% for normal requests. This yields ~10,000 traces/minute with 100% coverage of anomalies.
-Implementation: OTel `ParentBasedSampler` with a custom `TraceIdRatioBased` sampler for normal
-requests and a `RuleBasedSampler` that force-samples on error status and high latency.
+Head-based sampling decides at span *start*, before anything has happened. That makes it cheap
+and stateless, and it means **it cannot sample on outcome** — a head sampler fundamentally
+cannot implement "keep every request that errored or took over 500 ms", because at decision
+time neither fact exists yet. Anyone describing that policy as head-based has confused the two.
+Keeping errors and slow requests requires **tail-based** sampling: buffer all spans of a trace
+until it completes, then decide — which the OTel Collector's `tail_sampling` processor does,
+at the cost of holding traces in memory and requiring all spans of a trace to reach the same
+collector instance. The practical middle ground is `ParentBasedSampler` wrapping a
+`TraceIdRatioBased` sampler for a low baseline, with tail sampling in the collector for the
+anomaly policy — cheap in the app, selective in the pipeline.
 
 ### Grafana Labs — Exemplars linking metrics to Loki logs and Tempo traces
 
@@ -507,7 +507,7 @@ the same 32-char hex appears in all three backends.
 
 | Approach | Pros | Cons | When to use |
 |----------|------|------|-------------|
-| Micrometer Observation API | Single API for all signals; auto-exemplars; Spring Boot 3 native | New (Spring Boot 3.2+); ObservedAspect required | New Spring Boot 3 services |
+| Micrometer Observation API | Single API for all signals; auto-exemplars; Spring native since Boot 3.0 | `ObservedAspect` bean must be registered by hand for `@Observed` | Default for new Spring Boot services |
 | Manual OTel SDK | Full control; works with any framework | Verbose; requires SDK knowledge | Kafka consumers, non-Spring code |
 | OTel Java Agent | Zero code changes; auto-instruments 100+ libraries | Black-box; harder to debug instrumentation | Existing services, quick migration |
 | Zipkin/Brave bridge | Zipkin compatibility | No OTel native; cannot use OTLP directly | Services already committed to Zipkin |
@@ -558,9 +558,13 @@ Observation.createNotStarted("order.processing", registry)
     .observe(() -> processOrder(request));
 ```
 
-**Impact:** Prometheus with 10M+ time series crashes at query time (OOM in query engine). A
-Shopify incident in 2021 caused a 4-hour Prometheus outage from 50M time series created by
-a rogue user-ID label.
+**Impact:** each distinct label-value combination is a separate time series, each carrying its
+own in-memory index entry and chunk buffer — so a single unbounded label converts one metric
+into as many series as you have orders. Prometheus degrades on ingest first (memory growth,
+then OOM) and on query second, and the damage outlives the fix: the series stay in the index
+until they age out of the retention window. This is why `lowCardinalityKeyValue` and
+`highCardinalityKeyValue` are separate methods rather than a single tagging call — the API is
+built so the dangerous option has to be chosen deliberately.
 
 ---
 

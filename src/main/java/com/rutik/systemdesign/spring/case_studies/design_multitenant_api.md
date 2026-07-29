@@ -85,9 +85,14 @@ Total app heap:            max_requests × 2 MB + 512 MB baseline
 ```
 Per-tenant migration check (schema current): ~200 ms
 500 tenants: 500 × 200 ms = 100 s sequential → too slow
-Fix: parallel migration with virtual threads (Java 21):
-  500 tasks / available cores ≈ 8 s wall-clock time
+Fix: fork all 500 checks onto virtual threads at once. Cores are irrelevant —
+each task is blocked on the database, so the real limit is the shared pool:
+  500 × 200 ms / 20 pooled connections = 5 s wall-clock
 ```
+
+The pool size, not the thread count, is the knob. Forking 500 virtual threads against a
+10-connection pool gives 10 s; against 40 it gives 2.5 s at the cost of 40 concurrent DDL
+sessions on the database.
 
 ---
 
@@ -262,13 +267,19 @@ public class SchemaMultiTenantConnectionProvider
         TenantProperties.TenantConfig config = tenantProperties.tenants().get(tenantId);
         if (config == null) throw new SQLException("No config for tenant: " + tenantId);
         Connection conn = dataSource.getConnection();
-        conn.createStatement().execute("SET search_path TO " + config.schemaName() + ", public");
+        // schemaName is validated against ^[a-z_][a-z0-9_]*$ at config-binding time:
+        // it is concatenated, not bound, because an identifier cannot be a JDBC parameter.
+        try (Statement st = conn.createStatement()) {
+            st.execute("SET search_path TO " + config.schemaName() + ", public");
+        }
         return conn;
     }
 
     @Override
     public void releaseConnection(String tenantId, Connection conn) throws SQLException {
-        conn.createStatement().execute("SET search_path TO public");  // defensive reset
+        try (Statement st = conn.createStatement()) {
+            st.execute("SET search_path TO public");  // defensive reset before pool reuse
+        }
         conn.close();
     }
 
@@ -334,8 +345,8 @@ public class TenantAuthenticationManagerResolver
     }
 
     private AuthenticationManager buildAuthMgr(String tenantId) {
-        DaoAuthenticationProvider p = new DaoAuthenticationProvider();
-        p.setUserDetailsService(factory.createForTenant(tenantId));
+        DaoAuthenticationProvider p =
+            new DaoAuthenticationProvider(factory.createForTenant(tenantId));
         p.setPasswordEncoder(new BCryptPasswordEncoder(12));
         p.afterPropertiesSet();
         return p::authenticate;
@@ -377,13 +388,15 @@ public class TenantMigrationService implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
-        // Parallel migration with virtual threads (Java 21 GA)
-        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        // Parallel migration on virtual threads. awaitAllSuccessfulOrThrow cancels the
+        // whole scope the moment any tenant's migration fails, and join() rethrows it.
+        try (var scope = StructuredTaskScope.open(
+                StructuredTaskScope.Joiner.<Void>awaitAllSuccessfulOrThrow())) {
             tenantProperties.tenants().forEach((tenantId, config) -> {
                 if (config.active())
                     scope.fork(() -> { migrateSchema(tenantId, config.schemaName()); return null; });
             });
-            scope.join().throwIfFailed();
+            scope.join();
         } catch (Exception e) {
             throw new RuntimeException("Tenant migration failed", e);
         }
@@ -449,7 +462,7 @@ Schema-per-tenant was chosen because: 500 tenants on one PostgreSQL server is op
 
 ### ThreadLocal vs request-scoped bean
 
-`ThreadLocal` is used rather than `@RequestScope` because Hibernate SPIs (`MultiTenantConnectionProvider`, `CurrentTenantIdentifierResolver`) are invoked outside the Spring request scope during EntityManager session creation. `ThreadLocal` is always accessible from any thread.
+`ThreadLocal` is used rather than `@RequestScope` because Hibernate SPIs (`MultiTenantConnectionProvider`, `CurrentTenantIdentifierResolver`) are invoked outside the Spring request scope during EntityManager session creation. A `ThreadLocal` is readable from any code running on that thread, with no scope proxy and no `RequestContextHolder` dependency — which is exactly what an SPI called from Hibernate's internals needs.
 
 ### Flyway startup vs on-demand migration
 
@@ -463,13 +476,13 @@ Stateless JWT enables horizontal scaling without sticky sessions. Each token car
 
 ## 6. Real-World Implementations
 
-**Salesforce**: multi-tenant since 2001 with a single shared "meta-schema" — all tenant data in shared tables with a `tenant_id` column plus Oracle Virtual Private Database (analogous to PostgreSQL RLS) for row isolation. Their scale (150k+ tenants) required this approach; schema-per-tenant is impractical at their scale. Salesforce's challenge: a malformed governor limit can cause one tenant to starve others — exactly the problem tier-based connection pools solve.
+**Salesforce (Force.com)**: the opposite end of the isolation spectrum — a metadata-driven architecture where all tenant data lives in a few wide shared tables, every row tagged with an `OrgID`, and the object/field definitions themselves stored as metadata in the Universal Data Dictionary. Isolation is enforced by the platform's runtime query engine, which compiles every request into SQL that carries the caller's `OrgID` predicate; the tables and their indexes are then physically partitioned by `OrgID` so the optimizer only touches one tenant's partitions. At 150,000+ customers, schema-per-tenant would mean 150,000 schemas — the shared-table model is the only thing that scales that far, at the cost of never being able to give one tenant a different physical layout.
 
-**Stripe**: every API resource is scoped by `account_id` as the first dimension. The data layer uses horizontal sharding where each shard hosts multiple accounts but enforces account-level partition in every query through their ORM. Stripe's war story: an internal team accidentally queried without an account scope in 2019, discovering missing query guards through internal monitoring, not customer impact — defense in depth.
+**Stripe**: every API resource is scoped by `account_id` as the first dimension, and the data layer shards horizontally so that a shard hosts many accounts but every query carries the account partition. The design rule worth stealing is that the scope is enforced at the data-access layer rather than left to each caller — the same reason this design puts `search_path` in the connection provider instead of asking every repository method to remember a `WHERE tenant_id = ?`.
 
-**Linear** (project management SaaS): uses one PostgreSQL database per customer organization for full isolation. This matches database-per-tenant isolation at a lower tenant count (thousands, not millions). Their engineering blog documents that Postgres connection limits forced them to add PgBouncer early — the same fleet-total-connections problem described in §2.
+**Linear** (project management SaaS): does *not* use a database per customer. Workspaces share Postgres inside a region, with large tables partitioned by workspace ID; isolation between Linear's own services is done with separate schemas and database roles, so the auth service physically cannot read regional application data. For data residency Linear replicated the entire production deployment per region rather than sharding the database — the same "route the tenant to its home region" approach described in the multi-region Q&A in §11.
 
-**Heroku Postgres**: implements virtual databases via schema isolation — each customer "database" is a schema on shared infrastructure, with `search_path` set per session. The operational model is identical to this design: connection pooling via PgBouncer in transaction mode, schema migration via Liquibase, per-schema role grants for isolation.
+**AWS Prescriptive Guidance** names this design the **bridge** model, the middle of its silo/bridge/pool spectrum: silo = one database per tenant (best compliance story, worst agility and cost), pool = one shared table set keyed by tenant id (cheapest, but cross-tenant blast radius and compliance friction), bridge = shared instance and shared application stack with a dedicated schema per tenant. Its listed disadvantages match this file's pitfalls exactly — cross-tenant impact through the shared pool, and deployment complexity because every schema must be migrated.
 
 **HashiCorp Vault** (secrets for tenant key management): each tenant gets a dedicated KV path or namespace in Vault; the application authenticates with an IAM role and reads the tenant's JWT signing key at token verification time. Key rotation is per-tenant without affecting other tenants — directly addressing the JWT key isolation requirement.
 
@@ -489,7 +502,7 @@ Stateless JWT enables horizontal scaling without sticky sessions. Each token car
 | `HibernatePropertiesCustomizer` | Injects Hibernate multi-tenancy SPI beans into JPA auto-configuration |
 | `ApplicationRunner` | Runs Flyway migrations for all active tenants on startup |
 | `TaskDecorator` | Propagates `TenantContext` ThreadLocal across async thread pool boundaries |
-| `StructuredTaskScope` | Parallel tenant migration (Java 21 GA, JEP 453) |
+| `StructuredTaskScope` | Parallel tenant migration on virtual threads (preview API: JEP 505 in Java 25, JEP 525 in Java 26) |
 | `AbstractRoutingDataSource` | Routes to per-tier HikariCP pool for noisy-neighbor isolation |
 
 Infrastructure comparison:
@@ -698,7 +711,10 @@ vs database-per-tenant: 500 × 20 = 10,000 connections → impossible
 Throughput target:         10,000 req/sec
 Tomcat thread pool:        200 threads (default)
 Requests per thread:       10,000 / 200 = 50 req/sec per thread
-Avg request duration:      20 ms → 1 thread handles 50 req/sec easily
+Avg request duration:      20 ms → 1/0.020 = exactly 50 req/sec per thread
+  → 200 threads x 50 = 10,000 req/sec at 100% utilisation, zero headroom.
+  Size for 60-70%: 300-350 threads, or enable virtual threads
+  (spring.threads.virtual.enabled=true) so thread count stops being the ceiling.
 
 Max concurrent requests:   200
 Per-request heap budget:   2 MB (JPA L1 cache + DTOs)
@@ -713,8 +729,11 @@ But: in-memory TenantProperties, AuthMgr cache, and JWT key cache all grow linea
   500 tenants × 5 KB = 2.5 MB (trivial)
   10,000 tenants × 5 KB = 50 MB (still fine)
 
-Flyway migration at startup:
-  10,000 tenants × 200 ms parallel = 200 ms wall-clock (virtual threads)
+Flyway migration at startup is what actually breaks first:
+  10,000 × 200 ms / 20 pooled connections = 100 s wall-clock
+  → blows the 30 s startup budget from §1 by more than 3x
+Fix: give migration its own short-lived pool (10,000 × 200 ms / 100 = 20 s), or move
+migration out of startup entirely into the provisioning job that creates the schema.
 
 The real limit: PostgreSQL schema count. PostgreSQL handles tens of thousands of schemas
 per database, but DDL operations (CREATE TABLE, VACUUM) become slower at very high schema
@@ -730,7 +749,7 @@ range or consistent-hash assignment.
 The thread returns to the application server thread pool still carrying the previous tenant's ID. The next request processed on that thread silently queries the wrong tenant's schema — a data leak, not a crash. This is particularly dangerous because it is not caught in testing (tenants are usually different in production). The `finally` in `TenantResolutionFilter` is the primary safety net; a defensive secondary measure is calling `clear()` at the start of `doFilterInternal` before `set()`, in case a higher filter threw before the previous `finally` ran.
 
 **Q: With 500 tenants and a pool of 20, how many database connections does PostgreSQL see?**
-Exactly 20 — regardless of tenant count. The `SET search_path` switch is a session-level SQL command executed after acquiring a pooled connection; it does not require a new connection. This is schema-per-tenant's core operational advantage over database-per-tenant: 500 databases × 20 connections = 10,000 PostgreSQL backends (~100 MB each = 1 TB RAM) is impossible; 1 database × 20 connections = 200 MB, easily manageable.
+Exactly 20 — regardless of tenant count. The `SET search_path` switch is a session-level SQL command executed after acquiring a pooled connection; it does not require a new connection. This is schema-per-tenant's core operational advantage over database-per-tenant: 500 databases × 20 connections = 10,000 PostgreSQL backends at ~10 MB each = 100 GB of backend memory alone, against a `max_connections` default of 100; 1 database × 20 connections = 200 MB, easily manageable.
 
 **Q: Why can't you use `ReentrantReadWriteLock` in the filter to allow concurrent read-only requests without setting the tenant context?**
 The `search_path` is a mutable session-level setting on the JDBC connection — it must be set before any query runs on that connection. There is no "read" path that bypasses tenant identity in a multi-tenant system; even a `GET /orders` reads data that is tenant-scoped. The filter must always set the context. The distinction is between filter (identity extraction, runs before security) and interceptor (validation, runs after security can inject dependencies).

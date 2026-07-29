@@ -32,7 +32,7 @@ See also: [Resilience4j patterns](./cross_cutting/resilience4j_patterns.md),
 - Database survives L2 Redis outage (L1 must absorb hot keys during ~30s failover).
 - Cross-instance staleness after write: < 10ms (Pub/Sub propagation bound).
 
-**Constraints:** Spring Boot 3.x, Redis 7, Caffeine 3.x, 5 microservice instances.
+**Constraints:** Spring Boot 4.1 (Spring Framework 7, Jackson 3), Redis 8, Caffeine 3.2, 5 microservice instances.
 
 **Out of scope:** Redis Cluster migration (single instance now, cluster-ready design), read-your-own-writes consistency across instances, write-behind pattern for financial data.
 
@@ -46,7 +46,7 @@ Peak reads:           20,000 req/sec
 Cache hit rate (85%): 17,000 req/sec served from cache
 DB read rate:          3,000 req/sec (only cache misses + writes)
   -> Database sized for 3,000-4,000 reads/sec
-  -> If cache fails: DB faces 20,000 reads/sec = 5-6× overload -> potential collapse
+  -> If cache fails: DB faces 20,000 reads/sec = 20,000/3,000 = 6.7× overload -> collapse
 
 With two-level cache:
   L1 Caffeine (hot 50%):  10,000 req/sec at <0.1ms
@@ -151,7 +151,7 @@ public class CacheConfig {
         RedisCacheConfiguration defaultConfig = RedisCacheConfiguration.defaultCacheConfig()
             .entryTtl(Duration.ofHours(1))
             .serializeValuesWith(RedisSerializationContext.SerializationPair
-                .fromSerializer(new GenericJackson2JsonRedisSerializer()));
+                .fromSerializer(GenericJacksonJsonRedisSerializer.builder().build()));
 
         Map<String, RedisCacheConfiguration> cacheConfigs = new HashMap<>();
         cacheConfigs.put("products",     defaultConfig.entryTtl(Duration.ofHours(1)));
@@ -208,8 +208,11 @@ public class TwoLevelCache implements Cache {
 
     @Override
     public <T> T get(Object key, Callable<T> valueLoader) {
-        // Called by @Cacheable(sync=true) — delegates distributed lock to L2
-        T value = l2.get(key, valueLoader);    // only one node calls valueLoader (via Redisson lock)
+        // Called by @Cacheable(sync=true). L1 (Caffeine) coalesces loaders WITHIN this JVM.
+        // RedisCache does NOT coalesce across nodes — its writer is lock-free by default, and
+        // even lockingRedisCacheWriter() locks the whole cache, not the key. Cross-node
+        // coalescing needs an explicit per-key lock (§11) if the DB cannot take N loaders.
+        T value = l1.get(key, () -> l2.get(key, valueLoader));
         if (value != null) l1.put(key, value); // promote L2 hit to L1
         return value;
     }
@@ -423,15 +426,13 @@ cold-start stampedes after rolling deployments.
 
 ## 6. Real-World Implementations
 
-**Twitter (Manhattan + Memcache/Redis):** Twitter's profile and timeline caches use a multi-level hierarchy: L1 per-server LRU (in-process, ~100ms TTL) backed by L2 Memcache cluster, backed by Manhattan (distributed DB). L1 is specifically sized to absorb the traffic spike during cache-miss storms when L2 fails — the exact failsafe pattern in §4. Twitter uses sharded Pub/Sub (consistent-hash topic assignment per key range) to invalidate L1 entries across ~10,000 servers without routing every message to every subscriber.
+**Facebook — "Scaling Memcache at Facebook" (NSDI 2013):** the reference text for this whole design. Two of its findings land directly here. First, invalidation is driven off the database's own commit log: a daemon (`mcsqueal`) tails the MySQL log, extracts the deletes, and broadcasts them to the cache tier — the write path never has to remember to invalidate, which is precisely the failure mode of the application-level `publishInvalidation()` call in §4.4. Second, the paper is explicit that stale sets and thundering herds are handled with **leases**: on a miss, memcached hands exactly one client a lease token that entitles it to load from the database, and makes the rest wait. That is `sync=true` at cluster scale, and it is the mechanism this design has to reimplement (§11) because `RedisCache` does not provide it.
 
-**Facebook (TAO + Memcache):** Facebook's Memcache deployment described in their 2013 NSDI paper uses regional invalidation pools: a write to the DB triggers a DELETE to Memcache via McRouter, which fans out to all regional caches. At Facebook scale (100M req/sec), they found that explicit invalidation (rather than TTL-only) reduced average object age in cache from ~20 minutes to ~200ms — exactly the improvement Redis Pub/Sub provides in this design.
+**Redis server-assisted client-side caching (`CLIENT TRACKING`, Redis 6.0+):** the server tracks which keys each client has cached and pushes `INVALIDATE` messages to exactly those clients — on the same connection under RESP3, or redirected through Pub/Sub under RESP2. This is the L1-invalidation channel in §4.4 implemented by the database instead of by the application: no `cache-invalidation` topic to publish to, no missed publish when a code path forgets, and no fan-out to instances that never cached the key. Lettuce supports tracking, so the application-level publisher in §4.4 is best read as what you build when your client or proxy does not.
 
-**LinkedIn (Couchbase + in-process LRU):** LinkedIn's product pages use a write-through cache: every profile update writes to both Couchbase and an in-process LRU, using a logical clock (Lamport timestamp) to reject stale writes to the in-process cache. The clock prevents a stale broadcast from overwriting a fresher local update — relevant when Pub/Sub delivery is out-of-order.
+**AWS ElastiCache and other managed Redis** expose the same trap this design is built around: the cache is sized and priced as an optimization, but the database behind it is provisioned for post-cache traffic, which quietly makes the cache a hard availability dependency. This is why §1 lists "database survives L2 outage" as a non-functional *requirement* rather than a nice-to-have, and why the L1 tier exists at all.
 
-**Shopify (Redis with per-cache TTL namespacing):** Shopify runs 100+ Redis cache namespaces, each with distinct TTLs — product catalog hours, cart data minutes, session data days. The key lesson they published: cache namespace collisions between services caused silent data corruption at scale. Their convention is `{service}:{model}:{id}` — identical to the FIX in §4.5.
-
-**Redis Labs (RedisGears for reactive invalidation):** Redis 7.4 introduced client-side caching via `CLIENT TRACKING`, which notifies subscribed clients of key invalidations at the Redis server level — eliminating the need for an application-level Pub/Sub channel. This is the future direction for L1 invalidation: the Redis server sends `INVALIDATE` messages directly to each client that has tracked a key, removing the application publish step entirely.
+**Caffeine** (the L1 here) is worth understanding rather than treating as an LRU: it uses **W-TinyLFU**, a frequency sketch that admits a new entry only if it is estimated to be more valuable than the victim it would evict. That is why a 50,000-entry L1 holds the genuinely hot working set instead of being scanned out by a single sweep over the catalog — a plain LRU of the same size would be, and the cache-warming runner in §4.7 would be undone by the first bulk export job.
 
 ---
 
@@ -440,9 +441,9 @@ cold-start stampedes after rolling deployments.
 | Tool | L1 (in-process) | L2 (distributed) | Invalidation mechanism | Spring integration | When to choose |
 |---|---|---|---|---|---|
 | **Caffeine + Redis (chosen)** | Caffeine | Redis | Redis Pub/Sub | `CaffeineCacheManager` + `RedisCacheManager` | Default for Spring microservices needing two-level cache |
-| **Ehcache + Redis** | Ehcache | Redis | Ehcache cluster events | `EhCacheCacheManager` | If Ehcache is already in use; Ehcache has native cluster replication |
-| **Hazelcast** | Hazelcast near-cache | Hazelcast cluster | Native near-cache invalidation | `HazelcastCacheManager` | When distributed compute (Map-Reduce, entry processors) is also needed |
-| **Infinispan** | Near-cache | Infinispan cluster | Cluster invalidation | `InfinispanCacheManager` | JBoss/Quarkus ecosystem; strong consistency guarantees |
+| **Ehcache 3 + Redis** | Ehcache 3 | Redis | Terracotta clustered tier | `JCacheCacheManager` (Ehcache 3 is a JSR-107 provider) | If Ehcache is already in use; Spring's old `EhCacheCacheManager` is gone, so integration is via JCache |
+| **Hazelcast** | Hazelcast near-cache | Hazelcast cluster | Native near-cache invalidation | `HazelcastCacheManager` | When distributed compute (entry processors, distributed queries) is also needed |
+| **Infinispan** | Near-cache | Infinispan cluster | Cluster invalidation | `SpringEmbeddedCacheManager` / `SpringRemoteCacheManager` | JBoss/Quarkus ecosystem; embedded or Hot Rod remote |
 | **Redis only** | — | Redis | TTL or keyspace notifications | `RedisCacheManager` | Simpler setup; acceptable if P99 < 5ms is sufficient |
 
 ---
@@ -455,7 +456,7 @@ cold-start stampedes after rolling deployments.
 - `cache.redis.fallback.count` (Counter): alert immediately if nonzero — Redis is unavailable
 - `hikaricp.connections.pending` (Gauge): alert if > 0 sustained — DB is under pressure from cache misses
 - Redis: `redis-cli info keyspace` — track key count and expired key rate; mass expiry = stampede risk
-- Redis: `redis-cli info memory` — `used_memory_rss / used_memory` ratio > 1.5 indicates fragmentation; schedule `BGSAVE` + restart to defragment
+- Redis: `redis-cli info memory` — `mem_fragmentation_ratio` (`used_memory_rss / used_memory`) > 1.5 indicates fragmentation; enable `activedefrag yes` to compact online rather than restarting the instance
 
 ### (b) Cache Hit Rate Dashboard
 
@@ -473,7 +474,7 @@ Breakout:
 ### (c) Incident Runbooks
 
 **Runbook 1: Redis primary fails — circuit breaker fallback mode**
-- Symptom: `cache.redis.fallback.count` rising; Redis health check failing; `redissonClient.getStatus() == NOT_CONNECTED`
+- Symptom: `cache.redis.fallback.count` rising; `/actuator/health/redis` reporting DOWN; Lettuce logging reconnect attempts
 - Diagnose: `redis-cli ping` → NOAUTH or timeout; check Redis Sentinel for failover status
 - Mitigate: L1 Caffeine continues serving hot keys; circuit breaker opens, stops hammering dead primary; DB sees only long-tail misses (~30% of normal read volume if L1 hit rate is 70%)
 - Resolve: once Redis primary recovered, circuit breaker probes (`waitDurationInOpenState=30s`), closes automatically; L2 re-warms lazily on demand; confirm `cache.redis.fallback.count` stops growing
@@ -482,7 +483,7 @@ Breakout:
 - Symptom: sudden DB spike for 1-2 seconds; multiple threads reporting slow queries for the same product ID; `hikaricp.connections.active` spike
 - Diagnose: check if multiple entries expired simultaneously (`redis-cli object encoding <key>` + TTL inspection); check if `sync=true` is configured on the `@Cacheable` annotation
 - Mitigate: `@Cacheable(sync=true)` coalesces concurrent loaders; if not already set, add it (no-restart: can be done via feature flag controlling cache name)
-- Resolve: add TTL jitter to all cache configurations: `entryTtl(Duration.ofMinutes(5).plus(Duration.ofSeconds(ThreadLocalRandom.current().nextInt(60))))`
+- Resolve: add per-entry TTL jitter to all cache configurations — `entryTtl((key, value) -> Duration.ofMinutes(5).plusSeconds(ThreadLocalRandom.current().nextInt(60)))`. Use the `TtlFunction` overload, not `entryTtl(Duration)`: the latter is evaluated once at startup, so every key still expires in lockstep
 
 **Runbook 3: L1 Pub/Sub invalidation lag — stale data served**
 - Symptom: users see old product prices after a price update; `cache.l1.eviction.count` dropping unexpectedly; Redis message subscriber log not receiving invalidation messages
@@ -516,19 +517,24 @@ A service cached `Cart` objects by ID in Caffeine. The cache returned the same `
 
 A Redis primary failed and was not replaced by Sentinel for ~45 seconds (a configuration bug: `sentinel monitor redis localhost 6379 2` but only 1 Sentinel was running). During those 45 seconds, all 20,000 req/sec fell through to the database. The database was provisioned for ~3,000 read req/sec. Connection pool exhaustion hit within 10 seconds; the database started dropping connections within 20 seconds; total outage at 45 seconds.
 
-**Fix:** Deploy the two-level cache so L1 Caffeine (in-process, always available) absorbs the hot 50% of traffic during Redis outage. At L1 hit rate = 70%, the DB sees only 30% of total traffic during Redis failover — ~6,000 req/sec, which is within the DB's 3-5× headroom. The circuit breaker prevents retries from hammering the dead Redis primary.
+**Fix:** Deploy the two-level cache so L1 Caffeine (in-process, always available) absorbs the hot 50% of traffic during Redis outage. At L1 hit rate = 70%, the DB sees only 30% of total traffic during Redis failover — 6,000 req/sec against a DB provisioned for 3,000. That is 2× over, not 6.7× over: latency degrades and the pool queues, but the DB stays up long enough for Sentinel to promote a replica. The circuit breaker prevents retries from hammering the dead Redis primary.
 
 ### War Story 4: TTL Configuration Mistake — All Keys Expire Simultaneously
 
 A team set a fixed TTL of 3600 seconds for all product cache entries with no jitter. The cache was cold-started at 9 AM (deployment). At exactly 10 AM, all 50,000 cached entries expired simultaneously. Every one of the 50,000 concurrent threads requesting any product key missed L2 and hit the database. A 5-second DB spike at exactly 10:00:00 AM caused query queuing, P99 latency jumped from 5ms to 8 seconds, and the SLA was breached.
 
-**Fix:** Add ±10% random jitter per key:
+**Fix:** Add ±10% random jitter per key. The jitter must be drawn *per entry*, which means
+`entryTtl(TtlFunction)` — the `entryTtl(Duration)` overload takes one fixed value, so drawing
+a random `Duration` at configuration time just shifts every key's expiry together and leaves
+the stampede exactly where it was:
+
 ```java
 Duration baseTtl = Duration.ofHours(1);
-Duration jitter  = Duration.ofSeconds(ThreadLocalRandom.current().nextLong(
-    -baseTtl.toSeconds() / 10,
-     baseTtl.toSeconds() / 10));
-cacheConfigs.put("products", defaultConfig.entryTtl(baseTtl.plus(jitter)));
+long spread = baseTtl.toSeconds() / 10;            // +/-10% = +/-360 s
+
+// TtlFunction is invoked on every write, so each key draws its own TTL
+cacheConfigs.put("products", defaultConfig.entryTtl((key, value) ->
+    baseTtl.plusSeconds(ThreadLocalRandom.current().nextLong(-spread, spread))));
 ```
 The jitter spreads expiry over a 12-minute window (±6 minutes around 1 hour), eliminating the synchronized mass-expiry spike.
 
@@ -595,7 +601,7 @@ A: Instances stop receiving invalidation messages. L1 caches serve stale data un
 
 **Q: How does `sync=true` prevent cache stampede for Redis-backed caches?**
 
-A: For Caffeine, `sync=true` uses Caffeine's `get(key, loader)` which is internally synchronized — only one thread calls the loader, others wait. For `RedisCacheManager`, Spring's `sync=true` does not natively provide distributed locking; it falls back to unsynchronized access. The two-level design mitigates this: Caffeine handles stampede prevention for the common case (L1 miss), and for L2 misses a distributed lock (Redisson `RLock` or Redis `SET NX`) should wrap the DB loader to prevent 500 instances from simultaneously stampeding the DB.
+A: It does not — `sync=true` is a per-JVM guarantee, and only Caffeine actually delivers it here. Caffeine's `get(key, loader)` computes under the entry's lock, so of 500 threads in one instance exactly one calls the loader and the other 499 wait on it. `RedisCacheManager` builds a lock-free `RedisCacheWriter` by default; opting into `RedisCacheWriter.lockingRedisCacheWriter(cf)` does not fix this either, because that lock is held at *cache* granularity to make `putIfAbsent`/`clean` non-overlapping, not at key granularity to elect one loader. So with 5 instances you get 5 concurrent DB loads, not 500 — usually acceptable. When it is not, wrap the loader in an explicit per-key distributed lock (Redisson `RLock`, or `SET key token NX PX 30000` with a token-checking release), which is the same election memcached performs with leases.
 
 **Q: How do you handle cache penetration — requests for keys that do not exist in the database?**
 
@@ -603,7 +609,7 @@ A: Cache penetration occurs when requests flood for non-existent keys (e.g., ran
 
 **Q: How do you handle the case where a cached object's class changes between deployments?**
 
-A: With `GenericJackson2JsonRedisSerializer`, adding fields is safe — existing cached entries lack the new field and Jackson uses the Java default value. Removing fields: Jackson ignores extra JSON fields by default (`@JsonIgnoreProperties(ignoreUnknown=true)` is the default for `ObjectMapper`). Renaming a field is a compatibility break. Resolution: use `@JsonProperty` to maintain the old JSON name, or rename the cache (`products:v2`) and let the old cache TTL expire naturally. As a nuclear option, `@CacheEvict(allEntries=true)` as part of the deployment procedure.
+A: With `GenericJacksonJsonRedisSerializer`, adding fields is safe — existing cached entries lack the new field and Jackson uses the Java default value. Removing a field is also safe on Jackson 3, whose `FAIL_ON_UNKNOWN_PROPERTIES` defaults to **false**, so the now-unmapped JSON property is ignored rather than throwing (Jackson 2 defaulted the opposite way and would throw `UnrecognizedPropertyException`; Spring Boot always disabled it for you, which is why the difference rarely bit anyone). Renaming a field is a compatibility break either way. Resolution: use `@JsonProperty` to maintain the old JSON name, or rename the cache (`products:v2`) and let the old cache TTL expire naturally. As a nuclear option, `@CacheEvict(allEntries=true)` as part of the deployment procedure.
 
 **Q: How do you implement cache-aside with a fallback when Redis is completely down?**
 

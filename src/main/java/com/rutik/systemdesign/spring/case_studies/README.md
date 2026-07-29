@@ -9,8 +9,8 @@ Nine end-to-end case studies covering senior Spring engineer and backend system 
 If you have time for three case studies before an interview, read these:
 
 1. **[API Gateway](design_api_gateway.md)** — covers routing, rate limiting, auth delegation, circuit breaking, and observability at the gateway layer; the most broadly applicable Spring Cloud architecture question.
-2. **[Event-Driven Microservice](design_event_driven_microservice.md)** — covers Kafka producer/consumer, transactional outbox, idempotent consumption, and saga orchestration; asked at virtually every company using microservices.
-3. **[Idempotent Payment API](design_idempotent_payment_api.md)** — covers exactly-once semantics, idempotency keys in Redis, distributed locks, and two-phase commit alternatives; the canonical fintech design question.
+2. **[Event-Driven Microservice](design_event_driven_microservice.md)** — covers Kafka producer/consumer, transactional outbox, idempotent consumption, and choreography-based saga compensation; asked at virtually every company using microservices.
+3. **[Idempotent Payment API](design_idempotent_payment_api.md)** — covers exactly-once semantics, an idempotency-key table in PostgreSQL, advisory locks, and the outbox as an alternative to 2PC; the canonical fintech design question.
 
 ---
 
@@ -24,7 +24,7 @@ Studies are grouped by primary engineering concern, not product category.
 |---|---|---|
 | [API Gateway](design_api_gateway.md) | Request routing, cross-cutting concerns | Spring Cloud Gateway predicates and filters, Resilience4j circuit breakers, JWT validation at the edge, dynamic route configuration via Config Server |
 | [Distributed Rate Limiter](design_distributed_rate_limiter_spring.md) | Token bucket, Redis sliding window | Lua scripting for atomic Redis operations, leaky-bucket vs sliding-window comparison, per-tenant and per-endpoint limits, Resilience4j RateLimiter integration |
-| [Multi-Tenant API](design_multitenant_api.md) | Tenant isolation, schema-per-tenant | TenantContext via ThreadLocal, AbstractRoutingDataSource for schema routing, JWT claim extraction, row-level-security fallback, Spring Security tenant filter chain |
+| [Multi-Tenant API](design_multitenant_api.md) | Tenant isolation, schema-per-tenant | TenantContext via ThreadLocal, Hibernate `MultiTenantConnectionProvider` switching `search_path`, `AbstractRoutingDataSource` for per-tier pools, JWT claim extraction, RLS compared as the cheaper alternative, per-tenant `AuthenticationManagerResolver` |
 
 ### Group 2: Security and Identity
 
@@ -36,21 +36,21 @@ Studies are grouped by primary engineering concern, not product category.
 
 | Study | Primary Concern | What It Teaches |
 |---|---|---|
-| [Idempotent Payment API](design_idempotent_payment_api.md) | Exactly-once semantics, distributed locks | Idempotency key hashing in Redis, conditional writes, Redisson distributed lock, saga rollback on partial failure, reconciliation job design |
-| [Distributed Caching](design_distributed_caching.md) | Cache consistency, stampede prevention | Spring Cache abstraction, RedisCacheManager, cache-aside vs write-through, Redisson read/write lock for stampede prevention, multi-tier L1+L2 cache topology |
+| [Idempotent Payment API](design_idempotent_payment_api.md) | Exactly-once semantics, distributed locks | Idempotency-key table keyed on (client_id, key), request-body hashing to catch key reuse, PostgreSQL `pg_advisory_xact_lock`, transactional outbox to Kafka, provider-side idempotency keys |
+| [Distributed Caching](design_distributed_caching.md) | Cache consistency, stampede prevention | Spring Cache abstraction, `RedisCacheManager`, cache-aside vs write-through, `@Cacheable(sync=true)` and its per-JVM limits, per-entry TTL jitter, multi-tier L1+L2 topology with Redis Pub/Sub invalidation |
 
 ### Group 4: Messaging and Events
 
 | Study | Primary Concern | What It Teaches |
 |---|---|---|
-| [Event-Driven Microservice](design_event_driven_microservice.md) | Transactional outbox, saga | Spring Kafka producer/consumer, @TransactionalEventListener + outbox table, saga orchestrator with compensation, dead-letter topic handling, schema registry |
-| [Real-Time Notification Service](design_realtime_notification_service.md) | Fan-out, WebSocket at scale | Spring WebSocket + STOMP broker relay, Kafka consumer group fan-out, push channel preference (SSE vs WebSocket vs FCM), Redis pub/sub for horizontal scaling |
+| [Event-Driven Microservice](design_event_driven_microservice.md) | Transactional outbox, saga | Spring Kafka producer/consumer, outbox table drained by a `@Scheduled` poller using `FOR UPDATE SKIP LOCKED`, choreography saga with compensating events, `@RetryableTopic` + DLT handling, idempotent consumers |
+| [Real-Time Notification Service](design_realtime_notification_service.md) | Fan-out, WebSocket at scale | Raw `TextWebSocketHandler` with a per-pod session registry (STOMP contrasted, not used), Kafka as the durable source, Redis ZSET for replay-on-reconnect, Redis Pub/Sub per user for cross-pod routing, backpressure via `ConcurrentWebSocketSessionDecorator` |
 
 ### Group 5: Batch Processing
 
 | Study | Primary Concern | What It Teaches |
 |---|---|---|
-| [Batch Pipeline](design_batch_pipeline.md) | Chunk-oriented processing, partitioning | Spring Batch Job/Step/chunk model, remote partitioning across worker pods, skip/retry policies, JobRepository on PostgreSQL, idempotent re-run strategy |
+| [Batch Pipeline](design_batch_pipeline.md) | Chunk-oriented processing, partitioning | Spring Batch Job/Step/chunk model, local `TaskExecutor` partitioning across 8 threads (remote partitioning explicitly out of scope), skip/retry policies, JobRepository on PostgreSQL, restart via stable identifying job parameters |
 
 ---
 
@@ -62,7 +62,7 @@ These files in `cross_cutting/` cover infrastructure patterns used across multip
 |---|---|---|
 | [OTel Observability for Spring](cross_cutting/otel_observability_for_spring.md) | API Gateway, Event-Driven Microservice, Batch Pipeline | Micrometer Observation API, OTel SDK auto-instrumentation, W3C traceparent propagation across Kafka and HTTP, structured logging with trace correlation |
 | [Resilience4j Patterns](cross_cutting/resilience4j_patterns.md) | API Gateway, Distributed Rate Limiter | Circuit breaker state machine, bulkhead (semaphore + thread pool), retry with exponential backoff, TimeLimiter, combining decorators correctly |
-| [Testcontainers and Test Strategy](cross_cutting/testcontainers_and_test_strategy.md) | All case studies (read early) | @SpringBootTest slice strategy, Testcontainers for Postgres/Redis/Kafka, WireMock for external services, contract testing with Spring Cloud Contract |
+| [Testcontainers and Test Strategy](cross_cutting/testcontainers_and_test_strategy.md) | All case studies (read early) | `@SpringBootTest` vs slice strategy, `@ServiceConnection` wiring for Postgres/Redis/Kafka, WireMock for external HTTP, container reuse and its CI caveat |
 | [Zero-Downtime Deploys and Config](cross_cutting/zero_downtime_deploys_and_config.md) | Multi-Tenant API, Idempotent Payment API, Batch Pipeline | Rolling deploy with schema migration sequencing, @RefreshScope + Spring Cloud Config Bus, feature flags via environment properties, graceful shutdown drain |
 
 ---
@@ -123,16 +123,16 @@ design_batch_pipeline                    (standalone; no direct upstream depende
 
 | File | Template | Q&As | Status |
 |---|---|---|---|
-| [design_multitenant_api.md](design_multitenant_api.md) | 11-section principal | ~10 | DONE |
-| [design_event_driven_microservice.md](design_event_driven_microservice.md) | 11-section principal | ~10 | DONE |
-| [design_api_gateway.md](design_api_gateway.md) | 11-section principal | ~10 | DONE |
-| [design_batch_pipeline.md](design_batch_pipeline.md) | 11-section principal | ~10 | DONE |
-| [design_distributed_caching.md](design_distributed_caching.md) | 11-section principal | ~11 | DONE |
-| [design_distributed_rate_limiter_spring.md](design_distributed_rate_limiter_spring.md) | 11-section principal | ~10 | DONE |
-| [design_oauth2_authorization_server.md](design_oauth2_authorization_server.md) | 11-section principal | ~10 | DONE |
-| [design_idempotent_payment_api.md](design_idempotent_payment_api.md) | 11-section principal | ~8 | DONE |
-| [design_realtime_notification_service.md](design_realtime_notification_service.md) | 11-section principal | ~8 | DONE |
-| [cross_cutting/otel_observability_for_spring.md](cross_cutting/otel_observability_for_spring.md) | 14-section module | — | DONE |
-| [cross_cutting/resilience4j_patterns.md](cross_cutting/resilience4j_patterns.md) | 14-section module | — | DONE |
-| [cross_cutting/testcontainers_and_test_strategy.md](cross_cutting/testcontainers_and_test_strategy.md) | 14-section module | — | DONE |
-| [cross_cutting/zero_downtime_deploys_and_config.md](cross_cutting/zero_downtime_deploys_and_config.md) | 14-section module | — | DONE |
+| [design_multitenant_api.md](design_multitenant_api.md) | 11-section principal | 10 | DONE |
+| [design_event_driven_microservice.md](design_event_driven_microservice.md) | 11-section principal | 10 | DONE |
+| [design_api_gateway.md](design_api_gateway.md) | 11-section principal | 10 | DONE |
+| [design_batch_pipeline.md](design_batch_pipeline.md) | 11-section principal | 10 | DONE |
+| [design_distributed_caching.md](design_distributed_caching.md) | 11-section principal | 10 | DONE |
+| [design_distributed_rate_limiter_spring.md](design_distributed_rate_limiter_spring.md) | 11-section principal | 10 | DONE |
+| [design_oauth2_authorization_server.md](design_oauth2_authorization_server.md) | 11-section principal | 10 | DONE |
+| [design_idempotent_payment_api.md](design_idempotent_payment_api.md) | 11-section principal | 10 | DONE |
+| [design_realtime_notification_service.md](design_realtime_notification_service.md) | 11-section principal | 10 | DONE |
+| [cross_cutting/otel_observability_for_spring.md](cross_cutting/otel_observability_for_spring.md) | 14-section module | 10 | DONE |
+| [cross_cutting/resilience4j_patterns.md](cross_cutting/resilience4j_patterns.md) | 14-section module | 10 | DONE |
+| [cross_cutting/testcontainers_and_test_strategy.md](cross_cutting/testcontainers_and_test_strategy.md) | 14-section module | 10 | DONE |
+| [cross_cutting/zero_downtime_deploys_and_config.md](cross_cutting/zero_downtime_deploys_and_config.md) | 14-section module | 12 | DONE |

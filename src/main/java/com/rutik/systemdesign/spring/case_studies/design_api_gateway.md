@@ -20,7 +20,7 @@ See also: [Resilience4j patterns](./cross_cutting/resilience4j_patterns.md),
 **Functional requirements:**
 - Single entry point routing to 20+ backend services based on path, host, and headers.
 - JWT validation; forward user identity (`X-User-ID`, `X-User-Roles`) to backends.
-- Rate-limit each client to 1,000 req/min (100 req/sec, burst 200) via Redis token bucket.
+- Rate-limit each client to 6,000 req/min (100 req/sec sustained, burst 200) via Redis token bucket.
 - Per-route circuit breakers with service-specific fallback responses.
 - Structured request/response logging with timing; distributed trace propagation (B3/W3C).
 
@@ -30,9 +30,10 @@ See also: [Resilience4j patterns](./cross_cutting/resilience4j_patterns.md),
 - Route changes without restart (`RefreshRoutesEvent`).
 - Sub-30s recovery from Redis rate-limiter outage (fail-open).
 
-**Constraints:** Spring Cloud Gateway 4.x (reactive, WebFlux/Netty), Redis 7 for rate
-limiting, Resilience4j circuit breakers, Java 21 (virtual threads inapplicable — fully
-reactive model).
+**Constraints:** Spring Cloud Gateway 5.x on Spring Boot 4.1 (reactive, WebFlux/Netty —
+the `spring-cloud-starter-gateway-server-webflux` artifact), Redis 8 for rate limiting,
+Resilience4j 2.3 circuit breakers, Java 25 (virtual threads inapplicable — fully reactive
+model).
 
 **Out of scope:** API versioning strategy for backends, GraphQL gateway, service mesh
 (Istio/Envoy) integration.
@@ -47,11 +48,15 @@ Sustained:           20,000 req/sec
 Peak (2.5×):         50,000 req/sec
 Filter chain per request: 5 filters (tracing, auth, rate-limit, circuit-breaker, logging)
 
-Netty event-loop threads: 2 × CPU cores
-  -> 16-core node: 32 event-loop threads
-  -> At 50,000 req/sec each filter must complete in < 1ms (non-blocking)
-     otherwise 32 threads x 1ms = 32 concurrent requests -> queue backup
+Netty event-loop threads: max(CPU cores, 4)   [reactor.netty.ioWorkerCount]
+  -> 16-core node: 16 event-loop threads
+  -> 16 threads is the ENTIRE concurrency of the node. If a filter blocks for 1 ms,
+     ceiling = 16 / 0.001s = 16,000 req/sec, a third of the 50,000 target.
 ```
+
+Note the count is `max(cores, 4)`, not `2 x cores` — Reactor Netty runs one worker per core
+because the loop is never supposed to block, so doubling it would only add context switching.
+That makes the "never block the event loop" rule twice as sharp as it first appears.
 
 **Redis rate limiter sizing:**
 ```
@@ -68,9 +73,16 @@ Total Redis memory for limiter: 10,000 users × ~200 bytes = ~2 MB (negligible)
 ```
 Required in-flight connections (Little's Law):
   throughput × downstream latency = 50,000 × 0.020s = 1,000 in-flight
-Reactor Netty default upstream pool: 500 connections per pool → too small
-Set: spring.cloud.gateway.httpclient.pool.max-connections=1500 (with headroom)
+Gateway's default pool type is ELASTIC — it grows on demand and max-connections is ignored.
+To cap it you must switch to a fixed pool, or you have no backpressure toward backends:
+  spring.cloud.gateway.server.webflux.httpclient.pool.type=fixed
+  spring.cloud.gateway.server.webflux.httpclient.pool.max-connections=1500
+  spring.cloud.gateway.server.webflux.httpclient.pool.acquire-timeout=5000
 ```
+
+The property lives under `spring.cloud.gateway.server.webflux.*` — Gateway 5 namespaced
+every server property by flavour (`server.webflux` vs `server.webmvc`), so the old
+`spring.cloud.gateway.httpclient.*` form binds to nothing and fails silently.
 
 **Horizontal scaling:**
 ```
@@ -247,14 +259,15 @@ public class JwtAuthenticationFilter implements GlobalFilter, Ordered {
 
 ### 4.3 BROKEN/FIX — Blocking Call in Reactive Filter
 
-Spring Cloud Gateway runs on Netty's event loop: `2 × cores` threads handle all requests.
+Spring Cloud Gateway runs on Netty's event loop: `max(cores, 4)` threads handle all requests.
 A single blocking call stalls an entire event-loop thread.
 
 ```java
 // BROKEN: blocking JWKS fetch on the event-loop thread stalls all traffic
 public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
     String key = jwksClient.fetchKeyBlocking(kid); // blocks event-loop thread for ~50ms
-    // At 50k req/sec: 32 threads × 50ms = 32 concurrent before queue backup
+    // 16 threads / 0.050s = 320 req/sec ceiling against a 50,000 req/sec target.
+    // Not "slower" — a 150x collapse, and every route dies together.
     return chain.filter(exchange);
 }
 ```
@@ -349,7 +362,11 @@ resilience4j:
 @RequestMapping("/fallback")
 public class FallbackController {
 
-    @GetMapping("/orders") @PostMapping("/orders")
+    // One method, both verbs: stacking @GetMapping and @PostMapping does NOT work.
+    // Spring logs "Multiple @RequestMapping annotations found ... only the first will be
+    // used" and registers GET only, so every POST that trips the breaker gets a 405
+    // instead of the fallback body.
+    @RequestMapping(value = "/orders", method = {RequestMethod.GET, RequestMethod.POST})
     public Mono<ResponseEntity<Map<String, Object>>> ordersFallback(ServerWebExchange exchange) {
         return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Map.of(
             "error", "ORDER_SERVICE_UNAVAILABLE",
@@ -358,7 +375,7 @@ public class FallbackController {
             "timestamp", Instant.now().toString())));
     }
 
-    @GetMapping("/payments") @PostMapping("/payments")
+    @RequestMapping(value = "/payments", method = {RequestMethod.GET, RequestMethod.POST})
     public Mono<ResponseEntity<Map<String, Object>>> paymentsFallback(ServerWebExchange exchange) {
         return Mono.just(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(Map.of(
             "error", "PAYMENT_SERVICE_UNAVAILABLE",
@@ -375,10 +392,10 @@ public class FallbackController {
 
 | Decision | Choice | Alternative | Rationale |
 |---|---|---|---|
-| Gateway model | Reactive (WebFlux/Netty) | Servlet (Tomcat) | 50k req/sec on 32 event-loop threads vs 50k Tomcat threads; Reactor Netty achieves gateway overhead in microseconds not milliseconds |
+| Gateway model | Reactive (WebFlux/Netty) | Servlet (Tomcat) | 50k req/sec on 16 event-loop threads, because a proxied request holds no thread while it waits; the servlet model would need a thread per in-flight request |
 | Auth failure mode | Fail-open (key service down → pass through) | Fail-closed → 401 | Backend services also validate JWTs; key-service blip should not cause full API outage |
 | Rate-limiter failure mode | Fail-open → allow + alert | Fail-closed → 503 all traffic | Rate limiting is protective, not correctness; losing it briefly is safer than total outage |
-| Redis vs in-memory rate limiting | Redis (shared) | Per-JVM counter | N gateway instances with per-JVM counters allow N×1000 req/min; Redis enforces the global limit |
+| Redis vs in-memory rate limiting | Redis (shared) | Per-JVM counter | N gateway instances with per-JVM counters allow N× the configured limit; Redis enforces one global bucket |
 | Route config | Code DSL | YAML | Java DSL enables conditional logic and type safety; YAML is simpler for ops but less composable |
 | Route ordering | Most-specific first | Any order | First-match-wins semantics; wildcard before specific swallows the specific route silently |
 
@@ -395,15 +412,13 @@ public class FallbackController {
 
 ## 6. Real-World Implementations
 
-**Netflix (Zuul → Zuul2 → cloud-native):** Netflix built Zuul 1 as a servlet-based gateway and hit thread exhaustion under long-polling traffic. Zuul 2 migrated to Netty async I/O — the same architectural shift Spring Cloud Gateway embodies. Netflix runs Zuul 2 with per-route `FallbackHandler` instances and health-check-based route toggling, with JMX dynamically updating filter chains without restarts.
+**Netflix (Zuul 1 → Zuul 2):** Zuul 1 was servlet-based and blocking — one thread per connection — which broke down under long-lived and long-polling connections, exactly the thread-exhaustion arithmetic in §2. Zuul 2 was rewritten on Netty with async, non-blocking I/O so a connection costs a file descriptor rather than a thread. That is the same architectural bet Spring Cloud Gateway makes, and it comes with the same bill: everything on the path must be non-blocking, which is why §4.3 is a whole section rather than a footnote. Zuul's other durable idea is dynamically loadable filters — Groovy filters pushed to a running fleet without redeploying, the ancestor of `RefreshRoutesEvent` and `RouteDefinitionRepository` in §11.
 
-**Cloudflare Workers (edge gateway):** Cloudflare's API gateway runs Lua/V8 workers at the edge — closest analogue to Spring Cloud Gateway's `GlobalFilter` chain. Each worker is a stateless function; JWT validation uses cached public keys fetched from a regional key server, with fail-open for key-fetch failures (exactly the pattern in §4.3).
+**Cloudflare Workers (edge gateway):** the closest analogue to a `GlobalFilter` chain running at the edge. Each Worker is a **V8 isolate** executing JavaScript or WebAssembly — Cloudflare deliberately moved off Lua because Lua did not sandbox untrusted customer code, and an isolate starts in single-digit milliseconds where a container does not. The lesson that transfers: an isolate has no filesystem, no threads and a hard CPU budget, which forces the same discipline this design enforces by convention — cache the JWKS in-process, never make a blocking network call on the request path.
 
-**Airbnb (SmartStack → Nginx → SCG):** Airbnb migrated from Nginx-based routing to a Spring Cloud Gateway-based internal API platform when they needed service-discovery-native routing (Eureka `lb://` URIs) and per-route Resilience4j circuit breakers without writing Lua scripts. The migration eliminated a separate Nginx process per service and unified gateway metrics in their Micrometer/Prometheus stack.
+**Stripe — "Scaling your API with rate limiters":** Stripe published the design this section's limiter is modelled on: token buckets held in Redis, and *four different* limiter types layered together — a request-rate limiter, a concurrent-request limiter, a fleet-usage load shedder, and a worker-utilization load shedder. The point worth stealing is the last two: rate limits protect against one noisy client, but load shedding protects against *everyone* being reasonable at once, which no per-client limit can catch. This design only implements the first.
 
-**Stripe API Gateway:** Uses a custom Go gateway with per-endpoint rate limiting stored in Redis with Lua scripts for atomic token bucket — conceptually identical to Spring Cloud Gateway's `RedisRateLimiter`. Stripe's gateway is notably more strict: rate-limit violations return 429 with `Retry-After` headers, and the gateway fails-closed for payment endpoints while failing-open for informational endpoints (exactly the two-tier approach in this design).
-
-**AWS ALB + Lambda Authorizers:** In serverless architectures, AWS ALB plays the role of the gateway with JWT validation delegated to Lambda authorizers. The failure mode is fail-open by default — if the authorizer Lambda times out, ALB allows the request through to the backend. This matches the fail-open JWT approach in §4.2.
+**AWS API Gateway + Lambda authorizers:** the counterexample to §4.2's fail-open choice. A Lambda authorizer that errors or exceeds its 10-second limit produces `AUTHORIZER_FAILURE` and a 500 — the request is rejected, never forwarded. That is fail-**closed**, and it is the right default for a managed service that cannot know whether your backend re-validates. Fail-open is only defensible here because §4.2 explicitly assumes backends validate the JWT independently; drop that assumption and the fail-open branch becomes an authentication bypass.
 
 ---
 
@@ -446,7 +461,7 @@ and confirm every span has a downstream child span in the target service.
 
 **Runbook 2: Circuit breaker in OPEN state for critical route**
 - Symptom: all requests to `/api/v1/payments` return 503 from fallback; `resilience4j.circuitbreaker.state{name=payment-service-cb} == OPEN`
-- Diagnose: check payment service health endpoint directly (`curl lb://payment-service/actuator/health`); check `payment-service-cb` failure rate in last sliding window (10 calls)
+- Diagnose: resolve the instance from discovery and hit it directly (`curl http://<pod-ip>:8080/actuator/health` — `lb://` is a Spring Cloud scheme, not something curl can resolve); check `payment-service-cb` failure rate in last sliding window (10 calls)
 - Mitigate: if payment service is recovering, wait for half-open probe (3 allowed calls after `wait-duration-in-open-state=60s`); if backends are healthy but gateway has wrong target, refresh routes via `POST /actuator/gateway/refresh`
 - Resolve: verify CB transitions HALF_OPEN → CLOSED; confirm 200s from payment service
 
@@ -527,11 +542,11 @@ public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
 }
 ```
 
-**Impact:** 8 minutes of outage during peak hours; 3 customer SLA violations. Resolution: size guard + `maxmemory` limit on DataBuffer pool.
+**Impact:** 8 minutes of outage during peak hours; 3 customer SLA violations. Resolution: size guard, plus a cap on Netty's pooled direct memory (`-Dio.netty.maxDirectMemory`) so a buffering regression trips an allocation failure on one request instead of an OOM that kills the process.
 
 ### War Story 3: In-Memory Rate Limiting Across Multiple Gateway Instances
 
-Early design used a per-JVM `AtomicLong` token bucket instead of Redis. With 4 gateway instances and a configured limit of 1,000 req/min, clients could actually send 4,000 req/min — each instance maintained its own independent counter. A scraping bot discovered this and hammered the product search endpoint, causing N+1 query storms in the database.
+Early design used a per-JVM `AtomicLong` token bucket instead of Redis. With 4 gateway instances and a configured limit of 6,000 req/min, clients could actually send 24,000 req/min — each instance maintained its own independent counter, and a round-robin load balancer handed every client all four of them. A scraping bot discovered this and hammered the product search endpoint, causing N+1 query storms in the database.
 
 Fix: move to Redis-backed `RedisRateLimiter` which uses a Lua script to atomically decrement a shared counter. Per-instance counters are fundamentally broken for distributed rate limiting regardless of how precise they are locally.
 
@@ -542,11 +557,11 @@ Fix: move to Redis-backed `RedisRateLimiter` which uses a Lua script to atomical
 ### Filter latency budget
 
 ```
-Event-loop threads:   2 x 16 cores = 32 threads
+Event-loop threads:   max(16 cores, 4) = 16 threads
 Target throughput:    50,000 req/sec
-Time per request on event loop: 50,000 / 32 = 1,562 req/thread/sec = 0.64ms max per request
+Time per request on event loop: 50,000 / 16 = 3,125 req/thread/sec = 0.32ms max per request
 
-5 filters each must complete in < 0.13ms to stay under the 0.64ms budget.
+5 filters each must complete in < 0.064ms (64 microseconds) to stay under the 0.32ms budget.
 Any filter doing I/O must be reactive (Mono-returning); blocking I/O stalls the thread.
 ```
 
@@ -561,8 +576,9 @@ Horizontal scale:     2-3 nodes for 50k req/sec target + HA failover
 ### Connection and memory budget
 
 ```
-Upstream pool (Reactor Netty):  default 500 per pool
-Required (Little's Law):        50,000 x 0.020s = 1,000 in-flight -> set max-connections=1500
+Upstream pool (Gateway):        type=elastic by default -> unbounded growth, no backpressure
+Required (Little's Law):        50,000 x 0.020s = 1,000 in-flight
+                                -> pool.type=fixed, pool.max-connections=1500
 
 JVM heap:                       2-4 GB handles 50k req/sec in reactive model
                                 Watch for DataBuffer leaks (not heap size per se)
@@ -582,7 +598,7 @@ A: By default `RedisRateLimiter` throws and propagates the error as a 503. The f
 
 **Q: How do you prevent circuit breakers from tripping on client errors (4xx)?**
 
-A: Resilience4j's circuit breaker only counts exceptions (network errors, timeouts) as failures — HTTP 4xx responses are not exceptions in the reactive pipeline. To explicitly record only 5xx as failures, configure `recordHttpStatuses: SERVER_ERROR`. Also ignore 429 (expected behavior, not a service failure) via `ignoreExceptions: [TooManyRequestsException.class]`.
+A: You get this for free — Resilience4j counts only *exceptions* (network errors, timeouts) as failures, and a 4xx response is a perfectly successful HTTP exchange, so nothing records it. The trap is the reverse: 5xx responses are *also* not exceptions, so by default a backend returning 500 to every request never opens the breaker. The knob is on Gateway's filter, not on Resilience4j: `.circuitBreaker(c -> c.setName("order-service-cb").addStatusCode("500").addStatusCode("503"))` (`statusCodes` in YAML) makes the filter raise an exception for those statuses so the breaker sees them. On the Resilience4j side the properties are `record-exceptions`, `ignore-exceptions` and `record-failure-predicate` — there is no HTTP-status property, because Resilience4j has no idea it is wrapping HTTP.
 
 **Q: Why does filter latency arithmetic understate the real risk in a reactive gateway?**
 
@@ -602,7 +618,7 @@ A: Spring Cloud Gateway supports WebSocket proxying natively via `WebsocketRouti
 
 **Q: How do you size the upstream connection pool?**
 
-A: Use Little's Law: `in-flight = throughput × latency`. For 50,000 req/sec with 20ms downstream P99, in-flight is 50,000 × 0.020 = 1,000 connections. Add 50% headroom → set `max-connections=1500`. Reactor Netty defaults to 500 per pool, which bottlenecks this workload. Monitor `reactor.netty.connection.provider.pending.acquired.size`; rising pending-acquire counts signal either pool exhaustion or slow backends.
+A: Use Little's Law: `in-flight = throughput × latency`. For 50,000 req/sec with 20ms downstream P99, in-flight is 50,000 × 0.020 = 1,000 connections. Add 50% headroom → `max-connections=1500`. The catch is that Gateway's pool defaults to `type: elastic`, where `max-connections` is ignored entirely — the pool just grows, so a slow backend converts into unbounded connection growth against it rather than backpressure at the gateway. Set `pool.type=fixed` with an `acquire-timeout` to get a bounded pool that fails fast. Monitor `reactor.netty.connection.provider.pending.connections`; a rising pending count means either the pool is exhausted or backends have slowed.
 
 **Q: How does the architecture change for multi-region deployment?**
 
