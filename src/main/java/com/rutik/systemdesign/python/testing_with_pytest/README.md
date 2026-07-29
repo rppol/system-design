@@ -205,22 +205,24 @@ pytest resolves fixture parameters transitively: `test_get_item` names `client` 
 
 ```python
 # conftest.py
+from collections.abc import Iterator
+
 import pytest
-import psycopg2
-from psycopg2.extensions import connection
+import psycopg
+from psycopg import Connection
 
 # SESSION SCOPE: connect once for the entire test run.
 # Use when the resource is expensive to create and tests do NOT mutate shared state.
 @pytest.fixture(scope="session")
-def db_connection() -> connection:
-    conn = psycopg2.connect("postgresql://test:test@localhost:5432/testdb")
+def db_connection() -> Iterator[Connection]:
+    conn = psycopg.connect("postgresql://test:test@localhost:5432/testdb")
     yield conn
     conn.close()
 
 # FUNCTION SCOPE: fresh transaction per test; always rolled back.
 # Use when tests perform writes — guarantees isolation between tests.
 @pytest.fixture(scope="function")
-def db(db_connection: connection):
+def db(db_connection: Connection) -> Iterator[Connection]:
     db_connection.autocommit = False
     yield db_connection
     db_connection.rollback()
@@ -234,7 +236,9 @@ def expensive_model():
 
 ```python
 # test_users.py
-def test_insert_user(db: connection) -> None:
+from psycopg import Connection
+
+def test_insert_user(db: Connection) -> None:
     with db.cursor() as cur:
         cur.execute("INSERT INTO users (name) VALUES ('alice')")
         cur.execute("SELECT name FROM users WHERE name='alice'")
@@ -243,7 +247,7 @@ def test_insert_user(db: connection) -> None:
     assert row[0] == "alice"
     # db fixture rolls back after this test; the row disappears
 
-def test_no_user_leakage(db: connection) -> None:
+def test_no_user_leakage(db: Connection) -> None:
     with db.cursor() as cur:
         cur.execute("SELECT count(*) FROM users WHERE name='alice'")
         count = cur.fetchone()[0]
@@ -460,15 +464,19 @@ async def test_fetch_user_async() -> None:
 # [tool.pytest.ini_options]
 # asyncio_mode = "auto"    ← auto-detects async test functions; no @mark needed
 
+from collections.abc import AsyncIterator
+
 import pytest
-import httpx
-from httpx import AsyncClient
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 from app.main import app  # FastAPI application
 
-# Async fixture
-@pytest.fixture
-async def client() -> AsyncClient:
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+# Async fixture. In strict mode this MUST be @pytest_asyncio.fixture;
+# with asyncio_mode = "auto" a plain @pytest.fixture is rewritten for you.
+@pytest_asyncio.fixture
+async def client() -> AsyncIterator[AsyncClient]:
+    transport = ASGITransport(app=app)     # drive the ASGI app in-process, no socket
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
 # Async test
@@ -481,8 +489,8 @@ async def test_health_endpoint(client: AsyncClient) -> None:
 # Testing a FastAPI dependency override
 from app.dependencies import get_current_user
 
-@pytest.fixture
-async def auth_client(client: AsyncClient) -> AsyncClient:
+@pytest_asyncio.fixture
+async def auth_client(client: AsyncClient) -> AsyncIterator[AsyncClient]:
     app.dependency_overrides[get_current_user] = lambda: {"id": 42, "role": "admin"}
     yield client
     app.dependency_overrides.clear()
@@ -568,10 +576,11 @@ def test_log_capture(caplog: pytest.LogCaptureFixture) -> None:
 ```python
 # tests/integration/test_items_api.py
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def seeded_db(db: AsyncSession) -> None:
     from app.models import Item
     db.add(Item(id=1, name="widget", price=9.99))
@@ -664,6 +673,8 @@ async def test_rate_limit(
 
 **Do NOT use `unittest.mock.patch` as a default reflex.** If a function is hard to patch in a test, the real problem is a design issue — the dependency should be injected, not monkey-patched at the module level.
 
+**Do NOT assume `pytest-xdist -n auto` is free.** `-n auto` forks N worker processes, and a `scope="session"` fixture is created **once per worker**, not once per run — so a session fixture that creates a schema, seeds reference data, binds a port, or writes to a fixed temp path now runs N times concurrently against the same resource, and the failures look like flakiness rather than a config error. Give each worker its own namespace, keyed off the `PYTEST_XDIST_WORKER` environment variable (`gw0`, `gw1`, …): a per-worker database name, a per-worker Redis DB index, a port of `0` so the OS assigns one. Where a step genuinely must happen once for the whole run — a migration, a downloaded fixture corpus — guard it with a file lock on a path derived from `tmp_path_factory.getbasetemp().parent`, which is shared across workers while `tmp_path` is not. Ordering assumptions break too: xdist distributes tests across workers, so any test that depends on an earlier test having run is now a coin flip. Run the suite once with `-p no:randomly -n 0` and once with `-n auto` before trusting either result.
+
 ---
 
 ## 10. Common Pitfalls
@@ -741,7 +752,7 @@ def test_email_sent_once() -> None:
 
 ### Pitfall 3: Forgetting asyncio_mode or Mixing Sync and Async Fixtures
 
-Async fixtures passed to sync test functions raise `TypeError: object AsyncGenerator can't be used in 'await' expression` at collection time. Always mark async tests with `@pytest.mark.asyncio` or set `asyncio_mode = auto` globally in `pyproject.toml`.
+`pytest-asyncio` defaults to `asyncio_mode = strict`, where an async fixture declared with a plain `@pytest.fixture` is never awaited — pytest fails setup with `'test_x' requested an async fixture 'y', with no plugin or hook that handled it`, and an unmarked async test is skipped as an uncollected coroutine. Either set `asyncio_mode = "auto"` globally in `pyproject.toml`, or stay in strict mode and decorate every async test with `@pytest.mark.asyncio` and every async fixture with `@pytest_asyncio.fixture`. Also set `asyncio_default_fixture_loop_scope` explicitly so the fixture event-loop scope does not shift under you on a future upgrade.
 
 ### Pitfall 4: Patching the Wrong Namespace
 
@@ -862,7 +873,7 @@ A stub replaces a dependency and returns a fixed canned value without executing 
 
 **Q7: How would you test a FastAPI endpoint that has a dependency injection override?**
 
-Use `app.dependency_overrides` — a dictionary on the FastAPI application instance. Map the real dependency callable to a lambda or function that returns a test double. Pass the patched `app` to `httpx.AsyncClient` via `AsyncClient(app=app, base_url="http://test")`. After the test (or in the fixture teardown), call `app.dependency_overrides.clear()` to restore the original wiring. This approach tests the full request/response cycle including serialization and middleware without hitting real databases or external services.
+Use `app.dependency_overrides` — a dictionary on the FastAPI application instance. Map the real dependency callable to a lambda or function that returns a test double. Drive the patched `app` with `AsyncClient(transport=ASGITransport(app=app), base_url="http://test")`, which calls the ASGI app in-process without opening a socket. After the test (or in the fixture teardown), call `app.dependency_overrides.clear()` to restore the original wiring. This approach tests the full request/response cycle including serialization and middleware without hitting real databases or external services.
 
 **Q8: How does `hypothesis` shrinking work, and why does it matter?**
 
@@ -894,7 +905,7 @@ Stacking two `@parametrize` decorators produces the Cartesian product of both pa
 
 **Q15: What does `filterwarnings = ["error"]` do in a pytest CI configuration, and why is it valuable?**
 
-Setting `filterwarnings = ["error"]` in `pyproject.toml` converts every Python warning raised during a test run into a test failure instead of a silently-printed message, so deprecation notices from dependencies stop the build immediately rather than scrolling past in CI logs. This catches deprecated API usage — a library function slated for removal, an implicit type coercion — while it is still a warning, giving the team time to fix it before the next dependency upgrade turns it into a hard breaking change. Without this setting, warnings accumulate silently for months and then surface all at once as a wall of failures during a routine dependency upgrade. Combine it with narrower `filterwarnings` entries (ignoring one known third-party warning by module) when a specific dependency cannot be fixed immediately.
+Setting `filterwarnings = ["error"]` in `pyproject.toml` converts every Python warning raised during a test run into a test failure instead of a silently-printed message. Deprecation notices from dependencies then stop the build immediately rather than scrolling past in CI logs. This catches deprecated API usage — a library function slated for removal, an implicit type coercion — while it is still a warning, giving the team time to fix it before the next dependency upgrade turns it into a hard breaking change. Without this setting, warnings accumulate silently for months and then surface all at once as a wall of failures during a routine dependency upgrade. Combine it with narrower `filterwarnings` entries (ignoring one known third-party warning by module) when a specific dependency cannot be fixed immediately.
 
 **Q16: In the rate-limiter case study, why does `test_limit_five_broken` pollute later tests, and how does `monkeypatch.setattr` fix it?**
 
@@ -1049,9 +1060,11 @@ def get_resource(request: Request, cache: CacheClient = Depends(get_cache)) -> d
 ```python
 # tests/test_rate_limiter.py
 import pytest
+import pytest_asyncio
 import time
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch, call
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from app.main import app, get_cache
 from app.limiter import check_rate_limit
 import fakeredis
@@ -1065,11 +1078,12 @@ def fake_cache() -> fakeredis.FakeRedis:
     """Fresh in-memory Redis per test — zero state leakage."""
     return fakeredis.FakeRedis()
 
-@pytest.fixture
-async def client(fake_cache: fakeredis.FakeRedis) -> AsyncClient:
+@pytest_asyncio.fixture
+async def client(fake_cache: fakeredis.FakeRedis) -> AsyncIterator[AsyncClient]:
     """Async HTTP client with the cache dependency overridden to a fake."""
     app.dependency_overrides[get_cache] = lambda: fake_cache
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
 
@@ -1126,7 +1140,7 @@ async def test_time_window_rollover_allows_new_requests(
     assert first_in_new_window.status_code == 200
 
 # ---------------------------------------------------------------------------
-# AsyncMock: Redis unavailable raises 500, not 429
+# Cache unavailable surfaces as 500, not 429
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -1138,7 +1152,11 @@ async def test_cache_unavailable_returns_500(
 
     app.dependency_overrides[get_cache] = lambda: broken_cache
     try:
-        async with AsyncClient(app=app, base_url="http://test") as ac:
+        # raise_app_exceptions=False is REQUIRED: by default ASGITransport
+        # re-raises whatever the app raised, so the ConnectionError would
+        # escape the client call and the assert below would never run.
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
             response = await ac.get("/resource", headers={"X-User-Id": "user-3"})
         assert response.status_code == 500
     finally:
@@ -1184,6 +1202,6 @@ def test_limit_five_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
 #### Key design decisions in this test suite
 
 - `fakeredis.FakeRedis()` is a **fake** (not a mock): it implements the real Redis protocol in memory. This means `incr` and `expire` behave identically to production, catching off-by-one bugs in the sliding-window logic that a `Mock` would miss.
-- `monkeypatch.setattr("app.limiter.time.time", ...)` patches the `time` reference *inside* the limiter module, not the global `time` module. This is the correct namespace.
+- `monkeypatch.setattr("app.limiter.time.time", ...)` resolves `app.limiter.time` to the `time` module object itself — `import time` binds the one shared module — so this replaces `time.time` process-wide for the duration of the test, and `monkeypatch` restores it afterwards. If you want a patch that is genuinely confined to one module, the module must import the function by name (`from time import time`) and the test must target `app.limiter.time`.
 - `app.dependency_overrides.clear()` in the `client` fixture teardown (after `yield`) ensures the override does not leak to tests that run after the fixture is torn down.
 - The BROKEN→FIX block demonstrates the single most common source of test-suite flakiness in FastAPI projects: direct mutation of module-level configuration without cleanup.

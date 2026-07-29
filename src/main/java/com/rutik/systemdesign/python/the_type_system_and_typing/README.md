@@ -6,7 +6,9 @@ Python's type system is a **gradual, structural, and optional** annotation layer
 language's dynamic runtime. Introduced incrementally starting from PEP 3107 (function annotations,
 Python 3.0) and PEP 484 (type hints, Python 3.5), the system reached maturity with `Protocol`
 [3.8], `Annotated` [3.9], `ParamSpec` [3.10], `TypeGuard` [3.10], `Self` [3.11],
-`LiteralString` [3.11], and PEP 695 type parameter syntax [3.12].
+`LiteralString` [3.11], PEP 695 type parameter syntax and `@override` [3.12], `TypeIs` and
+PEP 696 type-parameter defaults [3.13], and PEP 649/749 deferred annotation evaluation plus the
+`annotationlib` introspection module [3.14].
 
 Core machinery lives in the `typing` module (standard library), with `typing_extensions` backporting
 newer constructs. Static type checkers (mypy, pyright) consume annotations at analysis time; the
@@ -18,9 +20,9 @@ Key constructs covered in this module:
 - `TypeVar`, `ParamSpec`, `TypeVarTuple` — generics
 - `Protocol` — structural subtyping
 - Variance: covariant, contravariant, invariant
-- `Annotated`, `Literal`, `TypeGuard`, `Self`, `LiteralString`
-- PEP 695 `type` statement and bracketed syntax [3.12]
-- Runtime introspection: `get_type_hints()`, `__annotations__`
+- `Annotated`, `Literal`, `TypeGuard` / `TypeIs`, `Self`, `LiteralString`
+- PEP 695 `type` statement and bracketed syntax [3.12]; PEP 696 defaults `[T = int]` [3.13]
+- Runtime introspection: `get_type_hints()`, `__annotations__`, `annotationlib` [3.14]
 - Toolchain: mypy, pyright, ruff, beartype
 - FastAPI integration: parameter introspection via `get_type_hints()` + `inspect.signature()`
 
@@ -67,9 +69,12 @@ audiences prevents the most common category of bugs.
    `isinstance(x, list[int])` raises `TypeError`. [3.9+ allows `list[int]` as a hint; the
    subscript creates a `types.GenericAlias` but carries no runtime element type enforcement.]
 
-5. **`__annotations__` is populated at import time** — only with the string representation of
-   the annotation when `from __future__ import annotations` is active (PEP 563) or in Python 3.14+
-   default mode (PEP 649). `get_type_hints()` evaluates the strings against the module namespace.
+5. **`__annotations__` is populated lazily, and its contents depend on the mode** — with
+   `from __future__ import annotations` (PEP 563) it holds *strings*. In Python 3.14's default mode
+   (PEP 649/749) the annotations are not evaluated at import at all; they are compiled into a hidden
+   `__annotate__` function, and reading `__annotations__` runs it and returns *real type objects*.
+   `get_type_hints()` normalises both, and `annotationlib.get_annotations(obj, format=Format.STRING)`
+   is how you deliberately ask 3.14 for strings.
 
 6. **`Any` is both top and bottom** — `Any` is compatible with every type in both directions,
    making it an escape hatch that silences all static errors at the cost of safety.
@@ -154,9 +159,18 @@ HttpMethod = Literal["GET", "POST", "PUT", "DELETE"]
 
 Enables discriminated unions and exhaustiveness checking.
 
-### 4.9 TypeGuard [3.10]
+### 4.9 TypeGuard [3.10] and TypeIs [3.13]
 
-Narrows the type of a variable inside an `if` block when a user-defined predicate returns `True`.
+Both narrow the type of a variable inside an `if` block when a user-defined predicate returns `True`,
+and they differ in exactly one way that decides which to reach for. `TypeGuard[T]` narrows only the
+positive branch and narrows it to `T` unconditionally, even when `T` is unrelated to the declared
+type. `TypeIs[T]` (PEP 742) additionally narrows the **negative** branch by subtracting `T`, and in
+the positive branch it *intersects* rather than replaces. Against `v: int | str`, a
+`TypeIs[str]` predicate gives `str` in the `if` and `int` in the `else`; the `TypeGuard[str]` version
+gives `str` in the `if` and leaves `int | str` in the `else`. `TypeIs` is what you almost always
+want, because it matches how `isinstance()` already behaves; keep `TypeGuard` for the deliberately
+lossy case — a parser that returns `TypeGuard[list[str]]` for a `list[Any]` argument, where the
+negative branch genuinely tells you nothing.
 
 ### 4.10 Self [3.11]
 
@@ -205,7 +219,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     src(["Source code<br/>.py with annotations"])
-    ann("__annotations__ dict<br/>raw strings if PEP 563")
+    ann("__annotations__<br/>strings under PEP 563,<br/>lazy objects under PEP 649")
     gth("get_type_hints()")
     resolved("resolved type objects")
     consumers(["Runtime consumers<br/>Pydantic · FastAPI · attrs · dataclasses"])
@@ -365,23 +379,33 @@ infers the return as `int`. This happens entirely at analysis time — at runtim
 ### 6.2 Bounded TypeVar
 
 ```python
-from typing import TypeVar, Protocol
+from typing import Any, TypeVar, Protocol
 
 class Comparable(Protocol):
-    def __lt__(self, other: "Comparable") -> bool: ...
+    # `other: Any` is load-bearing. Annotating it `Comparable` makes the protocol
+    # UNSATISFIABLE by int and str: int.__lt__ accepts only int, which is narrower
+    # than Comparable, and parameters are checked contravariantly.
+    def __lt__(self, other: Any, /) -> bool: ...
 
 CT = TypeVar("CT", bound=Comparable)
 
 def minimum(a: CT, b: CT) -> CT:
     return a if a < b else b
 
-minimum(1, 2)          # OK — int is Comparable
-minimum("x", "y")      # OK — str is Comparable
-minimum(1, "x")        # mypy ERROR — T bound to int, str not compatible
+class Opaque:          # no __lt__
+    pass
+
+minimum(1, 2)                    # OK — reveal_type: int
+minimum("x", "y")                # OK — reveal_type: str
+minimum(1, "x")                  # accepted; CT widens to the bound, reveal_type: Comparable
+minimum(Opaque(), Opaque())      # mypy ERROR: Value of type variable "CT" cannot be "Opaque"
 ```
 
 The `bound` restricts `CT` to subtypes of `Comparable`. Unlike constrained TypeVars, the bound
-allows any subtype (open set), while constrained TypeVars restrict to an exact closed list.
+allows any subtype (open set), while constrained TypeVars restrict to an exact closed list. Note what
+the bound does *not* do: it never forces both arguments to be the same type. When they differ, mypy
+solves `CT` to their join — here `Comparable` itself — and the call type-checks. If you need the two
+arguments locked to one type, use a constrained TypeVar (§6.3) or an `@overload`.
 
 ### 6.3 Constrained TypeVar
 
@@ -409,7 +433,7 @@ Without `ParamSpec`, decorators that wrap functions lose their parameter signatu
 
 ```python
 # WITHOUT ParamSpec — loses signature
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 F = TypeVar("F", bound=Callable[..., Any])
 
 def log(func: F) -> F:
@@ -484,7 +508,7 @@ isinstance(User(), Serializable)  # True — runtime_checkable enables this
 ### 6.6 Covariance and Contravariance
 
 ```python
-from typing import TypeVar, Generic
+from typing import Any, TypeVar, Generic
 
 T_co = TypeVar("T_co", covariant=True)    # producer
 T_contra = TypeVar("T_contra", contravariant=True)  # consumer
@@ -725,31 +749,40 @@ def clamp[T: (int, float)](value: T, lo: T, hi: T) -> T:
     return max(lo, min(value, hi))
 ```
 
-PEP 695 syntax is syntactic sugar — the runtime still creates `TypeVar` objects internally.
-Pyright 1.1.300+ and mypy 1.5+ support PEP 695.
+PEP 695 syntax is not pure sugar — the type parameters are lazily evaluated in their own scope, which
+is why a `type` alias can reference a name defined later in the file — but the runtime does still
+build `TypeVar` objects, reachable via `Stack.__type_params__`. Both major checkers handle it out of
+the box; mypy turned it on by default in 1.12 (it was behind
+`--enable-incomplete-feature=NewGenericSyntax` in 1.11).
 
 ### 6.11 `get_type_hints()` vs `__annotations__`
 
 ```python
-from __future__ import annotations  # PEP 563 — deferred evaluation
+from __future__ import annotations  # PEP 563 — stringified annotations
 from typing import get_type_hints
 
 class Node:
     value: int
-    next: "Node | None"  # forward reference
+    next: Node | None  # forward reference, legal because of the future-import
 
 print(Node.__annotations__)
 # {'value': 'int', 'next': 'Node | None'}  -- raw strings (PEP 563)
 
 print(get_type_hints(Node))
-# {'value': <class 'int'>, 'next': int | None}  -- resolved types
+# {'value': <class 'int'>, 'next': __main__.Node | None}  -- resolved type objects
 ```
 
-`__annotations__` returns raw string representations when PEP 563 is active (or always in
-Python 3.14+ default mode with PEP 649). `get_type_hints()` evaluates those strings in the
-correct namespace, resolving forward references. Always use `get_type_hints()` in library code.
+Under PEP 563 `__annotations__` holds raw strings, and `get_type_hints()` evaluates them in the
+defining module's namespace, resolving forward references. Under Python 3.14's PEP 649/749 default
+the picture is different and often misremembered: annotations are compiled into a hidden
+`__annotate__` function and evaluated only on first access, so `__annotations__` yields **real type
+objects**, not strings — while still tolerating a forward reference that has not been defined yet at
+class-creation time. To get strings back on 3.14, ask for them explicitly with
+`annotationlib.get_annotations(Node, format=annotationlib.Format.STRING)`; to get objects that
+degrade gracefully when a name is genuinely missing, use `Format.FORWARDREF`. Library code should
+still call `get_type_hints()`, which normalises every mode to resolved objects.
 
-Both storage modes funnel through the same resolver — the diagram makes that convergence
+All three storage modes funnel through the same resolver — the diagram makes that convergence
 explicit, which is why "always call `get_type_hints()`" is safe advice regardless of mode.
 
 ```mermaid
@@ -763,20 +796,23 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     start(["class Node:<br/>value: int"])
-    mode{"PEP 563 future-import<br/>or Python 3.14+ default?"}
-    rawStr("__annotations__ holds<br/>raw strings")
-    liveObj("__annotations__ holds<br/>live type objects")
+    mode{"Which annotation<br/>mode is in effect?"}
+    rawStr("PEP 563 future-import:<br/>__annotations__ holds strings")
+    lazyObj("3.14 default, PEP 649:<br/>__annotate__ runs on first read,<br/>yields type objects")
+    liveObj("pre-3.14, no future-import:<br/>evaluated eagerly at import")
     resolve("get_type_hints()<br/>resolves in module namespace")
     resolved(["resolved types<br/>e.g. int, Node or None"])
 
     start --> mode
-    mode -->|"yes, deferred"| rawStr --> resolve
-    mode -->|"no, eager"| liveObj --> resolve
+    mode -->|"stringified"| rawStr --> resolve
+    mode -->|"deferred"| lazyObj --> resolve
+    mode -->|"eager"| liveObj --> resolve
     resolve --> resolved
 
     class start io
     class mode mathOp
     class rawStr frozen
+    class lazyObj base
     class liveObj train
     class resolve mathOp
     class resolved train
@@ -906,7 +942,7 @@ safe_query(conn, "users")         # OK — string literal
 | `Literal` | Discriminated unions, narrowing | None |
 | `TypeGuard` | User-defined narrowing predicates | None |
 | `ParamSpec` | Decorator signature preservation | None |
-| `beartype` | Runtime type enforcement | ~1–5 µs per call |
+| `beartype` | Runtime type enforcement | ~0.1–1 µs per call |
 
 ---
 
@@ -1039,9 +1075,13 @@ class Circle:
 
 obj = Circle()
 isinstance(obj, Drawable)
-# TypeError: Protocols with non-method members don't support issubclass()
-# OR (for method-only Protocols without @runtime_checkable):
 # TypeError: Instance and class checks can only be used with @runtime_checkable protocols
+#
+# A DIFFERENT TypeError exists and is often confused with this one:
+#   TypeError: Protocols with non-method members don't support issubclass().
+#              Non-method members: 'name'.
+# That one comes from issubclass() -- never isinstance() -- on a Protocol that
+# declares a plain data attribute, and it fires even WITH @runtime_checkable.
 ```
 
 ```python
@@ -1073,12 +1113,18 @@ def process(x: int | None) -> None:
 
 import typing, inspect
 # At runtime: process.__annotations__ == {'x': 'int | None', 'return': 'None'}
-# calling get_type_hints(process) resolves this correctly IF int and None are in scope
-# but custom classes defined after this module's import can cause NameError
+# isinstance(v, process.__annotations__['x']) fails: the value is the str
+# 'int | None', not a type. get_type_hints(process) resolves it correctly IF the
+# names are importable from the defining module -- a class defined in the CALLER's
+# module, or inside a function body, is not, and raises NameError.
 ```
 
 The fix is to always use `get_type_hints()` in library code that reads annotations at runtime, and
-to not mix `from __future__ import annotations` with runtime `isinstance` on annotation objects.
+to not mix `from __future__ import annotations` with runtime `isinstance` on annotation objects. On
+Python 3.14 the same failure mode reappears in a different disguise: the annotations are objects
+again, but they are evaluated on *first access* rather than at import, so a `NameError` that used to
+fire at import time now fires at whatever unrelated line first touches `__annotations__`. Use
+`annotationlib.Format.FORWARDREF` when you need to introspect annotations that may not resolve.
 
 ### Pitfall 5: Forgetting `include_extras=True` in `get_type_hints()`
 
@@ -1104,16 +1150,16 @@ hints = get_type_hints(handler, include_extras=True)
 
 | Tool | Role | Strictness | Speed | IDE integration | Runtime overhead |
 |---|---|---|---|---|---|
-| **mypy** | Static type checker | High (`--strict` mode); gradual by default | Moderate (~seconds on large codebases) | VS Code via Pylance or mypy extension; PyCharm built-in | None |
-| **pyright** | Static type checker (Microsoft) | Very high; stricter than mypy on generics and narrowing | Fast (Rust-based language server); incremental | VS Code Pylance (built-in); Neovim via LSP | None |
+| **mypy** | Static type checker (reference implementation of the typing PEPs) | High (`--strict` mode); gradual by default | Moderate (~seconds on large codebases); compiled with mypyc | VS Code via the Mypy Type Checker extension; PyCharm built-in | None |
+| **pyright** | Static type checker (Microsoft) | Very high; stricter than mypy on generics and narrowing | Fast, incremental; written in TypeScript and run on Node, so it needs no Python environment of its own | VS Code Pylance (Pylance is the pyright-backed extension); Neovim via LSP | None |
 | **ruff** | Linter + formatter; `ruff check --select=ANN` for annotation enforcement | Linting rules, not full type inference | Extremely fast (Rust) | VS Code ruff extension; pre-commit | None |
-| **beartype** | Runtime type checker | Enforces annotations at function call time | ~1–5 µs per decorated call; O(1) strategy avoids full traversal | Minimal — decorators | Low–moderate per call |
+| **beartype** | Runtime type checker | Enforces annotations at function call time | ~0.1–1 µs per decorated call, measured on CPython 3.13; O(1) strategy avoids full traversal | Minimal — decorators | Sub-microsecond per call |
 
 **mypy configuration (`pyproject.toml`):**
 
 ```toml
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 warn_return_any = true
 warn_unused_ignores = true
@@ -1124,7 +1170,7 @@ disallow_untyped_defs = true
 
 ```json
 {
-  "pythonVersion": "3.12",
+  "pythonVersion": "3.14",
   "typeCheckingMode": "strict",
   "reportMissingTypeStubs": false
 }
@@ -1146,32 +1192,34 @@ add(1, "2")  # BeartypeCallHintParamViolation raised at runtime
 
 **What this actually says.** "Runtime type checking is free per call and expensive per loop — the only number that matters is how many decorated calls sit on the path you care about."
 
-The `~1-5 us per call` figure in the tables above is meaningless in isolation. Multiplied by a call count it becomes a decision rule, and the decision flips entirely depending on whether the decorated function is called once per request or once per row.
+The `~0.1-1 us per call` figure in the tables above is meaningless in isolation. Multiplied by a call count it becomes a decision rule, and the decision flips entirely depending on whether the decorated function is called once per request or once per row.
 
 | Symbol | What it is |
 |--------|------------|
-| `c` | Per-call overhead of a `@beartype`-decorated function: `1-5 us`, depending on hint complexity |
+| `c` | Per-call overhead of a `@beartype`-decorated function: `0.1-1 us`, depending on hint complexity |
 | `N` | Number of decorated calls on the path being measured |
 | `c x N` | Total added latency — the only figure worth comparing against a budget |
 | O(1) strategy | beartype's default: it spot-checks one element of a container, not all of them |
 | Static checking | mypy / pyright. `c = 0` at runtime because the work happened before execution |
 
-**Walk one example.** Price the same decorator at three very different call counts:
+**Walk one example.** Price the same decorator at three very different call counts. The bracket comes
+from measurement on CPython 3.13: two `int` parameters cost about `0.15 us`, nested container hints
+about `0.54 us`, and beartype's own documentation quotes "around 1 us" as the upper end.
 
 ```
-                                     at c = 1 us      at c = 5 us
-  1 call    (one API boundary)          0.001 ms         0.005 ms
-  50 calls  (a request's service layer) 0.05  ms         0.25  ms
-  1,000 calls                           1.0   ms         5.0   ms
-  100,000 calls (per-row in a loop)   100     ms       500     ms
+                                     at c = 0.1 us    at c = 1 us
+  1 call    (one API boundary)         0.0001 ms        0.001 ms
+  50 calls  (a request's service layer) 0.005 ms        0.05  ms
+  1,000 calls                           0.1   ms        1.0   ms
+  100,000 calls (per-row in a loop)    10     ms      100     ms
 
   against a 100 ms request budget:
-    50 decorated calls at 5 us  =  0.25 ms  =  0.25 % of budget   -> negligible
-    100,000 calls      at 5 us  =  500  ms  =  500 % of budget    -> the request
-                                                                     is now 6x slower
+    50 decorated calls at 1 us  =   0.05 ms =   0.05 % of budget  -> negligible
+    100,000 calls      at 1 us  = 100    ms = 100    % of budget  -> the request
+                                                                     is now 2x slower
 ```
 
-The guidance in Best Practice 11 — "use `beartype` for runtime enforcement in critical paths" — is really this arithmetic. Decorate the **boundary** functions where untrusted data enters (one call per request, `0.25 %` of budget, catches every bad input), and never decorate the per-row helper inside the loop it feeds (`100,000` calls, the request budget gone five times over). The overhead is not a property of beartype; it is a property of where you put the decorator.
+The guidance in Best Practice 11 — "use `beartype` for runtime enforcement in critical paths" — is really this arithmetic. Decorate the **boundary** functions where untrusted data enters (one call per request, `0.05 %` of budget, catches every bad input), and never decorate the per-row helper inside the loop it feeds (`100,000` calls, the whole request budget consumed twice over). The overhead is not a property of beartype; it is a property of where you put the decorator.
 
 **Why the O(1) strategy matters here.** Checking `list[str]` exhaustively would cost `O(len(list))`, so a 100,000-element list would make a *single* call expensive and `c` would stop being a constant at all. beartype instead samples one element per call, keeping `c` flat regardless of container size. The trade is that a list whose 40,000th element is an `int` may pass — runtime enforcement is a probabilistic net across many calls, not a proof. That is exactly why it complements `mypy --strict` rather than replacing it: the static checker gives you the proof, beartype catches what crosses the boundary from code the checker never saw.
 
@@ -1227,12 +1275,7 @@ path parameters, body, and headers. The `include_extras=True` flag is critical �
 `Annotated[int, Query(ge=1)]` reduces to `int` and the `Query` constraint is dropped silently.
 
 **Q7: What is the difference between `__annotations__` and `get_type_hints()`?**
-`__annotations__` is a raw dict on the class or function containing annotation values as-typed —
-under PEP 563 (`from __future__ import annotations`) or Python 3.14+ default behavior, these are
-stored as strings (deferred evaluation). `get_type_hints()` evaluates those strings in the
-correct module namespace, resolving forward references like `"Node | None"` to actual type objects.
-Library code that reads annotations at runtime must always use `get_type_hints()` to handle both
-eager and deferred annotation modes correctly.
+`__annotations__` is a raw dict on the class or function whose contents depend on the annotation mode, while `get_type_hints()` always returns resolved type objects. Under PEP 563 (`from __future__ import annotations`) the dict holds strings. Under Python 3.14's PEP 649/749 default the annotations are compiled into a hidden `__annotate__` function and evaluated lazily on first access, so the dict holds real objects — the common misconception is that 3.14 stores strings, which it does not; `annotationlib.get_annotations(obj, format=Format.STRING)` is how you ask for strings there. `get_type_hints()` evaluates and resolves forward references like `"Node | None"` in the defining module's namespace, which is why library code that reads annotations at runtime should always go through it rather than touching `__annotations__` directly.
 
 **Q8: How does `Annotated` enable Pydantic v2's field-level validation without subclassing?**
 `Annotated[int, Field(gt=0)]` stores `Field(gt=0)` as metadata alongside the base type `int`.
@@ -1246,8 +1289,12 @@ across multiple models without inheritance, unlike Pydantic v1 validators which 
 A plain `if isinstance(x, str)` allows mypy to narrow `x` to `str` inside the block because mypy
 has built-in knowledge of `isinstance`. `TypeGuard` [3.10] extends this to *user-defined*
 predicates — if a function returns `TypeGuard[list[str]]`, mypy narrows the checked variable to
-`list[str]` in the `if` branch. Without `TypeGuard`, user-defined predicates that return `bool`
-do not trigger narrowing and the original broad type persists.
+`list[str]` in the `if` branch. Without it, a predicate returning `bool` triggers no narrowing at all
+and the original broad type persists. The follow-up question is `TypeIs` [3.13, PEP 742]: it narrows
+the `else` branch too, by subtracting the guarded type, and intersects rather than overwrites in the
+`if`. For `v: int | str`, a `TypeIs[str]` predicate yields `str` / `int` across the two branches
+where `TypeGuard[str]` yields `str` / `int | str`. Default to `TypeIs`, since it matches `isinstance`
+semantics; use `TypeGuard` only when the negative branch legitimately proves nothing.
 
 **Q10: What are the rules for when a TypeVar should be covariant vs contravariant vs invariant?**
 Use the producer/consumer mnemonic: if a class only *produces* (returns) values of type T, mark T
