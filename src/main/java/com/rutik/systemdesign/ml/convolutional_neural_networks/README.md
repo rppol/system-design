@@ -635,54 +635,71 @@ cudnn.benchmark = True  # picks the fastest conv algorithm; often a large win at
 ## 12. Interview Questions with Answers
 
 **Q: What is the output size formula for a convolutional layer?**
+**Short:** The output size is floor((W - F + 2P) / S) + 1, applied independently to height and width.
 The formula is floor((W - F + 2P) / S) + 1 where W is input size, F is filter size, P is padding, S is stride. For a 224x224 input with a 7x7 filter, stride 2, and padding 3: (224 - 7 + 6) / 2 + 1 = 112. This applies independently to height and width. Padding P = (F-1)/2 preserves spatial size when stride is 1 (same padding).
 
 **Q: Why do CNNs use weight sharing and what advantage does it provide?**
+**Short:** Weight sharing reuses the same filter at every position, cutting parameters by orders of magnitude while encoding location-invariant feature detection.
 Weight sharing means the same filter is applied at every spatial position. This reduces parameters dramatically — a 3x3 filter for 64-channel input and 64-channel output has 3*3*64*64 = 36,864 parameters regardless of input image size, versus a fully connected layer on a 224x224x64 input needing billions of parameters. Weight sharing also encodes the inductive bias that useful features (edges, textures) can appear anywhere in the image, improving generalization.
 
 **Q: How do skip connections in ResNet solve the degradation problem?**
+**Short:** Skip connections give gradients a direct additive path around nonlinearities, letting the network learn easier residual mappings F(x)=H(x)-x instead of H(x) directly.
 Without skip connections, very deep networks (>20 layers) achieve worse training accuracy than shallower ones — not because of overfitting, but because optimization becomes harder as depth increases. Skip connections provide a direct gradient path from the loss to early layers: the gradient can flow through the addition node without passing through any nonlinearity. The network also learns residual functions F(x) = H(x) - x rather than H(x) directly, which is easier to optimize since F(x)=0 is a trivial solution (identity mapping).
 
 **Q: What is the difference between max pooling and average pooling? When would you use each?**
+**Short:** Max pooling keeps the strongest activation for feature detection, while average or global average pooling smooths and shrinks the map before the classifier head.
 Max pooling takes the maximum value in each window, retaining the strongest activation and providing spatial invariance. Average pooling takes the mean, producing smoother, more spatially spread representations. Max pooling is preferred in early-to-mid network stages for feature detection. Global average pooling (GAP) is the standard replacement for flattening before classification heads (used in ResNet, EfficientNet) — it reduces each feature map to a single scalar, providing extreme translation invariance and cutting parameters dramatically vs flattening.
 
 **Q: Explain depthwise separable convolutions and their computational advantage.**
+**Short:** Splitting a standard conv into depthwise plus pointwise stages replaces K^2*Cin*Cout cost with K^2*Cin + Cin*Cout, cutting compute nearly 9x for a 3x3 kernel.
 A standard 3x3 conv over C_in channels with C_out filters costs K^2 * C_in * C_out multiply-adds per output location. Depthwise separable convolution splits this into depthwise (one 3x3 filter per input channel: K^2 * C_in cost) followed by pointwise (1x1 conv mixing channels: C_in * C_out cost). Total: K^2 * C_in + C_in * C_out. Reduction factor vs standard: 1/(1/C_out + 1/K^2). For K=3 and C_out=256, this is 1/(1/256 + 1/9) = ~8.7x cheaper, approaching the 9x ceiling set by K^2 as C_out grows. MobileNet uses this throughout, achieving competitive accuracy at ~8x fewer multiply-adds.
 
 **Q: What is transfer learning and why is it effective for computer vision?**
+**Short:** Transfer learning reuses ImageNet-pretrained low-level features so a target task needs far fewer labeled images to reach comparable accuracy.
 Transfer learning initializes a model with weights pretrained on a large dataset (usually ImageNet, 1.2M images, 1000 classes) then fine-tunes on a target dataset. It is effective because low-level features (edges, textures) learned from ImageNet are universal across vision tasks. Fine-tuning on 1,000 domain-specific images with a pretrained backbone achieves accuracy that would require 100,000+ images when training from scratch. The typical workflow: freeze backbone, train new head for several epochs, then gradually unfreeze later backbone layers with 10x lower learning rate.
 
 **Q: What is the receptive field and why does it matter?**
+**Short:** The receptive field is the input region influencing a neuron's output, and it must grow large enough via depth, larger kernels, or dilation to cover the objects being classified.
 The receptive field (RF) of a neuron is the region of the input image that can influence its output. For a single 3x3 conv with stride 1, RF=3x3. Stacking K such layers gives RF = 2K+1. For deep networks to make semantic predictions (e.g., "is there a car?"), they need RFs large enough to encompass the object. Larger kernels (7x7) or strided convolutions grow the RF faster, at the cost of more parameters or spatial resolution. Dilated (atrous) convolutions grow RF without losing spatial resolution, commonly used in semantic segmentation (DeepLab).
 
 **Q: How does EfficientNet's compound scaling differ from ad-hoc scaling?**
+**Short:** Compound scaling grows depth, width, and resolution together under one fixed ratio instead of scaling a single dimension alone, giving better accuracy per FLOP.
 Prior work scaled models by increasing one dimension independently: wider (more channels), deeper (more layers), or higher resolution. Compound scaling jointly increases all three dimensions with a fixed ratio (depth *= alpha^phi, width *= beta^phi, resolution *= gamma^phi) subject to alpha * beta^2 * gamma^2 ~= 2 (doubling FLOPs per phi increment). This respects the constraint that depth and resolution are more beneficial together — a deeper network benefits more from higher resolution input. Empirically, EfficientNet-B7 reaches 84.3% top-1 while being 8.4x smaller and 6.1x faster than GPipe, the prior state of the art, and EfficientNet-B1 beats ResNet-152 with 7.6x fewer parameters.
 
 **Q: What is data augmentation and what are the standard techniques for image classification?**
+**Short:** Data augmentation randomly transforms training images, such as flip, crop, color jitter, Mixup, CutMix, and RandAugment, to teach invariances and effectively enlarge the dataset.
 Data augmentation applies random transformations to training images to increase dataset effective size and teach the model invariances. Standard: RandomHorizontalFlip (50% probability), RandomCrop (crop 224x224 from 256x256 image), ColorJitter (brightness/contrast/saturation/hue perturbation). Advanced: Mixup (linear interpolation of two image-label pairs), CutMix (paste random patch from one image into another), RandAugment (randomly sample from 14 operations). Augmentation is applied only to training data, not validation/test data.
 
 **Q: What is the difference between same padding and valid padding?**
+**Short:** Same padding adds zeros so output size equals input size at stride 1, while valid padding uses no padding and shrinks the output by F-1 per side.
 Same padding adds P = floor(F/2) zeros around the input so that the output spatial size equals the input size (when stride=1). Valid (no) padding applies convolution only where the filter fully overlaps the input, reducing output size by F-1 per side. Most modern architectures use same padding for 3x3 convs (P=1) to maintain spatial resolution between pooling/striding operations, making output size arithmetic simpler and preventing unintended spatial shrinkage.
 
 **Q: Why are conv layers biased toward local features early and global features late?**
+**Short:** Because each neuron only sees a small local receptive field that widens with depth, CNNs are architecturally forced to build global concepts from local primitives.
 Each neuron in a convolutional layer only connects to a small local region (the receptive field). In early layers, this is just a few pixels. As information flows through stacked layers, each neuron's effective receptive field grows linearly with depth, allowing it to integrate information from increasingly larger spatial regions. This architectural constraint forces the network to build from local primitives (edges, colors) to global abstractions (objects), which matches the compositional structure of visual scenes and is why CNNs generalize so well.
 
 **Q: How do you handle class imbalance in image classification with CNNs?**
+**Short:** Class imbalance in CNN classification is handled with weighted loss, WeightedRandomSampler oversampling, or heavier minority-class augmentation, evaluated with macro-F1 instead of accuracy.
 Three main strategies: (1) Weighted loss — set per-class weights inversely proportional to class frequency in `nn.CrossEntropyLoss(weight=class_weights)`. (2) Oversampling — use `WeightedRandomSampler` in PyTorch DataLoader to sample rare classes more frequently. (3) Data augmentation — apply heavier augmentation to minority classes. For severe imbalance (>100:1), combine weighted loss with oversampling. Evaluation metric matters: accuracy is misleading for imbalanced datasets; use macro-F1, precision-recall AUC, or per-class recall.
 
 **Q: Why do you set `bias=False` in convolution layers that are immediately followed by BatchNorm?**
+**Short:** Conv bias is set to False before BatchNorm because BN's mean-subtraction cancels any constant bias, making it a redundant parameter that BN's own beta already covers.
 BatchNorm subtracts the batch mean, which cancels any constant bias the preceding convolution adds, making that bias a redundant parameter. The BN layer has its own learnable shift (beta) that fully absorbs the offset role, so keeping a conv bias just wastes parameters and adds a no-op term to the gradient. This is why every reference ResNet/EfficientNet implementation uses `bias=False` on conv layers that feed a normalization layer; only convs with no following BN keep their bias.
 
 **Q: What goes wrong when you use BatchNorm with a batch size of 1, and what should you use instead?**
+**Short:** BatchNorm with batch size 1 degenerates into per-sample statistics that mismatch the training running averages, so GroupNorm or InstanceNorm should replace it instead.
 BatchNorm degenerates into per-sample InstanceNorm, so its running averages never match the training statistics and eval-mode accuracy collapses. PyTorch normalizes with the biased variance, so nothing divides by n-1 and nothing goes NaN; with a 4D input the statistics pool over N*H*W, so one large image raises no error at all (the `Expected more than 1 value per channel when training` ValueError fires only when N*H*W equals 1). The fix is a normalization that does not depend on the batch dimension: GroupNorm (num_groups=32) or InstanceNorm, both of which compute statistics within a single sample and behave identically at train and eval time.
 
 **Q: Why does forgetting to apply the training-time normalization at inference cause a catastrophic accuracy drop?**
+**Short:** Skipping the training-time normalization transform at inference feeds out-of-distribution pixel values to calibrated filters, collapsing accuracy sharply, for example from 76% to 35%.
 The model learned to expect normalized inputs, so raw pixel values are wildly out of distribution and accuracy can collapse from 76% to 35%. A ResNet trained on ImageNet-normalized tensors (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]) has calibrated its first-layer filters to that input scale; feeding [0,255] or even [0,1] tensors shifts every activation far outside the trained range. Always apply the exact same Resize/CenterCrop/Normalize transform at inference that was used in training.
 
 **Q: What does a 1x1 convolution actually compute, and why is it useful?**
+**Short:** A 1x1 convolution mixes channels at each pixel like a per-location fully connected layer, letting ResNet bottlenecks cheaply reduce and expand channel counts.
 A 1x1 convolution mixes information across channels at each spatial location, acting as a per-pixel fully connected layer over the channel dimension. It changes channel count without touching spatial extent, which is why ResNet bottlenecks use it to cheaply reduce channels before an expensive 3x3 conv and expand them afterward. It also adds a nonlinearity (via the following ReLU) and underpins pointwise convs in MobileNet and channel projections in skip connections.
 
 **Q: What are dilated (atrous) convolutions and when would you use them?**
+**Short:** Dilated convolutions insert gaps between kernel taps to exponentially grow the receptive field without added parameters or lost spatial resolution, as used in DeepLab segmentation.
 Dilated convolutions insert gaps between kernel taps to enlarge the receptive field without adding parameters or reducing spatial resolution. A 3x3 kernel with dilation 2 covers a 5x5 region but still uses only 9 weights, so stacking them with doubling dilation rates (1, 2, 4, 8) grows the receptive field exponentially while keeping full-resolution feature maps. This is essential for dense prediction tasks like semantic segmentation (DeepLab), where downsampling would destroy the pixel-level detail the output needs.
 
 ---
