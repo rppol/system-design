@@ -430,6 +430,41 @@ more requests. The headroom factor is what keeps that feedback loop from running
 also why the "FIXED" HPA in Common Pitfalls drops `targetGPUUtilization` from 80 to 60: scaling
 out earlier is cheaper than riding the knee of the latency curve.
 
+### Choosing the Autoscaling Signal
+
+The triggers above are the generic autoscaling recipe. For LLM decode the two metrics they reach
+for first — GPU utilization and requests per second — both misread the box:
+
+```
+GPU utilization %  (nvidia-smi / DCGM "SM active")
+  Measures: was a kernel resident on the SM this sample window
+  Does NOT measure: whether the SM did useful work
+  Decode at batch 1 is memory-bandwidth bound -> reports ~100% "utilized"
+  while the GPU still has KV room for 30 more sequences
+
+Requests per second
+  One request generating 20 tokens and one generating 2,000 tokens both count as 1
+  A 7B at batch 64 x 2,000 output tokens is saturated at RPS = 64/duration
+```
+
+The signal that maps to capacity is the one the serving engine already publishes on `/metrics`:
+
+| Metric | Reads as | Use |
+|--------|----------|-----|
+| `vllm:kv_cache_usage_perc` | fraction of KV blocks occupied, 0.0-1.0 | primary scaling target |
+| `vllm:num_requests_waiting` | requests admitted to the queue but not batched | leading indicator |
+| `vllm:num_requests_running` | sequences in the current decode batch | saturation sanity check |
+| `vllm:time_to_first_token_seconds` | TTFT histogram | SLO alerting, not scaling |
+
+A workable policy: target `kv_cache_usage_perc` at 0.65, scale out above 0.80 sustained 60s or on
+any `num_requests_waiting > 0` sustained 30s, scale in below 0.40 sustained 300s. Queue depth is
+the leading indicator and must be the trigger, because a 70B replica takes 30s-3min to become
+ready (see Cold start above) — by the time TTFT breaches its SLO, the new replica is still
+loading weights. Kubernetes HPA cannot read these natively (its `resource` metrics are cpu and
+memory only), so expose them through prometheus-adapter or KEDA as external metrics, exactly as
+the `targetGPUUtilization` shorthand in Common Pitfalls stands in for. Full manifest and the
+utilization economics: [GPU pool economics](../case_studies/cross_cutting/gpu_pool_economics.md).
+
 ### Batch Size vs Latency
 
 Batching is the throughput lever, and it trades directly against per-user speed:
@@ -1008,6 +1043,9 @@ Model routing directs each query to the optimal model based on complexity, cost 
 
 **Q: How do you estimate and optimize GPU cost for LLM serving?**
 GPU cost estimation starts with throughput capacity: an A100 80GB serving LLaMA 3 8B with vLLM achieves ~1,200 tokens/second throughput. At $2/hour on-demand (2026 median A100 80GB list is ~$1.81/hr; spot runs $0.60-1.20), a fully saturated GPU costs $2 / (1,200 x 3,600) = $0.00046 per 1K tokens. Compare to GPT-4o-mini at $0.60 per 1M output tokens ($0.0006/1K) — API is cheaper at low volume. Break-even calculation: self-hosted becomes cheaper when monthly volume exceeds the point where (GPU_cost_per_month) < (API_cost_per_token * monthly_tokens). For A100 at $1,500/month vs GPT-4o-mini: break-even at ~2.5B tokens/month (~83M tokens/day). Optimization strategies: (1) right-size GPU — use T4 for small models, A10G for medium, A100/H100 for large; (2) spot instances for batch workloads (60-70% savings); (3) quantization — FP8 or INT4 models serve from smaller/fewer GPUs; (4) batching — higher batch sizes increase throughput sublinearly up to memory limits (the Section 6 table shows 32x batch buying 12.8x throughput); (5) auto-scaling — scale to zero during off-hours if traffic permits.
+
+**Q: What metric should autoscale a self-hosted LLM fleet, and why not GPU utilization?**
+Scale on KV-cache occupancy and queue depth — `vllm:kv_cache_usage_perc` and `vllm:num_requests_waiting` — not on GPU utilization or RPS. GPU utilization reports whether a kernel was resident on the SM, not whether it did useful work: decode is memory-bandwidth bound, so a replica at batch 1 shows near-100% "utilization" while it still has KV room for 30 more sequences, and the autoscaler adds capacity that was already there. RPS is worse, because one request emitting 20 tokens and one emitting 2,000 count the same. A workable policy targets KV-cache usage at 0.65, scales out above 0.80 for 60s or on any waiting requests for 30s, and scales in below 0.40 for 300s. The queue must be the trigger rather than a latency SLO, since a 70B replica needs 30s-3min to load weights and become ready — by the time TTFT breaches, the fix is minutes away. Kubernetes HPA reads only cpu and memory natively, so publish these through prometheus-adapter or KEDA as external metrics.
 
 **Q: How do you prevent GPU OOM crashes in self-hosted LLM serving?**
 A single OOM kills every in-flight request on the node, so prevention is layered. Start with the four controls below: (1) cap per-request context length — a Llama-3-70B costs 320 KiB/token in FP16, so a 20K-token request already claims ~6 GB of KV cache; (2) alert on GPU memory at 75% (warning) and 85% (critical), watching early signals like rising KV-cache eviction rate and batch-size auto-reduction in the inference engine; (3) implement a graceful degradation chain — shrink max batch size, then reject long-context requests, then route overflow to an API provider, and only then return 503s. Budget memory explicitly before deploying: an A100 80GB serving a 70B INT4 model runs with only 2-15 GB of peak headroom, while an 8B FP16 model leaves a comfortable 19-30 GB. Use DCGM/dcgm-exporter for production telemetry rather than polling nvidia-smi.

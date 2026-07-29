@@ -436,6 +436,49 @@ the dataset — and running it anyway means the gate fires on noise and engineer
 `--no-verify`. `delta` is squared in the denominator, so halving the effect you want to catch
 quadruples the dataset you need; that is why "just lower the threshold" is never free.
 
+### Non-Functional Gates — Tokens and Latency
+
+The suite above gates quality and nothing else, so a change that holds every rubric score flat
+while adding 600 tokens to every request and 400ms to TTFT merges green. A prompt or model change
+is simultaneously a quality change, a cost change and a latency change; assert on all three from
+the same run you are already paying for, since the usage counts come back in every response.
+
+```python
+# add to the aggregate test — the eval run already produced these numbers
+def test_no_token_regression(results, baseline):
+    """Token counts are near-deterministic for a fixed prompt, so gate them tightly."""
+    med_in = statistics.median(r.input_tokens for r in results)
+    assert med_in <= baseline["median_input_tokens"] * 1.05, (
+        f"prompt grew: {baseline['median_input_tokens']} -> {med_in} median input tokens"
+    )
+    med_out = statistics.median(r.output_tokens for r in results)
+    assert med_out <= baseline["median_output_tokens"] * 1.20, "responses got longer"
+```
+
+Gate the two properties differently, because their noise profiles are nothing alike:
+
+| Property | Run-to-run noise | Gate on | Threshold shape |
+|----------|------------------|---------|-----------------|
+| Input tokens | near zero for a fixed prompt | median over the suite | tight, 5%, or an absolute ceiling |
+| Output tokens | moderate (sampling) | median over the suite | loose, 20% |
+| Wall-clock latency | high (shared runners, provider load) | trend only, never a hard gate | alert, do not fail the PR |
+
+**Walk one example.** A retrieval tweak lands with a flat quality score:
+
+```
+  median input tokens   1,850 -> 2,510          = +660 tokens on EVERY call, forever
+  quality delta         0.842 -> 0.839          = -0.003, inside the +/- 0.008 noise floor
+
+  at 2,000,000 calls/month and $3 per MTok input:
+    660 x 2e6 = 1.32e9 tokens = 1,320 MTok x $3  = $3,960/month
+```
+
+The quality gate was right to pass it and the PR was still a $47K/year decision made silently.
+Latency belongs on the same dashboard: output tokens are the honest proxy, because total latency
+is `TTFT + TPOT x output_length`, so a 20% longer answer is a 20% slower stream even when the
+provider is behaving. Registry-side budgets per prompt version are the complement to this
+CI gate — see [Prompt Management & PromptOps](../prompt_management_and_promptops/README.md).
+
 ### Flakiness Detection
 
 ```python
@@ -842,6 +885,9 @@ You cannot tell from a single aggregate number — both the system under test (t
 
 **Q: Your eval scores jumped 3 points overnight with no code or prompt change. What happened?**
 The most common cause is that the judge changed underneath you — using a floating model alias (e.g., a provider alias that silently moves to a new snapshot) means the grader's rubric interpretation shifts even though your system did not. Other causes in rough likelihood order: someone edited or appended to the golden dataset without versioning it, the judge temperature was nonzero, or an upstream dependency (retriever index, knowledge base) changed. This matters because a scoring discontinuity destroys trend comparability — every score before the change is now measured on a different ruler. Fix: pin the judge to a specific snapshot ID rather than a floating alias — note that a dateless ID is not automatically a floating one, Anthropic's IDs from the Claude 4.6 generation onward are dateless but still pinned snapshots — version the dataset file (hash it in CI), and when you deliberately upgrade the judge, re-score the historical baseline with the new judge before comparing anything across the boundary.
+
+**Q: Your eval suite is green but the change doubled the bill — what was missing from the gate?**
+Non-functional assertions: the suite gated quality only, so a change that left every rubric score flat while adding tokens to each request passed clean. Gate token counts in the same run that produces the quality scores — the usage numbers come back on every response, so it costs nothing extra. Median input tokens are near-deterministic for a fixed prompt, so they take a tight gate (5%, or an absolute prompt-token ceiling); median output tokens are noisier and take a loose one (20%); wall-clock latency is heavy-tailed on shared CI runners and under provider load, so track it as a trend and alert on it rather than failing PRs with it. The arithmetic is why this matters: a retrieval tweak that moves median input from 1,850 to 2,510 tokens is +660 tokens on every call forever, which at 2M calls/month and $3 per MTok is $3,960/month from a PR whose quality delta was inside the noise floor. Output tokens double as the honest latency proxy, since total latency is TTFT + TPOT x output_length.
 
 **Q: How do you build a golden evaluation dataset and what makes it high quality?**
 A golden evaluation dataset is a curated set of (input, expected criteria) pairs that represents the full distribution of production inputs. Construction steps: (1) sample 200-1000 queries from production logs (representative distribution); (2) include 50% typical, 30% edge cases, 10% adversarial, 10% boundary conditions; (3) have domain experts write reference answers for each query; (4) write explicit evaluation criteria per example (not just the answer — the rubric for judging answers); (5) hold out 20% as a final test set (never used for development decisions). Quality indicators: dataset covers all user intents; adversarial examples exercise safety properties; "no-answer" examples are included for RAG systems; the dataset is reviewed and updated quarterly as production queries evolve.

@@ -517,6 +517,59 @@ Solutions:
 For high-frequency, long-context applications (codebase assistants, document analysis):
 the only viable production approach is **prefix caching + KV quantization + GQA**.
 
+### Long Context Slows Every Token, Not Just the First
+
+The caching block above and Pitfall 5 both frame long context as a TTFT problem. Prefill is only
+half the bill: every DECODE step re-reads the accumulated KV cache out of HBM alongside the
+weights, so the per-token rate degrades with context length too.
+
+```
+  bytes_per_step = weight_bytes + batch x context_len x kv_bytes_per_token
+
+  TPOT_floor     = bytes_per_step / HBM_bandwidth
+
+  crossover L*   = weight_bytes / (batch x kv_bytes_per_token)
+```
+
+**Stated plainly.** "Weights are a fixed toll paid once per decode step no matter what; the KV
+cache is a toll that grows with every token already in the conversation. Past the crossover
+length the second toll is the larger one, and generation visibly slows down."
+
+| Symbol | What it is |
+|--------|------------|
+| `weight_bytes` | 140 GB for a 70B model in FP16. Fixed, independent of context |
+| `kv_bytes_per_token` | 320 KiB/token for Llama-3-70B FP16 — the figure used above |
+| `batch` | Concurrent sequences decoding together. Each reads its own KV, weights are shared |
+| `HBM_bandwidth` | Aggregate across the tensor-parallel group. 3.35 TB/s per H100 |
+| `TPOT_floor` | Best achievable time per output token. Real TPOT is higher |
+| `L*` | Context length at which the KV read equals the weight read |
+
+**Walk one example.** Llama-3-70B FP16 on 8x H100 (640 GB HBM, 26.8 TB/s aggregate):
+
+```
+  crossover, batch 1   = 140e9 / 327,680            = 427,000 tokens
+  crossover, batch 16  = 427,000 / 16               =  26,700 tokens
+
+  context   batch   KV bytes    step read   TPOT floor   per-user tok/s
+   2,048      16      10.7 GB    150.7 GB      5.6 ms        178
+  32,768      16     171.8 GB    311.8 GB     11.6 ms         86
+ 131,072       8     343.6 GB    483.6 GB     18.0 ms         55
+
+  worked: 16 x 32,768 x 327,680 = 171.8 GB of KV, + 140 GB of weights = 311.8 GB
+          311.8 GB / 26,800 GB/s = 11.6 ms per token -> 86 tokens/sec per user
+```
+
+Same model, same GPUs, same batch: 178 tokens/sec per user at 2K context and 86 at 32K. The 128K
+row drops to batch 8 because 16 sequences would need 687 GB of KV against the 500 GB left after
+weights — at long context, capacity caps the batch, and the batch is what amortizes the weight read.
+
+**Why the crossover moves with the batch.** `L*` divides by `batch` because the weights are read
+once for the whole batch while KV is read per sequence, so a single-user box only becomes
+KV-dominated past 427K tokens. That is why "TPOT is set by model size and bandwidth, not input
+length" ([Inference & Decoding](../inference_and_decoding/README.md)) holds at chat lengths and
+stops holding on a loaded long-context server at 30K. Quantizing KV to FP8 halves
+`kv_bytes_per_token`, which doubles `L*` — it buys per-token latency, not just capacity.
+
 ### Ring Attention — Sequence Parallelism for Ultra-Long Context
 
 Ring Attention distributes the sequence across devices in a ring topology, enabling training and inference on sequences that are too long for a single device:
@@ -937,6 +990,9 @@ A: Ring attention is sequence parallelism — the sequence is split across N dev
 
 **Q: What is position interpolation, and why does extending RoPE still need fine-tuning?**
 A: Position interpolation compresses positions by a constant factor — treating position p in the extended context as p × (original_length / new_length) — so every new position maps to a fractional position inside the range the model was actually trained on. The catch is that compression uniformly squeezes ALL RoPE frequency bands, including the high-frequency dimensions that distinguish adjacent tokens, so local position resolution degrades; this is exactly why naive `rope_scaling={"type": "linear", "factor": 32}` without continued training produced hallucinated clause references at 60K-100K tokens in the war story below, and why YaRN scales only the low-frequency (long-range) bands while leaving high-frequency (local) bands untouched. Always follow scaling with a short long-context fine-tune (a few hundred steps suffices for YaRN) and validate with a needle test across depths before shipping.
+
+**Q: Does a long context slow down only the first token, or every token?**
+A: Every token — each decode step re-reads the whole KV cache from HBM, so once the KV read exceeds the weight read, time-per-output-token grows linearly with context length. The crossover is computable: `L* = weight_bytes / (batch x kv_bytes_per_token)`, which for a 70B FP16 model (140 GB of weights, 320 KiB/token of KV) is ~427K tokens at batch 1 but only ~27K tokens at batch 16, because weights are read once for the whole batch while KV is read per sequence. On 8x H100 that shows up as ~178 tokens/sec per user at 2K context falling to ~86 at 32K and ~55 at 128K, and the long-context rows are additionally forced to a smaller batch because KV capacity runs out — which removes the batching that was amortizing the weight read. Practical consequences: quote TTFT and TPOT separately at the context lengths you actually serve, quantize the KV cache (FP8 halves the bytes per token and doubles `L*`), and never extrapolate a short-prompt token rate to a long-context deployment.
 
 **Q: Why do attention sinks matter when evicting KV cache for streaming long contexts?**
 A: Because autoregressive models learn to park a large fraction of attention mass on the first few tokens (the "attention sink"), naively evicting the oldest KV entries in a sliding window destroys those sink tokens and perplexity collapses — the model's outputs degrade sharply even though the evicted tokens carried little semantic content. The StreamingLLM recipe keeps ~4 initial sink tokens permanently plus a sliding window of recent tokens, which keeps generation stable over effectively unbounded streams with a fixed KV budget. The gotcha: this is memory management, not real long context — content evicted from the window is unrecoverable, so use it for streaming chat stability, never for tasks that need recall of arbitrary earlier content.

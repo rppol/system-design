@@ -494,6 +494,59 @@ their own contamination estimates in model papers -- cite those rather than
 repeating a rumour.
 ```
 
+### How Precise Is a Benchmark Score?
+
+Every number in Section 4 is an estimate from a finite question set, and those sets are small:
+GPQA Diamond is 198 questions, HumanEval 164, SWE-bench Verified 500, MT-Bench 80. A score is
+therefore a point estimate with an error bar, and most published model comparisons are inside it.
+
+```
+  SE      = sqrt( s_bar (1 - s_bar) / n )        binary-scored benchmark (pass/fail)
+  95% CI  = s_bar +/- 1.96 x SE
+
+  comparing two models on the SAME questions:
+    SE_unpaired = sqrt( SE_A^2 + SE_B^2 )
+    SE_paired   = sqrt( SE_A^2 + SE_B^2 - 2 x SE_A x SE_B x Corr(s_A, s_B) )
+```
+
+**Put simply.** "You did not measure the model's ability, you measured how it did on 198
+questions drawn from a much larger space of questions you could have asked. Ask a different 198
+and the number moves."
+
+| Symbol | What it is |
+|--------|------------|
+| `n` | Number of questions in the benchmark. GPQA Diamond: 198, not 448 |
+| `s_bar` | The reported score, as a fraction. 70% -> 0.70 |
+| `SE` | Standard error — how far the score would move on a fresh draw of n questions |
+| `Corr(s_A, s_B)` | Per-question correlation between the two models. High for similar models |
+| paired | Both models answered the *same* questions, so the shared difficulty cancels |
+
+**Walk one example.** Two models, 71% and 67% on GPQA Diamond:
+
+```
+  SE at n = 198, s_bar = 0.70   = sqrt(0.70 x 0.30 / 198)   = 0.0326  -> +/- 3.3 pp
+  95% CI on one score                = 0.71 +/- 0.064       -> [64.6%, 77.4%]
+
+  unpaired difference   SE = sqrt(0.0326^2 + 0.0326^2)      = 0.0461  -> +/- 9.0 pp at 95%
+      4-point gap vs a 9-point interval  ->  NOT significant
+
+  paired, Corr = 0.9    SE = 0.0326 x sqrt(2 - 2 x 0.9)     = 0.0146  -> +/- 2.9 pp at 95%
+      4-point gap vs a 2.9-point interval  ->  significant
+
+  for reference: HumanEval n = 164 at 0.90 -> SE 2.3 pp;  SWE-bench Verified
+                 n = 500 at 0.50 -> SE 2.2 pp;  MT-Bench n = 80 is the noisiest of all
+```
+
+**Why pairing is the whole game.** Report only the two headline percentages and a 4-point lead is
+indistinguishable from luck; keep the per-question results and the same 4 points become solid,
+because the questions both models got wrong cancel out of the difference. This is free precision
+that is thrown away by every leaderboard row. Two further corrections matter in practice: when
+questions come in clusters (MMLU's 57 subjects, several questions per reading passage) the naive
+`SE` understates the true one — Miller's "Adding Error Bars to Evals" (arXiv 2411.00640) reports
+clustered standard errors over 3x larger than the naive figure — and running each question K times
+divides the sampling component of the variance by K. Report `n`, the standard error, and the
+pairwise correlation alongside any score you publish internally.
+
 ### Evaluation at Different Stages
 
 ```
@@ -1142,6 +1195,9 @@ A: Contamination occurs when benchmark test examples appear in training data, so
 
 **Q: Why can the same evaluation suite at temperature=0 produce different scores across runs?**
 A: Because temperature=0 does not make LLM inference deterministic — floating-point non-associativity, GPU batching differences, and silent provider-side model updates all shift outputs between runs. A suite that swings several points on the same unchanged model across consecutive runs turns launch decisions into coin flips; LLM judges compound this, since Zheng et al. 2023 measured GPT-4 giving the same pairwise verdict after a position swap only 65% of the time. Run each evaluation 3-5 times, report the mean with a 95% confidence interval, and only act on changes that exceed that interval.
+
+**Q: Model A scores 71% and model B 67% on GPQA Diamond — is A actually better?**
+A: Not from those two numbers alone — GPQA Diamond has only 198 questions, so each score carries about 3.3 points of standard error and a 4-point gap sits inside the noise. Concretely, `SE = sqrt(0.70 x 0.30 / 198) = 0.033`, the 95% interval on a single score is roughly plus or minus 6.4 points, and the unpaired difference of two such scores has a 95% interval of about 9 points. The gap becomes decidable only if you keep the per-question results: because both models answered the same 198 questions, the paired standard error is `sqrt(SE_A^2 + SE_B^2 - 2 SE_A SE_B Corr)`, which at a plausible per-question correlation of 0.9 shrinks the interval to about 2.9 points and makes the 4-point lead significant. Two further corrections: clustered questions (MMLU's 57 subjects, several questions per passage) inflate the true standard error well above the naive one, and small suites like MT-Bench's 80 prompts are noisier still. Ask for `n`, the standard error, and the pairwise correlation before believing any leaderboard delta.
 
 **Q: Why can an aggregate A/B test metric hide a real regression?**
 A: Because LLM quality changes are rarely uniform across query types, so a gain in one category can fully hide a loss in another. A model can improve 10% on creative tasks while regressing 5% on factual tasks, and the blended metric reports a ~3% "improvement" that masks the regression. This is why stratification is mandatory for LLM A/B tests: split results by task type (factual, creative, reasoning, code), difficulty tier, and domain, since a 2% aggregate gain can coexist with a 15% drop in a critical category. Always report per-category win rates alongside the aggregate, and block rollout on any critical-category regression even when the aggregate improves.
