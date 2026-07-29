@@ -16,7 +16,7 @@ Think of a restaurant chef who declares "I need a knife, a cutting board, and fr
 
 **Why it matters:** Without DI, unit testing requires creating all transitive dependencies manually. A `UserService` that creates its own `UserRepository` which creates its own `DataSource` becomes untestable in isolation. DI allows injecting mock `UserRepository` in tests without touching the production database.
 
-**Key insight:** The three injection types differ in *when* the dependency is available. Constructor injection makes dependencies available immediately (in the constructor). Setter injection makes them available after `@PostConstruct`. Field injection makes them available after construction (same as setter but without the method).
+**Key insight:** The three injection types differ in *when* the dependency is available. Constructor injection makes dependencies available immediately (inside the constructor). Setter and field injection both happen during `populateBean()` — after the constructor has returned but before `@PostConstruct` — so the dependency is null in the constructor and non-null everywhere after it.
 
 ---
 
@@ -37,16 +37,19 @@ Think of a restaurant chef who declares "I need a knife, a cutting board, and fr
 | Type | Mechanism | `final` fields? | Works in tests without Spring? | Circular dep? |
 |------|-----------|----------------|-------------------------------|---------------|
 | Constructor | Parameters to constructor | Yes | Yes (just call `new`) | Detected immediately |
-| Setter | `@Autowired` on setter method | No | Possible (call setter) | Can be resolved |
-| Field | `@Autowired` on field | No | No (requires reflection) | Can be resolved |
+| Setter | `@Autowired` on setter method | No | Possible (call setter) | Resolvable, but only with `spring.main.allow-circular-references=true` |
+| Field | `@Autowired` on field | No | No (requires reflection) | Resolvable, but only with `spring.main.allow-circular-references=true` |
 
 ### Resolution Order
 
-When multiple beans match an injection point, Spring resolves in this priority:
-1. **Exact type match** with `@Primary` annotation on one candidate
-2. **Qualifier match** via `@Qualifier("beanName")` on injection point
-3. **Name match:** field/parameter name matches bean name
-4. `NoUniqueBeanDefinitionException` if still ambiguous
+When multiple beans match an injection point, `DefaultListableBeanFactory` resolves in this order:
+1. **Qualifier filtering first.** `findAutowireCandidates()` narrows the candidate set to beans matching any `@Qualifier` (or custom qualifier annotation) on the injection point. Everything below runs only on what survives.
+2. **`@Primary`** — `determinePrimaryCandidate()`; exactly one primary among the survivors wins.
+3. **Name match** — the field/parameter name, then a qualifier-suggested name, against the bean names.
+4. **`@Priority`** — `determineHighestPriorityCandidate()`; lowest numeric value wins.
+5. `NoUniqueBeanDefinitionException` if still ambiguous.
+
+This is why `@Qualifier` beats `@Primary`: the qualifier removes the primary bean from the candidate set before the primary check ever runs.
 
 ### Injection Annotations Comparison
 
@@ -210,9 +213,9 @@ public class OrderService {
 public class OrderService {
     // Looks for bean named "stripePaymentService" first, then type PaymentService
     @Resource(name = "stripePaymentService")
-    private PaymentService paymentService;
+    private PaymentService primaryGateway;
 
-    // When name not specified: uses field name "paymentService" as bean name
+    // When name not specified: uses the FIELD NAME as the bean name
     @Resource
     private PaymentService paymentService;  // looks for bean "paymentService"
 }
@@ -224,16 +227,15 @@ public class OrderService {
 // Inject ALL implementations of an interface
 @Service
 public class NotificationService {
-    private final List<NotificationChannel> channels;
+    private final List<NotificationChannel> channels;      // ordered by @Order
+    private final Map<String, NotificationChannel> byName;  // bean name -> bean instance
 
-    // Spring injects ALL NotificationChannel beans in this list
-    public NotificationService(List<NotificationChannel> channels) {
+    // One constructor only — a Spring bean with two candidate constructors and no
+    // @Autowired on either fails with "No default constructor found".
+    public NotificationService(List<NotificationChannel> channels,
+                               Map<String, NotificationChannel> byName) {
         this.channels = channels;  // [EmailChannel, SmsChannel, PushChannel]
-    }
-
-    // Inject as Map: bean name -> bean instance
-    public NotificationService(Map<String, NotificationChannel> channelMap) {
-        // channelMap = {"emailChannel" -> EmailChannel, "smsChannel" -> SmsChannel}
+        this.byName = byName;      // {"emailChannel" -> EmailChannel, "smsChannel" -> SmsChannel}
     }
 }
 
@@ -253,9 +255,12 @@ public class SmsChannel implements NotificationChannel { }
 @Service
 public class ReportService {
     private final ObjectProvider<CacheService> cacheProvider;
+    private final ObjectProvider<ReportSender> senderProvider;  // ReportSender is a prototype
 
-    public ReportService(ObjectProvider<CacheService> cacheProvider) {
+    public ReportService(ObjectProvider<CacheService> cacheProvider,
+                         ObjectProvider<ReportSender> senderProvider) {
         this.cacheProvider = cacheProvider;
+        this.senderProvider = senderProvider;
     }
 
     public Report generateReport(String type) {
@@ -485,7 +490,7 @@ private int timeoutSeconds;
 Constructor injection (via constructor parameters), setter injection (via `@Autowired` setter methods), and field injection (via `@Autowired` on instance fields). Constructor injection is strongly preferred because it makes dependencies explicit (visible in method signature), allows `final` fields (immutability), enables testing without Spring (just call `new`), and provides fail-fast behavior when a required dependency is missing. Field injection is an anti-pattern despite its convenience.
 
 **Q: How does Spring resolve ambiguity when multiple beans of the same type exist?**
-Spring first checks for `@Primary` on one of the candidates. If that fails or multiple have `@Primary`, it checks for a `@Qualifier` annotation on the injection point. If still ambiguous, it tries matching by field/parameter name against bean names. If all resolution strategies fail, `NoUniqueBeanDefinitionException` is thrown at startup. Best practice: use `@Primary` for the default implementation, `@Qualifier` for explicit overrides.
+A `@Qualifier` on the injection point is applied first, as a filter on the candidate set, and only the survivors go through the rest of the resolution. Within that filtered set Spring checks `@Primary`, then matches the field/parameter name (and any qualifier-suggested name) against bean names, then falls back to `@Priority` (lowest numeric value wins). If nothing selects a single candidate, `NoUniqueBeanDefinitionException` is thrown at startup. This filter-then-select ordering is exactly why `@Qualifier` beats `@Primary` — the qualifier has already removed the primary bean from consideration before `determinePrimaryCandidate()` runs. Best practice: use `@Primary` for the default implementation, `@Qualifier` for explicit overrides.
 
 **Q: What is the difference between @Autowired, @Resource, and @Inject?**
 `@Autowired` (Spring) resolves by type first, then by name if ambiguous; supports `required=false`. `@Resource` (JSR-250) resolves by name first, then by type; no `required` attribute. `@Inject` (JSR-330) resolves by type like `@Autowired` but without `required=false` support. For maximum portability, use `@Inject` (JSR-330). For Spring-specific features like `required=false`, use `@Autowired`. For name-based lookup, use `@Resource`.
@@ -512,7 +517,7 @@ Declare the injection point as `List<T>` to get all matching beans in `@Order` o
 Not directly via `@Autowired`. Options: (1) use `@Configurable` with AspectJ load-time weaving (complex setup); (2) call `SpringBeanAutowiringSupport.processInjectionBasedOnCurrentContext(this)` in the object's constructor (legacy); (3) redesign so the non-Spring object is created by a Spring-managed factory; (4) use `ApplicationContext.getBean()` (service locator, anti-pattern). The cleanest solution is usually option 3 — make the factory a Spring bean and have it create the instances.
 
 **Q: What is the effect of @Autowired on a constructor with multiple parameters?**
-Since Spring 4.3, `@Autowired` is implicit on a class with a single constructor. With multiple constructors, `@Autowired` must be placed explicitly on the preferred constructor. If no constructor is annotated and none has no-arg form, Spring throws `NoSuchMethodException`. Each constructor parameter is resolved as a separate injection point. This is why constructor injection is explicit about all required dependencies — missing one fails with a clear error at context startup.
+Since Spring 4.3, `@Autowired` is implicit on a class with a single constructor. With multiple constructors, `@Autowired` must be placed explicitly on the preferred constructor. If no constructor is annotated and there is no no-arg form, Spring falls back to the default constructor and fails with `BeanInstantiationException: No default constructor found`, wrapping a `NoSuchMethodException: <init>()`. Each constructor parameter is resolved as a separate injection point. This is why constructor injection is explicit about all required dependencies — missing one fails with a clear error at context startup.
 
 **Q: How does Spring handle circular dependencies with constructor injection?**
 It throws `BeanCurrentlyInCreationException` immediately at startup. Spring tracks in-progress beans in `singletonsCurrentlyInCreation`. When bean A's constructor requires B, and B's constructor requires A, Spring detects the cycle and fails. There is no way to resolve constructor circular dependencies in Spring — the design must be changed. Common fixes: extract a third bean with shared logic, use events, or change one injection to setter/field injection (which Spring can resolve via early references, though this is still a design smell).
@@ -537,7 +542,7 @@ With field injection, if the bean is not available and `required=false`, the fie
 5. **Use `@Value` with default values** — `${property.key:defaultValue}` prevents startup failures for optional configuration.
 6. **Use `@ConfigurationProperties` instead of `@Value` for complex config** — better binding, validation, and IDE support.
 7. **Avoid injecting `ApplicationContext`** — it is the Service Locator anti-pattern.
-8. **Avoid field injection in production code** — restrict it to test classes where `@MockBean` or `@Autowired` on test fields is acceptable.
+8. **Avoid field injection in production code** — restrict it to test classes where `@MockitoBean` or `@Autowired` on test fields is acceptable.
 9. **Use `Map<String, T>` injection for plugin patterns** — extensible without modifying the injection point.
 10. **Limit the number of constructor parameters to ~4** — if you need more, it is a signal that the class has too many responsibilities.
 
@@ -547,7 +552,7 @@ With field injection, if the bean is not available and `required=false`, the fie
 
 ### Scenario: Multi-Strategy Notification Service
 
-A SaaS platform (Spring Boot 3.2 / Java 17) sends transactional notifications across Email, SMS, and Push. Requirements:
+A SaaS platform (Spring Boot 4.1 / Java 25) sends transactional notifications across Email, SMS, and Push. Requirements:
 
 - Fan-out to all enabled channels for some events, single channel for others
 - Email is the default channel when no preference is specified

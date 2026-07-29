@@ -13,7 +13,7 @@ This is a sub-file of [Request Handling](README.md) — the same controllers,
 `@ControllerAdvice`, and `ProblemDetail` from the parent become locale-aware here,
 so error messages and validation feedback speak the user's language.
 
-Version baseline: all code targets **Spring Boot 3.x** (Spring Framework 6,
+Version baseline: all code targets **Spring Boot 4.x** (Spring Framework 7,
 `jakarta.validation.*`, JDK 17+). Boot auto-configures a `MessageSource` from
 `spring.messages.*`.
 
@@ -201,7 +201,7 @@ Note `L''utilisateur` — when args are present, the string is run through
 `java.text.MessageFormat`, where a literal single quote must be **doubled** and `{`
 must be quoted, or interpolation silently misbehaves.
 
-### Configuring MessageSource and locale (Boot 3.x)
+### Configuring MessageSource and locale
 
 Boot auto-configures a `ResourceBundleMessageSource` from properties — often all you
 need:
@@ -360,7 +360,7 @@ public String formatOrderDate(LocalDate date) {
 public String formatPrice(BigDecimal amount) {
     Locale locale = LocaleContextHolder.getLocale();
     NumberFormat currency = NumberFormat.getCurrencyInstance(locale);
-    return currency.format(amount);   // "1 234,56 EUR" (fr) vs "$1,234.56" (en_US)
+    return currency.format(amount);   // "1 234,56 €" (fr_FR) vs "$1,234.56" (en_US)
 }
 ```
 See [Java Date/Time](../../java/java_time_datetime/README.md) for the `java.time`
@@ -493,9 +493,11 @@ WebFlux pipelines.
 ### Pitfall 2: `MessageFormat` quoting eats your apostrophes
 
 When args are supplied, the template is parsed by `MessageFormat`, where a single
-quote is an escape character. `L'utilisateur {0}` renders as `Lutilisateur` (the
-`{0}` swallowed) unless you double it: `L''utilisateur {0}`. This bug only appears
-when args are passed (no-arg lookups skip `MessageFormat`), making it sneaky.
+quote is an escape character: it opens a quoted region in which `{0}` stops being a
+placeholder. `L'utilisateur {0}` renders as the literal `Lutilisateur {0}` — the quote
+vanishes and the argument is never substituted — unless you double it:
+`L''utilisateur {0}` gives `L'utilisateur Marie`. This bug only appears when args are
+passed (no-arg lookups skip `MessageFormat`), making it sneaky.
 
 ### Pitfall 3: Bundle encoding mojibake
 
@@ -574,7 +576,7 @@ Move the text into `messages_xx.properties` keyed by a code, and have controller
 `ApplicationContext` extends the `MessageSource` interface, so the container itself resolves messages — you can call `context.getMessage(...)` directly. Boot registers a `MessageSource` bean (named `messageSource`) that the context delegates to, and any bean can inject `MessageSource` or implement `MessageSourceAware`. This is why localization needs no special infrastructure beyond a properties file and the standard container.
 
 **Q: What is the gotcha with single quotes in message templates?**
-When a message has arguments, Spring runs it through `java.text.MessageFormat`, where a single quote is an escape character, so `L'utilisateur {0}` drops the `{0}` and renders `Lutilisateur`. You must double the quote: `L''utilisateur {0}`. The trap is that no-argument lookups skip `MessageFormat`, so the same string can look correct until an argument is passed.
+A single quote opens a quoted region in `java.text.MessageFormat`, so `L'utilisateur {0}` renders as the literal `Lutilisateur {0}` and the argument is never substituted. Spring runs a message through `MessageFormat` only when arguments are supplied. You must double the quote: `L''utilisateur {0}`, which yields `L'utilisateur Marie`. The trap is that no-argument lookups skip `MessageFormat`, so the same string can look correct until an argument is passed.
 
 **Q: What is the difference between `ResourceBundleMessageSource` and `ReloadableResourceBundleMessageSource`?**
 `ResourceBundleMessageSource` wraps `java.util.ResourceBundle`, reads only from the classpath, and caches bundles for the JVM's lifetime, so translations change only on restart. `ReloadableResourceBundleMessageSource` reads from any Spring `Resource` (including `file:`), supports explicit encoding, and reloads edited files on a `cacheSeconds` interval. Use the reloadable one when translators or ops must edit copy without a redeploy; otherwise the classpath one is Boot's simpler default.
@@ -595,7 +597,7 @@ Boot's `MessageSourceAutoConfiguration` creates a `ResourceBundleMessageSource` 
 By default Hibernate Validator interpolates from `ValidationMessages.properties` on the classpath, independent of Spring's locale. To route validation through Spring's `MessageSource` and the resolved locale, define a `LocalValidatorFactoryBean` and call `setValidationMessageSource(messageSource)`, then reference codes in constraints like `@NotBlank(message = "{user.name.required}")`. Now validation errors come from `messages_xx.properties` and honor the request's locale like everything else.
 
 **Q: How do you format numbers, dates, and currency per locale in Spring?**
-Use locale-aware formatters bound to the current locale, never string concatenation. Examples are `DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale)`, `NumberFormat.getCurrencyInstance(locale)`, and Spring's `@DateTimeFormat`/`@NumberFormat` on bound fields. Spring's `FormattingConversionService` reads `LocaleContextHolder`, so binding and rendering pick up the request locale automatically. This yields `1 234,56 EUR` in `fr_FR` versus `$1,234.56` in `en_US` from the same value.
+Use locale-aware formatters bound to the current locale, never string concatenation. Examples are `DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale)`, `NumberFormat.getCurrencyInstance(locale)`, and Spring's `@DateTimeFormat`/`@NumberFormat` on bound fields. Spring's `FormattingConversionService` reads `LocaleContextHolder`, so binding and rendering pick up the request locale automatically. This yields `1 234,56 €` in `fr_FR` versus `$1,234.56` in `en_US` from the same value.
 
 **Q: How do you handle per-user timezone?**
 Store all instants in UTC and render them in the user's zone read from `LocaleContextHolder.getTimeZone()`, which is populated when the resolver implements `TimeZoneAwareLocaleContext` (Cookie/Session resolvers do). Convert with `instant.atZone(LocaleContextHolder.getTimeZone().toZoneId())` at display time. This keeps storage unambiguous while showing each user their local wall-clock time.

@@ -27,7 +27,7 @@ Think of a bean's lifecycle like hiring and onboarding an employee:
 ## 3. Core Principles
 
 1. **Instantiation before injection:** The constructor runs first, then dependencies are injected. Constructor injection combines these two phases.
-2. **Aware interfaces are called before BeanPostProcessors:** `BeanNameAware`, `BeanFactoryAware`, `ApplicationContextAware` callbacks run after property injection but before any `BeanPostProcessor`.
+2. **Aware callbacks split into two groups:** `initializeBean()` calls `invokeAwareMethods()` for exactly three — `BeanNameAware`, `BeanClassLoaderAware`, `BeanFactoryAware` — after property injection and before any `BeanPostProcessor`. `ApplicationContextAware` (like `EnvironmentAware` and `ResourceLoaderAware`) is delivered by `ApplicationContextAwareProcessor`, which *is* a `BeanPostProcessor`; the context registers it first in `prepareBeanFactory()`, so it runs ahead of your own BPPs but not ahead of all of them.
 3. **Multiple initialization mechanisms exist:** `@PostConstruct`, `InitializingBean.afterPropertiesSet()`, and `@Bean(initMethod=...)` are all valid. They execute in that order if all three are present.
 4. **Prototype beans are not destroyed by the container:** Only singleton beans go through the destroy phase. The container creates prototype beans but does not track them — `@PreDestroy` never fires for prototypes.
 5. **BeanPostProcessor applies to all other beans:** A `BeanPostProcessor` bean processes every other bean in the context (but not itself).
@@ -509,10 +509,10 @@ The prototype bean is injected exactly once at singleton initialization time. Al
 Both execute at the same lifecycle phase, with `@PostConstruct` running first if both are present. `@PostConstruct` is preferred because it is a JSR-250 standard annotation that does not tie your code to the Spring API. `InitializingBean` requires your class to implement a Spring interface and allows checked exceptions. `@Bean(initMethod=...)` is the best choice for third-party classes you cannot annotate. For your own code, use `@PostConstruct`.
 
 **Q: Does @PreDestroy get called for prototype beans?**
-No. The container creates prototype beans but does not retain a reference to them after delivery. The container cannot call `@PreDestroy` on objects it does not track. Only singleton beans (and other container-managed scoped beans like request/session) have their destroy lifecycle called. If your prototype bean holds resources (connections, file handles), the caller is responsible for cleanup. This is a common memory/resource leak in Spring applications.
+No — the container never invokes `@PreDestroy` or `destroy()` on a prototype bean. The container creates prototype beans but does not retain a reference to them after delivery. The container cannot call `@PreDestroy` on objects it does not track. Only singleton beans (and other container-managed scoped beans like request/session) have their destroy lifecycle called. If your prototype bean holds resources (connections, file handles), the caller is responsible for cleanup. This is a common memory/resource leak in Spring applications.
 
 **Q: What are the Aware interfaces and when should you implement them?**
-`BeanNameAware`, `BeanFactoryAware`, `ApplicationContextAware` (and others) provide callbacks for beans to obtain framework infrastructure references. They run after property injection but before `BeanPostProcessor`. You should implement them only when writing framework extensions, not application beans. Application beans should never hold an `ApplicationContext` reference — that is the Service Locator anti-pattern. Use `@Autowired` injection for application-level dependencies.
+`BeanNameAware`, `BeanFactoryAware`, `ApplicationContextAware` (and others) provide callbacks for beans to obtain framework infrastructure references. Only three run outside the post-processor chain — `invokeAwareMethods()` handles `BeanNameAware`, `BeanClassLoaderAware` and `BeanFactoryAware` after property injection and before any `BeanPostProcessor`. The rest, including `ApplicationContextAware`, are injected by `ApplicationContextAwareProcessor`, itself a `BeanPostProcessor` that the context registers first so it still precedes your own. You should implement them only when writing framework extensions, not application beans. Application beans should never hold an `ApplicationContext` reference — that is the Service Locator anti-pattern. Use `@Autowired` injection for application-level dependencies.
 
 **Q: What is BeanPostProcessor and what are its two methods?**
 `BeanPostProcessor` has two methods: `postProcessBeforeInitialization(Object bean, String beanName)` (runs before `@PostConstruct`) and `postProcessAfterInitialization(Object bean, String beanName)` (runs after all init methods, returns the bean or a proxy replacement). Both must return the bean (or a modified/wrapped version of it). Returning `null` is not permitted. Spring uses `BeanPostProcessor`s to implement `@Autowired`, `@Value`, `@PostConstruct`, and AOP proxying.
@@ -562,7 +562,7 @@ Spring builds a dependency graph from injection relationships (`@Autowired` fiel
 
 ### Scenario: Managed Database Connection Pool Bean
 
-A trade-settlement service (Spring Boot 3.2 / Java 17) wraps its own `DatabaseConnectionPool` as a Spring-managed singleton. Operational requirements:
+A trade-settlement service (Spring Boot 4.1 / Java 25) wraps its own `DatabaseConnectionPool` as a Spring-managed singleton. Operational requirements:
 
 - Pool initializes 10 live connections at startup; the service must not accept traffic before the pool is ready
 - On shutdown (Kubernetes SIGTERM, ~30s grace), all in-flight work must finish and every connection must close cleanly — leaked sockets exhausted the database's connection limit in a prior incident

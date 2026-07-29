@@ -6,7 +6,7 @@
 
 Spring web applications process HTTP requests through two distinct interception mechanisms that operate at different layers of the stack:
 
-- **Servlet Filters** (`javax.servlet.Filter` / `jakarta.servlet.Filter`) are part of the servlet container (Tomcat, Jetty, Undertow). They wrap the entire request/response cycle and execute before the DispatcherServlet ever sees the request. Filters can intercept every request regardless of whether Spring handles it.
+- **Servlet Filters** (`jakarta.servlet.Filter`) are part of the servlet container (Tomcat, Jetty). They wrap the entire request/response cycle and execute before the DispatcherServlet ever sees the request. Filters can intercept every request regardless of whether Spring handles it.
 
 - **HandlerInterceptors** (`org.springframework.web.servlet.HandlerInterceptor`) are a Spring MVC construct. They run inside the DispatcherServlet, after routing has resolved the target handler. They have fine-grained hooks — `preHandle`, `postHandle`, and `afterCompletion` — and have access to the resolved `HandlerMethod`.
 
@@ -84,7 +84,7 @@ Registered via `WebMvcConfigurer.addInterceptors()`.
 
 ### 4.3 OncePerRequestFilter
 
-Base class that uses a request attribute to track whether the filter has already been invoked for this logical request. Subclass and implement `doFilterInternal()`.
+Base class that uses a request attribute to track whether the filter has already been invoked for this logical request, and additionally skips `ASYNC` and `ERROR` dispatches by default. Subclass and implement `doFilterInternal()`.
 
 ```java
 public abstract class OncePerRequestFilter extends GenericFilterBean {
@@ -95,6 +95,9 @@ public abstract class OncePerRequestFilter extends GenericFilterBean {
     protected boolean shouldNotFilter(HttpServletRequest request) throws ServletException {
         return false; // override to skip certain paths
     }
+
+    protected boolean shouldNotFilterAsyncDispatch() { return true; }  // ASYNC skipped by default
+    protected boolean shouldNotFilterErrorDispatch() { return true; }  // ERROR skipped by default
 }
 ```
 
@@ -108,7 +111,7 @@ Extends `HandlerInterceptor` with `afterConcurrentHandlingStarted()`, which fire
 
 ### 4.6 Spring Security FilterChainProxy
 
-`FilterChainProxy` is a single filter registered in the servlet container that internally delegates to a list of `SecurityFilterChain` instances. Each chain matches a request pattern and contains security filters in a fixed order (e.g., `UsernamePasswordAuthenticationFilter`, `BasicAuthenticationFilter`, `ExceptionTranslationFilter`, `FilterSecurityInterceptor`). The fixed internal order is defined by `FilterOrderRegistration` — do not rely on `@Order` for security filters inside the chain.
+`FilterChainProxy` is a single filter registered in the servlet container that internally delegates to a list of `SecurityFilterChain` instances. Each chain matches a request pattern and contains security filters in a fixed order (e.g., `SecurityContextHolderFilter`, `CsrfFilter`, `UsernamePasswordAuthenticationFilter`, `BasicAuthenticationFilter`, `ExceptionTranslationFilter`, and `AuthorizationFilter` last). The fixed internal order is defined by `FilterOrderRegistration` — do not rely on `@Order` for security filters inside the chain.
 
 ---
 
@@ -324,8 +327,8 @@ public class RequestBodyCachingFilter extends OncePerRequestFilter {
 - Tomcat default thread pool: 200 max threads (`server.tomcat.threads.max=200`)
 - Tomcat default acceptCount: 100 (queue before rejecting)
 - Each filter in the chain adds one method call overhead — negligible, typically under 1 microsecond per filter for simple pass-through
-- `ContentCachingRequestWrapper` allocates a `ByteArrayOutputStream` that grows 32 bytes at a time initially — for a 10 KB JSON body, expect ~40 KB of heap allocated (original stream + cached copy + possible deserialization)
-- Spring Security `FilterChainProxy` internally maintains a list of ~15 filters in a standard Spring Boot Security setup
+- `ContentCachingRequestWrapper` allocates a `FastByteArrayOutputStream` sized from `request.getContentLength()` — one block of exactly the body size when the client sends `Content-Length`, and 256-byte chained blocks when it does not. For a 10 KB JSON body that is a 10 KB cached copy on top of whatever the deserialized object graph costs
+- Spring Security's default `SecurityFilterChain` holds ~15 filters in a standard Spring Boot Security setup, ending with `AuthorizationFilter`
 
 **Stated plainly.** "On a blocking Servlet stack, a thread is occupied for the *entire* request including every filter, so your maximum throughput is simply the thread count divided by how long one request holds a thread." This is Little's Law applied to Tomcat, and it is why a few milliseconds of I/O inside a filter is not a rounding error — it is a direct multiplier on capacity.
 
@@ -697,8 +700,8 @@ public class FilterConfig {
 
 | Technology | Role |
 |------------|------|
-| `javax.servlet.Filter` (Jakarta EE 8 and below) | Servlet filter API |
-| `jakarta.servlet.Filter` (Jakarta EE 9+, Spring Boot 3.x) | Servlet filter API (namespace change) |
+| `jakarta.servlet.Filter` | Servlet filter API (Servlet 6.1 / Jakarta EE 11 baseline in Spring Boot 4) |
+| `jakarta.servlet.FilterChain` | The chain handed to `doFilter`; call it or the request stops here |
 | `org.springframework.web.filter.OncePerRequestFilter` | Base class guaranteeing single filter execution |
 | `org.springframework.web.filter.CommonsRequestLoggingFilter` | Built-in Spring filter for request logging; configurable |
 | `org.springframework.web.filter.ShallowEtagHeaderFilter` | Adds ETag support with response caching |
@@ -737,7 +740,7 @@ Wrap the request in a `ContentCachingRequestWrapper` and pass the wrapper to `ch
 The client receives an empty response body. `ContentCachingResponseWrapper` intercepts writes to the response output stream and stores them in an internal buffer instead of writing them to the actual response. `copyBodyToResponse()` flushes that buffer to the real response. This is a silent bug — the status code is correct, Content-Type is set, but the body is empty. Load balancer health checks will often still pass (HTTP 200 with no body), masking the bug in monitoring.
 
 **Q: How does DelegatingFilterProxy work?**
-`DelegatingFilterProxy` is a `javax.servlet.Filter` registered with the servlet container that looks up a Spring bean by name from the `ApplicationContext` and delegates all `doFilter()` calls to it. This bridges the lifecycle gap: the servlet container initializes filters at startup before the Spring context is ready, but `DelegatingFilterProxy` defers the actual bean lookup to the first request. Spring Security's `FilterChainProxy` is registered through `DelegatingFilterProxy` under the bean name `"springSecurityFilterChain"`.
+`DelegatingFilterProxy` is a `jakarta.servlet.Filter` registered with the servlet container that looks up a Spring bean by name from the `ApplicationContext` and delegates all `doFilter()` calls to it. This bridges the lifecycle gap: the servlet container initializes filters at startup before the Spring context is ready, but `DelegatingFilterProxy` defers the actual bean lookup to the first request. Spring Security's `FilterChainProxy` is registered through `DelegatingFilterProxy` under the bean name `"springSecurityFilterChain"`.
 
 **Q: Can an interceptor's preHandle method access path variables?**
 Not directly from the `HttpServletRequest`. Path variables are extracted by Spring MVC after routing and stored in a request attribute: `request.getAttribute(HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE)`. In `preHandle`, this attribute is already populated because handler mapping has completed before the interceptor fires. Cast the result to `Map<String, String>` to access individual path variable values.
@@ -749,10 +752,10 @@ Use `InterceptorRegistration.excludePathPatterns()` in `WebMvcConfigurer.addInte
 Returning `false` from `preHandle` halts the handler chain — DispatcherServlet stops processing and returns the response as-is (typically empty 200 if you haven't written anything, or whatever you wrote in `preHandle`). You are responsible for writing a meaningful error response before returning `false`. Throwing an exception triggers Spring MVC's exception handling pipeline (`@ExceptionHandler`, `@ControllerAdvice`) and results in a structured error response. For API error responses with proper JSON bodies and status codes, throw an appropriate exception rather than returning `false`.
 
 **Q: What is `OncePerRequestFilter` and why is it preferred over implementing `Filter` directly?**
-`OncePerRequestFilter` (Spring's abstract class) guarantees the filter executes exactly once per request, even when the request is forwarded internally via `RequestDispatcher.forward()`. A plain `javax.servlet.Filter` is called on every dispatch — including `FORWARD` and `INCLUDE` dispatches within the same request, which means it runs multiple times for a request involving `RequestDispatcher`. `OncePerRequestFilter` achieves once-per-request by marking the request with a request attribute on first execution and skipping if the attribute is already set. Override `shouldNotFilter(HttpServletRequest)` to exclude specific requests (e.g., static resources). Almost all Spring Security filters extend `OncePerRequestFilter` for this reason.
+`OncePerRequestFilter` (Spring's abstract class) guarantees the filter executes exactly once per request, even when the request is forwarded internally via `RequestDispatcher.forward()`. A plain `jakarta.servlet.Filter` is called on every dispatch type it is mapped to — including `FORWARD` and `INCLUDE` dispatches within the same request, which means it runs multiple times for a request involving `RequestDispatcher`. `OncePerRequestFilter` uses two mechanisms: it marks the request with an `alreadyFiltered` attribute on first execution and skips if the attribute is already set (this covers `FORWARD`/`INCLUDE`), and `skipDispatch()` bypasses `ASYNC` and `ERROR` dispatches outright because `shouldNotFilterAsyncDispatch()` and `shouldNotFilterErrorDispatch()` both return `true` by default. Override `shouldNotFilter(HttpServletRequest)` to exclude specific requests (e.g., static resources). Almost all Spring Security filters extend `OncePerRequestFilter` for this reason.
 
 **Q: How do you measure and record per-request latency in a `Filter` without blocking the response body write?**
-Timing in a filter wraps `chain.doFilter(request, response)` with `System.nanoTime()` measurements. However, for streaming responses, the response body write happens after `doFilter` returns — the `afterCompletion` timing in an interceptor or a `ContentCachingResponseWrapper` is needed for body size. For simple request latency (time to send the last byte of headers + body): use a `ContentCachingResponseWrapper` in the filter to buffer the response, record `nanoTime()` before and after `doFilter`, then write the cached response. For real production latency instrumentation, use Micrometer's `WebMvcMetricsFilter` (auto-configured by Spring Boot Actuator) which uses `HttpServletResponse.setStatus()` callback via `HandlerInterceptor.afterCompletion` to accurately attribute time.
+Timing in a filter wraps `chain.doFilter(request, response)` with `System.nanoTime()` measurements. However, for streaming responses, the response body write happens after `doFilter` returns — the `afterCompletion` timing in an interceptor or a `ContentCachingResponseWrapper` is needed for body size. For simple request latency (time to send the last byte of headers + body): use a `ContentCachingResponseWrapper` in the filter to buffer the response, record `nanoTime()` before and after `doFilter`, then write the cached response. For real production latency instrumentation, do not hand-roll it: Spring Framework's `ServerHttpObservationFilter` is auto-configured by Spring Boot Actuator and is what produces the `http.server.requests` metric. It is an `OncePerRequestFilter` that opens an `Observation` around `filterChain.doFilter` and stops it in a `finally` block, and because it defers tagging until the handler has been resolved it attributes the timing to the right `uri` template rather than the raw path. Customise the tags by contributing a `DefaultServerRequestObservationConvention` subclass instead of writing your own timing filter.
 
 **Q: What happens to a Spring Security filter that is ordered too early in the security filter chain?**
 Spring Security's `SecurityFilterChain` is itself a `Filter` registered in the Servlet filter chain at `SecurityProperties.DEFAULT_FILTER_ORDER` (-100 by default). Within the security chain, filters have a fixed order defined by `FilterOrderRegistration`. If you insert a custom filter too early (e.g., `addFilterBefore(myFilter, UsernamePasswordAuthenticationFilter.class)`) when your filter depends on the `SecurityContext` being populated, the context will not be set yet — `SecurityContextHolder.getContext().getAuthentication()` returns null. The correct pattern: know the security filter order, place authentication-dependent filters after `SecurityContextHolderFilter` (which restores the context from the session). Use `HttpSecurity.addFilterAfter` / `addFilterBefore` with precise reference filters.
@@ -883,24 +886,35 @@ public WebClient webClient() {
 
 **Additional war stories and interview Q&As:**
 
-**Pitfall: Filter executing twice for error dispatch.** A logging filter records every request — but for an error, Spring dispatches the request twice (first to the original URL, then to `/error`). The filter fires both times, producing duplicate log entries.
+**Pitfall: opting a filter INTO the error dispatch and getting duplicate work.** For an error, Spring dispatches the request twice (first to the original URL, then to `/error`). `OncePerRequestFilter` already skips the second one — `shouldNotFilterErrorDispatch()` returns `true` by default, and `skipDispatch()` checks `WebUtils.ERROR_REQUEST_URI_ATTRIBUTE` before running `doFilterInternal`. The bug appears when someone overrides it to `false` in order to see error responses, and then every exception path is logged, audited or rate-limited twice.
 
 ```java
-// BROKEN: filter fires for both REQUEST and ERROR dispatches
+// BROKEN: overriding the default opts the filter into the ERROR dispatch as well,
+// so an exception response logs "GET /orders" and then "GET /error"
 @Component
 public class RequestLogFilter extends OncePerRequestFilter {
+    @Override
+    protected boolean shouldNotFilterErrorDispatch() {
+        return false;   // now runs on REQUEST *and* ERROR
+    }
     @Override
     protected void doFilterInternal(...) {
         log.info("Request: {}", request.getRequestURI());
         filterChain.doFilter(request, response);
     }
-    // Logs "GET /orders" then "GET /error" for every exception response
 }
 
-// FIX: override shouldNotFilterErrorDispatch to skip ERROR dispatch
-@Override
-protected boolean shouldNotFilterErrorDispatch() {
-    return true;  // only logs the original REQUEST dispatch
+// FIX: leave the default alone (skip ERROR), and read the status in the finally block
+@Component
+public class RequestLogFilter extends OncePerRequestFilter {
+    @Override
+    protected void doFilterInternal(...) {
+        try {
+            filterChain.doFilter(request, response);
+        } finally {
+            log.info("Request: {} -> {}", request.getRequestURI(), response.getStatus());
+        }
+    }
 }
 ```
 
@@ -931,7 +945,7 @@ public boolean preHandle(HttpServletRequest req, HttpServletResponse res,
 
 **Additional interview Q&As:**
 
-**What is the difference between OncePerRequestFilter and GenericFilterBean?** `OncePerRequestFilter` guarantees single execution per request, even during forwards, includes, or error dispatches (with `shouldNotFilterErrorDispatch`). `GenericFilterBean` fires on every dispatch. Use `OncePerRequestFilter` for any filter that must not double-execute (logging, authentication, rate limiting). Use `GenericFilterBean` only when you explicitly need to intercept all dispatch types.
+**What is the difference between OncePerRequestFilter and GenericFilterBean?** `GenericFilterBean` is only a Spring-aware base class — it gives a filter access to the environment, `ServletContext` and bean-style configuration, but leaves `doFilter` to you, so the filter runs on every dispatch type it is mapped to. `OncePerRequestFilter` extends it and adds the guarantee: an `alreadyFiltered` request attribute de-duplicates `FORWARD`/`INCLUDE`, and `ASYNC` and `ERROR` dispatches are skipped outright because `shouldNotFilterAsyncDispatch()` and `shouldNotFilterErrorDispatch()` default to `true`. Use `OncePerRequestFilter` for any filter that must not double-execute (logging, authentication, rate limiting); drop to `GenericFilterBean` only when you explicitly need to intercept all dispatch types.
 
 **How do you pass data from a Filter to a Controller?** Set a request attribute: `request.setAttribute("key", value)`. In the controller, inject `HttpServletRequest` and call `request.getAttribute("key")`. Alternatively, put the data in the `SecurityContext` (for auth principal) or in an MDC thread-local (for trace IDs). Never use static fields or application-scope singletons for request-scoped data.
 

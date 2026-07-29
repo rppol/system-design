@@ -38,7 +38,7 @@ Key insight: Most Spring Boot performance problems are not JVM problems — they
 
 **Startup time is deployment time**: In container orchestration environments (Kubernetes), slow startup means slow pod readiness, slow horizontal scaling, and long deployment windows. Reducing startup time improves deployment safety and enables faster autoscaling reactions.
 
-**Virtual threads are not magic**: Virtual threads eliminate the platform thread as a scalability bottleneck for I/O-bound workloads. They do NOT help CPU-bound work, they do NOT eliminate synchronized blocks from being pinned, and they require libraries to be non-blocking at the syscall level to achieve full benefit.
+**Virtual threads are not magic**: Virtual threads eliminate the platform thread as a scalability bottleneck for I/O-bound workloads. They do NOT help CPU-bound work, they cannot unmount from a carrier while a native frame (a JNI method or a Foreign Function & Memory downcall) is on the stack, and they require the blocking call in each library to be pure Java to achieve full benefit.
 
 ---
 
@@ -65,7 +65,7 @@ Both formulas are answering the same question from opposite ends. The OLTP one a
 | Symbol | What it is |
 |--------|------------|
 | `CPU cores` | Cores on the **database** host, not the app host — the DB is what executes the query |
-| `effective_spindle_count` | How many independent disks can seek concurrently. SSD: use `1` |
+| `effective_spindle_count` | How many independent disks can seek concurrently. SSD: use `1`; pure NVMe is commonly modelled as `0` |
 | `requests_per_second` | Arrival rate of requests that touch the database |
 | `avg_query_duration_ms` | How long one connection is *held*, including transaction time, not just query time |
 | `/ 1000` | Converts milliseconds to seconds so the units cancel and the result is a plain count |
@@ -149,7 +149,7 @@ flowchart TD
     class H frozen
 ```
 
-Saturation scenario: 200 Tomcat threads all blocked waiting on HikariCP (pool size 10) leaves 190 threads in the pending queue, so `connection-timeout` is exceeded for late arrivals and `SQLTimeoutException` is thrown to callers.
+Saturation scenario: 200 Tomcat threads all blocked waiting on HikariCP (pool size 10) leaves 190 threads in the pending queue, so `connection-timeout` is exceeded for late arrivals and HikariCP throws `SQLTransientConnectionException` ("Connection is not available, request timed out after ...") to callers.
 
 **What this actually says.** "Your real concurrency limit is the *smallest* pool in the chain, and every thread beyond it is not working — it is queueing."
 
@@ -523,19 +523,20 @@ public class VirtualThreadAsyncConfig {
     }
 }
 
-// Important: synchronized blocks and methods pin the virtual thread to its carrier platform thread
-// This eliminates the scalability benefit for pinned sections
-// Replace synchronized with ReentrantLock where pinning is observed
+// Important: a virtual thread cannot unmount while a NATIVE frame is on its stack —
+// a JNI method or a Foreign Function & Memory downcall that blocks holds the carrier.
+// Audit every I/O-touching dependency (JDBC driver, Redis client, HTTP client) for a
+// native transport before enabling virtual threads, and diagnose with the
+// jdk.VirtualThreadPinned JFR event (on by default at a 20 ms threshold).
 
-// PINNED (bad for virtual threads):
-public synchronized void updateSharedState() { ... }
+// PINS THE CARRIER (a native transport blocks in C):
+public void callVendorApi() { nativeVendorClient.invoke(request); }  // JNI shim
 
-// UNPINNED (preferred):
-private final ReentrantLock lock = new ReentrantLock();
-public void updateSharedState() {
-    lock.lock();
-    try { ... }
-    finally { lock.unlock(); }
+// FIXED: push the native call onto a small, explicitly sized platform-thread pool
+// and let the virtual thread park on the Future instead of holding a carrier.
+private final ExecutorService nativeIo = Executors.newFixedThreadPool(16);
+public void callVendorApi() {
+    nativeIo.submit(() -> nativeVendorClient.invoke(request)).get();
 }
 ```
 
@@ -600,6 +601,21 @@ java -Xshare:on -XX:SharedArchiveFile=orders-cds.jsa -jar orders-service.jar
     <jvmArguments>-XX:ArchiveClassesAtExit=app-cds.jsa</jvmArguments>
 </configuration>
 ```
+
+### JVM and GC Tuning
+
+Section 1 lists JVM configuration as a lever; here is what actually moves the needle for a Spring Boot service. Pick the collector by the shape of your latency requirement, not by fashion — every collector below is production-ready.
+
+| Collector | Flag | Pause profile | Heap sweet spot | Choose it when |
+|-----------|------|---------------|-----------------|----------------|
+| G1 (default since JDK 9) | `-XX:+UseG1GC` | Target-driven, `-XX:MaxGCPauseMillis=200` by default | 4 GB - 32 GB | Default. Balanced throughput and pause for a typical request/response service |
+| ZGC (generational since JDK 21) | `-XX:+UseZGC` | Sub-millisecond, independent of heap size | 8 GB and up | P99 tail latency is the SLO and you can spend 5-15% more CPU on barriers |
+| Parallel | `-XX:+UseParallelGC` | Long stop-the-world, highest throughput | any | Batch jobs and Spring Batch steps where wall-clock total beats per-request latency |
+| Serial | `-XX:+UseSerialGC` | Single-threaded | under 2 GB | Small containers, one or two vCPUs, where G1's own threads are pure overhead |
+
+Three settings matter more than collector choice. First, **size the heap against the container, not the host**: the JVM is container-aware and defaults `MaxRAMPercentage` to 25%, which wastes most of a 4 GB pod — set `-XX:MaxRAMPercentage=75` and let the flag scale when the pod is resized, rather than hard-coding `-Xmx`. Second, **set `-Xms` equal to `-Xmx`** so the heap never has to grow under load; growth events are stop-the-world resizes at exactly the wrong moment. Third, **leave `MaxGCPauseMillis` alone unless you have measured a violation** — lowering it makes G1 shrink the young generation, which raises GC frequency and can cost more total pause time than it saves.
+
+JIT tuning is almost always the wrong lever: tiered compilation is on by default and the C1-then-C2 handoff is what makes the first few thousand requests progressively faster. The one exception is a short-lived job that never reaches C2, where `-XX:TieredStopAtLevel=1` skips C2 entirely and cuts startup and CPU at the cost of steady-state throughput — the same trade CDS and AOT make. Prove any of this with JFR (`-XX:StartFlightRecording=settings=profile`) before changing a flag, and re-run the load test after; a GC flag changed without a before-and-after measurement is a guess with a version-control entry.
 
 ### N+1 Query Detection
 
@@ -1025,7 +1041,7 @@ spring:
 ## 12. Interview Questions with Answers
 
 **Q: What is the correct formula for sizing a HikariCP connection pool, and what happens if it is too small or too large?**
-The HikariCP-recommended formula for OLTP workloads is: poolSize = (numCores * 2) + effectiveSpindleCount. For a 4-core application server using an SSD-backed database, this yields 9 connections. The throughput formula is: poolSize = (requestsPerSecond * avgQueryDurationMs) / 1000. If the pool is too small, threads queue for connections — `hikaricp.connections.pending` rises, P99 latency spikes, and eventually connection-timeout exceptions occur. If the pool is too large, the database server handles too many concurrent connections — lock contention increases, context switches multiply, and the DB's own connection overhead (each PostgreSQL connection spawns a backend process) becomes expensive. The right size is validated empirically by load testing and monitoring the pending metric: it should stay near zero under target load.
+The HikariCP-recommended formula for OLTP workloads is: poolSize = (numCores * 2) + effectiveSpindleCount, where numCores is the core count of the **database** host, not the application host. For a 4-core SSD-backed database server, this yields 9 connections. The throughput formula is: poolSize = (requestsPerSecond * avgQueryDurationMs) / 1000. If the pool is too small, threads queue for connections — `hikaricp.connections.pending` rises, P99 latency spikes, and eventually connection-timeout exceptions occur. If the pool is too large, the database server handles too many concurrent connections — lock contention increases, context switches multiply, and the DB's own connection overhead (each PostgreSQL connection spawns a backend process) becomes expensive. The right size is validated empirically by load testing and monitoring the pending metric: it should stay near zero under target load.
 
 **Q: What does spring.main.lazy-initialization=true do, and what is the risk of enabling it?**
 It configures all Spring beans to be created on first access rather than at ApplicationContext startup. This reduces startup time because the majority of beans are never needed during JVM initialization — they are created on the first request that exercises their code path. Typical startup time reduction is 40–70% for large applications. The risk is late-fail behavior: misconfigurations (missing required properties, unsatisfied dependencies, failed @PostConstruct methods) that would normally surface as startup errors are deferred until the first request triggers the problematic bean's creation. This means a misconfigured deployment may appear healthy (readiness probe passes) but fail on the first real request. Mitigate by running integration tests in CI that exercise all beans before production deployment, or by selectively annotating critical beans with @Lazy(false) to force eager initialization.
@@ -1051,8 +1067,8 @@ GraalVM's native-image compiler performs ahead-of-time compilation by running a 
 **Q: How does HikariCP pool saturation manifest in production metrics, and what is the remediation sequence?**
 Pool saturation manifests as: (1) hikaricp.connections.pending > 0 regularly under load — threads are waiting for a free connection; (2) hikaricp.connections.acquire P99 rising from sub-millisecond to tens or hundreds of milliseconds; (3) application P99 latency spiking proportionally. The remediation sequence: first, check if the pool size is below the formula recommendation — increase it if so. Second, check if the average query duration is high (slow queries holding connections longer than expected) — use slow query log or Hibernate statistics to identify expensive queries and add indexes or optimize them. Third, check if transactions are holding connections longer than necessary (N+1 patterns, external API calls within @Transactional) — refactor to minimize connection hold time. Finally, if the database itself is the bottleneck (CPU or I/O saturation), adding connections will not help — scale the database.
 
-**Q: What are the implications of synchronized blocks and methods on virtual thread performance?**
-Java's synchronized keyword acquires a monitor associated with a specific object. In JDK 21, a virtual thread that enters a synchronized block is pinned to its carrier platform thread — it cannot be unmounted even if it blocks on I/O inside the synchronized block. This means the carrier platform thread is blocked for the duration, eliminating the scalability benefit of virtual threads for that code path. Synchronized blocks that call blocking I/O (database queries, network calls) are particularly harmful. The fix is to replace synchronized with ReentrantLock, which supports virtual thread unmounting: the virtual thread can park while waiting for the lock or for I/O, freeing the carrier thread. Spring Boot 3.2 with virtual threads enabled logs warnings when pinning is detected. Libraries using synchronized internally (some legacy JDBC drivers, older connection pools) can degrade virtual thread scalability — this is one reason Loom-friendly versions of common libraries were updated for Java 21.
+**Q: What still pins a virtual thread to its carrier thread in a Spring Boot service, and how do you detect it?**
+Only a native frame pins: a JNI method or a Foreign Function & Memory downcall that blocks while it is on the virtual thread's stack. While pinned, the carrier platform thread cannot run any other virtual thread, so throughput collapses to `carriers / blocking_time` — on an 8-vCPU pod with a 100 ms native call that is roughly 80 requests/sec regardless of load. Detect it with the `jdk.VirtualThreadPinned` JFR event, which is enabled by default at a 20 ms threshold and reports the blocking operation, the pinning reason, and the carrier thread; corroborate with `VirtualThreadSchedulerMXBean`, where `getMountedVirtualThreadCount()` pegged at `getParallelism()` while `getQueuedVirtualThreadCount()` climbs means carrier starvation whatever the cause. Micrometer's `micrometer-java21` module publishes both as `jvm.threads.virtual.pinned` and `jvm.threads.virtual.*` gauges. The fix is to route the native blocking call through a small, explicitly sized platform-thread executor so the virtual thread parks on a `Future` instead of holding a carrier. Note what is no longer a cause: `synchronized` and `Object.wait()` stopped pinning in Java 24 under JEP 491, so choose `synchronized` or `ReentrantLock` on the merits (fairness, timed or interruptible acquisition, read-write separation), not to avoid pinning.
 
 **Q: How does the @Cacheable TTL strategy affect consistency and what patterns reduce stale read risk?**
 TTL-based cache expiry means cached values are served for up to TTL seconds after they are written — during this window, readers may see stale data if the source record changed. The risk is proportional to TTL length and update frequency. Patterns to reduce stale reads: (1) @CacheEvict on write operations — immediately removes the cache entry when data changes, forcing the next read to go to the database. This provides strong consistency for single-service scenarios. (2) Short TTL for volatile data — exchange rates at 30 seconds, product prices at 5 minutes, user profiles at 30 minutes. (3) Event-driven cache invalidation — another service publishing a change event triggers a cache eviction listener. (4) Cache-aside with version checking — include a version number in the cache key; when data changes, the version increments and old keys are naturally abandoned. Never cache data that must be strongly consistent (bank balances, inventory counts during checkout) — the complexity of maintaining cache consistency under concurrent writes exceeds the performance benefit.
@@ -1087,7 +1103,7 @@ Lazy initialisation defers bean creation until the bean is first requested (firs
 
 **Use spring-context-indexer in production builds**: It is a pure compile-time change with zero runtime downside. It removes classpath scanning overhead and is especially impactful for large multi-module applications.
 
-**Enable virtual threads via one property for Spring Boot 3.2+ on Java 21**: spring.threads.virtual.enabled=true is a one-line change that eliminates thread pool as a bottleneck for I/O-bound workloads. Test for pinning issues with -Djdk.tracePinnedThreads=full.
+**Enable virtual threads via one property for Spring Boot 3.2+ on Java 21 or later**: spring.threads.virtual.enabled=true is a one-line change that eliminates thread pool as a bottleneck for I/O-bound workloads. Before switching, run the service under load with a default JFR recording and check the `jdk.VirtualThreadPinned` event to confirm no dependency blocks inside a native frame.
 
 **Exclude unused auto-configurations explicitly**: Review the autoconfiguration report (--debug flag on startup) to see which auto-configurations are active. Exclude ones that configure unused infrastructure (Kafka, ActiveMQ, Liquibase) to reduce startup time and context complexity.
 
@@ -1187,7 +1203,7 @@ public void warmUp() {
 
 **Expanded Case Study: Migrating a 200 TPS REST API to Virtual Threads and GraalVM Native**
 
-**Scenario:** A fleet management API (Java 17, Spring Boot 3.1, 200 TPS peak) runs on 8-core Kubernetes pods with 4GB heap. Platform-thread pool (200 Tomcat threads) is saturated at 180 TPS because DB queries average 40ms blocking. P99 latency is 1,200ms. The team evaluates three performance levers: (1) virtual threads (Java 21 LTS), (2) HikariCP pool tuning, (3) GraalVM native compilation. Each lever is benchmarked independently.
+**Scenario:** A fleet management API (Java 17, Spring Boot 3.1, 200 TPS peak) runs on 8-core Kubernetes pods with 4GB heap. Platform-thread pool (200 Tomcat threads) is saturated at 180 TPS because DB queries average 40ms blocking. P99 latency is 1,200ms. The team evaluates three performance levers: (1) virtual threads on Java 25 LTS, (2) HikariCP pool tuning, (3) GraalVM native compilation. Each lever is benchmarked independently.
 
 **Scale:** 200 TPS sustained, peak 400 TPS on Monday morning GPS batch sync. 8 cores, 4GB heap, 40ms DB p50, PostgreSQL with 20 existing HikariCP connections.
 
@@ -1234,7 +1250,7 @@ That single pair of percentages is the whole diagnosis. High thread utilization 
   measured ceiling is 180 TPS -- 14x below theory. The pool is not the only
   limit: the 20-connection HikariCP pool caps DB-touching work at
     20 / 0.040 = 500 TPS,
-  and lock/pinning effects pull the real number down further.
+  and lock contention on shared state pulls the real number down further.
 
   CPU actually consumed        : 8 x 0.22 = 1.76 cores of 8  -> 6.24 cores idle
   threads actually working     : 200 - 196 = 4 of 200
@@ -1303,32 +1319,30 @@ public void doWork() {
 }
 ```
 
-**BROKEN→FIX: synchronized block pins virtual threads to OS thread**
+**BROKEN→FIX: holding a lock across an I/O call serialises every caller**
 
 ```java
-// BROKEN: synchronized method blocks the OS carrier thread while holding DB lock
-// Negates the benefit of virtual threads — all other VTs on this carrier queue up
+// BROKEN: a 40 ms Redis write happens while the monitor is held.
+// This no longer pins the carrier (JEP 491, Java 24), but it does something worse:
+// every other virtual thread queues on the monitor, so the ceiling for this method
+// is 1 / 0.040 s = 25 calls/sec no matter how many virtual threads you create.
 public synchronized void updateFleetCache(String key, FleetData data) {
-    // 40ms Redis write inside synchronized — pins OS thread!
     redis.set(key, data);
 }
 
-// FIX: use ReentrantLock (JDK 21 makes VT-aware) or restructure to avoid locking
-private final ReentrantLock lock = new ReentrantLock();
+// FIX: never hold a lock across I/O — the map write is the only thing needing atomicity
+private final ConcurrentHashMap<String, FleetData> cache = new ConcurrentHashMap<>();
 
 public void updateFleetCache(String key, FleetData data) {
-    lock.lock();    // VT suspends instead of pinning OS thread
-    try {
-        redis.set(key, data);
-    } finally {
-        lock.unlock();
-    }
+    cache.put(key, data);   // CAS internally, no lock at all
+    redis.set(key, data);   // I/O outside any critical section — scales with VT count
 }
 
-// BETTER FIX: use ConcurrentHashMap for cache — no lock needed
-private final ConcurrentHashMap<String, FleetData> cache = new ConcurrentHashMap<>();
-public void updateFleetCache(String key, FleetData data) {
-    cache.put(key, data);  // CAS internally, no pinning
+// What DOES still pin: a native frame on the virtual thread's stack.
+// A JNI-backed telematics client blocking in C holds its carrier for the whole call.
+private final ExecutorService nativeIo = Executors.newFixedThreadPool(16);
+public FleetData readFromVendorDevice(String id) throws Exception {
+    return nativeIo.submit(() -> jniTelematicsClient.read(id)).get();  // VT parks on the Future
 }
 ```
 
@@ -1391,7 +1405,7 @@ spring:
 
 **Why do virtual threads not help CPU-bound workloads?** Virtual threads reduce blocking overhead: when a virtual thread blocks on I/O, the OS carrier thread is released to run other virtual threads. For CPU-bound work (parsing, cryptography, matrix multiplication), threads are never blocked — they use the CPU continuously. Adding more virtual threads beyond `Runtime.availableProcessors()` for CPU-bound code just adds scheduling overhead.
 
-**What is "pinning" in virtual thread context and how do you detect it?** A virtual thread is "pinned" to its OS carrier thread when it blocks inside a `synchronized` block or method. While pinned, the carrier cannot execute other virtual threads, defeating the purpose. Detect pinning via `-Djdk.tracePinnedThreads=full` JVM flag (logs stack traces when pinning occurs) or JFR with the `jdk.VirtualThreadPinned` event. Fix by replacing `synchronized` with `ReentrantLock` or restructuring to avoid locks on I/O paths.
+**What is "pinning" in virtual thread context and how do you detect it?** A virtual thread is "pinned" when it cannot unmount from its carrier because a native frame is on its stack — a JNI method or a Foreign Function & Memory downcall that blocks. While pinned, the carrier cannot execute other virtual threads, so throughput falls to `carriers / blocking_time`. Detect it with the `jdk.VirtualThreadPinned` JFR event, enabled by default at a 20 ms threshold, which names the blocking operation, the pinning reason and the carrier thread; `jfr print --events jdk.VirtualThreadPinned app.jfr` reads it straight out of a recording. Fix by moving the native call onto a small platform-thread executor and parking the virtual thread on the resulting `Future`. `synchronized` and `Object.wait()` are not on this list any more — JEP 491 (Java 24) removed monitor pinning along with the old `jdk.tracePinnedThreads` system property.
 
 **How do you size the HikariCP pool when using virtual threads?** With platform threads, pool size = thread count (threads block, holding connections). With virtual threads, threads are cheap but DB connections are still expensive OS resources. Size based on actual connection hold time: `pool = TPS × avg_hold_ms / 1000` + headroom. Avoid a pool larger than the DB server's `max_connections / service_count` — PostgreSQL default is 100; with 5 services each getting 20 connections, you exactly hit the limit.
 
