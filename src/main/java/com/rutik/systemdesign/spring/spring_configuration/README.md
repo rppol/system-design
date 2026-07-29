@@ -569,7 +569,7 @@ application-prod-us.yml          (us data residency, us external URLs)
 
   +-- @Import composes ---------------------------+
   |  DataSourceConfig   (@Profile per env)        |
-  |  ExternalServiceConfig (@ConditionalOnProperty)|
+  |  ExternalServiceConfig(@ConditionalOnProperty)|
   |  FeatureFlagConfig  (@Conditional)            |
   +-----------------------------------------------+
 ```

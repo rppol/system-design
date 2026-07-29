@@ -209,7 +209,7 @@ Text Prompt
 |    cond_pred  = DiT(z_t, t, text_emb)     |
 |    uncond_pred = DiT(z_t, t, null_emb)    |
 |    [batched as single forward pass]       |
-|    z_t-1 = z_t - eta*(cond + cfg*(cond-uncond)) |
+|    z_t-1=z_t-eta*(cond+cfg*(cond-uncond)) |
 |                                           |
 |  Temporal attention: each frame attends   |
 |  to k=4 neighboring frames via causal     |

@@ -1038,7 +1038,7 @@ FIXED -- bucketed all-reduce overlapped with backward (DDP default):
 
   |--- backward: layers N..k ---|--- backward: layers k..0 ---|
                      |-- all-reduce bucket 1 (layers N..k) -- |
-                                       |-- all-reduce bucket 2 (layers k..0) --|
+                                       |-- bucket 2 (k..0) -- |
   Step time: ~65 ms (bucket 1's communication hides inside bucket 2's compute)
 ```
 

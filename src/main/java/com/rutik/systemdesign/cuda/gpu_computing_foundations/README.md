@@ -161,7 +161,7 @@ CPU die (transistor budget allocation)         GPU die (transistor budget alloca
 +----------------------------------+           +----------------------------------+
 | Control  ################        |           | Control  ##                      |
 | Cache    ####################### |           | Cache    ####                    |
-| ALU      ####                    |           | ALU      ############################|
+| ALU      ####                    |           | ALU      ########################|
 +----------------------------------+           +----------------------------------+
 Few cores (8-64), each fast alone.             Thousands of ALUs ("CUDA cores"),
 Deep pipeline, branch prediction,              each simple and slow alone.

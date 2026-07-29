@@ -424,14 +424,14 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │                                                                  │
   │  Raw query: "red running shoes size 10"                          │
   │                                                                  │
-  │  1. Spell correction (SymSpell, <1ms)                           │
+  │  1. Spell correction (SymSpell, <1ms)                            │
   │     "sheos" → "shoes"                                            │
   │                                                                  │
-  │  2. Query intent classification (BERT fine-tuned, 4ms)          │
-  │     P(navigational)=0.02, P(transactional)=0.91                 │
+  │  2. Query intent classification (BERT fine-tuned, 4ms)           │
+  │     P(navigational)=0.02, P(transactional)=0.91                  │
   │     P(informational)=0.07                                        │
   │                                                                  │
-  │  3. Tokenization + embedding (BERT-mini query encoder, 4ms)     │
+  │  3. Tokenization + embedding (BERT-mini query encoder, 4ms)      │
   │     Output: 256-dim dense vector (L2-normalized)                 │
   │                                                                  │
   │  4. BM25 query preparation                                       │
@@ -447,7 +447,7 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │  BM25 RETRIEVAL      │    │  ANN DENSE RETRIEVAL             │
   │  (ElasticSearch)     │    │  (FAISS IVF4096,PQ32)            │
   │                      │    │                                  │
-  │  Query: BM25 scoring │    │  Query vector → FAISS search    │
+  │  Query: BM25 scoring │    │  Query vector → FAISS search     │
   │  on product title,   │    │  nprobe=64 cells searched        │
   │  description, tags   │    │  10M item embeddings indexed     │
   │                      │    │  PQ-compressed: 320MB RAM        │
@@ -469,7 +469,7 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   ┌──────────────────────────────────────────────────────────────────┐
   │  HYBRID FUSION: Reciprocal Rank Fusion                           │
   │                                                                  │
-  │  RRF score(doc) = 1/(60+rank_bm25) + 1/(60+rank_dense)          │
+  │  RRF score(doc) = 1/(60+rank_bm25) + 1/(60+rank_dense)           │
   │                                                                  │
   │  Advantage over linear combination:                              │
   │  - No weight tuning across query types                           │
@@ -485,8 +485,8 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │  CROSS-ENCODER RERANKER (optional, for high-value queries)       │
   │                                                                  │
   │  Applied to top-50 candidates when:                              │
-  │  - High-revenue query category (electronics, luxury)            │
-  │  - User segment: high-LTV (lifetime value > $500/yr)            │
+  │  - High-revenue query category (electronics, luxury)             │
+  │  - User segment: high-LTV (lifetime value > $500/yr)             │
   │                                                                  │
   │  Model: BERT-base cross-encoder                                  │
   │  Input: concat(query_tokens, [SEP], product_title_tokens)        │
@@ -494,9 +494,9 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │  Latency: 8ms for batch of 50 on GPU                             │
   │                                                                  │
   │  Cross-encoder vs bi-encoder:                                    │
-  │  - Cross-encoder: attends over both query+doc jointly → richer  │
+  │  - Cross-encoder: attends over both query+doc jointly → richer   │
   │  - Bi-encoder: independently encodes; used for retrieval scale   │
-  │  - Cross-encoder NDCG is materially higher, throughput is       │
+  │  - Cross-encoder NDCG is materially higher, throughput is        │
   │    orders of magnitude lower (one forward pass per pair)         │
   └──────────────────────────┬───────────────────────────────────────┘
                              │
@@ -506,16 +506,16 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │                                                                  │
   │  500 (query, product) features → score                           │
   │  Feature categories:                                             │
-  │  - Retrieval: bm25_score, dense_score, rrf_score, cross_score   │
-  │  - Product quality: CTR_7d, CVR_7d, avg_rating, review_count    │
+  │  - Retrieval: bm25_score, dense_score, rrf_score, cross_score    │
+  │  - Product quality: CTR_7d, CVR_7d, avg_rating, review_count     │
   │  - User match: price_affinity, category_affinity, brand_history  │
-  │  - Context: device, hour, session_depth, A/B variant            │
+  │  - Context: device, hour, session_depth, A/B variant             │
   │                                                                  │
   │  Training:                                                       │
-  │  - Click logs (500M/day) → IPW-debiased labels                  │
-  │  - Label: purchase=3, add_to_cart=2, long_click=1, click=0.5    │
+  │  - Click logs (500M/day) → IPW-debiased labels                   │
+  │  - Label: purchase=3, add_to_cart=2, long_click=1, click=0.5     │
   │  - Daily retrain on 30-day rolling window (~15B examples)        │
-  │  - Trains in 2 hours on 16-core CPU cluster                     │
+  │  - Trains in 2 hours on 16-core CPU cluster                      │
   └──────────────────────────┬───────────────────────────────────────┘
                              │
                              v (5ms)
@@ -523,12 +523,12 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │  BUSINESS POST-RANKER                                            │
   │                                                                  │
   │  Hard constraints (must satisfy):                                │
-  │  - Out-of-stock: demotion to position 18-20 (not removed)       │
+  │  - Out-of-stock: demotion to position 18-20 (not removed)        │
   │  - Banned products: removed entirely                             │
   │  - Brand diversity: max 3 per brand in top-10                    │
   │                                                                  │
   │  Soft boosts (bounded):                                          │
-  │  - Promoted listings: +0.02 score boost (capped at +3 positions)│
+  │  - Promoted listings: +0.02 score boost (capped at +3 positions) │
   │  - Margin optimization: high-margin products +0.01 boost         │
   │  - New seller boost: products from new sellers (< 30 days)       │
   │    receive +0.015 to ensure new seller discovery                 │
@@ -548,7 +548,7 @@ Offline NDCG@10 on a held-out click dataset measures ranking quality but is bias
   │  - purchase event (30-min attribution window)                    │
   │  - dwell time (session close event)                              │
   │                                                                  │
-  │  Output → Kafka → Spark ETL → LTR training data                 │
+  │  Output → Kafka → Spark ETL → LTR training data                  │
   │                                                                  │
   │  Feature logging is critical:                                    │
   │  "Log features at serve time, not at label join time"            │
