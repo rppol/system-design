@@ -830,54 +830,88 @@ A team evaluated SSL quality by fine-tuning the full model and comparing to supe
 ## 12. Interview Questions with Answers
 
 **Q: What is self-supervised learning and how does it differ from unsupervised learning?**
+**Short:** Self-supervised learning trains on pretext tasks with automatically generated pseudo-labels, unlike generic unsupervised methods.
+
 Self-supervised learning is a subset of unsupervised learning that creates supervisory signals automatically from the input data. Traditional unsupervised learning methods (clustering, PCA, autoencoders) aim to model the data distribution or find low-dimensional structure. SSL explicitly trains on a pretext task with generated pseudo-labels — next token prediction, masked token prediction, or predicting one view from another. The distinction matters because SSL produces representations directly optimized for prediction tasks, which transfer significantly better to downstream classification and regression.
 
 **Q: What is the InfoNCE loss and what does it optimize?**
+**Short:** InfoNCE optimizes a lower bound on mutual information by scoring the positive pair above all negative pairs.
+
 InfoNCE (noise-contrastive estimation) loss is a lower bound on the mutual information I(z_i; z_j) between two views. It optimizes the encoder to make the positive pair's similarity score higher than any negative pair's score. The temperature parameter tau controls sharpness: lower temperature creates a harder classification problem (more focus on near-miss negatives), higher temperature distributes gradient more uniformly. InfoNCE is equivalent to cross-entropy classification where the correct class is the positive pair among 2N-1 candidates.
 
 **Q: How does BYOL avoid representation collapse without negative samples?**
+**Short:** BYOL avoids collapse via an asymmetric predictor, a momentum target network, and stop-gradient on the target.
+
 BYOL uses three mechanisms together: (1) an asymmetric predictor network on the online branch only — the online network must predict the target's projection, which is a harder, non-trivial task, (2) a momentum (EMA) target network — the target moves slowly, providing a stable but non-trivial prediction target, and (3) stop-gradient on the target — gradients do not flow through the target network, preventing the trivial solution where both networks collapse together. Remove any single mechanism and collapse occurs.
 
 **Q: What is the difference between linear evaluation and fine-tuning for evaluating SSL representations?**
+**Short:** Linear evaluation freezes the encoder to diagnose representation quality, unlike fine-tuning which can mask weak pretraining.
+
 Linear evaluation freezes the pretrained encoder and trains only a linear classifier on top. This measures the quality of representations independent of subsequent adaptation. Fine-tuning updates all weights with labeled data — the additional capacity can compensate for poor representations. Linear evaluation scores are more diagnostic: if linear evaluation is high (>70% on ImageNet), representations have learned class structure without labels. A high fine-tuning score with low linear evaluation suggests the fine-tuning process is doing the heavy lifting, not the SSL pretraining.
 
 **Q: Why does BERT use a 15% masking rate and what happens if you change it?**
+**Short:** BERT's 15% masking rate balances enough gradient signal against enough remaining context to predict masked tokens.
+
 15% is a balance between signal strength and context availability. Too low (5%): too few positions receive gradient signal, learning is slow. Too high (40%): insufficient context remains for the model to accurately predict masked tokens — the task becomes too hard, and the model learns to rely on local statistical patterns rather than long-range semantics. The 15% rate was determined empirically and has remained standard across BERT variants. SpanBERT found that masking contiguous spans (rather than random tokens) is more effective for span-extraction tasks.
 
 **Q: How does the temperature parameter affect contrastive learning?**
+**Short:** Low contrastive temperature sharpens focus on hard negatives; high temperature gives softer, more stable gradients.
+
 Temperature tau (typically 0.07–0.2) controls the sharpness of the softmax distribution over similarities. Low tau: the loss is dominated by the hardest negatives (near-miss samples with high similarity to the anchor). This creates strong gradients when the model nearly confuses a negative for the positive, pushing apart similar-looking negatives aggressively. High tau: softer distribution, more uniform gradient across all negatives, slower convergence but more stable. SimCLR uses tau=0.07, MoCo uses 0.07–0.1. Setting tau too low (<0.03) causes gradient explosion and instability.
 
 **Q: What is ELECTRA and why is it more efficient than BERT?**
+**Short:** ELECTRA's discriminator gets gradient signal from every token, making it about four times more compute-efficient than BERT.
+
 ELECTRA trains a discriminator model to detect replaced tokens in a sequence. A small generator (MLM-style) produces plausible token replacements. The discriminator sees every token and predicts which are genuine vs. generated. All N tokens receive gradient signal (not just 15% as in BERT MLM). This makes ELECTRA ~4x more compute-efficient: the same model performance is achieved in 1/4 the compute. The discriminator (the actual model) never sees [MASK] tokens, eliminating the pretraining/fine-tuning mismatch. ELECTRA-base matches BERT-large with 1/4 the FLOPs.
 
 **Q: What augmentation strategies work for graph SSL and why are they different from vision SSL?**
+**Short:** Graph SSL augmentations like edge dropout and feature masking are domain-dependent, unlike interchangeable vision augmentations.
+
 Graph augmentations must preserve graph semantics. Standard augmentations: (1) edge dropout — randomly remove 10–20% of edges, models learn robust to missing connections, (2) node feature masking — zero out 10–30% of node feature dimensions, (3) subgraph sampling — random walk to extract a subgraph, (4) node dropout — remove nodes with low degree. Unlike vision SSL where all augmentations are roughly equivalent, graph augmentations are highly domain-dependent: for molecular graphs, removing edges means breaking bonds (semantically invalid for drug-like properties), so attribute masking works better. For social networks, edge dropout is appropriate.
 
 **Q: How would you apply SSL to a tabular dataset with no natural augmentations?**
+**Short:** SCARF corrupts a random subset of tabular features by sampling from their marginal distributions to create SSL views.
+
 Use SCARF (feature corruption): for each training sample, randomly select 20–60% of features and replace their values by sampling from that feature's marginal distribution (computed over the full dataset). This simulates "what if some measurements were taken from a different patient." The model must predict which features were corrupted or use contrastive loss between the clean and corrupted views. Alternative: SubTab — split features randomly into two halves, learn representations that reconstruct each half from the other. Both approaches exploit feature correlations for representation learning.
 
 **Q: What is the SimCSE approach for sentence embeddings?**
+**Short:** SimCSE creates positive pairs from the same sentence encoded twice with different dropout masks.
+
 SimCSE (Simple Contrastive Learning of Sentence Embeddings) creates positive pairs from a single sentence passed through the encoder twice with different dropout masks. The stochastic nature of dropout (p=0.1) produces two slightly different representations of the same sentence — these are the positive pair. All other sentences in the batch are negatives. This minimal augmentation is sufficient because sentence meaning is preserved, while dropout creates just enough variation. Hard negative version adds NLI-contradictory sentences as explicit negatives. SimCSE improved STS benchmarks by 2–3 points over supervised SimCSE baselines.
 
 **Q: Why do we need a projector in SimCLR and why is it discarded after pretraining?**
+**Short:** SimCLR's projector absorbs the invariance objective, keeping the encoder's own representations more discriminative.
+
 The projector (MLP head mapping encoder output to lower-dimensional z) serves two purposes: (1) it absorbs the invariance objective — the contrastive loss forces z to be invariant to augmentations. If this invariance were imposed directly on the encoder, the encoder would lose discriminative information needed for downstream tasks. The projector acts as a "sacrifice layer" that becomes maximally invariant. (2) It prevents the encoder from collapsing — the encoder only needs to encode enough information for the projector to succeed, not be perfectly invariant itself. Empirically, using h (encoder output) instead of z (projector output) for linear evaluation improves accuracy by 10+ points.
 
 **Q: What is the false-negative problem in contrastive learning and how do you mitigate it?**
+**Short:** The false-negative problem is when same-class samples are wrongly treated as negatives, capping representation quality.
+
 It is when two samples of the same class land in the batch as a negative pair, so the loss wrongly pushes apart embeddings that should be close. InfoNCE treats every other in-batch sample as a negative, but with few classes or very large batches many "negatives" are actually same-class, injecting label noise that caps representation quality. Mitigations: use supervised contrastive loss (SupCon) when labels exist to pull same-class samples together, raise the temperature slightly to soften penalties, apply debiased contrastive loss, or filter obvious false negatives above a similarity threshold.
 
 **Q: Why is the stop-gradient essential in SimSiam, and how does it differ from BYOL?**
+**Short:** Stop-gradient is the single mechanism preventing SimSiam's two branches from collapsing to a constant output.
+
 Without the stop-gradient both branches minimize the loss by collapsing to a constant vector, so it is the single mechanism that keeps SimSiam from degenerating. SimSiam uses a predictor on one branch and a stop-gradient on the other, with shared encoder weights, no momentum encoder, and no negatives. BYOL adds an EMA target network; SimSiam's ablations show the EMA is optional but the stop-gradient is not — remove it and linear accuracy crashes to near-random within a few epochs. The predictor plus stop-gradient together create the asymmetry that yields a non-trivial optimization target.
 
 **Q: Why can masked image modeling (MAE) mask 75% of patches while BERT masks only 15% of tokens?**
+**Short:** MAE can mask 75% of image patches because spatial redundancy still leaves enough visible context, unlike dense text.
+
 Because images are spatially redundant, even with 75% of patches hidden the visible ones give enough context, whereas language is information-dense and 15% is already a hard task. A masked pixel patch is highly predictable from its neighbors, so a low masking ratio makes the pretext task trivial (copy adjacent patches); MAE needs aggressive 75% masking to force semantic understanding, and it also makes the encoder cheap by processing only visible patches. Text tokens carry far more information per unit, so masking 40%+ removes too much context and the model falls back on local statistics.
 
 **Q: What is the difference between generative (masked/autoregressive) SSL and contrastive SSL?**
+**Short:** Generative SSL reconstructs raw data directly, while contrastive SSL pulls augmented views together in embedding space.
+
 Generative SSL reconstructs or predicts raw data (masked or next tokens), while contrastive SSL learns by pulling augmented views together and pushing others apart in embedding space. Generative methods (BERT MLM, GPT, MAE) need no negatives and directly model the data distribution, which suits language and dense reconstruction; contrastive methods (SimCLR, MoCo) optimize an instance-discrimination objective and depend heavily on augmentation design and negatives. Non-contrastive methods (BYOL, DINO, SimSiam) sit in between — no negatives and no reconstruction, relying on architectural asymmetry to avoid collapse.
 
 **Q: How does DINO avoid representation collapse without negative pairs?**
+**Short:** DINO prevents collapse by centering and sharpening a momentum teacher's output distribution during self-distillation.
+
 DINO uses self-distillation with centering and sharpening on the teacher outputs, which together prevent both constant collapse and uniform collapse. A student network matches the softmax output of an EMA teacher across multi-crop views. Centering (subtract a running mean of teacher outputs) stops any one dimension from dominating, while sharpening (a low teacher temperature) stops the output distribution from becoming uniform — the two forces balance each other. This yields emergent object-segmentation attention maps in vision transformers with no labels and no negatives.
 
 **Q: What is dimensional collapse and how do Barlow Twins and VICReg prevent it?**
+**Short:** Barlow Twins and VICReg prevent dimensional collapse by decorrelating embedding dimensions instead of just matching views.
+
 Dimensional collapse is when embeddings span only a low-dimensional subspace, wasting model capacity even though the vectors are not all identical. Unlike full collapse to a constant, the embeddings still vary but become redundant across dimensions. Barlow Twins pushes the cross-correlation matrix of the two views toward the identity — diagonal ones enforce invariance and off-diagonal zeros enforce decorrelation — so dimensions carry non-redundant information. VICReg makes this explicit with three terms: variance (keep each dimension's std above a floor), invariance (match views), and covariance (decorrelate dimensions). Neither method needs negatives or a momentum encoder.
 
 

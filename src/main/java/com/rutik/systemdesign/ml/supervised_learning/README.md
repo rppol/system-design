@@ -673,57 +673,93 @@ Time-series customer behavior data was split with random shuffle: future data le
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between regression and classification in supervised learning?**
+**Short:** Regression predicts a continuous number; classification predicts a discrete class label.
+
 Regression predicts a continuous numeric output (e.g., price, temperature), while classification predicts a discrete class label (e.g., spam/not-spam, digit 0-9). The key difference is the output space: regression uses loss functions like MSE or MAE; classification uses cross-entropy or hinge loss. Some algorithms (SVM, decision trees) handle both natively; logistic regression for classification is named misleadingly but outputs a probability via the sigmoid.
 
 **Q: Explain the bias-variance tradeoff.**
+**Short:** Test error splits into bias squared, variance, and irreducible noise, and reducing one raises the other.
+
 Total expected test error decomposes into Bias^2 + Variance + Irreducible Noise. Bias measures systematic error (underfitting — model too simple). Variance measures sensitivity to training data fluctuations (overfitting — model too complex). Reducing one typically increases the other. Fix: regularization, ensemble methods (bagging reduces variance, boosting reduces bias), and cross-validation to find the sweet spot.
 
 **Q: What is data leakage and how do you prevent it?**
+**Short:** Data leakage is test-set or future information contaminating training, which inflates evaluation metrics.
+
 Data leakage occurs when information from the test set (or from the future) influences model training, producing optimistic evaluation metrics that do not reflect production performance. The two main forms are feature leakage (features that encode the target) and preprocessing leakage (fitting scalers or encoders on all data before splitting). Prevention: use sklearn Pipeline so all preprocessing fits only on training folds; enforce temporal ordering for time-series data; audit every feature for causal impossibility.
 
 **Q: When would you choose logistic regression over a more powerful model like gradient boosting?**
+**Short:** Prefer logistic regression when interpretability, small data, speed, or calibrated probabilities outweigh raw accuracy.
+
 Choose logistic regression whenever a constraint other than raw accuracy dominates. That covers interpretability requirements (regulated industries, clinical decisions), small training sets where it generalizes well with limited samples, high-throughput systems needing fast training and inference, and calibrated probability baselines. Gradient boosting wins when predictive accuracy matters most and interpretability is secondary.
 
 **Q: How do you handle class imbalance in a classification problem?**
+**Short:** Combine imbalance-aware metrics, class weighting, resampling, and threshold tuning rather than one fix alone.
+
 Combine several complementary strategies rather than relying on any single one. Those are: (1) choose appropriate metrics — AUC-ROC, F1, precision-recall curve instead of accuracy; (2) apply class_weight="balanced" in sklearn algorithms; (3) oversample the minority class with SMOTE or ADASYN; (4) undersample the majority class; (5) use threshold tuning on the predicted probability to trade precision for recall. The right balance depends on the cost ratio of false positives to false negatives in the business context.
 
 **Q: What is the curse of dimensionality and how does it affect supervised learning?**
+**Short:** As dimensions grow, training data becomes sparse and distance-based methods lose meaningful neighborhoods.
+
 As feature dimensionality d increases, the volume of the space grows exponentially, so training points become sparse. Distance-based methods (k-NN, SVM RBF) suffer most: all points appear equidistant, destroying the neighborhood structure. Linear models are less affected but require n >> d to avoid overfitting. Solutions: feature selection, dimensionality reduction (PCA, UMAP), regularization (L1 sparsity), and collecting more data.
 
 **Q: What is overfitting and what techniques prevent it?**
+**Short:** Overfitting is fitting training noise instead of signal, shown by low training error but high test error.
+
 Overfitting means the model learns noise in training data rather than the true signal, resulting in low training error but high test error. Prevention techniques: regularization (L1, L2, dropout for neural nets), early stopping (monitor validation loss), data augmentation (increase effective training set size), reducing model complexity (shallow trees, fewer parameters), cross-validation to detect the gap between training and validation performance, and ensemble averaging (bagging).
 
 **Q: Explain the no-free-lunch theorem and its practical implications.**
+**Short:** No single algorithm outperforms all others across every problem, so always benchmark against a baseline.
+
 The NFL theorem states that averaged over all possible problems, no algorithm outperforms any other. In practice this means: do not have a single default algorithm — evaluate multiple algorithms on your specific data distribution. Domain knowledge, feature engineering, and empirical experimentation matter more than algorithm selection. Always run a simple baseline (logistic regression, decision stump) before investing in complex models.
 
 **Q: What evaluation metric would you use for a fraud detection model with 0.1% positive rate?**
+**Short:** Use precision-recall AUC and F-beta score rather than accuracy when the positive rate is 0.1%.
+
 Accuracy is useless here (99.9% by predicting all negatives). The right metrics are: Precision-Recall AUC (focuses on the rare positive class, unaffected by the large number of true negatives), F1 score or F-beta score (beta > 1 to weight recall if missed fraud is costlier than false alarms), and a confusion matrix to understand false negative and false positive trade-offs at the chosen operating threshold.
 
 **Q: What is cross-validation and why is it necessary?**
+**Short:** Cross-validation estimates generalization by repeatedly splitting training data into train and validation folds.
+
 Cross-validation (CV) is a technique for estimating generalization performance using only the training set, by repeatedly splitting it into train and validation subsets. k-fold CV divides data into k equal parts, trains on k-1 folds, and evaluates on the held-out fold, rotating until every fold has served as validation. This is necessary because: a single train/val split is high variance (depends on which samples happened to land in each set), and it enables hyperparameter tuning without touching the held-out test set.
 
 **Q: Why must you scale features for SVM and k-NN but not for decision trees?**
+**Short:** Distance-based models need scaled features, while trees split on per-feature thresholds unaffected by scale.
+
 SVM and k-NN measure Euclidean distance, so a feature with a large numeric range dominates the distance and drowns out smaller-scale features. A price feature (0–100,000) swamps a ratio feature (0–1) unless both are standardized to comparable scales. Decision trees split on one feature at a time using threshold comparisons (is x > 3.5?), so absolute scale is irrelevant — monotonic rescaling never changes which split is chosen. Put a StandardScaler before SVM, k-NN, and any distance- or gradient-based model; skip it for tree-based models.
 
 **Q: When should you use ROC-AUC versus PR-AUC?**
+**Short:** Use ROC-AUC for roughly balanced classes and PR-AUC when the rare positive class is what matters.
+
 Use ROC-AUC when classes are roughly balanced; use PR-AUC when the positive class is rare and is the class you care about. ROC-AUC plots TPR vs FPR and is insensitive to class ratio, which makes it look deceptively good on imbalanced data because a huge true-negative count keeps FPR tiny. PR-AUC (precision vs recall) ignores true negatives entirely, so it exposes how much precision you sacrifice to catch the rare positives. For fraud, disease, and anomaly detection, PR-AUC is the more honest headline metric.
 
 **Q: How do you decide whether to optimize for precision or recall?**
+**Short:** Optimize recall when missing a positive is costly, and precision when false alarms are costly.
+
 Optimize recall when a missed positive is the costly error (cancer screening, fraud) and precision when a false alarm is costly (flagging legitimate email as spam). Precision is, of the cases you flagged, how many were right; recall is, of the true positives, how many you caught. You trade one for the other by moving the decision threshold, so the choice follows the business cost ratio of false negatives to false positives. When both matter, optimize F1, or F-beta with beta tuned to that cost ratio.
 
 **Q: What is the difference between a discriminative and a generative model?**
+**Short:** Discriminative models learn P(y|x) directly; generative models learn P(x|y) and P(y), then apply Bayes' theorem.
+
 A discriminative model learns P(y | x) — the decision boundary — directly, while a generative model learns P(x | y) and P(y), then applies Bayes theorem to obtain P(y | x). Logistic regression, SVM, and trees are discriminative; Naive Bayes and LDA are generative. Generative models can synthesize new samples and often need less data, but discriminative models usually reach higher accuracy when data is plentiful because they optimize the quantity you actually care about. Choose generative for tiny datasets or when you need P(x); discriminative otherwise.
 
 **Q: What is the difference between parametric and non-parametric models?**
+**Short:** Parametric models keep a fixed parameter count, while non-parametric models grow in complexity with the data.
+
 A parametric model has a fixed number of parameters regardless of dataset size, while a non-parametric model's effective complexity grows with the data. Parametric examples include linear/logistic regression and Naive Bayes; non-parametric examples include k-NN, decision trees, and kernel SVM. Parametric models are compact and fast at inference but impose strong assumptions about the functional form, whereas non-parametric models are more flexible at the cost of higher memory or compute and greater overfitting risk on small data. The name is misleading — non-parametric means "unbounded parameters," not "no parameters."
 
 **Q: What is the difference between L1 and L2 regularization?**
+**Short:** L1 drives some weights exactly to zero for feature selection, while L2 shrinks all weights smoothly toward zero.
+
 L1 (Lasso) drives some weights exactly to zero for automatic feature selection, while L2 (Ridge) shrinks weights smoothly toward zero without eliminating any. L1's corner-shaped constraint region makes sparse solutions likely, which is valuable in high dimensions where you want an interpretable subset of features. L2 handles correlated features more gracefully by sharing weight among them rather than arbitrarily picking one. Elastic Net combines both to get sparsity plus the stability of L2 under correlation.
 
 **Q: What is probability calibration and when does it matter?**
+**Short:** Calibration means a predicted probability matches its empirical outcome rate, not just correct ranking.
+
 Calibration means a predicted probability of 0.8 corresponds to an 80% empirical positive rate; a model can rank perfectly yet still be badly calibrated. It matters whenever the probability itself feeds a downstream decision — expected-value calculations, risk thresholds, or routing bands — rather than just a ranking. SVMs, naive Bayes, and boosted trees often output over-confident scores, whereas logistic regression is usually well-calibrated. Fix with Platt scaling (sigmoid) or isotonic regression on a held-out calibration set, and verify with a reliability diagram or Brier score.
 
 **Q: How do bagging and boosting differ in how they affect bias and variance?**
+**Short:** Bagging averages parallel models to cut variance; boosting corrects errors sequentially to cut bias.
+
 Bagging (e.g., random forests) trains many models in parallel on bootstrap samples and averages them, which mainly reduces variance while leaving bias roughly unchanged. Boosting (e.g., XGBoost) trains models sequentially, each correcting the previous one's errors, which mainly reduces bias and can also reduce variance. So bagging is the cure for a high-variance, overfitting base learner (deep trees), while boosting builds a strong model from high-bias weak learners (shallow stumps). Boosting is more accurate but more prone to overfitting noisy labels unless regularized with learning rate and early stopping.
 
 ---

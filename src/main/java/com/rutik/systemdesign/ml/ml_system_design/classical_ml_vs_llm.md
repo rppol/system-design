@@ -244,51 +244,67 @@ The mechanics also include a *capability* gate that cost cannot override: if you
 ## 12. Interview Questions with Answers
 
 **Q: When would you choose a gradient-boosted tree over an LLM?**
+**Short:** Choose a GBDT for high-volume, tight-latency tabular prediction like CTR, fraud, or default risk.
 For structured/tabular prediction at high volume and tight latency — CTR, fraud, default risk. GBDTs give microsecond inference, micro-cent cost, strong accuracy on numeric features, and SHAP interpretability, all of which an LLM loses on. The LLM is worse on accuracy, ~1000× the latency, and orders of magnitude more expensive here. Reach for classical ML whenever the input is tabular and the QPS is high.
 
 **Q: What is the single biggest factor that makes an LLM the wrong choice?**
+**Short:** High prediction volume under a tight latency budget is the biggest factor ruling out an LLM.
 High prediction volume under a tight latency budget, because the LLM's per-call marginal cost and 100ms–second latency dominate at scale. A task at 1M+ predictions/day and a millisecond SLO cannot afford per-call LLM inference. This is why ad ranking and fraud stay classical even in an LLM era. Compute the break-even volume before committing.
 
 **Q: You have zero labeled data for a fuzzy text task. What do you do?**
+**Short:** Start with an LLM zero/few-shot to unblock the task, then use its outputs as labels to distill a cheap model.
 Start with an LLM zero/few-shot, because classical supervised ML is simply unavailable without labels. The LLM handles the task immediately and, just as importantly, can *generate* labels you then use to train a cheap task-specific model. That bootstrapping — LLM to unblock, then distill for economics — is the standard modern pattern. Labels, or the lack of them, set the classical-ML floor.
 
 **Q: Explain the fixed-vs-marginal cost tradeoff between the two paradigms.**
+**Short:** Classical ML has high fixed cost and near-zero marginal cost, while an LLM has the reverse, crossing over at some volume.
 Classical ML has high fixed cost (labeling, training, pipeline) but near-zero marginal cost per prediction; an LLM has near-zero fixed cost (a prompt) but high marginal cost per call. At low volume the LLM's cheap start wins; as volume rises the marginal cost dominates and classical ML wins. The decision is largely about where you sit on those crossing cost curves. Always estimate the break-even volume.
 
 **Q: What is model distillation and why is it the bridge between the paradigms?**
+**Short:** Distillation trains a small cheap student model from a large LLM teacher, keeping its quality at classical serving cost.
 Distillation uses a large model (the LLM teacher) to train a small task-specific model (the student), transferring quality into a cheap, low-latency package. It lets you keep the LLM's accuracy on a task while paying classical ML's economics at serving time. It is the answer when an LLM feature outgrows its cost envelope as volume rises. See knowledge_distillation.
 
 **Q: Why might regulation force you away from an LLM even if it is more accurate?**
+**Short:** Regulated decisions require an auditable, explainable rationale that a black-box LLM cannot reliably provide.
 Because regulated decisions (credit, hiring, healthcare) require an auditable, monotonic, explainable rationale that a black-box LLM cannot provide. Laws like ECOA/FCRA demand specific adverse-action reasons, which a scorecard or monotonic GBDT gives and an LLM's free-text rationale does not. Interpretability and compliance can veto the higher-accuracy model. Accuracy is not the only acceptance criterion.
 
 **Q: When is a hybrid of classical ML and an LLM the right answer?**
+**Short:** A hybrid works when cheap classical filters handle the high-volume common case and an LLM handles the nuanced long tail.
 When different parts of the pipeline have different cost and quality profiles. Cheap classical filters then handle the high-volume common case, and an LLM handles the nuanced long tail or the natural-language surface. Semantic search (embeddings retrieve, LLM reranks/synthesizes) and moderation (classical filters plus LLM guardrails) are canonical hybrids. Use each paradigm where it is cheap and strong. Hybrids are usually the real production design.
 
 **Q: How do you actually compute the break-even point between an LLM and a trained model?**
+**Short:** Break-even daily volume equals the build cost divided by the annual per-call savings times 365.
 Set the classical build cost equal to the annual marginal savings: break-even daily volume = build_cost / (per_call_savings × 365). With an LLM at ~$0.002/call, a GBDT at micro-cents, and a ~$40k build, break-even is only a few tens of thousands of calls/day. Above that, the trained model is cheaper within a year — and also meets latency SLOs the LLM misses. Make this calculation explicit in a design.
 
 **Q: Why is prompting an LLM for tabular CTR prediction a bad idea?**
+**Short:** Structured numeric features are GBDT's home turf, so prompting an LLM there adds huge latency and cost for worse accuracy.
 Because structured numeric features are classical ML's home turf, where GBDTs are more accurate, and the LLM adds 1000× latency and cost for worse results. LLMs excel at unstructured language, not at learning feature interactions over numeric columns. This is the golden-hammer pitfall — choosing the newer tool regardless of fit. Ranking billions of tabular rows/day belongs to GBDT/DLRM.
 
 **Q: What makes fine-tuning a small encoder (BERT) different from fine-tuning an LLM?**
+**Short:** A fine-tuned small encoder is a cheap low-latency classifier, while a fine-tuned LLM remains a costly generative model.
 A fine-tuned small encoder (DistilBERT) is a low-latency, low-cost task-specific classifier — milliseconds and cheap at scale — whereas a fine-tuned LLM is still a generative model with high per-call cost. For high-volume text classification/NER you want the small encoder; for domain-styled generation you want the fine-tuned LLM. Pick by whether the output is a label (encoder) or free text (LLM). Volume usually favors the encoder.
 
 **Q: How does time-to-first-version influence the paradigm choice?**
+**Short:** An LLM prompt delivers a working v0 in hours with no labels, so teams often prototype on an LLM before building classical ML.
 An LLM prompt gives a working v0 in hours with no labels or training, which is invaluable for prototyping, validating product-market fit, or covering a long tail cheaply. Classical ML's build cost (labeling, training, pipeline) delays v0 by days or weeks. So even when classical ML is the right steady-state answer, teams often start on an LLM and migrate once volume justifies the build. Speed-to-learn can outweigh steady-state cost early.
 
 **Q: What are the hidden risks of an LLM that classical ML does not have?**
+**Short:** Hallucination, prompt injection, non-determinism, and provider dependency are LLM risks a trained classifier does not carry.
 Hallucination, prompt-injection, non-determinism, and provider dependency/cost drift, none of which a trained classifier exhibits. An LLM can confidently produce wrong output that needs guardrails, evaluation harnesses, and monitoring the classical model would not require. These operational costs belong in the comparison, not just the per-call price. Factor guardrail and eval overhead into the LLM's true cost.
 
 **Q: How do you decide between RAG and fine-tuning when you have already chosen the LLM paradigm?**
+**Short:** Use RAG to ground answers in changing knowledge and fine-tuning to change the model's behavior, format, or style.
 Use RAG when the knowledge is large, changing, or must be cited (ground answers in retrieved documents); use fine-tuning when you need to change the model's *behavior, format, or style* rather than inject facts. They are complementary — many systems fine-tune for format and use RAG for knowledge. This is the intra-LLM version of the same fit question. See llm/context_engineering.
 
 **Q: A prototype LLM feature is cheap today; why might it not scale?**
+**Short:** Marginal LLM cost scales linearly with volume, so a penny-cheap prototype can become a six-figure bill at production scale.
 Because marginal cost scales linearly with volume — a feature that costs pennies at 1k calls/day becomes a six-or-seven-figure annual bill and breaches latency SLOs at 10M calls/day. The cheap prototype hides the marginal-cost curve that only bites at scale. Always project cost at target volume and set a distillation trigger. Prototype economics are not production economics.
 
 **Q: If an LLM can technically do a task, why might you still not use it?**
+**Short:** Capability is necessary but not sufficient, since fit to cost, latency, data, and audit constraints decides the build.
 Because capability is necessary but not sufficient — fit to cost, latency, data, and audit constraints decides the build. An LLM that *can* classify tabular rows may still be the wrong choice versus a GBDT that is cheaper, faster, more accurate, and auditable. Choosing on benchmark capability rather than production fit is a classic mistake. The right question is not "can it" but "should it, given the constraints."
 
 **Q: How does interpretability differ between the two paradigms and when does it decide the design?**
+**Short:** Classical models give faithful SHAP-level explanations while an LLM offers only a non-faithful rationale, deciding regulated designs.
 Classical models offer SHAP values, monotonic constraints, and coefficient-level explanations; an LLM offers at best a post-hoc free-text rationale that is not a faithful account of its computation. When a decision must be defended to a regulator, contested in an appeal, or debugged for bias, that auditability decides the design in classical ML's favor. Interpretability is a hard requirement in credit, hiring, and healthcare, not a nice-to-have.
 
 ## 13. Best Practices

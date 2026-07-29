@@ -843,57 +843,93 @@ PCA requires numeric, preferably continuous features. Applying PCA to one-hot en
 ## 12. Interview Questions with Answers
 
 **Q: What is k-means++ initialization and why does it matter?**
+**Short:** k-means++ spaces initial centroids apart via distance-weighted sampling, cutting the chance of poor local minima.
+
 k-means++ selects the first centroid randomly, then chooses each subsequent centroid with probability proportional to its squared distance from the nearest already-selected centroid. This spreads initial centroids apart, reducing the chance of poor local minima. Arthur and Vassilvitskii (2007) prove it gives an O(log k)-competitive expected inertia versus no guarantee at all for random init, and report both faster convergence and lower final inertia in practice — which is why fewer restarts are needed to reach a good solution. Measure the inertia gain on your own data rather than quoting a fixed percentage.
 
 **Q: What is the silhouette score and how do you interpret it?**
+**Short:** Silhouette score compares a point's own-cluster fit to its nearest-cluster fit, ranging from -1 to +1.
+
 The silhouette score measures how similar each point is to its own cluster versus the nearest other cluster: `(b - a) / max(a, b)` where `a` = mean intra-cluster distance and `b` = mean nearest-cluster distance. Range is -1 to +1; > 0.7 indicates strong structure, 0.25–0.5 is weak, negative values mean the point likely belongs to a different cluster. To pick k, compute the mean silhouette for each candidate k and take the k that maximizes it, using the elbow plot as a cross-check.
 
 **Q: How does DBSCAN define a cluster, and what are core, border, and noise points?**
+**Short:** DBSCAN labels points core, border, or noise based on how many neighbors fall within a set radius.
+
 DBSCAN classifies points as: core (has at least `min_samples` neighbors within radius `eps`), border (within eps of a core point but not itself a core point), or noise (neither). A cluster is the set of all density-connected core points and their border points. Noise points receive label -1. This allows DBSCAN to find arbitrarily shaped clusters and explicitly identify outliers.
 
 **Q: When would you choose DBSCAN over k-means?**
+**Short:** Choose DBSCAN for unknown cluster counts or irregular shapes, and k-means for large, globular, interpretable clusters.
+
 Choose DBSCAN when: (1) the number of clusters is unknown, (2) clusters have non-convex or irregular shapes (e.g., ring-shaped, geographic), (3) you need outlier labeling built into the algorithm. Use k-means when you have large n (millions of rows), expect globular clusters, and interpretable centroids are needed.
 
 **Q: How do you select the number of PCA components?**
+**Short:** Choose PCA components from the cumulative explained-variance elbow, or by validating downstream model performance.
+
 Plot cumulative explained variance ratio against number of components (scree plot). Select the number of components that explain 95% of variance for noise reduction, or look for the "elbow" where marginal variance gain drops sharply. For downstream supervised learning, also validate by running cross-validation with different component counts and selecting based on held-out score.
 
 **Q: Why must you scale features before PCA?**
+**Short:** PCA needs scaled features, or a large-magnitude feature dominates the first principal component.
+
 PCA finds directions of maximum variance. If feature scales differ (e.g., one feature ranges 0–100,000 and another 0–1), the high-magnitude feature contributes almost all variance and the first principal component will nearly align with it. StandardScaler gives each feature zero mean and unit variance, ensuring PCA treats all features equally before decomposition.
 
 **Q: What is the curse of dimensionality and how does it affect clustering?**
+**Short:** In high dimensions distances converge to similar values, making distance-based clustering unreliable without reduction.
+
 In high dimensions (d > ~50), Euclidean distances between all pairs of points converge to the same value — there is no meaningful notion of "near" versus "far". This makes distance-based clustering (k-means, DBSCAN) unreliable. Mitigation: reduce dimensionality with PCA or UMAP before clustering, use cosine similarity (better for text), or switch to algorithms designed for high-dimensional data.
 
 **Q: Can you use t-SNE embeddings as input features for a classifier? Why or why not?**
+**Short:** No, t-SNE embeddings are for visualization only, since they cannot transform new points or preserve global distances.
+
 No — t-SNE embeddings are for looking at, not for feeding a model. It is unsuitable for feature extraction because: (1) it cannot transform new/unseen data points — it requires rerunning the optimization on the full dataset, (2) distances in t-SNE space are not meaningful for global structure — only local neighborhoods are preserved, and (3) results change with different random seeds. Use UMAP or PCA for feature extraction; reserve t-SNE for visualization only.
 
 **Q: How do you evaluate clustering when you have no ground truth labels?**
+**Short:** Use silhouette, Davies-Bouldin, or Calinski-Harabasz scores, then validate cluster meaning with domain experts.
+
 Use intrinsic metrics: silhouette score (higher is better, -1 to +1), Davies-Bouldin index (lower is better), and Calinski-Harabasz index (higher is better). None of these tell you if the clusters are meaningful — validate by having domain experts inspect cluster contents, or use extrinsic evaluation if a small labeled subset is available (adjusted Rand index, normalized mutual information).
 
 **Q: Explain the difference between t-SNE and UMAP. When would you choose each?**
+**Short:** UMAP is faster, preserves more global structure, and can project new points, unlike t-SNE.
+
 Both are non-linear dimensionality reduction methods for visualization, but UMAP is faster, preserves more global structure, and can project new points, while t-SNE does none of those. They differ in four ways: (1) speed — UMAP is ~5-10x faster than t-SNE for equivalent n; (2) global structure — UMAP better preserves inter-cluster distances, t-SNE distorts them; (3) new data — UMAP supports `transform()` on new points, t-SNE does not; (4) reproducibility — UMAP with fixed seed is deterministic, t-SNE can vary. Choose UMAP in almost all new projects; t-SNE is useful when you need maximum local neighborhood fidelity for small n.
 
 **Q: What is the Davies-Bouldin index?**
+**Short:** Davies-Bouldin index averages each cluster's similarity to its closest other cluster; lower means better clustering.
+
 The Davies-Bouldin index measures the average similarity between each cluster and its most similar other cluster. Similarity is defined as the ratio of within-cluster scatter to between-cluster distance. Lower values indicate better clustering (0 is perfect). It is easier to compute than silhouette score for large n because it only requires cluster centroids, not all pairwise distances.
 
 **Q: Why does k-means struggle with clusters of different sizes, densities, or non-globular shapes?**
+**Short:** k-means assumes convex, similarly sized spherical clusters, so irregular shapes or densities need DBSCAN or a GMM.
+
 k-means assumes clusters are convex, roughly spherical, and similarly sized, because it assigns every point to its nearest centroid — a Voronoi partition. A crescent-shaped or ring cluster gets sliced across the straight Voronoi boundaries; a dense small cluster next to a sparse large one gets absorbed because the shared centroid is pulled toward the denser mass. When shapes are irregular or densities vary, switch to DBSCAN (arbitrary shapes) or HDBSCAN (varying density); if clusters are elliptical, a Gaussian Mixture Model with full covariance fits better than k-means.
 
 **Q: When should you use cosine distance instead of Euclidean distance for clustering?**
+**Short:** Use cosine distance when only vector direction matters, as with text and sparse high-dimensional embeddings.
+
 Use cosine distance when only the direction of a vector matters and its magnitude does not — most notably for text and other high-dimensional sparse embeddings. Two documents with the same topic mix but different lengths point in the same direction yet sit far apart in Euclidean space, so Euclidean k-means would wrongly separate them. Spherical k-means (L2-normalize each vector, then run k-means) is the standard workaround, and cosine also resists the curse of dimensionality better than raw Euclidean distance in high dimensions.
 
 **Q: How do you choose eps and min_samples for DBSCAN?**
+**Short:** Set min_samples from feature count and read eps off the knee of the sorted k-distance plot.
+
 Set min_samples to roughly 2 × n_features and pick eps from the knee of the k-distance plot, where k = min_samples. Compute the distance from each point to its kth nearest neighbor, sort those distances descending, and read eps off the sharp bend in the curve — points beyond the knee are the sparse tail that should become noise. Too-small eps labels almost everything as noise; too-large eps merges everything into one giant cluster; and because eps is an absolute distance, you must scale features first or one high-range feature dominates it.
 
 **Q: Does k-means find the globally optimal clustering, and why run it multiple times?**
+**Short:** No, k-means only reaches a local optimum, so it must be run multiple times from different initial centroids.
+
 No — Lloyd's algorithm only converges to a local optimum, so the result depends on the initial centroids. k-means clustering is NP-hard in general, and a bad random start can leave two centroids inside one true cluster while another cluster is split. The fix is `n_init=10` (run the whole algorithm 10 times from different seeds and keep the lowest-inertia result) combined with k-means++ initialization, which spreads the initial centroids apart to make good starts far more likely.
 
 **Q: What is the difference between k-means and a Gaussian Mixture Model (GMM)?**
+**Short:** k-means makes hard nearest-centroid assignments, while a GMM makes soft assignments to elliptical Gaussian clusters.
+
 k-means makes hard assignments to the nearest centroid, while a GMM makes soft probabilistic assignments and models each cluster as a Gaussian with its own mean and covariance. Because a GMM learns covariance, it fits elliptical and differently-oriented clusters that k-means (which only sees distance to a point) cannot; it is fit by Expectation-Maximization rather than Lloyd's updates. k-means is effectively the limiting case of a GMM with spherical, equal-variance components and hard assignment — use GMM when you need calibrated membership probabilities or non-spherical clusters.
 
 **Q: How does agglomerative hierarchical clustering work, and what do the linkage criteria mean?**
+**Short:** Agglomerative clustering repeatedly merges the closest clusters, and the linkage rule defines what counts as closest.
+
 Agglomerative clustering starts with every point as its own cluster and repeatedly merges the two closest clusters until one remains, producing a dendrogram. The linkage criterion defines "closest": single linkage uses the minimum pairwise distance (finds elongated chains but is prone to chaining), complete linkage uses the maximum (compact, equal-diameter clusters), average linkage averages all pairwise distances, and Ward linkage merges the pair that minimizes the increase in total within-cluster variance (the common default). You choose the number of clusters after fitting by cutting the dendrogram at a chosen height, which is why no k is required up front.
 
 **Q: What is the difference between PCA and an autoencoder for dimensionality reduction?**
+**Short:** PCA is a linear projection, while an autoencoder learns a non-linear compression that can model curved manifolds.
+
 PCA is a linear projection onto the top-variance orthogonal directions, while an autoencoder learns a possibly non-linear compression through neural-network encoder and decoder layers. A single-layer linear autoencoder trained with MSE loss actually recovers the same subspace as PCA, so autoencoders only add value when the data lies on a non-linear manifold that linear components cannot capture. The tradeoff: PCA is deterministic, fast, and interpretable (components have explained-variance ratios), whereas autoencoders need more data, GPU compute, and tuning but can model curved structure and power reconstruction-error anomaly detection.
 
 ---

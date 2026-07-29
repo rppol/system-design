@@ -714,54 +714,88 @@ Post-pruning (ccp_alpha) is more principled than pre-pruning with max_depth but 
 ## 12. Interview Questions with Answers
 
 **Q: What is Gini impurity and how is it computed?**
+**Short:** Gini impurity is 1 minus the sum of squared class fractions, measuring how mixed a node's classes are.
+
 Gini impurity measures the probability that a randomly chosen sample from a node would be incorrectly classified if labeled randomly according to the class distribution in that node. Formula: Gini(t) = 1 - sum_k p_k^2, where p_k is the fraction of class k samples in node t. Gini = 0 means the node is pure (all samples are the same class). Gini = 0.5 for a perfectly balanced two-class split. CART selects the split that minimizes the weighted average Gini of the two child nodes.
 
 **Q: What is the difference between Gini impurity and entropy? Which should you use?**
+**Short:** Gini and entropy yield nearly identical trees, but Gini is cheaper because it skips the logarithm.
+
 Entropy uses a logarithm: H(t) = -sum_k p_k log2(p_k). Both measure node impurity and produce nearly identical trees in practice. Gini is computationally cheaper (no log operation). Entropy is slightly more sensitive to changes in the class distribution near zero probability (the log term goes to infinity). In practice, the choice rarely matters — cross-validate both if it is uncertain. sklearn default is Gini; ID3 and C4.5 algorithms use entropy.
 
 **Q: Explain the CART algorithm step by step.**
+**Short:** CART greedily picks the feature-threshold split that most reduces child-node impurity at every node.
+
 CART builds a binary tree by greedily choosing, at every node, the one feature-threshold pair that most reduces child impurity. The full loop is: (1) at the root, consider all features and all possible split thresholds; (2) for each candidate split, compute the weighted average impurity of the two resulting child nodes; (3) select the feature and threshold that minimizes this weighted impurity (maximizes information gain); (4) split the node into two children; (5) recursively apply steps 1-4 to each child; (6) stop recursion when a stopping criterion is met (max_depth, min_samples_split, all samples in node are same class, or impurity gain below threshold). Leaves predict the majority class (classification) or mean value (regression).
 
 **Q: What is the time complexity of training a decision tree?**
+**Short:** sklearn trains a full decision tree in about O(d times n times log n) by sorting each feature once.
+
 For a balanced tree of depth log(n): at each level, we scan through d features and sort n samples per feature — O(d * n log n) per level, times log(n) levels = O(d * n * log^2(n)) total. sklearn's implementation sorts once per feature and reuses the sorted order across splits, achieving O(d * n * log n) for the full tree. Inference is O(depth) — follow one path from root to leaf.
 
 **Q: What is the difference between pre-pruning and post-pruning?**
+**Short:** Pre-pruning stops growth early via hyperparameters, while post-pruning grows a full tree and then trims it back.
+
 Pre-pruning (early stopping) stops tree growth based on hyperparameters set before training: max_depth, min_samples_split, min_samples_leaf, min_impurity_decrease. It is fast and simple but may stop splitting prematurely (a split that looks bad locally might lead to much better splits in child nodes). Post-pruning grows a full tree and then removes nodes bottom-up when removal does not significantly hurt validation accuracy. Cost-complexity pruning (sklearn's ccp_alpha) is the standard post-pruning method — it is more principled but requires computing the full pruning path.
 
 **Q: How is feature importance computed in a decision tree and what are its limitations?**
+**Short:** Mean Decrease in Impurity is biased toward high-cardinality features and reflects training fit, not generalization.
+
 Mean Decrease in Impurity (MDI): sum over all nodes where feature f is used of (n_t / n * impurity_decrease_t), normalized to sum to 1. This reflects how much each feature reduces impurity when used as a split. Limitations: (1) biased toward high-cardinality features — a random unique identifier may appear more important than truly predictive features just because it has many split points; (2) measures training-set importance, not generalization; (3) does not account for feature redundancy (correlated features share importance). Use permutation importance on a held-out test set for unbiased estimates.
 
 **Q: How do decision trees handle categorical features?**
+**Short:** sklearn trees require encoded categoricals, while CART, XGBoost, and LightGBM can split raw categories directly.
+
 sklearn's decision tree does not natively support string categoricals — you must encode them first. Options: (1) ordinal encoding for ordered categories; (2) one-hot encoding for nominal categories (creates binary features); (3) target encoding (replace each category with its mean target value — beware of leakage, use cross-fitted target encoding). CART implementations in R, XGBoost, and LightGBM support optimal categorical splitting: for a feature with K categories, the algorithm searches over 2^K possible binary splits (exact for K <= 32) to find the one that maximizes impurity gain. This is exponential but fast in practice for K <= 10.
 
 **Q: What is the relationship between decision trees and random forests?**
+**Short:** A random forest bags many decision trees, each split on a random feature subset, to cut variance.
+
 A random forest is an ensemble of decision trees trained via bagging, with an extra layer of randomness at each split. Each tree is trained on a bootstrap sample (n samples drawn with replacement from training data) and at each split considers a random subset of features — sqrt(d) is sklearn's default for classification, and Breiman's original recommendation for regression is d/3, though sklearn's RandomForestRegressor defaults to using all d. The forest prediction is the majority vote (classification) or mean (regression) across all trees. Random forests reduce variance without increasing bias — a single deep tree has high variance; averaging many independently trained trees cancels out their individual errors. The bias of the ensemble equals the bias of each individual tree.
 
 **Q: Why can a decision tree overfit even with max_depth set?**
+**Short:** A shallow tree can still overfit if min_samples_leaf and min_samples_split are set too low.
+
 Even with max_depth=6, a tree can overfit if min_samples_split and min_samples_leaf are too low. A node with 2 samples at depth 5 can still create a leaf that perfectly separates those 2 samples, memorizing noise. Additionally, with many features, the tree can find spurious correlations that disappear in new data. Setting min_samples_leaf=10 to 50 (depending on dataset size) prevents leaves from being defined by too few samples. Cross-validation on validation data is the only reliable way to detect overfitting.
 
 **Q: How do decision trees handle class imbalance?**
+**Short:** Use class_weight="balanced", custom weights, oversampling, or threshold tuning to fix tree class imbalance.
+
 By default, decision tree splitting maximizes impurity reduction without regard to class frequency, which causes the tree to favor the majority class. Fix: (1) set class_weight="balanced" — sklearn weights each class inversely proportional to its frequency, scaling the impurity contribution of each sample; (2) set class_weight={0: 1, 1: 10} for custom weighting; (3) oversample the minority class before training (SMOTE); (4) use sample_weight parameter in fit() for per-sample weights. After training, adjust the prediction threshold (not 0.5) based on precision-recall tradeoffs.
 
 **Q: What makes decision trees poor at extrapolation?**
+**Short:** Decision trees predict the nearest leaf's training value, so they cannot extrapolate beyond seen ranges.
+
 Decision trees partition feature space into rectangular regions and predict the mean (or mode) of training samples in each leaf. If a test sample has a feature value outside the range seen in training, it falls into the leaf containing the most extreme training values — the tree predicts the edge value, not a sensible extrapolation. A linear regression would extrapolate by following the fitted line. For problems where extrapolation matters (forecasting demand for next year when this year's peak was never seen before), linear models or splines are better choices than trees.
 
 **Q: What is cost-complexity pruning and how do you select the alpha parameter?**
+**Short:** Cost-complexity pruning penalizes leaf count by alpha, chosen via cross-validated accuracy along the pruning path.
+
 Cost-complexity pruning evaluates trees T by minimizing R_alpha(T) = misclassification_rate(T) + alpha * n_leaves(T). At alpha=0, the full tree minimizes this. As alpha increases, the penalty for complexity forces subtree collapses. sklearn's cost_complexity_pruning_path(X_train, y_train) returns the sequence of (alpha, n_leaves, impurity) for each pruning step. To select alpha: for each alpha in the path, train a pruned tree and measure 5-fold CV accuracy. Select alpha with the highest CV accuracy, then retrain on the full training set. This is analogous to selecting the regularization parameter in Lasso.
 
 **Q: How do you extract rules from a decision tree for a rule engine?**
+**Short:** Walk tree_.feature and tree_.threshold arrays to convert each root-to-leaf path into an explicit rule.
+
 Use sklearn's export_text (text output) or export_graphviz (for visualization). For programmatic rule extraction, traverse the tree using tree_.feature (which feature at each node), tree_.threshold (split threshold), tree_.children_left, tree_.children_right (child node indices). Each path from root to leaf is a conjunction of conditions — collect all conditions along the path, strip the class label at the leaf. These rules can be inserted directly into SQL CASE WHEN statements, business rule engines (Drools), or decision tables. A tree of depth 4 produces at most 2^4 = 16 rules.
 
 **Q: Explain information gain and information gain ratio. Why does information gain ratio matter?**
+**Short:** Information gain ratio normalizes information gain by split entropy so it stops favoring high-cardinality splits.
+
 Information gain (IG) = H(parent) - weighted_avg(H(children)). A problem with plain IG: it favors features with many categories. A feature with one unique value per sample produces perfect splits (all leaves pure) with maximum IG — this is why ID3 (which uses IG) performs poorly with high-cardinality features. Information gain ratio (IGR) normalizes IG by the split information: IGR = IG / H(split_values), where H(split_values) is the entropy of the split itself. Features with many categories have high H(split_values), penalizing their IGR. C4.5 uses IGR instead of IG; CART uses Gini (which has a similar normalizing effect implicitly). sklearn uses Gini or entropy, not IGR, and does not natively penalize high-cardinality features — making MDI importance analysis unreliable for high-cardinality features.
 
 **Q: What happens when you set max_features in a decision tree?**
+**Short:** max_features limits how many features are considered per split, adding bias but reducing variance.
+
 max_features controls how many features are considered at each split point. When max_features < d, the algorithm randomly selects a subset of features at each node and finds the best split among only those features. This is the key mechanism in Random Forest (sqrt(d) for classification). For a single decision tree, max_features < d introduces bias (the globally best split may not be considered) but reduces variance — sometimes useful as additional regularization. Setting max_features="sqrt" for a single tree is unusual but valid; it is mostly a Random Forest hyperparameter.
 
 **Q: How would you interpret a decision tree to a non-technical business stakeholder?**
+**Short:** Present a decision tree as a flowchart of plain-language questions ending in a confidence-scored outcome.
+
 A decision tree can be presented as a flowchart of questions. Trace the path a customer takes through the tree and read off the conditions: "Customers who placed more than 3 orders in the last 30 days AND whose last order was within 7 days have a 4% churn risk. Customers who placed fewer than 3 orders AND have not visited the app in 14 days have a 72% churn risk." Each leaf gives a prediction with a confidence (fraction of training samples in that leaf that belong to each class). This level of transparency is impossible with gradient boosting or neural networks without post-hoc explanation methods.
 
 **Q: What is the depth at which a decision tree begins to overfit on a typical medium-sized dataset?**
+**Short:** On a typical 10,000-row dataset, trees deeper than roughly log2(n) begin to overfit noticeably.
+
 On a typical tabular dataset with n=10,000 samples and d=20 features, a tree with max_depth=None typically reaches depth 15-25 with training accuracy near 100% and test accuracy 10-20% below training accuracy. Depth 4-8 is typically the sweet spot for a single tree, depending on the complexity of the true decision boundary. Cross-validation on a validation set is the correct way to determine the optimal depth. As a rule of thumb: if the tree depth exceeds log2(n) = 13 for 10,000 samples, it is very likely overfitting.
 
 ---

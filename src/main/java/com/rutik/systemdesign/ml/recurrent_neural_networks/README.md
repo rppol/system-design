@@ -727,54 +727,88 @@ Key API notes:
 ## 12. Interview Questions with Answers
 
 **Q: What is the vanishing gradient problem in vanilla RNNs and how do LSTMs address it?**
+**Short:** LSTMs fix vanishing gradients by using an additive cell-state update instead of repeated matrix multiplication.
+
 In vanilla RNNs, gradients flow backward through T time steps by repeated multiplication with the recurrent weight matrix W_hh. If the spectral norm of W_hh is less than 1, gradients decay exponentially; if greater than 1, they explode. For a 100-step sequence with factor 0.9 per step: 0.9^100 ≈ 2.7e-5, making gradients effectively zero for early tokens. LSTMs address this via the cell state, which is updated by addition (c_t = f_t * c_{t-1} + i_t * g_t), not multiplication. The gradient of the loss with respect to c_{t-1} can flow through the addition without shrinking, as long as the forget gate f_t is near 1. This creates a gradient highway analogous to ResNet skip connections.
 
 **Q: Explain the four gates in LSTM and what each controls.**
+**Short:** LSTM's forget, input, candidate, and output gates control what to erase, write, and expose from the cell state.
+
 Forget gate (f_t = sigmoid(W_f * [h_{t-1}, x_t])): controls how much of the previous cell state to retain. Value near 0 erases, near 1 preserves. Input gate (i_t = sigmoid(...)): controls how much new information to write to the cell state. Candidate gate (g_t = tanh(...)): the actual candidate values to potentially write. Output gate (o_t = sigmoid(...)): controls what portion of the cell state to expose as the hidden state h_t. The cell update is: c_t = f_t * c_{t-1} + i_t * g_t. A common initialization trick is setting the forget gate bias to 1.0 so the LSTM starts by remembering everything, giving it a chance to learn what to forget.
 
 **Q: How does GRU differ from LSTM and when would you prefer each?**
+**Short:** GRU uses two gates and no separate cell state, training faster than LSTM's four gates at a small accuracy tradeoff.
+
 GRU has 2 gates (reset and update) versus LSTM's 4, and no separate cell state. The update gate z_t simultaneously controls how much old hidden state to keep and how much new candidate to adopt: h_t = (1-z_t)*h_{t-1} + z_t*n_t. The reset gate r_t controls how much of h_{t-1} to use when computing the candidate. GRU has 3/4 the parameters of LSTM (three gate matrices instead of four) and trains correspondingly faster per step. Prefer GRU for sequences < 200 steps, speed-constrained training, or when GRU reaches the same validation metric with fewer resources. Prefer LSTM for very long sequences (>500 steps) or when accuracy on benchmarks is the primary concern.
 
 **Q: What is teacher forcing and what is exposure bias?**
+**Short:** Teacher forcing trains on ground-truth tokens, creating exposure bias when inference must rely on the model's own predictions.
+
 Teacher forcing is a training technique for autoregressive decoders where the ground truth token is fed as the next-step input rather than the model's previous prediction. This makes training stable and fast because errors do not accumulate. Exposure bias is the mismatch: at inference, the model receives its own (possibly incorrect) previous prediction, not the ground truth. A small early error can cascade — the model has never been trained to handle its own mistakes. Fix: scheduled sampling (gradually decay teacher forcing ratio during training from 100% to 50%), or beam search (explore multiple hypothesis sequences at inference).
 
 **Q: What is gradient clipping and what value should you use?**
+**Short:** Gradient clipping rescales the global gradient norm to a max value, typically 1.0, to prevent exploding updates.
+
 Gradient clipping limits the global L2 norm of all parameter gradients to a maximum value. If the norm exceeds max_norm, all gradients are scaled down proportionally (direction preserved). This prevents the optimizer step from moving parameters catastrophically far when gradients explode. Typical max_norm=1.0 for LSTM on NLP tasks; 0.5 for very deep stacked RNNs; Deep Speech 2 rescaled to norm 400 for speech (longer sequences, larger natural gradient norms). You should monitor the pre-clipping gradient norm — if it consistently exceeds max_norm by large factors, investigate the learning rate or architecture, not just clip harder.
 
 **Q: Why can't bidirectional RNNs be used for streaming inference?**
+**Short:** Bidirectional RNNs need the full sequence before starting, making them incompatible with real-time streaming inference.
+
 Bidirectional RNNs run a forward LSTM (left to right) and a backward LSTM (right to left). The backward LSTM requires knowing the entire input sequence to begin processing (it starts at the last token). This means for a 10-second audio clip, you must wait for all 10 seconds before generating any output — incompatible with real-time streaming requirements. Bidirectional models are excellent for encoding tasks (classification, named entity recognition, embeddings) where the full input is available. For streaming generation, use unidirectional models or causal Transformers.
 
 **Q: What is the CTC loss and when is it used?**
+**Short:** CTC loss marginalizes over all valid alignments to train sequence models without frame-level alignment labels.
+
 CTC (Connectionist Temporal Classification) is a loss function for sequence-to-sequence tasks where the alignment between input and output is unknown. In speech recognition, a 1-second audio clip at 100 frames/second produces 100 output frames, but the transcript may have only 20 characters. CTC introduces a blank token and marginalizes over all valid alignments (using dynamic programming) that map the output sequence to the target label sequence by collapsing repeated non-blank characters. It enables end-to-end training without explicit frame-level alignment labels. Used in DeepSpeech, wav2vec, and OCR systems.
 
 **Q: How do you handle variable-length sequences in LSTM efficiently?**
+**Short:** Packing padded sequences before an LSTM skips padding computation and avoids contaminating batch statistics.
+
 Use `torch.nn.utils.rnn.pack_padded_sequence` before the LSTM and `pad_packed_sequence` after. Packing removes padding tokens from computation — the LSTM only processes real tokens at each step, skipping padding. This is faster than processing padded sequences (especially when length variance is high) and ensures BatchNorm/statistics are not contaminated by padding. Input lengths must be sorted descending unless you pass `enforce_sorted=False`, which lets PyTorch sort and restore the order for you (`enforce_sorted=True` is the default and is only needed for ONNX export).
 
 **Q: Why did Transformers replace RNNs for NLP tasks?**
+**Short:** Transformers replaced RNNs mainly because self-attention parallelizes training and reaches long-range dependencies in O(1).
+
 Three core reasons: (1) Parallelization — RNNs are inherently sequential (step t depends on step t-1), so training a sequence of length T on a GPU takes T sequential matrix multiplications. Transformers apply attention over all pairs simultaneously, utilizing GPU parallelism fully. Training is 10-100x faster in practice. (2) Long-range dependencies — attention connects any two tokens in O(1) operations regardless of distance. RNNs must carry information through all intermediate hidden states. (3) Scalability — Transformers scale more favorably with data and compute (GPT, BERT, T5 are all Transformer-based). Large LSTM language models were trained on billion-token corpora, but doing so cost weeks on large GPU fleets precisely because the recurrence serializes the sequence dimension.
 
 **Q: What is the forget gate bias initialization trick and why does it help?**
+**Short:** Initializing the forget gate bias to 1.0 makes the LSTM default to remembering, speeding convergence on long sequences.
+
 Initializing the forget gate bias to 1.0 (instead of 0.0) makes the LSTM start training in a "remember by default" state: f_t ≈ sigmoid(1.0) ≈ 0.73. This means the cell state retains ~73% of its previous value by default at the start of training. Without this, f_t ≈ 0.5 and the LSTM aggressively forgets early in training before it has learned what to preserve. The biased initialization gives the LSTM a head start on modeling long-range dependencies, often leading to faster convergence and better performance on long sequences. It was proposed by Gers, Schmidhuber and Cummins (2000) — the paper that introduced the forget gate — and re-popularized by Jozefowicz et al. (2015), who showed a forget-gate bias of 1 makes the LSTM competitive with the best architecture variants they searched; Greff et al. (2017) studied it again in their LSTM ablation.
 
 **Q: How do you prevent the hidden state from leaking between independent sequences in a batch?**
+**Short:** Resetting the hidden state to None between independent sequences prevents state from leaking across batch examples.
+
 Pass `None` as the initial hidden state (h_0, c_0) to `nn.LSTM` or explicitly create zero tensors. In PyTorch, passing None initializes to zeros automatically. For stateful streaming (one long continuous sequence), carry the hidden state across batches but call `.detach()` to prevent gradients from flowing into previous batches (avoids memory explosion): `h = h.detach()`. For independent sequences (document classification), always reset to None between sequences.
 
 **Q: What are the tradeoffs between a deep stacked LSTM and a wide single-layer LSTM?**
+**Short:** Stacked LSTMs learn hierarchical representations and generally outperform one very wide single-layer LSTM.
+
 A stacked LSTM (multiple layers) learns hierarchical representations: lower layers capture local patterns, higher layers capture abstract semantics — analogous to deep CNNs. A single wide LSTM has all representational capacity at one level. Empirically, 2-4 LSTM layers outperform 1 very wide layer for complex tasks. Beyond 4 layers, training becomes unstable without careful initialization and learning rate tuning. Dropout between layers (not on the last layer) is essential for regularization in stacked LSTMs. Typical hidden_size=256-512 per layer; dropout_between_layers=0.2-0.5.
 
 **Q: Why do exploding gradients, not vanishing gradients, cause NaN loss in RNN training?**
+**Short:** Exploding gradients cause NaN loss by growing exponentially and overflowing, unlike vanishing gradients, which just stall learning.
+
 When the recurrent weight's spectral norm exceeds 1, gradients grow exponentially through timesteps and overflow to NaN, whereas vanishing gradients merely stall learning without crashing. Because the amplification is exponential in sequence length, a deep LSTM over hundreds of steps can produce a gradient norm orders of magnitude above the healthy band, so a single large update sends weights to inf and the next forward pass returns NaN. The fix is gradient clipping (`clip_grad_norm_`, max_norm=1.0), which caps the global gradient norm while preserving its direction; vanishing is instead addressed architecturally by gating.
 
 **Q: Why does BatchNorm not work well in RNNs, and what normalization is used instead?**
+**Short:** BatchNorm fails in RNNs because per-timestep batch statistics are noisy; LayerNorm is used instead.
+
 BatchNorm computes statistics over the batch at each timestep, but sequence lengths vary and per-timestep batch statistics are noisy and undefined for late timesteps that few sequences reach. LayerNorm is used instead: it normalizes across the feature dimension within a single example, so it is independent of batch size and sequence position and behaves identically at train and inference. This is why LayerNorm became the default in recurrent and transformer sequence models.
 
 **Q: Where should dropout be applied in a stacked LSTM, and why not on the recurrent connections?**
+**Short:** Dropout belongs between stacked LSTM layers, not on recurrent connections, which would erase carried memory.
+
 Dropout should be applied between stacked LSTM layers, not on the hidden-to-hidden recurrent path, because randomly zeroing recurrent activations erases the very memory the cell is trying to carry across timesteps. PyTorch's `nn.LSTM(dropout=p)` correctly applies dropout only between layers (and is a no-op when num_layers=1). If you need recurrent regularization, use variational dropout, which applies the same dropout mask at every timestep rather than a fresh one each step.
 
 **Q: What is the difference between the hidden state h_t and the cell state c_t in an LSTM?**
+**Short:** The cell state is an LSTM's long-term memory; the hidden state is its gate-filtered, tanh-squashed exposed view.
+
 The cell state c_t is the long-term memory that flows along the additive gradient highway, while the hidden state h_t is the tanh-squashed view of c_t exposed to the next layer. The output gate decides how much of c_t becomes h_t at each step, so c_t can hold information that is not currently exposed to the output. Vanilla RNNs and GRUs have only one state vector; the separate cell state is exactly what lets LSTMs preserve information across very long spans.
 
 **Q: What problem does the fixed context vector in a plain (no-attention) seq2seq model create?**
+**Short:** A fixed context vector bottlenecks long inputs in plain seq2seq models, a limitation that attention removes.
+
 A plain seq2seq compresses the entire input into one fixed-size context vector (the encoder's final hidden state), so long inputs lose information as everything is squeezed through that bottleneck. Translation quality degrades sharply beyond ~30 words because early tokens are overwritten in the summary. Attention removes the bottleneck by letting the decoder attend to all encoder states directly at each step, which is what enabled accurate translation of 100+ word sentences.
 
 ---

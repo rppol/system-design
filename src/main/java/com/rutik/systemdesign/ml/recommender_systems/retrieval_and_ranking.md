@@ -863,57 +863,93 @@ instrument.
 ## 12. Interview Questions with Answers
 
 **Q: Why does a recommendation system use a two-stage retrieval-ranking architecture instead of ranking all items directly?**
+**Short:** Two-stage design narrows millions of items to a few hundred candidates before a heavier model ranks them.
+
 Ranking all items with a rich model is computationally infeasible at scale. For 10M items and a 10ms latency budget, you have 1 microsecond per item — not enough even for a single linear model evaluation. The two-stage design solves this: retrieval uses a dot product ANN search (~5ms for 10M items) to reduce to 500 candidates, and ranking then applies a deep model to just those 500 candidates (<10ms). The retrieval stage accepts some imprecision (recall@100 ~95%) in exchange for speed; the ranking stage uses that precision budget to optimize final ordering.
 
 **Q: What is position bias and how do you correct for it?**
+**Short:** Position bias inflates clicks for top-ranked items; inverse propensity weighting from randomized traffic corrects it.
+
 Position bias is the observation that users click items at higher positions more frequently regardless of item quality — position 1 receives roughly 10x the clicks of position 10 for identical items. If you train a ranking model on raw click data, it learns that "being shown at position 1" is a proxy for quality, leading to a feedback loop where historically top-ranked items dominate recommendations. Correction: inverse propensity weighting (IPW). Run a small fraction (5-10%) of randomized traffic where items are shown at random positions; estimate propensity P(click | position) from this data; upweight clicks at lower positions by 1/propensity during training. This recovers the unbiased estimate of true item quality.
 
 **Q: What is LambdaMART and how does it optimize NDCG?**
+**Short:** LambdaMART trains gradient boosted trees with LambdaRank gradients that directly target NDCG improvement.
+
 LambdaMART is gradient boosted decision trees where the gradient (lambda) at each step is the LambdaRank gradient rather than the standard MSE gradient. LambdaRank computes, for each pair of items (i, j) where i is more relevant than j, the gradient contribution as: lambda_ij = sigma(-score_diff) * |delta_NDCG(i, j)|, where delta_NDCG is the improvement in NDCG from swapping i and j in the ranked list. Items whose swap would cause the largest NDCG improvement receive the largest gradients — NDCG is directly baked into the training signal. MART (Multiple Additive Regression Trees) is gradient boosting; combining with LambdaRank gives LambdaMART, winner of multiple learning-to-rank competitions.
 
 **Q: What FAISS index type would you choose for 10M items at 95% recall and <10ms latency?**
+**Short:** FAISS IVFFlat with tuned nprobe reaches roughly 95% recall under 10ms latency for a 10M-item catalog.
+
 FAISS IVFFlat with n_lists in the sqrt(N) to 4*sqrt(N) range — for N = 10M that is roughly 3,000-13,000 cells — and nprobe tuned to achieve 95% recall. Expect nprobe around n_lists/8 to n_lists/4; the Section 8 curve (n_lists = 256, nprobe = 64 -> ~96% recall at ~6ms) shows the shape, and a larger n_lists needs a proportionally larger nprobe to cover the same neighbourhood. For higher recall (98%) with acceptable latency, HNSW achieves this but consumes more RAM (graph structure ~4 bytes per edge per vector). If throughput is the priority, ScaNN (Google) achieves higher QPS than FAISS IVF at equivalent recall. For a 10M item catalog, a single FAISS IVF index fits in ~10GB RAM (float32) or ~2.5GB with product quantization (PQ, slight recall drop).
 
 **Q: How do you handle multiple retrieval sources in a candidate generation pipeline?**
+**Short:** Multiple retrieval sources each contribute a candidate quota, then results are merged and deduplicated.
+
 Each source runs independently and generates candidates with a relevance score. Common sources: personalized two-tower (majority share, ~500 candidates), trending/popular items (10-15%), subscribed creators' content, re-engagement items (videos 50% watched but abandoned). After each source runs, candidates are merged and de-duplicated (same item from two sources: keep the higher score or blend). Each source gets a quota (minimum number of candidates it contributes) to ensure diversity even if the two-tower dominates. The merged ~700 candidates then pass to the ranking stage. The key principle: each source captures a different signal (personalization, novelty, social), and the ranking model learns to weigh them.
 
 **Q: What is Maximal Marginal Relevance (MMR) and when do you use it?**
+**Short:** Maximal Marginal Relevance greedily balances relevance against diversity when re-ranking a candidate list.
+
 MMR is a greedy re-ranking algorithm that balances relevance and diversity. At each step, it selects the next item maximizing: lambda * relevance(i) - (1 - lambda) * max_j_selected similarity(i, j). Lambda = 1 means pure relevance ordering; lambda = 0 means pure diversity (farthest-first traversal). MMR is used in re-ranking when you want to prevent the final list from containing 10 items from the same category. It is O(K * M) per recommendation list (K = final list size, M = candidate set size), which is acceptable for small K and M. For larger sets, Determinantal Point Processes (DPP) give a more principled probabilistic approach but are computationally heavier.
 
 **Q: What is the difference between pointwise, pairwise, and listwise learning-to-rank?**
+**Short:** Pointwise scores items independently, pairwise compares item pairs, and listwise optimizes the entire ranked list.
+
 Pointwise LTR treats each (user, item) pair independently, predicting a relevance score or click probability — standard binary cross-entropy. Simple but ignores the ranking context (an item's optimal score depends on the other items in the list). Pairwise LTR (BPR, RankNet) considers pairs: for each pair (item_i, item_j), the model should rank item_i above item_j if item_i is more relevant. Directly optimizes pairwise ordering but not the list-level metric. Listwise LTR (LambdaMART, ListNet, SoftRank) optimizes the full list ordering — the gradient accounts for the effect of each item's score on the list-level metric (NDCG, MAP). Listwise achieves the best NDCG but is hardest to implement.
 
 **Q: How would you tune nprobe in a FAISS IVF index for production?**
+**Short:** Tune nprobe by benchmarking the recall-latency curve and choosing the elbow under a hard latency SLA.
+
 Run a benchmark over a representative sample of 10K user queries. For each nprobe value from 8 to n_lists, measure: (1) recall@100 vs. exact brute-force ground truth, (2) latency (p50, p95, p99). Plot the recall-latency curve. Select the nprobe at the "elbow" — the point of diminishing recall return before latency grows steeply. Typical elbow: nprobe = n_lists/4 to n_lists/8. Example: for n_lists=256, nprobe=32-64 achieves ~93-96% recall at 3-6ms. Set a hard latency SLA (e.g., p99 < 10ms) and choose the highest nprobe satisfying it. Re-benchmark quarterly as the catalog changes.
 
 **Q: Describe how you would implement a recall@K evaluation for a retrieval system.**
+**Short:** Recall@K evaluation uses a temporal split to measure the fraction of true interactions captured in top-K candidates.
+
 Temporal split: train retrieval model on interactions before date T. For each user in the test set (interactions at T+1 to T+7): run retrieval to get top-K candidates; compute recall@K = |retrieved ∩ actual_interactions| / |actual_interactions|. Average across all test users. Implementation pitfalls: ensure retrieved candidates do not include already-interacted items; use the same filtering as production (otherwise offline recall inflates). Target: recall@100 > 93% for good downstream ranking. Also measure recall@10, @50, @200 to understand the recall curve. Report separately for cold-start users (fewer than 5 historical interactions) vs. warm users.
 
 **Q: How would you detect and address a feedback loop in a recommendation system?**
+**Short:** A feedback loop shows as falling diversity and coverage, fixed with exploration and popularity discounting.
+
 Detect it as falling entropy and coverage in what you recommend, then break it with exploration, popularity discounting and novelty constraints. Detection signals: (1) item concentration — top-100 recommended items have decreasing entropy week-over-week; (2) catalog coverage declining (fewer unique items recommended); (3) long-tail item impressions dropping; (4) recommendation diversity (ILD) declining. Address feedback loops: (1) epsilon-greedy exploration — show 5-10% of impressions randomly; (2) popularity discount in ranking — divide item scores by log(1 + popularity); (3) novelty constraints in re-ranking (force fraction of recommendations to be items the user has not seen recently); (4) UCB or Thompson Sampling bandit for exploration-aware ranking. Monitor diversity metrics as first-class production metrics alongside CTR.
 
 **Q: What is the hardest engineering challenge in deploying a retrieval-ranking pipeline at scale?**
+**Short:** Feature freshness consistency across offline, near-real-time, and real-time stores is the hardest scaling challenge.
+
 Feature freshness consistency is the hardest challenge. The ranking model uses dozens of features: some are pre-computed offline (item quality score, category), some are near-real-time (item click rate in last hour), some are real-time (user's last 3 clicks this session). Stale features cause silent degradation — the model was trained with fresh features but served with stale ones. Production solution: tiered feature stores. Redis for session-level real-time features (TTL 1 hour). A stream processing layer (Flink, Kafka Streams) for near-real-time aggregations (last-hour click rate, updated every 5 min). Batch feature store (Spark → Parquet) for slow-changing features (updated nightly). The feature vector assembled at serving time must match the exact feature distribution the model was trained on — data skew between training and serving is the #1 cause of model underperformance in production.
 
 **Q: How do you handle the cold-start problem specifically in the retrieval stage?**
+**Short:** Retrieval cold start is handled with popularity fallbacks, content-based vectors, or demographic cluster centroids.
+
 Two-tower ANN requires a user vector — but new users have no history to compute one from. Strategies: (1) fallback source — include a "popular items" retrieval source that always contributes 100-200 popular candidates for all users, including new ones; (2) content-based initialization — use any available user signals (country, device, referral source) in the user tower to compute an approximate vector even without interaction history; (3) demographic cluster centroids — cluster the user population into K demographic groups; assign new user to a cluster based on observable attributes; use the cluster centroid as user vector. As interactions accumulate (threshold: ~5 interactions), switch to full personalized retrieval. Track cold-start recall@100 separately from warm user recall — the delta quantifies how much new users are underserved.
 
 **Q: What is the role of the ranking stage's latency budget in system design?**
+**Short:** The ranking stage's latency budget is whatever remains after retrieval, feature fetch, and network overhead.
+
 The ranking stage must score all retrieved candidates within the overall latency SLA. If end-to-end SLA is 100ms and retrieval takes 10ms, feature fetch takes 20ms, and network overhead is 10ms, the ranking model has ~60ms. For 500 candidates, that is 0.12ms per candidate — achievable with GBDT (LightGBM) which can score 1000 candidates in ~2ms. A deep neural ranker may take 20-50ms for 500 candidates with batched GPU inference, still within budget. Design principles: score all candidates in a single batched forward pass (not sequentially); pre-cache static item features to avoid per-candidate feature fetches; use quantized models (INT8) for neural rankers to halve inference time. Always benchmark the ranking model latency under the peak QPS load, not average — p99 latency under load is the binding constraint.
 
 **Q: How do you prevent feature leakage in ranking model training?**
+**Short:** Feature leakage happens when training features use information unavailable at prediction time; point-in-time joins fix it.
+
 Feature leakage occurs when a training feature was computed using information that would not be available at the time of prediction. Common leakage patterns: (1) item statistics computed over the full dataset including the future (e.g., total item clicks including the training example's click); fix: compute item statistics with a time offset — use item stats from 24h before the training example timestamp; (2) user features that include the interaction being predicted (e.g., "user's average rating" including the current rating); fix: exclude the current interaction from all user aggregations; (3) joint features computed from test period signals leaking into training; fix: strict point-in-time correct feature computation using feature stores with temporal joins. Test for leakage: a model with suspiciously high offline metrics but poor online performance is a red flag — investigate feature importances for any feature correlated with the label beyond causal expectation.
 
 **Q: What metrics do you monitor in production for a retrieval-ranking system?**
+**Short:** Production monitoring tracks recall@100, NDCG@10, latency percentiles, CTR by position, and catalog coverage.
+
 Retrieval metrics: recall@100 (sample-tested against brute force weekly), candidate set size distribution, retrieval latency p50/p95/p99. Ranking metrics: NDCG@10 on offline test set (run daily), ranking model inference latency. End-to-end metrics: CTR by position (watch for position 1/position 2 ratio — should be stable), session engagement rate, conversion rate, return rate. Health metrics: candidate diversity (unique categories in retrieved set), item coverage (unique items recommended across all users in 24h), long-tail item exposure fraction (items with < 1000 total clicks). Alert thresholds: if recall@100 drops more than 3% week-over-week (IVF index staleness), if CTR at any position drops more than 10% day-over-day (potential ranking bug), if catalog coverage drops more than 15% (feedback loop forming).
 
 **Q: When would you choose a GBDT ranker over a neural ranker, and vice versa?**
+**Short:** GBDT wins for tabular features under tight latency; neural rankers win with rich embeddings and abundant data.
+
 Default to GBDT (LightGBM/XGBoost) for tabular features under a tight latency budget; use a neural ranker only when dense embedding interactions dominate. GBDT scores 1000 candidates in ~2ms, handles mixed feature types natively, gives interpretable feature importances, and trains fast — it is the industry-standard baseline. A neural ranker (Wide & Deep, DeepFM) wins when you have rich dense features (item/user embeddings) and complex non-linear feature interactions that trees approximate poorly, and when training data is abundant (>100M labeled examples). In practice teams start with GBDT, then ensemble or replace with a neural ranker only after GBDT saturates; the neural ranker's 20-50ms batched-GPU latency must still fit the SLA.
 
 **Q: What is the difference between retrieval recall and ranking NDCG, and why optimize them separately?**
+**Short:** Recall measures whether good items reach the ranker; NDCG measures whether the ranker orders them correctly.
+
 Recall measures whether the good items reach the ranker; NDCG measures whether the ranker orders the items it received correctly. Recall@100 is a set-membership metric (did the ground-truth item land in the candidate set?), so a retrieval miss is unrecoverable — no downstream ranker can rank an item it never sees. NDCG@10 is an ordering metric conditioned on the candidates already retrieved. They are optimized separately because the objectives conflict: retrieval trades precision for speed and breadth (accept irrelevant items to avoid missing relevant ones), while ranking spends its precision budget on ordering. Jointly training end-to-end tends to degrade both; the clean division of labor is why the cascade works.
 
 **Q: How would you A/B test a change to the retrieval stage without ranking changes masking the effect?**
+**Short:** A/B test retrieval changes with the ranker frozen so any CTR delta is causally attributable to retrieval alone.
+
 Hold the ranking and re-ranking stages fixed, vary only the retrieval stage, and measure both offline recall@100 and downstream online CTR on the identical ranker. If you change retrieval and ranking together, a CTR delta cannot be attributed. First run an offline recall@100 comparison against brute-force ground truth to confirm the new retrieval improves candidate quality; then run the online A/B with the ranker frozen so any engagement lift is causally the retrieval change. Watch a guardrail: a retrieval change that raises recall but shifts the candidate distribution can still hurt online metrics if the frozen ranker was trained on the old distribution (train-serve skew) — so also monitor the fraction of ranked items coming from the new source.
 
 ---

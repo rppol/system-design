@@ -824,57 +824,93 @@ SMOTE creates synthetic minority points by interpolating between neighbors, but 
 ## 12. Interview Questions with Answers
 
 **Q: Why do linear models (logistic regression, linear SVM) usually beat nonlinear kernels on text?**
+**Short:** Linear models beat nonlinear kernels on text because bag-of-words features are high-dimensional and already separable.
+
 Text bag-of-words features are extremely high-dimensional and sparse, so classes are almost always linearly separable and a flat hyperplane suffices. Nonlinear kernels (RBF) add capacity that overfits the sparse tail and slow training from near-linear to `O(n^2)` in examples. A `LinearSVC` on TF-IDF typically matches or beats an RBF SVM at a fraction of the cost, which is why the linear kernel is the text default.
 
 **Q: Why does Naive Bayes work well for text despite its independence assumption being false?**
+**Short:** Naive Bayes ranks classes correctly despite false independence because classification only needs the argmax.
+
 The independence assumption produces miscalibrated probabilities but a correct class ranking, and classification only needs the `argmax`. Words in a spam email co-occur (violating independence), yet they all point toward the spam class, so the wrong magnitudes still yield the right winner. NB fails when you need the probability itself (thresholding, calibration), not just the top class.
 
 **Q: When would you pick a TF-IDF baseline over fine-tuning BERT?**
+**Short:** A TF-IDF baseline is preferable when the signal is lexical, latency is tight, or a baseline has not yet been measured.
+
 Pick the baseline when the signal is topical/lexical, latency is tight, data is modest, or you have not yet measured a baseline. A TF-IDF + LinearSVC pipeline reaches within 5–15% of BERT on most classification tasks at <1 ms CPU inference versus 10–80 ms on GPU. You fine-tune BERT only when the residual errors demonstrably require order/context/semantics and the gap clears the cost bar.
 
 **Q: What is the difference between Multinomial and Bernoulli Naive Bayes for text?**
+**Short:** Multinomial NB uses word counts for longer text, while Bernoulli NB uses binary presence for very short text.
+
 Multinomial NB uses word counts and multiplies `P(w|c)` once per occurrence; Bernoulli NB uses binary presence and explicitly includes the probability that a word is absent. Multinomial suits medium/long documents where repeated words compound evidence; Bernoulli suits very short text (tweets, titles) where a word appearing twice is not more informative. Bernoulli's use of absence as a signal helps when the vocabulary is small and documents are short.
 
 **Q: Why is Laplace smoothing necessary in Naive Bayes and what does alpha control?**
+**Short:** Laplace smoothing adds a pseudocount so an unseen word cannot zero out an entire class's probability.
+
 Without smoothing, an unseen (word, class) pair gives `P(w|c) = 0`, which zeroes the entire product and makes that class impossible no matter what other words say. Laplace smoothing adds a pseudocount `alpha` (default 1) to every count so no term can veto a class. Smaller `alpha` (0.01–0.1) trusts the data more and often helps on large vocabularies; `alpha=0` reintroduces the zero-probability bug.
 
 **Q: You report 98% accuracy on a spam classifier. Why might that be meaningless?**
+**Short:** 98% accuracy is meaningless under class imbalance, since always predicting the majority class scores the same.
+
 If 98% of email is ham, a model that always predicts "ham" scores 98% accuracy while catching zero spam. Accuracy is dominated by the majority class under imbalance, so you must report precision, recall, and F1 on the minority (spam) class, or PR-AUC. The fix is to evaluate the minority class and tune the decision threshold to the required operating point.
 
 **Q: What is data leakage in a text-classification pipeline and how do you prevent it?**
+**Short:** Data leakage happens when the TF-IDF vectorizer is fit on the full corpus, leaking test-set statistics into training.
+
 Data leakage is when information from the test set influences training — most commonly fitting the TF-IDF vectorizer on the full corpus before splitting, which leaks test-set IDF statistics and vocabulary. It inflates offline metrics that then collapse in production. Prevent it by splitting first and fitting the vectorizer on the training fold only, ideally by putting it inside a `Pipeline` so cross-validation re-fits it per fold.
 
 **Q: How do you handle class imbalance in text classification?**
+**Short:** Handle text class imbalance by escalating from class weights to threshold moving, resampling, then focal loss.
+
 Start with the cheapest lever and escalate: class weights, then threshold moving, then resampling, then focal loss. Concretely that is `class_weight="balanced"`, then a validation-tuned decision threshold, then oversampling, then focal loss for neural models, and `ComplementNB` in place of `MultinomialNB` for imbalanced text. Threshold moving is often the highest-leverage step because it directly targets the precision/recall operating point without retraining. Always tune the threshold on validation data, never on the test set.
 
 **Q: Explain TextCNN's architecture and why max-over-time pooling matters.**
+**Short:** TextCNN runs parallel n-gram convolutions and max-over-time pooling to detect the most informative phrase anywhere in a sentence.
+
 TextCNN (Kim 2014) runs parallel 1-D convolutions of widths 3, 4, and 5 (100 filters each) over the embedding sequence, acting as learned trigram/4-gram/5-gram detectors, then applies max-over-time pooling and a softmax. Max-over-time pooling keeps only each filter's single strongest activation across the whole sentence, making the model invariant to where an informative phrase occurs and to sentence length. The three filter widths concatenate to a 300-dim feature vector fed to the classifier.
 
 **Q: How does fastText achieve such fast training and OOV robustness?**
+**Short:** fastText trains fast via averaged n-gram embeddings and hierarchical softmax, and handles OOV words through subwords.
+
 fastText averages word and character-n-gram embeddings into one document vector and uses hierarchical softmax to reduce the output cost from `O(K)` to `O(log K)`. The character n-grams give it robustness to out-of-vocabulary words and typos because subwords of an unseen word are still known. On millions of documents it trains in seconds on CPU while matching deep models within a couple of accuracy points.
 
 **Q: What is the generative-vs-discriminative distinction and how does it affect small-data behavior?**
+**Short:** Naive Bayes, a generative model, converges faster on small data, while discriminative models win as data grows.
+
 Naive Bayes is generative — it models `P(x|y)` and `P(y)` — while logistic regression and SVM are discriminative, modeling `P(y|x)` or the boundary directly. Ng & Jordan (2002) showed generative NB has higher asymptotic error but converges to it with far fewer examples, so NB tends to win at small data and discriminative models win as data grows. This crossover is visible as the learning-curve intersection between NB and logistic regression.
 
 **Q: How do you frame and train a multi-label classifier?**
+**Short:** Multi-label classification uses independent sigmoid outputs with per-label binary cross-entropy, never a softmax.
+
 Use K independent binary classifiers (binary relevance) or a neural head with K sigmoid outputs trained with per-label binary cross-entropy, then threshold each label independently. Do not use a K-way softmax, which forces labels to compete and suppresses all but the top one. To model label correlations, use classifier chains (feed earlier predictions as features) at the cost of order-dependence and error propagation.
 
 **Q: Why prefer LinearSVC over an RBF-kernel SVM for text, and what does LinearSVC lack?**
+**Short:** LinearSVC matches RBF accuracy on sparse text in near-linear time but lacks calibrated probability outputs.
+
 LinearSVC trains in near-linear time and matches RBF accuracy on high-dimensional sparse text where a linear boundary already separates classes, whereas RBF is `O(n^2)` and overfits. The tradeoff: `LinearSVC` provides no `predict_proba`, so if you need calibrated probabilities for thresholding you wrap it in `CalibratedClassifierCV` (Platt scaling or isotonic). For pure top-1 prediction, the raw decision function is enough.
 
 **Q: What does TF-IDF do and why is it better than raw counts?**
+**Short:** TF-IDF down-weights common words and up-weights rare discriminative terms, unlike raw word counts.
+
 TF-IDF multiplies term frequency by inverse document frequency (`log(N / df)`), down-weighting words common across many documents (the, is) and up-weighting rare discriminative terms. Raw counts overweight frequent function words that carry little class signal. Sublinear TF (`1 + log(tf)`) further dampens a word repeated many times in one document so a single spammy repetition does not dominate the vector.
 
 **Q: When is Bernoulli NB the right choice over Multinomial NB?**
+**Short:** Bernoulli NB is the right choice for very short documents where word presence, not count, carries the signal.
+
 Choose Bernoulli NB for very short documents — tweets, subject lines, product titles — where word presence matters more than count and the explicit absence signal is informative. Multinomial NB is better for medium/long documents where repeated words should compound evidence. Empirically Bernoulli wins on short-text tasks with small vocabularies and Multinomial wins as document length grows.
 
 **Q: Why can preprocessing like stopword removal hurt a text classifier?**
+**Short:** Stopword removal can hurt a classifier because it strips decisive negation words like not, no, and never.
+
 Standard stopword lists remove words like not, no, and never that are decisive for sentiment and negation, and aggressive lowercasing collapses distinctions like US (country) vs us. Over-cleaning also drops punctuation such as the multiple exclamation marks that flag spam. Always A/B each preprocessing step against the baseline rather than assuming normalization helps.
 
 **Q: How do you choose the decision threshold for a binary text classifier?**
+**Short:** The decision threshold should come from a validation precision-recall curve, not the default 0.5.
+
 Compute the precision-recall curve on a validation set and pick the threshold that meets the product's operating point. Use a high threshold when false positives are costly (blocking real email), a low one when misses are costly (letting fraud through). The default 0.5 is rarely optimal under imbalance. Fix the threshold on validation data and only then report metrics on the held-out test set.
 
 **Q: Why is SMOTE risky on TF-IDF features?**
+**Short:** SMOTE is risky on TF-IDF features because interpolating sparse vectors creates dense points matching no real document.
+
 SMOTE synthesizes minority points by interpolating between sparse neighbor vectors, producing dense vectors that correspond to no real document and can degrade linear models. Text imbalance is better handled with class weights, threshold moving, or `ComplementNB`. If you must resample, simple minority oversampling is safer than SMOTE on bag-of-words features.
 
 ---

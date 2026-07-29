@@ -892,63 +892,83 @@ Dropping 300d to 100d is a straight 3x memory cut because the relationship is li
 ## 12. Interview Questions with Answers
 
 **Q: Why does removing stop words hurt sentiment analysis but help topic modeling?**
+**Short:** Stop word removal strips negation words like 'not', flipping sentiment polarity, while those same words carry no useful topical signal.
 Stop word removal strips negation words like "not" and "never" that flip sentiment polarity, so "not good" collapses to "good". Those same words carry no topical signal, so removing them helps LDA and search by concentrating on content words. The rule: keep stop words (especially negations) for polarity tasks, remove them for topic modeling and information retrieval. This single preprocessing toggle can swing sentiment accuracy by 5-10 points.
 
 **Q: Why can fitting TF-IDF on the full dataset before the train/test split inflate accuracy?**
+**Short:** Fitting TF-IDF on the whole corpus leaks test-document term frequencies into training, inflating offline accuracy far above production accuracy.
 Because IDF weights computed over the whole corpus leak test-document term frequencies into training, so the model quietly memorizes test-set vocabulary instead of generalizing. The symptom is a large train-to-production gap: one spam classifier showed 97% test accuracy that dropped to 71% in production. The fix is to call `fit_transform` only on the training split and `transform` (never `fit`) on validation and test, ideally wrapped in an sklearn Pipeline so leakage is structurally impossible.
 
 **Q: What is TF-IDF and why is it better than raw term frequency?**
+**Short:** TF-IDF down-weights terms common across many documents, unlike raw term frequency, which overweights uninformative words like 'the'.
 TF-IDF (Term Frequency * Inverse Document Frequency) weights each term by how often it appears in a document relative to how common it is across all documents. Raw TF heavily weights common words like "the" and "is" which carry no discriminative signal. IDF penalizes words that appear in many documents, so domain-specific rare terms get higher weight. Practically, sublinear_tf=True (log normalization) further reduces the gap between frequent and rare terms within a document.
 
 **Q: Explain the difference between Word2Vec Skip-gram and CBOW.**
+**Short:** Skip-gram predicts context from a center word and suits rare words, while CBOW predicts the center word from context and trains faster.
 Skip-gram predicts surrounding context words given a center word; CBOW predicts a center word given surrounding context words. Skip-gram is slower to train but produces higher-quality vectors for rare words because each rare word's representation is updated whenever it is the center word. CBOW is ~3x faster and works better for frequent words. On large corpora (>1B tokens), CBOW is preferred for speed; on small or domain-specific corpora, Skip-gram produces better embeddings.
 
 **Q: How does FastText handle out-of-vocabulary words?**
+**Short:** FastText represents a word as the sum of its character n-gram vectors, so an unseen word still gets a meaningful vector from shared subwords.
 FastText represents each word as the sum of its character n-gram vectors (typically n=3 to 6). For "unhappiness", it computes vectors for substrings "unh", "nha", "hap", "app", "ppi", "pin", "ine", "nes", "ess", then sums them to form the word vector. An OOV word like "unhappily" shares most n-grams with "unhappiness" and receives a meaningful vector rather than a zero or random fallback. This is critical for morphologically rich languages (Turkish, Finnish) and domain-specific text with abbreviations and misspellings.
 
 **Q: What is the BIO tagging scheme in NER?**
+**Short:** BIO marks the first token of an entity as B-type, later tokens as I-type, and non-entity tokens as O, disambiguating adjacent same-type entities.
 BIO stands for Beginning, Inside, Outside. B-{entity} marks the first token of an entity span, I-{entity} marks subsequent tokens of the same span, and O marks non-entity tokens. For "New York City": B-LOC I-LOC I-LOC. BIO is important because it disambiguates consecutive entities of the same type: "Steve Jobs Tim Cook" becomes B-PER I-PER B-PER I-PER, not four I-PER tokens.
 
 **Q: Why add a CRF layer on top of BiLSTM for NER instead of just softmax?**
+**Short:** A CRF layer learns valid label transitions and finds the globally best tag sequence via Viterbi, where independent softmax can emit illegal tags.
 Softmax predicts each token's label independently, so it can output structurally invalid sequences like I-LOC following B-PER. A CRF layer learns transition scores between label pairs (e.g., the transition I-LOC -> B-PER is valid but I-PER -> B-LOC is unusual) and finds the globally optimal label sequence using Viterbi decoding. This typically improves NER F1 by 1-3 points and eliminates illegal tag sequences entirely.
 
 **Q: What is LDA and how do you evaluate topic model quality?**
+**Short:** LDA models documents as mixtures of topics over vocabulary words, and topic quality is best judged by coherence score, not perplexity.
 LDA (Latent Dirichlet Allocation) models each document as a mixture of K topics, where each topic is a probability distribution over vocabulary words. Inference finds the posterior distribution of topics given observed words. Quality is evaluated using coherence score (C_v): how often the top-N words of each topic co-occur in the training corpus. A C_v of 0.4-0.5 is acceptable; 0.6+ is good. Perplexity measures held-out likelihood but correlates poorly with human-judged topic quality — always prefer coherence.
 
 **Q: How does the TextCNN architecture capture phrase-level features?**
+**Short:** TextCNN applies convolutional filters of varying widths over word embeddings, so each filter learns to activate on a specific n-gram pattern.
 TextCNN applies 1D convolutional filters of varying sizes (e.g., widths 2, 3, 4 tokens) over word embedding sequences. A filter of width 3 can learn to activate on trigrams like "not very good" or "highly recommend". Max-pooling over time picks the most significant activation of each filter regardless of position in the sentence, making the model position-invariant. Multiple filter sizes capture different n-gram granularities simultaneously.
 
 **Q: When would you choose Naive Bayes over Logistic Regression for text classification?**
+**Short:** Naive Bayes trains in a single fast pass and is more robust on very small datasets, while logistic regression wins with more data and calibration.
 Naive Bayes trains in O(n*d) with a single pass over data, making it ideal when new training data arrives continuously (e.g., spam that evolves daily) and when training time is constrained. It is also more robust with very small training sets (fewer than 500 examples) because it makes a strong independence assumption that prevents overfitting. Logistic Regression is preferable when you have more than a few thousand examples, correlated features (n-grams), or need calibrated probabilities for downstream decision making.
 
 **Q: What is the difference between stemming and lemmatization? When would you prefer each?**
+**Short:** Stemming is fast rule-based suffix stripping that can produce non-words, while lemmatization uses a dictionary to return valid base forms.
 Stemming applies rule-based suffix stripping to produce a root form ("studies" -> "studi", "running" -> "run"). It is fast (O(1) per word) but produces non-words. Lemmatization uses a morphological dictionary to produce the canonical base form ("studies" -> "study", "running" -> "run"). Lemmatization is ~10x slower than stemming but produces valid words with correct part-of-speech awareness. Use stemming for information retrieval (search engines) where recall matters and the query also gets stemmed. Use lemmatization for tasks where word validity matters (text generation seeds, vocabulary-limited models).
 
 **Q: How do you handle class imbalance in text classification?**
+**Short:** Prefer reweighting the loss or moving the decision threshold over resampling, and always evaluate with F1 or AUPR rather than accuracy.
 Reweight the loss, resample the minority class, or move the decision threshold — in that order of preference. Concretely: (1) `class_weight="balanced"` in scikit-learn LogisticRegression, which weights each sample inversely proportional to class frequency; (2) oversampling the minority class using SMOTE in the embedding space (not on raw text); (3) adjusting the decision threshold post-training based on precision-recall curve analysis. For extreme imbalance (1:100+), reframe as anomaly detection using one-class classifiers. Always evaluate with F1 or AUPR, never accuracy, which is misleading on imbalanced datasets.
 
 **Q: What is the distributional hypothesis and why does it underpin word embeddings?**
+**Short:** The distributional hypothesis says words in similar contexts share meaning, which is the assumption Word2Vec exploits to learn embeddings.
 The distributional hypothesis states that words appearing in similar contexts have similar meanings (Firth, 1957: "You shall know a word by the company it keeps"). Word2Vec exploits this by training a neural network to predict context words from a center word (or vice versa). The intermediate weight matrix becomes the word embedding — words with similar context distributions (e.g., "cat" and "dog" both appear near "pet", "food", "vet") end up geometrically close in the embedding space, enabling semantic arithmetic like king - man + woman = queen.
 
 **Q: Explain why pre-trained word embeddings can hurt performance on specialized domains.**
+**Short:** General-purpose pretrained embeddings encode common-usage word meanings that can directly conflict with a specialized domain's actual usage.
 Pre-trained embeddings (Word2Vec on Google News, GloVe on Common Crawl) embed words according to general English usage. In a biomedical context, "cold" primarily means a respiratory infection, but in general English it means low temperature. Fine-tuning only the output layer on top of frozen general embeddings will not correct this semantic mismatch. Solutions: (1) train domain-specific embeddings from scratch on domain corpus; (2) continue training (fine-tune) pre-trained embeddings on domain data; (3) use subword models like FastText which are more robust to domain terminology.
 
 **Q: When would you use BERT fine-tuning over TF-IDF + Logistic Regression for text classification?**
+**Short:** Fine-tune BERT once you have over roughly 10K labeled examples and GPU access; below about 5K examples, TF-IDF plus logistic regression wins.
 Use BERT fine-tuning when you have more than 10K labeled examples, a GPU is available, and accuracy is more important than latency. BERT's bidirectional context captures meaning that TF-IDF cannot — "bank" near "river" vs "bank" near "loan" get different representations. For fewer than 5K examples, TF-IDF + LR usually generalizes better because BERT overfits without sufficient data. For latency under 5ms or CPU-only environments, TF-IDF + LR is the only practical choice. DistilBERT is a middle ground: 40% smaller than BERT-base, 60% faster, and retaining 97% of its language understanding (Sanh et al., 2019). See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) for detailed guidance.
 
 **Q: What is BM25 and when does it outperform dense embedding retrieval?**
+**Short:** BM25 is a lexical ranking function that beats dense retrieval on rare terms, exact keyword lookups, and very large unindexed collections.
 BM25 (Best Match 25) is a probabilistic lexical ranking function that scores documents by saturating term frequency, normalizing for document length, and weighting by IDF. Its three ingredients are TF saturation (k1=1.2, so additional occurrences of a term yield diminishing returns), length normalization (b=0.75, penalizing verbose documents), and IDF (downweighting common terms). BM25 outperforms dense retrieval when queries contain rare terms, product codes, or proper nouns not seen in the embedding model's training data; when queries are exact keyword lookups ("error code 0x80070057"); and when the document collection is very large and un-indexed (FAISS requires memory proportional to corpus size). Dense retrieval wins on paraphrase and semantic matching tasks. Hybrid (BM25 + dense, fused with RRF) is the production standard for general search. See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for full derivation.
 
 **Q: How do sentence embeddings differ from word embeddings, and why can't you just average word2vec vectors?**
+**Short:** Averaging word2vec vectors discards word order, so Sentence-BERT instead trains a siamese network so cosine similarity reflects sentence meaning.
 Sentence embeddings represent an entire sentence as a single fixed-length vector capturing sentence-level semantics, not individual word semantics. Averaging word2vec vectors loses word order and composition — "dog bites man" and "man bites dog" have the same average embedding. Additionally, word2vec embeddings are context-independent, so "bank" always has one vector regardless of whether it means river bank or financial institution. Sentence-BERT (SBERT) uses a siamese BERT network trained on NLI (natural language inference) triplets with contrastive loss, producing embeddings where cosine similarity directly measures semantic similarity. SBERT cosine similarity reaches Spearman 86.1 on STS-B, versus 58.0 for averaged GloVe and 16.5 for raw BERT `[CLS]` (Reimers & Gurevych, 2019). See [text_representation_and_retrieval.md](text_representation_and_retrieval.md) for training details.
 
 **Q: What is BLEU and what are its most significant weaknesses?**
+**Short:** BLEU is a clipped n-gram precision metric with a brevity penalty, but it correlates poorly with human judgment at the single-sentence level.
 BLEU is a precision metric: the geometric mean of clipped n-gram precisions for n=1 to 4, multiplied by a brevity penalty that punishes short output. Modified precision clips each n-gram count by its maximum occurrence in any reference, preventing trivial repetition. Weaknesses: BLEU is a corpus-level metric that correlates poorly with human judgment at the sentence level; it penalizes valid paraphrases not matching any reference (a correct translation using "automobile" when the reference says "car" scores zero for that bigram); it rewards n-gram overlap regardless of grammatical coherence; and it is computed differently across implementations (smoothing methods vary). ROUGE-L is preferred for summarization (recall-oriented, based on longest common subsequence). BERTScore is preferred when semantic equivalence matters over lexical matching. See [nlp_evaluation_and_metrics.md](nlp_evaluation_and_metrics.md) for full derivations.
 
 **Q: What is the vanishing gradient problem in RNNs and how do LSTMs address it?**
+**Short:** Vanishing gradients shrink learning signal for distant tokens in a plain RNN, and LSTMs fix this with a gated, additive cell-state path.
 Gradients shrink multiplicatively through many time steps, so tokens far back in the sequence receive almost no learning signal and long-range dependencies never get learned. A plain RNN multiplies the same weight matrix at every step, so errors decay (or explode) exponentially with sequence length. LSTMs add a gated cell state with an additive update path — the cell carries information forward with minimal attenuation, and input/forget/output gates learn what to keep or discard. This is why LSTMs and GRUs handle sequences of 100+ tokens where vanilla RNNs fail past ~10.
 
 **Q: Why does a BiLSTM read the sequence in both directions, and when can you NOT use it?**
+**Short:** A BiLSTM concatenates forward and backward hidden states for full-context labeling, but it leaks future tokens and cannot be used for generation.
 A BiLSTM runs one LSTM left-to-right and a second right-to-left and concatenates their hidden states, so every token's representation sees both its left and right context. That bidirectional view is critical for NER and POS tagging, where a word's role often depends on what follows it. You cannot use a BiLSTM for autoregressive generation or streaming, because the backward pass peeks at future tokens the model is supposed to predict, which is information leakage at inference. For generation tasks use a unidirectional (causal) LSTM or a decoder; reserve bidirectional encoders for labeling and classification where the full input is available up front.
 
 ---

@@ -797,54 +797,88 @@ SVR's epsilon parameter is in the units of the target variable. If the target ha
 ## 12. Interview Questions with Answers
 
 **Q: What are support vectors and why do only they matter after training?**
+**Short:** Support vectors are the training points with non-zero Lagrange multipliers, the only ones the decision function needs.
+
 Support vectors are the training points that lie on or within the margin boundaries — they have non-zero Lagrange multipliers (alpha_i > 0) in the dual formulation. After training, the decision function is f(x) = sum_i alpha_i y_i K(x_i, x) + b, which only involves the support vectors (all non-support points have alpha_i = 0). This means the trained model only needs to store and evaluate support vectors at inference time, not the entire training set.
 
 **Q: Explain the kernel trick. Why is it computationally advantageous?**
+**Short:** The kernel trick computes high-dimensional inner products directly, without ever forming that feature space.
+
 The kernel trick exploits that the SVM dual formulation requires only pairwise dot products between training points: K(x_i, x_j) = phi(x_i)^T phi(x_j). By defining a kernel function K that computes this inner product without explicitly computing phi, we can operate in very high or infinite-dimensional feature spaces at O(d) cost per kernel evaluation (the original feature dimensionality). For example, the RBF kernel implicitly maps to an infinite-dimensional space but each evaluation costs O(d) not O(infinity).
 
 **Q: What is the role of the C parameter in soft-margin SVM?**
+**Short:** C trades margin width for training error: large C fits tightly, small C regularizes with a wider margin.
+
 C controls the trade-off between maximizing the margin and minimizing training error. Large C: heavily penalizes misclassification — small margin, model fits training data tightly, risks overfitting. Small C: allows more misclassification — large margin, more regularization, risks underfitting. C is the inverse of regularization strength: C = 1/lambda. Tuning C via cross-validation is essential; common range: 10^{-3} to 10^3 on a log scale.
 
 **Q: What is the difference between the primal and dual formulation of SVM, and why is the dual used?**
+**Short:** The dual needs only kernel evaluations, making kernel SVM tractable in high or infinite-dimensional feature spaces.
+
 The primal is a d-dimensional QP (d = feature dimension): minimize over w, b. The dual is an n-dimensional QP (n = samples): maximize over alpha. For kernel SVM with high or infinite-dimensional feature space (RBF), the primal formulation requires operating in that space, which may be computationally intractable. The dual formulation requires only kernel evaluations K(x_i, x_j), which cost O(d) regardless of the implicit feature space dimension. For n << d (small datasets, high dimensions), the primal can be preferable; for large n with kernels, the dual is necessary.
 
 **Q: How does the RBF gamma parameter affect the decision boundary?**
+**Short:** Large gamma narrows the RBF kernel into a wiggly, overfitting boundary; small gamma smooths it toward underfitting.
+
 Gamma controls the width of the Gaussian kernel: K(x, z) = exp(-gamma * ||x-z||^2). Large gamma: the Gaussian is narrow — each training point influences only its immediate neighborhood. The decision boundary becomes complex and wiggly, following individual training points closely — high variance, risk of overfitting. Small gamma: wide Gaussian — each point influences a broad region. The boundary is smooth and almost linear — high bias, risk of underfitting. gamma="scale" (default in sklearn) sets gamma = 1/(n_features * X.var()), which is a good starting point.
 
 **Q: Why is SVM effective in high-dimensional spaces despite the curse of dimensionality?**
+**Short:** SVM's margin-based generalization bound is independent of input dimensionality, unlike distance-based methods.
+
 SVM maximizes the margin, which provides a generalization bound independent of the input dimensionality d. The VC dimension of an unconstrained hyperplane in d dimensions is d + 1, but for margin-gamma hyperplanes over data inside a ball of radius R the effective (fat-shattering) dimension is bounded by min(d, R^2 / gamma^2) + 1 — so a large margin, not a small d, is what caps capacity. In high-dimensional sparse spaces (text), the data is often linearly separable with a large margin — SVM exploits this. This contrasts with k-NN, where all distances collapse in high dimensions.
 
 **Q: Compare SVM and logistic regression. When would you choose each?**
+**Short:** Choose SVM for small data or kernel non-linearity, and logistic regression for calibrated probabilities and speed.
+
 Both SVM (hinge loss + L2) and logistic regression (log-loss + L2) produce linear classifiers in their primal form and have similar generalization performance on large datasets. Choose SVM: small dataset where maximizing margin matters, kernel trick for non-linearity, sparse text features (LinearSVC). Choose logistic regression: when you need calibrated probabilities, interpretable coefficients, faster training on large data, or online learning. SVM does not natively output calibrated probabilities (Platt scaling is an approximation). On very large datasets, SGD-based logistic regression (sklearn SGDClassifier with log loss) wins on speed.
 
 **Q: How does One-Class SVM differ from isolation forest for anomaly detection?**
+**Short:** Isolation Forest scales better and is generally more robust than One-Class SVM on tabular anomaly detection.
+
 One-Class SVM learns a boundary enclosing the training data in a kernel-induced feature space; it is sensitive to the kernel choice and gamma parameter, and scales as O(n^2). It works well when normal data is compact and anomalies are far from the center. Isolation Forest randomly partitions the feature space and assigns anomaly scores based on the average path length to isolate a point; it scales as O(n log n), handles high-dimensional data better, and is generally more robust to outliers in the training set. In practice, Isolation Forest outperforms One-Class SVM on most tabular anomaly detection benchmarks.
 
 **Q: What is the SMO algorithm and why was it important for practical SVM training?**
+**Short:** SMO solves the SVM dual as a sequence of analytically solvable two-variable subproblems, avoiding huge matrix ops.
+
 Sequential Minimal Optimization (Platt 1998) decomposes the large n-variable QP of SVM dual into a series of minimal 2-variable sub-problems, each solvable analytically in closed form. This avoids storing the full n x n kernel matrix (O(n^2) memory) and avoids large matrix operations. SMO selects the two most violating variables at each step (heuristic), making progress toward the KKT optimum. SMO made SVM practical for datasets with tens of thousands of points — before it, only hundreds of points were feasible.
 
 **Q: How do you use an SVM for multi-class classification?**
+**Short:** sklearn's SVC defaults to one-vs-one voting, while LinearSVC defaults to one-vs-rest classifiers.
+
 sklearn SVC uses One-vs-One (OvO) by default: for K classes, it trains K(K-1)/2 binary classifiers and uses majority vote. For 10 classes, that is 45 classifiers. LinearSVC uses One-vs-Rest (OvR): K classifiers, each separating one class from all others; assign the class with highest decision function value. OvO is typically more accurate because each binary classifier trains on a balanced subset; OvR is faster. For K > 10, OvR or the Crammer-Singer multi-class SVM formulation are preferred.
 
 **Q: Why does adding probability calibration to an SVM slow training significantly?**
+**Short:** Platt scaling calibration refits the SVM across cross-validation folds, roughly multiplying training time fivefold.
+
 Calibrating an SVM adds Platt scaling: after the SVM is trained, a sigmoid P(y=1|x) = 1 / (1 + exp(A * f(x) + B)) is fitted to the decision values using an internal k-fold cross-validation (5-fold by default). That multiplies total training time by approximately 5-6x, since the SVM itself is refitted once per fold. The resulting probabilities are approximate and the sigmoid fit can be unstable for small datasets or extreme class distributions. Use `CalibratedClassifierCV(SVC(), method="sigmoid", cv=5, ensemble=False)`; `ensemble=False` refits a single SVC on all the data and calibrates it, rather than averaging the five fold models.
 
 **Q: What is the hinge loss and how does it relate to the SVM objective?**
+**Short:** Hinge loss is zero once a point clears the margin and grows linearly for every margin violation otherwise.
+
 Hinge loss for a single example: L = max(0, 1 - y * f(x)), where y in {-1, +1} and f(x) = w^T x + b. It is zero when the example is correctly classified with margin >= 1, and linear in the margin violation otherwise. The soft-margin SVM minimizes (1/2)||w||^2 + C * sum_i max(0, 1 - y_i f(x_i)), which is L2 regularization of the weight vector plus C times the sum of hinge losses. This is exactly a regularized ERM with hinge loss. Compared to logistic regression's log loss, hinge loss is zero beyond the margin (sparser gradient updates, fewer support vectors) but is not differentiable at margin = 1.
 
 **Q: How would you debug an SVM that achieves near-random performance on a binary classification task?**
+**Short:** Check feature scaling, support-vector count, a linear-kernel baseline, and labels before retuning C and gamma.
+
 Work through six checks in order, from cheapest to most expensive. They are: (1) check that features are scaled — unscaled features with high variance dominate RBF kernel; (2) print n_support_ — very high number (~50% of training data) indicates the model is underfitting (C too low or data is not separable with current kernel); (3) try LinearSVC first — if linear kernel fails, the boundary is genuinely non-linear; (4) reduce the dataset to 2 features and plot the decision boundary to visually confirm the kernel is learning; (5) check for label issues — if classes are mislabeled or highly imbalanced and class_weight is not set, the model predicts all-majority-class; (6) verify C and gamma range in grid search — if the optimal point is at the boundary of your grid, expand the search.
 
 **Q: How does SVR differ from linear regression, and when would you prefer it?**
+**Short:** SVR ignores errors inside an epsilon tube and penalizes only points outside it, making it robust to small noise.
+
 SVR minimizes ||w||^2 subject to all predictions being within epsilon of the true values — errors within the tube incur no loss (epsilon-insensitivity). Points outside the tube are penalized linearly. This produces a sparser solution than OLS (only out-of-tube points are support vectors) and is more robust to outliers (the epsilon tube absorbs small errors). SVR is preferred when: the target has significant noise that should be ignored (measured sensor readings with ±5% instrument error); outliers in y are possible and should not dominate the fit; a non-linear kernel gives better generalization than polynomial feature expansion. For most tabular regression tasks, gradient boosted trees dominate SVR in practice.
 
 **Q: How do you handle very large datasets (n > 1 million) with SVMs?**
+**Short:** Use LinearSVC, SGD, Nystrom approximation, or random Fourier features instead of kernel SVM past about 100,000 rows.
+
 Kernel SVMs are impractical beyond ~100,000 samples due to O(n^2)–O(n^3) training complexity. Options: (1) LinearSVC or SGDClassifier(loss="hinge") — linear SVM via liblinear or online SGD, both O(n); (2) Nystrom approximation — approximate the kernel matrix with a low-rank factorization, reducing to a linear problem in the approximated feature space; (3) Random Fourier Features (sklearn RBFSampler) — approximate RBF kernel with random feature maps, then use linear SVM; (4) Mini-batch training with gradient-based solvers. In practice, for n > 1M, gradient boosted trees or neural networks are the standard choice.
 
 **Q: What are the KKT conditions for SVM and what do they tell us about support vectors?**
+**Short:** KKT conditions split points into non-support, margin-boundary support, and margin-violating support vectors.
+
 The Karush-Kuhn-Tucker (KKT) conditions for the SVM dual are: (1) alpha_i >= 0; (2) y_i f(x_i) - 1 + xi_i >= 0; (3) alpha_i (y_i f(x_i) - 1 + xi_i) = 0; (4) mu_i xi_i = 0, where mu_i = C - alpha_i. From condition (3): if alpha_i > 0 (a support vector), then y_i f(x_i) = 1 - xi_i. Three regimes: alpha_i = 0 (non-support vector, correctly classified with margin > 1); 0 < alpha_i < C (on the margin boundary, xi_i = 0); alpha_i = C (inside or on the wrong side of the margin, xi_i > 0). The SMO algorithm uses KKT violation as its selection criterion for which alpha pairs to optimize next.
 
 **Q: How do you extract feature importance from a kernel SVM?**
+**Short:** Linear SVM exposes weights directly, but kernel SVM needs permutation importance or SHAP since weights stay implicit.
+
 For linear SVM: the weight vector w = sum_i alpha_i y_i x_i is explicitly available as model.coef_. Feature importance is |w_j| — larger absolute values indicate stronger linear influence. For kernel SVM (RBF, polynomial): w is implicitly defined in the infinite-dimensional feature space and is not directly interpretable in the input space. Use model-agnostic methods: permutation importance (sklearn.inspection.permutation_importance) — randomly shuffle each feature and measure accuracy drop; SHAP kernel explainer (slower but theoretically grounded); or switch to a linear kernel for interpretability and accept the lower accuracy.
 
 ---

@@ -998,6 +998,8 @@ first-class metric — a spike means the vocabulary no longer matches the traffi
 ## 12. Interview Questions with Answers
 
 **Q: Why does word2vec use negative sampling instead of the full softmax?**
+**Short:** Negative sampling replaces the full softmax with k+1 binary decisions, avoiding normalization over the whole vocabulary.
+
 The full softmax normalizes over the entire vocabulary, costing `O(V·d)` per example — infeasible at V=1M.
 Negative sampling replaces the V-way classification with `k+1` independent binary decisions (real pair vs `k`
 noise words), dropping cost to `O(k·d)` with `k=5–20`. The trick works because we do not need calibrated
@@ -1005,36 +1007,48 @@ probabilities — we only need vectors whose dot products separate true neighbor
 around 5–20 for small corpora and 2–5 for large ones.
 
 **Q: What exactly is the negative sampling loss?**
+**Short:** The negative sampling loss maximizes the true pair's sigmoid score while pushing sampled negative pairs toward zero.
+
 It maximizes `log σ(u_o · v_c) + Σ_{i=1}^{k} log σ(-u_{n_i} · v_c)` for each (center, true-context) pair. The
 first term raises the sigmoid of the true pair's dot product toward 1; each negative term raises the sigmoid
 of the *negated* dot product, pushing random words toward 0. Negatives are drawn from `P(w) ∝ freq(w)^0.75`,
 and the gradient at each score reduces to the clean `(sigmoid − label)`.
 
 **Q: What is the distributional hypothesis?**
+**Short:** The distributional hypothesis holds that words appearing in similar contexts tend to have similar meanings.
+
 Words that occur in similar contexts tend to have similar meanings ("know a word by the company it keeps",
 Firth 1957). Every embedding method operationalizes it by compressing a word's context distribution into a
 dense vector. It is why "physician" and "doctor" — which share neighbors — land near each other even without
 a dictionary. The hypothesis also explains the core limitation: words with multiple senses get averaged.
 
 **Q: Why is the noise distribution raised to the 3/4 power?**
+**Short:** Raising unigram frequencies to the 0.75 power flattens the noise distribution so rare words get sampled more.
+
 Raising unigram frequencies to 0.75 flattens the distribution so rare words are sampled as negatives more
 often than pure frequency would allow. Pure unigram sampling would draw "the"/"of" almost every time,
 wasting negatives on uninformative words; uniform sampling would ignore frequency entirely. The 0.75 power is
 an empirical compromise Mikolov found best, boosting rare-word representation quality.
 
 **Q: What is the difference between skip-gram and CBOW, and which is better?**
+**Short:** Skip-gram predicts context from the center word and wins on rare words, while CBOW is faster on frequent words.
+
 Skip-gram predicts context words from the center word; CBOW averages the context and predicts the center.
 Skip-gram makes `2c` predictions per window so it extracts more signal per sentence — better on rare words
 and small corpora — while CBOW is faster and slightly better on frequent words in large corpora. Default to
 skip-gram when unsure, especially with limited data or when rare-word quality matters.
 
 **Q: Why does each word have two vectors during training?**
+**Short:** word2vec keeps separate input and output vectors per word to avoid odd self-similarity constraints.
+
 word2vec learns an "input" vector `v_w` (used when the word is the center) and an "output" vector `u_w`
 (used when the word is a context/negative). Separating them makes the optimization well-behaved — a word is
 rarely its own neighbor, so tying the two would create odd self-similarity constraints. After training the
 input matrix is kept as the embeddings; some setups average the two.
 
 **Q: How does GloVe differ from word2vec?**
+**Short:** GloVe factorizes a global co-occurrence matrix directly, while word2vec streams and predicts over local windows.
+
 GloVe is count-based: it factorizes a global word-word co-occurrence matrix rather than streaming local
 windows. It fits `w_i · w̃_j + b_i + b̃_j ≈ log X_ij` with a weighted least-squares loss, so it uses aggregate
 corpus statistics directly instead of a sampled stream of windows. word2vec is predictive and streaming.
@@ -1042,18 +1056,24 @@ Quality is comparable; GloVe is favored when you want one fixed statistic to ref
 streaming/online training.
 
 **Q: What does GloVe's weighting function f(x) do?**
+**Short:** GloVe's weighting function damps the influence of very frequent co-occurrences so they don't dominate the loss.
+
 It damps the influence of very frequent co-occurrences and zeroes out empty cells so the loss skips them.
 `f(x) = (x/x_max)^0.75` for `x < x_max=100`, else 1 — this stops ultra-frequent pairs like ("the","of") from
 dominating the least-squares objective while still giving them nonzero weight. Without it, common-word
 co-occurrences would swamp the informative rare-pair signal.
 
 **Q: How does fastText handle out-of-vocabulary words?**
+**Short:** fastText handles OOV words by summing the vectors of a word's character n-grams, also capturing morphology.
+
 It represents each word as the sum of its character n-gram vectors (typically 3–6 chars), so an unseen word
 still gets a vector by summing whatever known n-grams it contains. This also captures morphology — "running",
 "runner", "runs" share the "run" n-grams — and makes vectors robust to typos. The cost is a larger memory
 footprint for the n-gram buckets and slightly noisier vectors for very short words.
 
 **Q: Why do word2vec vectors support analogies like king - man + woman = queen?**
+**Short:** word2vec supports analogies because consistent semantic relationships form roughly parallel offset vectors.
+
 Because consistent semantic relationships become roughly parallel offset vectors in the space — the
 "male→female" direction is approximately the same vector whether applied to king/queen or actor/actress. The
 skip-gram objective encodes such regularities as linear structure since it factorizes a (shifted PMI) matrix.
@@ -1061,24 +1081,32 @@ Note analogy accuracy is modest (~60–70% on the Google set) and the query word
 answers (the 3COSADD rule).
 
 **Q: What is subsampling of frequent words and why does it help?**
+**Short:** Subsampling frequent words drops most stopword occurrences, speeding training and improving rare-word vectors.
+
 Each occurrence of a word is dropped with probability `1 - sqrt(t/f(w))` (`t≈1e-5`), removing most
 stopword occurrences. It speeds training ~2x and improves rare-word vectors by effectively widening windows
 (dropping "the" brings content words closer together). Frequent words carry little contextual signal, so
 discarding most of their occurrences loses almost nothing.
 
 **Q: What is the difference between intrinsic and extrinsic evaluation of embeddings?**
+**Short:** Intrinsic evaluation tests vectors directly on analogies, while extrinsic evaluation measures downstream task performance.
+
 Intrinsic evaluation tests the vectors directly — analogy accuracy (Google set), similarity correlation with
 human ratings (WordSim-353, SimLex-999, via Spearman). Extrinsic evaluation measures downstream task
 performance (NER F1, classification accuracy) when the embeddings are used as features. Intrinsic scores are
 cheap but can disagree with extrinsic — always validate on the actual downstream task before choosing.
 
 **Q: Why are static embeddings bad at polysemy, and what fixes it?**
+**Short:** Static embeddings handle polysemy poorly because each word type gets one averaged vector across all its senses.
+
 A static method assigns one vector per word type, so "bank" (river) and "bank" (finance) are forced into a
 single averaged point in space. The fix is contextual embeddings (ELMo, BERT, GPT), which produce a different
 vector for each occurrence based on surrounding words. If you must stay static, sense-specific embeddings
 (one vector per word sense) are a partial workaround, but transformers dominate here.
 
 **Q: How is bias measured in word embeddings?**
+**Short:** Bias in word embeddings is measured with WEAT, which computes an association effect size between word sets.
+
 The WEAT (Word Embedding Association Test) computes an effect size for how much more strongly one set of
 target words (e.g., male vs female names) associates with attribute words (e.g., career vs family) in cosine
 space. Embeddings trained on human text reliably show gender, race, and age bias — famously
@@ -1086,24 +1114,32 @@ space. Embeddings trained on human text reliably show gender, race, and age bias
 model that inherits these vectors reaches production.
 
 **Q: Should you use dot product or cosine similarity with word2vec vectors?**
+**Short:** Cosine similarity is preferred over raw dot product because word2vec vector norms grow with word frequency.
+
 Cosine, because word2vec vector norms grow with word frequency, so a raw dot product biases toward frequent
 words. L2-normalizing both vectors makes the dot product equal to cosine, comparing direction (semantics)
 independent of magnitude (frequency). Most `most_similar` implementations normalize internally for exactly
 this reason.
 
 **Q: How would you get a sentence embedding from word vectors?**
+**Short:** A cheap sentence embedding comes from SIF-weighted averaging, though it discards word order and underperforms SBERT.
+
 The cheap baseline is a weighted average — SIF (smooth inverse frequency) down-weights common words and then
 removes the top principal component, beating plain averaging by ~10 points on similarity tasks. But averaging
 discards word order and is a weak encoder; for real semantic similarity or retrieval use SBERT or a dense
 encoder. Static-vector averaging is fine only as a fast, low-resource baseline.
 
 **Q: When would you choose fastText over word2vec or GloVe?**
+**Short:** fastText is preferred over word2vec or GloVe when morphology, typos, or out-of-vocabulary robustness matter most.
+
 Choose fastText when morphology or OOV robustness matters — inflected/agglutinative languages (Finnish,
 Turkish), noisy user text with typos, or any setting where words unseen at training must still get vectors.
 Its subword composition provides all three. The tradeoffs are higher memory for n-gram buckets and slightly
 noisier vectors for very short words, so for clean English with a fixed vocabulary word2vec/GloVe are fine.
 
 **Q: Why is 300 the standard embedding dimension?**
+**Short:** 300 is the standard embedding dimension because quality rises steeply up to that size and then plateaus.
+
 Because analogy and similarity quality rises steeply up to roughly 300 dimensions then plateaus, so more
 dimensions mostly waste memory and compute. Google News word2vec, GloVe's headline vectors, and most
 fastText releases all ship at 300. Smaller (50–100) is fine for lightweight or low-resource settings;

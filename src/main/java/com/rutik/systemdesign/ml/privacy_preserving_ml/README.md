@@ -749,66 +749,108 @@ Local DP's per-user noise only averages out with huge N. Deploying local DP to a
 ## 12. Interview Questions with Answers
 
 **Q: What is differential privacy, in one precise sentence?**
+**Short:** Differential privacy bounds how much a mechanism's output distribution can change from adding or removing one record.
+
 Differential privacy guarantees that a mechanism's output distribution changes by at most a factor of e^ε (plus a small δ) when any single individual's record is added to or removed from the dataset. That "any one record barely matters" property is what makes membership, inversion, and extraction attacks provably bounded — an adversary seeing the output cannot confidently tell whether you were in the data. The knobs are ε (privacy loss, smaller = stronger) and δ (probability the bound fails, kept ≪ 1/N). Crucially it protects *presence of an individual*, not the population-level correlations the data reveals.
 
 **Q: Explain DP-SGD and why you can't just add noise to normal SGD.**
+**Short:** DP-SGD clips each per-sample gradient to a fixed norm before adding calibrated noise, bounding any one record's influence.
+
 DP-SGD makes training private with three per-step changes: compute per-sample gradients, clip each to a fixed L2 norm C (e.g. 1.0), then sum, add Gaussian noise scaled to C and the noise multiplier σ, and average. Plain "SGD + noise" fails because the averaged batch gradient has *unbounded* sensitivity — one outlier example can move it arbitrarily far, so no finite noise level yields a valid ε. The per-sample clipping is what bounds any single record's influence to C, which is the sensitivity the noise is calibrated against, and a privacy accountant (RDP/moments) tracks the cumulative (ε, δ) across thousands of steps.
 
 **Q: What do ε and δ actually mean, and how do you pick them?**
+**Short:** Epsilon bounds the multiplicative privacy loss and delta bounds the probability that bound fails to hold.
+
 ε bounds the multiplicative privacy loss (e^ε is the max ratio between output probabilities on neighboring datasets) and δ is the probability that bound is violated. ε ≤ 1 is strong, 1–10 is common, and >10 is weak but sometimes justified (the US Census used ε ≈ 19.61 as a deliberate policy choice); δ should be much smaller than 1/N so a catastrophic one-record leak is astronomically unlikely, typically 1e-5 for hundreds of thousands of records. You pick ε by balancing the utility the task tolerates against the guarantee the threat model or regulator demands, and you report it explicitly because it is meaningless without context.
 
 **Q: What is membership inference and why does DP address it?**
+**Short:** Membership inference determines whether a record was in training, and DP bounds it by limiting one record's influence on the output.
+
 Membership inference decides whether a specific record was in a model's training set, usually by exploiting that models are more confident on data they trained on than on unseen data. It is the canonical privacy harm — revealing someone was in a therapy-bot's fine-tuning set or a cancer cohort is itself sensitive — and it is precisely the attack DP's definition bounds, since DP guarantees the output barely changes whether or not any record was included. This module summarizes it; the attack mechanics (shadow models, loss thresholds) are owned by [adversarial_ml_and_robustness](../adversarial_ml_and_robustness/README.md). Strength correlates with overfitting and duplication, so deduplication and early stopping are privacy controls too.
 
 **Q: What's the difference between the Laplace and Gaussian mechanisms?**
+**Short:** The Laplace mechanism gives a pure epsilon guarantee with no failure probability, while Gaussian composes more tightly.
+
 The Laplace mechanism adds noise scaled to Δf/ε and gives pure (ε, 0)-DP; the Gaussian mechanism adds noise with σ = Δf·√(2 ln(1.25/δ))/ε and gives approximate (ε, δ)-DP. You use Laplace when you need a hard guarantee with no failure probability (δ = 0) on low-sensitivity queries like counts, and Gaussian when you will compose many mechanisms — because Gaussian noise composes far more tightly under Rényi DP, which is exactly why DP-SGD, with its thousands of noisy steps, uses Gaussian. Both scale noise to the sensitivity Δf, the maximum output change from one record.
 
 **Q: What is federated learning and does it provide privacy on its own?**
+**Short:** Federated learning keeps raw data on-device but by itself gives no formal privacy guarantee, since updates can be inverted.
+
 Federated learning trains a shared model by sending it to where the data lives (phones, hospitals), training locally, and returning only model updates that a server averages — raw data never centralizes. By itself it provides *data locality*, not a formal privacy guarantee, because individual updates can be inverted to reconstruct training examples (gradient-inversion attacks recover images from one gradient). That is why production FL (Gboard) layers secure aggregation so the server sees only the summed update, and DP so even the aggregate is provably private. FL solves the centralization/breach/residency problem; DP and secure aggregation solve the leakage problem.
 
 **Q: Walk through the FedAvg algorithm.**
+**Short:** FedAvg repeats broadcasting the global model, local training, and a sample-weighted average of client updates each round.
+
 FedAvg repeats four steps each round: broadcast, local training, upload, aggregate. The server broadcasts the current global model to a sampled subset of clients; each client runs E epochs of local SGD on its own data and returns its updated weights plus its sample count; the server then sets the new global model to the sample-count-weighted average of the client weights and repeats for many rounds. Weighting by n_k ensures a client with more data has proportionally more influence, and sampling only a fraction of the fleet per round controls bandwidth and stragglers. A production keyboard model converges in hundreds to thousands of rounds with thousands of clients per round; only weight deltas, never keystrokes, cross the network.
 
 **Q: How does secure aggregation let the server compute a sum without seeing any input?**
+**Short:** Secure aggregation lets the server learn only the sum of client updates by having pairwise random masks cancel out.
+
 Every pair of clients shares a random mask that one adds and the other subtracts, so the masks cancel when the server sums all updates, leaving only the true sum. Each individual masked update looks like uniform random noise, so the server learns Σuᵢ but never any single uᵢ, which blocks gradient-inversion of one client's update. Key exchange (Diffie-Hellman) plus a PRG generates the masks cheaply, and Shamir secret-sharing of the mask seeds lets the protocol recover the correct sum even when some phones drop mid-round.
 
 **Q: Explain PATE and when it beats DP-SGD.**
+**Short:** PATE trains many teacher models on private data shards and distills them into a student trained only on noisy public labels.
+
 PATE trains an ensemble of "teacher" models on disjoint shards of the private data, then labels a public unlabeled dataset by noisy majority vote and trains a "student" on those noisy labels. The student, the only shipped model, never touches private data directly. It beats DP-SGD when you have abundant cheap public unlabeled data and the teachers agree strongly, because PATE's privacy analysis is *data-dependent*: strong consensus means the noisy vote rarely flips, so each query costs almost no budget, yielding better accuracy at the same ε. Its cost is training many teachers plus a student and needing that public dataset.
 
 **Q: Why is homomorphic encryption rarely used to train a whole model?**
+**Short:** Homomorphic encryption is rarely used for whole-model training because computing on ciphertext is orders of magnitude slower.
+
 Homomorphic encryption lets you compute on ciphertext so the server never sees plaintext, but it is roughly 10³–10⁶× slower than plaintext, which makes whole-model training economically absurd. A single CKKS multiplication is enormously expensive, ciphertexts are large, and deep-network training needs huge multiplicative depth, so end-to-end HE is a non-starter beyond toy models. In practice HE shows up only in narrow, shallow spots — encrypted secure aggregation of a linear sum of gradients — while the heavy lifting stays in plaintext protected by DP and secure aggregation instead.
 
 **Q: Why is k-anonymity considered weak, and what replaced it?**
+**Short:** K-anonymity is weak because it gives no formal guarantee and breaks under auxiliary-data linkage attacks.
+
 k-anonymity ensures every record shares its quasi-identifiers with at least k−1 others, but it gives no formal guarantee and breaks under auxiliary-data linkage. It fails against attribute disclosure (if all k share a sensitive value you learn it anyway), and the Netflix Prize and Massachusetts-governor re-identifications both broke k-anonymity-style releases using outside data. l-diversity and t-closeness patch specific holes but stay syntactic with no formal adversary model. Differential privacy replaced them because its guarantee holds regardless of what auxiliary data the adversary has.
 
 **Q: What is the privacy budget and why does composition matter?**
+**Short:** The privacy budget is the total epsilon spendable across all data uses, and composition theorems govern how fast it depletes.
+
 The privacy budget is the total ε you are willing to spend across everything that touches the private data; composition theorems say how fast repeated mechanisms drain it. Basic composition adds ε linearly (k queries at ε each cost kε), advanced composition grows roughly with √k, and Rényi DP / the moments accountant composes tightest by tracking Rényi divergence and converting to (ε, δ) once at the end — often giving 10× smaller ε than advanced composition for DP-SGD's thousands of steps. It matters because teams routinely underestimate spend: every training run, hyperparameter sweep, and release on the same data consumes budget, and once spent you cannot answer more questions privately without adding more noise.
 
 **Q: What is the central vs local DP distinction?**
+**Short:** Central DP adds noise once at a trusted aggregator needing far less noise, while local DP noises each value on-device.
+
 In central DP a trusted curator collects raw data and adds noise once to the aggregate; in local DP each user adds noise to their own value before it ever leaves the device, so no one is trusted with raw data. Central DP needs far less noise (roughly a √N advantage) and gives better utility, which is why the US Census uses it; local DP is stronger on trust (Apple never sees a true individual value) but requires millions of contributions for the noise to average out. Choose local DP when you cannot trust any aggregator and have huge N; otherwise central DP or secure aggregation gives much better accuracy.
 
 **Q: How do you set the clipping norm C in DP-SGD, and why does it matter so much?**
+**Short:** The clipping norm C sets the sensitivity DP-SGD's noise is calibrated against, so getting it wrong wrecks learning or privacy.
+
 C is the L2 norm each per-sample gradient is clipped to, and it is the sensitivity the noise is scaled against, so getting it wrong wrecks either learning or utility. Too small clips away the real signal and the model won't train; too large forces enormous calibrated noise and accuracy collapses. The standard starting point is C = 1.0, tuned jointly with the learning rate, sometimes with per-layer or adaptive clipping that sets C to a running quantile of observed gradient norms. DP-SGD is more sensitive to C than to nearly any other hyperparameter, so tune it first.
 
 **Q: How would you design a private next-word-prediction keyboard?**
+**Short:** A private keyboard combines federated learning, secure aggregation, and differential privacy, since no single layer alone suffices.
+
 Use federated learning so keystrokes never leave the device: broadcast the global model, train locally, return only updates. Layer secure aggregation so the server sees only the summed update, never one user's gradient, and add DP (DP-FTRL or DP-SGD on the aggregate) so the model has a formal ε bound against membership and extraction. Handle non-IID data (each user's vocabulary differs) with FedProx or personalization layers, sample a small fraction of eligible devices (charging, idle, Wi-Fi) each round, and account the cumulative ε across the training run — this is exactly the Gboard architecture.
 
 **Q: Can differential privacy help with GDPR's right to erasure?**
+**Short:** Differential privacy helps GDPR erasure because a DP-trained model provably reveals almost nothing about any one user.
+
 Indirectly but importantly: a DP-trained model provably changes by only a bounded amount from any one user's presence, so the weights reveal almost nothing about them. That largely satisfies the erasure obligation on the weights by construction — you still delete their raw records from corpora and logs. This is far stronger than machine unlearning, which tries to remove a record after the fact and often fails audits. The defensible architecture keeps personal data out of the weights so deletion requests never require surgery on a trained model; see [privacy_and_data_governance](../../llm/llm_security/privacy_and_data_governance.md).
 
 **Q: What is model inversion and how is it different from membership inference?**
+**Short:** Model inversion reconstructs a representative input for a class, while membership inference only decides if a record was in training.
+
 Model inversion reconstructs a representative input for a class or individual, whereas membership inference only decides yes/no whether a specific record was in training. Fredrikson recovered recognizable faces from a face-recognition model — inversion is a reconstruction attack (you get data back) and membership is a detection attack (you learn presence). Both exploit that the model's behavior depends on specific training records, so DP bounds both by limiting how much any single record influences the model. Returning coarse outputs (top-k labels, rounded confidences) instead of full probability vectors further blunts inversion.
 
 **Q: What is attribute inference and why is it hard to defend against?**
+**Short:** Attribute inference recovers a known person's hidden sensitive attribute from correlated model outputs, hard to defend without hurting utility.
+
 Attribute inference recovers a hidden sensitive attribute of a person the adversary already knows — their health status, income, or orientation — from features the model correlates with it. It differs from membership inference (which asks if you were in the data) and inversion (which reconstructs an input): here the adversary already knows who you are and uses the model to fill in a secret field. It is hard to defend because the correlation the attacker exploits is often the *legitimate signal the model was built to learn* — you cannot noise it away without destroying utility. Mitigations focus on not exposing the correlated outputs, fairness/decorrelation constraints, and DP to bound how confidently any single record's attribute can be inferred.
 
 **Q: How does gradient inversion work and why does it break naive federated learning?**
+**Short:** Gradient inversion reconstructs a client's raw training data from its shared gradient, breaking the on-device-only privacy assumption.
+
 Gradient inversion reconstructs a client's raw training examples from the gradient (or weight update) it shares, by optimizing a synthetic input until its gradient matches the observed one. Published attacks (Deep Leakage from Gradients) recover pixel-accurate images and token-accurate text from a single small-batch update, which is exactly why "the data stays on the device" is not a privacy guarantee in FL. The larger the batch and the more local steps, the harder inversion becomes, but the reliable fixes are secure aggregation (the server sees only a sum of many updates, not one) and DP noise on the update (bounding what any gradient reveals). This is the concrete threat that makes the FL + secure-aggregation + DP stack non-optional.
 
 **Q: What is split learning and when would you use it over federated learning?**
+**Short:** Split learning has the client run early layers and send only activations, splitting data exposure and model ownership.
+
 Split learning cuts the network at a layer so the client runs the first layers on its raw data and sends only the activations, while the server runs the rest. Raw features never leave the client and no single party holds the full model, so it splits both data exposure and model ownership. You'd prefer it over FL when the client is too weak to train the whole model (the server carries the heavy layers) or when you specifically want to split model ownership, and it sends less per step than shipping full weight updates. Its weaknesses are that the cut activations can still leak (pair with noise) and that vanilla split learning serializes clients, so in practice it is combined with federated learning (SplitFed) to parallelize across a fleet.
 
 **Q: Why isn't secure aggregation alone enough — why add DP?**
+**Short:** Secure aggregation alone is insufficient because the revealed aggregate can still leak, so DP is layered on top of it.
+
 Secure aggregation hides individual updates, but the aggregate it reveals can still leak information about one client. If the sum is dominated by one client, or an adversary controls all but one client, the remaining contribution is exposed, and even a clean aggregate can memorize outliers. DP fixes this by adding calibrated noise to the aggregate so it is provably insensitive to any single client's data regardless of the others. So secure aggregation protects the update at the server and DP bounds what the released model reveals — you need both for a real guarantee.
 
 ---

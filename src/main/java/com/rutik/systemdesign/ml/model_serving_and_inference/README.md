@@ -711,57 +711,75 @@ torch.onnx.export(
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between REST and gRPC for model serving, and when would you choose each?**
+**Short:** gRPC's binary Protocol Buffers over HTTP/2 serialize 2-10x faster than REST/JSON, making it the pick for high-QPS internal serving calls.
 REST uses HTTP/1.1 with JSON bodies; gRPC uses HTTP/2 with binary Protocol Buffers. gRPC serialization is 2–10x faster and connections are persistent, reducing overhead. For high-QPS internal microservice calls or latency-sensitive paths, gRPC is preferred. REST is better for external-facing APIs, diverse clients, or when human readability of payloads matters for debugging.
 
 **Q: How does dynamic batching reduce cost while maintaining latency SLAs?**
+**Short:** Dynamic batching amortizes the fixed per-launch GPU cost across many requests, capping added latency at the configured max_wait_ms.
 Dynamic batching waits up to `max_wait_ms` (e.g., 5ms) or until `max_batch_size` (e.g., 32) requests accumulate before sending a single GPU kernel launch. The mechanism is amortization: the per-launch cost (kernel launch, reading model weights out of HBM, the framework frame) is paid once per batch instead of once per request. With the worked example in Section 6 — 4.0ms fixed overhead, 0.25ms per sample — going from B=1 to B=32 raises throughput about 11x for 7.75ms of worst-case added latency. The SLA is maintained because the added latency is bounded by `max_wait_ms`.
 
 **Q: Why might you choose ONNX Runtime over native PyTorch for CPU-based serving?**
+**Short:** ONNX Runtime applies graph-level fusion and drops the Python interpreter from the request path, often speeding up small dense models on CPU.
 ONNXRuntime applies graph-level optimizations (operator fusion, constant folding, memory layout optimization) that PyTorch's eager mode cannot. It also drops the Python interpreter from the request path entirely. The size of the CPU win is model-dependent — small dense models with many little ops gain the most from fusion, and you should measure it rather than quote a multiplier. ONNX also enables cross-framework portability — a model trained in TensorFlow can be exported to ONNX and served in an ONNXRuntime-based PyTorch microservice.
 
 **Q: Explain the cold-start problem in GPU-based model serving and how to mitigate it.**
+**Short:** Cold start comes from CUDA context creation, weight transfer, and kernel selection, and is mitigated with warm-up requests and pre-built engines.
 A fresh serving process pays several one-time costs before its first prediction, so early requests are far slower than steady state. Those costs are CUDA context creation on the first CUDA call (tens to a couple hundred milliseconds, scaling with the memory mapped), copying model weights to GPU memory (100ms to several seconds for large models), and cuDNN/cuBLAS algorithm selection or JIT compilation at the first input shape. At the pod level, image pull and node provisioning dominate everything else and push the real cold start into tens of seconds. Mitigation: send warm-up requests during pod startup; use Kubernetes readiness probes to hold traffic until the model is ready; use pre-built TensorRT engines that skip JIT compilation; keep a warm buffer of pods so scale-up is not on the critical path.
 
 **Q: What is continuous batching and why is it important for LLM serving?**
+**Short:** Continuous batching inserts new requests into a running LLM batch at every step, reaching up to 23x the throughput of naive static batching.
 Traditional static batching for LLMs waits until all sequences in a batch finish generation, wasting GPU cycles on idle sequences. Continuous batching (iteration-level scheduling) allows inserting new requests into the batch at each forward pass step, filling slots freed by completed sequences. The published Anyscale benchmark (OPT-13B on one A100-40GB) measured up to 23x throughput over naive static batching for vLLM, and about 8x for continuous-batching servers without vLLM's paged KV cache — and median latency improved rather than regressed, because queued requests start generating sooner.
 
 **Q: How do you implement A/B testing for model updates in production?**
+**Short:** Route a small traffic percentage to the new model version, compare business and technical metrics, then promote or roll back after significance.
 Deploy both model versions as separate serving instances. Configure the load balancer or a feature flag system to route a small percentage of traffic (e.g., 5%) to the new version. Collect business and technical metrics (conversion rate, latency, accuracy on delayed labels) for both versions. After a statistically significant observation period, either promote the new version to 100% or roll back. Shadow mode (run both, compare offline without affecting users) is safer for high-stakes models.
 
 **Q: What are the tradeoffs between serving on GPU vs CPU?**
+**Short:** GPU maximizes throughput for large models at high QPS but adds cold-start and cost; CPU scales cheaply but can't handle large models at scale.
 GPU maximizes throughput for large models and high QPS but has high fixed cost, cold-start latency, and is harder to autoscale quickly. CPU has lower per-instance cost, near-zero cold-start, and scales easily, but is insufficient for large models (LLMs, large CNNs) at production QPS. Rule of thumb: use CPU for models under ~10M parameters at < 50 RPS; use GPU for large models or when throughput demands batch sizes > 8.
 
 **Q: How do you handle model versioning in a production serving system?**
+**Short:** Version model artifacts in a registry with stage labels, and have serving load the Production-tagged model so rollback is an atomic pointer swap.
 Store model artifacts in a versioned artifact store (S3 with versioning, GCS, MLflow artifact store). Assign semantic or timestamp-based version identifiers. Register models in a model registry (MLflow Model Registry) with stage labels (Staging, Production). Serving infrastructure loads the model pinned to the Production stage. Rolling updates swap the serving pointer atomically, keeping the previous version registered for instant rollback.
 
 **Q: What observability signals should every model serving endpoint emit?**
+**Short:** Every serving endpoint should emit latency percentiles, throughput, error rate, and prediction distribution, all labelled by model version.
 Every endpoint must emit latency percentiles, throughput, error rate, and the prediction distribution, all labelled by model version. Concretely: request latency (P50, P95, P99) per model version; throughput (RPS); error rate (5xx, timeout); batch size distribution; input feature statistics (mean, std, null rate for drift detection); model output distribution (prediction score histogram); hardware utilization (GPU memory and utilization, CPU, memory). These should feed into Prometheus/Grafana with alerts on SLA breaches.
 
 **Q: How does TorchServe's handler architecture work?**
+**Short:** TorchServe's handler implements preprocess, inference, and postprocess, letting the server own infra concerns while engineers own only the handler.
 TorchServe loads a model archive (.mar file) containing the serialized model and a handler Python class. The handler implements three methods: `preprocess` (raw request bytes → tensor), `inference` (tensor → tensor via model.forward), and `postprocess` (tensor → response bytes). The server manages concurrency, batching, and versioning; the handler is the only user-authored code. This separation allows infrastructure teams to own the server and ML engineers to own the handler. Know the pattern, but note that TorchServe itself is no longer maintained (repo archived August 2025), so the same three-stage handler contract is what you now look for in Triton's Python backend or a BentoML service.
 
 **Q: What is shadow mode serving and when do you use it?**
+**Short:** Shadow mode runs a candidate model on live traffic without returning its output to users, logging predictions for safe offline comparison.
 Shadow mode runs a candidate model on live traffic alongside the production model, but only the production model's response is returned to users. The candidate's predictions are logged and compared offline. This is used when the model update is high-risk (medical, financial), when labeling is slow, or when you want to validate model behavior at real traffic distribution before any user is affected. It doubles inference cost during the shadow period.
 
 **Q: Your model runs in 2ms but P99 latency is 45ms — where is the time going?**
+**Short:** The missing latency is almost always outside the model itself, in payload deserialization, feature-store lookups, or queue wait time.
 The time is almost certainly outside inference, so profile the whole request lifecycle before touching the model. Check payload deserialization, feature-store lookups, queue wait, and response serialization. Size each one instead of guessing: on CPython a single 500-float JSON array parses in about 0.1ms and cannot explain 43ms, but a 2MB batch payload of ~100,000 numbers costs around 20ms in `json.loads` plus more in validation, and a synchronous feature-store round trip easily costs tens of milliseconds. Switching JSON to gRPC with Protobuf, reusing connections, and moving remote lookups off the critical path are the usual fixes.
 
 **Q: What is the difference between a liveness (`/health`) and a readiness (`/ready`) probe, and why does confusing them cause deploy outages?**
+**Short:** Liveness only checks the process is alive, so relying on it alone routes traffic before the model finishes loading, causing deploy-time 500s.
 Liveness answers "is the process alive?" and readiness answers "can it serve traffic yet?". If you only implement liveness, Kubernetes routes traffic to a pod the moment the process starts — before the model is downloaded and loaded — producing seconds of 500 errors on every deploy. The readiness endpoint must return 503 until the model session is initialized so the load balancer holds traffic until the pod is genuinely ready.
 
 **Q: How do you set `max_batch_size` and `max_wait_ms` for dynamic batching?**
+**Short:** Set max_wait_ms as a small fraction of your latency SLA and pick max_batch_size at the knee of the measured latency-versus-batch-size curve.
 Derive them from your latency budget, not from defaults. `max_wait_ms` is worst-case latency you add to every request while it waits for a batch to fill, so set it to a fraction of your P99 budget (e.g., 5ms of a 50ms SLA); `max_batch_size` should be the largest batch the GPU runs before per-request latency starts climbing. Measure the latency-vs-batch curve for your model and hardware, then pick the knee.
 
 **Q: Why must a serving instance be stateless, and what breaks if it is not?**
+**Short:** A serving instance must be stateless because holding per-user state locally forces sticky sessions and breaks horizontal scaling and failover.
 Stateless instances can be freely added or removed behind a load balancer, which is what makes horizontal scaling work. If an instance holds per-user state (a session cache, an accumulating counter) in local memory, requests must be pinned to one pod via sticky sessions, scaling and failover break, and predictions become non-reproducible. Push shared state to an external store (feature store, Redis) and keep the loaded model weights the only in-process state.
 
 **Q: How do you autoscale GPU-backed model servers, and why is it harder than autoscaling CPU services?**
+**Short:** GPU autoscaling must key on queue depth or GPU utilization rather than CPU%, since a saturated GPU server can show low CPU and never scale up.
 GPU autoscaling is harder because a new pod takes tens of seconds to become useful and GPUs are expensive, so reactive scaling always lags demand. That cold start is node provisioning, image pull, weight load and CUDA/kernel warm-up stacked together, not a sub-second event. Scale on a leading signal that tracks the actual bottleneck — request queue depth, in-flight sequences, or GPU utilization — never CPU%, which on a GPU-bound server stays low while the GPU saturates and will simply never trigger the scale-up. Keep a warm buffer of pre-initialized pods so a traffic spike does not hit cold CUDA-context initialization, and set conservative scale-down to avoid thrashing pods up and down.
 
 **Q: What is the difference between blue-green and canary deployment for models?**
+**Short:** Blue-green flips all traffic to a validated new environment at once for instant rollback, while canary ramps traffic gradually to limit blast radius.
 Blue-green keeps two full environments and flips 100% of traffic from the old (blue) to the new (green) at once after validating green, giving instant rollback by flipping back. Canary instead shifts traffic gradually (5% → 25% → 100%), limiting blast radius and letting you watch metrics at each step, but exposing some users to a bad model before you catch it. Blue-green optimizes for fast, clean cutover; canary optimizes for early detection on real traffic.
 
 **Q: When and why would you use server-sent events (SSE) or streaming for model serving?**
+**Short:** Streaming tokens as they're generated slashes a generative model's perceived latency even though it doesn't change total inference time.
 Use streaming for generative models so users see tokens as they are produced instead of waiting for the full response. It does not make inference faster, but it slashes perceived latency — time-to-first-token is what users feel, so a 3-second completion can feel instant. Streaming also enables natural backpressure: a client that stops reading signals the server to abort and reclaim resources, which is essential for LLM chat interfaces.
 
 ---

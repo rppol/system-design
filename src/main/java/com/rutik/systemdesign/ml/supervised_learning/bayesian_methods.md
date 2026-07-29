@@ -864,63 +864,103 @@ A Bayesian network (an extension of Naive Bayes that models dependencies) team s
 ## 12. Interview Questions with Answers
 
 **Q: State Bayes theorem and explain each term in a classification context.**
+**Short:** Bayes theorem combines the likelihood and prior into the posterior, since the marginal cancels under argmax.
+
 P(y | x) = P(x | y) * P(y) / P(x). The posterior P(y | x) is the probability of the class given the observed features — this is what we want to predict. P(x | y) is the likelihood: how likely are these features under each class model. P(y) is the prior: how frequent is each class in the training data. P(x) is the marginal likelihood (normalizing constant): the same for all classes, so it cancels when taking argmax. In practice we compute: argmax_k P(x | y=k) * P(y=k).
 
 **Q: Why is the independence assumption "naive" and why does NB still work?**
+**Short:** The feature-independence assumption is almost always false, yet NB still ranks classes correctly in practice.
+
 The independence assumption P(x | y) = prod_j P(x_j | y) is almost always violated — words co-occur, features are correlated. Despite this, NB works because: (1) for classification, we only need the argmax of P(y | x) across classes, not the exact probability — the ranking can be correct even with wrong individual probabilities; (2) if all features point toward the same class (many spam words in a spam email), even correlated features cumulatively support the correct prediction; (3) the strong bias (independence assumption) acts as regularization, preventing overfitting on small datasets. NB is a high-bias, low-variance model.
 
 **Q: What is Laplace smoothing and why is it necessary?**
+**Short:** Laplace smoothing adds pseudocounts so an unseen word never zeroes out the whole document's probability.
+
 Laplace smoothing adds a pseudocount of alpha to every word count in every class before computing likelihood estimates. The estimator becomes P(word_j | y=k) = (count(word_j, y=k) + alpha) / (total_words_in_y=k + alpha * V), where alpha is sklearn's `alpha` parameter and V is the vocabulary size. Without smoothing (alpha=0), any word not seen in training for class k gives P(word_j | y=k) = 0, which makes the entire document probability zero (the zero-probability catastrophe). Laplace smoothing corresponds to using a Dirichlet(alpha,...,alpha) prior over the multinomial parameters — it is Bayesian estimation with a uniform prior (alpha=1) or a more informative prior (alpha < 1 for sharper models, alpha > 1 for more smoothing). Setting alpha = 1/V (expected count per word in uniform distribution) is also common.
 
 **Q: What is the difference between MultinomialNB and BernoulliNB?**
+**Short:** MultinomialNB models word counts, while BernoulliNB models only whether each word is present or absent.
+
 MultinomialNB uses word counts as features: P(x | y=k) is a multinomial distribution over words. It is appropriate when the number of occurrences matters (longer documents with more occurrences of key words should score higher). BernoulliNB uses binary features: each feature is 0 (word absent) or 1 (word present), regardless of frequency. BernoulliNB explicitly models the probability of word absence — P(x_j=0 | y=k) — which is useful when absence is informative (a spam email that lacks common greeting words is suspicious). For long documents, MultinomialNB typically outperforms BernoulliNB; for short texts (tweets, titles), the difference is smaller.
 
 **Q: How does Naive Bayes handle continuous features?**
+**Short:** GaussianNB models each continuous feature as a Gaussian distribution fitted separately within each class.
+
 GaussianNB assumes each continuous feature is Gaussian within each class: P(x_j | y=k) = N(mu_kj, sigma_kj^2). During training, it estimates mu_kj = sample mean and sigma_kj^2 = sample variance for each feature-class combination. Prediction uses the Gaussian PDF to compute the likelihood. If the Gaussian assumption is violated (skewed features, multimodal distributions), GaussianNB performance degrades. Alternatives: (1) log-transform skewed features; (2) discretize continuous features and use MultinomialNB; (3) use kernel density estimation instead of Gaussian (KDE-based NB).
 
 **Q: Can Naive Bayes be used for regression? If not, what is the Bayesian regression equivalent?**
+**Short:** NB is classification-only; the Bayesian regression counterpart is Bayesian linear regression with a Gaussian posterior.
+
 Standard NB is a classifier. The Bayesian regression equivalent is Bayesian linear regression: assumes w ~ N(mu_0, Sigma_0) as prior and y = w^T x + epsilon where epsilon ~ N(0, sigma^2). The posterior is also Gaussian (conjugate): w | X, y ~ N(mu_n, Sigma_n) with closed-form updates. Predictions are distributions over y, not point estimates. Bayesian ridge regression (sklearn BayesianRidge) implements this — it automatically estimates the regularization parameter from the data via evidence maximization, rather than requiring cross-validation.
 
 **Q: What is the difference between MAP estimation and full Bayesian inference?**
+**Short:** MAP returns one point estimate at the posterior's peak; full Bayesian inference keeps the entire posterior distribution.
+
 MAP (Maximum A Posteriori) estimation finds the single parameter value that maximizes the posterior P(theta | data) = P(data | theta) * P(theta) / P(data). It is a point estimate — equivalent to regularized MLE (L2 regularization corresponds to a Gaussian prior; L1 corresponds to a Laplace prior). Full Bayesian inference maintains the entire posterior distribution P(theta | data), enabling uncertainty quantification, credible intervals, and predictive distributions that account for parameter uncertainty. MAP is fast (gradient optimization); full inference requires MCMC (slow, exact) or variational inference (fast approximation).
 
 **Q: What are conjugate priors and why are they useful?**
+**Short:** A conjugate prior produces a posterior in the same distribution family, enabling closed-form updates.
+
 A conjugate prior is a prior distribution that, when combined with a specific likelihood via Bayes theorem, produces a posterior of the same distributional family. This enables closed-form posterior updates without numerical integration. Example: Beta prior + Binomial likelihood = Beta posterior (the counts just add to the parameters: Beta(alpha + successes, beta + failures)). Useful because: (1) exact posterior in closed form — no MCMC needed; (2) interpretable updates — posterior parameters have direct meaning as pseudocounts; (3) online learning is trivial — each new observation updates the parameters analytically. Laplace smoothing in NB is using a Dirichlet(alpha) prior conjugate to the Multinomial likelihood.
 
 **Q: How do you handle a feature with a very large number of categories in Naive Bayes?**
+**Short:** Increase smoothing, bucket rare categories, or hash high-cardinality features to avoid zero-count estimates.
+
 With K classes and a feature with V categories, you estimate K*V probabilities from the training data. If V is very large (e.g., user_id, product_id), many category-class combinations will have zero count, causing over-reliance on Laplace smoothing (all zeros become alpha/(n_class + alpha*V) — effectively ignoring the feature). Solutions: (1) increase alpha to smooth more aggressively; (2) group rare categories into an "Other" bucket; (3) use hashing (sklearn HashingVectorizer) to collapse high-cardinality into a fixed-size hash space; (4) remove high-cardinality identifiers entirely — they are unlikely to generalize.
 
 **Q: What is the relationship between Naive Bayes and logistic regression?**
+**Short:** Gaussian NB with equal class variances yields the same linear decision-boundary form as logistic regression.
+
 For Gaussian NB with equal class variances (assumption: covariance matrices are identical across classes), the decision boundary is linear and has exactly the same functional form as logistic regression's. The two are a generative-discriminative pair (Ng and Jordan, 2001): same parametric family for P(y | x), different estimation, so the fitted coefficients generally differ. More generally, NB is a generative model (models P(x, y) = P(x | y) P(y)) and logistic regression is a discriminative model (models P(y | x) directly). When the NB assumptions hold perfectly, NB achieves the same asymptotic accuracy as logistic regression with fewer training samples. When the NB assumptions are violated, logistic regression typically outperforms NB on large datasets because it learns the best linear boundary without assuming a parametric distribution.
 
 **Q: How would you compute P(spam | words) for a new email using Multinomial NB?**
+**Short:** Sum the log prior with each word's log-likelihood per class, then compare the resulting log-scores.
+
 Step 1: compute log P(spam) = log(n_spam / n_total) and log P(ham) from training data. Step 2: for each word j in the email with count c_j, add c_j * log P(word_j | spam) to the spam log-score and c_j * log P(word_j | ham) to the ham log-score (skip words not in vocabulary if using vocabulary-limited vectorizer, or handle with smoothing). Step 3: the spam score = log P(spam) + sum_j c_j * log P(word_j | spam). Step 4: the class with the higher log-score wins. To get the actual probability: P(spam | x) = exp(spam_score) / (exp(spam_score) + exp(ham_score)) — use scipy.special.softmax for numerical stability.
 
 **Q: How do you calibrate Naive Bayes probabilities, and when is this important?**
+**Short:** Wrap Naive Bayes with CalibratedClassifierCV since its raw output probabilities are often poorly calibrated.
+
 NB probabilities are often poorly calibrated — predicted probability 0.99 does not mean 99% of such cases are positive. Calibration is important when the probability itself is used downstream (expected value calculations, risk thresholds, probability-based routing). Fix using sklearn CalibratedClassifierCV: wrap the NB model with method="isotonic" (nonparametric, requires > ~1000 calibration examples) or method="sigmoid" (Platt scaling, for smaller calibration sets). Always evaluate calibration on a separate calibration set (not the training set) using a reliability diagram or Brier score.
 
 **Q: Explain Bayesian A/B testing and how it differs from frequentist hypothesis testing.**
+**Short:** Bayesian A/B testing reports P(treatment beats control) directly, instead of a frequentist null-hypothesis p-value.
+
 Bayesian A/B test: model conversion rate p as Beta(alpha, beta) prior (typically uniform Beta(1,1)). After observing n conversions out of N trials, the posterior is Beta(alpha + conversions, beta + non_conversions). To compare two variants, compute P(p_treatment > p_control) via Monte Carlo samples from both posteriors. Result: a direct probability statement ("91% chance treatment wins"). Frequentist: compute a p-value (probability of observing data this extreme under the null hypothesis), compare to alpha=0.05. Does NOT give P(treatment is better). Frequentist fixed-horizon tests suffer from optional stopping bias: peeking at the data and stopping early inflates the false positive rate. The Bayesian posterior stays a valid statement about the data seen so far no matter when you look, which is why peeking does not corrupt the inference — but a decision rule of "ship as soon as P(treatment > control) exceeds 0.95" is still a stopping rule, and its long-run false-positive rate is higher than a fixed-horizon test at the same nominal level. If you need a guaranteed error rate under continuous monitoring, use a sequential test with an alpha-spending boundary.
 
 **Q: What is the difference between a credible interval and a confidence interval?**
+**Short:** A credible interval states the parameter's probability directly; a confidence interval describes long-run coverage.
+
 A 95% Bayesian credible interval [a, b] means: given the observed data, the probability that the parameter lies in [a, b] is 0.95. This is the intuitive, direct interpretation. A 95% frequentist confidence interval means: if we repeated the experiment many times and computed this interval each time, 95% of such intervals would contain the true parameter. It does NOT mean the probability that this specific interval contains the true parameter is 95% (because in the frequentist framework, the parameter is fixed, not random). In practice, most practitioners (incorrectly) interpret confidence intervals as credible intervals — which is actually valid under a flat (non-informative) prior.
 
 **Q: How does Naive Bayes perform compared to gradient boosting on tabular data?**
+**Short:** Gradient boosting usually beats Naive Bayes on tabular data except for tiny, count-based, or latency-critical cases.
+
 On most tabular datasets with continuous features, gradient boosting significantly outperforms Naive Bayes. Three reasons: (1) gradient boosting captures feature interactions; (2) NB's Gaussian assumption rarely holds for tabular data; (3) gradient boosting handles non-linear relationships natively. NB is competitive or superior when: features are truly count-based (text, event logs); dataset is very small (n < 500); training and inference must be sub-millisecond; features are conditionally nearly independent (rare in tabular data but common in text). On a bag-of-words corpus such as 20 Newsgroups the gap is typically a handful of accuracy points in gradient boosting's favour — small enough that NB's orders-of-magnitude faster training usually decides it. Benchmark on your own corpus rather than trusting a quoted pair of numbers; the gap swings with vectorizer, alpha and class balance.
 
 **Q: What is Bayesian model selection and how does it differ from cross-validation?**
+**Short:** Bayesian model selection compares models by marginal likelihood instead of empirical cross-validation performance.
+
 Bayesian model selection uses the marginal likelihood P(data | model) = integral P(data | theta, model) P(theta | model) d_theta — also called evidence or model evidence — to compare models. The model with the highest evidence is preferred. This automatically balances fit and complexity (the Occam's Razor of Bayesian model selection: models that fit the data well without excessive parameters have higher evidence). Cross-validation estimates out-of-sample predictive performance empirically, requiring multiple train-test splits. Bayesian model selection is computationally harder (requires integrating over the parameter space) but provides an analytical framework for model comparison. In sklearn, BayesianRidge selects its regularization strength by evidence maximization, and BayesianGaussianMixture uses a variational Dirichlet-process prior to drive unneeded mixture components toward zero weight — both are the same "let the evidence decide the complexity" idea applied inside a single estimator.
 
 **Q: How does BayesianRidge regression differ from standard Ridge regression?**
+**Short:** BayesianRidge learns its regularization strength from the data instead of requiring cross-validation like Ridge.
+
 Standard Ridge (Ridge(alpha=1.0)) fixes the regularization strength alpha externally (chosen by cross-validation). BayesianRidge places a Gamma prior on the noise precision (sklearn calls it `alpha_`, equal to 1/sigma^2) and another on the weight precision (`lambda_`), then estimates both by maximizing the marginal likelihood (type-II MLE / empirical Bayes). The result: the effective regularization strength lambda/alpha is learned from the data automatically — no cross-validation needed. BayesianRidge also provides posterior variance on the weights (enabling confidence intervals on predictions). It is especially useful when the training set is small (< 1000 samples) or when cross-validation is computationally expensive.
 
 **Q: Why is Naive Bayes computed in log space using the log-sum-exp trick?**
+**Short:** Naive Bayes sums log-probabilities instead of multiplying raw ones to avoid numerical underflow.
+
 Multiplying many small per-word probabilities underflows to zero in floating point, so NB sums log-probabilities instead of multiplying raw probabilities. A 200-word document multiplies 200 numbers each around 0.001, giving ~10^-600, which is below the float64 minimum (~10^-308) and rounds to exactly 0 — destroying the class comparison. Taking logs turns the product into a sum of finite negative numbers that never underflows. To recover the normalized probability P(y | x) from log-scores, apply the log-sum-exp trick (subtract the max log-score before exponentiating) for numerical stability.
 
 **Q: What is the difference between var_smoothing in GaussianNB and alpha smoothing in MultinomialNB?**
+**Short:** var_smoothing prevents zero-variance Gaussian features; alpha smooths unseen words in count-based features.
+
 They fix different failure modes: var_smoothing guards against zero-variance continuous features, while alpha guards against unseen words in count features. var_smoothing adds a tiny epsilon to feature variances so a zero-variance feature does not cause a divide-by-zero in the Gaussian PDF (default 1e-9, scaled by the largest feature variance). alpha adds pseudocounts to word counts so an unseen word does not force P=0 in the multinomial (default 1.0, a Bayesian Dirichlet prior). A common mistake is expecting alpha to help GaussianNB — it has no alpha parameter at all.
 
 **Q: Why does ComplementNB often outperform MultinomialNB on imbalanced text?**
+**Short:** ComplementNB estimates parameters from the complement class, giving more stable estimates on imbalanced text.
+
 ComplementNB estimates each class's parameters from the complement of that class — all documents NOT in it — giving a far larger, more stable sample when the class itself is tiny. Standard MultinomialNB estimates P(word | class) from only the in-class documents, so a minority class with few examples yields noisy, count-starved likelihoods biased toward the majority. Using the complement also counteracts the tendency to assign long documents to text-heavy classes. On skewed 20-Newsgroups-style corpora, ComplementNB typically beats MultinomialNB by 1–3% accuracy.
 
 ---

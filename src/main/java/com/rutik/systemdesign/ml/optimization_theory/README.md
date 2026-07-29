@@ -838,57 +838,93 @@ optimizer.step()
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between batch gradient descent, SGD, and mini-batch gradient descent?**
+**Short:** Mini-batch gradient descent is the practical standard because it balances unbiased gradients with GPU parallelism.
+
 Batch GD computes the exact gradient using all N training samples before each update — very accurate gradient but expensive per step, and cannot use the mini-batch pipeline parallelism of modern GPUs. SGD uses a single sample per update — cheapest per step but very noisy gradients with high variance. Mini-batch SGD uses 32-256 samples per update — the practical standard because it is unbiased like batch GD, parallelizable across GPU cores, and the gradient noise is low enough for stable training. Almost all modern deep learning uses mini-batch with batch size tuned for GPU memory.
 
 **Q: What problem does momentum solve in gradient descent?**
+**Short:** Momentum solves oscillation and slow convergence by accumulating velocity along consistent gradient directions.
+
 Momentum addresses two issues: oscillation and slow convergence in ravine-shaped loss surfaces. Without momentum, gradient descent oscillates across a narrow valley because the gradient perpendicular to the valley bottom is large, leading to zig-zag steps. Momentum accumulates velocity — updates in consistent directions grow while oscillating directions cancel out. It also accelerates convergence when the gradient consistently points in the same direction. The effective learning rate in a consistent direction is lr / (1 - beta) = 10x for beta=0.9.
 
 **Q: Explain Adam's two moment estimates and why bias correction is needed.**
+**Short:** Adam's bias correction rescales its moment estimates, which start at zero and are biased low early in training.
+
 Adam maintains m (first moment — exponential moving average of gradients, like momentum) and v (second moment — exponential moving average of squared gradients, like RMSProp). At step t, both are initialized to 0, so early values are biased toward 0. Bias correction computes m_hat = m / (1 - beta1^t) and v_hat = v / (1 - beta2^t). At t=1 with beta1=0.9: m_hat = m / 0.1, which counteracts the 90% discounting of the first gradient. The two biases do not cancel: uncorrected m is 10x too small while uncorrected sqrt(v) is about 31.6x too small, so an uncorrected first step comes out 3.16x LARGER than lr. That inflation factor, (1 - beta1^t) / sqrt(1 - beta2^t), is still 3.24x at t=100 and only settles near 1.0 after a few thousand steps, so it distorts the whole early phase rather than one step.
 
 **Q: Why does Adam sometimes generalize worse than SGD for vision tasks?**
+**Short:** Adam sometimes generalizes worse than SGD on vision because its adaptivity converges into sharper, less robust minima.
+
 Adam's adaptive learning rates tend to find sharp minima — narrow valleys in the loss landscape that generalize worse. It gets there by taking large steps along low-curvature directions and small steps along high-curvature ones, which converges into tighter basins. SGD with momentum, lacking this adaptivity, tends to find flatter minima with wider basins that generalize better — the flat minima hypothesis (Hochreiter & Schmidhuber, 1997) suggests parameters in flat regions are more robust to small perturbations. For NLP tasks where the loss landscape geometry differs, this trade-off reverses and Adam is superior.
 
 **Q: What is AdamW and why is it preferred over Adam with weight decay?**
+**Short:** AdamW decouples weight decay from the adaptive gradient update, making regularization strength consistent across parameters.
+
 Standard Adam with L2 regularization adds lambda * theta to the gradient before the adaptive update. This means weight decay is divided by sqrt(v_hat), making its effective strength different for each parameter and time step — parameters with small squared gradients get less effective regularization. AdamW (decoupled weight decay) applies weight decay directly to the parameters: theta = theta * (1 - lr * lambda) - adam_update. This makes the effective regularization strength consistent and independent of the adaptive scaling. AdamW is the standard for all transformer training (GPT, BERT, LLaMA use AdamW).
 
 **Q: What is gradient clipping and when should you use it?**
+**Short:** Gradient clipping rescales the gradient when its norm exceeds a threshold, preventing exploding-gradient instability.
+
 Gradient clipping rescales the gradient when its norm exceeds a threshold: g = g * (clip_norm / max(||g||, clip_norm)). This prevents gradient explosions — sudden large gradient magnitudes that send weights to NaN or far out of a good region. Always use gradient clipping for RNNs (vanishing/exploding gradients are the norm) and during early transformer training. Typical clip value is 1.0. Clip based on global gradient norm (all parameters together), not per-parameter, to preserve the relative gradient direction. Use per-layer gradient norms as a diagnostic metric during training.
 
 **Q: What is a saddle point and why is it not usually a problem in deep learning?**
+**Short:** Saddle points rarely trap deep learning training because high-dimensional critical points are almost never all-positive-curvature.
+
 A saddle point is a point where the gradient is zero but which is not a local minimum — curvature is positive in some directions and negative in others (like the center of a saddle). In low dimensions, saddle points can trap first-order methods indefinitely. In high-dimensional parameter spaces (millions to billions of parameters), the probability that all eigenvalues of the Hessian are positive at a critical point decreases exponentially with dimension. Near saddle points, gradient noise from mini-batches provides perturbations that push parameters along the negatively-curved escape directions.
 
 **Q: What is the difference between convex and non-convex optimization, and how does it affect training?**
+**Short:** Convex optimization guarantees every local minimum is global, while non-convex neural network losses offer no such guarantee.
+
 A function is convex if the line segment between any two points on the function lies above the function: f(lambda*x + (1-lambda)*y) <= lambda*f(x) + (1-lambda)*f(y). For convex functions, every local minimum is a global minimum, and gradient descent is guaranteed to converge. Logistic regression loss is convex; neural network loss is not. Non-convex optimization offers no global convergence guarantee, but in practice overparameterized networks seem to have many equivalent global minima, and SGD noise helps avoid poor local minima.
 
 **Q: How does the learning rate schedule affect training, and what is warmup?**
+**Short:** Warmup ramps the learning rate up gradually early in training, preventing divergence while Adam's variance estimate stabilizes.
+
 The learning rate controls how large each gradient step is. Early in training, large steps help explore the loss landscape quickly; late in training, small steps allow fine-grained convergence to a good minimum. Learning rate decay (step, exponential, cosine) implements this intuition. Warmup increases lr from near 0 to the target lr over the first 1-5% of training steps. This is critical for Adam because at initialization the second moment v rests on only a handful of gradients, so the per-parameter step size has very high variance; warmup keeps steps small until v is a reliable scale estimate, preventing early divergence.
 
 **Q: Why is second-order optimization not used for large neural networks?**
+**Short:** Second-order optimization is impractical for large networks because storing or inverting the Hessian requires infeasible memory.
+
 Newton's method computes the parameter update as theta = theta - H^{-1} * g where H is the n x n Hessian. For a model with n = 10^9 parameters, the Hessian has 10^18 entries — storing it requires petabytes of memory. Even computing the Hessian-vector product (Hv) without explicitly forming H takes O(n) time but requires a second backward pass. L-BFGS approximates the inverse Hessian with m previous gradient/step difference pairs (m=10-20), so its two-loop recursion costs only O(m*n) memory and O(m*n) time per step — cheap in principle, but it needs a line search over the full-batch loss, which is what rules it out for stochastic mini-batch training. Adam approximates the diagonal of the Hessian via the second moment v — a rough but practical substitute that captures per-parameter curvature.
 
 **Q: What is the effect of batch size on optimization and generalization?**
+**Short:** Larger batches give lower-variance gradients and faster convergence but tend to find sharper, worse-generalizing minima.
+
 Larger batch sizes produce lower-variance gradient estimates, allowing larger learning rates and faster wall-clock convergence. However, large batches tend to find sharper minima with worse generalization (the "generalization gap" for large batches, Keskar et al. 2017). Empirically, linear scaling rule: when batch size is multiplied by k, multiply lr by k (with warmup). Small batches (16-32) regularize implicitly through gradient noise and often find flatter minima, but are slower due to GPU underutilization. GPT-3 used batch size 3.2M tokens — large batch enabled by learning rate scaling.
 
 **Q: How do you diagnose whether a learning rate is too high or too low?**
+**Short:** A learning rate is diagnosed as too high when loss diverges, and too low when loss plateaus or falls very slowly.
+
 A learning rate that is too high shows a loss that diverges, oscillates, or spikes to NaN, while one that is too low shows a loss that decreases painfully slowly or plateaus early. A useful quantitative check is the ratio of the update norm to the parameter norm, which should sit near 1e-3 per step — much larger means the lr is too high, much smaller means it is too low. Loss curves are the first signal: a jagged or rising training loss almost always means lower the lr, and a smooth but nearly flat loss means raise it. The LR range test automates finding the sweet spot between these two regimes.
 
 **Q: What is the difference between classical momentum and Nesterov accelerated gradient (NAG)?**
+**Short:** Nesterov accelerated gradient evaluates the gradient at a lookahead position, damping overshoot better than classical momentum.
+
 Both accumulate a velocity vector, but Nesterov evaluates the gradient at the looked-ahead position theta + beta*v rather than at the current theta. This lookahead lets NAG anticipate where momentum is carrying the parameters and correct sooner, damping overshoot and giving a provably better rate on smooth convex problems (O(1/t^2) vs O(1/t)). In practice the gain over plain momentum is modest for deep nets, but NAG is a cheap drop-in exposed as the `nesterov=True` flag in SGD. Classical momentum uses v = beta*v - lr*g(theta); Nesterov uses v = beta*v - lr*g(theta + beta*v).
 
 **Q: Why is cosine annealing usually preferred over step decay for learning-rate schedules?**
+**Short:** Cosine annealing decays the learning rate smoothly, avoiding step decay's abrupt discontinuities and extra hyperparameters.
+
 Cosine annealing decays the lr smoothly from lr_max to lr_min following a half-cosine curve, avoiding the abrupt discontinuities of step decay. Step decay holds the lr constant then divides it by gamma (often 10x) at fixed epochs, so the model oscillates in one region until each drop, and the drop schedule adds extra hyperparameters to tune. Cosine keeps a large useful lr early for exploration and eases into small steps near convergence with only two parameters (lr_max, lr_min). It is the de facto standard for transformer pretraining, usually paired with linear warmup.
 
 **Q: Why does Adagrad's learning rate decay to zero, and how do RMSProp and Adam fix it?**
+**Short:** Adagrad's rate decays to zero from summing all past gradients; RMSProp and Adam use a bounded moving average instead.
+
 Adagrad accumulates the sum of all past squared gradients in its denominator, so the effective learning rate only ever shrinks and eventually decays to zero. RMSProp replaces the cumulative sum with an exponential moving average (decay 0.9 in Hinton's original lecture, 0.99 as PyTorch's `alpha` default), so the denominator reflects recent gradients and stays bounded; Adam builds on that EMA second moment with beta2=0.999 and adds a momentum first moment plus bias correction. Adagrad's decaying behavior is actually desirable for sparse features like word embeddings, where rarely-updated parameters keep larger effective steps, but it is fatal for dense deep networks that stall before convergence.
 
 **Q: What do Adam's beta1 and beta2 hyperparameters control, and when would you lower beta2?**
+**Short:** beta1 and beta2 control the decay of Adam's first and second moment estimates, and lowering beta2 aids large-batch LLM training.
+
 beta1 controls the decay of the first-moment (momentum) EMA and beta2 controls the decay of the second-moment (squared-gradient) EMA. The default beta2=0.999 averages over roughly the last 1/(1-beta2)=1000 gradients — very smooth but slow to react to changing gradient statistics. Lowering beta2 to 0.95, as GPT-3 and the Llama models did, makes the variance estimate more responsive and improves stability for large-batch LLM training where statistics shift quickly. Lowering beta1 makes updates react faster but noisier and is rarely changed from 0.9.
 
 **Q: How does the learning-rate range test (LR finder) work?**
+**Short:** The learning-rate range test sweeps lr geometrically while tracking loss to find the point just before divergence.
+
 Start at a tiny lr such as 1e-7 and increase it geometrically each mini-batch while recording the loss, then plot loss versus lr. The loss stays flat while lr is too small, drops steeply through the useful range, then diverges once lr is too large, so you pick a maximum lr slightly below the point of steepest descent (often about 10x below the minimum-loss lr). Introduced by Leslie Smith in 2017, it replaces a blind grid search over lr with a single short sweep of a few hundred steps. For one-cycle training, the chosen value becomes the peak lr.
 
 **Q: How does gradient accumulation affect the effective batch size, and what must you watch out for?**
+**Short:** Gradient accumulation simulates a larger batch by summing gradients over micro-batches before each optimizer step.
+
 Gradient accumulation sums gradients over K micro-batches before a single optimizer step, so the effective batch size becomes micro_batch * K times the number of GPUs. It lets you simulate a large batch that would not fit in memory, at the cost of K forward/backward passes per update. The key gotcha is loss scaling — you must divide each micro-batch loss by K (or average the gradients), otherwise the accumulated gradient is K times too large and the effective learning rate is silently inflated. A second gotcha is that LR schedules must be defined in optimizer steps, not forward passes, or the warmup length is off by a factor of K.
 
 ---

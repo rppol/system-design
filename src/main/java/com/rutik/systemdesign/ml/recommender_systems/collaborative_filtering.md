@@ -766,60 +766,98 @@ def popularity_fallback(
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between user-user and item-item collaborative filtering?**
+**Short:** Item-item CF is preferred because item similarities stay more stable over time than shifting user preferences.
+
 User-user CF finds the K users most similar to the target user (by cosine similarity on their interaction vectors) and aggregates their ratings for unseen items. Item-item CF finds, for each item the target user has interacted with, the K most similar items, and scores candidates by weighted similarity. Item-item is preferred in practice because item similarities are more stable over time (user preferences shift; item relationships do not), and the similarity table can be pre-computed offline, making serving O(1).
 
 **Q: How does ALS handle the fact that implicit feedback has no true negatives?**
+**Short:** ALS uses a confidence-weighted binary preference matrix so unobserved items are only weakly negative.
+
 ALS for implicit (Hu, Koren, Volinsky 2008) introduces a binary preference matrix P[u,i] = 1 if r[u,i] > 0, and a confidence matrix C[u,i] = 1 + alpha * r[u,i]. For unobserved interactions, P[u,i] = 0 and C[u,i] = 1 — a low but nonzero confidence that the user dislikes the item. For observed interactions, confidence scales with frequency. The model learns to satisfy high-confidence preferences strongly while only weakly satisfying low-confidence (unobserved) preferences. This avoids the pathology of treating all unobserved items as equally irrelevant.
 
 **Q: What is the role of the confidence parameter alpha in ALS?**
+**Short:** Alpha scales raw interaction counts into confidence values that weight positives against unobserved items.
+
 Alpha scales the raw interaction counts into confidence values: c_ui = 1 + alpha * r_ui. With alpha = 40, a user who clicked an item once has confidence 41 vs. confidence 1 for a non-clicked item. Alpha controls how much weight positive interactions receive relative to unobserved items. Typical values: 40 for e-commerce click data, 1 for binary (clicked or not) data. Too high: popular items dominate and diversity collapses. Too low: the model cannot distinguish between items the user loves and items they have never seen.
 
 **Q: Why does BPR outperform ALS for ranking tasks?**
+**Short:** BPR directly optimizes a pairwise ranking loss, which aligns better with NDCG than ALS's squared-error objective.
+
 ALS minimizes a weighted squared error loss — it optimizes rating prediction. BPR directly optimizes a pairwise ranking loss: for each user, the model is penalized whenever a non-interacted item is scored higher than an interacted item. Since the downstream evaluation metric (NDCG, MRR) cares about ranking order, BPR's training objective is more aligned with the evaluation. Empirically, BPR achieves better NDCG and MRR at equivalent factor dimensionality, though ALS can achieve better RMSE.
 
 **Q: Explain the cold start problem in collaborative filtering and your mitigation strategy.**
+**Short:** Cold start is mitigated with popularity fallbacks for new users and content-based embeddings for new items.
+
 User cold start: a new user has no interaction history, so their latent vector cannot be computed. Item cold start: a new item has no interactions, so its latent vector is unknown. Mitigations for user cold start: show popular or trending items; use an onboarding quiz to infer initial preferences; or use a content-based fallback using any available demographic/context features. Mitigations for item cold start: compute item embeddings from content features (text, category, price) using a content-based model; inject new items into ALS using the item embedding from content as initialization; run more frequent ALS updates (hourly batch) to incorporate early signals quickly.
 
 **Q: How would you evaluate a collaborative filtering model offline?**
+**Short:** Evaluate collaborative filtering with a temporal train/test split and Recall@K, NDCG@K, and MRR metrics.
+
 Use a temporal train/test split: train on interactions before date T, test on interactions after T. Metrics: Recall@K (fraction of test interactions recovered in top-K recommendations), NDCG@K (ranking quality), MRR. Avoid random train/test splits — they cause data leakage because future interactions of the same user inform the model about that user's preferences. Also evaluate diversity (ILD) to detect popularity bias, and measure coverage (fraction of catalog that appears in recommendations for at least one user).
 
 **Q: What happens if you set regularization too low in matrix factorization?**
+**Short:** Too-low regularization lets latent vectors overfit observed interactions and collapse test-set recall.
+
 With regularization lambda close to 0, user and item latent vectors can grow arbitrarily large to minimize training loss on observed cells. This causes severe overfitting: the model perfectly predicts observed interactions but fails on unobserved ones. In practice, you see training loss near zero but poor Recall@K on the test set. The fix: set lambda in the range 0.001–0.1 (empirically tuned), or use cross-validation on a held-out validation split to select lambda.
 
 **Q: How does SVD++ extend standard matrix factorization?**
+**Short:** SVD++ augments the user vector with an implicit term derived from which items the user chose to interact with.
+
 SVD++ adds an implicit-feedback term to the user vector, so which items a user chose to rate shapes their taste alongside how they rated them. Concretely: user_vector_u = user_factor_u + (1/sqrt(|N(u)|)) * sum over j in N(u) of implicit_factor_j, where N(u) is the set of items user u has interacted with (regardless of rating value) and implicit_factor_j is a learned vector for each item. This captures the notion that which items a user chose to interact with (not just how they rated them) is informative. SVD++ was one of the strongest single models inside the Netflix Prize-winning blend and consistently beat plain SVD on the same data — by a margin that looks small in absolute RMSE but was decisive in a contest whose entire target was 10%.
 
 **Q: What is the complexity of item-item CF pre-computation and how would you scale it?**
+**Short:** Naive item-item similarity is O(I^2 * U); LSH and co-occurrence filtering scale it to millions of items.
+
 Naive item-item similarity computation requires O(I^2 * U) time (for all item pairs, compute cosine similarity on user interaction vectors of length U). For 1M items, this is 10^12 operations — infeasible. Scalable approaches: (1) use MinHash/LSH to approximate nearest items in O(I * U) with a false-negative tradeoff; (2) compute similarities only for item pairs that share at least one user (co-occurrence filtering, sparse matrix multiply); (3) use approximate nearest neighbor on item embeddings from a trained ALS model (FAISS). The `implicit` library computes item similarities via the ALS item factor dot products, which is O(I^2 * k) but k is small (128) vs. U (millions).
 
 **Q: What is the sparsity problem in collaborative filtering and why does it matter?**
+**Short:** Interaction matrices are over 99.999% sparse, so factorization must optimize only over observed cells.
+
 The user-item interaction matrix for a large platform (200M users, 10M items) contains 2 * 10^15 cells. With 50M total interactions, sparsity is 1 - 50M/(2*10^15) > 99.999%. Algorithms that operate on the dense matrix (naive SVD) fail because most entries are unknown. Matrix factorization addresses this by optimizing only over observed cells (plus weak signals for unobserved in ALS). Neighborhood methods fail because most user pairs share zero common items, making cosine similarity undefined. Remedies: use product graph (items frequently co-purchased) to find similar items even with sparse direct interactions; use session data (within-session views) to fill in co-occurrence signal.
 
 **Q: Compare ALS and SGD for training matrix factorization.**
+**Short:** ALS uses parallel closed-form updates well suited to implicit feedback; SGD is more flexible for custom losses.
+
 ALS alternates between closed-form updates for user factors (holding item factors fixed) and item factors (holding user factors fixed). Each update is an exact solution to a linear system, so convergence per iteration is reliable. Parallelizes perfectly — each user/item update is independent. Best for implicit feedback with the confidence weighting structure. SGD (stochastic gradient descent) processes one (user, item) pair at a time, updating both factors by gradient step. More flexible (any loss function), lower memory, but requires careful learning rate scheduling. ALS converges in 10–20 iterations and is preferred for large-scale implicit CF; SGD is used for explicit feedback and custom losses like BPR.
 
 **Q: How would you handle new users arriving between ALS training runs?**
+**Short:** New users are folded in via a single ridge solve against frozen item factors, avoiding full retraining.
+
 Fold them in: one small ridge solve against the frozen item factors gives a usable user vector without retraining. Strategy 1, folding in. Given a new user's interaction vector r_new (length n_items), compute their user factor analytically using the fixed item factor matrix V: u_new = solve((V.T @ diag(c_new) @ V + lambda*I), V.T @ (c_new * p_new)). This is a single linear solve with pre-computed V.T @ V. No retraining required. Limitation: the new user's interactions do not influence item factors until the next training run. Strategy 2: real-time online updates via SGD — process the new user's interactions as they arrive. Strategy 3: content-based cold start — use available features (age group, country, onboarding preferences) to select an initial user factor from the learned factor space (nearest centroid assignment).
 
 **Q: What is item frequency bias in ALS and how do you correct it?**
+**Short:** Item frequency bias inflates popular items' factor magnitudes; normalizing or discounting scores corrects it.
+
 Frequently interacted items accumulate high confidence weights across many users. Their item factors are trained on far more data and become large-magnitude vectors. When computing dot products for ranking, high-magnitude item factors dominate even for users who have never interacted with those items. Correction: L2-normalize item factors before computing recommendation scores; or apply popularity-based score discounting: score(u,i) = U[u] · V[i] / log(1 + popularity(i)). The `implicit` library includes a popularity-based filter option for this reason.
 
 **Q: Describe how you would A/B test a new collaborative filtering model.**
+**Short:** A/B test collaborative filtering with a user-level split, sustained runtime, and guards against novelty effects.
+
 Design: split users randomly into control (current model) and treatment (new ALS model) groups. Ensure the split is at the user level (not request level) to avoid interference. Run for at least 2 weeks to capture weekly seasonal patterns. Primary metrics: click-through rate, session watch/listen time, conversion rate. Secondary metrics: diversity (ILD), long-tail coverage, return rate (did users come back?). Statistical test: two-sample t-test or Mann-Whitney U for continuous metrics; chi-squared for binary. Guard against novelty effect: users may click on new recommendations simply because they are different, not because they are better. Require sustained improvement over the full test period.
 
 **Q: Why does collaborative filtering suffer from popularity bias?**
+**Short:** Popularity bias arises because popular items get better-trained factors, creating a self-reinforcing feedback loop.
+
 Popular items have more interactions and thus more evidence in the training data. Their latent factors are trained on thousands of data points while long-tail items are trained on tens. This makes popular items' factors more accurate and their dot product scores more extreme. At serving time, the model consistently ranks popular items higher. This creates a feedback loop: popular items get recommended more, receive more clicks, become more popular. Corrections: (1) downweight popular items in the confidence matrix (c_ui = 1 + alpha * log(1 + r_ui)); (2) apply re-ranking diversity constraints; (3) evaluate with coverage and novelty metrics alongside NDCG.
 
 **Q: Why does filling unobserved cells with zero and running SVD hurt implicit-feedback recommendations?**
+**Short:** Zero-filling wrongly treats missing clicks as confirmed negatives, biasing SVD toward predicting zero everywhere.
+
 Zero-filling tells SVD that every unobserved pair is a confirmed negative rating, so the millions of zeros dominate the squared-error loss and the model is pulled toward predicting zero everywhere. Implicit feedback has no true negatives — a missing click may mean the user never saw the item — so treating absence as a hard zero is simply wrong. ALS fixes this with a binary preference plus confidence weighting, so unobserved cells are only weakly negative rather than strongly negative.
 
 **Q: Why apply a log transformation to raw interaction counts before ALS?**
+**Short:** Log-transforming interaction counts stops power users and heavily-played items from dominating latent factors.
+
 Raw counts let a song played 1000 times dominate the latent factors, so log1p compression makes the gap between 100 and 1000 plays far smaller than the gap between 1 and 2 plays. Power users and binge-listened items otherwise skew the confidence weights and collapse diversity toward a few heavy-tail items. The transform r = log(1 + count) preserves ordering while damping the tail, which is often more impactful than tuning n_factors or lambda.
 
 **Q: What is the difference between memory-based and model-based collaborative filtering?**
+**Short:** Memory-based CF computes similarities at prediction time; model-based CF learns compact latent factors offline.
+
 Memory-based CF computes similarities directly from the interaction matrix at prediction time, while model-based CF learns a compact model — usually latent factors — offline and predicts from it. Memory-based (user-user, item-item) is simple and interpretable but scales poorly and needs the full matrix at serving; model-based (matrix factorization, ALS, BPR) compresses the matrix into low-rank factors that generalize better on sparse data and serve as O(k) dot products. Most large systems use model-based factors, often keeping item-item neighborhoods for the "similar items" rail.
 
 **Q: How does negative sampling work in BPR and why does the sampling strategy matter?**
+**Short:** BPR's negative sampling strategy shapes what it learns; uniform sampling wastes updates on easy negatives.
+
 For each observed (user, item) pair BPR draws an unobserved item as a negative and trains the user to score the positive above it, so the sampler's distribution directly shapes what the model learns. Uniform sampling is cheap but wastes most updates on easy negatives the model already ranks low; popularity-based or dynamic hard-negative sampling speeds convergence and sharpens tail ranking, at the risk of drawing false negatives (items the user would actually like). Tune the sampler alongside the learning rate, and always exclude the user's known positives from the negative pool.
 
 ---

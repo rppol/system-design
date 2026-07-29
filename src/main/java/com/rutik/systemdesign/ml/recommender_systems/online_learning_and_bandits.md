@@ -838,60 +838,98 @@ Thompson Sampling takes about 22% less regret than **fixed** epsilon-greedy here
 ## 12. Interview Questions with Answers
 
 **Q: What is the explore-exploit tradeoff in recommendation systems?**
+**Short:** The explore-exploit tradeoff balances confident high-reward picks against uncertain items worth testing.
+
 Exploitation means recommending items the system is confident the user will like — maximizing immediate reward. Exploration means trying items the system is uncertain about — gathering information that may improve future decisions. Pure exploitation risks missing better items (e.g., a new item that would become the user's favorite). Pure exploration produces poor recommendations (showing random items). Bandit algorithms (epsilon-greedy, UCB, Thompson Sampling) formalize this tradeoff as regret minimization: minimize cumulative reward lost by not always choosing the optimal item. In practice, 5-15% exploration budget typically balances discovery with user experience quality.
 
 **Q: Explain UCB1 and why it achieves better regret than epsilon-greedy.**
+**Short:** UCB1 explores arms proportional to uncertainty, achieving logarithmic regret versus epsilon-greedy's linear regret.
+
 UCB1 selects the arm maximizing: empirical_mean(i) + sqrt(2 * ln(t) / n_i). The second term is an upper confidence bound — it decreases as arm i is pulled more (n_i grows) and increases as total time grows (ln(t)). UCB1 explores arms proportionally to their uncertainty, not uniformly at random. Epsilon-greedy explores all arms with equal probability — wasting exploration budget on arms already proven to be bad. UCB1 achieves O(K * log(T)) cumulative regret (optimal up to constants in the log term), while epsilon-greedy with a fixed epsilon never stops paying its exploration toll and so incurs O(T) — linear — regret. Practically: UCB1 identifies the optimal arm faster and spends less time exploring bad arms.
 
 **Q: How does Thompson Sampling work for binary reward recommendation?**
+**Short:** Thompson Sampling samples from each arm's Beta posterior, naturally balancing exploration and exploitation.
+
 For each arm (item), Thompson Sampling maintains a Beta(alpha, beta) distribution where alpha = 1 + total clicks and beta = 1 + total non-clicks (initialized to Beta(1,1) = uniform prior). At each step: sample a value p_i from each arm's Beta distribution; recommend the arm with the highest sample. If a Beta distribution is wide (arm has few observations), it sometimes samples very high values — leading to exploration. If narrow (many observations), it samples near the true mean — leading to exploitation. The sampling is stochastic, so the model naturally balances exploration and exploitation without explicit epsilon or confidence bound computation. Against a fixed 10% exploration rate Thompson Sampling takes roughly 20% less regret over the first 10K trials, and it is asymptotically optimal in expected regret.
 
 **Q: What is a contextual bandit and how does LinUCB work?**
+**Short:** LinUCB selects arms using a linear reward model plus a context-dependent exploration bonus term.
+
 A contextual bandit extends the standard bandit by conditioning arm selection on a context vector x (user features, item features, session context). LinUCB assumes reward is linear in context: r_i(x) = theta_i.T x. For each arm i, LinUCB maintains a ridge regression model (A_i, b_i) and selects the arm maximizing: x.T theta_i + alpha * sqrt(x.T A_i^{-1} x). The first term is the predicted reward; the second is an exploration bonus that is large when x is in a direction not well-covered by past observations (A_i^{-1} is large in unexplored directions). After observing reward r, update: A_i += x x.T; b_i += r x. LinUCB achieves O(d * sqrt(T)) regret where d is the context dimension.
 
 **Q: How would you handle non-stationary rewards in a bandit algorithm?**
+**Short:** Sliding windows, discounted updates, or change detection adapt bandits to non-stationary reward distributions.
+
 Non-stationary rewards occur when the true click rate changes over time (trending topics, seasonal effects, user preference drift). Standard UCB1 and Thompson Sampling assume stationary rewards — old observations from very different distributions contaminate the current estimate. Solutions: (1) Sliding window UCB — only use the last W interactions per arm (recent observations only); (2) Discounted UCB — exponentially discount older rewards: weighted mean with discount factor gamma^(age_of_observation); (3) Discounted Thompson Sampling — maintain decaying alpha, beta counts: alpha_t = gamma * alpha_{t-1} + click; beta_t = gamma * beta_{t-1} + (1 - click); (4) CUSUM/Bayesian change detection — detect abrupt distributional shifts and reset arm statistics on detection.
 
 **Q: Why is epsilon-greedy inefficient for large action spaces?**
+**Short:** Epsilon-greedy wastes exploration budget uniformly across arms, making it impractical for large action spaces.
+
 Epsilon-greedy explores uniformly at random across all arms. With 10,000 arms and epsilon=0.1, each arm is explored with probability 0.1/10,000 = 0.00001 per step. An arm with 2% true CTR requires ~1000 pulls for a reliable estimate; at 0.00001 pulls/step, reliable estimation takes 100 million steps — impractical. UCB and Thompson Sampling focus exploration on uncertain arms, spending more pulls on competitive alternatives. For large action spaces, the correct architecture is: use a small number of bandit arms representing high-level decisions (which recommendation policy to use, which model to serve), not individual items. Item-level exploration is handled by other mechanisms (cold-start fraction, random injection).
 
 **Q: What is regret and how do you compute it?**
+**Short:** Regret is the cumulative reward lost from not always choosing the single best-performing arm.
+
 Regret is the cumulative reward lost by not always choosing the optimal arm: Regret(T) = T * mu* - sum_{t=1}^{T} r(a_t), where mu* is the expected reward of the best arm and r(a_t) is the reward received at step t. In recommendation, mu* = best item's CTR. Example: if the best item has 8% CTR and your algorithm achieved 6.5% average CTR over 100,000 impressions, regret = (0.08 - 0.065) * 100,000 = 1,500 missed clicks. In practice, you compute regret in simulation (where true rewards are known) or approximate it in production using the observed best arm as a proxy for the optimum.
 
 **Q: What is the difference between MAB (multi-armed bandit) and full reinforcement learning for recommendation?**
+**Short:** A bandit is the stateless immediate-reward special case of RL, which models sequential, state-dependent decisions.
+
 A bandit is the stateless, immediate-reward special case of RL; full RL models state and how today's action changes tomorrow's options. Multi-armed bandit is a special case of RL where: (1) there is no state — the next decision does not depend on the current action (actions are i.i.d.); (2) reward is immediate; (3) the goal is to maximize cumulative reward over a single-state MDP. Full RL for recommendation models state (e.g., user's interaction history shapes future preferences) and sequential decision-making (showing item A now changes what items are good to show next). RL approaches (DQN, PPO for recommendations) are used when: the recommendation sequence matters (watching 3 mystery films makes a 4th mystery film boring, not interesting), long-term engagement is the target (30-day retention, not single-click), or exploration has multi-step effects. Bandit approaches are used for simpler A/B-test-like decisions where actions are independent.
 
 **Q: How does Thompson Sampling accelerate A/B testing compared to fixed-ratio splits?**
+**Short:** Thompson Sampling dynamically shifts traffic toward the winning variant, reducing regret versus fixed A/B splits.
+
 Traditional A/B testing allocates traffic 50/50 between control and treatment throughout the test, even after evidence for a winner accumulates. Thompson Sampling dynamically adjusts allocation: as the winning variant's Beta distribution shifts toward higher values, it is sampled more often. Traffic automatically concentrates on the winner while maintaining some exploration in the loser (to confirm it is indeed worse). Benefits: (1) lower regret during the test — fewer users see the inferior variant; (2) faster time-to-decision — confidence accumulates non-uniformly toward the better variant; (3) natural stopping criterion — test concludes when one variant's posterior probability of being best exceeds 95%. Netflix runs artwork selection this way rather than as a fixed A/B test, though it has not published a convergence-speed figure.
 
 **Q: What happens when you use a bandit to select between multiple recommendation models in an online system?**
+**Short:** A model-selection bandit treats each recommendation model as an arm and picks the best one per user context.
+
 This is a model selection bandit — each arm is a recommendation model (e.g., ALS, two-tower, popularity baseline). At each user request, the bandit selects which model to serve. Reward: click, purchase, or engagement. This is a contextual bandit — the context (user features) determines which model is likely best for this user. Implementation: LinUCB or Thompson Sampling at the model selection layer; each selected model then runs its own recommendation logic. The bandit learns: "for cold-start users (few interactions), use the content-based model; for warm users, use the two-tower model." This is more adaptive than static A/B test splits and requires less traffic to converge on the best model per user segment.
 
 **Q: How would you design an online learning pipeline for a news recommendation bandit?**
+**Short:** A news bandit pipeline streams events through Kafka, updates arm statistics in Redis, and attributes delayed rewards.
+
 Stream events through Kafka into a feature processor, keep per-arm statistics in a low-latency store, and close the loop with a bounded reward-attribution window. Architecture: (1) Kafka topic receives user events (clicks, dwell time, skips) with article ID; (2) Flink stream processor computes context features per event (user segment, session features, article freshness) and looks up article features; (3) Bandit model (LinUCB or Thompson Sampling stored in Redis): reads arm statistics (A_i, b_i) on each recommendation request, selects arm, writes updated statistics after reward observed; (4) Reward attribution: pair each impression with reward within a 1-hour attribution window; (5) Drift detection: monitor average reward per hour; if reward drops >20%, reset arm statistics (concept drift — trending topics change fast). Key challenge: Redis must handle arm statistic reads/writes at peak QPS (tens of thousands/second) — use pipelining and batch updates (update every N events, not every event).
 
 **Q: Explain the UCB1 regret bound O(K log T) and its practical implications.**
+**Short:** UCB1's regret bound shows near-optimal arms need far more pulls to distinguish than clearly suboptimal ones.
+
 UCB1 achieves cumulative regret of at most 8 * sum_{i: mu_i < mu*} (ln(T) / delta_i) + constant, where delta_i = mu* - mu_i (gap between arm i and optimal arm). Arms far from optimal (large delta_i) contribute little to regret because they are quickly ruled out. Arms close to optimal (small delta_i) are explored more (smaller delta_i = harder to distinguish from optimal). Practical implication: if you have 10 items and the best has 8% CTR while the second-best has 7.9% CTR (delta = 0.001), the bound puts the runner-up's pull count at about 8*ln(T)/delta^2 — at T = 10^8 that is roughly 1.5 x 10^8 pulls, so the pair is never reliably separated at realistic traffic. This is the "bandit's hardest case." For large catalogs with many near-optimal items, consider a contextual bandit or batch A/B testing as a complement.
 
 **Q: How does a sliding window bandit handle concept drift and what are its limitations?**
+**Short:** A sliding window bandit discards stale observations, trading fast drift adaptation against estimate variance.
+
 A sliding window bandit maintains arm statistics only for the last W interactions per arm — old observations outside the window are discarded. When the reward distribution changes (a news topic becomes irrelevant, a seasonal item becomes popular), the stale statistics are quickly replaced by current data. W controls the adaptability-stability tradeoff: small W = fast adaptation but high variance estimates (needs many pulls); large W = stable estimates but slow adaptation to drift. Limitation: the sliding window is oblivious to gradual vs. abrupt drift. An exponential discount (Discounted UCB) is smoother — every observation is retained but with exponentially decreasing weight. Both methods require retuning W or gamma when the rate of drift changes. CUSUM change detection is preferred for abrupt concept drift (trending topics, external events).
 
 **Q: Describe Thompson Sampling's behavior at initialization vs. convergence.**
+**Short:** Thompson Sampling starts near-uniform random and narrows toward the best arm as posteriors tighten with data.
+
 At initialization, all arms have Beta(1, 1) — uniform distribution over [0, 1]. Samples from each arm are uniformly distributed, so arm selection is near-uniform random (exploration phase). After 100 observations per arm, posteriors have narrowed considerably. After 10K+ observations, posteriors are tight around true CTR values. At convergence, the arm with the highest true CTR has its sample consistently drawn near its mean (e.g., 0.08 for an 8% CTR arm), while lower-CTR arms sample near their means (0.04, 0.05). The best arm is selected almost always. Exploration effectively ceases. This graceful transition from exploration to exploitation — driven by data rather than a decaying epsilon schedule — is Thompson Sampling's key advantage. Practical note: in non-stationary settings, use discounted posteriors (alpha_t = gamma * alpha_{t-1} + click) to prevent convergence to stale distributions.
 
 **Q: How would you monitor a bandit algorithm in production?**
+**Short:** Bandit monitoring tracks arm selection rates, exploration fraction, reward trends, and posterior width.
+
 Monitor arm selection rates, exploration fraction, rolling reward rate, model update lag, and posterior width per arm. Key metrics: (1) arm selection rate — which arms are selected at what frequency; if one arm dominates (>90% of selections) too early, the algorithm may be over-exploiting; (2) exploration rate — fraction of requests where the selected arm is not the current greedy choice; should be 5-20% early, decreasing over time; (3) cumulative reward rate — rolling 1-hour CTR; alert if it drops more than 15% from the 7-day baseline; (4) arm update lag — time from reward observation to model update; should be < 5 minutes for news recommendation; (5) regret vs. oracle — periodically sample traffic with the current best arm (oracle) to estimate true regret; (6) Beta posterior width — for Thompson Sampling, track std(Beta(alpha, beta)) per arm; if width stops decreasing, the arm is receiving insufficient traffic to update. Alert on: uniform arm selection persisting too long (UCB not exploring efficiently), a single arm dominating with implausibly high reward (reward attribution bug), arm statistics exceeding memory limits.
 
 **Q: How do you handle delayed rewards, such as a purchase that happens days after the recommendation?**
+**Short:** Delayed rewards are handled by buffering impressions and crediting arms when the reward arrives within a window.
+
 Buffer each impression with its arm and timestamp, and attribute the reward when it arrives within a defined attribution window before updating the arm. Standard UCB and Thompson Sampling assume immediate feedback; if you update the arm at impression time with reward=0 (no immediate click) and never fold in the later conversion, arms that drive delayed conversions are systematically undervalued. The fix is a pending-reward buffer with TTL equal to the attribution window (e.g., 1 hour for clicks, 24 hours or 7 days for purchases): keep every (arm, timestamp) pair, and when a reward event arrives, credit all arms within the window. This decouples the decision time from the reward time so the posterior reflects true long-horizon value, not just instant clicks.
 
 **Q: How do you apply Thompson Sampling to continuous rewards like watch time?**
+**Short:** Continuous rewards need Gaussian Thompson Sampling or binarization, since Beta-Bernoulli assumes 0/1 outcomes.
+
 Use Gaussian Thompson Sampling that maintains a mean and variance per arm, or discretize the reward to binary; the Beta-Bernoulli form only works for 0/1 rewards. A common failure is adding raw continuous values (session minutes, 0-120) into the Beta alpha parameter as if they were click counts — alpha explodes into the millions within days, the Beta distribution collapses to near-zero variance, and exploration stops entirely. Two correct options: (1) model each arm's reward as a Gaussian with an updating posterior over its mean (Normal-Inverse-Gamma conjugate prior), sampling from that posterior to select arms; or (2) threshold the continuous signal into a success indicator (watch > 50% = 1) and keep the Beta-Bernoulli machinery. Gaussian TS preserves more information; binarization is simpler and often good enough.
 
 **Q: Why should exploration impressions be tagged and excluded from offline model training?**
+**Short:** Exploration impressions must be tagged or reweighted, or offline training learns that bad items are good.
+
 Because exploration deliberately shows low-quality arms, so an offline model trained on that traffic learns to score bad items highly unless the impressions are tagged out or IPW-corrected. The bandit's exploration is a feature, not noise — it intentionally samples uncertain and often poor arms to gather information. If those impressions flow unlabeled into the offline batch training set, the model sees bad items receiving impressions and infers they are good, corrupting its scores. Fix: attach an "exploration" flag to every impression the bandit chose non-greedily; either exclude those rows from offline training, or keep them but reweight by inverse propensity (1 / P(arm shown)) so the training distribution matches an unbiased exploitation policy. This separation between the online exploration log and the offline training corpus is essential whenever a bandit and a batch model coexist.
 
 **Q: What is the difference between disjoint and hybrid LinUCB?**
+**Short:** Disjoint LinUCB learns per-arm parameters alone; hybrid LinUCB shares parameters so arms borrow strength.
+
 Disjoint LinUCB learns a separate parameter vector per arm, while hybrid LinUCB adds shared parameters across arms so arms can borrow strength from common features. In the disjoint model each arm i has its own (A_i, b_i) and theta_i, so an arm learns only from its own pulls — fine when arms are unrelated but wasteful when many arms share structure (e.g., all news articles respond similarly to a "user likes sports" feature). Hybrid LinUCB adds a shared coefficient vector beta over features common to all arms, plus the per-arm theta_i for arm-specific effects; the reward model becomes r = z.T beta + x.T theta_i. The shared component means data from one arm improves estimates for all arms through beta, which accelerates learning across a large or churning arm set, at the cost of a more complex update (the original Yahoo! news paper used the hybrid form for exactly this reason).
 
 ---

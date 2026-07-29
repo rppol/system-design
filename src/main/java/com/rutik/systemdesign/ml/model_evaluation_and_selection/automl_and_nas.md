@@ -595,57 +595,75 @@ Cross-links: [../gpu_and_hardware_optimization/README.md](../gpu_and_hardware_op
 ## 12. Interview Questions with Answers
 
 **Q: When is AutoML or NAS actually worth it over a strong manual baseline?**
+**Short:** AutoML or NAS pays off only when its search cost is amortized across many similar problems or a fixed hardware latency target.
 It is worth it when you have many similar problems to solve or a fixed hardware target to optimize for, and rarely worth it for a single one-off task where a tuned baseline exists. AutoML amortizes across dozens of tabular models and NAS earns its cost when a device latency budget makes an off-the-shelf backbone unusable; on a single well-understood dataset a tuned XGBoost or a stock EfficientNet usually matches NAS at ~0 search cost. Decide by whether the search cost is amortized.
 
 **Q: What are the three axes that define any NAS method?**
+**Short:** Every NAS method is defined by its search space, its search strategy, and its performance-estimation strategy.
 Every NAS method is defined by its search space, its search strategy, and its performance-estimation strategy. The search space fixes which architectures are reachable (cell-based vs macro); the strategy explores it (RL controller, evolution, or gradient descent); estimation scores a candidate cheaply (full training, a weight-sharing supernet, or a low-fidelity proxy). These are independent — DARTS is (cell space) × (gradient) × (weight-sharing).
 
 **Q: Why did early RL-based NAS cost ~2000 GPU-days while DARTS costs a few GPU-days?**
+**Short:** DARTS trains one shared supernet once instead of thousands of candidates from scratch, cutting cost by roughly 500 to 1300x.
 Because RL-NAS trained thousands of candidate networks from scratch, while DARTS trains one shared supernet a single time and turns search into ordinary gradient descent. NASNet ran 500 GPUs for 4 days (2000 GPU-days); DARTS reports 1.5 GPU-days first-order and 4 second-order, a 500x to 1300x saving. That saving comes almost entirely from the performance-estimation axis (weight sharing), not from a smarter search strategy. This is the core lesson: in NAS, where you spend fidelity dominates cost.
 
 **Q: How does Successive Halving work and what does the reduction factor eta control?**
+**Short:** Successive Halving keeps the top 1/eta of configs at each rung and multiplies their budget by eta, with eta controlling pruning aggressiveness.
 Successive Halving runs many configs at a small budget, keeps the top 1/eta, multiplies the survivors' budget by eta, and repeats until one remains. Eta is the aggressiveness dial: eta=3 keeps a third each rung (81→27→9→3→1), eta=4 keeps a quarter and prunes faster. Larger eta saves more compute but risks killing a slow-starting config that would have won at full budget.
 
 **Q: What makes ASHA different from synchronous Successive Halving?**
+**Short:** ASHA promotes configurations asynchronously as soon as a rung has enough finished trials, avoiding the straggler bottleneck of synchronous SHA.
 ASHA promotes configurations asynchronously as soon as a rung has enough finished trials, instead of waiting for every trial in a rung to complete. Synchronous SHA blocks on the slowest trial in a rung, so a single straggler idles the whole cluster; ASHA keeps every worker busy and scales near-linearly to hundreds of workers. This makes it the default multi-fidelity scheduler for large parallel HPO in Ray Tune.
 
 **Q: What problem does Hyperband solve that plain Successive Halving does not?**
+**Short:** Hyperband runs Successive Halving at multiple bracket sizes to hedge the unknown tradeoff between many cheap trials and few expensive ones.
 Hyperband hedges the unknown tradeoff between trying many configs at low budget versus few configs at high budget by running Successive Halving at several bracket sizes. Pure SHA must guess n (number of configs) and r (starting budget); if it starts too aggressive it kills good slow-starters, too conservative it wastes compute. Hyperband runs a spectrum of brackets so at least one is well-matched to the problem. BOHB then adds TPE to pick *which* configs rather than sampling randomly.
 
 **Q: What is the single most dangerous failure mode of NAS and how do you prevent it?**
+**Short:** NAS overfits its chosen architecture to the validation set, so a truly held-out test set the search never touches is mandatory.
 NAS overfits the architecture to the validation set, because the search selects among thousands of candidates by their validation score. The winning architecture is fit to that split exactly like an overfit model is fit to its training data, so a truly held-out test set the search never touches is mandatory. Report the test-set number, not the search-selection score, or the "gain" is search overfitting.
 
 **Q: What is a weight-sharing one-shot supernet and what bias does it introduce?**
+**Short:** A one-shot supernet scores candidates without training them from scratch, but its ranking can correlate poorly with true standalone accuracy.
 A one-shot supernet is a single over-parameterized network whose sub-architectures share weights, so any candidate is scored without training it from scratch. This is what makes ENAS/DARTS two-to-three orders of magnitude cheaper than full-training NAS, but it introduces rank disorder: supernet accuracy can correlate poorly with true stand-alone accuracy, and published Kendall tau values range from near zero to 0.95 depending on the supernet and search space, so no single number can be quoted. Measure the correlation on your own space and mitigate by retraining the top-k candidates standalone before final selection.
 
 **Q: Explain DARTS continuous relaxation and its bilevel optimization.**
+**Short:** DARTS relaxes discrete operation choices into a softmax and alternates updating shared weights and architecture logits on separate splits.
 DARTS replaces the discrete choice of one operation per edge with a softmax over all candidate operations, making the architecture differentiable. It then solves a bilevel problem: update shared weights `w` on the training split (inner) and architecture logits `alpha` on the validation split (outer), alternating each step. After search, each edge keeps its argmax operation and the pruned network is retrained from scratch.
 
 **Q: What is hardware-aware NAS and how is latency put into the objective?**
+**Short:** Hardware-aware NAS adds a measured device-latency term to the search objective instead of relying on a poor FLOPs proxy.
 Hardware-aware NAS adds a measured or predicted device-latency term to the search objective. That term is either an additive penalty `accuracy − λ · latency` or MnasNet's multiplicative form `ACC(m) × [LAT(m)/T]^w` with a target latency T. It uses a latency lookup table or predictor for the *actual* target device rather than FLOPs, because FLOPs correlate poorly with real latency (depthwise convs are FLOP-cheap but memory-bound). MnasNet measured latency on the big CPU core of a Pixel 1 phone at batch size 1 and put it straight into the reward; MobileNetV3 inherited that and added NetAdapt. EfficientNet is the counterexample often miscited here: it reused MnasNet's search space but optimized FLOPS, not device latency, so it is not hardware-aware.
 
 **Q: How does auto-sklearn use meta-learning to speed up search?**
+**Short:** Auto-sklearn warm-starts Bayesian optimization with pipelines that performed well on past datasets with similar meta-features.
 Auto-sklearn warm-starts its Bayesian optimization with configurations that performed well on similar past datasets, ranked by dataset meta-features. It computes 38 meta-features (rows, columns, class ratio, skew, target entropy) of the new dataset, ranks 140 stored OpenML datasets by L1 distance in meta-feature space, and seeds the search with the best-known pipelines of the k = 25 nearest — skipping the cold start. It then runs SMAC Bayesian search and post-hoc greedy-ensembles the best runs.
 
 **Q: How does AutoGluon reach strong accuracy without heavy hyperparameter search?**
+**Short:** AutoGluon multi-layer-stacks and bags a fixed portfolio of strong models instead of exhaustively tuning any single one.
 AutoGluon largely skips per-model HPO and instead multi-layer-stacks and bags a fixed portfolio of strong models (LightGBM, CatBoost, XGBoost, RF, NN). Stacking a diverse portfolio is more sample-efficient than exhaustively tuning any single model, so it reaches strong accuracy within a time budget where an HPO-heavy approach is still tuning. `presets="best_quality"` turns on the full stacking/bagging stack.
 
 **Q: How does AutoML leak data through cross-validation and how do you stop it?**
+**Short:** AutoML leaks when preprocessing is fit on the full dataset before splitting, fixed by placing every transform inside the CV pipeline.
 AutoML leaks when preprocessing — scaling, imputation, target encoding — is fit on the full dataset before the CV split, so validation folds influence the transforms and scores inflate 2–4 AUC points. The fix is to put every fit-transform step inside a scikit-learn Pipeline that is evaluated within each fold, so the scaler and imputer see only the training fold. This is the top reason an AutoML leaderboard score fails to reproduce in production.
 
 **Q: DARTS versus ENAS — what is the difference?**
+**Short:** ENAS samples discrete architectures via an RL controller, while DARTS relaxes the choice into a differentiable softmax and never samples.
 ENAS uses an RL controller to sample discrete architectures from a shared-weight supernet, while DARTS makes the whole supernet differentiable and optimizes architecture weights by gradient descent. Both use weight sharing for cheap estimation, but ENAS still samples discrete graphs and updates the controller with REINFORCE, whereas DARTS never samples — it relaxes the choice into a softmax and back-propagates through it. DARTS is faster to converge but prone to skip-connect collapse.
 
 **Q: What is Once-for-All and why is it efficient across hardware targets?**
+**Short:** Once-for-All trains one elastic supernet and extracts specialized sub-networks per latency budget with no per-device retraining.
 Once-for-All trains a single elastic supernet once, then extracts specialized sub-networks for different latency budgets with no retraining. Instead of running a fresh NAS per device, the expensive supernet training (~1200 GPU-hours) is amortized across all deployment targets, and a small predictor picks the best sub-net for each device's latency budget. This is the method of choice when you must serve phones, FPGAs, and CPUs from one model family.
 
 **Q: Why are NAS results notoriously hard to reproduce and what should a paper report?**
+**Short:** NAS gains are fragile since seeds and training tricks often matter more than the algorithm, so results need multiple seeds and a baseline.
 NAS gains are fragile because random seeds, the exact search space, and training tricks (cutout, cosine LR, extra epochs) often contribute more than the search algorithm itself. A credible NAS result must report multiple seeds with variance, the search cost in GPU-days, and a random-search-with-early-stopping baseline. NAS benchmarks like NAS-Bench-201 exist precisely to make comparisons fair by tabulating stand-alone accuracies.
 
 **Q: When would you choose evolutionary NAS over gradient-based DARTS?**
+**Short:** Choose evolutionary NAS for discrete or non-differentiable search spaces where no smooth relaxation like DARTS's softmax exists.
 Choose evolutionary NAS when the search space is discrete or non-differentiable — quantization bit-widths, hardware-specific ops, or mixed structural choices where no smooth relaxation exists. Evolution (mutate the best, tournament-select) is also more robust than DARTS, which can collapse to all-skip-connect architectures. The cost is many more evaluations, so it fits settings with a cheap estimator (weight sharing or a benchmark lookup) or hyperscaler compute.
 
 **Q: How is Bayesian optimization (TPE) related to and different from Hyperband/ASHA?**
+**Short:** TPE chooses which configuration to try next while Hyperband and ASHA decide how much budget each gets, and BOHB combines both.
 TPE decides *which* configuration to try next from past results, while Hyperband and ASHA decide *how much* budget to give each configuration; BOHB combines both. TPE alone runs every config at full budget but picks configs intelligently; ASHA/Hyperband run configs at escalating budgets but (in their base form) pick them randomly. Combining a TPE sampler with a Hyperband pruner in Optuna is essentially BOHB — smart selection plus smart budgeting.
 
 ---

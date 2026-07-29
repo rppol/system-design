@@ -561,54 +561,88 @@ Recall and hit rate cannot see that improvement at all, while NDCG climbs 62% an
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between the retrieval and ranking stages in a recommendation pipeline?**
+**Short:** Retrieval maximizes recall over millions of items; ranking maximizes precision on a few hundred candidates.
+
 Retrieval (candidate generation) selects ~100-1000 items from a corpus of millions, optimizing for recall (recall@100 > 95% is the target). Ranking then scores those candidates with a heavier model, optimizing for precision (NDCG@10). The two-stage design exists because scoring all 10M items with a deep model per request would take seconds; a simple dot product ANN search takes milliseconds. Retrieval sacrifices a little recall to enable feasible ranking.
 
 **Q: How does matrix factorization work for collaborative filtering?**
+**Short:** Matrix factorization decomposes the sparse user-item matrix into low-rank user and item latent vectors.
+
 Matrix factorization decomposes the sparse user-item interaction matrix R (n_users x n_items) into two low-rank matrices: U (n_users x k) and V (n_items x k), such that R ≈ U @ V.T. Each user and item gets a k-dimensional latent vector (k = 50–200 typically). For explicit feedback, the loss is MSE on observed ratings; for implicit feedback, ALS with confidence weighting is preferred. In the Netflix Prize, plain SVD reached 0.8914 RMSE against Cinematch's 0.9514 — about 6% of the 10% needed to win, from one model.
 
 **Q: What is implicit feedback and how does it differ from explicit feedback?**
+**Short:** Explicit feedback is a direct rating; implicit feedback is inferred from behavior with no true negatives.
+
 Explicit feedback is a direct user rating (1–5 stars). Implicit feedback is inferred from behavior: clicks, purchases, dwell time, skips. Implicit is far more abundant but carries no true negatives — if a user did not click an item, they may not have seen it, or it may not have been shown. Algorithms like ALS (with confidence weighting) and BPR (pairwise ranking) are specifically designed for implicit feedback, treating unobserved interactions as weakly negative rather than missing.
 
 **Q: Explain the cold start problem and how you would mitigate it.**
+**Short:** Cold start is mitigated with popularity-based defaults for new users and content features for new items.
+
 Cold start occurs when a new user has no interaction history (user cold start) or a new item has no interactions (item cold start). Mitigations: for new users, show popularity-based or editorially curated content, then use onboarding questions to build an initial profile; for new items, use content-based features (text embeddings, category, price) to generate an item vector that can be placed into the existing ANN index without needing interactions. A hybrid two-tower model handles this naturally — content features allow scoring even without historical signals.
 
 **Q: What is position bias in recommender systems and how do you correct for it?**
+**Short:** Position bias inflates clicks for top-ranked items regardless of quality; inverse propensity weighting corrects it.
+
 Position bias is the tendency for users to click items shown at higher positions regardless of intrinsic quality. Items at position 1 can receive 10x the CTR of items at position 10 with identical quality. If you train on raw clicks, the model learns position as a proxy for quality. Correction methods: inverse propensity weighting (IPW) — upweight clicks at lower positions by 1/P(position), where P is estimated from randomization experiments; or use a separate position bias model trained on randomized traffic to debias labels.
 
 **Q: How does the Wide & Deep model work?**
+**Short:** Wide & Deep jointly trains a linear memorization component with a deep generalization network.
+
 Wide & Deep (Google, 2016) combines a wide linear model with a deep neural network, trained jointly. The wide part memorizes specific feature combinations (e.g., "user installed app X and searched for Y" → install Z) using manually crafted cross features. The deep part generalizes to unseen feature combinations via dense embeddings through multiple MLP layers. The intuition: memorization handles rare but reliable patterns; generalization handles novel combinations. Google published it on Google Play (over 1 billion active users, over 1 million apps), trained on 500 billion examples, with the ranking layer scoring over 10 million apps per second at peak.
 
 **Q: What metrics would you use to evaluate a recommender system offline?**
+**Short:** NDCG@K, Recall@K, and MRR are the standard offline metrics for evaluating recommender ranking quality.
+
 NDCG@K (Normalized Discounted Cumulative Gain) — measures ranking quality, giving higher weight to relevant items at top positions. Recall@K — fraction of relevant items captured in top-K, important for the retrieval stage. MRR (Mean Reciprocal Rank) — 1/rank of first relevant item, important when finding any relevant item quickly matters. For diversity: ILD (Intra-List Diversity) — average pairwise distance among recommended items. For novelty: mean inverse log popularity of recommended items. Critical caveat: always use temporal train/test split, never random split.
 
 **Q: What is the explore-exploit tradeoff in recommendation?**
+**Short:** The explore-exploit tradeoff balances recommending confident bets against uncertain, discovery-worthy items.
+
 Exploitation means recommending items the model is confident the user will like (high expected reward). Exploration means recommending items the model is uncertain about (potentially discovering better options). Pure exploitation leads to feedback loops and filter bubbles. Pure exploration leads to poor user experience. Bandit algorithms (epsilon-greedy, UCB, Thompson Sampling) balance this explicitly. In practice, most systems inject a small exploration fraction (5–10% of impressions) using bandit or random strategies, while exploiting for the rest.
 
 **Q: How would you scale a recommendation system to 1 billion users and 10 million items?**
+**Short:** Scaling to billions of users needs precomputed item embeddings, sharded ANN indexes, and cached user features.
+
 First, pre-compute item embeddings offline (batch job, runs nightly or streaming). Store item vectors in a distributed ANN index (FAISS, ScaNN) sharded across machines — each machine holds a subset of items, results merged. User embeddings can be computed at request time from a user tower model (fast inference, ~5ms). Feature stores (Redis for online features, Spark for batch) provide fresh user features. Ranking: a lighter model (GBDT or small DNN) scores 500 candidates in <10ms. Horizontal scaling of serving infrastructure handles throughput. Caching of user embeddings (TTL ~1 hour) reduces recomputation.
 
 **Q: Describe the SASRec model for sequential recommendation.**
+**Short:** SASRec applies causal self-attention over a user's recent item sequence to predict the next item.
+
 SASRec (Self-Attentive Sequential Recommendation, 2018) applies the Transformer self-attention mechanism to a user's sequence of recently interacted items. The input is the last N items (N = 50 typical), each represented by a learned embedding. Positional encodings capture order. Multiple self-attention blocks let the model learn which past interactions are most predictive of the next action. Causal masking ensures position i can only attend to positions 1..i. The output at the last position predicts the next item. SASRec outperforms GRU4Rec and vanilla MF on most sequential recommendation benchmarks.
 
 **Q: Why can a model with higher offline NDCG perform worse in a live A/B test?**
+**Short:** Offline metrics reward fitting biased historical logs, not necessarily improving live user satisfaction.
+
 Offline metrics reward predicting logged historical clicks, but those logs were biased by the previous model's exposure and by position bias, so fitting them better does not guarantee better live behavior. The offline label distribution is a consequence of what the old system chose to show; a model that ranks those same items well may be memorizing the old policy rather than improving user satisfaction. Gate model promotion on offline metrics but make the ship decision on an online A/B test with a long-term holdback group.
 
 **Q: Why must recommender evaluation use a temporal train/test split rather than a random split?**
+**Short:** Temporal splits prevent training on future interactions that would otherwise leak into predicting the past.
+
 A random split leaks future interactions into training, letting the model see a user's later clicks while predicting their earlier ones, which inflates offline metrics that then collapse online. Real serving only ever has past data to predict the future, so evaluation must mirror that by training on interactions before a cutoff time T and testing on interactions after T. Random splits routinely show large NDCG gains that translate to zero online CTR lift.
 
 **Q: How do you stop a two-tower retrieval model from only recommending popular items?**
+**Short:** Discounting scores by popularity and reserving an exploration budget stops two-tower models favoring blockbusters.
+
 Discount by popularity at scoring time — divide the score by log(1 + interaction_count) — and reserve a small exploration budget for the long tail. Head domination comes from the training positives: blockbusters are most of the logged interactions, so the towers learn they are a safe bet for everyone. Diversity and category caps in re-ranking are the third lever. The logQ correction fixes a different, opposite bias: in-batch negatives are drawn in proportion to popularity, so uncorrected training over-penalizes popular items as negatives, and subtracting log Q(i) from the logits restores an approximately unbiased softmax (Yi et al., 2019).
 
 **Q: What is the difference between pointwise, pairwise, and listwise learning-to-rank?**
+**Short:** Pointwise scores items independently, pairwise compares item pairs, and listwise optimizes the whole ranked list.
+
 Pointwise predicts an absolute relevance score per item, pairwise learns which of two items should rank higher, and listwise optimizes a metric defined over the whole ranked list. Pointwise (logistic regression on click) is simplest and fully parallel but ignores relative order; pairwise (RankNet, LambdaRank, BPR) directly targets ordering; listwise (ListNet, LambdaMART) aligns best with NDCG but costs more to train. Most production rankers use pairwise or LambdaMART because ordering, not absolute score, drives the ranking metric.
 
 **Q: How do you choose between FAISS IVF, HNSW, and ScaNN for the retrieval index?**
+**Short:** IVF minimizes memory, HNSW maximizes recall, and ScaNN gives the best throughput-recall balance.
+
 Pick IVF for the lowest memory and easy sharding, HNSW for the highest recall at higher memory cost, and ScaNN for the best throughput-recall tradeoff via anisotropic quantization. IVF partitions vectors into clusters and probes a few, trading recall for speed through the nprobe knob; HNSW builds a navigable small-world graph that reaches ~98% recall but stores many edges per node; ScaNN's learned quantization tops throughput benchmarks at ~95-97% recall. Match the choice to your memory budget, catalog size, and recall SLA rather than defaulting to one.
 
 **Q: Why is re-ranking a separate stage from ranking?**
+**Short:** Re-ranking applies list-level rules like diversity and business logic that per-item scoring cannot express.
+
 Re-ranking applies list-level objectives — diversity, freshness, and business rules — that a per-item ranking score cannot express because they depend on the other items already selected. The ranker scores each candidate independently for relevance; only after you have a ranked list can you enforce that no genre dominates (MMR), that sponsored items get placement, or that a just-purchased item is suppressed. Keeping it separate also lets business rules change without retraining the ranking model.
 
 **Q: Why do production ranking models predict multiple objectives at once instead of just click probability?**
+**Short:** Multi-task ranking predicts click, watch time, and other signals together to avoid rewarding clickbait.
+
 A multi-task model predicts several signals — click, watch time, like, share — through shared layers because optimizing click alone rewards clickbait and ignores long-term satisfaction. Clicks are cheap and abundant but weakly correlated with value; adding watch-time or conversion heads lets the final score blend engagement with quality, and the shared representation regularizes the sparser objectives. YouTube's ranker famously predicts expected watch time rather than click-through to avoid promoting misleading thumbnails.
 
 ---

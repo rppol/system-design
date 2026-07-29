@@ -727,54 +727,88 @@ If rewards are in the range [-100, +100], the Q-network must output values up to
 ## 12. Interview Questions with Answers
 
 **Q: What is the Bellman equation and why is it fundamental to RL?**
+**Short:** The Bellman equation recursively relates a state's value to successor states, enabling bootstrapped TD learning.
+
 The Bellman equation defines a recursive relationship between the value of a state and the values of its successor states: Q(s,a) = R(s,a) + gamma * sum_{s'} P(s'|s,a) * max_{a'} Q(s', a'). It is fundamental because it enables bootstrapping — estimating the value of a state from the estimated value of the next state — without needing to roll out the entire episode to get a return. This bootstrapping is what enables online temporal difference (TD) learning algorithms like Q-learning and SARSA to update value estimates after every single step, making RL tractable. Without it, we would need Monte Carlo methods that require complete episode rollouts.
 
 **Q: What is the difference between on-policy and off-policy RL?**
+**Short:** On-policy methods learn only from their own current data; off-policy methods reuse old data via a replay buffer.
+
 On-policy methods (SARSA, PPO, A2C) evaluate and improve the same policy that is used to collect experience. The samples must come from the current policy, so old experience cannot be reused — it must be discarded after each update. Off-policy methods (Q-learning, DQN, SAC) separate the behavior policy (used for exploration) from the target policy (being optimized). This enables experience replay — storing transitions in a buffer and reusing them across many gradient updates — dramatically improving sample efficiency. The trade-off: off-policy methods can be unstable due to distribution mismatch between the replay buffer data and the current policy.
 
 **Q: Why does DQN use a separate target network, and how often should it be updated?**
+**Short:** DQN uses a frozen target network to stop the regression target from chasing itself and oscillating.
+
 Without a target network, the Q-network is chasing a moving target: the training target y_t = r + gamma * max Q(s'; theta) depends on the same weights theta that are being updated, causing feedback loops and oscillation. The target network theta^- is a frozen copy of Q updated every 10,000 steps (in the original Atari DQN paper), providing a stable regression target for the current 10,000 steps. The update frequency is a hyperparameter: too infrequent causes the target to lag too far behind (slow learning); too frequent (soft update tau=0.001 per step is an alternative) risks the oscillation you were trying to prevent. Soft updates (exponential moving average) are now more common than hard updates.
 
 **Q: Explain the exploration-exploitation dilemma and give three strategies to address it.**
+**Short:** Epsilon-greedy, UCB, and Thompson Sampling are three standard strategies for balancing exploration and exploitation.
+
 The agent must explore to discover potentially better actions but must exploit known good actions to accumulate reward. If it only exploits, it gets stuck in local optima. If it only explores, it wastes reward on already-understood states. Three strategies: (1) Epsilon-greedy: take a random action with probability epsilon (decaying over training from 1.0 to 0.01); simple but not directed. (2) UCB (Upper Confidence Bound): select action with highest Q(s,a) + c * sqrt(log(t) / N(a)), where N(a) is how many times action a was tried; prefers under-explored actions. (3) Thompson Sampling: maintain a posterior distribution over Q-values and sample from it; asymptotically optimal for bandits and extends naturally to Bayesian RL.
 
 **Q: What is the policy gradient theorem and what problem does REINFORCE solve?**
+**Short:** REINFORCE uses Monte Carlo returns to estimate the policy gradient, at the cost of high-variance updates.
+
 The policy gradient theorem states that the gradient of expected return with respect to policy parameters theta is: grad_theta J = E[grad_theta log pi_theta(a|s) * Q(s,a)]. REINFORCE implements this with Monte Carlo estimates: run complete episodes, compute discounted returns G_t for each timestep, and update theta += alpha * G_t * grad_theta log pi_theta(a_t|s_t). The core problem REINFORCE solves is optimizing a stochastic policy in environments with non-differentiable reward functions. The core weakness of REINFORCE is high variance — G_t is a noisy estimate of Q(s,a), requiring many episodes for stable learning. Actor-critic methods replace G_t with the advantage A_t = G_t - V(s_t) to reduce variance.
 
 **Q: How does PPO improve over vanilla policy gradient (REINFORCE)?**
+**Short:** PPO clips the policy update ratio to prevent destructively large policy changes in a single step.
+
 PPO prevents the policy from updating too aggressively in any single step. Vanilla policy gradient has no constraint on the step size — a large gradient update can collapse performance irreversibly (the new policy generates poor data, the next update is worse, etc.). PPO-Clip introduces the ratio r_t = pi_theta_new / pi_theta_old and clips it to [1-eps, 1+eps] (typically 0.8 to 1.2). Updates that would push the ratio outside this range are clipped to zero gradient, preventing catastrophically large policy changes. PPO also allows multiple gradient steps per rollout (4-10 epochs), amortizing the cost of collecting rollout data — more compute efficiency than REINFORCE's one-update-per-episode approach.
 
 **Q: What is SAC and when would you prefer it over PPO?**
+**Short:** SAC maximizes return plus entropy off-policy for continuous control; PPO is simpler and suits discrete actions.
+
 SAC (Soft Actor-Critic) maximizes both expected return and policy entropy: J = E[sum_t (r_t + alpha * H(pi(.|s_t)))]. The entropy bonus alpha encourages the policy to remain stochastic (exploring), and the optimal alpha is tuned automatically via a dual optimization. SAC is off-policy (uses experience replay) and operates in continuous action spaces. Prefer SAC over PPO when: action space is continuous (robotic control, continuous control benchmarks like HalfCheetah-v3), sample efficiency matters (SAC achieves MuJoCo benchmark performance in 1M steps vs PPO's 3-5M), and you have a replay buffer available. Prefer PPO when: action space is discrete (Atari, text generation), on-policy guarantees are required (RLHF training where distribution matters), or simplicity of implementation is prioritized.
 
 **Q: How does RLHF connect RL to LLM alignment?**
+**Short:** RLHF fine-tunes an LLM with PPO against a learned reward model, constrained by a KL penalty to the SFT policy.
+
 RLHF (Reinforcement Learning from Human Feedback) has three phases: (1) Supervised Fine-Tuning (SFT): fine-tune the base LLM on high-quality demonstrations; (2) Reward Modeling: train a reward model (RM) on human preference comparisons — given two LLM responses to the same prompt, a human labels which is better; (3) RL Optimization: use PPO to fine-tune the SFT model to maximize the RM score, with a KL divergence penalty to the SFT model (preventing the policy from drifting so far that it produces degenerate text). The LLM is the policy (outputs tokens), the prompt is the state, each token is an action, and the reward model score at the end of the sequence is the reward. KL penalty prevents reward hacking (generating gibberish that confuses the reward model).
 
 **Q: What is reward shaping and when is it necessary?**
+**Short:** Reward shaping adds intermediate signals to sparse-reward tasks, using potential-based shaping to preserve the optimal policy.
+
 Reward shaping adds auxiliary reward signals to help the agent navigate sparse-reward environments. If the true reward is only given at episode termination (e.g., win/loss in a game), the agent must discover the winning sequence through pure exploration — computationally infeasible in high-dimensional state spaces. Shaping adds intermediate rewards (e.g., chess piece captures, progress toward goal) while preserving the optimal policy through potential-based shaping: F(s, s') = gamma * Phi(s') - Phi(s), where Phi is a potential function. Potential-based shaping is guaranteed not to change the optimal policy (Ng et al., 1999). Arbitrary shaping (like many game rewards) can produce reward hacking — the agent maximizes the shaped reward while ignoring the true objective.
 
 **Q: What is the curse of dimensionality in RL and how do deep networks help?**
+**Short:** Deep Q-networks replace infeasible tabular Q-tables with function approximation that generalizes across similar states.
+
 Tabular RL maintains a separate Q(s,a) entry for every (state, action) pair. A simple Atari game has state space 210x160x3x256 = ~10^7 pixels per frame, and stacking 4 frames gives ~10^28 states — tabularly infeasible. Deep Q-networks approximate Q(s,a) with a neural network that generalizes across similar states: a convolutional network learns that similar visual patterns (e.g., a ball near a paddle) have similar values, regardless of exact pixel positions. This function approximation enables RL to operate in state spaces that are continuous or astronomically large, but introduces instability (the approximation error feeds back into the Bellman target), which is why experience replay and target networks were essential innovations.
 
 **Q: What are the main differences between DQN and DDPG for continuous action spaces?**
+**Short:** DDPG replaces DQN's discrete argmax with a deterministic actor network, enabling continuous action control.
+
 DQN uses the argmax over a discrete set of Q-values to select actions, which is infeasible when actions are continuous (e.g., joint torques for a robot arm). DDPG (Deep Deterministic Policy Gradient) introduces a deterministic actor network mu_theta(s) that directly outputs a continuous action vector. A critic network Q(s, mu_theta(s)) is used to compute the policy gradient: grad_theta J = E[grad_a Q(s,a)|_{a=mu(s)} * grad_theta mu_theta(s)]. DDPG is off-policy (uses a replay buffer) and adds action noise (Ornstein-Uhlenbeck or Gaussian) during exploration. Modern variants — TD3 (Twin Delayed Deep Deterministic Policy Gradient) — address DDPG's overestimation bias by using two critic networks and taking the minimum, and delaying policy updates every 2 critic updates.
 
 **Q: How do you debug an RL agent that is not learning?**
+**Short:** Debugging a stuck RL agent starts by checking reward signals, Q-value scale, exploration rate, and loss convergence.
+
 Start with sanity checks in order: (1) Verify rewards are being received — log mean episode reward; if it stays at initialization value, the environment or reward signal is broken. (2) Check Q-value scale — predicted Q-values should roughly match the discounted return (for gamma=0.99 and reward=1 per step, Q should approach ~100). If Q diverges to thousands, use reward normalization or reduce learning rate. (3) Verify exploration — log the fraction of random vs greedy actions (epsilon value); if epsilon is decayed too fast, the agent stops exploring before learning. (4) Reduce the problem — test on a simpler environment (CartPole before Atari) to isolate algorithmic bugs from hyperparameter issues. (5) Monitor the loss curve — a non-decreasing loss (not converging to zero) suggests the target network is not stabilizing training.
 
 **Q: What is the difference between SARSA and Q-learning, and what does the cliff-walking example reveal?**
+**Short:** SARSA learns a safer on-policy path while Q-learning learns the riskier optimal path in cliff-walking.
+
 SARSA is on-policy and Q-learning is off-policy, so on the classic cliff-walking gridworld SARSA learns a safer path while Q-learning learns the optimal but riskier one. SARSA updates toward the action the behavior policy actually takes next — Q(s,a) += alpha * [r + gamma * Q(s', a') - Q(s,a)], where a' is the epsilon-greedy action — whereas Q-learning updates toward the greedy maximum r + gamma * max_a' Q(s', a'). In cliff-walking the optimal route hugs the cliff edge; because SARSA accounts for the epsilon-greedy chance of stepping off, it prefers a longer path away from the edge, while Q-learning follows the edge and falls more often during training. As epsilon decays to zero both converge to the same optimal policy — the gap is a behavior-versus-target-policy artifact, not a difference in the optimum.
 
 **Q: What is the difference between Monte Carlo and temporal-difference (TD) learning?**
+**Short:** Monte Carlo waits for episode returns with low bias and high variance; TD bootstraps online with the opposite tradeoff.
+
 Monte Carlo waits until an episode ends and updates toward the actual return, while temporal-difference learning bootstraps and updates after every step using its own value estimate. MC is unbiased (it uses the real observed return) but high variance and requires episodes to terminate; TD is biased (its target r + gamma * V(s') depends on an imperfect V) but low variance and works online in continuing tasks. TD(lambda) interpolates between the two using eligibility traces. Q-learning and SARSA are TD methods; REINFORCE is a Monte Carlo method — which is precisely why REINFORCE suffers from notoriously high gradient variance.
 
 **Q: What is the "deadly triad" in reinforcement learning?**
+**Short:** The deadly triad is function approximation, bootstrapping, and off-policy training combined, which can cause divergence.
+
 The deadly triad is the combination of function approximation, bootstrapping, and off-policy training, which together can make value estimates diverge. Each ingredient is individually safe, but combining all three — as DQN does — removes the convergence guarantees that tabular Q-learning enjoys. Function approximation ties states together through shared parameters, so one update perturbs others; bootstrapping makes the target depend on those same moving estimates; off-policy means the update distribution does not match the policy being evaluated. This is why DQN needs stabilizers — a target network, experience replay, and reward clipping — to counteract the divergence the triad predicts.
 
 **Q: What is Generalized Advantage Estimation (GAE) and what does its lambda parameter control?**
+**Short:** GAE's lambda parameter blends n-step TD errors, trading bias against variance in the advantage estimate.
+
 GAE estimates the advantage as an exponentially weighted average of n-step TD errors, and its lambda parameter trades bias against variance. The estimator is A_t = sum_{l>=0} (gamma * lambda)^l * delta_{t+l}, where delta_t = r_t + gamma * V(s_{t+1}) - V(s_t) is the one-step TD error. lambda=0 collapses to the one-step advantage (low variance, high bias from an imperfect value function); lambda=1 collapses to the Monte Carlo advantage (unbiased but high variance). PPO typically uses lambda=0.95 with gamma=0.99, capturing most of the variance reduction while accepting only a small bias.
 
 **Q: Why must the discount factor gamma be less than 1, and how do you choose it?**
+**Short:** Discount factor gamma must stay below 1 to keep infinite-horizon returns finite and bound the planning horizon.
+
 A discount factor below 1 keeps the infinite-horizon return finite and expresses a preference for sooner rewards; it is usually set between 0.95 and 0.99. For a continuing task, sum of gamma^t * r_t converges only when gamma < 1 — gamma=1 is valid only for episodes guaranteed to terminate. The effective planning horizon is roughly 1/(1 - gamma): gamma=0.99 looks about 100 steps ahead, gamma=0.9 only about 10. Set gamma high when rewards are delayed (Go, long-horizon control) and lower when the task is myopic or long-horizon credit assignment destabilizes learning; note that raising gamma also inflates Q-value magnitudes, which interacts with reward scaling.
 
 ---

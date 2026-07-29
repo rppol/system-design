@@ -883,60 +883,98 @@ sigma_sq = np.var(data, ddof=1)   # divides by n-1
 ## 12. Interview Questions with Answers
 
 **Q: What is the relationship between MLE and cross-entropy loss?**
+**Short:** Minimizing cross-entropy loss is mathematically equivalent to maximum likelihood estimation under a categorical distribution.
+
 Minimizing cross-entropy loss is equivalent to maximum likelihood estimation under a categorical distribution. The log-likelihood of n iid categorical samples with true labels y_i and predicted probabilities p_i is sum_i log p_i(y_i). Negating this gives the cross-entropy loss. This connection means using cross-entropy for classification is not arbitrary — it is the principled MLE objective for the model.
 
 **Q: Why does L2 regularization correspond to a Gaussian prior in MAP estimation?**
+**Short:** L2 regularization is a Gaussian prior in MAP because the prior's log-probability is proportional to squared weights.
+
 MAP estimation maximizes log P(theta | data) = log P(data | theta) + log P(theta). If the prior is P(theta) = N(0, sigma_w^2 I), then log P(theta) = -||theta||^2 / (2 sigma_w^2) + const. Adding this to the log-likelihood gives loss + (1/(2 sigma_w^2)) * ||theta||^2, which is exactly L2-regularized MLE with lambda = 1/(2 sigma_w^2). A stronger prior (smaller sigma_w^2) corresponds to larger lambda.
 
 **Q: What is the Central Limit Theorem and why does it matter for ML?**
+**Short:** The Central Limit Theorem states that the mean of many iid variables converges to a Gaussian as sample size grows.
+
 The CLT states that the mean of n iid random variables with mean mu and variance sigma^2 converges in distribution to N(mu, sigma^2/n) as n -> infinity. It matters in ML because: (1) mini-batch gradient estimates are approximately Gaussian, justifying their use as noisy gradient descent; (2) model performance metrics (accuracy, AUROC) averaged over test samples have approximately Gaussian sampling distributions, enabling confidence intervals; (3) it justifies Gaussian assumptions in many models even when individual data points are not Gaussian.
 
 **Q: What is the difference between a confidence interval and a credible interval?**
+**Short:** A confidence interval is a statement about the procedure, while a credible interval is a direct probability about the parameter.
+
 A 95% confidence interval is a frequentist concept: if you repeated the experiment many times and computed a CI each time, 95% of those intervals would contain the true parameter. It says nothing about the probability that the true parameter is in any single computed interval. A 95% Bayesian credible interval contains the true parameter with 95% posterior probability (given data and prior). The credible interval is the natural intuitive statement; the confidence interval is not a probability statement about the parameter.
 
 **Q: What is the p-value and what are its limitations?**
+**Short:** The p-value is the probability of data at least as extreme as observed under the null, not the null's truth probability.
+
 The p-value is the probability of observing data at least as extreme as the actual data, assuming the null hypothesis is true. Limitations: (1) it does not tell you the probability that H0 is true; (2) with large samples almost any real effect is statistically significant even if practically meaningless — always report effect size; (3) with small samples, you can miss real effects (low power); (4) multiple comparisons inflate false positive rate; (5) it depends on the sampling plan (stopping rule matters in frequentist testing).
 
 **Q: How does the Poisson distribution differ from the Binomial, and when should you use each?**
+**Short:** Binomial models successes in a fixed number of trials, while Poisson models event counts over a fixed interval of rare events.
+
 The Binomial(n, p) models the count of successes in n fixed independent trials. The Poisson(lambda) models the count of events in a fixed interval when events occur independently at a constant rate. Poisson is the limit of Binomial as n -> inf and p -> 0 with np = lambda constant — it applies when events are rare and the total number of possible events is very large. Use Binomial for "number of users who click a button out of 1000 shown it"; use Poisson for "number of errors per hour in a service."
 
 **Q: What is overfitting from a probabilistic perspective?**
+**Short:** Overfitting is maximizing likelihood by memorizing training noise, which regularization corrects by adding a prior penalty.
+
 Overfitting is when the model maximizes likelihood on training data by memorizing noise rather than signal. A model with more parameters than data points can achieve perfect likelihood (loss = 0) on training data by explaining each data point individually, but the parameters encode noise specific to those samples. Regularization addresses this by incorporating a prior that penalizes complex parameter configurations (large weights), effectively performing MAP instead of MLE. Early stopping is approximately equivalent to L2 regularization — on a quadratic objective, stopping after t steps of gradient descent with learning rate eta gives the same solution as a ridge penalty of roughly 1/(eta*t), so it too is MAP with a Gaussian prior.
 
 **Q: What is covariance and how does it differ from correlation?**
+**Short:** Covariance measures how two variables move together in their original units, while correlation normalizes it to [-1,1].
+
 Covariance Cov(X,Y) = E[(X-mu_X)(Y-mu_Y)] measures how two variables move together. If X and Y tend to both be above/below their means simultaneously, covariance is positive. Correlation rho = Cov(X,Y) / (std(X) * std(Y)) normalizes covariance to [-1, +1], making it scale-invariant. Correlation is a pure measure of linear relationship; covariance retains units (e.g., height in cm covariance with weight in kg has units cm*kg). Pearson correlation assumes linearity; Spearman rank correlation is robust to monotone nonlinear relationships.
 
 **Q: Why does a Gaussian prior on weights in a neural network not produce exact zeros?**
+**Short:** A Gaussian prior shrinks weights proportionally to their own magnitude, so the pull toward zero vanishes before reaching it.
+
 A Gaussian prior shrinks every weight in proportion to its own magnitude, so the pull toward zero vanishes as the weight does and never reaches it. Concretely, the gradient of the prior term -||w||^2/(2 sigma^2) is proportional to w: large weights shrink fast, small weights shrink ever more slowly, and exactly zero is only approached in the limit. A Laplace prior (L1 regularization) has a sharp peak at zero with non-differentiable kink; the subgradient is constant for nonzero weights (not proportional to magnitude), which creates a "pull toward exactly zero" that can take small weights all the way to zero.
 
 **Q: What is the Beta distribution and why is it used as a prior for probabilities?**
+**Short:** The Beta distribution is a natural prior for probabilities because it's supported on [0,1] and conjugate to the Bernoulli likelihood.
+
 The Beta(alpha, beta) distribution is supported on [0,1], making it a natural prior for any probability parameter. Beta(1,1) is Uniform(0,1) — a non-informative prior. Beta(10,10) encodes a belief that the probability is near 0.5 with moderate confidence. It is the conjugate prior for the Bernoulli/Binomial likelihood: if prior is Beta(alpha, beta) and you observe h heads and t tails, the posterior is Beta(alpha+h, beta+t), allowing cheap analytic updates without MCMC.
 
 **Q: How do you design an A/B test to detect a 5% relative improvement in conversion rate?**
+**Short:** Designing an A/B test requires computing sample size from the baseline rate, alpha, power, and minimum detectable effect.
+
 First determine the baseline conversion rate (say p=0.10) and the minimum detectable effect (MDE = 5% relative = 0.005 absolute). Choose alpha=0.05 and power=0.80. Compute the required sample size: n = 2 * (z_alpha/2 + z_beta)^2 * p*(1-p) / delta^2 where delta=0.005; with z_alpha/2=1.96 and z_beta=0.842 this gives approximately 57,000 per group. Run the test without peeking until the target n is reached. Report both p-value and 95% CI on the absolute difference; a CI lower bound above 0 makes it statistically significant, and a CI lower bound above the MDE makes it practically significant too.
 
 **Q: What is the difference between MLE and MAP, and when do they coincide?**
+**Short:** MLE maximizes the likelihood alone, while MAP adds a prior term, and the two coincide when the prior is uniform.
+
 MLE maximizes P(data|theta) with no prior, while MAP maximizes P(theta|data) by adding a log-prior term, and they coincide when the prior is uniform. MAP = argmax [log P(data|theta) + log P(theta)], so a flat prior makes the prior term constant and MAP reduces to MLE. MAP also converges to MLE as data grows, because the likelihood scales with n while the fixed prior is eventually swamped. Practically, prefer MAP (regularization) with little data and a meaningful prior; MLE is fine once data dwarfs the number of parameters.
 
 **Q: Why do we maximize the log-likelihood instead of the likelihood directly?**
+**Short:** Log-likelihood is maximized instead of likelihood because log turns a numerically unstable product into a stable sum.
+
 We use the log-likelihood because log turns the product of per-sample probabilities into a sum that is numerically stable and easier to differentiate. Multiplying thousands of probabilities below 1 underflows to zero in floating point, whereas summing their logs does not. Because log is monotonic, the argmax is unchanged. Sums also differentiate term-by-term into the clean additive gradients SGD relies on, and they connect directly to cross-entropy and information measured in nats or bits.
 
 **Q: What is the difference between an unbiased estimator and a consistent estimator?**
+**Short:** An unbiased estimator matches the true parameter in expectation at any n, while a consistent one only converges as n grows.
+
 An unbiased estimator has expected value equal to the true parameter for any n, while a consistent estimator merely converges to it as n grows. The two are independent: the MLE variance (dividing by n) is biased downward yet still consistent, since its bias factor (n-1)/n tends to 1. Conversely an estimator can be unbiased but inconsistent if its variance never shrinks. In ML we usually value consistency and low variance over strict unbiasedness, which is the bias-variance tradeoff — a slightly biased, lower-variance estimator often generalizes better.
 
 **Q: What is the difference between a Type I and a Type II error?**
+**Short:** A Type I error rejects a true null hypothesis, while a Type II error fails to reject a false one, and the two trade off.
+
 A Type I error rejects a true null hypothesis (false positive), and a Type II error fails to reject a false null (false negative). Type I is controlled by the significance level alpha (typically 0.05); Type II is beta, and statistical power equals 1 - beta. The two trade off: lowering alpha to demand stronger evidence raises beta unless you increase the sample size. In an A/B test a Type I error ships a change that does nothing, while a Type II error misses a real improvement, so pick alpha and power based on which mistake is costlier.
 
 **Q: When does the Central Limit Theorem fail to apply?**
+**Short:** The CLT fails when samples aren't independent, have infinite variance, or n is too small for heavy-tailed data.
+
 The CLT fails when samples are not independent, when the underlying variance is infinite, or when n is too small for heavy-tailed data. Distributions with infinite variance such as the Cauchy never yield a Gaussian sample mean no matter how large n is. Strong dependence (time-series autocorrelation, repeated measurements on the same user) breaks the iid assumption, so the effective sample size is far below n. For very skewed or heavy-tailed data the n needed for a good Gaussian approximation can be thousands rather than the rule-of-thumb 30.
 
 **Q: What is the core difference between the frequentist and Bayesian interpretations of probability?**
+**Short:** Frequentists treat probability as long-run frequency with fixed parameters, while Bayesians treat it as a degree of belief.
+
 Frequentists see probability as long-run frequency with fixed unknown parameters, while Bayesians see it as degree of belief with parameters treated as random variables. A frequentist 95% confidence interval is a statement about the procedure across repeated experiments; a Bayesian 95% credible interval is a direct probability statement about the parameter given a prior. Frequentist methods need no prior but forbid probability claims about hypotheses; Bayesian methods require a prior but yield the intuitive P(hypothesis|data). MAP and L2 regularization are the Bayesian view showing up inside everyday ML.
 
 **Q: What is Jensen's inequality and where does it show up in ML?**
+**Short:** Jensen's inequality states that for a convex function, the function of the expectation is at most the expectation of the function.
+
 Jensen's inequality states that for a convex function f, f(E[X]) <= E[f(X)], with the direction reversed for concave functions. Because log is concave, E[log X] <= log E[X], which is exactly the gap the ELBO (evidence lower bound) exploits to make variational inference and VAEs tractable. It also proves the arithmetic mean is at least the geometric mean and underlies the non-negativity of KL divergence. Whenever you swap an expectation with a nonlinear function, Jensen tells you which direction the resulting bias points.
 
 **Q: What is the exponential family and why is it important in ML?**
+**Short:** The exponential family is a class of distributions sharing sufficient statistics and conjugate priors, unifying generalized linear models.
+
 The exponential family is a class of distributions writable as exp(eta^T T(x) - A(eta)), covering the Gaussian, Bernoulli, Poisson, and more. Members share convenient properties: sufficient statistics T(x) summarize the data, the log-partition A(eta) generates moments by differentiation, and each has a conjugate prior enabling closed-form Bayesian updates. Generalized linear models — linear, logistic, and Poisson regression — are exactly the exponential family paired with a link function. This shared structure is why so many classical models are fit with the same machinery.
 
 ---

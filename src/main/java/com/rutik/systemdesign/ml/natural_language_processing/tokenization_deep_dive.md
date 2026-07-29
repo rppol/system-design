@@ -710,63 +710,103 @@ model.resize_token_embeddings(len(tok))
 ## 12. Interview Questions with Answers
 
 **Q: Why must BPE apply its merges in the exact order they were learned, and what breaks if you do not?**
+**Short:** BPE must apply merges in learned order because reordering silently changes token boundaries with no error.
+
 Merge rank is priority: applying merges out of order produces different, wrong token boundaries for the same text, so the ordered merge list is part of the model artifact and must ship with it. BPE encoding repeatedly applies the highest-ranked (earliest-learned) applicable merge, so `es` before `est` before `lo` is not arbitrary — it reconstructs the training-time segmentation. If you ship a reordered or truncated merge file, identical input yields different IDs and the model silently degrades, with no crash to alert you.
 
 **Q: Why can two tokenizers with the same vocabulary size still produce different token counts on the same text?**
+**Short:** Tokenizers of equal vocab size produce different token counts because their segmentation algorithms differ.
+
 Because the segmentation algorithm and the specific pieces kept differ, so a BPE, WordPiece, and Unigram tokenizer of equal vocab size split the same string into different numbers of pieces. Vocab size only bounds the table; which 32k pieces you keep depends on frequency (BPE), likelihood ratio (WordPiece), or likelihood-pruning (Unigram), and how you segment depends on ranked-merge replay vs greedy-longest-match vs Viterbi. This is why you must measure fertility with the actual tokenizer rather than assuming equal-vocab tokenizers cost the same.
 
 **Q: Why do modern models use subword tokenization instead of word-level?**
+**Short:** Subword tokenization caps vocabulary size while still representing any input, unlike word-level tokenization.
+
 Word-level tokenization forces an enormous vocabulary and still cannot represent unseen words, mapping them to a single `<UNK>` token that destroys information. Subword tokenization caps the vocabulary (typically 30k-100k) while guaranteeing any input is representable by falling back to smaller pieces or bytes. It also shares parameters across morphologically related words ("run", "running", "runner" share the "run" piece), which improves generalization and handles rare/novel strings gracefully.
 
 **Q: Explain BPE training in one paragraph.**
+**Short:** BPE training repeatedly merges the most frequent adjacent symbol pair until it reaches the target vocabulary size.
+
 Start with each word as a sequence of characters (plus an end-of-word marker). Count all adjacent symbol pairs across the corpus, merge the single most frequent pair into a new symbol, and repeat. Each merge adds one entry to the vocabulary; the ordered list of merges is the learned model. After `vocab_size - base_alphabet` merges you stop. At inference you re-apply those merges in the same learned order, so frequent sequences collapse into single tokens and rare ones stay fragmented.
 
 **Q: How does WordPiece differ from BPE?**
+**Short:** WordPiece merges the pair maximizing likelihood ratio, while BPE simply merges the most frequent pair.
+
 Both are bottom-up merge algorithms, but they choose merges differently. BPE merges the most *frequent* adjacent pair. WordPiece merges the pair that maximizes corpus likelihood, scoring `freq(a,b) / (freq(a)·freq(b))`, which favors pairs that co-occur more than chance rather than merely frequent ones. At inference WordPiece does greedy longest-match-first segmentation and marks continuation pieces with `##`, whereas BPE replays its ranked merge list.
 
 **Q: How does the Unigram language model tokenizer work, and how is it different?**
+**Short:** Unigram starts from a large candidate vocabulary and prunes pieces via EM until the target size is reached.
+
 Unigram is top-down. It seeds a large candidate vocabulary, assigns each piece a probability via EM to maximize corpus likelihood, then iteratively prunes the pieces whose removal least hurts likelihood until it reaches the target size. At inference it uses Viterbi to pick the single most probable segmentation. Unlike BPE/WordPiece it can also *sample* alternative segmentations (subword regularization), which acts as data augmentation and improves robustness.
 
 **Q: What is byte-level BPE and why is it useful?**
+**Short:** Byte-level BPE uses 256 bytes as its base alphabet, eliminating OOV at the cost of more tokens for non-ASCII text.
+
 Byte-level BPE (introduced with GPT-2) uses the 256 possible bytes as the base alphabet instead of Unicode characters. Because every UTF-8 string decomposes into bytes, there is no possible OOV — any text, emoji, or even binary is encodable. The cost is that non-ASCII characters span 2-4 UTF-8 bytes, so scripts the merges never saw cost 2-3 tokens per character (Devanagari and Thai 2, Burmese 3 on GPT-2), inflating sequence length for non-English text.
 
 **Q: What is the `##` prefix in BERT's tokens and the `Ġ`/`▁` marker in GPT/SentencePiece?**
+**Short:** These markers encode whether a token continues a word or starts a new one after whitespace.
+
 They encode word-boundary/whitespace information. WordPiece uses `##` to mark a *continuation* piece (`play`, `##ing` reconstructs "playing"). Byte-level BPE uses `Ġ` to mark a piece that was preceded by a space, and SentencePiece uses `▁` (U+2581) for the same purpose. Without these markers, detokenization could not tell "newyork" from "new york."
 
 **Q: Why can "hello" and " hello" produce different token IDs?**
+**Short:** "hello" and " hello" produce different IDs because the leading space is part of the token itself.
+
 In byte-level BPE and SentencePiece, the leading space is part of the token. " hello" becomes a single `Ġhello`/`▁hello` token, while "hello" at the start of a string has no leading space and tokenizes as `hello`. This matters when you splice pre-tokenized fragments together: dropping or adding spaces shifts the IDs and can degrade model output.
 
 **Q: How does vocabulary size trade off against sequence length and model size?**
+**Short:** Larger vocabularies shorten sequences but enlarge the embedding and softmax tables, trading compute for parameters.
+
 A larger vocabulary shortens sequences but enlarges the embedding and output-softmax tables, so you trade a one-time parameter cost for a per-request compute saving. Fewer, longer tokens mean less attention compute (which is quadratic in length), while the two tables grow linearly with vocab size. A smaller vocabulary shrinks those tables but fragments text into more tokens, lengthening sequences. Common practice lands at 32k-50k for monolingual and 100k-250k for heavily multilingual models.
 
 **Q: What is tokenizer "fertility" and why does it matter?**
+**Short:** Fertility is the average tokens per word a tokenizer produces, and higher fertility means costlier sequences.
+
 Fertility is the average number of tokens per word (or per character) the tokenizer produces on a given text. High fertility means longer sequences, which increase latency, memory, and API cost while reducing how much real content fits in a fixed context window. A tokenizer trained mostly on English has low fertility on English (~1.1) but high fertility (2-4) on under-represented languages — both a cost and a fairness issue.
 
 **Q: A fine-tuned model gives nonsense in production but worked in evaluation. Tokenization is suspect — how do you debug?**
+**Short:** Debug a suspected tokenization mismatch by encoding a known sentence with both tokenizers and diffing the IDs.
+
 First confirm the inference tokenizer is byte-for-byte identical to the training one (same name, revision, casing, special tokens) — load both from the saved artifact, not from a hub name. Encode a known sentence with both and diff the IDs. Check normalization settings (lowercasing, NFKC), `add_prefix_space`, and whether special tokens were added after training without `resize_token_embeddings`. A mismatch produces valid-but-wrong IDs, so there is no crash — only silently wrong outputs.
 
 **Q: Should you train a custom tokenizer or reuse a pretrained one?**
+**Short:** Reuse the pretrained tokenizer when fine-tuning, since it is bound to the model's already-learned embeddings.
+
 Reuse the pretrained tokenizer whenever you fine-tune an existing model — it is bound to the learned embeddings, so replacing it invalidates them. Train a custom tokenizer only when pretraining from scratch or when your domain is far from the original corpus (code, genomics, a non-English language) and measured fertility is high (>1.6 tokens/word). Even then, you must train the model embeddings to match, so a custom tokenizer implies a (re)training budget.
 
 **Q: How do you add domain-specific or special tokens to an existing tokenizer safely?**
+**Short:** Adding new tokens safely requires calling resize_token_embeddings so the model gains rows for the new IDs.
+
 Use `add_tokens` / `add_special_tokens`, then immediately call `model.resize_token_embeddings(len(tokenizer))` so the embedding and output layers gain rows for the new IDs. New tokens start with random embeddings, so they need fine-tuning data to become useful. Adding too many rare tokens wastes capacity; reserve this for high-frequency domain markers (e.g. `[ENTITY]`, code keywords).
 
 **Q: Why does the same English sentence cost more tokens in some non-Latin languages?**
+**Short:** Non-Latin languages cost more tokens because the tokenizer's merges were learned mostly from English-heavy data.
+
 The tokenizer's merges were learned mostly from English-heavy data, so it has few multi-character tokens for other scripts and falls back to byte- or character-level pieces. A Hindi or Thai sentence therefore fragments into many more tokens than its English translation. Multilingual models mitigate this by training the tokenizer on balanced multilingual corpora so common pieces exist for many scripts.
 
 **Q: What is subword regularization and which algorithm supports it?**
+**Short:** Subword regularization samples among valid segmentations during training, acting as data augmentation.
+
 Subword regularization samples among multiple valid segmentations of the same text during training instead of always using the best one. That acts as data augmentation and makes the model robust to tokenization ambiguity. The Unigram LM (via SentencePiece) supports it natively because it has a probability distribution over segmentations; BPE has a dropout variant (BPE-dropout) that randomly skips merges to achieve a similar effect. Kudo (2018) reports +1-2 BLEU on most pairs and up to +4.6 BLEU on low-resource translation.
 
 **Q: How should you count tokens for a context-window or cost budget?**
+**Short:** Token counts should be computed with the actual model tokenizer, not character- or word-based estimates.
+
 Always run the actual model tokenizer: `len(tokenizer.encode(text))`. Character- or word-based estimates ("4 chars per token") are English averages that break badly on code, JSON, math, or non-Latin scripts where the ratio can be 1-2 chars/token. For OpenAI models use `tiktoken` with the model-specific encoding; for HF models use the model's own tokenizer.
 
 **Q: Why is whitespace and newline handling important for code models?**
+**Short:** Whitespace-heavy code inflates token counts unless the tokenizer adds dedicated tokens for indentation runs.
+
 Code is dense with repeated whitespace (indentation, blank lines). A tokenizer that spends one token per space or per `\n    ` inflates every file by 20-40%, wasting context and compute. Code-oriented tokenizers add tokens for common indentation runs and language patterns, dramatically lowering fertility on source files and improving effective context length.
 
 **Q: What is the difference between WordPiece's greedy longest-match and Unigram's Viterbi at inference?**
+**Short:** WordPiece greedily picks the longest matching prefix, while Unigram's Viterbi finds the globally most probable split.
+
 WordPiece greedily takes the longest vocabulary prefix at each position, while Unigram runs Viterbi to find the globally most probable segmentation. The greedy match is a fast local choice that never backtracks, so it can make a locally-optimal cut that leaves a worse overall split; Viterbi instead weighs whole-word piece-probability products and may prefer a shorter first piece when the total is more likely. This is also why Unigram can sample alternative segmentations (subword regularization) whereas greedy WordPiece cannot.
 
 **Q: Why does character-level tokenization eliminate OOV but is rarely used for large models?**
+**Short:** Character-level tokenization eliminates OOV but produces very long sequences that make attention cost explode.
+
 Character tokenization has no OOV because its tiny alphabet covers everything, but it produces very long sequences where each token carries little meaning. Those long sequences make attention cost, which is quadratic in length, explode, and they force the model to learn word composition from scratch. A 10-character word becomes 10 tokens instead of 1-2 subwords, so context windows fill far faster and training is slower to converge. Subword tokenization is the practical middle ground — bounded vocabulary, no hard OOV via byte fallback, and moderate sequence length — which is why nearly all transformers use it.
 
 ---

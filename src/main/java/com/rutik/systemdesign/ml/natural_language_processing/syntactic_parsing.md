@@ -811,60 +811,98 @@ Applying arc-standard/arc-eager to a non-projective language (Czech ~23% non-pro
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between constituency parsing and dependency parsing?**
+**Short:** Constituency parsing builds nested phrase trees; dependency parsing links each word to one head via labeled arcs.
+
 Constituency parsing groups words into nested phrases (NP, VP) from a context-free grammar; dependency parsing links each word directly to its single syntactic head with a labeled arc. Constituency trees have interior phrase nodes and ~2n nodes for n words; dependency trees have only the n words and exactly n arcs. Dependency structure maps more directly onto predicate-argument structure, which is why relation-extraction pipelines prefer it; constituency is preferred when you need explicit phrase boundaries (chunking, translation grammars). Both are recoverable from each other via head-finding rules.
 
 **Q: What is projectivity and why does it matter for parsing algorithms?**
+**Short:** A dependency tree is projective when none of its arcs cross in linear word order.
+
 A dependency tree is projective if no arcs cross when the words are drawn in linear order and all arcs are above the sentence. It matters because arc-standard and arc-eager transition systems, and Eisner's algorithm, can only produce projective trees — so on non-projective languages they cannot represent the correct parse at all. English is ~99% projective, but Czech and German have many crossing dependencies (topicalization, extraposition). To handle non-projectivity you use the SWAP transition, a pseudo-projective transform, or a graph-based Chu-Liu/Edmonds decoder that has no projectivity restriction.
 
 **Q: Why does a greedy transition-based parser suffer error propagation, and how do you fix it?**
+**Short:** Greedy parsers commit to one action per step, so an early mistake cascades through the rest of the parse.
+
 A greedy parser commits to the top-scoring action at every step with no lookahead, so one wrong early action removes the state needed for later correct arcs and the error cascades through the rest of the sentence. The two standard fixes are beam search (keep the top-k partial hypotheses so a locally suboptimal action can still win globally) and a dynamic oracle at training time (which returns the best actions from *any* configuration, including erroneous ones, so the model learns to recover from its own mistakes). Google's SyntaxNet combined beam search with global normalization to reach ~94% UAS; in practice enable a beam of 16–64 and train with a dynamic oracle rather than a static one.
 
 **Q: What is the difference between UAS and LAS?**
+**Short:** UAS scores only correct head attachment, while LAS additionally requires the correct relation label.
+
 UAS (Unlabeled Attachment Score) is the percentage of tokens assigned the correct head; LAS (Labeled Attachment Score) is the percentage assigned both the correct head and the correct relation label. LAS is always ≤ UAS because it is strictly harder. Modern English parsers reach ~96–97% UAS and ~94–95% LAS; a large UAS–LAS gap signals the parser attaches correctly but confuses labels (e.g., `obj` vs `iobj`, `nmod` vs `obl`). Always report both, and quote the treebank and tokenization since scores are not comparable across annotation schemes.
 
 **Q: What is the time complexity of CKY and why does it require Chomsky Normal Form?**
+**Short:** CKY runs in O(n^3 times grammar size) and needs CNF because it only combines two adjacent sub-spans per cell.
+
 CKY runs in O(n³·|G|): three nested loops over span width, start position, and split point give n³, and each cell tries every grammar rule, so grammar size |G| multiplies in. It requires Chomsky Normal Form — every rule binary (`A -> B C`) or lexical (`A -> word`) — because the algorithm builds each span by combining exactly two adjacent sub-spans at a split point; a ternary rule has three children and no single split, so CKY would silently skip it. You binarize rules (introducing intermediate symbols) and handle unary chains with a closure pass before running CKY.
 
 **Q: Explain arc-standard versus arc-eager transition systems.**
+**Short:** Arc-standard delays right-arc attachments until dependents are complete, while arc-eager attaches them immediately.
+
 Arc-standard has three transitions (SHIFT, LEFT-ARC, RIGHT-ARC) and attaches a word's right dependents only after all of that word's own descendants are built, taking exactly 2n transitions for n words. Arc-eager adds a REDUCE transition and attaches right dependents eagerly as soon as they are seen, giving shorter derivations for right-branching structures and often better incremental behavior. Both are O(n) greedy and both produce only projective trees. Arc-eager's eager attachment can be more accurate on some languages but its four-way action space and the REDUCE precondition make its oracle slightly more intricate.
 
 **Q: Compare transition-based and graph-based dependency parsing.**
+**Short:** Transition-based parsing is fast and greedy, while graph-based parsing decodes the globally optimal spanning tree.
+
 Transition-based parsers build the tree incrementally with scored shift-reduce actions in O(n) greedy; graph-based parsers score every arc and decode the global maximum spanning tree. Transition parsing is fastest and sees rich partial-tree features but a greedy version suffers error propagation; graph-based parsing (Eisner O(n³) projective, Chu-Liu/Edmonds O(n²) non-projective) avoids error propagation and handles non-projectivity natively at higher decoding cost. Historically graph-based was slightly more accurate out of the box; with beam search and neural scoring the two families converge. Choose transition-based for speed and rich features, graph-based for global optimality and non-projective languages.
 
 **Q: What is a PCFG and how does the parser use the probabilities?**
+**Short:** A PCFG assigns each grammar rule a probability so parses are ranked by the product of the rules used.
+
 A PCFG (Probabilistic Context-Free Grammar) attaches a probability to each rewrite rule such that the probabilities of all rules with the same left-hand side sum to 1. The probability of a parse tree is the product of the probabilities of the rules used (or the sum of log-probabilities). A Viterbi CKY parser uses these to return the single most probable tree among the exponentially many legal ones, resolving structural ambiguity like PP attachment by preferring the higher-probability derivation. Vanilla PCFGs are weak because rule probabilities ignore the actual words, so lexicalized PCFGs (Collins, Charniak) condition on head words and reach ~90 F1.
 
 **Q: When would you use Eisner's algorithm versus Chu-Liu/Edmonds?**
+**Short:** Eisner's algorithm finds the best projective tree, while Chu-Liu/Edmonds allows non-projective, crossing arcs.
+
 Use Eisner's algorithm when the language is projective (like English): it is an O(n³) dynamic program that finds the optimal *projective* dependency tree, respecting the no-crossing constraint. Use Chu-Liu/Edmonds when you need non-projective trees: it finds the maximum spanning arborescence over the complete arc-score graph in O(n²) for dense graphs, with no projectivity restriction, which is essential for free-word-order languages. Both are edge-factored decoders that take a matrix of arc scores (e.g., from a biaffine network) and return a single-root tree; the choice is purely about whether crossing arcs are allowed.
 
 **Q: What is biaffine attention in a neural dependency parser?**
+**Short:** Biaffine attention scores every word pair as head-dependent candidates using a single bilinear transformation.
+
 Biaffine attention scores every ordered word pair for whether word i is the head of word j using a bilinear form s(i,j) = h_i^T · U · d_j plus bias terms. The vectors `h_i` and `d_j` are head- and dependent-specific projections of the encoder states, so one matrix multiply produces the full n×n arc-score matrix, decoupling learned scoring from combinatorial decoding — an MST decoder then extracts the tree. Dozat & Manning's 2017 biaffine parser reached ~95.7% UAS and became the dominant architecture; a second biaffine layer scores relation labels for the chosen arcs. The key idea is that a bilinear map captures head-dependent compatibility far better than concatenating and feeding through an MLP.
 
 **Q: Why does spaCy use a transition-based parser instead of a graph-based one?**
+**Short:** spaCy uses a greedy transition-based parser because it runs in linear time, favoring production throughput.
+
 spaCy prioritizes speed for production pipelines, and a greedy transition parser runs in O(n) — parsing thousands of sentences per second on CPU — versus O(n²)–O(n³) for graph-based decoding. Transition parsing also exposes the partially built tree as features, integrates cleanly with spaCy's incremental token processing, and its accuracy gap versus graph-based parsers is small (a few tenths of a point) with a good neural model. For applications that need the last drop of accuracy or non-projective trees, Stanza's biaffine graph-based parser is the alternative, trading throughput for accuracy.
 
 **Q: What is the difference between a static and a dynamic oracle?**
+**Short:** A static oracle teaches only the gold path, while a dynamic oracle also teaches recovery from parser errors.
+
 A static oracle maps each configuration to the single gold transition assuming the parser has made no mistakes, so training only ever sees states on the gold path. A dynamic oracle returns, from *any* configuration — including erroneous ones the parser reaches at test time — the set of actions still consistent with the best tree reachable from that state. Training with a dynamic oracle (Goldberg & Nivre 2012) lets the parser explore and learn to recover from its own errors, closing the exposure-bias gap and typically adding 0.5–1.0 LAS. It is the training-time complement to beam search's inference-time fix for error propagation.
 
 **Q: How do you make a transition-based parser handle non-projective sentences?**
+**Short:** Non-projective sentences are handled with a SWAP transition, a pseudo-projective transform, or a graph-based decoder.
+
 Use one of three approaches: a SWAP transition, a pseudo-projective transform, or a graph-based Chu-Liu/Edmonds decoder that has no projectivity restriction. In detail: (1) a SWAP transition reorders the top of the stack, letting the parser reach configurations that license crossing arcs (Nivre 2009), at the cost of longer derivations; (2) pseudo-projective parsing (Nivre & Nilsson) transforms non-projective training trees into projective ones with augmented labels, parses projectively, then inverts the transformation to restore crossings; (3) a graph-based Chu-Liu/Edmonds decoder produces non-projective trees directly. The choice depends on how non-projective the language is and whether you can afford the graph-based decoder's cost.
 
 **Q: What is Universal Dependencies and why does standardization matter?**
+**Short:** Universal Dependencies is a shared cross-lingual scheme that makes parsers and evaluation comparable across languages.
+
 Universal Dependencies (UD) is a cross-linguistically consistent annotation scheme: one fixed inventory of ~37 relation labels and universal POS tags shared across 200+ treebanks in 150+ languages. The labels (nsubj, obj, obl, nmod, amod, ...) and files (CoNLL-U format) are identical across languages, so one parser architecture and one relation set transfer across languages, enabling multilingual and cross-lingual parsers, transfer learning from high- to low-resource languages, and directly comparable evaluation. Before UD, every treebank had its own labels, so a "subject" in one corpus was not comparable to another; UD made dependency parsing a genuinely multilingual field.
 
 **Q: How is constituency parsing evaluated with labeled bracketing F1 (PARSEVAL)?**
+**Short:** PARSEVAL scores constituency parses by precision and recall over labeled bracketed spans, combined into F1.
+
 PARSEVAL treats each labeled constituent (a phrase span plus its category, e.g. "NP over words 2–4") as an item; precision is the fraction of predicted brackets that match a gold bracket, recall is the fraction of gold brackets recovered, and F1 is their harmonic mean. It also reports crossing brackets (predicted spans that overlap a gold span without nesting) and complete-match rate. Weaknesses: it over-credits parsers on easy short spans, is sensitive to annotation conventions (unary chains, punctuation attachment), and a single high attachment error can shift many brackets. Modern neural constituency parsers reach ~95 F1 on the Penn Treebank; use the official `evalb` script rather than a homemade scorer.
 
 **Q: With LLMs available, why does syntactic parsing still matter?**
+**Short:** Parsing still matters because it gives explicit, cheap, deterministic structure that LLMs do not expose.
+
 Parsing produces an explicit, inspectable structure that LLMs do not expose, giving the exact subject-verb-object relations needed for auditable extraction and grammar checking. That structure is essential for rule-based relation extraction, grammar and style checking (agreement and dangling modifiers are defined structurally), and coreference features. It is also cheap, deterministic, and runs on CPU at thousands of sentences/second, whereas an LLM call is orders of magnitude slower and costlier. For low-resource languages, Universal Dependencies parsers often outperform LLMs that lack pretraining data. Parsing is a means to structured signal, not a chat interface, so it remains in production wherever explicit structure beats an opaque embedding.
 
 **Q: How do you convert a constituency tree into a dependency tree?**
+**Short:** Head-finding rules convert the tree by propagating each phrase's head word up to its parent's head.
+
 You apply head-finding rules (head percolation tables, e.g. Collins' rules): for each phrase-structure rule, a table specifies which child is the head (the head of a VP is its verb, the head of an NP is its rightmost noun), and that head word propagates up the tree. Each non-head child's head word then becomes a dependent of the parent's head word, producing a dependency arc; relation labels are assigned from the phrase categories and positions. This is exactly how the Penn Treebank (constituency) was converted to Stanford Dependencies and later to Universal Dependencies, letting dependency parsers train on originally-constituency corpora.
 
 **Q: What features does a neural transition-based parser use compared to classical feature-engineered parsers?**
+**Short:** Neural parsers replace sparse hand-engineered features with dense embeddings fed through an MLP or contextual encoder.
+
 Classical parsers used sparse, hand-engineered features — the words, POS tags, and arc labels of the top stack and front buffer items, plus their conjunctions. This was often millions of sparse indicator features (MaltParser and Chen & Manning's precursor). Neural parsers (Chen & Manning 2014 onward) instead feed dense embeddings of the top stack items, front buffer items, and their POS/label embeddings through an MLP, or encode the whole sentence with a BiLSTM/BERT and read out the contextual states of `s1`, `s2`, and `b1`. The neural approach captures feature interactions automatically, avoids the sparse-feature engineering, generalizes better, and — with contextual encoders — lets each configuration decision see the entire sentence.
 
 **Q: How do you guarantee the decoder output is a valid single-root tree?**
+**Short:** A spanning-tree decoder like Chu-Liu/Edmonds or Eisner's algorithm guarantees a valid single-root tree.
+
 Enforce it with a spanning-tree decoder rather than independent per-token head selection: independent `argmax` over the arc-score matrix can create cycles or multiple roots. Chu-Liu/Edmonds finds the maximum spanning arborescence (single root, no cycles) for non-projective trees, and Eisner's dynamic program guarantees a well-formed projective tree; both also let you constrain exactly one token to attach to the artificial ROOT. Skipping this decode step is the most common bug in a hand-rolled biaffine parser — training scores look fine but inference emits cyclic, non-tree output.
 
 ---

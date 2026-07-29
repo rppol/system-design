@@ -898,57 +898,93 @@ Training an LSTM with seq_len=30, horizon=1 and then iterating predictions to fo
 ## 12. Interview Questions with Answers
 
 **Q: What is stationarity and why does ARIMA require it?**
+**Short:** Stationarity means constant mean, variance, and autocorrelation over time, which ARIMA's linear structure requires.
+
 A stationary time series has constant mean, variance, and autocorrelation structure over time. ARIMA's AR and MA components are defined by linear relationships between time-shifted versions of the series; these relationships are only stable and estimable when the process is stationary. Non-stationary series have trends (drifting mean) or heteroscedasticity (changing variance) that would cause ARIMA coefficients to be non-constant across time, making the model invalid. The ADF test checks for a unit root (the most common form of non-stationarity); differencing d times removes it.
 
 **Q: How do you select p, d, q parameters in ARIMA?**
+**Short:** Choose d from ADF-test stationarity, p from the PACF cutoff, q from the ACF cutoff, or automate with auto_arima.
+
 d is the number of differences needed to achieve stationarity — use the ADF test iteratively (d=0,1,2). p (AR order) is selected from the Partial ACF (PACF) plot: p is where the PACF cuts off sharply. q (MA order) is selected from the ACF plot: q is where the ACF cuts off. In practice, auto_arima from pmdarima automates this search using AIC/BIC model selection, making manual inspection of ACF/PACF less necessary except for diagnosis.
 
 **Q: What is the difference between additive and multiplicative seasonality?**
+**Short:** Additive seasonality adds a constant amount regardless of level; multiplicative seasonality scales with the level.
+
 In additive seasonality, seasonal fluctuations have constant absolute magnitude regardless of the trend level (e.g., always +100 units in December). In multiplicative seasonality, seasonal fluctuations scale with the level (e.g., December is always 30% above the annual average). Use additive when variance is constant over time; use multiplicative when variance grows with the series level (common in retail and finance). Prophet uses seasonality_mode="multiplicative" for revenue series. An easy diagnostic: if a log transformation makes the seasonal variation look constant, the original series is multiplicative.
 
 **Q: How does Prophet model trend and seasonality?**
+**Short:** Prophet sums a piecewise-linear trend, Fourier-series seasonality, and holiday effects, fit jointly via L-BFGS.
+
 Prophet models y(t) = g(t) + s(t) + h(t) + epsilon. g(t) is a piecewise linear (or logistic) trend with automatically detected changepoints — locations where the trend slope changes. s(t) is a Fourier series: for yearly seasonality with N=10 terms, it has 20 parameters (sin and cos at each frequency). h(t) is a user-provided holiday effect represented as a window function centered on each holiday date. All components are fit jointly using Stan's L-BFGS optimizer. The key hyperparameter is changepoint_prior_scale (default 0.05), which controls trend flexibility.
 
 **Q: What is walk-forward validation and why is it necessary for time series?**
+**Short:** Walk-forward validation trains up to time t and tests forward, avoiding the future leakage of shuffled splits.
+
 Walk-forward validation simulates how a forecasting model would perform in production: the model is trained on all data up to time t and evaluated on t+1 through t+horizon, then the training window advances and the process repeats. This is necessary because: (1) standard k-fold would allow future data to appear in training folds; (2) temporal autocorrelation means shuffled splits produce optimistically biased estimates; (3) model performance typically degrades as forecast horizon increases, and walk-forward captures this degradation. Using sklearn's TimeSeriesSplit achieves expanding-window walk-forward.
 
 **Q: When would you choose DeepAR over a per-series ARIMA model?**
+**Short:** Prefer DeepAR for short, numerous, covariate-rich series needing probabilistic output; ARIMA for long independent series.
+
 DeepAR trains a single global LSTM model across thousands of related time series simultaneously. It is superior to per-series ARIMA when: (1) individual series are short (fewer than 100 observations) but the full dataset contains millions of (series, time) tuples — global information transfers across series; (2) multiple covariates (promotions, prices, weather) must be incorporated; (3) probabilistic outputs are required (DeepAR natively outputs a Gaussian or negative binomial distribution over future values). ARIMA is preferred when series are long (500+ points), completely independent, and interpretability of coefficients is required.
 
 **Q: How do you handle hierarchical time series (national -> regional -> store)?**
+**Short:** Reconcile hierarchical forecasts bottom-up, top-down, or via MinTrace so every level stays mutually consistent.
+
 Three approaches: (1) Bottom-up: forecast each leaf series independently and aggregate upward — preserves granularity but aggregation may not match top-level constraints; (2) Top-down: forecast the aggregate and disaggregate using historical proportions — smooth but loses local signals; (3) Optimal reconciliation (MinTrace): forecast all levels independently, then apply a linear projection that makes forecasts coherent (consistent across levels) while minimizing total variance. The statsforecast and sktime libraries implement MinTrace. For large hierarchies (10K+ nodes), bottom-up with shared global models (one LightGBM per level) is practical.
 
 **Q: What is the difference between one-step-ahead and multi-step-ahead forecasting?**
+**Short:** Recursive forecasting accumulates error per step, direct trains one model per step, and MIMO predicts all steps jointly.
+
 One-step-ahead predicts t+1 given all observations up to t. Multi-step-ahead predicts t+1 through t+h simultaneously. Recursive strategy: iteratively predict t+1, append to history, predict t+2, etc. — errors accumulate at each step. Direct strategy: train h separate models, each predicting a specific future step — no error accumulation but h times the model count. MIMO (Multiple Input Multiple Output) strategy: a single model with h outputs trained jointly — balances accuracy and efficiency. LSTMs naturally implement MIMO; ARIMA naturally uses recursive strategy.
 
 **Q: How do you detect and handle concept drift in a production forecasting system?**
+**Short:** Detect drift via rolling error monitoring, then retrain from post-break data or reweight toward recent samples.
+
 Concept drift means the data-generating process has changed (e.g., market structure shift, new competitor, COVID). Detection: monitor rolling RMSE/SMAPE on a sliding window; alert when rolling metric exceeds 2 standard deviations above historical baseline. Two drift types: abrupt (sudden structural break — retrain from post-break data only) and gradual (slow evolution — use exponentially weighted training samples to give recent data higher weight). Ruptures library (PELT algorithm) detects changepoints in historical series. In production, automated retraining pipelines should trigger when drift score exceeds threshold, verified by human review before promoting the new model.
 
 **Q: Why is gradient clipping important when training LSTMs for time series?**
+**Short:** Gradient clipping caps the gradient norm to stop LSTM training from exploding over long backpropagation sequences.
+
 LSTM hidden states can accumulate large magnitudes across long sequences, causing gradient norms to explode during backpropagation through time (BPTT). An exploding gradient update makes model weights jump to NaN or extreme values in a single step. Gradient clipping (nn.utils.clip_grad_norm_ with max_norm=1.0) caps the L2 norm of the gradient vector before the optimizer step, preventing instability without slowing training. The vanishing gradient problem in LSTMs is mitigated by the cell state and gating mechanism (unlike vanilla RNNs), but exploding gradients still occur on long sequences (seq_len > 100).
 
 **Q: What are Fourier features and why are they used for seasonality encoding?**
+**Short:** Fourier features encode periodic seasonality as smooth, compact sine and cosine terms instead of one-hot days.
+
 Fourier features represent periodic patterns as sums of sine and cosine functions at specific frequencies. For a weekly period of 7 days, Fourier features are sin(2*pi*t/7), cos(2*pi*t/7), sin(4*pi*t/7), cos(4*pi*t/7), etc. Using K pairs captures the first K harmonics of the pattern. Advantages over one-hot day-of-week encoding: (1) smooth — Sunday and Monday are adjacent in Fourier space; (2) compact — K=3 pairs (6 features) vs 7 one-hot features; (3) handles any period (not just integer periods). Prophet uses Fourier features internally for both weekly and yearly seasonality.
 
 **Q: Why does shuffling or random train/test splitting produce misleadingly optimistic results on a time series?**
+**Short:** Random splitting lets future data leak into training, making a time series model look better than it truly generalizes.
+
 Random splitting leaks future information into training because future observations land in the training set and are used to predict the past. Temporal autocorrelation means a shuffled test point is nearly identical to a neighboring training point, so the model appears to generalize when it is really memorizing. This is why development MAPE of 8% can jump to 31% live. Always split chronologically and validate with walk-forward folds, never with KFold or a random split.
 
 **Q: Why is MAPE a poor metric for series that contain zeros, and what should you use instead?**
+**Short:** MAPE breaks down on zero actuals and penalizes over- and under-forecasts asymmetrically; use SMAPE or MASE instead.
+
 MAPE divides absolute error by the actual value, so it becomes undefined or infinite whenever an actual is zero. Intermittent-demand series (many zero-sales weeks) therefore produce NaN or infinity under MAPE, and MAPE is also asymmetric — it penalizes over-forecasts more lightly than under-forecasts. Use SMAPE (bounded 0-200%), MAE, or MASE/RMSSE, which scale error by a naive seasonal baseline and stay well-defined even when actuals hit zero.
 
 **Q: Why must you scale features before training an LSTM but not before fitting ARIMA?**
+**Short:** LSTMs need scaled inputs to avoid saturated gradients, while ARIMA's least-squares fit is scale-invariant.
+
 LSTMs need scaled inputs because large-magnitude values saturate activations and make gradients vanish or explode during backpropagation through time. Raw sales in the range 0-100,000 push hidden-state gradients toward zero, and the network fails to learn. Fit a MinMaxScaler or StandardScaler on the training window only, apply it to validation and test, and inverse-transform predictions. ARIMA operates on the raw series directly because its coefficients are estimated by linear least-squares, which is scale-invariant.
 
 **Q: How do you avoid target leakage when engineering rolling-window features?**
+**Short:** Shift the target before computing rolling or lag features so none of them see the value being predicted.
+
 Shift the target by one step before computing any rolling statistic so each feature is built only from strictly past values. A `rolling_mean(7)` computed without a `shift(1)` includes the current timestep's own value, letting the model peek at the label it is trying to predict. The same applies to lag features: never compute t+7 lags from the full series before the train/test split, or test samples inherit their own future.
 
 **Q: What is the difference between ARIMA and exponential smoothing (ETS)?**
+**Short:** ARIMA models autocorrelation in a differenced series, while ETS smooths level, trend, and seasonality exponentially.
+
 ARIMA models the autocorrelation of the differenced series, while ETS models level, trend, and seasonality as exponentially weighted moving averages. ARIMA is more flexible for series with complex autocorrelation structure but requires stationarity and careful (p,d,q) selection; ETS (Holt-Winters) is simpler, needs no stationarity assumption, and often wins on short seasonal business series. In practice they are complementary — the M-competitions show ETS and ARIMA trading wins by series type, which is why ensembling both is common.
 
 **Q: How does DeepAR produce probabilistic forecasts instead of single point estimates?**
+**Short:** DeepAR predicts distribution parameters at each step, then samples forward to build quantile forecast intervals.
+
 DeepAR outputs the parameters of a likelihood (Gaussian or negative binomial) at each step rather than a single value, then samples forward to build prediction intervals. It trains a single global LSTM across thousands of related series by maximizing the log-likelihood of the observed values under the predicted distribution. At inference it draws many sample paths through the autoregressive decoder and reads off quantiles (P10/P50/P90), which is what makes it suitable for inventory decisions at a target service level.
 
 **Q: What is the difference between an expanding-window and a sliding-window backtest?**
+**Short:** Expanding windows keep all history for stable processes; sliding windows drop stale data to adapt to drift.
+
 An expanding window keeps all history and grows the training set each fold, while a sliding window holds a fixed-length recent window and drops the oldest data. Expanding windows maximize data and suit stable processes; sliding windows adapt faster to drift and structural breaks because stale pre-break data is discarded. Choose sliding for regimes that change (post-COVID retail, evolving markets) and expanding when the data-generating process is stationary and every extra observation helps.
 
 ---

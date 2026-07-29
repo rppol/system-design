@@ -813,57 +813,93 @@ Bidirectional attention is O(N^2) in sequence length. For sequences longer than 
 ## 12. Interview Questions with Answers
 
 **Q: How does a two-tower model work for recommendation retrieval?**
+**Short:** A two-tower model scores users and items via separate networks whose output vectors combine by dot product.
+
 A two-tower model has a user tower and an item tower, each a separate neural network. The user tower takes user features (user ID, demographics, interaction history) and outputs a dense vector. The item tower takes item features (item ID, category, metadata) and outputs a dense vector of the same dimension. During training, the score for a (user, item) pair is their dot product, and training maximizes the score for observed (user, item) interactions using in-batch negatives or sampled softmax. At serving time, all item vectors are pre-computed and stored in a FAISS index; only the user vector is computed per request, and ANN search returns the top candidates in milliseconds.
 
 **Q: What are in-batch negatives and why are they used in two-tower training?**
+**Short:** In-batch negatives reuse other users' positive items in the batch as free negative examples for training.
+
 In-batch negatives use all other items in the training batch as negative examples for each user. If batch size is 1024, each user sees 1023 negative items (the positive items of other users in the batch). This is efficient because no extra negative sampling is needed — the batch naturally provides negatives. The loss is cross-entropy: the model must identify the one true positive item among all items in the batch. The caveat: popular items appear as negatives more often than rare items, creating a biased estimator. Correction: logQ correction (subtract log(Q(item)) from the score, where Q is the sampling probability proportional to item frequency).
 
 **Q: What is the difference between DeepFM and Wide & Deep?**
+**Short:** DeepFM replaces Wide & Deep's manual feature crosses with an automatically learned Factorization Machine component.
+
 Both combine a component for feature interactions with a deep MLP. Wide & Deep uses a manually crafted linear model for the "wide" part, requiring feature engineering (explicitly defining feature crosses). DeepFM replaces the wide linear model with a Factorization Machine that automatically models all pairwise feature interactions via learned embeddings — no manual cross feature specification. DeepFM is generally preferred when the team cannot enumerate all relevant feature crosses manually. Wide & Deep is preferred when domain knowledge can specify a small set of high-impact crosses.
 
 **Q: How does SASRec differ from BERT4Rec for sequential recommendation?**
+**Short:** SASRec uses causal attention for fast single-pass next-item inference; BERT4Rec uses bidirectional masked prediction.
+
 SASRec uses a Transformer decoder with causal (left-to-right) self-attention: each position can only attend to past positions. It is trained to predict the next item given all previous items. BERT4Rec uses bidirectional self-attention (like BERT) with a masked item prediction objective: random items in the sequence are masked and the model predicts them from both past and future context. SASRec is better for online inference (only one forward pass to predict the next item), while BERT4Rec can capture bidirectional context but requires masking at serving time (mask the last item and predict it).
 
 **Q: Explain the temperature parameter in contrastive learning for two-tower models.**
+**Short:** A small softmax temperature sharpens the similarity distribution, forcing the positive pair's score to stand out.
+
 The temperature parameter T scales the dot product similarity before softmax: logits = dot(user_vec, item_vec) / T. Small T (e.g., 0.07) sharpens the distribution — the model has high confidence that one item is clearly positive and all others are negative. Large T softens the distribution. In practice, a small temperature (0.05–0.1) works best for retrieval models because it forces the model to maximize the similarity for the positive pair relative to negatives. Annealing temperature during training (starting high, decreasing) can help avoid local minima early in training.
 
 **Q: How would you handle the embedding table memory problem for a 1B user recommendation model?**
+**Short:** Feature hashing, frequency-based pruning, and table sharding keep billion-user embedding tables within memory budgets.
+
 Strategy 1: Feature hashing — hash user IDs into a smaller bucket space (e.g., 10M buckets for 1B users). Hash collisions mean some users share embeddings, but the loss is small for high-cardinality features. Strategy 2: Frequency-based pruning — only maintain separate embeddings for users with more than K interactions; hash rare users into shared buckets. Strategy 3: Embedding compression — reduce dimension for high-cardinality features and use higher dimensions for low-cardinality features with higher predictive power. Strategy 4: Model parallelism — shard embedding tables across GPUs; each GPU holds a subset of the embedding table, and embeddings are gathered from remote GPUs during forward pass (DLRM approach).
 
 **Q: What is hard negative mining and when is it beneficial?**
+**Short:** Hard negative mining trains on near-miss items to teach the model finer distinctions than random negatives allow.
+
 Hard negatives are items that are similar to the user's preferred items but are not actually positive (the user did not interact with them). Training with only random negatives means the model easily distinguishes the positive from completely irrelevant items. Hard negatives force the model to learn fine-grained distinctions. Mining: after a training epoch, compute user-item similarities; for each user, the top-K most similar non-positive items are hard negatives for the next epoch. Benefit: improves recall@K for similar items (the "hard" region of the embedding space). Risk: false hard negatives — items the user would actually like but has not yet seen — can harm training. Mitigation: mix 50% hard and 50% random negatives.
 
 **Q: How does Wide & Deep handle the memorization-generalization tradeoff?**
+**Short:** Wide & Deep's linear part memorizes rare feature crosses while its deep part generalizes across unseen combinations.
+
 The wide linear part memorizes rare but reliable feature crosses while the deep part generalizes across them, and joint training keeps both contributing. The wide part memorizes specific feature combinations by directly modeling raw and crossed features — e.g., "if user installed Word AND searched for Excel, show Excel App." These combinations are rare but highly predictive. A deep neural network would rarely see this exact combination in training and cannot generalize to it reliably. The deep part generalizes across features it has not seen together by learning dense representations — e.g., "productivity apps" cluster together in embedding space. Joint training ensures both components complement each other rather than one dominating.
 
 **Q: How do you evaluate a two-tower retrieval model?**
+**Short:** Two-tower retrieval is evaluated primarily with Recall@K against a temporal train/test split.
+
 Primary metric: Recall@K — what fraction of the true positive items appear in the top-K retrieved candidates. Target: Recall@100 > 95% (so the ranking stage has enough good candidates). Also measure: Hit@1 (fraction of users for whom the true positive item is ranked #1, useful for next-item prediction tasks), and catalog coverage. Use temporal evaluation: train on interactions before date T, evaluate on interactions at T+1 to T+7. Compare against an ALS baseline — two-tower with features should outperform ALS significantly when item content features are informative.
 
 **Q: What causes the "representation collapse" problem in two-tower models?**
+**Short:** Representation collapse is when user and item embeddings converge to one point, making similarity scores uniform.
+
 Representation collapse occurs when user and item embeddings all converge to nearly the same vector, making similarity scores uniform. Root cause: the in-batch contrastive loss can be minimized by collapsing all representations to a single point because every pair (user, item) becomes equally similar. Prevention: L2 normalization forces representations onto the unit hypersphere, preventing magnitude collapse; temperature scaling with small T prevents uniform similarity; batch normalization of intermediate layers. Symptoms: if the standard deviation of pairwise similarities approaches zero during training, collapse is occurring.
 
 **Q: How would you incorporate real-time user signals (last 3 clicks) into a two-tower model?**
+**Short:** Recent clicks feed the user tower via pooled or attention-weighted embeddings of the last few interacted items.
+
 The user tower input should include a "recent interaction sequence" feature. Two approaches: (1) average pooling — compute the mean of the item embeddings for the last 3 clicked items and concatenate with the static user embedding. This is cheap and effective. (2) Attention pooling — learn an attention weight over the recent items conditioned on the user's static embedding, allowing the model to weight recent clicks differently. At serving time, the last 3 item IDs are fetched from a real-time store (Redis, with TTL 1 hour), their embeddings looked up, pooled, and fed into the user tower. The user vector is computed per request — not pre-cached — which adds ~3ms to latency.
 
 **Q: What is the role of the output dimension in a two-tower model?**
+**Short:** The output dimension trades embedding expressiveness against FAISS index size and ANN search latency.
+
 The output dimension D determines the resolution of the embedding space. Larger D allows the model to encode more user/item attributes but increases memory (FAISS index size = N_items * D * bytes) and ANN search time. Smaller D compresses information but may lose fine-grained distinctions. Typical values: 64–512 dimensions. In practice, 256 is a common default. Important: both towers must output the same dimension for dot product computation. The output layer is L2-normalized so the dot product equals cosine similarity, which is scale-invariant.
 
 **Q: How does DLRM (Facebook) handle the interaction between sparse and dense features?**
+**Short:** DLRM computes explicit pairwise dot products between dense and sparse embeddings before a final top MLP.
+
 DLRM first processes dense features through a "bottom MLP" producing a dense vector. Sparse features (user ID, item ID, category) are looked up in embedding tables to produce vectors of the same dimension as the bottom MLP output. Then explicit feature interactions are computed: the dot product of all pairs of these vectors (bottom MLP output + all sparse embeddings), forming the upper triangle of the interaction matrix. This explicit interaction layer is then fed into a "top MLP" that produces the final prediction. The explicit interaction design is more interpretable than learned interactions in DeepFM and is highly optimized for commodity CPU/GPU hardware.
 
 **Q: How do you prevent overfitting in embedding tables for rare items?**
+**Short:** Regularization, dropout, and content-based initialization prevent rare item embeddings from overfitting.
+
 Rare items have very few training examples, so their embedding vectors can overfit to those few interactions. Strategies: (1) L2 regularization on embedding weights — penalize large embedding magnitudes; (2) dropout on embeddings — randomly zero out embedding dimensions during training; (3) frequency-based initialization — initialize rare item embeddings as the average of their content features or their category embedding, giving a better starting point; (4) embedding sharing — items in the same category share part of their embedding representation via a shared category embedding; (5) minimum frequency threshold — items with fewer than K interactions use a special "unknown" embedding rather than a dedicated entry.
 
 **Q: Describe the serving architecture for a two-tower model in production.**
+**Short:** Two-tower serving precomputes item vectors offline and computes only the user vector at request time via ANN search.
+
 Offline: item tower runs as a batch job (nightly or streaming) over the full item catalog, computing and storing item_vectors (N_items x D) in a FAISS IVF index (sharded across machines for large catalogs). Online: (1) fetch user features from feature store (<1ms); (2) run user tower inference (GPU, ~3ms); (3) ANN search in FAISS (CPU cluster, ~5ms, returns top 500); (4) filter already-interacted items (Redis set lookup, ~1ms); pass candidates to ranking stage. Total retrieval latency: ~10ms. Item FAISS index rebuild triggered by: new items added, existing items metadata changed, or daily refresh. FAISS IVF with nprobe=64 achieves ~95% recall@100 at ~5ms latency on 10M vectors.
 
 **Q: What is the sampling bias problem in two-tower training with in-batch negatives?**
+**Short:** In-batch negatives underrank popular items since they appear disproportionately as negatives; logQ correction fixes it.
+
 When using in-batch negatives, popular items appear as negatives for many users in the batch (because they frequently appear as positives for other users). The model is trained to push popular items away from most user vectors, even though popular items are often actually relevant to many users. This causes the trained model to systematically underrank popular items at serving time. Fix: logQ correction — subtract log(Q_i) from the dot product score during training, where Q_i is the item's sampling probability (proportional to its training frequency). This removes the popularity bias from the gradient signal.
 
 **Q: How would you design a two-tower model to handle new items (item cold start)?**
+**Short:** Content-only item towers let new items get vectors immediately, refined later once interactions accumulate.
+
 Design the item tower to operate purely on content features — no item ID embedding (or use it only as a residual when available). The item tower takes: category embedding, text embedding (from pre-trained language model), numerical features (price, rating). At serving time, new items can immediately receive a vector from the content-only item tower without needing interaction history. As interactions accumulate, a fine-tuning step or online update adds the item ID embedding as a correction term. This is the "content-based initialization → collaborative refinement" pattern used at platforms with high item turnover (news, e-commerce).
 
 **Q: Why does a two-tower model cap accuracy compared to a single-tower cross-attention ranker?**
+**Short:** Two towers never interact before the dot product, so they cannot learn fine-grained cross-feature interactions.
+
 The two towers never interact until the final dot product, so the model cannot learn fine-grained user-item feature crosses that a cross-attention ranker captures. This "late interaction" is exactly the property that makes item vectors precomputable and ANN-searchable, but it forfeits expressiveness — the score is just a dot product of two independently computed vectors. That is why production stacks use two-tower for cheap high-recall retrieval (top-500) and then a heavier cross-feature ranker (Wide & Deep, DLRM) to re-score those candidates for the final ordering.
 
 ---

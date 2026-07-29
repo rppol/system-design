@@ -887,51 +887,83 @@ Lasso has a tendency to arbitrarily select one feature from a group of correlate
 ## 12. Interview Questions with Answers
 
 **Q: Derive the gradient of binary cross-entropy loss with respect to w in logistic regression.**
+**Short:** The logistic regression gradient simplifies to the prediction error, p minus y, multiplied by the input x.
+
 The loss for a single example is L = -[y log(sigma(z)) + (1-y) log(1 - sigma(z))], where z = w^T x. Using the chain rule: dL/dw = dL/dz * dz/dw. The key identity is d(sigma(z))/dz = sigma(z)(1 - sigma(z)). Working through the chain rule, dL/dz = sigma(z) - y = p - y. And dz/dw = x. Therefore dL/dw = (p - y) * x. This beautiful result means the gradient is simply the prediction error times the input.
 
 **Q: Why does L1 regularization produce sparse models while L2 does not?**
+**Short:** L1's diamond-shaped constraint region meets loss contours at corners, zeroing weights; L2's sphere does not.
+
 Geometrically, the L1 constraint region is a diamond (in 2D) with corners on the axes. The optimal constrained solution (where the loss contour first touches the constraint region) is very likely to land at a corner, where one or more weights are exactly zero. The L2 constraint is a sphere — smooth everywhere — so the touching point is almost never at a zero. Algebraically, L1's subdifferential at zero includes zero, so the optimizer can stay at zero; L2's gradient at zero is zero, but any perturbation pulls the weight away.
 
 **Q: What is the difference between Ridge and the Normal Equation, and how does Ridge handle multicollinearity?**
+**Short:** Ridge adds alpha times the identity matrix to X^T X, keeping it invertible under multicollinearity.
+
 The Normal Equation is w = (X^T X)^{-1} X^T y. When features are collinear, X^T X becomes singular (or near-singular), making the inverse numerically unstable and the coefficients explode. Ridge adds a regularization term: w = (X^T X + alpha * I)^{-1} X^T y. Adding alpha to the diagonal makes the matrix strictly positive definite and always invertible, producing stable, shrunk coefficients. This is the closed-form Ridge solution.
 
 **Q: When would you choose Lasso over Ridge?**
+**Short:** Choose Lasso for automatic feature selection via sparsity, and Ridge when features are correlated.
+
 Choose Lasso when you believe only a small subset of features are truly predictive and you want automatic feature selection. Lasso zeroes out irrelevant coefficients, producing a sparse model that is easier to interpret and faster at inference. Choose Ridge when features are correlated (Lasso arbitrarily picks one of a correlated pair) or when you want all features to contribute with small weights rather than hard zeros.
 
 **Q: What is the VIF and what threshold indicates a problem?**
+**Short:** VIF measures multicollinearity, and a value above 10 signals a severe problem needing correction.
+
 Variance Inflation Factor (VIF) for feature j is 1 / (1 - R^2_j), where R^2_j is the R-squared from regressing feature j on all other features. VIF = 1 means no correlation with other features. VIF = 5 is the soft warning threshold; VIF > 10 indicates severe multicollinearity and requires action (drop the feature, combine features, or switch to Ridge). VIF above 100 means near-perfect multicollinearity.
 
 **Q: How do you interpret a logistic regression coefficient?**
+**Short:** A logistic regression coefficient is the change in log-odds of the positive class per unit increase in that feature.
+
 The coefficient w_j represents the change in log-odds of the positive class per unit increase in feature x_j, holding all other features constant. Equivalently, exp(w_j) is the odds ratio: a one-unit increase in x_j multiplies the odds by exp(w_j). For binary features, exp(w_j) is the odds ratio comparing the two groups. Do not interpret coefficients as changes in probability — the probability effect is non-linear.
 
 **Q: What is the difference between the sigmoid and softmax functions?**
+**Short:** Sigmoid outputs one binary probability; softmax outputs a normalized probability vector across multiple classes.
+
 Sigmoid is used for binary classification: it maps a single scalar to (0, 1), representing P(y=1). Softmax is used for multi-class classification with K classes: it maps a K-dimensional vector of logits to a K-dimensional probability vector summing to 1. Sigmoid is a special case of softmax with K=2. For multi-label classification (multiple independent binary outputs), apply sigmoid independently to each output — do not use softmax.
 
 **Q: Why does logistic regression require iterative optimization while linear regression has a closed-form solution?**
+**Short:** Logistic regression's log-loss gradient is non-linear in w, so no closed-form solution exists.
+
 Linear regression with MSE loss produces a quadratic function of w, so setting the gradient to zero yields a linear system of equations solvable in closed form (Normal Equation). Logistic regression's cross-entropy loss involves log(sigma(w^T x)), which is non-linear in w. Setting the gradient to zero does not produce a linear system — the equation has no closed-form solution. However, the loss is convex, so iterative methods (gradient descent, L-BFGS, Newton's method) are guaranteed to find the global optimum.
 
 **Q: What is regularization path and how is it used for feature selection?**
+**Short:** The regularization path tracks how Lasso coefficients shrink to zero as its penalty strength increases.
+
 The regularization path is the sequence of coefficient values as the regularization strength (alpha or 1/C) varies from very weak to very strong. For Lasso, as alpha increases, coefficients drop to zero one by one — the last ones to drop are the most important features. Plotting the path reveals feature importance and helps select the number of features to retain. sklearn's LassoCV automatically finds the optimal alpha via cross-validation across the path.
 
 **Q: How do you handle a categorical feature with 1,000 distinct values in logistic regression?**
+**Short:** Use target encoding, frequency encoding, embeddings, or bucketing rare categories for a 1,000-value feature.
+
 One-hot encoding 1,000 categories adds 999 binary features (dropping one for identifiability). With high cardinality, this leads to sparsity and potential overfitting. Better approaches: (1) target encoding — replace each category with its mean target value, then add regularization to prevent leakage; (2) frequency encoding — replace with log frequency; (3) embedding via a neural network if the dataset is large enough; (4) grouping rare categories into an "Other" bucket. Always apply Lasso or Ridge after any of these to handle the resulting sparsity or collinearity.
 
 **Q: What is ElasticNet and when is it preferred over pure L1 or L2?**
+**Short:** ElasticNet mixes L1 and L2 penalties, keeping sparsity while handling correlated features better than pure Lasso.
+
 ElasticNet combines L1 and L2 penalties: alpha * [l1_ratio * ||w||_1 + (1 - l1_ratio) * ||w||^2]. It handles correlated features better than pure Lasso (which arbitrarily selects one from a correlated group) while still producing sparse solutions. Preferred when: features are correlated AND you still want some sparsity; n << d (very high-dimensional data with correlated features, such as genomics). The l1_ratio parameter controls the mix: 0 = Ridge, 1 = Lasso.
 
 **Q: How would you detect and handle non-linearity in a linear regression problem?**
+**Short:** Plot residuals versus fitted values to detect non-linearity, then fix with polynomial features or splines.
+
 Detection: plot residuals vs. fitted values — systematic patterns (U-shape, funnel) indicate non-linearity or heteroscedasticity. Also plot each feature vs. the target residuals. Handling options: (1) polynomial features (x^2, x^3, x1*x2 interactions) — sklearn PolynomialFeatures; (2) log/sqrt transformation of skewed features; (3) spline regression (piecewise polynomial, smooth at knots); (4) generalized additive models (GAMs) via pyGAM library. If non-linearity is pervasive and unstructured, switch to gradient boosted trees or a neural network.
 
 **Q: What solver should you use for sklearn LogisticRegression and why?**
+**Short:** Choose the LogisticRegression solver by dataset size and which l1_ratio penalty range it supports.
+
 Solver choice depends on the dataset and on which penalty you need, expressed through `l1_ratio`. lbfgs is the default, handles the L2 case (`l1_ratio=0`) well on small-to-medium data, and fits the multinomial softmax objective. liblinear accepts `l1_ratio=0` or `1` and is fast on small data, but it is binary-only — three or more classes raise a ValueError unless you wrap it in `OneVsRestClassifier`. saga is the only solver accepting any `l1_ratio` in [0, 1], so ElasticNet needs it; it is also the fastest on large data and supports multinomial. sag and newton-cholesky take `l1_ratio=0` only, with newton-cholesky strong when n is far larger than d. Always check that your `l1_ratio` is supported by the chosen solver — sklearn raises an error if incompatible.
 
 **Q: How does probability calibration work and when is it necessary?**
+**Short:** A model is calibrated when its predicted 0.8 probability corresponds to an actual 80% event rate.
+
 A model is well-calibrated if predicted probability 0.8 corresponds to an 80% empirical event rate. Logistic regression is generally well-calibrated; SVM and boosted trees are not — they tend to push probabilities toward 0 and 1. Calibration is necessary whenever the downstream system uses the raw probability (expected value calculations, risk scoring, multi-model ensemble). Fix with sklearn CalibratedClassifierCV: use Platt scaling (sigmoid fit) for small datasets or isotonic regression for larger ones.
 
 **Q: Explain the difference between L-BFGS and gradient descent for optimizing logistic regression.**
+**Short:** L-BFGS approximates the Hessian for superlinear convergence, needing far fewer iterations than gradient descent.
+
 Gradient descent makes small steps along the negative gradient, needing O(1/epsilon) iterations for epsilon-accuracy on a smooth convex loss. L-BFGS (Limited-memory Broyden–Fletcher–Goldfarb–Shanno) approximates the inverse Hessian (second-order information) from a fixed-size history of gradient and step vectors, which buys superlinear local convergence — once near the optimum, each iteration roughly squares the remaining error, so the last digits of accuracy are nearly free. L-BFGS uses more memory per iteration but converges in far fewer iterations, which is why it is sklearn's default solver for logistic regression.
 
 **Q: How do you choose C (regularization strength) for logistic regression in production?**
+**Short:** Choose C via cross-validation on a logarithmic grid, optimizing whichever business metric matters most.
+
 Use k-fold cross-validation (typically 5-fold or 10-fold, stratified for imbalanced data) with a logarithmic grid: C in [0.0001, 0.001, 0.01, 0.1, 1, 10, 100]. sklearn's LogisticRegressionCV does this efficiently by exploiting the warm-start property of the solver. Optimize for your business metric — AUC-ROC for ranking, F1 for balanced precision/recall, log-loss for probability calibration. Once C is chosen, retrain on the full training set (train + validation) before final evaluation on the held-out test set.
 
 ---

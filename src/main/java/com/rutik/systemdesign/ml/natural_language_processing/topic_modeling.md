@@ -1049,51 +1049,83 @@ train a supervised model if you need reliable labels.
 ## 12. Interview Questions with Answers
 
 **Q: How is topic modeling different from clustering documents?**
+**Short:** Topic modeling assigns each document a mixture of topics, while clustering assigns one hard group per document.
+
 Topic modeling gives each document a mixture of many topics, whereas clustering assigns each document to exactly one group. This mixed-membership is the core distinction: k-means forces a stadium-bond article into a single cluster, but LDA can represent it as 50% sports, 30% finance, 20% politics. Topics are also distributions over words (interpretable), while clusters are just centroids. Use clustering when documents are genuinely single-theme and you need hard assignments; use topic modeling when documents span themes and you want interpretable, soft structure.
 
 **Q: Why is perplexity a poor way to choose the number of topics?**
+**Short:** Perplexity is a poor guide for K because it falls monotonically and is negatively correlated with interpretability.
+
 Perplexity measures predictive fit and falls monotonically as you add topics, so optimizing it pushes K toward hundreds of overfit, incoherent topics. Chang et al.'s 2009 "Reading Tea Leaves" showed perplexity is actually *negatively* correlated with human interpretability. The fix is to select K by coherence (c_v), which peaks at a moderate K and then declines as topics fragment into near-duplicates. Always eyeball the top-10 words per topic before finalizing K.
 
 **Q: Walk through the LDA generative story.**
+**Short:** LDA's generative story draws topic-word and document-topic distributions from Dirichlet priors, then samples words.
+
 For each topic draw a word distribution phi from Dir(beta); for each document draw a topic mixture theta from Dir(alpha); then for each word slot pick a topic z from theta and a word from phi_z. That is the whole model: two Dirichlet-drawn distributions and two categorical draws per word. Inference reverses it — given only the observed words, recover theta (per-document mixtures) and phi (per-topic vocabularies). The Dirichlet priors are what enforce sparse, readable topics and let LDA generalize to unseen documents.
 
 **Q: What do the alpha and beta hyperparameters control in LDA?**
+**Short:** Alpha controls document-topic sparsity and beta controls topic-word sparsity, both making topics more readable when low.
+
 Alpha is the document-topic Dirichlet concentration and beta is the topic-word concentration; both below 1 induce sparsity. Low alpha (e.g. 0.1 or 50/K) makes each document concentrate on a few topics; low beta (e.g. 0.01) makes each topic concentrate on a few words, which is what makes topics readable. High values spread mass out, producing blurry documents and generic topics. gensim can learn an asymmetric alpha from data (`alpha='auto'`), which usually improves quality over a fixed symmetric prior.
 
 **Q: Compare collapsed Gibbs sampling and variational inference for LDA.**
+**Short:** Collapsed Gibbs sampling is slower but often more coherent, while variational inference is faster and scales further.
+
 Collapsed Gibbs integrates out theta and phi and samples each word's topic from count-based conditionals, while variational inference approximates the posterior with a factorized distribution and maximizes an ELBO. Gibbs is stochastic, slower, and usually finds slightly more coherent topics; variational (especially online/mini-batch variational Bayes) is faster, deterministic per seed, and scales to millions of documents by streaming. sklearn uses online variational Bayes; MALLET and tomotopy use optimized Gibbs. Variational inference here is the same EM machinery used for Gaussian mixtures.
 
 **Q: How does LSA differ from LDA?**
+**Short:** LSA is a deterministic linear-algebra SVD, while LDA is a probabilistic model with interpretable topic distributions.
+
 LSA is a truncated SVD of the term-document matrix (pure linear algebra), while LDA is a probabilistic generative model with Dirichlet priors. LSA's latent components can be negative and are hard to read as topics; LDA's topics are proper probability distributions over words. LSA is fast and deterministic and great for producing latent features for downstream models, but it gives no principled way to score new documents or reason about uncertainty. LDA is slower but yields interpretable, mixed-membership topics and a generative story.
 
 **Q: When would you choose NMF over LDA?**
+**Short:** NMF is preferred over LDA for short text because it lacks a per-document Dirichlet assumption and is deterministic.
+
 Choose NMF for short text and when you need speed and determinism, since it is often more coherent than LDA on tweets, titles, and ticket subjects. NMF factorizes the TF-IDF matrix into two non-negative factors, so topics are additive parts rather than a probabilistic mixture, and with `init="nndsvd"` it is fully deterministic. LDA's per-document Dirichlet starves on very short documents, whereas NMF has no such assumption. The tradeoff: NMF has no generative model or uncertainty estimates, which rarely matters for theme mining.
 
 **Q: What is topic coherence and how is c_v computed?**
+**Short:** Topic coherence measures how semantically related a topic's top words are, and c_v tracks human ratings best.
+
 Coherence scores how semantically related a topic's top words are, as a proxy for human interpretability. c_v combines an NPMI (normalized pointwise mutual information) computed over a sliding window with a cosine-similarity aggregation over the top-N words, and empirically tracks human ratings best among coherence measures. UMass uses intra-corpus log co-occurrence (fast, weaker), and UCI/c_uci uses PMI against an external reference corpus. Use c_v as the default for selecting K and comparing models, holding preprocessing fixed so the numbers stay comparable.
 
 **Q: How do you choose the number of topics K?**
+**Short:** K is chosen by sweeping values and picking the peak of c_v coherence, never perplexity.
+
 Sweep K over a range like 5 to 150, score each with c_v coherence, and pick the peak or point of diminishing returns. Do not use perplexity, which keeps falling with K. Then sanity-check by reading the top words of each topic and checking topic diversity (fraction of unique top words) to detect near-duplicates. BERTopic sidesteps the choice entirely by letting HDBSCAN discover the number of clusters from density. Domain knowledge about how many themes you expect is a valid prior on the range.
 
 **Q: Why does LDA struggle on short text and how do you fix it?**
+**Short:** LDA struggles on short text because each document gives too little evidence to infer a reliable topic mixture.
+
 LDA infers each document's topic mixture from that document's words, so a 10-word tweet gives almost no evidence and yields noisy, mushy topics. Fixes: use NMF or BERTopic, which do not rely on a per-document Dirichlet, or pool related short texts (all of a user's tweets, all replies in a thread) into pseudo-documents before fitting LDA. Biterm Topic Model is a purpose-built alternative that models word-pair co-occurrence across the whole corpus rather than per document.
 
 **Q: What does the Dirichlet prior add to pLSA to give LDA?**
+**Short:** The Dirichlet prior on document-topic distributions is what lets LDA generalize to unseen documents, unlike pLSA.
+
 The Dirichlet prior on the document-topic distribution turns pLSA's per-document free parameters into draws from a shared prior, which prevents overfitting and lets the model assign topics to unseen documents. pLSA's P(z|d) grows with the corpus size and has no generative story for new documents, so it overfits and cannot generalize. LDA's prior regularizes the mixtures and completes the Bayesian generative model. This is exactly why LDA superseded pLSA as the standard.
 
 **Q: How does BERTopic work and how does it differ from LDA?**
+**Short:** BERTopic clusters contextual sentence embeddings with HDBSCAN, unlike LDA's bag-of-words probabilistic model.
+
 BERTopic embeds documents with a sentence transformer, reduces dimensions with UMAP, clusters with HDBSCAN, and describes each cluster with class-based TF-IDF. Unlike LDA it is not bag-of-words: contextual embeddings capture semantics and word order, so "not good" and "good" differ. It handles short text, works multilingually, and auto-selects the number of topics from cluster density rather than requiring K. The tradeoffs are that it needs an embedding step (GPU-friendly), assigns each document to one dominant topic (less mixed-membership), and produces an outlier "-1" topic you may want to reassign.
 
 **Q: How do you label or interpret the discovered topics?**
+**Short:** Topics are labeled by reading each topic's top words and inspecting its most representative documents.
+
 Read each topic's top 10–15 highest-probability words and assign a human-readable name; pyLDAvis's relevance slider (lambda) helps by trading off topic-specific versus globally-frequent terms. Also inspect the most representative documents for each topic (highest theta), which grounds the label in real examples. Beware that some topics are junk or background — flag them explicitly. For production, you can prompt an LLM with the top words to draft candidate labels, then have a human confirm.
 
 **Q: Are topic models reproducible across runs?**
+**Short:** Topic models are not reproducible across seeds, so runs need a fixed seed and alignment by top-word overlap.
+
 No — LDA (random init plus sampling) and NMF (random init) produce different topics and different topic ids on different seeds. Fix the random seed, use `init="nndsvd"` for deterministic NMF, and never assume topic id 7 means the same thing after a retrain; align topics across runs by top-word overlap. For stable dashboards, either freeze a model and only re-fit on a schedule with alignment, or run multiple seeds and keep the most coherent. Reproducibility discipline is essential when topics drive recurring reports.
 
 **Q: Can you assign topics to a new, unseen document?**
+**Short:** LDA, NMF, and BERTopic can assign topics to unseen documents through fold-in, but pLSA cannot.
+
 LDA, NMF, and BERTopic can; pLSA cannot. LDA infers the new document's topic mixture by running inference with the learned phi fixed (`transform` in sklearn), NMF projects it onto the learned W, and BERTopic embeds and assigns it to the nearest cluster. pLSA has per-document parameters with no prior, so there is no mechanism to score a document outside the training set — a key reason it was replaced by LDA. This "fold-in" ability matters whenever you serve topic assignments online.
 
 **Q: What are dynamic and hierarchical topic models?**
+**Short:** Dynamic topic models track vocabulary drift over time, while hierarchical models organize topics into a tree.
+
 Dynamic Topic Models let a topic's word distribution drift across time slices, so you can track how a theme's vocabulary evolves (Blei & Lafferty on a century of *Science*). Hierarchical models (hLDA, nested Chinese Restaurant Process) organize topics into a tree from broad to specific, and Correlated Topic Models replace the Dirichlet with a logistic-normal prior so topics can co-occur (genetics with disease), which the Dirichlet's near-independence cannot express. Reach for these when time evolution, topic granularity, or topic correlation is the actual question. tomotopy implements DTM, hLDA, and CTM efficiently.
 
 ---

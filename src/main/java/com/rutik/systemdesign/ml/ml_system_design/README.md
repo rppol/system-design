@@ -481,54 +481,71 @@ def _choose_monitoring(req: MLSystemRequirements) -> str:
 ## 12. Interview Questions with Answers
 
 **Q: Walk me through the 6-step ML design interview framework.**
+**Short:** The framework runs requirements, problem formulation, data/features, model selection, serving, then monitoring, in that order.
 A structured approach: (1) Clarify requirements — scale (QPS, users), latency (P99 budget), accuracy targets, data availability. (2) Problem formulation — choose ML task type, define objective function and evaluation metrics. (3) Data and features — identify data sources, feature types, feature computation strategy, feature store architecture. (4) Model selection — match model complexity to data size and latency budget, choose retrieval vs ranking vs single-stage. (5) Serving architecture — online vs offline inference, caching strategy, latency budget decomposition. (6) Monitoring — data drift detection, model performance tracking, retraining triggers. Always clarify requirements before jumping to model selection.
 
 **Q: Why is a two-stage retrieval + ranking architecture commonly used for recommendation systems?**
+**Short:** A cheap model scores millions of items for recall while an expensive model ranks only the surviving hundred for precision.
 A two-stage design is used because it allows different accuracy/cost tradeoffs at each stage. Retrieval must score millions of items quickly, so it uses a simple embedding similarity model with ANN search, achieving recall@100 in <10ms. Ranking scores only 100-1000 candidates with a rich, expensive model, achieving high precision in <20ms. A single expensive model scoring all items would require either seconds of latency or a simpler model that achieves neither good recall nor good precision.
 
 **Q: What is training-serving skew and how do you prevent it?**
+**Short:** It is a mismatch between feature values computed at training time and at serving time for the same logical input.
 Training-serving skew is a mismatch between feature values computed during training and feature values computed during serving for the same logical input. It is the most common production failure in ML systems. Common causes: different code paths for feature computation, schema changes in upstream data, different join logic. Prevention: (1) compute features using a shared library used in both training and serving; (2) write integration tests that compare training-time and serving-time feature values for the same entity; (3) log serving-time features and compare distributions against training data.
 
 **Q: How do you handle the cold start problem in recommendation systems?**
+**Short:** New users get demographic or exploration-based fallbacks, and new items get content-based features until interactions accumulate.
 Cold start affects new users (no interaction history) and new items (no engagement data). For new users: fall back to demographic-based or context-based recommendations (location, time of day, device type); use exploration strategies (epsilon-greedy) to gather signal quickly. For new items: use content-based features (title, description, category, image embeddings) until sufficient interaction data accumulates (typically 10-50 interactions); promote new items with a freshness boost to accelerate data collection.
 
 **Q: How do you decide between online and offline inference?**
+**Short:** Use online inference when predictions must reflect current context or a fast-changing item set, offline otherwise.
 Online inference is required when predictions must reflect the user's current context (real-time fraud detection, live search ranking) or when the item set changes rapidly. Offline inference is appropriate when predictions can be precomputed (email campaign targeting, weekly report dashboards) or when the cost of online inference is prohibitive. Hybrid: precompute retrieval candidates offline and run ranking online. The decision driver is label availability and freshness requirements — if a user's state changes frequently and stale predictions cause business harm, use online inference.
 
 **Q: What metrics do you monitor after a model is deployed?**
+**Short:** Monitor data quality, model performance, and business metrics as three distinct layers after deployment.
 Three layers: (1) Data quality — feature distribution drift (PSI, KL divergence), null rates, schema violations; alert if PSI > 0.2. (2) Model performance — if labels are available quickly, track AUC/CTR/RMSE daily; use proxy metrics (click-through, conversion) if direct labels are delayed. (3) Business metrics — revenue, engagement, user satisfaction (NPS) — these are the ultimate success signal. Also monitor serving infrastructure: P99 latency, error rate, feature fetch failure rate.
 
 **Q: How do you design a retraining pipeline?**
+**Short:** Retraining triggers on a schedule, on feature drift past a PSI threshold, or on a business-metric performance drop.
 Three trigger types: (1) Scheduled — retrain weekly or daily regardless of performance, appropriate for stable distributions. (2) Drift-triggered — monitor feature distributions; if Population Stability Index exceeds 0.2 for key features, trigger retraining. (3) Performance-triggered — if online business metric (CTR, conversion) drops more than 5% from baseline, trigger retraining. The pipeline itself: validate new data -> compute features -> train model -> validate offline metrics (must exceed threshold) -> validate latency SLA -> shadow deploy -> gradual rollout.
 
 **Q: What is position bias in recommendation and ranking, and how do you address it?**
+**Short:** It is users clicking higher-ranked items regardless of quality, corrected with inverse propensity weighting or randomization.
 Position bias is the tendency for users to click on items shown in higher positions regardless of their actual quality. A model trained on click data will learn to recommend items that were shown prominently, creating a self-reinforcing loop. Corrections: (1) Inverse propensity weighting — downweight clicks at high positions by the probability of being shown there. (2) Position-aware features — include the position as a feature during training and set it to a fixed value (e.g., position=1) at serving time. (3) Randomization — occasionally shuffle results to collect unbiased click data. (4) Counterfactual evaluation — estimate what CTR would be if all items were shown at the same position.
 
 **Q: How do you design a model serving system that handles 100,000 QPS with P99 < 100ms?**
+**Short:** Combine a two-stage architecture, aggressive feature caching, request batching, and autoscaling so only a cheap model absorbs full traffic.
 Scale horizontally with a two-stage architecture, aggressive feature caching, request batching, and autoscaling so only the cheap model sees full QPS. Key components: (1) Load-balanced prediction servers behind an API gateway, auto-scaling based on CPU utilization; (2) Feature cache (Redis) to avoid recomputing static features on every request — cache user features with 60-second TTL; (3) Model server with batching enabled (max_batch=32, max_wait=5ms) to amortize GPU cost; (4) Two-stage architecture so only a cheap retrieval model handles full QPS and the expensive ranking model handles fewer requests; (5) Circuit breakers to fall back to a simpler model when latency spikes; (6) Canary deployments to catch latency regressions before they affect all traffic.
 
 **Q: What is the difference between batch features and real-time features in a feature store?**
+**Short:** Batch features come from scheduled Spark/Hive jobs while real-time features stream from Flink or Kafka with sub-minute freshness.
 Batch features are computed over historical data using Spark or Hive jobs, written to the offline store (S3/Hive), and synced to the online store (Redis) on a schedule (hourly or daily). They include aggregates like "user's average purchase value over the last 30 days." Real-time features are computed from streaming events using Flink or Kafka Streams and written directly to the online store, providing sub-minute freshness. They include signals like "number of page views in the last 5 minutes." The feature store serves both at request time; the serving latency is dominated by the online store read (<10ms for Redis) not the feature type.
 
 **Q: How do you evaluate a recommendation model before deploying it?**
+**Short:** Evaluate offline with ranking metrics, then shadow-deploy, then run a statistically significant A/B test before full rollout.
 Offline evaluation: compute ranking metrics (NDCG@10, MAP, Recall@K) on a held-out test set with temporal splitting (train on days 1-28, test on days 29-30). Validate that the model beats the baseline by a statistically significant margin. Check for feature leakage by examining feature importance and removing suspicious features. Latency evaluation: benchmark P50/P99 serving latency on production-representative hardware and traffic patterns. Shadow evaluation: deploy the model in shadow mode (receiving traffic but not affecting users) and compare its rankings against the production model without affecting users. A/B test: run a controlled experiment with 5% of traffic, measure primary business metric (CTR, revenue), and require statistical significance (p < 0.05) before full rollout.
 
 **Q: What is label leakage, and how is it different from training-serving skew?**
+**Short:** Leakage trains on a feature unavailable at prediction time, while skew is a value mismatch for a feature that is available.
 Label leakage is training on a feature that would not be available at prediction time, inflating offline metrics while production collapses. Skew is a value mismatch for a feature that IS available at serving; leakage is using a feature that is simply not knowable yet. Classic example: a fraud model with "account_closed_within_7_days" scores 99% AUC offline and 55% in production. Fix: enforce point-in-time correctness and audit every feature for whether it is actually observable at inference time.
 
 **Q: When does a model cascade reduce cost, and what is the main risk?**
+**Short:** A cascade escalates only low-confidence requests to an expensive model, but a miscalibrated confidence gate silently hides quality loss.
 A cascade runs a cheap model on all traffic and escalates only low-confidence cases to an expensive model. That cuts cost by roughly the price ratio weighted by the escalation rate — about 3.5x at an 80/20 split with a 10x price gap. It works when the cheap model is confidently correct on the easy majority (typically ~80% of requests) so the DNN only sees the hard ~20%. The main risk is a miscalibrated confidence gate: if the cheap model is overconfident on hard cases, those never escalate and quality drops silently. Calibrate the threshold on held-out data and monitor the escalation rate.
 
 **Q: Why use multi-task learning in a recommender, and what is negative transfer?**
+**Short:** Sharing one backbone across objectives improves data efficiency, but conflicting task gradients can degrade every task at once.
 Multi-task learning trains one shared backbone to predict several objectives (CTR, CVR, dwell time) at once, improving data efficiency and preventing over-optimizing one metric. Auxiliary tasks let data-poor objectives borrow signal from related ones. Negative transfer is the failure mode where conflicting task gradients degrade the shared representation so no task is served well. Mitigate with task-specific heads, uncertainty-based task weighting, or gradient surgery.
 
 **Q: How do you decompose a P99 latency budget across an ML serving pipeline?**
+**Short:** Assign each pipeline stage a slice of the total budget and keep deliberate headroom for tail effects like GC pauses.
 Assign each stage a slice of the total budget — network, feature fetch, retrieval, ranking, post-processing — and keep headroom for tail latency. For a 100ms P99 budget a typical split is 10ms network, 3ms gateway, 8ms feature fetch, 12ms retrieval, 18ms ranking, 4ms post-processing and 8ms serialization — 63ms modeled, leaving ~37ms for GC pauses and tail effects. Measure each stage independently so a regression is attributable to one component rather than the whole request.
 
 **Q: What should an ML system do when the model or feature store is unavailable?**
+**Short:** Fall back to a simpler strategy like popularity ranking or cached features instead of failing the request outright.
 Fall back to a simpler strategy — popularity ranking, cached features, or a rule-based default — rather than failing the request. Wrap the hot path in bounded-timeout calls and circuit breakers; serve cached or default feature values when the store is slow. A slightly worse prediction is almost always better than a hard failure on the serving path, so design graceful degradation at every layer from the design phase.
 
 **Q: What is the Lambda architecture for feature computation, and when do you need a speed layer?**
+**Short:** It pairs an accurate batch layer with a real-time speed layer, and you need the speed layer only when recent events change predictions materially.
 Lambda architecture pairs a batch layer that recomputes complete features from history with a speed layer that adds fresh real-time features, merged at serving time. The batch layer (Spark/Hive) is accurate but stale; the speed layer (Flink/Kafka Streams) provides sub-minute freshness for signals like "page views in the last 5 minutes." You need the speed layer when recent events materially change predictions — breaking news, live sessions, fast-moving fraud — and can skip it when hourly or daily freshness is enough.
 
 ---

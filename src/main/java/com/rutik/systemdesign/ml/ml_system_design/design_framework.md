@@ -705,54 +705,71 @@ def should_retrain(
 ## 12. Interview Questions with Answers
 
 **Q: How would you start an ML system design interview?**
+**Short:** Ask requirements questions first, covering business metric, scale, latency budget, data, and minimum offline metric.
 Start by asking requirements questions before drawing any diagram. Ask: (1) What business metric does this optimize? (2) What is the scale — QPS, users, catalog size? (3) What is the latency budget — P99? (4) What training data is available and how are labels generated? (5) What is the acceptable minimum offline metric? This signals production awareness and prevents designing a system that cannot meet the actual constraints.
 
 **Q: How do you formulate a recommendation problem as an ML task?**
+**Short:** Frame a large catalog as two-stage retrieval plus ranking, then define the label, objective, and known biases to correct.
 First decide the task type: if the catalog is large (>10K items), frame it as two-stage — retrieval (find candidates) + ranking (score candidates). Define the label: clicks are noisy but abundant; dwell time is higher quality but delayed. Define the objective: binary cross-entropy for CTR; lambdarank loss for learning-to-rank with NDCG optimization. Identify biases: position bias (items shown at the top get more clicks), popularity bias (popular items dominate). Plan corrections: inverse propensity weighting for position bias, popularity debiasing for collaborative signals.
 
 **Q: What is the difference between offline and online evaluation of ML models?**
+**Short:** Offline evaluation uses held-out metrics with no user impact, while online evaluation runs a controlled A/B test with real users.
 Offline evaluation measures model quality on a held-out test set without any user impact. Metrics include AUC-ROC, NDCG@K, precision@K, RMSE. Online evaluation runs a controlled experiment (A/B test) with real users, measuring business metrics (CTR, revenue, engagement). Offline metrics may not correlate with online metrics due to distribution shift between training data and current user behavior, position bias in click logs, or proxy metric misalignment. Always validate offline → online metric correlation before relying on offline metrics as proxies.
 
 **Q: How do you handle a catalog of 100 million items for real-time recommendation?**
+**Short:** A two-stage design retrieves top-1000 candidates via ANN search, then a richer model ranks only that shortlist.
 A two-stage architecture is required. Stage 1 (retrieval): use a two-tower model to learn user and item embeddings, then build a FAISS or ScaNN index over all item embeddings. At serving time, embed the user and perform ANN search to retrieve top-1000 candidates in <15ms. Stage 2 (ranking): use a rich feature model (LightGBM or DNN) to score the 1,000 candidates with user features, item features, and contextual features in <25ms. This architecture reduces the expensive ranking computation from 100M items to 1,000.
 
 **Q: How do you choose between LightGBM and a deep neural network for ranking?**
+**Short:** LightGBM suits smaller tabular data with fast CPU serving, while a DNN suits huge datasets with sparse or unstructured features.
 LightGBM is preferred when: training data is <100M examples; features are mostly tabular (counts, ratios, categorical); serving must be extremely fast (<5ms on CPU); interpretability is needed (feature importance). Deep neural networks are preferred when: training data exceeds 100M examples; raw features are sparse or unstructured (embeddings, text); interactions between features are complex and hard to engineer manually; GPU serving infrastructure is available. In practice, LightGBM often matches DNN quality on tabular data while being 10-100x cheaper to serve.
 
 **Q: How do you detect and handle training-serving skew?**
+**Short:** Prevent skew with a shared feature-computation library, and detect it by comparing serving and training feature distributions daily.
 Prevention: implement feature computation using a shared library (Python package) imported by both the training pipeline and the serving pipeline. The same code path computes the same feature value. Detection: log serving-time features for a random sample (1%) of requests; run statistical tests comparing the serving feature distribution to the training feature distribution daily; alert if KS test p-value < 0.01 or if PSI > 0.1 for any key feature. Response: investigate the root cause (schema change, different preprocessing, missing data handling difference), fix the discrepancy, and retrain.
 
 **Q: What is multi-task learning and when do you use it for recommendation?**
+**Short:** Multi-task learning shares one backbone across several objectives, risking negative transfer if the task gradients conflict.
 Multi-task learning (MTL) trains a single model to predict multiple objectives simultaneously, sharing a feature backbone. Use it when: (1) you need to optimize multiple business metrics (CTR, CVR, dwell time) without training separate models; (2) some tasks have limited training data and can borrow signal from related tasks (auxiliary tasks). The risk is negative transfer — if task gradients conflict, the shared representation may not optimize any task well. Mitigation: use task-specific learning rate scaling, gradient surgery, or uncertainty-based task weighting. MTL is used in YouTube, Twitter, and TikTok for recommendation.
 
 **Q: How do you handle label delay in a recommendation system?**
+**Short:** Use a faster proxy label, enforce a temporal cutoff, or share a backbone between a fast and a slow label in a multi-task model.
 Label delay means the outcome (e.g., purchase 24 hours after recommendation) is not available at the time of training. Strategies: (1) use a proxy label with lower delay (click available in minutes vs purchase in hours); (2) train on delayed labels with a temporal cutoff — exclude examples whose outcome window has not yet closed; (3) use a multi-task model where the fast proxy label (click) is task 1 and the slow business label (purchase) is task 2, sharing the backbone. The most dangerous error is including future labels in training — always enforce a temporal gap between training cutoff and label observation window.
 
 **Q: How do you prioritize features for a ranking model?**
+**Short:** Start from domain-known high-signal features, then keep only those whose measured NDCG gain justifies their serving cost.
 Start with the highest-signal features known from domain knowledge: for recommendation, user interest embeddings and item embeddings are typically the strongest. Use SHAP values or LightGBM feature importance on an initial model to identify the top 20 features by contribution. Measure the marginal gain of adding features: retrain with feature subsets and compare NDCG. Remove features that do not improve NDCG by > 0.1% — they add serving latency and fragility without benefit. Special attention to features that are expensive to compute at serving time: if a feature requires a database join and adds 5ms of latency for 0.05% NDCG gain, drop it.
 
 **Q: What is shadow mode deployment and why is it important?**
+**Short:** Shadow mode runs a new model on live traffic without serving its predictions, validating it before an A/B test.
 Shadow mode (also called shadow deployment or dark launch) runs a new model on production traffic, receiving the same requests as the production model, but without serving its predictions to users. The shadow model's predictions are logged and compared to the production model's predictions. Benefits: (1) validates that the new model produces sensible scores for real traffic (not just test set); (2) measures serving latency under real traffic load; (3) catches training-serving skew before users are affected; (4) enables offline comparison of model outputs without running an A/B test. Run shadow mode for 2-4 hours before promoting to A/B test.
 
 **Q: How do you design the monitoring strategy for a recommendation model?**
+**Short:** Monitor data quality, model health, and business metrics as three layers, each with its own alert threshold.
 Three layers of monitoring: (1) Data quality — schema validation on every feature pipeline run; distribution drift (PSI) measured daily on top-20 features; alert threshold PSI > 0.2. (2) Model health — prediction score distribution monitored daily; alert if mean score drifts > 2 standard deviations from baseline; if online labels are available quickly, monitor AUC daily. (3) Business metrics — track primary metric (CTR, engagement) in real-time dashboards with automated rollback if the metric drops > 5% below baseline for > 30 minutes. Monitoring SLA: an alert must fire within 1 hour of a detectable degradation.
 
 **Q: How do you structure the model validation gate before production deployment?**
+**Short:** A validation gate is a set of automated checks on offline metrics, significance, latency, and fairness that must all pass to deploy.
 A model validation gate is a set of automated checks that must pass before a model is promoted. Required checks: (1) offline metric must exceed threshold (e.g., NDCG@10 > 0.65); (2) improvement over production model must be statistically significant (paired t-test p < 0.05 on test set); (3) P99 inference latency must be within SLA (e.g., < 20ms for ranking model); (4) fairness check — performance gap across demographic groups must be < 10% relative; (5) shadow mode comparison — model output correlation with production model > 0.7 (sanity check). If any gate fails, the pipeline halts and sends an alert. No human approval required for routine retraining; human review required for architecture changes.
 
 **Q: How do you handle cold start for new users in a recommendation system?**
+**Short:** Cold start progresses from demographic-only signals to a content-collaborative blend as interaction history accumulates.
 Cold start for new users (0 historical interactions) is handled in stages. Day 0 (account creation): use demographic features (age, location, device) and context (time, onboarding survey responses) with a content-based model that does not require interaction history. Day 1-3 (sparse history): use a hybrid model that blends content-based signals (high weight) with collaborative filtering (low weight). Week 1+ (sufficient history): transition fully to collaborative / embedding-based model. The transition should be smooth (weight interpolation based on interaction count). A common threshold: collaborative filtering starts dominating after 10 interactions. Track cold-start users separately in monitoring — they often have different engagement patterns.
 
 **Q: What questions should you ask to clarify the data availability for an ML problem?**
+**Short:** Clarify label volume, feedback type, label noise and delay, feature availability at serving time, and any class imbalance.
 Key questions: (1) How many labeled training examples exist? (10K vs 100M changes model choice dramatically.) (2) How are labels generated — explicit feedback (ratings) or implicit feedback (clicks, dwell time)? (3) What is the label noise rate — are clicks reliable proxies for quality? (4) What is the label delay — how long after a recommendation is made do you know the outcome? (5) Are features available at training time and at serving time? Which features are unavailable at serving time? (6) What is the data retention policy — how far back does historical data go? (7) Is there a significant class imbalance — for fraud detection, 0.1% fraud rate requires careful sampling strategy.
 
 **Q: How do you avoid data leakage in ML training pipelines?**
+**Short:** Guard against temporal, feature, preprocessing, and group leakage, with temporal splitting as the single most important safeguard.
 Data leakage occurs when information from the future (relative to the prediction time) contaminates training examples. Common sources: (1) temporal leakage — using features computed after the label event (fix: point-in-time correct feature joins); (2) feature leakage — including features that are derived from or highly correlated with the label (fix: audit features for logical impossibility at prediction time); (3) test set contamination — preprocessing statistics (mean, std, vocabulary) computed on the full dataset including the test set (fix: fit preprocessors only on training fold); (4) group leakage — users or items appear in both train and test sets, inflating apparent generalization (fix: group-based train-test split). Temporal splitting is the most important safeguard: always train on earlier data and test on later data.
 
 **Q: Why does the retrieval stage optimize recall while the ranking stage optimizes precision?**
+**Short:** Retrieval must not drop relevant items before ranking sees them, since a missed item can never be recovered downstream.
 Retrieval must not drop relevant items before ranking ever sees them, so it maximizes recall@K; ranking then reorders that small set for precision. Retrieval recall is a hard ceiling on the whole system — an item missed at retrieval can never be recovered by ranking downstream. In practice you set an explicit target (recall@500 > 0.90) and monitor retrieval recall separately from end-to-end NDCG, because a ranking gain is worthless if retrieval already threw the best item away.
 
 **Q: When is a single-stage ranking model the right choice over a two-stage retrieval + ranking design?**
+**Short:** A single stage works when the catalog is small enough to score every item, avoiding the recall ceiling two-stage designs impose.
 Use a single stage when the catalog is small enough to score every item — roughly under 10,000 — so you avoid a retrieval recall ceiling entirely. Two-stage adds a second model and serving stack and caps quality at retrieval recall, but it is unavoidable once the catalog reaches millions because you cannot score them all in the latency budget. Single-stage is simpler, has no recall cap, and iterates faster, so reach for two-stage only when catalog size forces ANN retrieval.
 
 ---

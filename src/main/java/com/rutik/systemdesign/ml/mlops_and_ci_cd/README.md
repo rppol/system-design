@@ -772,57 +772,75 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between a DevOps CI/CD pipeline and an MLOps CI/CD pipeline?**
+**Short:** MLOps adds data-quality and model-quality gates on top of the code correctness a DevOps pipeline already tests.
 A DevOps pipeline tests code correctness and deploys a deterministic binary artifact. An MLOps pipeline adds two additional dimensions: data quality (schema, distribution) and model quality (performance gates, fairness, latency SLAs). A software artifact either passes tests or fails; a model artifact can pass all code tests while silently degrading due to data distribution shift, which is why model-specific validation gates are mandatory in MLOps.
 
 **Q: What is training-serving skew and how do you detect it in CI?**
+**Short:** Skew is features differing between training and serving, detected by asserting served predictions match offline-computed ones.
 Training-serving skew occurs when features presented to the model at serving time differ from what the model saw during training. This typically happens because preprocessing steps (scaling, encoding, imputation) are applied during training but omitted or applied differently at serving. Detection in CI: write an integration test that sends known raw input vectors to the deployed model server and asserts that predictions match expected outputs computed offline with the full training pipeline. Also compare mean and standard deviation of each feature between the offline feature store and online serving queries; flag any feature with >5% relative difference.
 
 **Q: Explain how MLflow Model Registry tracks a model's lifecycle and how you automate promotion.**
+**Short:** MLflow tracks lifecycle with mutable aliases like champion and challenger, and CI automates promotion by moving the alias after gates pass.
 Current MLflow uses mutable **aliases** such as `@champion` and `@challenger` plus key-value tags, not the old four stages. The None/Staging/Production/Archived stages were deprecated in MLflow 2.9.0; `transition_model_version_stage` and `get_latest_versions(stages=...)` still function in 3.x but emit deprecation warnings and are slated for removal, so new pipelines should not build on them. Automation: CI trains a model, logs it, calls `create_model_version()`, then runs validation gates (AUC >= baseline, latency SLA, fairness checks); if all pass it calls `set_registered_model_alias(name, "challenger", version)`. A separate deployment job, triggered by a merge to main or manual approval, repoints `@champion` to that version — a single atomic alias move, which is also what makes rollback one API call back to the prior version.
 
 **Q: How do you implement automatic rollback in a canary deployment for an ML model?**
+**Short:** A canary controller polls a live metric and atomically shifts all traffic weight back to the production model on regression.
 The canary controller polls a real-time metric (AUC from an online evaluation service, or a business proxy metric like conversion rate) every N minutes. If the metric regresses beyond a defined threshold (e.g., AUC drops > 2% from the production baseline), the controller calls the serving infrastructure API to set canary traffic weight to 0% and production weight to 100% — in Istio that is a patch to `spec.http[].route[].weight`, where the weight lives on each route destination, not on the HTTPRoute itself. Simultaneously it drops the `@challenger` alias from the candidate version, leaving `@champion` untouched, and sends an alert. The critical requirement is that rollback be atomic from the user's perspective: the weight change must reach every proxy before the next request wave, and the controller must verify the new split took effect rather than assume the API call succeeded.
 
 **Q: What is Population Stability Index (PSI) and when do you trigger retraining based on it?**
+**Short:** PSI measures how much a feature's distribution shifted from training to production, with retraining typically triggered above 0.2.
 PSI measures how much the distribution of a feature has shifted between a reference period (training data) and a current period (recent production traffic). PSI = sum over bins of (actual_fraction - expected_fraction) * ln(actual_fraction / expected_fraction). PSI < 0.1: no significant shift; 0.1–0.2: moderate shift, monitor; > 0.2: significant shift, trigger retraining. A common production setup computes PSI daily on the top 20 features and triggers a retraining pipeline when PSI > 0.2 on any of the top 5 features by feature importance.
 
 **Q: How does a feature store solve the offline-online consistency problem?**
+**Short:** A feature store defines feature computation once and writes it to both the offline training store and the online serving store.
 A feature store maintains a single feature computation definition that writes to both an offline store for batch training and an online store for low-latency inference. The offline store is typically S3 Parquet or BigQuery; the online store is Redis or Bigtable. Training pipelines read from the offline store; the serving layer reads from the online store using the same feature keys. The computation logic is defined once and executed in both contexts, eliminating the divergence that occurs when data science teams write Pandas code for training and engineering teams independently write SQL or Java for serving.
 
 **Q: What data tests should run in CI before a model is retrained?**
+**Short:** Run schema, null-rate, distribution, referential integrity, volume, and feature-store consistency checks before retraining.
 Schema validation: required columns present, correct dtypes, no unexpected columns. Null rate: null fraction per column <= defined threshold (e.g., 1% for label column, 10% for optional features). Distribution checks: mean and standard deviation of numeric features within 3 standard deviations of historical baseline. Referential integrity: foreign keys resolve to valid entity IDs. Volume check: row count within expected range (guards against partial data loads). Feature store consistency: online store feature statistics within 5% of offline store statistics for the same time window.
 
 **Q: How do you handle a situation where a new model version passes all CI gates but degrades in production?**
+**Short:** Roll back to the previous version immediately, then investigate whether the CI holdout no longer represents current production data.
 First, trigger automatic rollback via the canary controller if the degradation is caught within the canary window. If the model reached 100% traffic before degradation was detected, manually transition the previous Production model version back to Production in the registry and set traffic to 0% on the degraded version. Then conduct a root cause analysis: compare input feature distributions between the period when the old model was healthy and the current period; check whether a data pipeline change coincided with the deployment; run the model validation suite against the current production feature distribution rather than the CI holdout set. The common cause is that the CI holdout dataset did not represent the current data distribution (covariate shift since the last training run).
 
 **Q: What is the difference between shadow mode and canary deployment in ML?**
+**Short:** Shadow mode logs predictions without serving them, while canary deployment actually serves a small real-traffic slice to users.
 In shadow mode, the new model receives a copy of all live requests and produces predictions, but those predictions are never shown to users — they are logged for offline comparison against the production model. Shadow mode has zero user-facing risk but does not validate user behavior (e.g., click-through rate) on the new model's output. Canary deployment routes a small fraction of real traffic (5%) to the new model, whose predictions are actually served to users. Canary validates true user-facing metrics but carries a small risk that the fraction of users receiving canary predictions may have a degraded experience if the model underperforms.
 
 **Q: How do you version datasets in an ML project and why is it insufficient to just track the S3 path?**
+**Short:** An S3 path is mutable, so dataset versioning needs an immutable reference like a DVC hash or a table snapshot id.
 An S3 path is mutable — the same path can point to different data at different times (overwrite, append, schema evolution). Dataset versioning requires an immutable reference: a git commit SHA of a DVC `.dvc` file (which records the S3 URI + SHA256 of the data), or an Iceberg/Delta Lake table snapshot ID (a monotonically increasing integer that points to an immutable manifest). The MLflow run record stores this immutable reference, so any model can be traced back to the exact byte-for-byte dataset used to train it, enabling full reproducibility and regulatory audit trails.
 
 **Q: What is a model signature in MLflow and why does it matter for CI?**
+**Short:** A model signature is a type contract for inputs and outputs that MLflow enforces at serving time to catch malformed requests.
 A model signature in MLflow declares the expected column names and dtypes (and tensor shapes) for model inputs and outputs. It is a type contract, not a value-range constraint, so an in-range check still has to be a separate data test. It is inferred from actual training data using `infer_signature(X_train, model.predict(X_train))` and stored as JSON alongside the model artifact. At serving time MLflow's pyfunc wrapper enforces the signature on every request before inference: missing columns or uncastable types raise an `MlflowException` (MLflow has no `ModelSignatureException`), while extra columns are ignored and safe type conversions are performed silently. In CI, the integration test sends a malformed request to catch any serving code that bypasses signature enforcement. This provides the serving-layer equivalent of an API contract test.
 
 **Q: Why must preprocessing artifacts like scalers and encoders be bundled with the model, not stored separately?**
+**Short:** A separately stored scaler can be forgotten at serving time, silently feeding the model raw features and degrading predictions.
 A separately stored scaler can be forgotten or applied differently at serving time, feeding the model raw features and silently degrading predictions with no error. Bundle preprocessing and the estimator into one artifact (an sklearn `Pipeline`) and log it as a single unit, so `load_model` always returns the complete transform-plus-predict path. This eliminates an entire class of training-serving skew that produces plausible-but-wrong outputs rather than crashes.
 
 **Q: What is the CACE principle in ML systems?**
+**Short:** CACE means changing anything changes everything, since every feature interacts through the learned model with no isolated parts.
 CACE means "Changing Anything Changes Everything" — in ML there are no isolated features, because every input interacts through the learned model. Removing a feature, changing its encoding, or retraining on new data can shift the model's behavior on inputs that seem unrelated, so you cannot reason about changes locally the way you can with modular code. The practical consequence is that any change requires full retraining plus end-to-end evaluation, not a unit test on the changed part alone.
 
 **Q: Should every data drift alert trigger an automatic retraining pipeline?**
+**Short:** No, auto-retraining on every drift signal risks a retraining storm, so gate it on confirmed performance drops instead.
 No — auto-retraining on every drift signal risks a retraining storm that burns compute and can promote a model fit to transient noise. Drift is a leading indicator; gate retraining on a confirmed performance drop, sustained multi-feature drift, and availability of fresh trustworthy labels, with a champion/challenger evaluation before promotion. Otherwise a single noisy feature or a one-day spike triggers needless retrains that may degrade production.
 
 **Q: What is continuous training (CT) and how does it differ from CI and CD?**
+**Short:** Continuous training automatically regenerates the model on new data, a pipeline axis CI and CD alone do not provide.
 Continuous training is automatic retraining of the model on new data — a third pipeline axis that DevOps CI/CD does not have. CI validates code and data, CD ships the artifact, and CT regenerates the artifact itself when data drifts or on a schedule, then hands the new model back through the same CI/CD gates. MLOps Level 1 automates CT; Level 2 wraps full CI/CD around it.
 
 **Q: Why is reproducibility harder for ML pipelines, and what four things must you version to achieve it?**
+**Short:** ML results depend on data and randomness, so reproducing them requires versioning the dataset, code, hyperparameters, and environment.
 An ML result depends on data and randomness, not just code, so the same script can produce a different model unless every input is pinned. To reproduce a model you must version all four of: the dataset (DVC SHA or table snapshot id), the code (git commit), the hyperparameters (logged to MLflow), and the environment (Docker image digest). Miss any one — most often the dataset or a random seed — and the "same" run diverges beyond tolerance.
 
 **Q: What are the three MLOps maturity levels and how do you know which one you need?**
+**Short:** The three levels are manual, automated training, and full CI/CD, chosen by a model's blast radius and retraining cadence.
 Level 0 is manual notebooks, Level 1 automates the training pipeline, and Level 2 adds full CI/CD with gates, a registry, canary deploys, and drift-triggered retraining. Choose by blast radius and cadence: a one-off analysis stays at 0, a stable internal model at 1, and a revenue- or safety-critical model retrained more than monthly needs Level 2. Jumping straight to Level 2 for a prototype is over-engineering.
 
 **Q: How do you keep a retraining pipeline from silently learning on corrupted or poisoned data?**
+**Short:** Put automated data-validation gates before training so corrupted data fails the pipeline instead of reaching the model.
 Put automated data-validation gates before training so bad data fails the pipeline instead of flowing into the model. Great Expectations (or equivalent) enforces a schema contract — required columns, dtypes, null-rate and range bounds, row-count volume checks — and distribution checks flag values outside historical norms; for adversarial risk, add anomaly detection on new partitions and require human approval for large shifts. The gate must block the run, not merely warn.
 
 ---
