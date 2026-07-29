@@ -562,51 +562,67 @@ sandbox.upload_file(sample_data_bytes, "/data/sample.csv")
 ## 12. Interview Questions with Answers
 
 **Q: Why is running LLM-generated code with subprocess dangerous even if you trust the LLM?**
+**Short:** Even a trusted LLM can be prompt-injected into generating harmful code, so generated code must always run as untrusted.
 LLMs are susceptible to prompt injection — malicious content in retrieved documents or tool outputs can cause the model to generate harmful code. Even a well-intentioned LLM can produce code with bugs that cause accidental file deletion or network exposure. Defense-in-depth requires assuming the generated code is untrusted regardless of the LLM's intent.
 
 **Q: What is the difference between E2B and Riza, and when would you choose each?**
+**Short:** E2B runs real Firecracker microVMs with a filesystem and network; Riza runs dependency-free WebAssembly with near-zero startup.
 E2B uses Linux microVMs (Firecracker) — real OS, persistent filesystem, configurable network, sub-200ms start, billed per second by vCPU and RAM. Riza uses WebAssembly — no OS, no filesystem, no network by default, code begins executing in under 10ms because there is no sandbox to boot, and it is billed per call. Choose E2B when the code needs pip installs, file I/O, or network access. Choose Riza when you need short, dependency-free data processing and the smallest possible attack surface.
 
 **Q: What resource limits should you set on a code execution sandbox?**
+**Short:** Set an execution timeout, memory and CPU caps, and an output size limit as the minimum sandbox resource controls.
 At minimum: execution timeout (15-60s for most tasks), memory limit (512MB-4GB), CPU limit (1-2 cores), and output size limit (50KB stdout to prevent token flooding). Additionally: disk quota (1-10GB), network egress ACL (allowlist-only or blocked), and a maximum number of concurrent sandboxes per user to prevent cost abuse.
 
 **Q: How do you prevent the sandbox from being used as an exfiltration channel?**
+**Short:** Block outbound network at the network layer with an allowlist, since agent response text itself can still leak data.
 Block outbound network at the network layer (not just the application layer). Use a dedicated network namespace with no external routes, or an explicit allowlist of permitted domains. Log all network attempts. Additionally, limit the size of output the agent can return — even with no network, an agent can "exfiltrate" data by including it in its response text.
 
 **Q: What is RestrictedPython and when is it appropriate?**
+**Short:** RestrictedPython AST-blocks dangerous constructs with near-zero latency but offers weaker isolation than a VM or WASM sandbox.
 RestrictedPython is an in-process Python sandbox that compiles code with an AST transformer that blocks dangerous constructs (file access, import restrictions). It has near-zero startup latency but provides weaker isolation than a VM or WASM runtime — a sufficiently clever exploit can escape. Appropriate for trusted-but-untested code (e.g., user-written formulas) in internal tools, but not for fully LLM-generated code in production.
 
 **Q: How should database connections be handled in sandboxed environments?**
+**Short:** Never hand a sandbox a live production connection; mount extracted sample data or route through a reviewed, read-only replica.
 Never pass production database connections into sandboxes. Instead: (1) pre-extract sample data before the sandbox runs and mount it as a file; (2) if the agent needs to query, have the agent generate SQL that is reviewed (by human or another LLM) before execution against production; (3) use a read-only replica with row-level security to limit blast radius. The sandbox is not a substitute for data access controls.
 
 **Q: What is Firecracker and why do microVM-based sandboxes use it?**
+**Short:** Firecracker is AWS's lean VMM specified to boot a guest in under 125ms with just a few megabytes of overhead per VM.
 Firecracker is an open-source VMM (Virtual Machine Monitor) developed at AWS to back Lambda and Fargate. Its specification commits to two numbers: no more than 125ms from the `InstanceStart` API call to the guest's `/sbin/init`, and no more than 5 MiB of VMM memory overhead for a 1-vCPU, 128 MiB microVM — far leaner than a general-purpose VMM like QEMU. It provides hardware-level isolation (separate guest kernel, separate memory space), which is why sandbox providers like E2B use it to start many VMs per host economically. Snapshot resume is a separate, faster path than the 125ms cold-boot figure.
 
 **Q: How do you handle the case where LLM-generated code has an infinite loop?**
+**Short:** Enforce the timeout at the sandbox provider's VM level, since a Python-level signal handler can be bypassed.
 Set a hard execution timeout enforced by the sandbox provider — not a Python signal handler (which can be bypassed). E2B and Modal both enforce timeouts at the VM/container level (SIGKILL). The sandbox returns an error when timeout is exceeded; the agent receives this error and can either retry with fixed code or report failure. Never rely on `sys.setrecursionlimit` or Python-level guards alone.
 
 **Q: What is the cold start problem and how do sandbox providers solve it?**
+**Short:** Providers pre-warm Firecracker snapshots or use WASM's boot-free model to cut sandbox cold start to well under a second.
 Cold start is the time to provision a fresh execution environment. A general-purpose VM boots in seconds; Firecracker itself specifies at most 125ms from API call to guest init. E2B layers pre-warmed Firecracker snapshots on top of that and advertises in-region sandbox start under 200ms (80ms for its quick-start variant). Riza avoids the problem entirely — there is no sandbox to boot, so code starts executing in under 10ms. Modal solves it by keeping containers warm for frequently used functions.
 
 **Q: How do you test an agent's code execution behavior?**
+**Short:** Test malicious inputs, infinite loops, oversized output, and error propagation against the sandbox in integration tests.
 (1) Test with malicious inputs (path traversal, network calls, file deletion) and assert that the sandbox blocks them. (2) Test with infinite loops and assert that the timeout fires correctly. (3) Test with large outputs and assert truncation works. (4) Test error propagation — assert that execution errors are returned to the agent correctly so it can self-correct. Use pytest with real sandbox calls in integration tests; mock for unit tests.
 
 **Q: What is the cost model for cloud sandbox providers and how do you control costs?**
+**Short:** E2B bills by VM uptime while Riza bills per call, so control cost with short timeouts and immediate sandbox teardown.
 E2B charges by sandbox uptime (seconds of VM running, not CPU used). Control costs by: (1) using short timeouts; (2) destroying sandboxes immediately after use (context manager pattern); (3) reusing sandboxes within a session rather than creating new ones per code execution; (4) limiting concurrent sandboxes per user with a semaphore. Riza charges per execution call — cheaper for infrequent use, more expensive at high volume.
 
 **Q: Can a sandbox escape? What are known escape vectors?**
+**Short:** MicroVMs resist but aren't immune to escapes, and in-process sandboxes like RestrictedPython have known subclass-based bypasses.
 MicroVM sandboxes are resistant to escapes because the guest kernel is fully isolated from the host kernel, but "resistant" is not "immune" — Firecracker has published security advisories, including an arbitrary host file overwrite via symlink in the jailer (January 2026, moderate) and an out-of-bounds write in the virtio-pci transport (April 2026, high). WASM sandboxes have had spec-compliance bugs in runtimes. In-process sandboxes (RestrictedPython) have multiple known bypasses via `__subclasses__`, `ctypes`, or C extension modules. Defense: use microVMs or WASM for LLM-generated code, patch the VMM promptly, and apply defense-in-depth (run the sandbox provider as an unprivileged user, on a network-isolated host).
 
 **Q: How should output from the sandbox be validated before feeding back to the agent?**
+**Short:** Truncate sandbox output, sanitize control characters, and validate expected structured formats before returning it to the agent.
 (1) Truncate to a maximum length (50KB) to prevent context overflow. (2) Sanitize control characters that could break JSON serialization. (3) If the output is supposed to be structured (JSON, CSV), validate the format before passing to the agent — malformed output causes parsing errors downstream. (4) Flag high-risk patterns in output (base64-encoded strings, URLs, credentials patterns) for logging even if you allow them through.
 
 **Q: What is the difference between sandbox isolation and data access control?**
+**Short:** Sandbox isolation stops filesystem and network escape; data access control separately limits what rows the code can query.
 Sandbox isolation prevents code from accessing the host filesystem, network, and processes. Data access control (RBAC, row-level security) limits what data the code can query. Both are necessary: sandbox prevents escape, data access control limits what can be queried even within the allowed execution scope. A sandboxed agent with a production DB connection can still query all rows — you need both layers.
 
 **Q: How do you implement a per-user sandbox concurrency limit?**
+**Short:** Enforce a per-user semaphore in Redis capping concurrent sandboxes, returning 429 once the limit is exceeded.
 Use a semaphore per user (stored in Redis for distributed enforcement): `async with redis_semaphore(user_id, max_concurrent=3): execute_in_sandbox()`. Return HTTP 429 when the limit is exceeded. Set limits based on your cost model — a 2 vCPU / 1 GiB E2B sandbox costs about $0.117/hr, so 3 concurrent sandboxes per user is roughly $0.35/hr. Log semaphore wait time to detect user frustration and tune limits.
 
 **Q: When do you use a provider-hosted code execution tool instead of provisioning your own sandbox?**
+**Short:** Anthropic's hosted code execution tool has no network access at all, so provision your own sandbox once you need packages or network.
 Use the hosted tool for self-contained data work such as analysis, charts and file conversion, and provision your own sandbox the moment you need network access, GPUs, or package installs. Reach for E2B, Modal or Daytona also when a session must outlive a single task. Anthropic's code execution tool (`code_execution_20250825`, generally available with no beta header) runs Claude's Bash commands and file operations in a container with 1 CPU, 5 GiB RAM, 5 GiB workspace and Python 3.11, and its defining constraint is that internet access is completely disabled — no outbound requests at all, so nothing can be `pip install`ed at runtime and only the pre-installed libraries are available. Data enters through the Files API as a `container_upload` block rather than over the network, and containers are workspace-scoped, checkpointed after about five minutes idle, and expire 30 days after creation. Economics favor it strongly at low volume: billing is per execution time with a 5-minute minimum, 1,550 free hours per organization per month, and $0.05 per container-hour after that, versus per-second compute billing on a self-provisioned microVM. The integration trap to name in an interview is the multicomputer problem — offering the hosted tool alongside your own Bash tool gives Claude two filesystems with no shared state, so the system prompt must say explicitly that files and variables do not carry across environments.
 
 ---

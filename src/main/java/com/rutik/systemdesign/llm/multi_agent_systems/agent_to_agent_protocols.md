@@ -1094,54 +1094,71 @@ callback endpoint is an unauthenticated write path into your orchestrator's task
 ## 12. Interview Questions with Answers
 
 **Q: What problem does A2A solve that existing RPC frameworks (gRPC, REST) do not?**
+**Short:** A2A standardizes capability discovery, task lifecycle, and agent identity, which raw gRPC or REST leave to custom code.
 A2A solves capability advertisement, task lifecycle management, and standardized agent identity in one protocol. Existing RPC frameworks handle the transport layer but leave discovery, long-running task state, multi-turn conversation, and agent-specific authentication conventions to each implementation. A2A defines these at the protocol level so agents from different vendors interoperate without custom integration code.
 
 **Q: What is an agent card and what information does it contain?**
+**Short:** An agent card is a JSON document at a well-known URL advertising an agent's skills, modalities, and auth requirements.
 An agent card is a JSON document served at `/.well-known/agent-card.json` that advertises an agent's identity, supported skills, input/output modalities, authentication requirements, and endpoint URLs. It is the machine-readable equivalent of an API's documentation — other agents fetch it to determine whether this agent can handle a given task before submitting anything. Watch the path: early A2A drafts used `/.well-known/agent.json`, and clients still hardcoding that will 404 against a v1.0 server.
 
 **Q: Walk through the A2A task lifecycle states and explain why input-required exists.**
+**Short:** input-required pauses a task to ask the caller a clarifying question instead of guessing or failing outright.
 Tasks start as `submitted` (received, queued), transition to `working` (actively processing), then reach `completed`, `failed`, `canceled` or `rejected`; the v1.0 `TaskState` enum has nine values in total, adding `input-required`, `auth-required` and an `unspecified` zero value. The `input-required` state exists for multi-turn scenarios: if the agent discovers mid-task that it needs clarification (ambiguous instruction, missing parameter, conflicting constraints), it pauses and prompts the caller rather than making an assumption or failing. The caller provides the answer via a follow-up message to the same task ID, resuming work without losing accumulated context. `auth-required` is the same idea for credentials, and `rejected` distinguishes "I declined this" from "I tried and failed."
 
 **Q: How does A2A differ from MCP, and when would an agent use both simultaneously?**
+**Short:** MCP connects an LLM host to tool servers; A2A lets autonomous peer agents delegate tasks to each other.
 MCP is a client-server protocol where an LLM host calls tool servers (web search, calculator, database). A2A is a peer protocol where one autonomous agent delegates tasks to another autonomous agent. An agent uses both simultaneously when it has its own internal LLM that calls tools via MCP, but also exposes an A2A interface so orchestrators can assign it tasks, and itself delegates sub-tasks to specialist agents via A2A.
 
 **Q: Why must A2A JWT tokens be scoped to a specific audience (target agent URL)?**
+**Short:** Audience scoping binds a token to one target agent's URL, so a stolen token is rejected everywhere else.
 Without audience scoping, a token issued for agent A is valid at agent B — an attacker who intercepts the token can replay it against any agent that trusts the issuer. Scoping the token audience to the target agent URL means the token is cryptographically bound to exactly one recipient. Any other agent that receives the token will reject it with an audience mismatch error.
 
 **Q: What is the confused deputy problem in multi-agent systems and how do you prevent it?**
+**Short:** The confused deputy problem is an orchestrator forwarding a caller's token downstream instead of issuing its own to each hop.
 The confused deputy problem occurs when an orchestrator agent forwards the token it received from a caller to a downstream specialist agent. The specialist sees a token from the original caller (which may have high privileges) rather than from the orchestrator. Prevention: each agent always issues tokens using its own identity and private key when calling downstream agents. Tokens are never forwarded or re-used across agent hops.
 
 **Q: How do push notifications work in A2A and why are they needed?**
+**Short:** A registered callback URL lets a long task post its result back instead of forcing the caller to poll repeatedly.
 When submitting a task, the caller includes a `callbackUrl` in the request. When the task reaches a terminal state, the specialist agent sends an HTTP POST to that URL with the task result. Push notifications are needed for tasks that take minutes to hours — polling every few seconds for a 30-minute task wastes resources and adds unnecessary load to the specialist agent. The caller can free its thread and process other work until the callback arrives.
 
 **Q: Compare SSE streaming and push notifications in A2A — when would you choose each?**
+**Short:** SSE streams live progress over an open connection; push notifications fire a single callback once the task finishes.
 SSE streaming keeps an open HTTP connection and sends incremental events (partial results, progress updates) while the task is in progress — ideal when the caller needs to display live output (streaming text generation, progressive report building). Push notifications are fire-and-forget: the caller closes the connection immediately and receives a single callback when the task completes — ideal for long tasks where the caller does not need intermediate updates and cannot maintain an open connection.
 
 **Q: How does ANP achieve decentralized agent discovery without a central registry?**
+**Short:** ANP resolves an agent's DID through ordinary DNS and HTTPS to its public key and endpoints, needing no shared registry.
 ANP uses Decentralized Identifiers (DID). Each agent's DID (e.g., `did:web:agent.example.com`) resolves via standard DNS and HTTPS to a DID Document containing the agent's public key and service endpoints. Discovery requires no shared registry — any agent that knows another agent's DID can resolve its endpoint and public key purely through DNS resolution and HTTPS fetches, both of which are globally available infrastructure.
 
 **Q: What token lifetime should you use for agent-to-agent JWTs and why?**
+**Short:** Keep agent-to-agent JWTs short-lived, around five minutes, since cheap per-request signing limits a compromised token's blast radius.
 Short-lived tokens: 5 minutes (300 seconds) is a common production default, sufficient to cover one task submission and result retrieval. Long-lived tokens are dangerous because a compromised token gives an attacker extended access to the target agent. Per-request token generation (using a cached signing key) adds negligible latency (sub-millisecond crypto operation) while dramatically limiting the blast radius of token compromise.
 
 **Q: How would you implement rate limiting between agents to prevent a misbehaving agent from overwhelming a specialist?**
+**Short:** Rate-limit by the verified caller's JWT issuer claim with a sliding-window counter and a concurrent-task cap per agent.
 At the specialist agent's HTTP layer, apply per-caller-identity rate limiting using the verified JWT issuer claim as the key. For example: 100 task submissions per minute per agent ID, enforced in Redis with a sliding window counter. Exceeding the limit returns HTTP 429 with a `Retry-After` header. The specialist also enforces concurrent task limits per caller (e.g., no more than 10 active tasks from any single agent) to prevent resource exhaustion.
 
 **Q: What tracing information should be propagated across A2A calls for observability?**
+**Short:** Propagate the W3C traceparent header across every A2A and MCP hop to build one distributed trace of the call graph.
 Propagate the W3C `traceparent` header (OpenTelemetry standard) in all A2A requests. Each agent adds itself as a span in the trace, records the task ID and agent ID, and propagates the same `traceparent` to any further downstream A2A or MCP calls. This creates a complete distributed trace spanning the entire multi-agent call graph, allowing you to measure end-to-end latency, identify bottlenecks, and debug failures across agent boundaries.
 
 **Q: How should an agent validate task payloads received from other agents, even trusted ones?**
+**Short:** Enforce strict schema validation on every incoming task payload regardless of caller identity, since trust doesn't replace input checks.
 All incoming task payloads must be validated with strict schema enforcement (Pydantic models or equivalent) regardless of the caller's identity. A compromised trusted agent or a bug in a trusted agent could send malformed or malicious payloads. Validation must cover: field types, string length limits, enum value ranges, and no injection-prone raw values in queries. Defense-in-depth means not trusting data just because the authentication check passed.
 
 **Q: What is the minimum set of JWT claims required for secure agent-to-agent authentication?**
+**Short:** A secure A2A token needs iss, aud, a short exp, iat, a unique jti, and a scope claim limiting permitted operations.
 Required claims: `iss` (issuer — calling agent's identity), `aud` (audience — target agent's URL), `exp` (expiry — must be short, no more than 15 minutes), `iat` (issued-at — for freshness validation), `jti` (JWT ID — unique per token to prevent replay), `scope` (permitted operations — minimum required capabilities). Optional but recommended: `sub` (specific resource being acted on), agent-specific claims identifying the task context.
 
 **Q: In A2A, what is the difference between a Message and an Artifact, and what is contextId for?**
+**Short:** A Message is conversational turn content and an Artifact is task output, while contextId groups many tasks into one conversation.
 A Message is a unit of conversation (`messageId`, `role`, `parts`) while an Artifact is a task output (`artifactId`, `name`, `parts`) held in the Task's `artifacts` array. Both are built from the same `Part` union — `text`, `raw` bytes, a `url` reference, or structured `data` — so one code path returns prose and files alike; prefer `url` over `raw` for large payloads. `contextId` is the grouping key above `taskId`: a task ID is one unit of work, a context ID ties many tasks and messages into one conversation, so "profile this dataset" and "now chart it" are two tasks under one context and the agent can carry state between them. The server generates `taskId`; if a request supplies both a task ID and a context ID they must match. Streamed outputs arrive as `TaskArtifactUpdateEvent` with `append` and `lastChunk` flags — a consumer that overwrites instead of appending keeps only the last fragment.
 
 **Q: A caller registers a push-notification callback URL. What must your agent check before POSTing to it?**
+**Short:** Treat a caller-registered callback URL as SSRF-risky input, requiring HTTPS, host allowlisting, and signed JWT-authenticated callbacks.
 Treat the callback URL as untrusted input: it is a caller-controlled destination for a request your server makes, which is a textbook SSRF primitive. Require HTTPS, allowlist the host, and resolve it to reject private, loopback and link-local addresses — otherwise a caller registers the cloud metadata endpoint and reads credentials through your error responses, or points you at a third party and turns your agent into a DDoS amplifier. Where an open ecosystem rules out an allowlist, the spec's alternative is ownership verification by challenge-response plus egress firewall rules. Then authenticate the callback itself: sign each notification as a JWT with `iss`, `aud`, `iat`, `exp`, `jti` and `taskId`, publish keys at a JWKS endpoint, and have the receiver verify by `kid` and reject repeated `jti` values as replays. `PushNotificationConfig`'s optional `token` lets the receiver confirm the callback maps to a task it actually registered.
 
 **Q: How do you handle the case where a specialist agent is temporarily unavailable during A2A task submission?**
+**Short:** Retry submission with capped exponential backoff, distinguish retryable from fatal errors, and circuit-break after repeated failures.
 Implement retry with exponential backoff on the caller side: attempt submission at 1s, 2s, 4s, 8s, capping at 30s, for a total maximum retry window of 90 seconds before surfacing the error to the orchestrator. Distinguish between retryable errors (HTTP 429, 503, 504) and non-retryable errors (400 bad request, 401 unauthorized). Use circuit breaker pattern: after 5 consecutive failures, open the circuit for 60 seconds and fail fast rather than queuing retries that will also fail. Fall back to an alternate specialist agent if the registry provides multiple candidates for the same skill.
 
 ---

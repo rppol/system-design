@@ -989,51 +989,67 @@ class VersionedToolRegistry(ToolRegistry):
 ## 12. Interview Questions with Answers
 
 **Q: Why does model accuracy drop when you give it 100 tools instead of 10?**
+**Short:** Attention dilutes across more tool tokens and irrelevant options add noise to the selection decision, so accuracy drops.
 The model's attention is diluted across more tokens, and the correct tool may appear at a position that receives less attention weight. Additionally, irrelevant tools introduce noise into the function-selection decision. The size of the drop is not a constant — it depends on the model, how semantically distinct the tools are, and where the correct tool sits in the list — so quote a measured number from your own eval set rather than a benchmark headline.
 
 **Q: What is RAG-over-tools and how is it different from RAG-over-documents?**
+**Short:** RAG-over-tools retrieves tool schemas into the API's tools parameter instead of retrieving text chunks into the prompt.
 RAG-over-tools embeds tool descriptions (instead of document chunks) and retrieves the most relevant tool schemas at query time. The key difference is the retrieved artifact: tool schemas are injected into the `tools` parameter of an LLM API call, not into the prompt text. The retrieval mechanics (embedding, cosine search) are identical.
 
 **Q: What value of k should you use in top-k tool retrieval?**
+**Short:** Recall climbs steeply up to about k=10 and then flattens, while token cost keeps scaling linearly with k.
 Set k=10 as the production default, then measure Recall@k on your own labelled query set and tune from there. The shape of the tradeoff is universal even though the numbers are not: recall rises steeply from k=1 to about k=10 and then flattens, while token cost keeps climbing linearly at `k x S`. Increasing k beyond 15 buys diminishing recall for a strictly linear cost.
 
 **Q: Why is the tool description more important than the tool name for selection accuracy?**
+**Short:** The model calls tools based on their description text, so a vague name with a precise description still selects correctly.
 The model reads the description to understand what the tool does before deciding whether to call it. The embedding of the description also determines whether retrieval surfaces the tool for a given query. A poorly named but well-described tool is retrieved and called correctly far more often than a well-named but vague-description tool.
 
 **Q: How do you handle tool name collisions across multiple MCP servers?**
+**Short:** Namespace every tool as server underscore verb underscore object to eliminate ambiguous names across MCP servers.
 Use a namespacing convention: `<server>_<verb>_<object>`. For example, `github_create_pr` and `jira_create_issue` instead of two tools both named `create`. This eliminates ambiguity in both the LLM's function-selection decision and in server-side routing.
 
 **Q: What is the ToolBench benchmark and why does it matter?**
+**Short:** ToolBench evaluates tool selection across 16,464 real RapidAPI endpoints, showing retrieval quality rivals model size.
 ToolBench (Tsinghua / OpenBMB, 2023) is a benchmark of 16,464 real-world RESTful APIs from RapidAPI covering 49 categories. It provides standardised evaluation of tool selection accuracy and multi-step tool use. The associated ToolLLM paper shows a 7B model fine-tuned with retrieval-aware training (ToolLLaMA + DFSDT) reaching a 66.7% pass rate — just ahead of ChatGPT's 64.8% and a few points behind GPT-4's 71.1% — which implies retrieval quality matters nearly as much as model size for tool use.
 
 **Q: What is Gorilla LLM and what problem does it solve?**
+**Short:** Gorilla fine-tunes a LLaMA model with a retriever in the loop, eliminating the hallucinated API parameters models produce from memory.
 Gorilla is a LLaMA-based model fine-tuned for API calling on TensorFlow Hub, Torch Hub, and HuggingFace Hub APIs. Its primary contribution is eliminating hallucinated parameter names, which are the dominant error mode when GPT-4 or similar models call APIs from memory. Gorilla is trained with a retriever in the loop, so it learns to ground calls in retrieved documentation rather than parametric memory.
 
 **Q: How do you build training data for a tool routing classifier?**
+**Short:** Generate synthetic labelled queries per tool category with GPT-4 to fine-tune a small routing classifier past 90 percent accuracy.
 Use GPT-4 to generate 50-200 synthetic queries per tool category, labelled with the correct category. Prompt: "Generate 100 diverse user queries that would require using a {category} tool." This synthetic dataset is sufficient to fine-tune DistilBERT to >90% routing accuracy with no human labelling.
 
 **Q: When should you use a provider's deferred tool loading instead of building RAG-over-tools yourself?**
+**Short:** A provider's deferred tool loading keeps the cached prompt prefix intact, unlike a client-side registry that invalidates the cache each turn.
 Reach for the provider's version first: it deletes the retrieval layer entirely and, unlike a client-side registry, preserves prompt caching. The mechanism is that you still send every tool definition on every request but mark the non-essential ones `defer_loading: true`; those are kept out of the cached system-prompt prefix, and the model pulls them in on demand through a search tool that returns `tool_reference` blocks. That caching property is the decisive argument, and it is the one candidates usually miss — a FAISS registry that rewrites the `tools` array each turn changes the prefix on every call and invalidates the cache, so the token savings it reports on paper are partly given back at the cache layer. Build your own when you need a retrieval method the built-in regex and BM25 variants cannot express (embedding similarity, a trained routing classifier, cross-server re-ranking), when you must run against a provider that offers nothing equivalent, or when tool selection has to be auditable and reproducible offline. The hybrid is supported too: a custom client-side tool can return `tool_reference` blocks so your embedding search drives the provider's expansion machinery. Note what neither approach fixes — description quality and namespacing still determine whether any search finds the right tool.
 
 **Q: What is schema drift and how do you detect it at runtime?**
+**Short:** Fingerprint each tool's parameter schema and recompute it on deploy to detect a stale embedding index.
 Schema drift occurs when a tool's parameter structure or description changes after the FAISS index was built, making the stored embedding stale. Detect it by storing a SHA-256 fingerprint of each tool's parameter JSON at index build time. On each deployment, recompute fingerprints and compare; rebuild the index for any drifted tool.
 
 **Q: How does a hierarchical menu approach reduce token consumption?**
+**Short:** A two-level category-then-tool menu cuts per-selection tokens roughly sevenfold versus listing every tool at once.
 Instead of listing N tools in one prompt, the agent first selects a category (L1 menu: 5-10 categories, ~200 tokens) then selects a specific tool within that category (L2 menu: 5-20 tools, ~2000 tokens). Total token usage per selection is ~2200 vs ~15000 for a 50-tool naive approach — a 7x reduction. The cost is an extra LLM round-trip (400-800ms).
 
 **Q: When does RAG-over-tools fail?**
+**Short:** Tool RAG fails on jargon mismatch, near-duplicate tool clusters, or ambiguous queries where the wrong candidate ranks first.
 RAG-over-tools fails when: (1) the correct tool has a description that does not overlap semantically with the query (e.g., jargon mismatch), (2) the tool catalogue has many near-duplicate tools whose embeddings cluster together, or (3) the user query is ambiguous and the top-k tools retrieved are all plausible but the wrong one is ranked first.
 
 **Q: How do you evaluate the retrieval quality of your tool RAG system?**
+**Short:** Measure Recall@k and Mean Reciprocal Rank against labelled query-tool pairs, targeting Recall@10 above 95 percent.
 Build an evaluation dataset of (query, expected_tool_name) pairs. Run retrieval at multiple k values (k=1, 3, 5, 10) and measure Recall@k (fraction of queries where the correct tool appears in the top-k results) and MRR (Mean Reciprocal Rank). Target Recall@10 > 95% for production deployment.
 
 **Q: What is the difference between tool selection accuracy and task completion rate?**
+**Short:** Per-step tool accuracy compounds multiplicatively, so 95 percent per step yields only 77 percent completion over five steps.
 Tool selection accuracy measures whether the correct tool is called with correct parameters for a single step. Task completion rate measures whether the overall multi-step agent task succeeds. A tool selection accuracy of 95% per step means a 5-step task has a completion rate of 0.95^5 = 77%. This is why high per-step accuracy matters disproportionately.
 
 **Q: How do you handle a tool that could belong to multiple categories?**
+**Short:** Assign one primary category for coarse routing and let embedding-based retrieval still surface it for cross-category queries.
 Assign the tool to its primary category in the routing classifier. In the RAG index, the tool's embedding will naturally retrieve it for cross-category queries because semantic similarity operates on the full description, not the category label. The classifier is a coarse filter; RAG handles cross-category retrieval.
 
 **Q: What are the production costs of RAG-over-tools at 1 million calls per day?**
+**Short:** At a million calls a day, tool-RAG embedding costs about a dollar while saving tens of thousands in avoided input tokens.
 Using `text-embedding-3-small` at $0.02/1M tokens: embedding each query (average 50 tokens) costs $0.001 per 1K calls = $1/day at 1M calls. Saved tokens: 27,000 tokens per call (30,000 naive minus 3,000 retrieved) x 1M calls = 27B tokens/day. At GPT-4o input pricing of $2.50/1M tokens, savings = $67,500/day against a $1/day embedding bill. The embedding retrieval system pays for itself in the first two seconds of operation.
 
 ---

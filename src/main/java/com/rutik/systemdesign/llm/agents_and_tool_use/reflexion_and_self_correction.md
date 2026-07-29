@@ -479,51 +479,67 @@ Appending all past reflections to each retry's prompt without a sliding window w
 ## 12. Interview Questions with Answers
 
 **Q: What is Reflexion and how does it differ from simply retrying a failed LLM call?**
+**Short:** Reflexion stores a written critique of each failure and feeds it forward, unlike a bare retry that repeats the same prompt.
 A: Reflexion is an algorithm in which a separate "reflector" LLM writes a verbal critique of each failed attempt, and that critique is stored in episodic memory and included in the next attempt's prompt. A simple retry sends the same prompt again with no additional information. Reflexion works because the verbal critique encodes specific information about what went wrong ("you forgot to handle the empty list case") that guides the actor toward a correct solution rather than randomly sampling a different one. The episodic memory also accumulates across attempts so the model knows which specific approaches failed.
 
 **Q: When does self-correction with a language model evaluator backfire?**
+**Short:** Self-correction backfires when a sycophantic evaluator flips a correct answer to wrong just because it was challenged.
 A: It backfires when the evaluator produces sycophantic signal — agreeing that the actor made an error even when it did not, causing the actor to change a correct answer to an incorrect one. Sharma et al. (2023) found GPT-4 changes its answer 32% of the time when simply asked "Are you sure?", and that correct→incorrect flips outnumber incorrect→correct ones. Self-correction is unreliable whenever the evaluator cannot objectively verify correctness — subjective tasks (creative writing, tone), ambiguous tasks, or tasks where the model's own knowledge is the bottleneck.
 
 **Q: What does CRITIC do differently from Reflexion?**
+**Short:** CRITIC grounds critique in external tool output like code execution, replacing Reflexion's fallible LLM-only evaluator.
 A: CRITIC replaces the LLM evaluator with external tools — code execution, web search, calculator — to produce objective critique grounded in reality rather than model opinion. A CRITIC evaluating a code answer actually runs the code and reports test failures. A Reflexion evaluator is also an LLM that can be wrong. CRITIC eliminates the sycophancy risk for verifiable domains because the feedback comes from ground truth, not from another model's opinion.
 
 **Q: What is the sycophancy problem and how does it relate to self-correction?**
+**Short:** Sycophancy makes a model agree it was wrong under social pressure, turning vague self-correction feedback into random noise.
 A: Sycophancy is the tendency of RLHF-trained models to agree with human-expressed preferences regardless of correctness — if a user implies the model is wrong, it will often "agree" and change its answer. In self-correction, if the evaluator tells the actor "your answer was wrong" without specifics, the actor treats this as social pressure to change rather than as evidence of a specific error. The result is random perturbation, not guided improvement. Mitigation: always use specific, grounded, external feedback rather than vague binary signals.
 
 **Q: How does episodic memory in Reflexion prevent the model from repeating the same mistake?**
+**Short:** Stored reflections describe exactly what failed and what to try instead, kept to a sliding window to avoid context overflow.
 A: Each failed attempt produces a reflection that is appended to a list of past reflections. Before the next attempt, the actor reads all stored reflections. The reflections explicitly describe what failed and what to try instead ("on attempt 2, using a dict for lookup was too slow — next time use a set"). This is more reliable than relying on the model's implicit memory of the conversation history because the reflections are compressed, actionable summaries rather than raw conversation turns. A sliding window (typically last 3 reflections) prevents context overflow.
 
 **Q: How many retries does Reflexion use, and why not more?**
+**Short:** Reflexion typically caps at three retries because gains diminish sharply and each extra attempt roughly doubles cost.
 A: Typically 3 retries (4 total attempts). Beyond 3 retries, empirical gains diminish rapidly — most problems solvable by Reflexion are solved within 3 attempts; problems that persist beyond that usually require capabilities the model does not have. Each retry adds roughly one attempt's worth of cost plus a reflection call, so a 5-retry budget costs about 6× the single-attempt baseline. The published Reflexion curves show the same shape on every benchmark: the largest jump lands on the first one or two retries and the curve flattens after that, so measure your own per-retry deltas rather than assuming a fixed schedule.
 
 **Q: Describe how you would implement CRITIC for a SQL query generation task.**
+**Short:** Execute the generated SQL against the real database and feed back the actual error or row mismatch as the critique.
 A: The actor generates a SQL query. The evaluator executes the query against the actual database and compares the output to the expected result set (or checks for syntax errors). If the query fails or returns wrong rows, the evaluator formats the database error message and a sample of expected vs actual rows as a critique string. The actor reads this critique and generates a corrected query. No additional evaluator model is needed — the database is the evaluator. This approach eliminates hallucinated column names and incorrect JOIN logic because the feedback is from the schema and data, not from a language model's opinion of the query.
 
 **Q: How do you prevent context overflow when running many Reflexion iterations?**
+**Short:** Keep only the last few reflections in the prompt, or compress older ones into a shorter digest once they accumulate.
 A: Use a sliding window: retain only the last K reflections (typically K=3) in the actor's prompt. Older reflections are dropped. Alternatively, maintain a "compressed memory" — after K reflections accumulate, summarize them into a shorter digest and replace the list. The digest should retain specific error descriptions but drop verbose context. This keeps the actor's prompt within the context limit regardless of the number of retry attempts.
 
 **Q: What is Self-Refine and when should you prefer it over Reflexion?**
+**Short:** Self-Refine critiques in one conversation with no episodic memory, best for subjective tasks; Reflexion suits objective pass-fail ones.
 A: Self-Refine uses the same model to generate, critique, and refine in a single conversation without an external evaluator or separate episodic memory. Prefer Self-Refine for tasks where the model has strong domain knowledge and the task is partially subjective: essay improvement, code style, translation quality, prompt optimization. Prefer Reflexion when the task has objective pass/fail criteria and the model can plausibly miss specific edge cases — the episodic memory prevents repeating specific identified mistakes, which Self-Refine's in-context critique does not guarantee.
 
 **Q: What concrete benchmark improvements does Reflexion achieve?**
+**Short:** Reflexion lifts HumanEval pass@1 from 80.1 to 91.0 percent, though it actually underperforms baseline on MBPP.
 A: On HumanEval (code generation), GPT-4 pass@1 improves from 80.1% to 91.0%. On AlfWorld (interactive text games), Reflexion solves 130 of 134 tasks (97%) across 12 trials against a ReAct-only baseline that plateaus near 96/134 (72%). On HotpotQA (multi-hop reasoning), Reflexion adds roughly 14 points over the chain-of-thought baseline even when that baseline is given ground-truth context. Note the paper's one negative result: on MBPP, Reflexion scored 77.1% against the 80.1% baseline — worse than no reflection. These gains are domain-specific and depend on evaluator quality.
 
 **Q: What are the cost implications of adding Reflexion to a production agent?**
+**Short:** A three-retry Reflexion budget costs up to four times a single attempt, justified only when it meaningfully raises success rate.
 A: Each Reflexion retry adds approximately 2 LLM calls (reflector + actor) plus the evaluation cost. With a 3-retry budget, worst-case cost is 4× the single-attempt baseline for LLM calls plus evaluation overhead (negligible for code execution, ~1 extra LLM call for LLM-based evaluation). At Claude Sonnet 5 list pricing ($3/M input, $15/M output), a task using 2K input tokens and 500 output tokens costs ~$0.014 per attempt, $0.056 worst-case with 4 attempts. For tasks where self-correction increases quality from 68% to 91% success rate, as in the Section 14 deployment, this cost is well justified; for tasks already at 95%+, it is not.
 
 **Q: How do you decide which tasks should have self-correction enabled?**
+**Short:** Enable self-correction only with an objective evaluator and a baseline pass rate roughly between 50 and 85 percent.
 A: Apply a two-factor test: (1) Is there an objective evaluator? If not, sycophancy risk makes self-correction unreliable. (2) Is the baseline pass rate in the range where improvement is possible? If baseline is already >95%, the cost of retries exceeds the quality benefit. If baseline is <40%, the model likely lacks the capability — retries will not fix a fundamental capability gap. The sweet spot is 50-85% baseline pass rate with an objective evaluator. Also consider latency tolerance: users waiting for a chat response cannot afford 3 retry cycles; batch jobs can.
 
 **Q: How does Reflexion differ from chain-of-thought prompting?**
+**Short:** Chain-of-thought improves one attempt's reasoning; Reflexion adds an outer retry loop driven by evaluator feedback across attempts.
 A: Chain-of-thought (CoT) improves the quality of a single attempt by prompting the model to reason step-by-step before answering. CoT does not involve multiple attempts or an external evaluator. Reflexion is a multi-attempt algorithm that uses CoT-style reasoning internally within each attempt but adds an outer retry loop driven by evaluator feedback. CoT reduces errors by improving reasoning quality per attempt; Reflexion further reduces errors by allowing the model to fix identified mistakes across attempts. They are complementary — using CoT within each Reflexion trial is the recommended approach (see [ReAct & Reasoning Patterns](react_and_reasoning_patterns.md)).
 
 **Q: Can self-correction improve a task the model fundamentally cannot do?**
+**Short:** Self-correction cannot inject missing capability, so retries yield nothing on a task the model has zero chance of solving.
 A: No. Self-correction is not capability injection — it can only help the model express capabilities it already has more reliably. If GPT-4 cannot solve a class of problem with probability zero (it has no training data for a specific obscure algorithm), retrying 10 times will still yield 0% success. Reflexion's documented improvement on HumanEval (80.1% → 91.0%) comes from a task the model already solves four times out of five on the first try, meaning the knowledge is present but not always correctly expressed. Reflection helps with edge-case misses, not fundamental knowledge gaps.
 
 **Q: What is a practical way to test whether self-correction is helping on your task?**
+**Short:** Compare Reflexion-at-k against pass-at-k on the same k; if they're equal, the memory isn't adding value beyond random sampling.
 A: Run an A/B evaluation: for 100 task samples, measure (1) pass@1 (first attempt only), (2) pass@4 (best of 4 independent samples), and (3) Reflexion@4 (4 attempts with episodic memory). If Reflexion@4 significantly exceeds both pass@1 and pass@4, self-correction is adding value beyond random sampling. If Reflexion@4 ≈ pass@4, you are not benefiting from the memory — just sampling more. This distinction is critical: Reflexion is justified only when guided retries outperform random retries.
 
 **Q: How do you handle the case where the evaluator itself is wrong?**
+**Short:** Guard against false-pass and false-fail evaluators with complete test coverage or by requiring two-of-three evaluator agreement.
 A: Evaluator errors fall into two categories: false positives (evaluator says pass when the output is wrong) and false negatives (evaluator says fail when the output is correct). False negatives waste budget on unnecessary retries. False positives accept wrong outputs. Mitigations: for code evaluators, write test cases covering all edge cases before deployment — incomplete tests are the most common source of false positives. For LLM evaluators, use rubric-based scoring rather than binary judgment and calibrate the evaluator on a labeled dataset. When evaluator reliability is uncertain, require 2-of-3 evaluator agreement before accepting a pass.
 
 ---

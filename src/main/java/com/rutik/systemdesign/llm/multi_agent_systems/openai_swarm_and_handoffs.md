@@ -765,57 +765,75 @@ async def lookup_account(ctx: RunContextWrapper[SupportContext]) -> str:
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between OpenAI Swarm and the Agents SDK?**
+**Short:** Swarm is an experimental synchronous prototype OpenAI replaced with the async, typed, production Agents SDK.
 Swarm is a synchronous, stateless, explicitly experimental prototype released in October 2024 to demonstrate the handoff pattern; its own README says it is replaced by the Agents SDK. The Agents SDK (announced 11 March 2025) is the production successor: async, streaming, typed context, guardrails, built-in tracing, retry logic, and a max_turns safety limit. The APIs are not compatible — Swarm's `Agent` has a single `functions` list and no `handoffs` field, while the SDK separates `tools` (which must be `@function_tool`-decorated) from `handoffs`.
 
 **Q: How does a handoff actually work under the hood?**
+**Short:** A handoff-registered function call switches the active agent and restarts the LLM call under the new agent's system prompt.
 The LLM generates a function call whose name matches a transfer function (e.g., "transfer_to_billing_agent"). The runner detects that this function is registered as a handoff rather than a data-returning tool. It switches the active agent to billing_agent, appends a tool message saying "Transferred", and starts a new LLM call using billing_agent's instructions as the system prompt — while keeping the full conversation history.
 
 **Q: What are context variables and how do they persist across handoffs?**
+**Short:** Context variables are a shared dict or dataclass across a run, but the Agents SDK mutates it live while Swarm deep-copies it.
 Context variables are a dict (Swarm) or a typed dataclass (Agents SDK) shared across every agent invocation and tool call within a single run, so a mutation by one agent is immediately visible to the next. The boundary differs by framework: the Agents SDK passes your context object itself, so mutations are visible to the caller after the run; Swarm deep-copies the dict on entry to `run()`, so the caller's original is untouched and you must read `response.context_variables` and pass it back on the next call.
 
 **Q: What is a routine in the Swarm / Agents SDK pattern?**
+**Short:** A routine is a numbered scripted flow embedded in one agent's instructions, guiding the LLM through fixed steps without handoffs.
 A routine is a numbered list of steps embedded in an agent's instructions that guides the LLM through a predefined conversation flow (e.g., greet → qualify → pitch → close). The LLM follows the steps in order, calling tools at each step, and only hands off when the routine explicitly says to. Routines are useful for linear, scripted workflows where specialisation is not needed.
 
 **Q: When should you use a routine instead of separate agents with handoffs?**
+**Short:** Use a routine for a linear shared-context workflow and separate handoff agents when steps need distinct knowledge or tools.
 Use a routine when the workflow is linear, steps share the same domain context, and prompt isolation is not critical. Use separate agents with handoffs when steps require different specialised knowledge (reducing prompt length and hallucination risk), different tool sets, or when you need per-agent traceability.
 
 **Q: What is max_turns and why does it matter?**
+**Short:** max_turns caps total LLM calls per run so a pair of agents handing off to each other can't loop forever.
 max_turns is a parameter to Runner.run (default 10) that limits the total number of LLM calls per run, counting tool calls and handoffs. Without it, a pair of agents that hand off to each other could loop indefinitely, consuming unbounded tokens and cost. After max_turns is exceeded, the SDK raises MaxTurnsExceeded.
 
 **Q: How do input and output guardrails differ?**
+**Short:** Input guardrails inspect the message before the LLM sees it; output guardrails inspect the response after it's produced.
 Input guardrails run before the LLM receives the user message; they can inspect and block PII, prompt injection, or policy violations. Output guardrails run after the LLM produces its response; they can block toxic, off-topic, or malformed outputs. Both return GuardrailFunctionOutput; setting tripwire_triggered=True aborts the run by raising InputGuardrailTripwireTriggered or OutputGuardrailTripwireTriggered — two distinct exception classes, so catch both.
 
 **Q: Can a guardrail call another LLM?**
+**Short:** Avoid calling Runner.run inside a guardrail since it nests runs recursively; use a direct cheap-model call instead.
 You should avoid calling Runner.run inside a guardrail because it causes nested runs and can trigger guardrails recursively. Instead, use a direct openai.chat.completions.create call with a fast, cheap model (e.g., gpt-5.4-nano), a regex heuristic, or a local classifier. The latency budget for a guardrail is typically under 200ms.
 
 **Q: How does streaming work in the Agents SDK?**
+**Short:** run_streamed returns immediately and is iterated with async for, emitting raw token, agent-change, and run-item events.
 Runner.run_streamed is a synchronous call that immediately returns a RunResultStreaming object, which you then iterate with `async for event in result.stream_events()`. It is neither awaited nor used as an async context manager. There are three event types: raw_response_event (raw Responses API deltas, for token-level output), agent_updated_stream_event (the active agent changed, i.e. a handoff), and run_item_stream_event (a higher-level item finished — message_output_item, tool_call_item, tool_call_output_item, handoff_output_item). The caller can display tokens in real time while the runner continues processing.
 
 **Q: What happens to conversation history when a handoff occurs?**
+**Short:** A handoff preserves the full message history and only swaps the system prompt to the new agent's instructions.
 The full message history is preserved and passed to the new agent. The new agent sees all previous turns, including the triage agent's messages and tool results. The only change is the system prompt, which switches to the specialist agent's instructions. This allows the specialist to understand the context of the conversation without re-asking questions.
 
 **Q: How do you test an agent that makes handoffs?**
+**Short:** Run with a faked model and assert on last_agent.name and mutated context fields rather than calling the real API.
 Use Runner.run in a pytest-asyncio test with a FakeModel or by patching openai.AsyncOpenAI to return canned responses. Assert on result.last_agent.name to confirm the correct handoff occurred, and on context attributes to confirm tools mutated context correctly. Test the guardrail separately by calling it directly with a RunContextWrapper mock.
 
 **Q: What is the token cost implication of multi-agent handoffs?**
+**Short:** Each handoff resends the full conversation history, so a multi-agent chain's token cost grows roughly linearly with agent count.
 Each handoff triggers a new LLM call. The new call includes the full conversation history, so token cost grows linearly with conversation length. A 3-agent chain on a 10-turn conversation may pay 3x the token cost of a single-agent approach. Mitigation: summarise earlier turns before handoff, or use a cheaper model (gpt-5.4-nano at $0.20/1M input tokens) for triage and reserve gpt-5.6-terra ($2.50/1M) for specialists.
 
 **Q: How would you prevent a triage agent from looping back to itself?**
+**Short:** Remove any transfer-to-triage tool from specialists entirely and give them an escape hatch instead of a way back.
 Remove the transfer_to_triage tool from specialist agents entirely. Specialists should have an escape hatch that says "tell the user you cannot help and they should contact human support" — not a transfer back to triage. Set max_turns=8 as a circuit breaker. Log a warning if last_agent == starting_agent after more than 3 turns.
 
 **Q: What is output_type in the Agents SDK and how does it differ from a guardrail?**
+**Short:** output_type enforces a JSON schema on the final response with automatic retry; a guardrail only inspects for policy violations.
 output_type is a pydantic model that forces the LLM's final response to conform to a JSON schema (structured output). The runner validates the output against the schema and retries if validation fails. A guardrail, in contrast, can inspect free-text output for policy violations but does not enforce schema. Use output_type for structured data extraction; use guardrails for safety and policy enforcement.
 
 **Q: How does the Agents SDK integrate with OpenAI's tracing dashboard?**
+**Short:** Every Runner.run auto-creates a trace on OpenAI's dashboard by default, correlated by wrapping the call in a named trace context.
 Every Runner.run call automatically creates a trace on the OpenAI platform, viewable in the Traces dashboard. There is no trace_url attribute on RunResult — to correlate a run with its trace, wrap the call in `with trace("workflow-name", group_id=...)` and look it up by that name or group ID. The trace shows each LLM call, tool call, handoff, and guardrail evaluation with latency, token counts, and inputs/outputs. No additional instrumentation code is required; it is on by default with a valid API key.
 
 **Q: What is the recommended model size split for triage vs specialist agents in production?**
+**Short:** Put the cheapest adequate model on triage classification and reserve a stronger reasoning model for specialist work.
 Put your cheapest adequate model on triage, since triage only classifies intent and routes. gpt-5.4-nano at $0.20/1M input is a common choice; reserve a stronger model such as gpt-5.6-terra ($2.50/1M) for specialists that need reasoning, tool use, or domain knowledge. Never put a reasoning model on triage: hidden thinking tokens are billed as output and add seconds of latency to a call whose entire job is picking one of four labels. The size of the saving is just the price ratio times the share of turns handled by the cheap tier, so compute it from your own turn mix rather than quoting a generic percentage.
 
 **Q: When do you use `Agent.as_tool()` instead of a handoff in the Agents SDK?**
+**Short:** Use as_tool for bounded work that returns control to the manager, and a handoff when the specialist should own the conversation.
 Use `as_tool()` when a specialist should do a bounded piece of work and give control back; use a handoff when the specialist should own the user-facing conversation from that point on. `as_tool()` wraps an agent as an ordinary callable tool, so the manager stays the active agent — `RunResult.last_agent` is still the manager, and `final_output` is the manager's synthesis rather than the specialist's raw text. That is what makes it the only fan-out primitive on this SDK: a run has exactly one active agent, so you cannot hand off to three specialists at once, but you can expose three of them as tools and let the model call them in the same turn. Two behaviours differ from a handoff and cause most of the surprises: the nested agent does not inherit the conversation (history sharing is opt-in via `session` / `conversation_id` / `previous_response_id`), and its result comes back as a tool-result string, so use `custom_output_extractor` if the manager needs structured fields. Concrete test: "should the customer's next message go to this agent?" — yes means handoff, no means tool.
 
 **Q: What is the cost consequence of the manager pattern versus a chain of handoffs?**
+**Short:** The manager pattern pays for its own context plus a full nested run per specialist call, unlike a handoff chain's single active context.
 The manager pattern is strictly more expensive per unit of work, because the manager's context stays alive across every nested run instead of being replaced. In a handoff chain there is one active context at a time — the specialist inherits the history and the triage agent stops being billed. With `as_tool()` you pay the manager's prompt on every turn *plus* a full nested run per specialist call *plus* the manager re-reading each returned result, which is the [orchestrator-worker](orchestrator_worker_pattern.md) cost profile expressed in SDK primitives. You buy three things with that: parallel fan-out, a single enforcement point for output guardrails and house voice, and a `last_agent` that never drifts. Route on it accordingly — triage-to-specialist support flows should stay handoffs, and only genuinely fan-out work (translate to four languages, score one document on five rubrics) should pay for a manager.
 
 ---

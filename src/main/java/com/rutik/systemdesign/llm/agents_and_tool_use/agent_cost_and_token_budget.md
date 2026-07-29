@@ -634,51 +634,67 @@ messages = [{"role": "user", "content": f"Today is {datetime.now()}\n\nQuery: {q
 ## 12. Interview Questions with Answers
 
 **Q: Why are agentic LLM systems so much more expensive than single-shot calls?**
+**Short:** Agent loops resend the entire growing history on every call, so cost scales roughly quadratically with conversation length.
 Agent loops send the ENTIRE conversation history on every API call. After N tool calls, the input context contains all N prior tool results, plus reasoning, plus the new user message. Cost is O(N²) in conversation length, not O(N). A 20-step agent with average 3K-token tool outputs costs ~30× a single completion at the same output budget.
 
 **Q: What does Anthropic's prompt caching cost and when does it pay back?**
+**Short:** Cache writes cost 1.25x and reads cost 0.1x base price, so a five-minute cache prefix pays back on its very first reuse.
 Cache writes cost 1.25× base input price. Cache reads cost 0.1× base input price. The cache TTL is 5 minutes (ephemeral) or 1 hour (with `cache_control: {"type": "ephemeral", "ttl": "1h"}`). With the 5-minute TTL, the first read already pays the write back (1.25 + 0.1 = 1.35 vs 2.0 uncached), so any prefix used twice in the cache window is a net win; the 1-hour TTL costs 2× to write and needs three uses (2.0 + 0.2 = 2.2 vs 3.0).
 
 **Q: How do you implement a hard cost cap on an agent?**
+**Short:** Sum usage-reported token costs after every call and abort with a partial result once cumulative spend crosses the budget.
 Track cumulative input_tokens, output_tokens, cache_read_tokens, cache_write_tokens after every API call (from `response.usage`). Multiply by the model's pricing. Before every iteration, check if cumulative cost exceeds the budget; if so, return a partial result with a "budget exceeded" marker. Always set max_iterations as a backup cap.
 
 **Q: When should you use the Batch API vs the synchronous API?**
+**Short:** Use the Batch API for offline tasks tolerant of a 24-hour SLA at half price, and synchronous for anything user-facing.
 Use Batch API when: (a) task is async/offline (overnight processing, daily reports), (b) latency tolerance is >1 hour, (c) cost matters and you can wait. Batch is 50% cheaper but has 24h SLA. Use synchronous for: any user-facing latency, real-time agents, interactive applications.
 
 **Q: What is the right context compaction trigger and strategy?**
+**Short:** Trigger compaction at 70 percent of a self-imposed token ceiling and summarize all but the last few tool results with Haiku.
 Trigger at 70% of your working token budget, not of the model's raw context window. Current Claude models expose a 1M-token window, and Haiku 4.5 a 200K one, but agents rarely want to pay for a full million — so set a self-imposed ceiling (say 200K) and compact at 70% of that, 140K. Strategy: summarize all-but-the-last-4 tool result pairs into 5-10 bullet points using a cheaper model (Haiku). Replace the early conversation with the summary. Keep the most recent results verbatim since they're usually the most relevant for the next decision.
 
 **Q: How do you decide which model to use in a cascade?**
+**Short:** Route routine steps to a cheap model and reserve the most capable model for complex multi-step reasoning steps.
 Static heuristic: routing/classification → Haiku (cheap, fast). Standard tool use → Sonnet (good balance). Complex multi-step reasoning and code generation → Opus, or a raised `effort` level on the same model. Dynamic: use a router LLM call (Haiku) to classify task difficulty, route to model. Most production systems use static heuristics for predictability.
 
 **Q: What is the typical cost reduction from model cascading?**
+**Short:** Model cascading typically cuts cost 60-80 percent when most tasks are easy enough for the cheapest tier.
 60-80% if your task mix is 70-80% "easy" (handled by Haiku) and 20-30% "hard" (needs Sonnet/Opus). Compute the per-task cost across the mix vs all-Opus baseline. The savings come not just from cheaper model price but also from cheaper models being faster (lower latency, less wall-clock spent).
 
 **Q: How do you attribute token cost to specific tool calls?**
+**Short:** Log each tool's input and output size and correlate it against the usage delta on the following API call.
 Wrap your tool execution layer with logging: tool_name, input_size, output_size, timestamp. After each agent run, correlate the tool calls with the request's usage.input_tokens delta. Tools whose outputs went into the conversation history are responsible for the additional tokens. Plot cost per tool type — typically file/document tools dominate.
 
 **Q: Why is truncating tool outputs the most cost-effective optimization?**
+**Short:** An untruncated tool output re-bills its full size on every remaining step, so truncating it saves cost multiplied by steps left.
 Because tool outputs become permanent context for the rest of the agent loop. A 200KB file dump means EVERY subsequent LLM call pays input cost on those 200KB. Truncating to 50KB saves 150KB × N remaining iterations × input price. On a 10-step agent, a single 500KB read can cost $1.50+ if not truncated.
 
 **Q: What's the cost difference between Anthropic ephemeral cache and 1-hour cache?**
+**Short:** The one-hour cache costs twice as much to write but lasts twelve times longer than the five-minute ephemeral cache.
 Ephemeral (5-min TTL) costs the standard 1.25× write / 0.1× read. 1-hour cache costs 2× write / 0.1× read — more expensive write but lasts 12× longer. Use 1-hour for system prompts that are stable across sessions; use ephemeral for conversation-specific prefixes.
 
 **Q: How do you prevent prompt injection from causing cost explosions?**
+**Short:** Combine a per-task cost cap, an iteration cap, a per-user daily cap, and output truncation as layered cost defenses.
 (1) Hard cost cap per task. (2) Hard iteration cap (max_iterations=20). (3) Per-user daily cost cap (e.g., $5/day, configurable per tier). (4) Tool output truncation (50KB max). (5) Reject inputs >5K tokens from untrusted users. (6) Alert on per-user cost spikes (>3σ from rolling baseline). Defense in depth.
 
 **Q: Does prompt caching work for the conversation history or only the system prompt?**
+**Short:** Caching applies to any content block, so you can cache the system prompt, tools, and a stable conversation prefix together.
 Both. You can add `cache_control: {"type": "ephemeral"}` to any content block. For agents: cache the system prompt always (most stable), cache the tools definition (also stable), and optionally cache the conversation history up through the last "checkpoint" (a stable point you don't expect to change). Up to 4 cache breakpoints per request on Anthropic.
 
 **Q: What is the LiteLLM router and how does it help with cost?**
+**Short:** LiteLLM is a proxy that enforces per-team budget caps, tracks spend, and fails over between LLM providers automatically.
 LiteLLM is a proxy that sits in front of LLM APIs. It provides: (a) per-team and per-key budget caps (block requests when exceeded), (b) per-model spend tracking and reporting, (c) automatic failover between providers (e.g., Claude → an OpenAI GPT-5.4-tier model if Anthropic is rate-limited), (d) semantic caching (return cached response for similar prompts). Critical for multi-team enterprise deployments.
 
 **Q: How do you forecast cost for a new agent feature?**
+**Short:** Measure token usage across representative prototype tasks, then set the per-task budget at p95 plus a safety margin.
 (1) Run 20-50 representative tasks through a prototype, capture actual token usage. (2) Compute mean/p50/p95/p99 cost per task. (3) Multiply by expected traffic. (4) Add 30% safety margin for prompt injections and edge cases. (5) Set per-task budget at p95 + 50%. Always re-measure after first week of production — real traffic differs from prototyping.
 
 **Q: What's the production cost difference between caching enabled vs disabled?**
+**Short:** Caching saves 60-75 percent on input cost for active sessions but gives little benefit when calls are sparse and TTL expires.
 For typical agents with 2-3K-token system prompts and tools, caching saves 60-75% on input cost in active sessions. For agents called sparsely (one call per 30+ minutes), caching gives near-zero benefit because the 5-min TTL expires between calls. Use 1-hour cache TTL for sparse agents.
 
 **Q: Server-side context editing or client-side compaction — which do you reach for first?**
+**Short:** Reach for server-side context editing first since it drops old tool results without an extra summarization call.
 Context editing, because it drops old tool results inside the API without the extra summarization call that compaction requires, and your client keeps the untouched history either way. Configure it with `context_management={"edits": [{"type": "clear_tool_uses_20250919", ...}]}` under the `context-management-2025-06-27` beta header: `trigger` sets the input-token or tool-use threshold that fires it, `keep` preserves the most recent N tool-use/result pairs, `exclude_tools` protects results you can never lose, and `clear_tool_inputs` decides whether the tool arguments go too. Cleared results are replaced by a placeholder so the model knows something was removed. The catch that decides the tradeoff is prompt caching: clearing invalidates the cached prefix from the edit point on, so an edit that reclaims 2K tokens while dumping a 100K-token cached prefix costs about $0.27 in re-billed input to save $0.006 at Sonnet rates — set `clear_at_least` high enough that each edit pays for its own cache re-write. Reach for compaction instead when you need the *content* of the old steps carried forward as a summary rather than deleted, which is the case for long research agents whose early findings still matter at the end.
 
 ---

@@ -448,51 +448,67 @@ Two things explain the gap, and both are worth naming. First, the `~80%` figure 
 ## 12. Interview Questions with Answers
 
 **Q: Why is streaming thoughts important for agent UX?**
+**Short:** Streaming reasoning keeps users engaged during long agent processing instead of showing a blank screen.
 Without streaming, users see a blank screen for the duration of the agent's processing (often 5-30+ seconds). User attention drops sharply after 3-5 seconds of unexplained wait. Streaming the agent's reasoning (or even a "thinking..." indicator) keeps users engaged and lets them estimate completion time. Teams commonly report abandonment falling by roughly 3× on tasks longer than 5 seconds — a widely used planning rule of thumb rather than a published benchmark, so measure it on your own funnel.
 
 **Q: Which actions warrant an approval gate?**
+**Short:** Gate irreversible, expensive, and sensitive actions, with stricter thresholds in production than in dev.
 Three categories: (1) irreversible (delete, drop, force-push, send email), (2) expensive (deploy to production, run a $10 API call, large data import), (3) sensitive (access PII, modify auth, change permissions). Configurable per environment — dev environment may auto-approve more; production demands stricter gating.
 
 **Q: How do you implement interrupt/resume for a running agent?**
+**Short:** Checkpoint agent state at each step so a stopped run can reload edited history and resume instead of restarting.
 Use a framework with built-in checkpointing (LangGraph with SqliteSaver, Temporal). At each major step, persist the agent state (messages, tool results, current node). When user clicks "Stop and edit", load the latest checkpoint into the UI, accept user edits to the message history, then resume the agent from the checkpoint with the modified state. Without checkpointing, the agent starts over after any pause.
 
 **Q: What's the difference between artifact rendering and raw output?**
+**Short:** Artifact rendering extracts code into a dedicated editor pane with copy and edit controls, instead of inline chat text.
 Raw output: model returns text like "Here's the code: ```python\ndef foo(): ...```" — user must read it inline. Artifact rendering: the agent's code is extracted, rendered in a syntax-highlighted editor pane, with copy/edit buttons, and the chat message references it ("I wrote `foo.py` — see artifact #3"). Much better UX for code, tables, diagrams, documents.
 
 **Q: How do you signal confidence vs uncertainty without sounding evasive?**
+**Short:** Cite the specific verification source and timestamp rather than hedging with vague words like might or possibly.
 Use concrete hedges with reasons: "I verified this in the CRM (timestamp 2025-04-12)" vs "Based on general knowledge, the answer is X — I couldn't verify against your data". Always include citations or "no source available" markers. Avoid weasel words ("might", "possibly") in favor of specific signals ("not verified in your system" vs "verified from source X").
 
 **Q: How do you handle a long-running tool call in the UI?**
+**Short:** Show the tool name, elapsed time, a cancel button past ten seconds, and stream any partial output.
 (1) Show a spinner with the tool name and parameters being called. (2) Show elapsed time. (3) For tools >10 seconds, show a "Cancel" button (which sends an abort signal to your tool runner). (4) Stream any partial output the tool produces. (5) On completion, show the result and how long it took.
 
 **Q: What is the "co-pilot" mental model and why does it matter?**
+**Short:** The co-pilot frame keeps the user as captain with visible stop, approve, and override controls over the agent.
 The co-pilot model frames the user as the captain and the agent as a helpful assistant. The captain delegates execution but retains authority over decisions. UX must reinforce this — always make stop, approve, override visible. Contrast with the "autonomous agent" frame which positions the AI as in charge — appropriate only for narrow, well-bounded tasks where users accept the delegation.
 
 **Q: How do you balance approval-gate friction vs convenience?**
+**Short:** Let users opt into a learnable auto-approve allowlist while always gating truly destructive actions regardless of preference.
 Configurable approval policies per user/role/environment. Default: gate everything irreversible. Allow users to opt into "auto-approve safe commands" with a learnable allowlist (when user has approved `git status` 10 times, suggest auto-approving). Always gate truly destructive actions (rm -rf, deploy to prod, send to all customers) regardless of user preferences.
 
 **Q: How do you handle the case where the user disagrees with the agent mid-task?**
+**Short:** A stop-and-correct button pauses the agent and injects the user's correction into checkpointed history before resuming.
 Provide a "Stop and correct" button that pauses the agent, lets the user inject a correction message into the conversation history, and resumes. Critical: the agent must be able to reason from the corrected history (this requires checkpointing). Without this pattern, users have to restart from scratch.
 
 **Q: What's the right way to render agent errors?**
+**Short:** Distinguish recoverable, partial, and hard failures in the UI, each with its own indicator and recovery action.
 Three levels: (1) Recoverable error (retry happening) — show inline yellow indicator: "Search failed, trying alternative source...". (2) Partial failure (some tools worked, some didn't) — show in answer: "I gathered data from sources A and B; source C was unavailable, so the analysis is partial". (3) Hard failure — full error message + retry button + escalation option (open ticket, contact support).
 
 **Q: Should the agent always cite its sources?**
+**Short:** Cite sources for factual claims and explicitly flag unsourced or uncertain ones instead of presenting them as fact.
 For factual answers: yes. Include URLs, document IDs, or "verified via tool X at timestamp Y". For opinions or reasoning: state assumptions. For uncertain claims: explicit "I don't have a source for this". Citations reduce hallucination over-trust and let users verify. Format: inline footnotes [1] with collapsible source list, or hover-cards.
 
 **Q: How do you show the agent's "plan" without overwhelming the user?**
+**Short:** Show a short high-level plan upfront and let each step expand into its tool calls only when active or clicked.
 Progressive disclosure: show a 3-5 step high-level plan upfront ("1. Search competitors, 2. Compare features, 3. Generate report"). Each step expands to sub-steps when clicked or when in progress. Mark complete with checkmarks. Don't show every tool call as a top-level step — group them under the parent step.
 
 **Q: What's the latency budget for streaming first tokens?**
+**Short:** Perceived speed comes from time to first token, not total completion time, so stream within one to two seconds for chat.
 Voice agents: <300ms first audio byte for premium UX, <800ms acceptable. Chat agents: <1s to first text token acceptable, <2s tolerable. The "perception of speed" is set by time to first token, not total completion time — a 30s task that streams from 500ms feels fast; a 5s task that waits 3s before any output feels slow.
 
 **Q: How do you measure agent UX quality?**
+**Short:** Track completion rate, abandonment by duration, gate approval rate, and how often users stop to correct the agent.
 (1) Task completion rate, (2) user abandonment rate by task duration, (3) approval rate on gates (low = users distrust agent's choices), (4) thumbs up/down on responses, (5) time to first useful output, (6) "stop and correct" rate (high = agent often wrong, users intervene). Production targets: completion rate >85%, abandonment <10% on 30s tasks, approval rate >80%.
 
 **Q: Why is consent-before-scope-expansion important?**
+**Short:** Ask before expanding beyond the data scope the user originally requested, or unannounced access erodes trust.
 Surprise data access erodes trust. If the user said "summarize my emails", they expect the agent to read emails — but not also read calendar, files, contacts. Before expanding scope ("I'd like to also check your calendar to cross-reference"), the agent should ask. Builds trust that the agent stays within bounds. Critical in enterprise contexts with privacy regulations.
 
 **Q: How does agent UX change when the run is detached and nobody is watching?**
+**Short:** A detached agent must park indefinitely and always emit an out-of-band signal, since a silent needs_input state is worse than a crash.
 Every pattern inverts from pull to push: streaming becomes a persisted transcript you attach to later, the stop button becomes attach-or-stop by session ID, and the approval modal becomes an out-of-band notification while the run parks. The pattern that breaks hardest is the approval gate, because neither timeout default works — a 60-second default silently denies everything the moment the user steps away, and an infinite one parks the run forever with no signal. The rule that falls out is that a `needs_input` state with no out-of-band notification is worse than a crash: a crash is observable, while a silently parked agent burns wall-clock and trust while appearing to work. Claude Code is the clearest reference shape — `/background` detaches a whole session, `/tasks` lists what is running so you can check on, attach to, or stop it, agent view shows every session's state including which ones need input, and notifications fire a hook with an `agent_needs_input` or `agent_completed` type. Design contract for a detached agent: the run parks indefinitely without timing out, every park emits a signal, and the signal carries enough context to answer straight from the notification rather than by re-opening the session.
 
 ---

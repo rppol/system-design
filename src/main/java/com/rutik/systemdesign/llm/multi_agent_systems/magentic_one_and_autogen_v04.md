@@ -1042,57 +1042,75 @@ class MyAgent(RoutedAgent):
 ## 12. Interview Questions with Answers
 
 **Q: What is the Orchestrator's role in Magentic-One and how does it differ from a GroupChat manager?**
+**Short:** The Orchestrator tracks facts and plan in two persistent ledgers, unlike a GroupChat manager that just picks the next speaker.
 The Orchestrator maintains two explicit ledgers (task ledger for global facts and plan, progress ledger for per-step state) and uses them to select the next agent, detect stalls, and trigger replanning. A GroupChat manager in AutoGen v0.2 simply selects the next speaker based on a prompt over the conversation history — it has no structured plan representation and no stall detection. The ledger approach gives the Orchestrator a persistent, inspectable audit trail independent of the LLM's context window.
 
 **Q: What are the two ledgers in Magentic-One and what does each store?**
+**Short:** The task ledger holds durable facts and the plan; the progress ledger holds ephemeral per-step state overwritten each turn.
 The task ledger stores durable information: the original request, a list of verified facts, the current plan (list of steps), and the current step index. The progress ledger stores ephemeral per-step state: whether the task is done, whether the orchestrator needs user input, the instruction sent to the last agent, the assigned agent name, and the last observation (truncated output). The task ledger accumulates throughout the run; the progress ledger is overwritten each step.
 
 **Q: How does Magentic-One detect and recover from a stall?**
+**Short:** Three consecutive steps with no new facts trigger the Orchestrator to replan rather than repeat the same failing instruction.
 The Orchestrator counts consecutive steps in which no new facts were added to the task ledger. When this count exceeds a threshold (default 3 steps), it issues a replanning LLM call that rewrites `task_ledger.plan` given the facts accumulated so far. This avoids the infinite-loop failure mode where an agent keeps returning unhelpful output and the Orchestrator keeps re-sending the same instruction.
 
 **Q: What GAIA benchmark scores did Magentic-One achieve and what do they mean?**
+**Short:** Magentic-One scored 38 percent overall on GAIA, dropping steeply from Level 1 to Level 3 on the hardest multi-step tasks.
 Magentic-One's best configuration scored 38.00% overall on the GAIA test set, and 32.33% with GPT-4o alone. Per level on the validation set, that best configuration reached 54.84% (Level 1), 32.7% (Level 2) and 22.92% (Level 3); GPT-4o alone reached 46.24% / 28.3% / 18.75%. The steep drop from Level 1 to Level 3 is the point: hierarchical orchestration with specialized tool agents was statistically competitive with the previous state of the art without task-specific tuning, but under a quarter of the hardest multi-step tasks were solved.
 
 **Q: What is the fundamental architectural difference between AutoGen v0.2 and v0.4?**
+**Short:** AutoGen v0.4 replaces v0.2's blocking GroupChat loop with an async actor model of typed, independently routable agents.
 AutoGen v0.2 uses synchronous, blocking `initiate_chat` calls and routes messages via a GroupChat string-matching speaker selection loop. AutoGen v0.4 replaces this with an async-first actor model: each agent is a `RoutedAgent` that declares typed `@message_handler` methods, and a `SingleThreadedAgentRuntime` (or distributed runtime) routes typed Pydantic message objects to the correct handler. v0.4 eliminates the global mutable GroupChat state and enables concurrent execution of independent agents.
 
 **Q: What is a RoutedAgent and how does message routing work in AutoGen v0.4?**
+**Short:** A RoutedAgent dispatches by the first parameter's type annotation, silently dropping any message with no matching handler.
 A `RoutedAgent` is a base class whose subclasses declare message handlers with the `@message_handler` decorator. Each handler's first parameter type annotation (a dataclass or Pydantic model) is registered with the runtime as the message type that handler accepts. When a message is sent to the agent's `AgentId`, the runtime inspects the message type and calls the matching handler. If no handler matches, the message is dropped silently — hence the pitfall of using plain `str` as a message type.
 
 **Q: What is the difference between RoundRobinGroupChat and SelectorGroupChat in AutoGen v0.4?**
+**Short:** RoundRobinGroupChat cycles agents deterministically for free; SelectorGroupChat spends an extra LLM call to pick the next speaker.
 `RoundRobinGroupChat` activates agents in a fixed cyclic order — deterministic, predictable, zero extra LLM calls per turn. `SelectorGroupChat` uses a Selector LLM (one additional LLM call per turn, ~1-2 s, ~500 tokens) to read the conversation history and pick the most appropriate next speaker. Use RoundRobin when the step sequence is known; use Selector when the task requires dynamic routing based on what has been discussed.
 
 **Q: How does AutoGen v0.4 handle termination conditions?**
+**Short:** Composable termination conditions like message count or a text mention combine with OR and AND operators on a team.
 Termination conditions are composable objects passed to the team constructor. `MaxMessageTermination(n)` stops after n total messages. `TextMentionTermination("DONE")` stops when any agent's message contains the string "DONE". `StopMessageTermination()` stops when an agent returns a `StopMessage`. Conditions combine with `|` (OR) and `&` (AND) operators, e.g., `MaxMessageTermination(10) | TextMentionTermination("DONE")`.
 
 **Q: Why is the observation truncated before being passed back to the Orchestrator?**
+**Short:** Raw observations can overflow the context window, so truncating to the last few thousand characters keeps cost and size predictable.
 LLM context windows have hard limits (GPT-4o: 128K tokens). A WebSurfer observation can include full HTML (50-200 KB), and a Coder observation can include verbose stdout. Passing raw observations to the Orchestrator would overflow the context window, cause API errors, and dilute the prompt with irrelevant content. The cost effect is per-step rather than dramatic per-call — a filled 128K GPT-4o prompt is about $0.32 of input, but it is re-paid on every remaining step of the run. Truncating to the last 2,000-3,000 characters preserves the most recent (most relevant) output while keeping costs predictable.
 
 **Q: What security risks does Magentic-One's ComputerTerminal agent introduce and how are they mitigated?**
+**Short:** ComputerTerminal runs arbitrary shell commands, so sandbox it in a network-restricted Docker container with an explicit executor set.
 ComputerTerminal executes arbitrary shell commands on the host system. A malicious task or a hallucinating LLM could issue `rm -rf /`, exfiltrate credentials, or install malware. Mitigations: run ComputerTerminal inside a Docker container with no host mounts, no network egress (except a whitelist), and a non-root user (see [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md)). Add a command allowlist/denylist layer before execution. Log every command with its exit code for audit. The `autogen_ext.teams.magentic_one.MagenticOne` reference implementation uses Docker for code execution **if Docker is available and otherwise silently falls back to a local executor** — so pass an explicit `code_executor` in production rather than relying on the default, and note that Microsoft's own docstring warns Magentic-One is susceptible to prompt injection from webpages.
 
 **Q: How does AutoGen v0.4 improve testability compared to v0.2?**
+**Short:** v0.4 injects the runtime as a dependency, letting tests assert exact typed messages against mock agents with no real LLM calls.
 In v0.2, testing required mocking the global GroupChat state and monkey-patching `initiate_chat`. In v0.4, the runtime is injected as a dependency. Tests can create an in-memory `SingleThreadedAgentRuntime`, register mock agents that return predefined typed messages, and assert the exact typed messages exchanged — without any real LLM calls. This makes unit tests for agent logic fast (<100 ms) and deterministic.
 
 **Q: What is the Swarm pattern in AutoGen and how does it relate to Magentic-One?**
+**Short:** Swarm has each agent hand off to its own chosen successor, eliminating the Orchestrator and its global task ledger entirely.
 Swarm is a first-class AutoGen team type (`autogen_agentchat.teams.Swarm`) in which each agent picks its own successor by emitting a `HandoffMessage`. No Orchestrator assigns the next step. This eliminates the Orchestrator as a single point of failure and reduces latency by one LLM call per step. Unlike Magentic-One, Swarm has no global task ledger — each agent is responsible for deciding its own successor, which makes complex replanning harder but reduces coordination overhead.
 
 **Q: What token cost does the Orchestrator add per step in Magentic-One?**
+**Short:** Each Orchestrator decision costs roughly a fraction of a cent, adding up to a few cents of overhead across a 20-step task.
 Each Orchestrator decision requires one GPT-4o call consuming roughly 500-1,500 input tokens (ledger prompt + last observation) and 100-200 output tokens (JSON decision). At GPT-4o API pricing ($2.50/M input, $10/M output — the tier introduced with the August 2024 snapshot, still current), this is approximately $0.002-$0.005 per step. A 20-step task costs $0.04-$0.10 in Orchestrator calls alone, plus the cost of the specialist agent calls (WebSurfer screenshot analysis: ~2,000 tokens per page).
 
 **Q: How does SelectorGroupChat handle the case where no agent is clearly the right next speaker?**
+**Short:** SelectorGroupChat retries with corrective feedback a bounded number of times, then falls back to the previous speaker rather than failing.
 It retries with corrective feedback up to `max_selector_attempts` (default 3), then falls back rather than failing. Concretely: if the model mentions no valid participant name, or mentions more than one, the team appends a corrective user message ("No valid name was mentioned. Please select from: ...") and asks again. After the attempts are exhausted it logs a warning and returns the previous speaker — or, if there is no previous speaker, the first participant. It does not raise. Best practice is still to write a `selector_prompt` that lists the valid names and demands exactly one verbatim, because every retry is a wasted LLM call and the silent fallback to the previous speaker can look like a stall.
 
 **Q: What is the stall threshold in Magentic-One and how should it be tuned?**
+**Short:** The default three-stall threshold should rise for slow agents like browsers and shrink for fast ones like code execution.
 The shipped default is `max_stalls=3` on `MagenticOneGroupChat` — three consecutive stalled steps trigger a re-plan. For tasks with long-running agents (browser page loads, large file reads), the threshold should be increased to 5-7 to avoid premature replanning. For short-latency tasks (code execution), 2-3 is appropriate. Setting the threshold too low causes unnecessary replanning (wasted tokens); too high causes the system to spin on a dead-end strategy for many steps before recovering.
 
 **Q: Can Magentic-One agents run in parallel, and if not, what is the architectural reason?**
+**Short:** Magentic-One activates exactly one agent per step because the Orchestrator's next decision depends on that step's observation.
 No. The Orchestrator activates exactly one agent per step and waits for its observation before deciding the next step. This is intentional: the Orchestrator's decision depends on the latest observation (it reads `progress_ledger.last_observation`), so parallel agent execution would produce race conditions on the progress ledger. Parallelism can be introduced by having the Orchestrator issue a "batch instruction" to a fan-out coordinator, but this is not part of the base Magentic-One architecture.
 
 **Q: Magentic-One browses and runs shell commands with no approval step. How do you make that shippable against a real account?**
+**Short:** Gate only irreversible actions behind human approval, which Magentic-UI formalizes as a configurable action guard.
 Gate on irreversibility, not on autonomy: require human approval for the specific actions that cannot be undone, and let everything else run unattended. This is what Magentic-UI (Microsoft Research, May 2025) formalizes as an **action guard** — the agent pauses for consent before an irreversible action such as closing a tab or clicking a button with side effects, under a policy you configure, up to demanding consent for every action. Approving everything is slower than doing the task yourself and approving nothing is unusable against a real account, so the design work is deciding which actions land in the guarded set. Magentic-UI adds three more hooks at different points in the loop: **co-planning** lets the human edit the plan (add, delete, edit, regenerate steps) before step one, which is the cheapest place to fix a bad decomposition; **co-tasking** lets them take over the browser mid-run and hand control back; and **plan learning** saves an approved plan for reuse, so the human cost is paid once per task shape rather than once per run. It runs the same Magentic-One team on AutoGen, so this is a supervision layer over the architecture, not a replacement for it.
 
 **Q: An orchestrator pod restarts at step 14 of a 30-step plan. What did you have to build for the run to resume?**
+**Short:** Checkpoint both ledgers via save_state and load_state at step boundaries, and make custom agents override them or they resume amnesiac.
 State persistence via `save_state()` and `load_state()`, checkpointed at step boundaries — without it both ledgers were in memory and the whole run is re-executed from scratch. Calling `save_state()` on a team returns a JSON-serializable `TeamState` dict containing every participant's state plus the `team_id`, so you persist one object rather than iterating agents; on restart you rebuild the same team topology and call `load_state()` with it. The trap is custom agents: the base `save_state`/`load_state` implementations save and load empty state, so a specialist holding its own counters or scratch files must override both or it returns from the restart amnesiac while the rest of the team remembers everything — the run then continues and produces wrong work instead of failing loudly. Checkpoint after the progress ledger is updated and before the next instruction is dispatched, so a resumed run re-issues at most one already-sent instruction, which is precisely why the specialists must be idempotent. See [Durable Long-Running Agents](../agents_and_tool_use/durable_long_running_agents.md) for checkpoint placement and exactly-once side effects.
 
 ---

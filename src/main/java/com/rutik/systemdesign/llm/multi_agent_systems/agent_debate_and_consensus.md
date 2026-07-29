@@ -866,57 +866,75 @@ than by whether the debate is still producing value.
 ## 12. Interview Questions with Answers
 
 **Q: What is multi-agent debate and how does it differ from self-consistency / majority voting?**
+**Short:** Debate agents revise their answers by reading peer arguments across rounds; majority voting just samples once and counts.
 Multi-agent debate is an iterative process where agents share their reasoning and revise their answers in response to peer arguments across multiple rounds. Self-consistency (majority voting) is a one-shot process: N independent samples, pick the most common answer. The key difference is communication: debate agents can correct each other's reasoning; majority voting agents cannot. Debate produces larger accuracy gains on tasks with structured reasoning errors but at significantly higher token cost.
 
 **Q: What accuracy improvement did Du et al. 2023 report for three-agent debate on MMLU?**
+**Short:** Three-agent debate lifted MMLU from 63.9 to 71.1 percent on gpt-3.5-turbo, while single-agent self-reflection made it worse.
 Three-agent debate improved MMLU accuracy from 63.9% to 71.1%, a gain of 7.2 percentage points. This was achieved with 2 debate rounds, no fine-tuning, and `gpt-3.5-turbo-0301` for every agent — not GPT-4, which the paper did not use for its main benchmark table. The same paper reports GSM8K rising from 77.0% to 85.0%. A useful control in the same table: single-agent self-reflection *lowered* MMLU to 57.7%, which is why the mechanism is credited to encountering a peer's argument rather than to being told to re-check.
 
 **Q: Why must all agents generate round-0 answers independently, without seeing peer responses?**
+**Short:** Independent round-0 answers prevent the first responder from anchoring the rest into an echo chamber before any real exchange.
 If agents see each other's responses before generating their own initial answers, diversity collapses immediately. The first agent to respond anchors all subsequent agents, and the debate becomes an echo chamber. Round 0 must establish genuinely independent starting positions so that subsequent rounds involve real information exchange rather than mutual confirmation. This is the most common implementation mistake.
 
 **Q: What is the temperature diversity trick and why does it work?**
+**Short:** Sampling the same model at several temperatures manufactures answer diversity without paying for multiple model families.
 Running the same model at temperatures 0.2, 0.6, and 1.0 produces answers that sample from different parts of the token probability distribution. Low temperature (0.2) selects near-deterministic high-probability tokens — the model's "confident" answer. High temperature (1.0) explores lower-probability sequences that sometimes correspond to correct alternative reasoning paths. This generates opinion diversity without deploying multiple model families, at the same per-token cost. Two provider constraints bound the trick: Anthropic caps `temperature` at 1.0 (OpenAI allows 2.0), and Anthropic's adaptive-thinking models from Claude Opus 4.7 onward reject non-default sampling parameters with an HTTP 400 — on those, use role diversity instead.
 
 **Q: When does the judge agent pattern outperform simple majority voting?**
+**Short:** A judge beats majority voting when the correct answer is in the minority, since it weighs argument quality instead of counting votes.
 The judge pattern wins when the correct answer sits in the minority, because the judge weighs argument quality instead of counting heads. It outperforms whenever the debate produces reasoning the vote cannot see — for example, when two agents are wrong for the same reason and one agent is correct for an unusual reason. The judge reads the full reasoning trace and can identify the sound argument even when it is in the minority. Majority voting would incorrectly pick the 2-agent wrong answer. The judge pattern also provides explainability: the verdict includes a reasoning chain.
 
 **Q: What is the Society of Mind architecture and how does it differ from round-robin debate?**
+**Short:** Society of Mind pipelines specialized single-function agents; round-robin debate has generalist agents argue toward consensus.
 Society of Mind (inspired by Minsky 1986) uses specialized agents each responsible for a different cognitive function (decomposition, calculation, verification, formatting). Intelligence emerges from the structure of their interactions, not from iterative argument. Round-robin debate uses generalist agents that all attempt to answer the full question and argue toward consensus. Society of Mind is more like a pipeline; debate is more like a committee.
 
 **Q: When does multi-agent debate hurt rather than help?**
+**Short:** Debate hurts subjective tasks by converging on the generic midpoint, and can't fix a bias every agent shares.
 Debate hurts on subjective tasks (creative writing, design, preference selection) because agents optimize for consensus, and consensus on subjective dimensions selects the generic midpoint rather than the best option. It also hurts when all agents share the same systematic bias — they will debate and converge on a confident wrong answer. Debate cannot correct errors that are universally shared across agents trained on similar data.
 
 **Q: How does convergence detection reduce token cost, and what is a reasonable convergence criterion?**
+**Short:** Stop debate the moment every agent gives the same final answer, saving tokens proportional to how often that happens early.
 Early convergence detection terminates debate when all agents agree on the same final answer for the current round. This avoids running unnecessary rounds that add tokens but not accuracy. A reasonable criterion: unanimous agreement (all N agents give the same extracted final answer). The saving equals your dataset's early-convergence fraction times the rounds skipped — measure that fraction rather than assuming it, because easy factual sets converge early and hard reasoning sets barely converge at all.
 
 **Q: What are the token cost multipliers for 3-agent debate with 1 and 2 rounds versus a single call?**
+**Short:** Three-agent debate costs roughly 10x a single call at one extra round and roughly 20x at two, growing quadratically.
 A single call is 1x. Three-agent majority voting (round 0 only) is 3x. Three-agent debate with 1 additional round is roughly 10x, because each agent's round-1 prompt carries the question plus two peer responses from round 0. Three-agent debate with 2 additional rounds is roughly 20x, because peer context grows with the round index. Working the §5 formula at Q=200 and A=300 tokens gives 9.6x and 19.8x exactly; the growth is quadratic in both agents and rounds, so budget from the formula rather than from agent count. Beyond 2 rounds the marginal accuracy gain rarely repays the doubling.
 
 **Q: How do you prevent context window overflow in long debate sessions?**
+**Short:** Feed each agent only the immediately preceding round's peer responses, not the entire accumulated debate history.
 Include only the immediately preceding round's peer responses in each agent's next-round prompt, not the full debate history. This caps the peer context at (N-1) * avg_response_tokens per round regardless of how many rounds have elapsed. Agents do not need full history — they only need to know what their peers said most recently to update their position.
 
 **Q: What is the adversarial debate (devil's advocate) pattern and when is it useful?**
+**Short:** Assigning one agent to argue against consensus regardless of its own view prevents premature convergence from shared bias.
 One agent is assigned to argue against the current consensus, regardless of its independent opinion. This prevents premature convergence, which is a failure mode when all agents agree quickly not because they are correct but because they share the same training bias. Devil's advocate debate is most useful when baseline agents tend to produce identical answers on a given task class, indicating low natural diversity.
 
 **Q: How do you extract a final answer reliably from debate responses?**
+**Short:** Require a fixed FINAL ANSWER marker at the end of every response and parse it directly instead of using LLM extraction.
 Use a structured output constraint: require agents to end every response with a fixed marker such as `FINAL ANSWER: <answer>`. Parse by splitting on the marker and taking the last segment. This is more reliable than LLM-based extraction of the final answer from free text, which can itself hallucinate. Fall back to the last non-empty line if the marker is absent, and log the missing-marker rate as a quality metric.
 
 **Q: What is the relationship between multi-agent debate and ensemble methods in classical ML?**
+**Short:** Multi-agent debate mirrors boosting through peer-error correction, while majority voting mirrors bagging's uncorrelated averaging.
 Multi-agent debate is the LLM analog of boosting: agents iteratively refine their outputs by learning from peers' errors. Majority voting maps to bagging: independent samples whose errors are uncorrelated cancel out in aggregate. The key difference is that LLM agents communicate in natural language and can explicitly incorporate peer reasoning rather than just averaging numeric outputs.
 
 **Q: How should you test whether debate improves accuracy for a specific task before deploying it in production?**
+**Short:** Compare single-agent, majority-voting, and debate accuracy on a labeled set, and skip debate unless it beats voting by 2-3 points.
 Run an offline evaluation on a labeled dataset of 200–500 examples representative of your production task. Measure single-agent accuracy, majority-voting accuracy (same agent, 3 samples), and 2-round debate accuracy. If debate does not improve over majority voting by at least 2–3 percentage points, the additional token cost (3–5x over voting) is not justified. Also measure the variance: if debate accuracy varies more than single-agent across random seeds, the pattern is unstable for that task.
 
 **Q: What happens to debate quality when agents are given explicit roles (mathematician, critic, skeptic)?**
+**Short:** Explicit roles like critic reduce groupthink but can introduce their own bias, so pair role diversity with temperature diversity.
 Role assignment increases diversity by prompting agents to apply different evaluative lenses to the same problem. A "critic" role agent is more likely to challenge the consensus even when it initially agrees, reducing groupthink. However, role diversity can introduce systematic role-specific biases: a "skeptic" agent may challenge correct answers unnecessarily. The optimal configuration is role diversity for the critic position combined with temperature diversity for debater positions.
 
 **Q: How does the judge agent pattern handle cases where the debate does not converge?**
+**Short:** A judge renders a verdict straight from a non-converged transcript by argument quality, with a confidence score for review.
 The judge agent is specifically well-suited for non-convergence: it renders a verdict from the transcript rather than waiting for agreement. It reads the full debate transcript including the ongoing disagreement, identifies which agent's reasoning is strongest, and explains the choice. This is better than majority voting when agents are split (e.g., 2 vs 1 with the minority holding the correct position), because the judge can be persuaded by argument quality rather than argument count. The judge's response should include a confidence level so downstream systems can flag low-confidence verdicts for human review.
 
 **Q: Does multi-agent debate still win once you match the compute budget instead of comparing to a single call?**
+**Short:** Under compute-matched evaluation debate frequently loses to self-consistency at the same token spend, since cloned agents are correlated.
 Frequently not — under compute-matched evaluation, debate often fails to beat plain self-consistency or chain-of-thought spending the same tokens. Two systematic studies report this: Smit et al. (arXiv 2311.17371) find debate does not reliably outperform self-consistency and ensembling, and Zhang et al. (arXiv 2502.08788), sweeping 5 debate methods across 4 foundation models and 9 benchmarks, find debate "often fail[s] to outperform simple single-agent baselines such as Chain-of-Thought and Self-Consistency, even when consuming significantly more inference-time computation." The mechanism is the one §4.3 already names: N clones of one checkpoint are correlated, so most of the vote's apparent independence is fictional and the extra rounds only re-litigate a shared prior. The practical consequence is that the correct control arm is self-consistency at the same N, never a single call — and if debate cannot clear that bar on your own labeled set, the 9–18x is buying you nothing. Smit et al. add the useful caveat that debate is *tunable* rather than doomed: it is more hyperparameter-sensitive than voting, and adjusting how readily agents concede can recover the gap.
 
 **Q: Why do Du et al.'s 2023 debate gains not transfer cleanly to a modern reasoning model?**
+**Short:** Reasoning models already self-critique internally, so 2023's debate gains on gpt-3.5 mostly don't transfer and need re-measuring.
 Because the 2023 numbers were measured on `gpt-3.5-turbo-0301`, so they quantify how much a weak model gains from being shown a peer's contradicting argument. A reasoning model already spends test-time compute generating and critiquing its own alternative chains before emitting an answer, which absorbs a large part of the headroom debate was exploiting — the peer critique is partially redundant with what the model does internally. Zhang et al. (arXiv 2502.08788) point at the complementary fix: if the diversity has to come from somewhere, take it from **model heterogeneity** (different vendors or families) rather than from more instances of the same checkpoint at different temperatures. Practically: never quote the +7.2-point MMLU figure as an expected gain for your system; re-run the three-arm comparison (single call, self-consistency at N, debate at N) on the exact model you will deploy.
 
 ---
