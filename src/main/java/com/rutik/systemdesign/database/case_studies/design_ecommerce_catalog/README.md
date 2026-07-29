@@ -119,8 +119,12 @@ CREATE TABLE product_pricing (
     valid_until TIMESTAMPTZ,                -- NULL = indefinite
     created_at  TIMESTAMPTZ DEFAULT now()
 );
-CREATE INDEX idx_pricing_product_current ON product_pricing (product_id, valid_from DESC)
-    WHERE valid_until IS NULL OR valid_until > now();
+-- An index predicate must be IMMUTABLE, so `valid_until > now()` cannot appear in one.
+-- Split the intent into two static predicates instead:
+CREATE INDEX idx_pricing_open_ended ON product_pricing (product_id, valid_from DESC)
+    WHERE valid_until IS NULL;                 -- the standing price
+CREATE INDEX idx_pricing_scheduled  ON product_pricing (product_id, valid_until)
+    WHERE valid_until IS NOT NULL;             -- time-bounded promotions; now() filters at query time
 
 -- Inventory (source of truth, updated via atomic operations)
 CREATE TABLE inventory (
@@ -220,9 +224,11 @@ CREATE INDEX idx_category_path ON categories USING gist(path);
     },
     "rating_buckets": {"histogram": {"field": "rating_average", "interval": 1}}
   },
-  "sort": [{"rating_average": "desc"}, {"_score": "desc"}],
+  // search_after must supply exactly one value per sort field, and the last sort
+  // field must be a unique tiebreaker or pages will skip and duplicate hits
+  "sort": [{"rating_average": "desc"}, {"_score": "desc"}, {"id": "asc"}],
   "size": 24,
-  "search_after": ["4.5", "0.92", "product-id-xyz"]  // Cursor pagination
+  "search_after": [4.5, 0.92, "product-id-xyz"]  // Cursor pagination
 }
 ```
 
@@ -235,6 +241,9 @@ Inventory in Redis — atomic counters:
 
   Purchase flow (atomic via Lua script):
     local available = redis.call('GET', KEYS[1])
+    if not available then
+        return -2  -- Key absent: caller repopulates from PostgreSQL and retries
+    end            -- (redis.call returns false, not nil, so tonumber() would error)
     if tonumber(available) >= tonumber(ARGV[1]) then
         return redis.call('DECRBY', KEYS[1], ARGV[1])  -- Success: decrement
     else
@@ -245,8 +254,10 @@ Inventory in Redis — atomic counters:
     INCRBY inventory:{product_id} {quantity}
 
   Sync to PostgreSQL (async, every 5 seconds):
-    Background job: GETSET inventory:{product_id} {current_value}
-    → UPDATE inventory SET quantity = {value} WHERE product_id = ...
+    Background job reads the live counter and copies it down; it must NOT write
+    the counter back, or concurrent DECRBYs between read and write are lost.
+      GET inventory:{product_id}
+      → UPDATE inventory SET quantity = {value} WHERE product_id = ...
 
   Fallback on cache miss: read from PostgreSQL, populate Redis
   TTL: none (inventory counters never expire — always valid)
@@ -306,7 +317,6 @@ table.include.list: public.products,public.product_pricing,public.inventory,publ
 connector.class: io.confluent.connect.elasticsearch.ElasticsearchSinkConnector
 topics: ecommerce.public.products
 connection.url: http://elasticsearch:9200
-type.name: _doc
 key.ignore: false
 schema.ignore: true
 behavior.on.null.values: delete  # Soft delete in ES when product is deactivated
@@ -335,6 +345,39 @@ public class ProductIndexBuilder {
     }
 }
 ```
+
+### 5. Recommendations: Precomputed, Not Computed at Request Time
+
+"Frequently bought together" and "similar products" are the one read path with no
+online query that can meet the 50ms detail-page budget — a co-occurrence count over
+order history is an offline job. Both live as Redis Sorted Sets written by a nightly
+batch and read in a single `ZRANGE`:
+
+```
+frequently bought together (co-occurrence, from order history):
+  Nightly Spark/ClickHouse job over order_items, for every pair in the same order:
+    support(a,b) = orders containing both
+    lift(a,b)    = P(b|a) / P(b)      -- lift, not raw count, or batteries and
+                                      -- phone cases top every list
+  Write top 20 by lift:
+    ZADD rec:fbt:{product_id} <lift> <other_product_id>   (per product, 20 members)
+    EXPIRE rec:fbt:{product_id} 172800                    -- 48h: two job cycles
+  Read (single round trip, ~0.5ms):
+    ZRANGE rec:fbt:{product_id} 0 9 REV
+
+similar products (content-based, no order history needed):
+  Elasticsearch more_like_this over title + brand + category_path + attributes,
+  run at index time rather than query time, results written to
+    ZADD rec:similar:{product_id} <score> <other_product_id>
+  This is the cold-start path: a SKU listed an hour ago has no co-occurrence data
+  but does have text, so it always has *something* to show.
+```
+
+The read path never falls back to a live computation. If both keys miss, the API
+returns the category's best-sellers list (one shared key per category) rather than
+blocking the page — a slightly worse recommendation ships, an empty module does not.
+Because the source is order history, the job runs after the nightly inventory
+reconciliation, not before, or a day of purchases is missing from every pair count.
 
 ---
 
@@ -428,15 +471,29 @@ PARTITION BY toYYYYMM(changed_at)
 ORDER BY (product_id, changed_at)
 TTL changed_at + INTERVAL 5 YEAR;
 
--- Query: price elasticity analysis
+-- Query: price elasticity analysis.
+-- price_history stores only the instant a price changed, so the interval each
+-- price was in force has to be derived first — leadInFrame() supplies the next
+-- change timestamp, defaulting to the far future for the price still in effect.
+WITH price_windows AS (
+    SELECT
+        product_id,
+        price,
+        changed_at,
+        leadInFrame(changed_at, 1, toDateTime64('2999-01-01 00:00:00', 3))
+            OVER (PARTITION BY product_id ORDER BY changed_at
+                  ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS next_changed_at
+    FROM price_history
+    WHERE product_id = 'uuid-here'
+)
 SELECT
-    toStartOfWeek(changed_at) AS week,
-    AVG(price) AS avg_price,
-    SUM(units_sold) AS units_sold
-FROM price_history ph
-JOIN sales_events se ON ph.product_id = se.product_id
-    AND se.sale_date BETWEEN ph.changed_at AND ph.next_changed_at
-WHERE product_id = 'uuid-here'
+    toStartOfWeek(pw.changed_at) AS week,
+    avg(pw.price)      AS avg_price,
+    sum(se.units_sold) AS units_sold
+FROM price_windows AS pw
+INNER JOIN sales_events AS se ON pw.product_id = se.product_id
+WHERE se.sale_date >= pw.changed_at
+  AND se.sale_date <  pw.next_changed_at
 GROUP BY week
 ORDER BY week;
 -- Runs in 1-2 seconds on years of data (ClickHouse columnar scan)
@@ -451,7 +508,7 @@ ORDER BY week;
 | Search | Elasticsearch | PostgreSQL FTS | ES provides faceted aggregations, relevance ranking, and horizontal scale for 50M SKUs |
 | Inventory | Redis DECR | PostgreSQL UPDATE | Redis atomic DECR is sub-millisecond; PostgreSQL UPDATE at 100K TPS would saturate |
 | Product data | PostgreSQL JSONB for attributes | Normalized EAV table | EAV is an anti-pattern; JSONB with GIN index provides flexible attributes without join complexity |
-| Price history | ClickHouse | PostgreSQL partitioned | ClickHouse compresses price history 20x; analytics queries run 50x faster |
+| Price history | ClickHouse | PostgreSQL partitioned | Columnar storage plus per-column codecs compress a narrow, highly repetitive price feed by an order of magnitude, and aggregate scans read only the columns named — benchmark both on your own feed rather than assuming a ratio |
 | CDC | Debezium | Application dual-write | Debezium provides atomic, ordered change stream without application-layer coordination |
 | Search sync lag | ~1-5 seconds (CDC) | Synchronous (blocking) | Synchronous would add latency to product update API; 5s lag is acceptable for catalog search |
 

@@ -4,7 +4,8 @@
 
 Migrate a 5TB MySQL monolith to purpose-built databases without downtime:
 
-- Current state: a 5-year-old e-commerce platform with a 5TB MySQL 5.7 database
+- Current state: a 5-year-old e-commerce platform on a 5TB MySQL 8.0 database, now past
+  its end-of-life date, so the migration doubles as the forced upgrade off it
 - 500M rows in the orders table; 2B rows in the events/activity table
 - Problems:
   - Database CPU at 85% during peak; P99 query latency 2+ seconds
@@ -14,7 +15,8 @@ Migrate a 5TB MySQL monolith to purpose-built databases without downtime:
 - Migration targets:
   - Product search → Elasticsearch
   - Orders/user data → PostgreSQL (better ACID, JSON support, extensions)
-  - Events/activity log → ClickHouse (columnar, 100x compression for time-series)
+  - Events/activity log → ClickHouse (columnar; an order of magnitude of compression on
+    a repetitive event stream, measured on this dataset before committing to the move)
   - Sessions/cache → Redis (already partially done)
 - Constraints:
   - Zero planned downtime (< 5 minutes total unavailability acceptable)
@@ -94,8 +96,13 @@ flowchart LR
 
 ### 1. CDC Setup: Debezium on MySQL
 
-```yaml
-# Debezium MySQL connector configuration
+Kafka Connect takes its connector configuration as JSON, so the block below is JSON,
+not YAML, and carries no comments. `topic.prefix` names the Kafka topic namespace,
+`snapshot.mode: initial` takes one snapshot and then streams the binlog, and
+`snapshot.locking.mode: minimal` holds the global read lock only while reading
+schema, not while reading rows.
+
+```json
 {
   "name": "mysql-ecommerce-connector",
   "config": {
@@ -104,29 +111,32 @@ flowchart LR
     "database.port": "3306",
     "database.user": "debezium",
     "database.password": "${DEBEZIUM_PASSWORD}",
-    "database.server.name": "ecommerce",
+    "topic.prefix": "ecommerce",
     "database.include.list": "ecommerce_db",
     "table.include.list": "ecommerce_db.orders,ecommerce_db.users,ecommerce_db.products,ecommerce_db.events",
 
-    "snapshot.mode": "initial",  -- Take initial snapshot, then stream binlog
-    "snapshot.locking.mode": "minimal",  -- Minimal lock duration during snapshot
+    "snapshot.mode": "initial",
+    "snapshot.locking.mode": "minimal",
     "include.schema.changes": "true",
 
     "transforms": "route",
-    "transforms.route.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
+    "transforms.route.type": "org.apache.kafka.connect.transforms.RegexRouter",
+    "transforms.route.regex": "ecommerce\\.ecommerce_db\\.(.*)",
+    "transforms.route.replacement": "$1.events",
 
-    "database.history.kafka.bootstrap.servers": "kafka:9092",
-    "database.history.kafka.topic": "schema-changes.ecommerce"
+    "schema.history.internal.kafka.bootstrap.servers": "kafka:9092",
+    "schema.history.internal.kafka.topic": "schema-changes.ecommerce"
   }
 }
 ```
 
 ```
 MySQL requirements for Debezium CDC:
-  log_bin = ON              -- Binary logging enabled
-  binlog_format = ROW       -- Row-based (not statement-based) binary log
-  binlog_row_image = FULL   -- Full row image (before + after values)
-  expire_logs_days = 7      -- Retain binlog for 7 days (replay window)
+  log_bin = ON                          Binary logging enabled
+  binlog_format = ROW                   Row-based (not statement-based) binary log
+  binlog_row_image = FULL               Full row image (before + after values)
+  binlog_expire_logs_seconds = 604800   Retain binlog for 7 days (replay window);
+                                        server default is 2592000 (30 days)
 
 Debezium binlog position tracking:
   Debezium stores its position in Kafka (committed offset)
@@ -145,37 +155,45 @@ Debezium binlog position tracking:
 # 1. pg_dump is not applicable here (source is MySQL)
 # Use mydumper (parallel MySQL dump) + pgloader (fast PostgreSQL load)
 
-# Step 1: Dump from MySQL to CSV (mydumper — parallel, no lock on InnoDB)
+# Step 1: Dump from MySQL to CSV (mydumper - parallel, no lock on InnoDB).
+# --format CSV writes db.table.NNNNN.dat chunk files; --rows splits each table into
+# 500K-row chunks; --threads runs 8 dump threads. Do not add --compress: it is not
+# compatible with the load-data/CSV writer.
+# Comments must sit on their own line - a "#" after a trailing backslash breaks
+# the line continuation and truncates the command.
 mydumper \
     --host=mysql-primary \
     --user=backup_user \
     --password=... \
     --database=ecommerce_db \
-    --tables-list=orders,order_items,users,products \
+    --tables-list=ecommerce_db.orders,ecommerce_db.order_items,ecommerce_db.users,ecommerce_db.products \
     --outputdir=/backups/ecommerce/ \
-    --rows=500000 \          # 500K rows per file (parallel dump)
-    --threads=8 \            # 8 parallel dump threads
-    --compress \             # Compress output files
+    --format CSV \
+    --rows=500000 \
+    --threads=8 \
     --verbose 3
 
 # Duration estimate: 5TB / 200MB/s dump speed = ~7 hours
 
-# Step 2: Load into PostgreSQL (pgloader — concurrent load)
+# Step 2: Load into PostgreSQL (pgloader - concurrent load)
 pgloader \
     --type csv \
-    /backups/ecommerce/orders*.csv \
-    postgresql://postgres@pg-primary:5432/ecommerce
+    --field-list 'id,user_id,total,status,created_at' \
+    /backups/ecommerce/ecommerce_db.orders.*.dat \
+    postgresql://postgres@pg-primary:5432/ecommerce?orders
 
 # Duration estimate: 500M rows at 5M rows/minute = ~100 minutes
 
 # Step 3: Build indexes after load (faster than building during load)
 psql -c "CREATE INDEX CONCURRENTLY idx_orders_user_date ON orders (user_id, created_at DESC)"
 psql -c "CREATE INDEX CONCURRENTLY idx_orders_status ON orders (status, created_at DESC)"
-# CONCURRENTLY: builds index without blocking reads/writes
+# CONCURRENTLY: builds index without blocking reads/writes.
+# It does NOT work on a partitioned table - build each partition's index
+# concurrently, then attach the parent index non-concurrently (metadata only).
 
 # Step 4: Verify row counts
-mysql -e "SELECT COUNT(*) FROM orders"  -- e.g., 500,123,456
-psql -c "SELECT COUNT(*) FROM orders"   -- must match ± Debezium lag
+mysql -e "SELECT COUNT(*) FROM orders"  # e.g., 500,123,456
+psql -c "SELECT COUNT(*) FROM orders"   # must match within Debezium lag
 ```
 
 ```mermaid
@@ -339,11 +357,16 @@ WHERE created_at >= '2025-01-01';
 
 -- Sample record checksum (100K random orders):
 -- MySQL:
+-- Two traps here, both silent. (1) GROUP_CONCAT truncates at group_concat_max_len,
+-- default 1024 bytes, WITHOUT warning — the checksum would cover the first ~20 rows
+-- and always match. (2) MySQL rejects LIMIT directly inside an IN subquery with
+-- "ERROR 1235 ... LIMIT & IN/ALL/ANY/SOME subquery"; wrap it in a derived table.
+SET SESSION group_concat_max_len = 67108864;
 SELECT MD5(GROUP_CONCAT(
     CONCAT(id, user_id, total_amount, status, created_at) ORDER BY id
 )) AS checksum
 FROM (SELECT id, user_id, total_amount, status, created_at FROM orders
-      WHERE id IN (SELECT id FROM orders ORDER BY RAND() LIMIT 100000)) t;
+      WHERE id IN (SELECT id FROM (SELECT id FROM orders ORDER BY RAND() LIMIT 100000) s)) t;
 
 -- PostgreSQL equivalent:
 SELECT MD5(STRING_AGG(
@@ -435,9 +458,12 @@ CREATE TABLE id_mapping (
     PRIMARY KEY (entity_type, mysql_id)
 );
 
--- Populate during initial load:
+-- Populate during initial load. PostgreSQL cannot read a MySQL table by name, so
+-- expose it first with mysql_fdw (or stage the ID list as a plain COPY):
+CREATE EXTENSION IF NOT EXISTS mysql_fdw;
+-- ... CREATE SERVER / USER MAPPING / IMPORT FOREIGN SCHEMA into schema mysql_src ...
 INSERT INTO id_mapping (entity_type, mysql_id)
-SELECT 'orders', id FROM mysql.orders;
+SELECT 'orders', id FROM mysql_src.orders;
 
 -- Use mapping to transform IDs during pgloader load
 -- pgloader transformation function handles ID mapping lookup
@@ -470,4 +496,4 @@ Automated rollback triggers: (1) PostgreSQL error rate > 0.1% for 5 consecutive 
 Multi-level validation: (1) Row count comparison per table every 15 minutes — counts should match within Debezium lag (typically < 100 rows difference). (2) Business invariant queries: "every order has at least one order_item," "sum of payments for each order matches order total" — run against both databases, results must match. (3) Random sample checksums: select 100K random order IDs, compute MD5 of critical fields, compare between MySQL and PostgreSQL. Tolerance: 0% discrepancy (any mismatch investigated before increasing traffic percentage). (4) Shadow reads: 1% of production reads are answered by both MySQL and PostgreSQL; responses are compared. Discrepancy triggers an alert and is logged for investigation.
 
 **Q: What happens to MySQL after the full cutover?**
-MySQL is kept in read-only mode for 4 weeks (the rollback window). The application no longer writes to MySQL. MySQL continues receiving CDC from PostgreSQL via a reverse CDC setup (Debezium tailing PostgreSQL WAL → MySQL) during the rollback window. This ensures MySQL stays current in case rollback is needed. After 4 weeks without rollback triggers: (1) Decommission the reverse CDC. (2) Take a final MySQL backup for archival (7-year retention for compliance). (3) Remove MySQL from the application configuration. (4) Terminate the MySQL RDS instances. (5) Close the migration project.
+MySQL is kept in read-only mode for 4 weeks (the rollback window). The application no longer writes to MySQL. MySQL continues receiving CDC from PostgreSQL via a reverse pipeline during the rollback window: the Debezium PostgreSQL source connector tails the WAL into Kafka, and the Debezium JDBC sink connector applies those events back into MySQL (Debezium ships a source connector and a JDBC sink connector, not a MySQL sink — the sink is what closes the loop). This ensures MySQL stays current in case rollback is needed. After 4 weeks without rollback triggers: (1) Decommission the reverse CDC. (2) Take a final MySQL backup for archival (7-year retention for compliance). (3) Remove MySQL from the application configuration. (4) Terminate the MySQL RDS instances. (5) Close the migration project.

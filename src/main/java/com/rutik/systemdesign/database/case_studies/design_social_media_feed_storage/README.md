@@ -94,12 +94,15 @@ CREATE INDEX idx_follows_followee ON follows (followee_id, follower_id);
 
 -- Posts: source of truth for post content
 CREATE TABLE posts (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id          UUID DEFAULT gen_random_uuid(),
     author_id   UUID NOT NULL REFERENCES users(id),
     content     TEXT NOT NULL,
     media_urls  TEXT[],
     created_at  TIMESTAMPTZ DEFAULT now(),
-    is_deleted  BOOLEAN DEFAULT FALSE
+    is_deleted  BOOLEAN DEFAULT FALSE,
+    -- The partition key must appear in every unique constraint, so the key is
+    -- (id, created_at); `id UUID PRIMARY KEY` alone is rejected at CREATE TABLE
+    PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 -- Monthly partitions; posts older than 1 year moved to cold storage
 
@@ -119,13 +122,15 @@ CREATE KEYSPACE social WITH replication = {
 -- Home feed: each user's personalized feed
 -- Partition key: user_id (all feed entries for a user on same node)
 -- Clustering key: created_at DESC, post_id (time-ordered within partition)
+-- CLUSTERING ORDER BY must name EVERY clustering column, in primary-key order.
+-- Listing only created_at fails with "Missing CLUSTERING ORDER for column post_id".
 CREATE TABLE social.user_feed (
     user_id    UUID,
     created_at TIMESTAMP,
     post_id    UUID,
     author_id  UUID,
     PRIMARY KEY (user_id, created_at, post_id)
-) WITH CLUSTERING ORDER BY (created_at DESC)
+) WITH CLUSTERING ORDER BY (created_at DESC, post_id ASC)
   AND default_time_to_live = 2592000  -- 30 days TTL (posts auto-expire from feed)
   AND compaction = {
       'class': 'TimeWindowCompactionStrategy',
@@ -134,12 +139,15 @@ CREATE TABLE social.user_feed (
   };
 
 -- Celebrity posts: celebrities' posts stored separately (fan-out on read)
+-- post_id is part of the key, not a payload column: with (author_id, created_at)
+-- alone, two posts by the same celebrity in the same millisecond overwrite
+-- each other, and celebrities are exactly who post in bursts.
 CREATE TABLE social.celebrity_posts (
     author_id  UUID,
     created_at TIMESTAMP,
     post_id    UUID,
-    PRIMARY KEY (author_id, created_at)
-) WITH CLUSTERING ORDER BY (created_at DESC)
+    PRIMARY KEY (author_id, created_at, post_id)
+) WITH CLUSTERING ORDER BY (created_at DESC, post_id ASC)
   AND default_time_to_live = 2592000;
 
 -- Read feed for user 42: get last 50 posts
@@ -211,15 +219,19 @@ quadrantChart
     "Follower of 1000 celebrities": [0.1, 0.85]
 ```
 
-Fan-out-on-write is cheap for regular users but would push a celebrity's 10M followers into the worst-case top-right cell; switching celebrities to fan-out-on-read trades that for elevated read cost, which becomes extreme for a user following 1000 celebrities — the scenario the caching and batching mitigations below exist to solve.
+Fan-out-on-write is cheap for regular users but would push a celebrity's 10M followers into the bottom-right "write-heavy, avoided" cell; switching celebrities to fan-out-on-read moves them to the low-write left edge at the cost of elevated read cost, which climbs into the top-left "read-heavy" corner for a user following 1000 celebrities — the scenario the caching and batching mitigations below exist to solve. Nothing in this design sits in the top-right quadrant, which is the point.
 
 ### 4. Redis for Trending and Leaderboards
 
 ```
 Trending posts (decay-based scoring):
 
-Score = likes + (2 × comments) + (3 × shares) × decay(age)
-decay(age) = e^(-age_hours / 6)  -- half-life of 6 hours
+Score = (likes + 2×comments + 3×shares) × decay(age)
+        -- the parentheses matter: without them, precedence applies the decay to
+        -- the shares term alone and likes/comments never age out
+decay(age) = e^(-age_hours / 6)
+        -- 6 is the TIME CONSTANT, not the half-life: decay(6) = e^-1 = 0.37.
+        -- The half-life is 6·ln2 ≈ 4.2 hours.
 
 Redis Sorted Sets:
   Key: trending:global
@@ -227,7 +239,7 @@ Redis Sorted Sets:
   Score: above formula, updated on each like/comment/share event
 
   ZADD trending:global <score> <post_id>   -- update on engagement event
-  ZREVRANGE trending:global 0 9            -- top 10 trending posts
+  ZRANGE trending:global 0 9 REV           -- top 10 trending posts
   ZREMRANGEBYSCORE trending:global 0 <threshold>  -- cleanup old low-score posts
 
 Per-category trending:
@@ -348,14 +360,22 @@ public class EngagementService {
             EngagementEvent.like(userId, postId, Instant.now()));
     }
 
-    // Background job: sync Redis like counts to PostgreSQL nightly
-    @Scheduled(cron = "0 2 * * *")
+    // Background job: sync Redis like counts to PostgreSQL nightly.
+    // Spring cron expressions have SIX fields (sec min hour dom mon dow) — the
+    // five-field Unix form throws IllegalArgumentException at context startup.
+    @Scheduled(cron = "0 0 2 * * *")   // 02:00 daily
     public void syncLikeCounts() {
-        Set<String> keys = redis.keys("post:likes:*");
-        for (String key : keys) {
-            Long count = redis.opsForValue().get(key);
-            UUID postId = extractPostId(key);
-            postRepo.updateLikeCount(postId, count);
+        // Never KEYS in production: it is O(N) over the entire keyspace and
+        // blocks the single-threaded server for the whole scan. With 300M posts
+        // a day that is a self-inflicted outage. SCAN is cursor-based and
+        // yields between batches.
+        ScanOptions opts = ScanOptions.scanOptions().match("post:likes:*").count(1000).build();
+        try (Cursor<String> cursor = redis.scan(opts)) {
+            while (cursor.hasNext()) {
+                String key = cursor.next();
+                Long count = redis.opsForValue().get(key);
+                postRepo.updateLikeCount(extractPostId(key), count);
+            }
         }
     }
 }
@@ -382,7 +402,7 @@ public class EngagementService {
 Feed writes are 3,500 posts/second × average 500 followers = 1.75M Cassandra writes/second (fan-out on write for non-celebrities). PostgreSQL cannot handle this write throughput on a single node. Cassandra's leaderless architecture distributes writes across the cluster. The feed access pattern is a perfect match for Cassandra's data model: partition by user_id (all of a user's feed on one node), cluster by created_at DESC (natural time-ordered retrieval). The 30-day TTL is handled by Cassandra natively — no need for explicit deletion jobs. TWCS compaction efficiently drops old data windows.
 
 **Q: How does fan-out on write vs fan-out on read work and when do you switch?**
-Fan-out on write: when a user posts, write the post ID to each follower's feed partition in Cassandra immediately. Fast reads (single Cassandra query), but write amplification = N writes per post (N = follower count). For a user with 500 followers: 500 writes, manageable. For a celebrity with 10M followers: 10M writes takes 3+ hours — unacceptable. Fan-out on read: don't pre-populate followers' feeds. At read time, query the author's posts table and merge with the user's regular feed. Scales writes (1 write per post) at the cost of read complexity (N queries to celebrities' post tables, in-memory merge). Switch at the point where fan-out on write latency or cost is prohibitive (~10K followers is a common threshold).
+Fan-out on write: when a user posts, write the post ID to each follower's feed partition in Cassandra immediately. Fast reads (single Cassandra query), but write amplification = N writes per post (N = follower count). For a user with 500 followers: 500 writes, manageable. For a celebrity with 10M followers: even at the ~100K writes/second a single fan-out job can drive into the cluster, that is about 100 seconds before the last follower sees the post — three orders of magnitude past the "post appears immediately" expectation, and it is 10M writes competing with the 1.75M writes/second the rest of the platform already needs. Fan-out on read: don't pre-populate followers' feeds. At read time, query the author's posts table and merge with the user's regular feed. Scales writes (1 write per post) at the cost of read complexity (N queries to celebrities' post tables, in-memory merge). Switch at the point where fan-out on write latency or cost is prohibitive (~10K followers is a common threshold).
 
 **Q: How do you handle a user who follows 1000 celebrities?**
 A user following 1000 celebrities would require 1000 Cassandra reads per feed load (one per celebrity's post table). Mitigation: (1) Cap celebrity follows at 500 for feed computation (UI allows following more, but feed only shows top 500 by engagement). (2) Batch the celebrity post fetches into parallel requests (10 batches of 50, each batched as a Cassandra `IN` query). (3) Cache the merged celebrity feed in Redis per user (60s TTL) — repeat feed loads within 60s are served from cache. (4) Pre-compute celebrity feed merges asynchronously for high-engagement users, storing the result in Redis before the user requests it.

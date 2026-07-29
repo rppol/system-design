@@ -8,7 +8,8 @@ Design the database architecture for a B2B SaaS CRM platform:
   - 7,000 small businesses (SMB): 1–10 users, < 10K records each
   - 2,500 mid-market: 10–500 users, 10K–1M records each
   - 500 enterprise: 500–50,000 users, 1M–100M records per tenant
-- Total: ~200 billion records across all tenants
+- Total at the top of those ranges: 7,000 × 10K + 2,500 × 1M + 500 × 100M
+  = 70M + 2.5B + 50B ≈ 53 billion records, of which the enterprise tier is 94%
 - Requirements:
   - Strict data isolation: tenant A cannot see tenant B's data (compliance, contractual)
   - Enterprise tenants need custom schemas (additional columns, custom entities)
@@ -81,7 +82,7 @@ CREATE TABLE organizations (
 
 -- CRM contacts (shared schema example)
 CREATE TABLE contacts (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id          UUID DEFAULT gen_random_uuid(),
     org_id      UUID NOT NULL REFERENCES organizations(id),
     first_name  VARCHAR(100),
     last_name   VARCHAR(100),
@@ -89,7 +90,10 @@ CREATE TABLE contacts (
     phone       VARCHAR(50),
     custom_data JSONB DEFAULT '{}',  -- tenant-specific custom fields
     created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now()
+    updated_at  TIMESTAMPTZ DEFAULT now(),
+    -- Every unique constraint on a partitioned table must include the partition
+    -- key, so the key is (org_id, id) — `id` alone is rejected at CREATE TABLE
+    PRIMARY KEY (org_id, id)
 ) PARTITION BY HASH (org_id);  -- 16 hash partitions for load distribution
 
 -- Hash partitioning ensures each tenant's data is in one partition
@@ -207,17 +211,29 @@ public class TenantRoutingService {
     }
 }
 
-// Wraps DataSource to set tenant context for RLS on each connection
+// Wraps DataSource to set tenant context for RLS on each connection.
+//
+// Two rules make or break this class, and getting either wrong silently
+// disables tenant isolation:
+//   1. SET LOCAL is transaction-scoped. A JDBC connection is in autocommit by
+//      default, so `SET LOCAL` here would emit "SET LOCAL can only be used in
+//      transaction blocks", set nothing, and leave the RLS policy evaluating
+//      current_setting('app.current_org_id')::UUID against '' — every query
+//      then fails with `invalid input syntax for type uuid: ""`.
+//   2. The org id must be bound as a parameter. SET has no parameter form, so
+//      use set_config(name, value, is_local => true), which does.
 public class TenantContextDataSource implements DataSource {
 
     @Override
     public Connection getConnection() throws SQLException {
         Connection conn = delegate.getConnection();
-        // Set RLS tenant context
-        try (Statement stmt = conn.createStatement()) {
-            stmt.execute("SET LOCAL app.current_org_id = '" + orgId + "'");
+        conn.setAutoCommit(false);   // open a transaction so SET LOCAL semantics apply
+        try (PreparedStatement ps = conn.prepareStatement(
+                 "SELECT set_config('app.current_org_id', ?, true)")) {
+            ps.setString(1, orgId);
+            ps.execute();
         }
-        return conn;
+        return conn;   // caller commits/rolls back; the setting dies with the transaction
     }
 }
 ```
@@ -232,15 +248,25 @@ SMB tier (shared cluster):
   7,000 tenants × 10 users avg = 70,000 potential connections
   PostgreSQL max_connections = 500
   Solution: PgBouncer in transaction mode
-    - 70,000 PgBouncer client connections → 100 PostgreSQL server connections
+    - 70,000 client connections → ~100 PostgreSQL server connections
+    - One PgBouncer process cannot hold 70,000 sockets, so run 8 instances
+      behind the router: 8 × 10,000 client slots covers the 70,000 ceiling
     - Transaction mode: connection released after each transaction
     - RLS context set per transaction: SET LOCAL is transaction-scoped
-    - Prepared statements: DISABLED (incompatible with transaction mode + RLS SET LOCAL)
+    - Prepared statements: ENABLED. Transaction mode supported protocol-level
+      named prepared statements from PgBouncer 1.21 onward, via
+      max_prepared_statements (default 200); it is not a reason to give them up.
 
-  Configuration:
-    max_client_conn = 10000
-    server_pool_size = 100  (100 PostgreSQL backend connections total)
+  Configuration (per PgBouncer instance):
+    max_client_conn = 10000        # client sockets this instance accepts
+    default_pool_size = 12         # server connections per user/database pair
+    max_db_connections = 50        # per-instance ceiling of backends per database
+    max_prepared_statements = 200
     pool_mode = transaction
+  There is no `server_pool_size` setting — `default_pool_size` sizes the pool and
+  `max_db_connections` caps it. Both are PER INSTANCE, so multiply by the instance
+  count before comparing to max_connections: 8 × 12 = 96 steady-state backends and
+  8 × 50 = 400 worst case, both under the 500 the server allows.
 
 Mid-market tier (5 clusters):
   2,500 tenants × 500 users avg = 1,250,000 potential connections
@@ -264,10 +290,10 @@ stateDiagram-v2
     Expand --> DualWrite: nullable column added<br/>CREATE INDEX CONCURRENTLY
     DualWrite --> Contract: existing rows backfilled<br/>app writes old + new
     Contract --> Validate: CHECK ... NOT VALID added<br/>no scan, no lock
-    Validate --> [*]: VALIDATE CONSTRAINT<br/>scans table, shares lock with reads
+    Validate --> [*]: VALIDATE CONSTRAINT<br/>scans table under SHARE UPDATE EXCLUSIVE
 ```
 
-Each phase of the expand-contract pattern is its own low-lock deployment, so a breaking change to the shared `contacts` table never blocks the 7,000 SMB tenants reading and writing it; only the final Validate phase takes a table scan, and it shares its lock with concurrent reads.
+Each phase of the expand-contract pattern is its own low-lock deployment, so a breaking change to the shared `contacts` table never blocks the 7,000 SMB tenants reading and writing it. Only the final Validate phase scans the table, and its SHARE UPDATE EXCLUSIVE lock does not conflict with the ROW EXCLUSIVE lock that INSERT, UPDATE and DELETE take — reads and writes both keep running; what it does block is another concurrent DDL or VACUUM.
 
 ```sql
 -- Migration for shared schema (affects all SMB tenants simultaneously)
@@ -278,7 +304,15 @@ Each phase of the expand-contract pattern is its own low-lock deployment, so a b
 -- Phase 1 (EXPAND): Add nullable column (no lock on large table)
 -- Run in one deployment:
 ALTER TABLE contacts ADD COLUMN company_size INT;  -- nullable, no default
-CREATE INDEX CONCURRENTLY idx_contacts_company_size ON contacts (org_id, company_size)
+
+-- CREATE INDEX CONCURRENTLY is rejected on a partitioned table
+-- ("cannot create index on partitioned table ... concurrently"). Build each
+-- partition's index concurrently, then attach the parent index — that last
+-- step is metadata-only because every partition already has a matching index.
+CREATE INDEX CONCURRENTLY idx_contacts_p0_company_size ON contacts_p0 (org_id, company_size)
+    WHERE company_size IS NOT NULL;
+-- ... repeat for contacts_p1 .. contacts_p15 ...
+CREATE INDEX idx_contacts_company_size ON contacts (org_id, company_size)
     WHERE company_size IS NOT NULL;
 
 -- Phase 2: Application writes both old and new (dual-write)
@@ -292,7 +326,8 @@ ALTER TABLE contacts ADD CONSTRAINT company_size_not_null
 
 -- Phase 4: Validate constraint (in a low-traffic window)
 ALTER TABLE contacts VALIDATE CONSTRAINT company_size_not_null;
--- Scans table to verify all existing rows comply (shares lock with reads)
+-- Scans the table under SHARE UPDATE EXCLUSIVE: reads and writes both continue,
+-- only concurrent DDL and VACUUM wait
 
 -- Mid-market/Enterprise: use Flyway per-schema migration
 -- Each tenant schema has its own flyway_schema_history table
@@ -414,7 +449,7 @@ public class TenantMigrationService {
 | Enterprise isolation | Database-per-tenant | Schema-per-tenant | Enterprise requires HIPAA isolation, dedicated resources, custom extensions |
 | Custom fields (SMB) | JSONB | EAV / new columns | JSONB allows flexible custom fields without schema changes; GIN index supports queries |
 | Connection pooling | PgBouncer transaction mode | Session mode | Transaction mode allows 100 PostgreSQL connections to serve 10K tenant connections |
-| Migrations (shared) | Expand-contract | Big-bang ALTER | Big-bang ALTER TABLE on 200B rows across all tenants would take hours with locks |
+| Migrations (shared) | Expand-contract | Big-bang ALTER | A single `ALTER TABLE ... SET NOT NULL` on the shared 70M-row contacts table takes ACCESS EXCLUSIVE and a full scan, blocking all 7,000 SMB tenants for its duration; expand-contract keeps every step at SHARE UPDATE EXCLUSIVE or lower |
 
 ---
 
@@ -424,7 +459,7 @@ public class TenantMigrationService {
 The choice is driven by tenant size, isolation requirements, and operational cost: (1) Shared schema + RLS for small tenants (SMB) — minimal operational overhead, good isolation via RLS, limited customization. (2) Schema-per-tenant for medium tenants — allows per-tenant schema customization (custom columns), schema-level isolation without full database overhead, manageable at a few thousand schemas per cluster. (3) Database-per-tenant for large tenants — full isolation (separate process, storage, HA), HIPAA/FedRAMP compliance, custom PostgreSQL extensions, dedicated performance. The tiering approach is common in production SaaS: auto-upgrade tenants as they grow.
 
 **Q: How do you handle connection pooling for 10,000 tenants?**
-PgBouncer in transaction mode is essential. Without it: 10K tenants × 10 connections each = 100K PostgreSQL backends — impossible (max_connections=500, and each backend uses 5–10MB RAM). With PgBouncer: 100K client connections → 100 PostgreSQL server connections (1000:1 multiplexing). Transaction mode enables this because a server connection is released after each transaction and reused by another client. The RLS tenant context (`SET LOCAL app.current_org_id`) must be set within the transaction (not the session) because transaction mode does not guarantee the same server connection across transactions.
+PgBouncer in transaction mode is essential. Without it: 10K tenants × 10 connections each = 100K PostgreSQL backends — impossible (max_connections=500, and each backend uses 5–10MB RAM). With PgBouncer: 100K client connections → about 100 PostgreSQL server connections (1000:1 multiplexing), spread over several PgBouncer instances since one process cannot hold 100K sockets. Transaction mode enables this because a server connection is released after each transaction and reused by another client. The RLS tenant context (`SET LOCAL app.current_org_id`, or `set_config(..., true)`) must be set within the transaction (not the session) because transaction mode does not guarantee the same server connection across transactions. Transaction mode no longer costs you prepared statements: PgBouncer has tracked protocol-level named prepared statements since 1.21, controlled by `max_prepared_statements` (default 200).
 
 **Q: What happens if a tenant's data needs to be deleted (GDPR right to erasure)?**
 For SMB (shared schema): `DELETE FROM all_tables WHERE org_id = ?` — requires careful ordering to respect foreign keys; use CASCADE or deferred constraints. Then delete the organization record. Historical data in ClickHouse: same `WHERE org_id = ?` deletion, but ClickHouse bulk deletion is expensive — use TTL with the erasure date or mark the partition for deletion. For mid-market (schema-per-tenant): `DROP SCHEMA tenant_abc123 CASCADE` — instant, removes all tenant data atomically. For enterprise (database-per-tenant): `DROP DATABASE; terminate RDS instance; delete S3 backup prefix`. Document: GDPR erasure is effective immediately in live data; backup data erased within retention window (verified to compliance team).

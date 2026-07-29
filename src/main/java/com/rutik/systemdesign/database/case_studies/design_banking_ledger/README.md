@@ -108,7 +108,7 @@ CREATE TABLE accounts (
 
 -- Ledger entries: the immutable heart of the system
 CREATE TABLE ledger_entries (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id              UUID DEFAULT gen_random_uuid(),
     transaction_id  UUID NOT NULL,             -- groups debit + credit entries
     account_id      UUID NOT NULL REFERENCES accounts(id),
     amount          DECIMAL(19, 4) NOT NULL,   -- positive = credit, negative = debit
@@ -116,6 +116,9 @@ CREATE TABLE ledger_entries (
     entry_type      VARCHAR(10) NOT NULL CHECK (entry_type IN ('DEBIT', 'CREDIT')),
     description     TEXT,
     created_at      TIMESTAMPTZ DEFAULT now() NOT NULL,
+    -- Every unique constraint on a partitioned table must contain the partition key,
+    -- so the primary key is (id, created_at), not id alone
+    PRIMARY KEY (id, created_at),
     -- Immutable: no UPDATE or DELETE allowed on this table
     CONSTRAINT positive_credit CHECK (entry_type = 'DEBIT' OR amount > 0),
     CONSTRAINT negative_debit  CHECK (entry_type = 'CREDIT' OR amount < 0)
@@ -156,6 +159,37 @@ CREATE INDEX idx_transactions_idempotency ON transactions (idempotency_key);
 CREATE INDEX idx_transactions_source ON transactions (source_account, created_at DESC);
 CREATE UNIQUE INDEX idx_outbox_pending ON outbox (id) WHERE status = 'PENDING';
 ```
+
+**Enforcing the immutability the regulator asked for.** A `-- no UPDATE or DELETE
+allowed` comment is documentation, not a control, and an auditor will treat it as
+one. Immutability has to be enforced by the database, in two layers, because either
+one alone has a hole:
+
+```sql
+-- Layer 1: privileges. The application role can only ever append.
+REVOKE UPDATE, DELETE, TRUNCATE ON ledger_entries FROM app_writer;
+GRANT  SELECT, INSERT                ON ledger_entries TO   app_writer;
+
+-- Layer 2: a trigger, because privileges do not bind the table OWNER, and the
+-- owner is who runs migrations at 2am.
+CREATE OR REPLACE FUNCTION reject_ledger_mutation() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'ledger_entries is append-only (attempted %)', TG_OP
+        USING ERRCODE = 'restrict_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ledger_entries_immutable
+    BEFORE UPDATE OR DELETE ON ledger_entries
+    FOR EACH ROW EXECUTE FUNCTION reject_ledger_mutation();
+-- Triggers on a partitioned parent propagate to every partition, existing and future.
+```
+
+Corrections never edit history: post a reversing entry with the same
+`transaction_id` and the opposite sign, so the audit trail shows both the error and
+its remedy. `TRUNCATE` is revoked separately because it is not a `DELETE` and the
+row trigger never sees it — a `BEFORE TRUNCATE ... FOR EACH STATEMENT` trigger is
+the belt-and-braces version.
 
 ### 2. SERIALIZABLE Isolation for Payment Transactions
 
@@ -234,7 +268,7 @@ sequenceDiagram
     Note over B,D: Application retries the aborted transaction
 ```
 
-*Under READ COMMITTED, both transactions would read the same starting balance and both debits would commit, driving the account negative. SERIALIZABLE detects that A and B read and wrote the same row and aborts B with a serialization failure, so the application-level retry is the only path forward — the 10-20% throughput cost from the first Q&A below buys this guarantee.*
+*Without the `SELECT ... FOR UPDATE` of step 2, READ COMMITTED lets both transactions read the same starting balance and commit both debits, driving the account negative. SERIALIZABLE catches it even with no explicit lock: A and B each read the set of `ledger_entries` rows the other then inserted into, so SSI flags the read-write dependency cycle and aborts B with a serialization failure. The application-level retry is the only path forward — the throughput cost discussed in the first Q&A below buys this guarantee.*
 
 ### 3. Balance Calculation (Derived from Ledger)
 
@@ -282,15 +316,22 @@ CREATE TABLE balance_checkpoints (
 CREATE OR REPLACE FUNCTION get_balance_optimized(p_account_id UUID, p_currency CHAR(3))
 RETURNS DECIMAL(19, 4) AS $$
 DECLARE
-    v_checkpoint_balance DECIMAL(19,4) := 0;
-    v_checkpoint_date    DATE := '1970-01-01';
-    v_delta              DECIMAL(19,4) := 0;
+    v_checkpoint_balance DECIMAL(19,4);
+    v_checkpoint_date    DATE;
+    v_delta              DECIMAL(19,4);
 BEGIN
     SELECT balance, as_of_date
     INTO v_checkpoint_balance, v_checkpoint_date
     FROM balance_checkpoints
     WHERE account_id = p_account_id AND currency = p_currency
     ORDER BY as_of_date DESC LIMIT 1;
+
+    -- SELECT ... INTO sets both variables to NULL when no checkpoint row exists,
+    -- so an unguarded NULL + delta would return NULL for every new account
+    IF NOT FOUND THEN
+        v_checkpoint_balance := 0;
+        v_checkpoint_date    := DATE '1970-01-01';
+    END IF;
 
     SELECT COALESCE(SUM(amount), 0)
     INTO v_delta
@@ -310,6 +351,12 @@ $$ LANGUAGE plpgsql STABLE;
 -- Multi-tenant banking: each user/org can only see their own accounts
 ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ledger_entries ENABLE ROW LEVEL SECURITY;
+
+-- FORCE is required, not optional: ENABLE alone still lets the TABLE OWNER read
+-- every row, and the application role is usually the owner. (Superusers and
+-- BYPASSRLS roles bypass regardless, so the app must never connect as one.)
+ALTER TABLE accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE ledger_entries FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY account_owner ON accounts
     USING (id = ANY(current_setting('app.authorized_accounts')::UUID[]));
@@ -445,7 +492,7 @@ flowchart LR
 ## Interview Discussion Points
 
 **Q: Why SERIALIZABLE isolation instead of READ COMMITTED for payment processing?**
-SERIALIZABLE prevents write skew — the scenario where two concurrent transactions each read a balance, both see sufficient funds, and both debit, resulting in a negative balance. READ COMMITTED allows write skew because both transactions can read the same committed value before either commits their debit. SERIALIZABLE detects conflicting patterns (both transactions read and write the same balance) and aborts one with a serialization failure error. The application retries the aborted transaction. The overhead of SERIALIZABLE (typically 10–20% throughput reduction) is justified for financial correctness.
+SERIALIZABLE prevents write skew — the scenario where two concurrent transactions each read a balance, both see sufficient funds, and both debit, resulting in a negative balance. READ COMMITTED allows write skew because both transactions can read the same committed value before either commits their debit. SERIALIZABLE detects conflicting patterns (both transactions read the entry set the other writes into) and aborts one with a serialization failure error. The application retries the aborted transaction. The overhead of SERIALIZABLE is not a fixed percentage — it is predicate-lock bookkeeping plus a retry rate that grows with the conflict rate, so the cost is near zero when accounts are rarely contended and severe when many transactions hit the same account. Budget for it by measuring `serialization_failure` retries per second in your own workload rather than assuming a number; for financial correctness the cost is accepted whatever it measures.
 
 **Q: Why is balance derived from ledger entries instead of stored as a column?**
 A stored balance column creates a risk of ledger/balance divergence — if a bug or direct DB manipulation changes the balance column without corresponding ledger entries, the account has incorrect money. Deriving balance by summing all ledger entries means the balance is always mathematically consistent with the transaction history. Balance checkpoints (daily snapshots) optimize query performance for accounts with millions of entries. The double-entry constraint (sum of entries per transaction = 0) provides a further integrity check.
