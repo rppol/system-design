@@ -480,6 +480,25 @@ silently dropped from the game or renders wrong. These rules are derived from
   (optional trailing `:`/`.`), a `**Qn:` / `**Q:` label, or an opening `**` that
   wraps across lines. This is why the "bold the question" rule is load-bearing,
   not cosmetic.
+- **NEVER number your Q&As as a Markdown list.** `is_question_line()` requires the
+  line to *start* with `**`, so `1. **"question?"**` never registers as a question
+  boundary and the whole section is silently unreachable. Measured 2026-07-29: six
+  `lld` files used it and lost **45 Q&As** between them (fixed in bc06e22). Two
+  distinct symptoms, and the first is nastier than plain loss:
+  - the three `lld/creational/` files yielded **two GARBAGE pseudo-questions each**,
+    whose question text was a bold section header (`Q: "Common Interview Questions:"`)
+    with the entire list swallowed as the answer — junk that then fed the distractor
+    pool for every sibling question;
+  - the three `lld/concurrency_patterns/*_README.md` files yielded **exactly zero**,
+    which is how they escaped the `**Short:**` migration entirely: a file with no
+    parsed questions looks like a file with nothing to migrate.
+
+  If you inherit the format, convert it — do not hand-edit. The converter is at
+  `memory/fix_numbered_qa.py` (checked into the assistant memory directory, since
+  session scratch is ephemeral). It rewrites `N. **"q?"**` to `**Q: q?**`, dedents
+  the body, maps `Answer:` to `A:`, and turns the bold section headers into `###`
+  so they stop parsing as questions. Verify with a word-frequency diff: the only
+  tokens that may disappear are the list numbers and the renamed header words.
 - **The first sentence of the answer should be a self-contained direct answer of
   15–220 characters**, because for a Q&A with no authored `**Short:**` line it
   becomes the MCQ's correct option. **It is NOT a drop rule** — `make_short()`
