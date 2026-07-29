@@ -3,6 +3,28 @@
 Section root: `src/main/java/com/rutik/systemdesign/book/`
 Global conventions (formatting, Q&A rules, diagram rules): see root `CLAUDE.md`.
 
+## PARKED — to be done later (owner-set 2026-07-28)
+
+This section is **out of scope for everything** — the repo-wide factual audit, the
+`**Short:**` MCQ-summary migration, and the modernization pass — until the owner re-opens
+it. **Parked, not cancelled**: all 6 books are complete, pushed, and still ship in the game
+(one Study node per book).
+
+| Paused work | Amount |
+|-------------|--------|
+| Factual-audit units | none — `book/` was never entered into the audit manifest |
+| Q&As awaiting `**Short:**` summaries | 1,402 |
+
+Note the audit reason is specific to this section: a book summary is **faithful to its
+source**, so "is this claim true and current as of today" is the wrong test — a 2017 claim
+in DDIA is correctly reported as what DDIA says. That is why `book/` is excluded from the
+audit outright rather than merely deferred. The Short migration is only deferred.
+
+**Do not dispatch audit or Short-migration agents at this section.** Adding or editing
+chapters normally is unaffected. The durable scope table is in root `CLAUDE.md` ->
+"Deferred / To Be Planned"; the other parked sections are `devops/`, `cuda/` and
+`cs_fundamentals/`.
+
 This section is **organized by book**, not by topic. Each book is a folder; each chapter is
 a sub-folder containing a `README.md` that follows the book's own section order.
 

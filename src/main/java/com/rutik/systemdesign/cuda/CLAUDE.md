@@ -6,6 +6,37 @@ Build manifest / status tracker: `README.md` §8 — check the NEXT UP pointer a
 
 This section teaches GPU programming from the **kernel author's** viewpoint. It deliberately **cross-references** the GPU material in `ml/`, `llm/`, and `devops/` instead of duplicating it — see the non-overlap boundary in `README.md` §2 and the GPU Non-Overlap Boundary below.
 
+## PARKED — to be done later (owner-set 2026-07-29)
+
+This section is **out of scope** for the repo-wide factual audit and the `**Short:**`
+MCQ-summary migration until the owner re-opens it. **Parked, not cancelled** — the content
+is complete and still ships in the game.
+
+| Paused work | Amount |
+|-------------|--------|
+| Factual-audit units | 14 of 19 (5 complete) |
+| Q&As awaiting `**Short:**` summaries | 427 |
+
+**THE TRAP — the section is in three states, not two.** Anyone resuming must know which:
+
+| Modules | State | Commit |
+|---------|-------|--------|
+| `cuda_memory_model_and_hierarchy`, `cuda_programming_model_and_kernels`, `debugging_correctness_and_numerics`, `gpu_computing_foundations`, `gpu_hardware_architecture` | **Audited.** 175 claims checked, verdicts recorded | `b223d21` |
+| `memory_coalescing_and_access_patterns`, `memory_management_and_data_transfer`, `occupancy_and_launch_configuration`, `parallel_patterns_reduction_scan_histogram`, `profiling_and_performance_analysis` | **INTERRUPTED partial batch.** Real corrections, but stopped mid-section with **no verdict record** — **re-audit from the top** | `2fca64f` |
+| everything else | Never audited | — |
+
+The middle row is the hazard: those files *look* audited in `git log` and are not. The
+commit message says so explicitly. Do not mark those units done on the strength of it.
+
+**Do not dispatch audit or Short-migration agents at this section** until the owner
+re-opens it. Adding or editing modules normally is unaffected. The durable scope table is
+in root `CLAUDE.md` -> "Deferred / To Be Planned"; the other parked sections are `devops/`,
+`cs_fundamentals/` and `book/`.
+
+One correction to record while it is fresh: this file has claimed the section missed the
+repo-wide `Q: ` prefix sweep. All five audited modules already carry the prefix, so that
+claim is at least partly stale — verify before scheduling any bulk relabel.
+
 ---
 
 ## Module List — 24 Modules (6 Phases)

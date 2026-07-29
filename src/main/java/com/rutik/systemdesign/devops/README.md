@@ -4,6 +4,13 @@ A comprehensive, one-stop reference for mastering **DevOps, SRE, Cloud, and Plat
 
 > **No runtime application** — all content is Markdown with executable-shaped YAML / HCL / Dockerfile / Bash / PromQL / Rego / Go code blocks.
 
+> **PARKED — to be done later (owner-set 2026-07-29).** This section is out of scope for the
+> repo-wide factual audit and the `**Short:**` MCQ-summary migration until the owner
+> re-opens it. **Parked, not cancelled**: the content is untouched, complete, and still ships
+> in the game. What is paused is **27 audit units (none started)** and **650 Q&As awaiting
+> one-line MCQ summaries**. Do not dispatch audit or migration work here in the meantime.
+> Scope table: root `CLAUDE.md` -> "Deferred / To Be Planned".
+
 ---
 
 ## Intuition

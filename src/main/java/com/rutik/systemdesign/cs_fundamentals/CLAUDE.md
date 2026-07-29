@@ -4,6 +4,22 @@ Section root: `src/main/java/com/rutik/systemdesign/cs_fundamentals/`
 Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 Build manifest / status tracker: `README.md` §7 — check NEXT UP pointer and per-file status before starting a new module.
 
+## PARKED — to be done later (owner-set 2026-07-29)
+
+This section is **out of scope** for the repo-wide factual audit and the `**Short:**`
+MCQ-summary migration until the owner re-opens it. **Parked, not cancelled** — the content
+is complete and untouched, and still ships in the game.
+
+| Paused work | Amount |
+|-------------|--------|
+| Factual-audit units | 24, none started |
+| Q&As awaiting `**Short:**` summaries | 701 |
+
+**Do not dispatch audit or Short-migration agents at this section** until the owner
+re-opens it. Adding or editing modules normally is unaffected. The durable scope table is
+in root `CLAUDE.md` -> "Deferred / To Be Planned"; the other parked sections are `devops/`,
+`cuda/` and `book/`.
+
 ---
 
 ## Why This Section Exists

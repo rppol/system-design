@@ -4,6 +4,24 @@ A comprehensive, one-stop reference for mastering **general-purpose GPU programm
 
 > **No runtime application** — all content is Markdown with executable-shaped CUDA C++, PTX, and Python (CuPy / Numba / Triton / PyTorch) code blocks. Concepts are shown in CUDA C++ and Python side-by-side where both teach; in C++ alone where the concept is inherently C++ (WMMA, PTX, `__launch_bounds__`); in Python alone where inherently Python (Triton, CuPy).
 
+> **PARKED — to be done later (owner-set 2026-07-29).** This section is out of scope for the
+> repo-wide factual audit and the `**Short:**` MCQ-summary migration until the owner
+> re-opens it. **Parked, not cancelled**: the content is untouched and still ships in the
+> game. Paused: **14 of 19 audit units** and **427 Q&As awaiting one-line MCQ summaries**.
+>
+> **Partly audited — read this before resuming.** Five modules were genuinely audited and
+> committed (`b223d21`): `cuda_memory_model_and_hierarchy`,
+> `cuda_programming_model_and_kernels`, `debugging_correctness_and_numerics`,
+> `gpu_computing_foundations`, `gpu_hardware_architecture`. Five more —
+> `memory_coalescing_and_access_patterns`, `memory_management_and_data_transfer`,
+> `occupancy_and_launch_configuration`, `parallel_patterns_reduction_scan_histogram`,
+> `profiling_and_performance_analysis` — carry an **interrupted partial batch** (`2fca64f`).
+> Those edits are real corrections, but the agent was stopped mid-section and never produced
+> a verdict record, so **those five must be re-audited from the top**. Treat that commit as a
+> partial improvement, never as an audited result.
+>
+> Scope table: root `CLAUDE.md` -> "Deferred / To Be Planned".
+
 ---
 
 ## Intuition

@@ -49,6 +49,38 @@ src/main/java/com/rutik/systemdesign/
 
 ---
 
+## Deferred / To Be Planned — parked sections (owner-set)
+
+Four sections are **parked, not cancelled**. They are out of scope for the factual audit and
+the `**Short:**` MCQ-summary migration until the owner re-opens them. Their content is
+untouched and still ships in the game; only the improvement passes are paused.
+
+| Section | Parked | Audit units parked | Q&As not migrating yet |
+|---------|--------|--------------------|------------------------|
+| `book/` | 2026-07-28 | n/a (never in the audit) | 1,402 |
+| `devops/` | 2026-07-29 | 27 (none started) | 650 |
+| `cs_fundamentals/` | 2026-07-29 | 24 (none started) | 701 |
+| `cuda/` | 2026-07-29 | 14 of 19 (5 done, committed) | 427 |
+
+**Effect on every progress number:** the audit denominator is **230 in-scope units, not
+295**; the Short migration denominator is **8,489 in-scope Q&As, not 10,618**. Report against
+the in-scope figure and name the parked sections — never quote a bare percentage of the full
+repo, which understates the work by making parked scope look unfinished.
+
+**Do not dispatch work at these sections** until the owner re-opens them.
+
+**The `cuda` trap, for whoever resumes it.** Units 48-52 are genuinely audited and committed
+(`b223d21`). Units 53-57 have an **interrupted partial batch** committed as `2fca64f`: five
+files carry real corrections, but the agent was stopped mid-§14 and never produced a verdict
+record, so those units are deliberately still `status != done`. **Re-audit those five files
+from the top** — treat that commit as a partial improvement, never as an audited result.
+
+Working state (`audit_manifest.json`, per-unit `status`) lives in the session scratch
+directory, which is ephemeral. This table is the durable record; if the manifest is gone,
+rebuild it from here and from the `audit(...)` commit messages, which each name their units.
+
+---
+
 ## The 14-Section Module Template
 
 Every module README must follow this exact structure:

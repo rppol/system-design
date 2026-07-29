@@ -4,6 +4,14 @@
 > that reading the summary is as close as possible to reading the book itself, then mapped
 > back into the deep-dive modules elsewhere in this repository.
 
+> **PARKED — to be done later (owner-set 2026-07-28).** This section is out of scope for the
+> repo-wide factual audit and the `**Short:**` MCQ-summary migration until the owner
+> re-opens it. **Parked, not cancelled**: all 6 books are complete, pushed, and still ship in
+> the game. Paused: **1,402 Q&As awaiting one-line MCQ summaries**. The audit exclusion is
+> permanent rather than temporary — a book summary is faithful to its source, so "is this
+> claim current today" is the wrong test for it. Scope table: root `CLAUDE.md` ->
+> "Deferred / To Be Planned".
+
 ---
 
 ## What This Section Is
