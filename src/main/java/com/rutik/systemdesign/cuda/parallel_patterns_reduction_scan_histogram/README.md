@@ -79,10 +79,13 @@ contention-free.
   reduction does `n-1` additions total (same as a serial loop) but only `log2(n)`
   *sequential* rounds. For `n=1,048,576` (2^20), that is 20 rounds instead of
   1,048,575 sequential steps.
-- **Naive interleaved addressing is warp-divergent *and* bank-conflicted.** The classic
-  first-attempt reduction (`if (tid % (2*s) == 0)`) leaves active threads scattered
-  within every warp rather than packed at the front, and its shared-memory addressing
-  pattern maps multiple active threads to the same bank as `s` grows.
+- **The two classic first attempts fail for two *different* reasons.** The modulo form
+  (`if (tid % (2*s) == 0)`) is warp-divergent — active lanes are scattered through every
+  warp instead of packed at the front — but it is not bank-conflicted, because once `s`
+  reaches 16 barely one lane per warp is even active. Rewriting it with a strided index
+  (`int index = 2*s*tid; if (index < blockDim.x)`) removes the divergence and introduces
+  the *other* defect: lane `i` now touches `sdata[2*s*i]`, a 2-way bank conflict at `s=1`
+  that doubles with every step.
 - **Sequential addressing fixes both defects with one line.** Changing the loop to
   `for (s = blockDim.x/2; s > 0; s >>= 1) if (tid < s)` packs active threads into a
   contiguous, warp-aligned prefix and accesses shared memory with unit stride — no
@@ -140,9 +143,10 @@ rather than a single associative accumulation.
 Collapse `n` values to 1 via an associative operator (sum, min, max). The interview
 progression:
 
-1. **Naive interleaved addressing** — `if (tid % (2*s) == 0)` — warp-divergent,
-   bank-conflicted. Never write this in production; know it as the "what's wrong with
-   this kernel" starting point.
+1. **Naive interleaved addressing** — `if (tid % (2*s) == 0)` — warp-divergent. Its usual
+   first repair, the strided index `2*s*tid`, trades that divergence for bank conflicts.
+   Never write either in production; know them as the "what's wrong with this kernel"
+   starting point.
 2. **Sequential addressing** — `if (tid < s)` — the fix every interviewer expects you
    to reach in under a minute. This module stops here; see §14 and the case study for
    what comes after.
@@ -310,7 +314,7 @@ step  s   active tid    operation                          live values (index 0.
 
 4 steps = log2(16); 15 additions total = n-1 -> O(n) work, O(log n) depth.
 Active threads at every step are a contiguous prefix (tid < s) -> no warp
-divergence once s <= 32, and stride-1 addressing at every step -> no bank conflicts.
+divergence while s >= 32, and stride-1 addressing at every step -> no bank conflicts.
 ```
 
 Each step halves both the active-thread count and the stride between paired
@@ -453,7 +457,9 @@ thousands of contended per-element atomics for exactly 256 uncontended
 ### 6.1 Reduction: Naive vs. Sequential Addressing
 
 ```cpp
-// BROKEN: interleaved addressing -- warp-divergent AND bank-conflicted
+// BROKEN: interleaved addressing with a modulo test -- warp-divergent.
+// (Its usual first repair, `int index = 2*s*tid`, removes the divergence but
+//  introduces bank conflicts instead; sequential addressing removes both.)
 __global__ void reduceNaiveInterleaved(const float* g_idata, float* g_odata, int n) {
     extern __shared__ float sdata[];
     unsigned int tid = threadIdx.x;
@@ -463,7 +469,7 @@ __global__ void reduceNaiveInterleaved(const float* g_idata, float* g_odata, int
 
     for (unsigned int s = 1; s < blockDim.x; s *= 2) {
         if (tid % (2 * s) == 0) {          // active threads scattered within a warp
-            sdata[tid] += sdata[tid + s];  // stride grows -> bank conflicts
+            sdata[tid] += sdata[tid + s];  // addressing itself is conflict-free
         }
         __syncthreads();
     }
@@ -493,10 +499,12 @@ __global__ void reduceSequentialAddressing(const float* g_idata, float* g_odata,
 At `blockDim.x=256`, the naive kernel's first iteration (`s=1`) leaves only tid
 `0, 2, 4, ... 254` active — 128 of 256 threads, but scattered two apart, so within
 every 32-thread warp exactly half the lanes are active and half masked, forcing the
-warp scheduler to serialize the active and inactive paths every iteration. The fixed
-kernel's first iteration (`s=128`) leaves tid `0..127` active — 4 full warps run,
-4 full warps retire entirely (no divergence, no wasted cycles), and every access
-`sdata[tid]`/`sdata[tid+s]` lands in a distinct bank at unit stride.
+warp scheduler to serialize the active and inactive paths every iteration; by `s=16`
+only one lane per warp is still active, which is why the modulo variant's cost is
+divergence rather than bank conflicts. The fixed kernel's first iteration (`s=128`)
+leaves tid `0..127` active — 4 full warps run, 4 full warps retire entirely (no
+divergence, no wasted cycles), and every access `sdata[tid]`/`sdata[tid+s]` lands in a
+distinct bank at unit stride.
 
 ### 6.2 Reduction via Library: Thrust and CuPy
 
@@ -884,7 +892,10 @@ for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
 The modulo test scatters active threads across every warp instead of packing them
 into a contiguous prefix, forcing intra-warp serialization at every step; the fixed
 version keeps active threads warp-aligned and contiguous, eliminating divergence
-until fewer than 32 threads remain active.
+until fewer than 32 threads remain active. Note what the fix skips: rewriting the
+modulo test as the strided index `2*s*tid` also kills the divergence, but replaces it
+with 2-way-and-doubling bank conflicts. Sequential addressing is the version that has
+neither.
 
 1. **Forgetting `__syncthreads()` between reduction/scan steps.** Every step reads
    values another thread wrote in the previous step; skipping the barrier produces a
@@ -935,20 +946,23 @@ framework in full depth.
 ## 12. Interview Questions with Answers
 
 **Q: Why is the naive interleaved-addressing reduction (`if (tid % (2*s) == 0)`) slow?**
-It is both warp-divergent and bank-conflicted. The modulo test leaves active threads
-scattered throughout every warp instead of packed contiguously, forcing the warp
-scheduler to serialize active and inactive lanes at every step, and the growing
-stride `s` causes multiple active threads to map to the same shared-memory bank as
-the loop progresses. Sequential addressing (`if (tid < s)`) fixes both defects with
-a one-line change to the loop bounds and index test.
+It is warp-divergent: the modulo test leaves active lanes scattered through every warp
+instead of packed contiguously, so the scheduler serializes the active and inactive
+paths at every step. It is *not* bank-conflicted — its shared-memory addressing is
+unit-stride, and by `s=16` only one lane per warp is even active. The instinctive
+repair, replacing the test with a strided index (`int index = 2*s*tid`), removes the
+divergence but introduces bank conflicts instead, because lane `i` then touches
+`sdata[2*s*i]`. Sequential addressing (`if (tid < s)`) is the one-line change that
+avoids both.
 
 **Q: What does sequential addressing change, mechanically, versus interleaved
 addressing?** It swaps the loop and index test so active threads stay a contiguous,
 warp-aligned prefix at every step instead of a modulo-scattered set. Concretely,
 `for (s=1; s<blockDim.x; s*=2) if (tid % (2*s)==0)` becomes
-`for (s=blockDim.x/2; s>0; s>>=1) if (tid < s)`, and the shared-memory access
-pattern becomes unit-stride within the active range, removing the bank conflicts
-that grow with `s` in the naive version.
+`for (s=blockDim.x/2; s>0; s>>=1) if (tid < s)`, which packs whole warps at the front
+and lets the rest retire. The shared-memory access stays unit-stride within the active
+range, so unlike the strided-index rewrite of the interleaved kernel it buys that
+divergence fix without paying for it in bank conflicts.
 
 **Q: Why does a global-atomic histogram collapse under contention, and what fixes
 it?** Every thread's `atomicAdd` targets one of a small number of global-memory
@@ -989,12 +1003,16 @@ dependent additions into `log2(n)` sequential rounds (the tree depth), each roun
 doing many additions in parallel while the total addition count stays `n-1`,
 matching a serial sum.
 
-**Q: Concretely, what does a bank conflict look like in the naive interleaved
-reduction?** Shared memory has 32 banks of 4 bytes each, and as the stride `s` in
-the naive loop grows, active threads increasingly map to the same bank modulo 32.
-At `s=16` with `blockDim.x=256`, groups of active threads collide 2-way on
-shared-memory banks, serializing what should be a single-cycle broadcast into
-multiple cycles.
+**Q: Concretely, what does a bank conflict look like in an interleaved-addressing
+reduction?** It appears in the strided-index variant, not the modulo one: with
+`int index = 2*s*tid`, lane `i` reads `sdata[2*s*i]`, so at `s=1` lanes 0 and 16 collide
+on bank 0 — a 2-way conflict across the whole warp. Their word indices are 0 and 32.
+Shared memory has 32 banks of 4 bytes and the bank of `sdata[j]` is `j % 32`, so the
+conflict degree doubles at every step: 4-way at `s=2`, 8-way at `s=4`, serializing
+what should be one access into that many cycles. The modulo variant
+(`tid % (2*s) == 0`) has the opposite profile — its addressing is unit-stride and
+conflict-free, and its cost is divergence. Sequential addressing (`if (tid < s)`)
+has neither defect.
 
 **Q: How do you combine per-block partial reductions into one final value?**
 Launch the reduction kernel once per block to produce one partial sum per block
@@ -1149,14 +1167,20 @@ __global__ void frameHistogramPrivatized(const unsigned char* frame, int n, unsi
 }
 ```
 
+The grid-stride loop is what makes the merge cheap, so the fixed kernel is launched
+with a fixed, GPU-sized grid rather than one thread per pixel: **1,024 blocks x 256
+threads**, each block folding ~2,025 pixels into its private bins before posting.
 Measured under the same conditions: **0.31 ms/frame** (a 3,225 fps ceiling in
-isolation) — a **15.5x speedup**. Contention scope dropped from "every thread
-across all 8,100 blocks sharing 256 bins" to "the threads within one block sharing
-256 shared-memory bins," and the final merge added only `256 * 8,100` lightly
-contended global atomics instead of `2,073,600` heavily contended ones. Nsight
-Compute confirmed the kernel became global-memory-bandwidth-bound (reading the
-frame once) rather than atomic-throughput-bound — the correct bottleneck to be
-limited by, given the algorithm must read every pixel at least once.
+isolation) — a **15.5x speedup**. Contention scope dropped from "every thread in the
+grid sharing 256 bins" to "the threads within one block sharing 256 shared-memory
+bins," and the final merge issues `256 * 1,024 = 262,144` lightly contended global
+atomics instead of `2,073,600` heavily contended ones — the 7.91x reduction derived in
+§6.6. Nsight Compute confirmed the atomic-unit stalls were gone; what remains is
+shared-memory atomic conflicts on the handful of hot luminance bins plus the merge.
+Note what the fixed kernel is *not*: at 2.07 MB read in 0.31 ms it moves about
+6.7 GB/s, over 200x under an A100's HBM peak — one 1080p frame is far too small to
+saturate the device, so the next lever is batching several frames into one launch,
+not further tuning this kernel's memory path.
 
 **Discussion questions:**
 - At what bin count would privatization stop helping, and why (tie back to §12's

@@ -21,9 +21,11 @@ cycle latency of a global-memory load by switching to a different warp instead o
 sharedMemBytes, stream>>>` — block size (threads/block), grid size (blocks/grid), and
 dynamic shared-memory bytes — that determine how many blocks and warps can be resident on
 each SM simultaneously. Three hardware resources cap how many blocks an SM can host at once:
-the **register file** (65,536 32-bit registers/SM), **shared memory** (up to ~164-228 KB/SM
-on recent architectures), and fixed **block/warp slot counts** (32 resident blocks/SM, 64
-resident warps/SM on Volta/Ampere/Hopper). Whichever of the three runs out first — the
+the **register file** (65,536 32-bit registers/SM on every architecture), **shared memory**
+(100 KB/SM on compute capability 8.6/8.9/12.x, 164 KB on A100, 228 KB on H100 and B200), and
+fixed **block/warp slot counts** (32 resident blocks and 64 resident warps per SM on 7.0/8.0/
+9.0/10.x; 16-24 blocks and 48 warps on 8.6/8.9/12.x; 16 blocks and 32 warps on Turing 7.5).
+Whichever of the three runs out first — the
 *binding limiter* — sets your occupancy ceiling for that kernel. Tuning launch configuration
 means understanding which limiter binds, and deciding whether raising it (fewer registers,
 less shared memory, a different block size) is worth the tradeoff.
@@ -110,31 +112,37 @@ which is why occupancy is a means to an end and not the end itself.
 ## 3. Core Principles
 
 - **Occupancy is a ratio, always relative to the hardware ceiling.** `active_warps /
-  max_warps_per_SM`. The ceiling itself varies by compute capability — 64 warps/SM (2048
-  threads) on Volta/Ampere/Hopper/Blackwell, 32 warps/SM (1024 threads) on Turing — so the
-  same kernel has a different theoretical occupancy just by moving between generations.
+  max_warps_per_SM`. The ceiling varies by compute capability, and *not* simply by
+  architecture family — 64 warps/SM (2048 threads) on 7.0, 8.0 (A100), 9.0 (H100) and 10.x
+  (B200); 48 warps/SM (1536 threads) on 8.6, 8.9 and 12.x (the GeForce/workstation parts of
+  Ampere, Ada and Blackwell); 32 warps/SM (1024 threads) on Turing 7.5. Query
+  `cudaDeviceProp::maxThreadsPerMultiProcessor` rather than assuming a family's ceiling.
 
 ```mermaid
 timeline
     title Occupancy Ceiling Across GPU Generations
-    Volta (2017) : 64 warps/SM (2048 threads/SM)
-    Turing (2018) : 32 warps/SM (1024 threads/SM) — ceiling halved
-    Ampere (2020) : 64 warps/SM restored
-                  : opt-in shared mem up to 164 KB/SM (A100)
-    Hopper (2022) : 64 warps/SM ceiling holds
-                  : opt-in shared mem up to 228 KB/SM (H100)
-    Blackwell (2024) : 64 warps/SM ceiling holds
+    Volta 7.0 (2017) : 64 warps/SM (2048 threads/SM)
+    Turing 7.5 (2018) : 32 warps/SM (1024 threads/SM) — ceiling halved
+    Ampere 8.0 A100 (2020) : 64 warps/SM restored
+                  : opt-in shared mem up to 164 KB/SM
+    Ampere 8.6 GA10x (2020) : 48 warps/SM (1536 threads/SM)
+                  : shared mem 100 KB/SM
+    Hopper 9.0 H100 (2022) : 64 warps/SM
+                  : opt-in shared mem up to 228 KB/SM
+    Blackwell 10.x B200 (2024) : 64 warps/SM
+    Blackwell 12.x GeForce (2025) : 48 warps/SM (1536 threads/SM)
 ```
 
-*Caption*: the same launch configuration can carry a different theoretical occupancy purely
-from the target architecture — Turing's 32-warp ceiling is half of every generation before
-and after it, which is why an occupancy target tuned on one GPU generation must be
-re-verified on another (see the related Q&A in §12).
+*Caption*: the ceiling tracks compute capability, not the marketing architecture name — the
+data-center part of a generation holds 64 warps/SM while its GeForce/workstation sibling
+holds 48, and Turing's 32 is the lowest of any currently supported part. That is why an
+occupancy target tuned on one GPU must be re-verified on another (see the related Q&A in §12).
 
 - **Three independent resources gate occupancy, and the tightest one wins.** Registers
-  (65,536 32-bit registers/SM), shared memory (48 KB/block default, up to ~164-228 KB/SM
-  with opt-in on Ampere/Hopper), and fixed slot counts (max 32 resident blocks/SM, max 64
-  resident warps/SM). Occupancy = `min(registers-limited blocks, shared-mem-limited blocks,
+  (65,536 32-bit registers/SM), shared memory (48 KB/block default, raised by opt-in to
+  163 KB/block on A100 and 227 KB/block on H100), and fixed slot counts (32 resident
+  blocks/SM and 64 resident warps/SM on A100/H100/B200, lower on the capabilities listed
+  above). Occupancy = `min(registers-limited blocks, shared-mem-limited blocks,
   block-slot limit) × threads-per-block / max_threads_per_SM`.
 
 - **Registers are allocated per-thread, but consumed per-SM.** A kernel compiled to use 64
@@ -174,8 +182,8 @@ re-verified on another (see the related Q&A in §12).
 | Limiter | Per-SM Budget (typical) | How a block consumes it | Symptom when binding |
 |---------|--------------------------|--------------------------|------------------------|
 | **Registers** | 65,536 32-bit registers | `threads/block × regs/thread` | Register-heavy kernels (deep unrolling, many live temporaries, GEMM microkernels) cap occupancy first |
-| **Shared memory** | 48 KB/block default; up to ~164 KB (A100)/~228 KB (H100) per SM with opt-in | `sharedMemBytes` (static + dynamic) per resident block | Large tiles (e.g. big GEMM/convolution tiles) cap blocks/SM before registers do |
-| **Block/warp slots** | 32 resident blocks/SM; 64 resident warps/SM (Volta/Ampere/Hopper), 32 (Turing) | 1 slot per block regardless of size; `threads/block ÷ 32` warp slots | Very small blocks (e.g. 32-64 threads) hit the 32-block ceiling before registers or shared memory do, wasting warp capacity |
+| **Shared memory** | 48 KB/block default; 164 KB/SM (A100), 228 KB/SM (H100, B200), 100 KB/SM (8.6/8.9/12.x) with opt-in | `sharedMemBytes` (static + dynamic) per resident block | Large tiles (e.g. big GEMM/convolution tiles) cap blocks/SM before registers do |
+| **Block/warp slots** | 32 blocks + 64 warps per SM (7.0/8.0/9.0/10.x); 16 blocks + 48 warps (8.6); 24 blocks + 48 warps (8.9/12.x); 16 blocks + 32 warps (7.5) | 1 slot per block regardless of size; `threads/block ÷ 32` warp slots | Very small blocks (e.g. 32-64 threads) hit the block-slot ceiling before registers or shared memory do, wasting warp capacity |
 
 ### 4.2 Launch-Configuration Strategies
 
@@ -243,12 +251,12 @@ budget, assuming a 256-thread block (8 warps/block) so occupancy changes only wh
 register ceiling forces one fewer *block* resident:
 
 ```
-SM budget: 65,536 32-bit registers/SM  |  64 max resident warps (2048 threads) — Volta/
-Ampere/Hopper/Blackwell.  Block size fixed at 256 threads/block (8 warps/block) below.
+SM budget: 65,536 32-bit registers/SM  |  64 max resident warps (2048 threads) — compute
+capability 7.0, 8.0, 9.0, 10.x.  Block size fixed at 256 threads/block (8 warps/block).
 
   Regs/thread   Regs/block (256thr)   Blocks/SM        Warps/SM   Occ.      Bar
   ------------- ---------------------- ----------------- ---------- --------- --------------------
-  1   -   32     up to  8,192           8 (blk-capped)    64         100 %    ####################
+  1   -   32     up to  8,192           8 (warp-slot cap) 64         100 %    ####################
   33  -   64     up to 16,384           4                 32          50 %    ##########
   65  -  128     up to 32,768           2                 16          25 %    #####
   129 -  255     up to 65,280           1                  8        12.5 %    ##
@@ -444,7 +452,7 @@ void report_occupancy(int n) {
 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
-    int maxWarpsPerSM = prop.maxThreadsPerMultiProcessor / 32;   // 2048/32 = 64 on Ampere/Hopper
+    int maxWarpsPerSM = prop.maxThreadsPerMultiProcessor / 32;   // 64 on A100/H100, 48 on GA10x
     int warpsPerBlock = 256 / 32;                                 // 8
     float occupancy = (numBlocksPerSM * warpsPerBlock) / (float)maxWarpsPerSM;
 
@@ -545,16 +553,19 @@ __global__ void grid_stride_scale(float* data, float alpha, int n) {
 
 void launch_scale(float* data, float alpha, int n) {
     const int blockSize = 256;                       // multiple of 32; sweet spot 128-256
-    int minGridSize, suggestedBlockSize;
-    cudaOccupancyMaxPotentialBlockSize(&minGridSize, &suggestedBlockSize, grid_stride_scale);
 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
+    // Ask how many blocks of THIS size are resident per SM, then multiply by the SM count.
+    // (cudaOccupancyMaxPotentialBlockSize's minGridSize is already device-wide -- it counts
+    // SMs internally -- so multiplying it by multiProcessorCount over-subscribes by ~SM x.)
+    int blocksPerSM = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, grid_stride_scale,
+                                                   blockSize, /*dynamicSMemSize=*/0);
     // Launch exactly enough blocks to fill every SM once — grid-stride loop covers any n
     // without over- or under-subscribing, avoiding the tail-effect underutilization of a
     // grid sized to n/blockSize when n does not divide evenly by (SMs x blocks/SM).
-    int numSMs = prop.multiProcessorCount;
-    int gridSize = numSMs * minGridSize;               // "fill the GPU exactly once" heuristic
+    int gridSize = prop.multiProcessorCount * blocksPerSM;   // one full wave
     grid_stride_scale<<<gridSize, blockSize>>>(data, alpha, n);
 }
 ```
@@ -562,15 +573,19 @@ void launch_scale(float* data, float alpha, int n) {
 ### 6.4 Inspecting Occupancy in Python — PyCUDA
 
 PyCUDA compiles real CUDA C via `SourceModule` and exposes the compiled kernel's actual
-resource usage (`num_regs`, `shared_size_bytes`) as attributes on the `Function` object —
-feeding those straight into `pycuda.tools.OccupancyRecord` reproduces the same arithmetic as
-the CUDA occupancy calculator, from Python:
+resource usage (`num_regs`, `shared_size_bytes`) as attributes on the `Function` object.
+Those two numbers are ground truth. `pycuda.tools.OccupancyRecord` will then run the
+limiter arithmetic on them, but treat its *result* as an estimate: `pycuda.tools.DeviceData`
+hardcodes 64 warps/SM and 8 blocks/SM rather than querying the device, so on a part with a
+48-warp ceiling (8.6/8.9/12.x) or a 32-block ceiling it computes against the wrong budget.
+Cross-check with `cudaOccupancyMaxActiveBlocksPerMultiprocessor` (§6.1) or Nsight Compute
+before trusting the percentage:
 
 ```python
 import pycuda.autoinit
 import pycuda.driver as cuda
 from pycuda.compiler import SourceModule
-from pycuda.tools import OccupancyRecord
+from pycuda.tools import DeviceData, OccupancyRecord
 
 mod = SourceModule("""
 __global__ void normalize_kernel(float* data, int n) {
@@ -590,8 +605,9 @@ print(f"shared mem/block  : {kernel.shared_size_bytes} bytes")
 print(f"local mem/thread  : {kernel.local_size_bytes} bytes (0 unless spilling)")
 
 dev = cuda.Context.get_device()
+devdata = DeviceData(dev)          # OccupancyRecord takes DeviceData, not Device
 block_size = 256
-occ = OccupancyRecord(dev, block_size,
+occ = OccupancyRecord(devdata, block_size,
                        shared_mem=kernel.shared_size_bytes,
                        registers=kernel.num_regs)
 
@@ -681,8 +697,10 @@ card short of complete, you still pay for the whole round."
 ```
 
 **Why the tail stops mattering as grids grow.** The waste is bounded by one wave, so it is a
-*fixed* cost divided by a growing grid: one block of overshoot costs 47 percentage points of
-efficiency at 700 blocks, but only 1.3 points at 3907. Small grids are where wave
+*fixed* cost divided by a growing grid: a 40-block overshoot costs 47 percentage points of
+efficiency at 700 blocks, while a 607-block remainder costs only 1.3 points at 3907 — and a
+single block over the wave is the worst case of all, halving efficiency to 50.1% at 661
+blocks. Small grids are where wave
 quantization does real damage — and it is exactly why the grid-stride loop in §6.3 is the
 default idiom: it pins `grid_blocks` at `blocks_per_wave` (or a small multiple of it) and
 lets the loop absorb any `n`, making `wave_efficiency` 100% by construction instead of by
@@ -766,7 +784,7 @@ luck.
 __global__ void reduce_unrolled8(const float* in, float* out, int n) {
     float sum0=0, sum1=0, sum2=0, sum3=0, sum4=0, sum5=0, sum6=0, sum7=0;
     int idx = (blockIdx.x * blockDim.x + threadIdx.x) * 8;
-    for (; idx < n; idx += gridDim.x * blockDim.x * 8) {
+    for (; idx + 7 < n; idx += gridDim.x * blockDim.x * 8) {
         sum0 += in[idx];   sum1 += in[idx+1]; sum2 += in[idx+2]; sum3 += in[idx+3];
         sum4 += in[idx+4]; sum5 += in[idx+5]; sum6 += in[idx+6]; sum7 += in[idx+7];
     }
@@ -797,7 +815,7 @@ __global__ void __launch_bounds__(256, 4) reduce_unrolled8_forced(const float* i
 __global__ void reduce_unrolled4(const float* in, float* out, int n) {
     float sum0=0, sum1=0, sum2=0, sum3=0;
     int idx = (blockIdx.x * blockDim.x + threadIdx.x) * 4;
-    for (; idx < n; idx += gridDim.x * blockDim.x * 4) {
+    for (; idx + 3 < n; idx += gridDim.x * blockDim.x * 4) {
         sum0 += in[idx]; sum1 += in[idx+1]; sum2 += in[idx+2]; sum3 += in[idx+3];
     }
     float partial = sum0 + sum1 + sum2 + sum3;
@@ -816,9 +834,10 @@ __global__ void reduce_unrolled4(const float* in, float* out, int n) {
   exists to correct — see §9. Always profile before and after, not just the theoretical
   occupancy number.
 - **Ignoring the tail effect (wave quantization).** If `grid_size` is not a multiple of
-  `SM_count x blocks_per_SM`, the final "wave" of blocks under-fills the GPU — e.g. 133 blocks
-  on a 132-block-per-wave GPU (`SMs x blocks/SM = 132`) launches a second, nearly-empty wave
-  that takes almost as long as the first. Size grids to a multiple of the wave, or use a
+  `SM_count x blocks_per_SM`, the final "wave" of blocks under-fills the GPU — e.g. 661 blocks
+  on an H100 whose wave is 660 (`132 SMs x 5 blocks/SM`, the §6.6 example) launches a second
+  wave holding one block that takes almost as long as the full first wave. Size grids to a
+  multiple of the wave, or use a
   grid-stride loop (§6.3) to decouple grid size from problem size entirely.
 - **`-maxrregcount` applied file-wide with multiple kernels.** A single restrictive flag
   meant to help one register-hungry kernel silently caps every other kernel in the same
@@ -834,9 +853,10 @@ __global__ void reduce_unrolled4(const float* in, float* out, int n) {
   imbalance (some blocks finish early and leave warps idle) or the tail effect above — the
   theoretical number is a ceiling, not a guarantee.
 - **Compiling once, deploying to multiple architectures.** `cudaFuncAttributes.numRegs` and
-  the max-warps-per-SM ceiling both vary by compute capability (32 vs 64 warps/SM, Turing vs
-  Ampere) — an occupancy target tuned on one GPU generation is not guaranteed to hold on
-  another; re-run the occupancy calculator (or profile) per target architecture.
+  the max-warps-per-SM ceiling both vary by compute capability (32, 48 or 64 warps/SM) — an
+  occupancy target tuned on one GPU is not guaranteed to hold on another, and the split runs
+  *within* an architecture family (A100 64 vs GA10x 48), not just across generations; re-run
+  the occupancy calculator (or profile) per target compute capability.
 
 ---
 
@@ -852,7 +872,7 @@ __global__ void reduce_unrolled4(const float* in, float* out, int n) {
 | `-maxrregcount=N` (nvcc flag) | File-wide register cap | Blunt instrument; can starve sibling kernels |
 | `cuobjdump --resource-usage <binary>` | Post-hoc register/shared-mem usage inspection of a compiled cubin | Useful when you only have the binary, not the source |
 | Nsight Compute — "Occupancy" section | Theoretical vs. Achieved occupancy, binding limiter, warp-state stall reasons | The authoritative source for what a kernel actually achieved and which resource bound it — see [profiling_and_performance_analysis](../profiling_and_performance_analysis/) |
-| `pycuda.tools.OccupancyRecord` | Python-side occupancy arithmetic from a compiled `Function`'s `num_regs`/`shared_size_bytes` | Reproduces the CUDA occupancy calculator's math in Python |
+| `pycuda.tools.OccupancyRecord` | Python-side occupancy arithmetic from a compiled `Function`'s `num_regs`/`shared_size_bytes` | Takes a `pycuda.tools.DeviceData`, not a `Device`; its `DeviceData` hardcodes 64 warps/SM and 8 blocks/SM, so cross-check the result on any part with a different ceiling |
 | `numba.cuda` device attributes (`WARP_SIZE`, `MAX_THREADS_PER_BLOCK`, `MULTIPROCESSOR_COUNT`) | Device query for launch-config heuristics from Python | Kernels still compile through the same nvcc/ptxas pipeline underneath |
 
 ---
@@ -874,8 +894,9 @@ blocks are resident as whole units.
 
 **Q: What are the three resources that limit occupancy?**
 Registers (65,536 32-bit
-registers/SM), shared memory (48 KB/block default, up to ~164-228 KB/SM with opt-in), and
-fixed block/warp slot counts (32 blocks/SM, 64 warps/SM on Volta+). Whichever produces the
+registers/SM), shared memory (48 KB/block default, raised by opt-in to 163 KB/block on A100
+and 227 KB/block on H100), and fixed block/warp slot counts (32 blocks and 64 warps per SM on
+A100/H100/B200, 48 or 32 warps on the lower compute capabilities). Whichever produces the
 smallest number of resident blocks is the *binding limiter* for that launch configuration.
 
 **Q: What does `__launch_bounds__` actually do, and how does it differ from
@@ -914,8 +935,8 @@ grid-stride loop to decouple grid size from data size entirely.
 **Q: How do you compute theoretical occupancy from a kernel's register usage?**
 Divide the
 65,536-register SM budget by `threads_per_block x registers_per_thread` to get reg-limited
-blocks/SM, multiply by warps/block, and divide by the SM's max warps (64 on Volta+, 32 on
-Turing) — whichever of the register, shared-memory, and block-slot limiters gives the
+blocks/SM, multiply by warps/block, and divide by the SM's max warps (64 on 7.0/8.0/9.0/10.x,
+48 on 8.6/8.9/12.x, 32 on Turing 7.5) — whichever of the register, shared-memory, and block-slot limiters gives the
 smallest blocks/SM number sets the actual occupancy.
 
 **Q: What CUDA runtime API suggests a good block size automatically?**
@@ -968,12 +989,14 @@ its shared-memory footprint (and thus occupancy) at compile time; `extern __shar
 byte count passed at launch lets the same compiled kernel trade shared-memory size for
 occupancy at runtime, which is how libraries dynamically select among several tile sizes.
 
-**Q: Why does maximum warps/SM differ between GPU generations (32 vs 64)?**
-Turing (compute
-capability 7.5) caps at 1024 threads/SM (32 warps), while Volta, Ampere, Hopper, and
-Blackwell cap at 2048 threads/SM (64 warps) — the same kernel and launch configuration can
-therefore have a different theoretical occupancy ceiling purely from the target architecture,
-so occupancy tuning should be re-verified per deployed GPU generation.
+**Q: Why does maximum warps/SM differ between GPU generations (32 vs 48 vs 64)?**
+The ceiling
+is set by compute capability, not by the architecture's marketing name. Compute capability
+7.0, 8.0 (A100), 9.0 (H100) and 10.x (B200) hold 2048 threads/SM (64 warps); 8.6, 8.9 and
+12.x — the GeForce and workstation parts of Ampere, Ada and Blackwell — hold 1536 (48
+warps); Turing 7.5 holds 1024 (32 warps). The same kernel and launch configuration therefore
+has a different theoretical occupancy ceiling on each, so read
+`cudaDeviceProp::maxThreadsPerMultiProcessor` and re-verify per deployed part.
 
 **Q: Nsight Compute reports low achieved occupancy despite good theoretical occupancy — what
 causes the gap?** Common causes are the tail effect (the final wave of blocks under-filling
@@ -1008,9 +1031,9 @@ reduced per-thread ILP.
   under-subscription and tail-effect waste across arbitrary input sizes.
 - **Opt in explicitly to >48 KB shared memory** via `cudaFuncSetAttribute` on Ampere/Hopper
   when a tile genuinely needs it — don't assume the larger budget is automatic.
-- **Re-verify occupancy targets per target GPU generation** — the 32-vs-64-warps/SM split
-  between Turing and everything since Volta changes the ceiling the same kernel is measured
-  against.
+- **Re-verify occupancy targets per target compute capability** — the 32/48/64-warps-per-SM
+  split (Turing 7.5, the GeForce capabilities 8.6/8.9/12.x, and the data-center capabilities
+  7.0/8.0/9.0/10.x) changes the ceiling the same kernel is measured against.
 - **Treat the ~50-60% occupancy plateau as the default target for latency-bound kernels**,
   and treat much lower occupancy as *expected and correct* for compute-bound, high-ILP
   kernels — don't chase 100% by default.

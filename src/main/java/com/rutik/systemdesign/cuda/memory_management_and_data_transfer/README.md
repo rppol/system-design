@@ -87,11 +87,14 @@ hidden tax.
   path and for true async copies.** `cudaHostAlloc` (or `cudaMallocHost`)
   allocates it; ordinary `malloc`/`new` memory is pageable and forces a
   driver-managed staging copy.
-- **`cudaMemcpy` is synchronous with respect to the host** (for host↔device
-  directions) — it blocks the calling CPU thread until the transfer
-  completes. `cudaMemcpyAsync` returns immediately and only *stream-orders*
-  the copy, requiring pinned source/destination memory to actually overlap
-  with other stream work.
+- **`cudaMemcpy` blocks the calling CPU thread — but not always until the DMA
+  finishes.** A device-to-host copy returns only once the bytes have landed in
+  host memory. A host-to-device copy from *pageable* memory returns as soon as
+  the driver has staged your buffer into its own pinned bounce buffer, with the
+  DMA to the device still in flight — so the call is host-blocking without being
+  a completion guarantee. `cudaMemcpyAsync` returns immediately and only
+  *stream-orders* the copy, requiring pinned source/destination memory to
+  actually overlap with other stream work.
 - **Unified (Managed) memory presents one pointer valid on host and device**,
   with the CUDA runtime migrating pages (4 KB up to 2 MB, generation-
   dependent) on first-touch page fault rather than requiring an explicit copy
@@ -185,7 +188,7 @@ dominates.
 | Page fault | A device access to an unmigrated page; the warp stalls until the page lands |
 | Fault cost | Driver round-trip per fault, order ~10-20 microseconds, largely independent of page size |
 | `cudaMemPrefetchAsync` | Moves a whole range in one scheduled operation — one event, not N |
-| Bulk bandwidth | ~25 GB/s over PCIe once a transfer is actually in flight |
+| Bulk bandwidth | ~25 GB/s for a prefetched range over PCIe Gen4 x16 — under the ~28 GB/s a raw pinned `cudaMemcpy` reaches (§8), because the driver still walks page tables |
 
 **Walk one example.** Move 1 GB to the device two ways and count events, not bytes:
 
@@ -355,10 +358,13 @@ timeline is genuinely overlappable, which is why 28 ms becomes 19 ms and not 10 
 
 Notice what the 19 ms is made of: 14 of those milliseconds are pipeline fill and drain,
 and only 5 came free. Chunk into 4 instead of 2 and the per-chunk stages shrink further, so
-fill and drain shrink too — the asymptote as chunk count grows is the *sum of the busiest
-single resource*, here the copy engine's 20 ms of total H2D+D2H work. That is the real
-ceiling, and it is why this optimization tops out around 1.4-1.5x rather than approaching
-the 28/8 = 3.5x you would get if copies were free.
+fill and drain shrink too — the asymptote as chunk count grows is *the busiest single
+engine*, and which engine that is depends on the hardware. A GPU with one DMA engine runs
+H2D and D2H through the same queue, so its floor is 10 + 10 = 20 ms and the speedup tops out
+at 28/20 = 1.4x. Data-center parts ship separate H2D and D2H engines
+(`cudaDeviceProp::asyncEngineCount == 2`), the two directions overlap, and the floor becomes
+`max(10, 8, 10) = 10 ms` for a 2.8x ceiling. Query `asyncEngineCount` before predicting which
+one you get — never the 28/8 = 3.5x you would see only if copies were free.
 
 ### Overlap as an actor timeline — copy engine vs. SM
 
@@ -533,7 +539,9 @@ pinned_view = np.frombuffer(pinned_host, dtype=np.float32, count=host_array.size
 pinned_view[:] = host_array
 
 stream = cp.cuda.Stream(non_blocking=True)
-device_buf = cp.empty_like(host_array)
+# cp.empty_like() takes a CuPy array; build the device buffer from shape/dtype
+# so a NumPy source does not raise TypeError.
+device_buf = cp.empty(host_array.shape, dtype=host_array.dtype)
 device_buf.set(pinned_view, stream=stream)     # async H2D on `stream`
 stream.synchronize()
 
@@ -745,8 +753,10 @@ into a single lookup before reading the detailed bullets below.
 - The access pattern is well known ahead of time and interview/production
   code needs deterministic, profileable transfer timing — explicit
   `cudaMemcpyAsync` is easier to reason about in a profiler trace.
-- Working set exceeds device memory by a large margin on older
-  (pre-Pascal) architectures with limited oversubscription support.
+- The working set exceeds device memory and you are on Windows in the default
+  WDDM driver mode, where Unified Memory cannot oversubscribe a single
+  allocation past device capacity. Oversubscription requires Linux (or a
+  Windows TCC-mode device); check the platform before relying on it.
 
 **Use zero-copy when:**
 - The kernel touches a buffer once, or very rarely, and copying it wholesale
@@ -754,9 +764,9 @@ into a single lookup before reading the detailed bullets below.
 
 **Avoid zero-copy when:**
 - The buffer is read many times per kernel launch or across many launches —
-  every access pays PCIe/NVLink round-trip latency instead of HBM latency
-  (roughly two orders of magnitude slower per access), which dominates
-  quickly.
+  every access is served over the interconnect instead of from HBM, and a
+  PCIe Gen4 x16 link carries ~32 GB/s against an A100's 1,935 GB/s of HBM2e,
+  so a reused buffer runs roughly 60x slower on the mapped path.
 
 ---
 
@@ -1011,13 +1021,16 @@ the *next* call instead of the one that actually failed.
 
 ## 14. Case Study
 
-### Scenario: a signal-processing pipeline stalls on upload
+### Scenario: a machine-vision pipeline stalls on upload
 
-A team ships a real-time audio-denoising pipeline: 10 ms frames arrive from
-the host, get uploaded to the GPU, denoised by a CUDA kernel, and downloaded
-back for playback. Profiling shows the pipeline barely keeps up with
+A team ships a real-time inspection pipeline: a 12-megapixel camera delivers
+one `float32` mono frame (12M x 4 B = **48 MB**) every 10 ms at 100 fps. Each
+frame is uploaded to the GPU, denoised by a CUDA kernel, and downloaded for
+the defect classifier. Profiling shows the pipeline barely keeps up with
 real-time (10 ms budget per frame), and the kernel itself measures at only
-3 ms in isolation.
+3 ms in isolation. Sanity-check the copy times against §8's bars before
+reading on: 48 MB at the pageable path's 12 GB/s is 4 ms; at the pinned
+path's 28 GB/s it is 1.7 ms.
 
 ### Diagram: the original synchronous pipeline
 
@@ -1027,11 +1040,11 @@ flowchart LR
     classDef slow  fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
     classDef fast  fill:#98c379,stroke:#27ae60,color:#1a1a1a,font-weight:bold
 
-    IN(["Host: 10ms audio frame\n(pageable buffer)"])
+    IN(["Host: 48 MB camera frame\n(pageable buffer)"])
     UP["cudaMemcpy H2D\n~4ms (pageable, staged)"]
     K["Denoise kernel\n~3ms"]
     DOWN["cudaMemcpy D2H\n~4ms (pageable, staged)"]
-    OUT(["Playback"])
+    OUT(["Defect classifier"])
 
     IN --> UP --> K --> DOWN --> OUT
     class IN,OUT io
@@ -1048,17 +1061,17 @@ pageable copies, not the kernel, causing it.
 ```cpp
 // BROKEN: pageable host buffers, synchronous copies, no overlap between
 // frame N's download and frame N+1's upload.
-struct AudioPipeline {
+struct FramePipeline {
     float* h_in;   // plain new[] -- pageable
     float* h_out;  // plain new[] -- pageable
     float* d_in;
     float* d_out;
-    size_t frameSamples;
+    size_t frameElems;
 
     void processFrame() {
-        size_t bytes = frameSamples * sizeof(float);
+        size_t bytes = frameElems * sizeof(float);
         cudaMemcpy(d_in, h_in, bytes, cudaMemcpyHostToDevice);
-        denoiseKernel<<<grid, block>>>(d_in, d_out, frameSamples);
+        denoiseKernel<<<grid, block>>>(d_in, d_out, frameElems);
         cudaMemcpy(h_out, d_out, bytes, cudaMemcpyDeviceToHost);
         // No error check on any of the three calls above.
     }
@@ -1072,16 +1085,16 @@ struct AudioPipeline {
 // upload begin while frame N's kernel is still running, and the pipeline's
 // steady-state latency drops to roughly the max(upload, kernel, download)
 // stage instead of their sum.
-struct AudioPipelineFixed {
+struct FramePipelineFixed {
     float* h_in;   // cudaHostAlloc -- pinned
     float* h_out;  // cudaHostAlloc -- pinned
     float* d_in;
     float* d_out;
     cudaStream_t stream;
-    size_t frameSamples;
+    size_t frameElems;
 
     void init() {
-        size_t bytes = frameSamples * sizeof(float);
+        size_t bytes = frameElems * sizeof(float);
         CUDA_CHECK(cudaHostAlloc(&h_in, bytes, cudaHostAllocDefault));
         CUDA_CHECK(cudaHostAlloc(&h_out, bytes, cudaHostAllocDefault));
         CUDA_CHECK(cudaMalloc(&d_in, bytes));
@@ -1090,10 +1103,10 @@ struct AudioPipelineFixed {
     }
 
     void processFrame() {
-        size_t bytes = frameSamples * sizeof(float);
+        size_t bytes = frameElems * sizeof(float);
         CUDA_CHECK(cudaMemcpyAsync(d_in, h_in, bytes, cudaMemcpyHostToDevice,
                                     stream));
-        denoiseKernel<<<grid, block, 0, stream>>>(d_in, d_out, frameSamples);
+        denoiseKernel<<<grid, block, 0, stream>>>(d_in, d_out, frameElems);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpyAsync(h_out, d_out, bytes, cudaMemcpyDeviceToHost,
                                     stream));
@@ -1171,7 +1184,7 @@ into roughly the maximum of the three stages once steady state is reached.
 
 - Why did pinning the buffers alone (without async) already roughly halve
   copy time, before any overlap was introduced?
-- What would happen to this pipeline's latency if the audio frames were large
+- What would happen to this pipeline's latency if the frames were large
   enough that pinning them exhausted a meaningful fraction of system RAM?
 - How would you verify the claimed overlap actually happened, rather than
   trusting the wall-clock numbers — see

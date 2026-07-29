@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-Memory coalescing is the hardware mechanism by which a GPU's memory controller merges the individual global-memory requests issued by the 32 threads of a warp into the smallest possible number of physical bus transactions. It is the single highest-leverage performance topic in CUDA: on nearly every profiled "slow kernel" ticket, the first thing a senior GPU engineer checks is whether the warp's addresses are coalesced, because an uncoalesced access pattern can silently throw away 50-97% of the memory bandwidth a kernel actually has available.
+Memory coalescing is the hardware mechanism by which a GPU's memory controller merges the individual global-memory requests issued by the 32 threads of a warp into the smallest possible number of physical bus transactions. It is the single highest-leverage performance topic in CUDA: on nearly every profiled "slow kernel" ticket, the first thing a senior GPU engineer checks is whether the warp's addresses are coalesced, because an uncoalesced access pattern can silently throw away 50-87.5% of the memory bandwidth a kernel actually has available.
 
 The hardware does not see "thread 3 wants `arr[3]`" — it sees a warp-wide memory instruction and asks a single question: *what is the minimum set of 32-byte sectors that covers every address the 32 active lanes touched?* When those 32 lanes touch 32 consecutive 4-byte words starting at a 128-byte-aligned address, the answer is exactly four sectors (128 bytes) — one transaction, zero waste. When the lanes touch addresses that are strided, misaligned, or scattered, the answer balloons: the same 128 bytes of *useful* data might require 256 bytes, 1024 bytes, or (in the worst case) 32 separate 32-byte transactions to service.
 
@@ -30,7 +30,7 @@ This module is the kernel author's field guide to that mechanism: the hardware t
 - **The hardware transacts in fixed-size sectors, not bytes.** On compute capability 6.0+ (Pascal onward), global memory transactions are serviced through 32-byte sectors; up to four contiguous sectors combine into a 128-byte L1/L2 cache-line-sized transaction.
 - **Coalesced = consecutive + aligned.** A warp's 32 lanes reading 32 consecutive 4-byte `float`s starting at a 128-byte-aligned address is the textbook case: exactly 4 sectors, exactly 128 bytes, 100% of the fetched bytes used.
 - **Stride destroys sector efficiency, not necessarily transaction *count*.** A stride-2 access still hits 32 distinct 4-byte words, but they now spread across twice the address range, so twice the sectors (and bytes) must be fetched to deliver the same 128 bytes of *useful* data — 50% of every transaction is wasted.
-- **Scatter (large stride / random) destroys sector *sharing* entirely.** When each lane's 4 bytes lands in a different 32-byte sector from every other lane, the warp needs up to 32 separate sector fetches — as little as 1/8 to 1/32 of the bytes moved are ever used (the classic "8-32× bandwidth loss" figure).
+- **Scatter (large stride / random) destroys sector *sharing* entirely.** When each lane's 4 bytes lands in a different 32-byte sector from every other lane, the warp needs 32 separate sector fetches — 1024 bytes moved for 128 bytes used, so exactly 1/8 of the traffic is useful (an 8x bandwidth loss) while the *transaction count* rises up to 32x.
 - **Misalignment splits a would-be single transaction into two.** Even a perfectly consecutive, unit-stride access is not free if it starts at an address that is not 128-byte aligned — the request straddles two cache lines and costs two transactions instead of one.
 - **AoS layouts are a structural coalescing trap.** When a warp reads "one field from every thread's struct" (e.g. all 32 threads read `particles[tid].x`), the field is separated from the next thread's copy of the same field by `sizeof(struct)` bytes — a stride equal to the whole struct size, not 4 bytes.
 - **SoA layouts make the common warp access pattern free.** Splitting each field into its own contiguous array turns "read field x for all 32 threads" back into a unit-stride, fully coalesced load.
@@ -48,9 +48,9 @@ This module is the kernel author's field guide to that mechanism: the hardware t
 | **Coalesced, aligned** | Consecutive addresses, 128-byte-aligned start | 4 sectors (128 B) | 100% |
 | **Coalesced, misaligned** | Consecutive addresses, arbitrary start offset | 5 sectors (spans 2 cache lines) | ~80% |
 | **Strided (stride 2)** | Every other element (`arr[tid*2]`) | 8 sectors (256 B) for 128 B useful | 50% |
-| **Strided (stride 8)** | Every 8th element | up to 32 sectors, minimal sharing | ~12.5% |
-| **Scattered / large-stride (column-major)** | Row-width or larger stride, e.g. transposed matrix access | up to 32 sectors, one per lane | ~12.5% (worst case ~3%) |
-| **Fully random** | Hash-bucket or pointer-chased indices | up to 32 sectors, zero sharing | as low as ~3-12.5% |
+| **Strided (stride 8)** | Every 8th element (32 B apart — one sector per lane) | 32 sectors (1024 B), no sharing | 12.5% |
+| **Scattered / large-stride (column-major)** | Row-width or larger stride, e.g. transposed matrix access | 32 sectors, one per lane | 12.5% |
+| **Fully random** | Hash-bucket or pointer-chased indices | 32 sectors, zero sharing, up to 32 separate transactions | 12.5% |
 
 ### 4.2 By Layout Strategy
 
@@ -110,8 +110,8 @@ used/skip    X  .   X  .   X  .   X  .   ...           X  .   X  .
 
 X = 4 B this lane actually reads     . = 4 B fetched into the sector, unused
 
-sector 0 [bytes  0-31]: L0,L2 use bytes 0-3,16-19  -> 32 B fetched, 8 B used
-sector 1 [bytes 32-63]: L4,L6 use bytes 32-3,48-19 -> 32 B fetched, 8 B used
+sector 0 [bytes  0-31]: L0-L3 use bytes 0-3,8-11,16-19,24-27 -> 32 B, 16 B used
+sector 1 [bytes 32-63]: L4-L7 use bytes 32-35,40-43,48-51,56-59 -> 32 B, 16 B used
 ...(pattern repeats across all 8 sectors spanning 256 B)...
                           TOTAL: 256 B moved, 128 B used -> 50% bus efficiency
 ```
@@ -133,8 +133,9 @@ byte addr    0       4096       8192      12288       ...     126976
 32 lanes -> 32 separate 32 B sector fetches = 1024 B moved to deliver 128 B
 useful data -> 8x bandwidth waste (12.5% efficiency) even in the best case
 where the memory controller can batch same-cycle sector fetches; a fully
-random / pointer-chased pattern can serialize these into 32 distinct
-transactions per warp -- up to 32x more traffic than the coalesced ideal.
+random / pointer-chased pattern serializes these into 32 distinct
+transactions per warp -- 32x the transaction COUNT of the coalesced ideal,
+though the bytes moved stay at 8x because a sector is 32 B, not 128 B.
 ```
 
 *This is the shape of the naive matrix-transpose write and of any "read down a column" loop over a row-major array — the case study in §14 shows the shared-memory fix.*
@@ -183,9 +184,9 @@ flowchart LR
 
     warp(["Warp issues<br/>32 addresses"]) --> chk{"Consecutive and<br/>128B-aligned?"}
     chk -->|"Yes"| one("1 transaction<br/>4 sectors, 100%")
-    chk -->|"No"| gap{"Small stride<br/>2 to 8?"}
-    gap -->|"Yes"| few("2-8 sectors<br/>12.5-50% eff.")
-    gap -->|"No"| many("Up to 32 sectors<br/>3-12.5% eff.")
+    chk -->|"No"| gap{"Stride 2 to 4<br/>elements?"}
+    gap -->|"Yes"| few("8-16 sectors<br/>25-50% eff.")
+    gap -->|"No"| many("32 sectors<br/>12.5% floor")
 
     class warp io
     class chk,gap mathOp
@@ -205,10 +206,10 @@ xychart-beta
     title "Global-Memory Bus Efficiency by Access Pattern"
     x-axis ["Aligned", "Misaligned", "Stride-2", "Stride-8", "Scatter", "Random"]
     y-axis "Bus efficiency (%)" 0 --> 100
-    bar [100, 80, 50, 12.5, 12.5, 5]
+    bar [100, 80, 50, 12.5, 12.5, 12.5]
 ```
 
-*Going from aligned to merely misaligned costs 20 points; going from stride-2 to stride-8 costs 37.5 more — after that, scattered and random patterns are all fighting over the same ~3-12.5% floor, which is why "just add a little padding" rarely helps a badly strided kernel.*
+*Going from aligned to merely misaligned costs 20 points; going from stride-2 to stride-8 costs 37.5 more — after that, scattered and random patterns all sit on the same 12.5% floor (4 useful bytes per 32-byte sector), which is why "just add a little padding" rarely helps a badly strided kernel.*
 
 ### 5.7 Layout Tradeoff Space — AoS, SoA, AoSoA, Vectorized
 
@@ -647,11 +648,6 @@ cuda.synchronize()
 // cudaMallocPitch pads the row stride ("pitch") to a hardware-friendly value
 // and returns it; the kernel must index with the pitch, not the logical width.
 
-size_t pitch;
-float* d_matrix;
-int width = 1000, height = 1000;   // 1000 floats/row -> not 128 B-aligned
-CUDA_CHECK(cudaMallocPitch(&d_matrix, &pitch, width * sizeof(float), height));
-
 __global__ void rowSumPitched(const float* data, size_t pitch, float* sums,
                                int width, int height) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -663,6 +659,14 @@ __global__ void rowSumPitched(const float* data, size_t pitch, float* sums,
     for (int col = 0; col < width; col++) sum += rowPtr[col];
     sums[row] = sum;
 }
+
+void allocatePitched() {
+    size_t pitch;
+    float* d_matrix;
+    int width = 1000, height = 1000;   // 1000 floats/row -> not 128 B-aligned
+    CUDA_CHECK(cudaMallocPitch(&d_matrix, &pitch, width * sizeof(float), height));
+    // ... launch rowSumPitched<<<...>>>(d_matrix, pitch, ...) ...
+}
 ```
 
 ---
@@ -671,10 +675,10 @@ __global__ void rowSumPitched(const float* data, size_t pitch, float* sums,
 
 - **cuBLAS/cuDNN GEMM kernels** stage tiles through shared memory precisely so the global-memory phase is always a coalesced, vectorized (`float4`/`128-bit`) load regardless of the logical matrix layout requested by the caller — see [shared_memory_and_bank_conflicts](../shared_memory_and_bank_conflicts/) and the tiled-GEMM case study.
 - **Thrust and CUB** default to SoA-friendly iterator patterns and document that `transform`/`reduce` over interleaved (AoS) data should be restructured or accessed via `zip_iterator` over separate arrays to preserve coalescing.
-- **Physics engines (particle simulators, molecular dynamics codes)** are a canonical AoS-vs-SoA battleground: early CUDA ports of N-body and MD codes (e.g. early GROMACS/AMBER GPU ports) saw multi-x speedups converting `float4` "one struct per atom" layouts to separated position/velocity/force arrays once the access pattern was warp-wide per-field rather than per-particle.
+- **Physics engines (particle simulators, molecular dynamics codes)** are the canonical AoS-vs-SoA battleground, and the deciding question is whether a kernel reads *one* field or *all* of them. GROMACS packs a particle's x, y, z and charge into a single 16-byte `float4` (`xyzq`) precisely because its nonbonded kernel consumes all four together — a 16-byte-aligned AoS read is the vectorized case of §6.6 and transacts at 100% efficiency. Codes whose kernels sweep one field at a time across all particles go the other way and split position, velocity and force into separate arrays.
 - **Image processing pipelines** load pixels as `uchar4`/`float4` (RGBA) precisely because the channel layout is naturally 4-wide and vectorizable — a coalescing win that comes for free from the data's native shape.
 - **cuFFT and cuSPARSE** internally reorder/pad data (bit-reversal permutation staged through shared memory; CSR row-pointer alignment) specifically to keep the memory-bound phases of FFT butterflies and sparse row gathers coalesced.
-- **The classic NVIDIA "Efficient Matrix Transpose" developer-blog case** (Ruetsch & Micikevicius) is the textbook demonstration that a naive transpose is bandwidth-starved by uncoalesced writes, and that a shared-memory tile fixes it — reproduced in §14 below.
+- **NVIDIA's matrix-transpose material** — the whitepaper "Optimizing Matrix Transpose in CUDA" (Ruetsch & Micikevicius) and the shorter developer-blog post "An Efficient Matrix Transpose in CUDA C/C++" (Mark Harris) — is the textbook demonstration that a naive transpose is bandwidth-starved by uncoalesced writes, and that a shared-memory tile fixes it; reproduced in §14 below.
 
 ---
 
@@ -710,59 +714,53 @@ __global__ void rowSumPitched(const float* data, size_t pitch, float* sums,
 
 ## 10. Common Pitfalls
 
-### 10.1 BROKEN -> FIX: Column-Major (Strided) Global Access
+### 10.1 BROKEN -> FIX: One Thread Per Row (Strided) Global Access
 
 ```cuda
-// BROKEN: each thread walks straight down a column of a row-major matrix.
-// data[row * width + col] means consecutive threadIdx.x (mapped to `row`)
-// jump `width` elements apart -- exactly the 5.3 large-stride disaster.
-__global__ void columnSumBroken(const float* data, float* colSums,
-                                 int height, int width) {
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (col >= width) return;
+// BROKEN: each thread owns one ROW of a row-major matrix and walks across it.
+// Coalescing is decided per warp per INSTRUCTION, so what matters is the gap
+// between lanes inside one iteration: lane i and lane i+1 read addresses
+// `width * 4` bytes apart -- exactly the 5.3 large-stride disaster.
+__global__ void rowSumBroken(const float* data, float* rowSums,
+                              int height, int width) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= height) return;
     float sum = 0.0f;
-    for (int row = 0; row < height; row++) {
-        sum += data[row * width + col];   // stride = width * 4 bytes per row
+    for (int col = 0; col < width; col++) {
+        sum += data[row * width + col];   // lanes stride by width * 4 bytes
     }
-    colSums[col] = sum;
+    rowSums[row] = sum;
 }
-// Nsight Compute: "Global Load Efficiency" ~ 12-25% depending on width;
-// "sectors per request" far above the ideal 4/request.
+// Nsight Compute: "Global Load Efficiency" 12.5% once width >= 8 floats
+// (every lane owns its own sector); "sectors per request" pinned at 32
+// instead of the ideal 4.
 ```
 
 ```cuda
-// FIX: keep the same per-thread "own one column" assignment (the algorithm
-// genuinely needs a per-column reduction), but change *which axis maps to
-// threadIdx.x within a tile* so a warp reads one row (contiguous) at a time
-// and reduces across rows using shared memory -- i.e. restructure the loop
-// so the warp-wide load is row-major (SoA-equivalent for this access), then
-// each thread accumulates its own column from the tile that is now resident
-// on-chip in a coalesced-friendly layout.
-#define TILE 32
+// FIX: give each WARP one row instead of each thread. The 32 lanes now sweep
+// across the row together, so every load is unit-stride and coalesced (5.1),
+// and the per-row total is finished with a warp-shuffle reduction rather than
+// a per-thread serial loop. The algorithm is unchanged; only the thread-to-
+// index mapping moved -- remediation row 1 of the §4.3 table.
+__global__ void rowSumFixed(const float* data, float* rowSums,
+                             int height, int width) {
+    int warpId = (blockIdx.x * blockDim.x + threadIdx.x) / 32;  // warp-uniform
+    int lane   = threadIdx.x & 31;
+    if (warpId >= height) return;          // whole warp exits together
 
-__global__ void columnSumFixed(const float* data, float* colSums,
-                                int height, int width) {
-    __shared__ float tile[TILE][TILE + 1];   // +1 padding, see bank-conflicts doc
-    int col = blockIdx.x * TILE + threadIdx.x;
+    const float* rowPtr = data + (size_t)warpId * width;
     float sum = 0.0f;
+    // Coalesced: consecutive lanes -> consecutive col -> unit stride (see 5.1).
+    for (int col = lane; col < width; col += 32) sum += rowPtr[col];
 
-    for (int rowBase = 0; rowBase < height; rowBase += TILE) {
-        int row = rowBase + threadIdx.y;
-        // Coalesced global read: consecutive threadIdx.x -> consecutive col
-        // -> consecutive addresses within row `row` (unit stride, see 5.1).
-        tile[threadIdx.y][threadIdx.x] =
-            (row < height && col < width) ? data[row * width + col] : 0.0f;
-        __syncthreads();
-        if (threadIdx.y == 0) {
-            for (int r = 0; r < TILE; r++) sum += tile[r][threadIdx.x];
-        }
-        __syncthreads();
-    }
-    if (threadIdx.y == 0 && col < width) colSums[col] = sum;
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xffffffff, sum, off);
+    if (lane == 0) rowSums[warpId] = sum;
 }
-// Measured-style result: Global Load Efficiency rises from ~15% to ~95-100%;
-// end-to-end kernel time drops roughly 4-6x on a bandwidth-bound column sum
-// over a large (e.g. 8192 x 8192) matrix.
+// Measured-style result: Global Load Efficiency rises from 12.5% to ~100%;
+// end-to-end kernel time drops roughly 4-6x on a bandwidth-bound row sum
+// over a large (e.g. 8192 x 8192) matrix. Launch with blockDim.x a multiple
+// of 32 so `warpId` stays uniform across every warp.
 ```
 
 ### 10.2 Additional Pitfalls (Shorter Form)
@@ -850,7 +848,7 @@ A sector (32 bytes) is the smallest unit the memory system will ever fetch; a tr
 It's worth a quick check but not worth deep investment — if Nsight Compute's roofline chart places the kernel near the compute ceiling rather than the memory-bandwidth ceiling, even a perfect coalescing fix will not move wall-clock time meaningfully, because the ALUs (not the memory bus) are the bottleneck; effort is better spent on instruction mix or Tensor Core utilization in that regime.
 
 **Q: Give an example where fixing coalescing made the biggest measured difference you'd expect in an interview answer.**
-The classic naive-vs-tiled matrix transpose: the naive kernel's uncoalesced writes limit it to roughly 10-15% of a GPU's peak HBM bandwidth, while a shared-memory-tiled version that makes both the read and the write coalesced typically reaches 70-90% of peak — commonly cited as a 6-8x wall-clock improvement on the transpose operation alone (see §14 for the full BROKEN -> FIX kernel pair).
+The classic naive-vs-tiled matrix transpose: the naive kernel's uncoalesced writes limit it to roughly 10-15% of a GPU's peak HBM bandwidth, while a shared-memory-tiled version that makes both the read and the write coalesced typically reaches 70-90% of peak — which works out to a 6-8x wall-clock improvement on the transpose operation alone (the arithmetic is in §14.3.1, the kernel pair in §14).
 
 **Q: Why does `cudaMallocPitch` matter for 2D arrays specifically, and not for 1D arrays?**
 A 1D array has no "next row" whose start address can drift, but a 2D array's row-to-row stride equals its logical width, and if that width is not a multiple of 128/256 bytes, every subsequent row starts progressively misaligned relative to a coalescing boundary. `cudaMallocPitch` pads the stride so every row begins aligned, and the kernel must use the returned pitch (not the logical width) for its address math.
@@ -876,7 +874,7 @@ Because a kernel that reads several fields of the *same* element in quick succes
 
 ## 14. Case Study — Naive vs Tiled Matrix Transpose
 
-**Scenario**: A row-major `float` matrix `A` of size `N x N` (`N = 4096`, so 64 MB) must be transposed into `B` such that `B[j][i] = A[i][j]`. This is one of the most-cited coalescing case studies in CUDA history (the NVIDIA developer-blog "Efficient Matrix Transpose" post) precisely because it cannot be solved by reindexing alone — one of the two global accesses is unavoidably strided unless you stage through shared memory.
+**Scenario**: A row-major `float` matrix `A` of size `N x N` (`N = 4096`, so 64 MB) must be transposed into `B` such that `B[j][i] = A[i][j]`. This is one of the most-cited coalescing case studies in CUDA history (Ruetsch & Micikevicius's "Optimizing Matrix Transpose in CUDA" whitepaper, and Mark Harris's follow-up developer-blog post) precisely because it cannot be solved by reindexing alone — one of the two global accesses is unavoidably strided unless you stage through shared memory.
 
 ### 14.1 Why Reindexing Alone Cannot Fix It
 
@@ -939,8 +937,8 @@ __global__ void transposeNaive(const float* in, float* out) {
         out[x * N + y] = in[y * N + x];   // write stride = N floats = 16 KB
     }
 }
-// Measured-style result on an A100 (HBM2e, ~1.9 TB/s peak): naive transpose
-// sustains roughly 200-280 GB/s -- about 11-15% of peak bandwidth, similar
+// Measured-style result on an A100 80GB PCIe (HBM2e, 1,935 GB/s peak): naive transpose
+// sustains roughly 200-280 GB/s -- about 10-14% of peak bandwidth, similar
 // to what a fully scattered access would cost even though the read side is
 // perfectly coalesced.
 ```
@@ -984,7 +982,7 @@ __global__ void transposeTiled(const float* in, float* out) {
     }
 }
 // Measured-style result on the same A100: tiled transpose sustains roughly
-// 1.4-1.7 TB/s -- about 74-89% of peak bandwidth, a ~6-8x wall-clock
+// 1.4-1.7 TB/s -- about 72-88% of peak bandwidth, a ~6-8x wall-clock
 // improvement over transposeNaive for the same 64 MB matrix.
 ```
 
@@ -1009,8 +1007,8 @@ scorecard for coalescing.
 | `bytes_read + bytes_written` | The kernel's mandatory traffic. For a transpose, the matrix once in each direction |
 | `elapsed_time` | Wall-clock kernel duration from `cudaEvent` timing or Nsight |
 | effective bandwidth | Bytes the *algorithm* needed, per second — not the bytes the bus actually carried |
-| `peak_HBM_bandwidth` | The device spec sheet number: `~1.9 TB/s` on an A100 (HBM2e) |
-| percent of peak | The scorecard. Above ~70% means coalesced; near 12.5% means one side is scattered |
+| `peak_HBM_bandwidth` | The device spec sheet number: `1,935 GB/s` on an A100 80GB PCIe (HBM2e) |
+| percent of peak | The scorecard. Above ~70% means coalesced; well under 30% means one side is scattered |
 
 **Walk one example.** The `N = 4096` transpose from §14.2 and §14.3, using the midpoint of each quoted range:
 
@@ -1021,27 +1019,29 @@ scorecard for coalescing.
 
   NAIVE  (quoted 200-280 GB/s, midpoint 240 GB/s):
     time = 134,217,728 B / 240e9 B/s = 0.5592 ms
-    percent of peak = 240 / 1900 = 12.6%      <- the 12.5% floor, exactly
+    percent of peak = 240 / 1935 = 12.4%
 
   TILED  (quoted 1.4-1.7 TB/s, midpoint 1550 GB/s):
     time = 134,217,728 B / 1550e9 B/s = 0.0866 ms
-    percent of peak = 1550 / 1900 = 81.6%
+    percent of peak = 1550 / 1935 = 80.1%
 
   speedup = 0.5592 ms / 0.0866 ms = 6.46x     <- matches the quoted "6-8x"
 ```
 
-Notice that the naive kernel's 12.6% of peak lands on the §6.1.1 floor to within a
-rounding error. That is not luck: its read is perfectly coalesced and its write is a
-stride-16384 scatter, so the write leg moves 8x the bytes it uses and dominates total
-time. **The percent-of-peak figure is the sector-efficiency table showing up in wall-clock
-form** — which is exactly why an experienced reviewer asks for GB/s before asking to see
-the kernel.
+Work out what the sector rule alone predicts for the naive kernel and you get a *higher*
+number than 12.4%: its read is perfectly coalesced (64 MiB moved for 64 MiB used) while
+its write is a stride-16384 scatter (512 MiB moved for 64 MiB used), so the bus carries
+576 MiB to deliver 128 MiB — a 22% ceiling. The measured figure sits below that ceiling
+because a column-major write also destroys DRAM-side locality, hammering one memory
+partition at a time; that is the effect Ruetsch & Micikevicius named **partition camping**.
+**Percent of peak is the sector-efficiency table plus whatever DRAM locality costs on top**
+— which is exactly why an experienced reviewer asks for GB/s before asking to see the kernel.
 
 **Why "effective" and not just "achieved".** Nsight's DRAM counters report the bytes the
-bus really carried (1024 MiB-worth of sectors for the naive write), while effective
-bandwidth divides only the bytes the *algorithm* required. The gap between the two is the
-waste. Report effective bandwidth when you want an honest speed number, and report both
-when you want to prove *why* a kernel is slow.
+bus really carried (576 MiB total for the naive kernel, 512 MiB of it on the write leg),
+while effective bandwidth divides only the bytes the *algorithm* required. The gap between
+the two is the waste. Report effective bandwidth when you want an honest speed number, and
+report both when you want to prove *why* a kernel is slow.
 
 ### 14.4 CuPy `RawKernel` Equivalent
 
@@ -1085,14 +1085,16 @@ assert cp.allclose(b, a.T)
 ### 14.5 Verifying the Fix in Nsight Compute
 
 ```
-ncu --set full --metrics \
-  smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct,\
-  smsp__sass_average_data_bytes_per_sector_mem_global_op_st.pct,\
-  dram__throughput.avg.pct_of_peak_sustained_elapsed \
-  ./transpose_naive ./transpose_tiled
+# ncu profiles ONE application per invocation -- run it twice, once per binary.
+METRICS=smsp__sass_average_data_bytes_per_sector_mem_global_op_ld.pct,\
+smsp__sass_average_data_bytes_per_sector_mem_global_op_st.pct,\
+dram__throughput.avg.pct_of_peak_sustained_elapsed
+
+ncu --metrics $METRICS -o naive_report ./transpose_naive
+ncu --metrics $METRICS -o tiled_report ./transpose_tiled
 ```
 
-- `transposeNaive` should show a low load-sector efficiency on the write side and DRAM throughput well under 20% of peak.
+- `transposeNaive` should show a low STORE-sector efficiency (the `_op_st` metric — the write is the strided leg) alongside a healthy load-sector efficiency, and DRAM throughput well under 20% of peak.
 - `transposeTiled` should show both load and store sector efficiency near 100% and DRAM throughput in the 70-90%-of-peak range — see [profiling_and_performance_analysis](../profiling_and_performance_analysis/) and [nsight_profiling_workflow](../case_studies/cross_cutting/nsight_profiling_workflow.md) for the full guided-analysis workflow this case study is a worked example of.
 
 ### 14.6 Discussion Questions

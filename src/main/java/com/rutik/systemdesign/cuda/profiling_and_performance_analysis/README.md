@@ -227,8 +227,8 @@ flowchart TD
 
 Every arrow is one iteration: a single hypothesis, one targeted fix, one re-measurement. The
 loop always enters at the system level and only narrows into `ncu` once a specific kernel is
-implicated — the full worked walkthrough (a matrix-transpose kernel taken from 88% wasted
-DRAM bandwidth down to 100% store efficiency) lives in
+implicated — the full worked walkthrough (a matrix-transpose kernel sitting at 88% DRAM SOL
+with only 25% store efficiency, taken to 91% SOL at 100% store efficiency) lives in
 [`nsight_profiling_workflow.md`](../case_studies/cross_cutting/nsight_profiling_workflow.md).
 
 ### SOL Bars — Reading the Triage Signal
@@ -261,8 +261,8 @@ element, less divergence, or moving the matmul onto Tensor Cores -- coalescing
 the already-adequate memory traffic further would not move this kernel at all.
 ```
 
-This ASCII mock captures the numbers from the worked transpose example in the cross-cutting
-profiling file: a naive kernel sits at 88% DRAM SOL but only 25% store efficiency (three
+This ASCII mock has the same shape as the worked transpose example in the cross-cutting
+profiling file, where a naive kernel sits at 88% DRAM SOL but only 25% store efficiency (three
 out of every four bytes moved are wasted on a strided write), which is why "92% DRAM
 throughput" alone does not mean "already optimal" — it must be read alongside sectors-per-
 request before concluding the kernel cannot go faster.
@@ -457,11 +457,16 @@ question this answers first: is the GPU busy the whole time, or are there large 
 ```bash
 # Scope to exactly one kernel launch -- never run --set full on a whole application:
 ncu --set full -k saxpy --launch-count 1 -o saxpy_ncu ./app
+
+# CI-gate recipe: emit the triage metrics as CSV and diff two runs. Because --csv writes
+# to stdout, a regression check is a plain text diff -- no GUI, no report parsing.
+ncu --csv --section SpeedOfLight -k saxpy --launch-count 1 ./app > sol_after.csv
+diff sol_before.csv sol_after.csv   # non-zero exit == the SOL profile moved
 ```
 
 | Metric | What it tells you | Read it as |
 |--------|--------------------|------------|
-| SOL Memory (DRAM throughput %) | Bytes moved to/from HBM as a fraction of peak (~3 TB/s on H100 HBM3) | Near the roof (80-95%+) = memory pipe near-saturated |
+| SOL Memory (DRAM throughput %) | Bytes moved to/from HBM as a fraction of peak (3.35 TB/s on an H100 SXM's HBM3) | Near the roof (80-95%+) = memory pipe near-saturated |
 | SOL Compute (SM throughput %) | Issued FLOPs/instructions as a fraction of peak issue rate | Near the roof = ALUs are the bottleneck |
 | Achieved occupancy | Resident warps ÷ the SM's maximum, averaged over the run | A *capacity* number for latency hiding, not throughput — see [occupancy_and_launch_configuration](../occupancy_and_launch_configuration/README.md) |
 | Warp stall reasons | Histogram of why warps were not eligible to issue | `long scoreboard` = waiting on global memory (memory-bound signature); `barrier` = `__syncthreads` imbalance; `short scoreboard` = shared-mem/texture latency; `not selected` = usually benign |
@@ -553,8 +558,10 @@ before you ever launch the profiler.
     0.17  <  295    ->  1771x below the ridge  ->  hopelessly memory-bound
 ```
 
-Kernel A can be sped up by using Tensor Cores; Kernel B cannot be sped up by any arithmetic
-change at all, because it spends 30.05 us worth of its budget waiting on bytes either way. The
+Kernel A can be sped up by using Tensor Cores — its 138.97 us compute leg is 4.6x its 30.05 us
+memory leg, so the ALUs are what to attack. Kernel B cannot be sped up by any arithmetic
+change at all: at 0.17 FLOPs/byte its runtime is fixed by the 12 bytes per element it must
+drag across HBM, no matter what the ALUs are asked to do with them in between. The
 ridge point is the single number that tells you which of those two sentences applies, and it is
 why "add more math to hide the stall" (the §10 anti-pattern below) is arithmetically doomed.
 
@@ -713,9 +720,10 @@ __global__ void slow_scale_more_math(float* out, const float* in, float k, int n
         out[i] = v;
     }
 }
-// ncu shows SOL Memory unchanged at ~90%, SOL Compute barely moves off the floor,
-// and wall-clock time is UNCHANGED (or slightly worse) -- the extra math has nowhere
-// to hide because the warps are still stalled on the same uncoalesced global loads.
+// ncu shows SOL Memory unchanged at ~90% and wall-clock time UNCHANGED: SOL Compute
+// rises but stays far below the memory bar, so the extra math still fits inside the
+// stalls the uncoalesced loads were already causing. It bought nothing -- and pile on
+// enough of it to outgrow those stalls and SOL Memory starts falling instead (§14).
 ```
 
 **FIX — profile first; the SOL bars show this is memory-bound, so coalesce instead:**
@@ -900,16 +908,18 @@ ncu --set full -k attention_gemv_kernel --launch-count 1 \
 
 ```
 Metric                              This release    Previous release
-SOL Memory (DRAM throughput)        94%             93%
+Kernel time                         0.84 ms         0.59 ms
+SOL Memory (DRAM throughput)        66%             94%
 SOL Compute (SM throughput)         41%             14%
 Achieved occupancy                  63%             67%
 Top stall reason                    long scoreboard  long scoreboard (58%)
                                      (44%)
 ```
 
-**Read it like this.** "The memory pipe was already 94% full before the change and is still
-94% full after it. The only thing that moved is how much arithmetic we pile on top — and
-arithmetic was never what we were waiting for."
+**Read it like this.** "The kernel moves exactly the same bytes as before — the diff added no
+loads or stores — but it now takes 42% longer to move them, so the memory bar has *fallen*
+from 94% to 66% while the compute bar tripled. Nothing got faster; the same traffic is
+spread over a longer kernel."
 
 Speed-of-Light bars are percentages *of that unit's own peak*, not shares of a single budget,
 so they do not sum to 100. Reading them as a pair is the entire diagnostic: which roof is the
@@ -917,7 +927,7 @@ kernel pinned against, and did the change move that roof or a different one?
 
 | Symbol | What it is |
 |--------|------------|
-| `SOL Memory` | DRAM throughput as a percentage of the GPU's peak HBM bandwidth. 94% = the memory pipe is saturated |
+| `SOL Memory` | DRAM throughput as a percentage of the GPU's peak HBM bandwidth. 94% = saturated; the same bytes over a longer kernel read as a *lower* percentage |
 | `SOL Compute` | SM issue throughput as a percentage of peak instruction/FLOP rate. 41% = ALUs are less than half busy |
 | `Achieved occupancy` | Average resident warps divided by the SM's maximum. A latency-hiding *capacity* number, not a speed |
 | `long scoreboard` | Stall reason: the warp is parked waiting on a global-memory load to return |
@@ -927,28 +937,36 @@ kernel pinned against, and did the change move that roof or a different one?
 
 ```
                                   previous   this release   delta
-    SOL Memory                       93%          94%        +1 pt      <- pinned, unchanged
+    Kernel time                     0.59 ms      0.84 ms     0.84/0.59 = 1.42x
+    SOL Memory                       94%          66%        94 x (0.59/0.84) = 66
     SOL Compute                      14%          41%        41/14 = 2.93x
     Achieved occupancy               67%          63%        -4 pt
     long-scoreboard stall            58%          44%        still the top reason
 
-    Regime check (both releases): SOL Memory 94  >>  SOL Compute 41
-      -> memory-bound in both  ->  runtime is set by bytes/s, not FLOPs/s
+    Bytes moved: IDENTICAL (the diff added arithmetic, not loads or stores)
+      -> DRAM throughput must fall by exactly the factor the kernel lengthened.
+         94 x 0.59/0.84 = 66.  The memory bar is a rate, not a workload.
 
-    Headroom left on the memory roof = 100% - 94% =  6 pt
-      -> best case from ANY arithmetic change      =  6% faster, and only if it
-         somehow also freed bandwidth, which added expf/logf does not
+    Regime check (previous release): SOL Memory 94  >>  SOL Compute 14
+      -> it was pinned against the memory roof, so no arithmetic change could
+         ever have made it faster; the most a perfect one could win was 6%
 ```
 
-The extra `expf`/`logf` tripled SOL Compute and bought nothing, because 2.93x of a number that
-was never binding is still not binding. Note the trap in the stall column: `long scoreboard`
-*fell* from 58% to 44%, which looks like an improvement — it is not. The memory waits did not
-shrink; the added arithmetic simply gave the scheduler other work to attribute cycles to, so
-the same stalls now occupy a smaller share of a longer run.
+The extra `expf`/`logf` tripled SOL Compute and bought nothing — 2.93x of a number that was
+never binding is still not binding — and then cost 42% of the runtime, because at 41% SOL
+Compute the arithmetic no longer fits inside the memory stalls that were hiding it. That is
+the sharper form of the module's lesson: adding math to a memory-bound kernel can never make
+it faster, and once the added math exceeds what memory latency hides, it makes it slower.
+Note the trap in the stall column: `long scoreboard` *fell* from 58% to 44%, which looks like
+an improvement — it is not. The memory waits did not shrink; the added arithmetic simply gave
+the scheduler other work to attribute cycles to, so the same stalls occupy a smaller share of
+a longer run.
 
-**Step 3 — hypothesize.** SOL Memory is essentially unchanged (94% vs. 93%), ruling out a
-new coalescing regression. SOL Compute nearly tripled (14% → 41%) — a code change added
-meaningfully more arithmetic per element. Reviewing the diff between releases confirms it:
+**Step 3 — hypothesize.** SOL Memory *fell* (94% → 66%) rather than rising, which rules out
+a new coalescing regression — a regression that wasted bytes would push DRAM throughput up,
+not down. The fall is exactly the 1.42x kernel lengthening applied to unchanged traffic. SOL
+Compute nearly tripled (14% → 41%) — a code change added meaningfully more arithmetic per
+element. Reviewing the diff between releases confirms it:
 a numerically-stabilized variant of the attention scaling was added, replacing a single
 multiply with an extra `expf`/`logf` pair per element, "to be safe" against overflow that
 was never actually observed in this kernel's dynamic range.
@@ -962,9 +980,9 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
 
     A(["p99 decode latency\n+40% since last release"]) --> B["nsys: decode_step range\nlonger, GPU near 100% busy\n-> one kernel dominates"]
-    B --> C["ncu on attention_gemv_kernel:\nSOL Memory unchanged (94%),\nSOL Compute 14% -> 41%"]
+    B --> C["ncu on attention_gemv_kernel:\nSOL Memory 94% -> 66%,\nSOL Compute 14% -> 41%"]
     C --> D{"Diff review:\nextra expf/logf added\nfor 'safety'"}
-    D --> E["Fix: this kernel is and\nremains memory-bound at 94%\nSOL Memory -- remove the\nunneeded transcendental ops"]
+    D --> E["Fix: same bytes, longer\nkernel -- remove the unneeded\ntranscendental ops to restore\nthe 94% memory roof"]
     E --> F["Re-measure: SOL Compute\nback to ~15%, p99 latency\nback to baseline"]
 
     class A lossN
@@ -977,7 +995,7 @@ flowchart TD
 
 ```cpp
 // BROKEN (this release) -- extra transcendental ops added defensively, on a kernel
-// that SOL Memory (94%) already shows is memory-bound and never needed them:
+// the previous release's 94% SOL Memory already showed was memory-bound:
 __global__ void attention_gemv_kernel_regressed(
     float* out, const float* q, const float* k, const float* v,
     float scale, int seq_len, int head_dim) {
@@ -1014,18 +1032,19 @@ nsys profile --trace=cuda,nvtx,osrt -o serve_trace_fixed -- \
 | Metric | Regressed | Fixed |
 |--------|----------:|------:|
 | Kernel time | 0.84 ms | 0.59 ms |
-| SOL Memory | 94% | 94% |
+| SOL Memory | 66% | 94% |
 | SOL Compute | 41% | 15% |
 | p99 decode latency (full pipeline) | +40% vs. prior release | back to prior-release baseline |
 
-DRAM throughput is unchanged before and after — expected, since this GEMV kernel's
-arithmetic intensity is low and it was always going to sit near the memory roof. What
-changed is that the same memory-bound ceiling is now reached without burning extra cycles on
-transcendental ops the profiler showed were never load-bearing for correctness in this
-kernel's actual input range. This mirrors the module-level lesson directly: once the SOL
-bars say a kernel is memory-bound, additional compute is a cost with no corresponding
-benefit, and the fix is always to remove wasted work, not add safety margins that were never
-measured against the real bottleneck.
+The bytes moved never changed — this GEMV kernel's arithmetic intensity is low and it was
+always going to sit near the memory roof. What the fix restored is the *rate*: removing the
+transcendental ops shortened the kernel back to 0.59 ms, so the same traffic is once again
+delivered at 94% of peak instead of being stretched to 66%. Read the two SOL bars as a pair
+and the diagnosis is unambiguous — a memory bar that FALLS while a compute bar RISES is
+added arithmetic, not a wasted-bytes regression, which would push the memory bar up instead.
+The module-level lesson holds in its sharper form: once the SOL bars say a kernel is
+memory-bound, additional compute is a cost with no corresponding benefit, and past the point
+where memory latency can hide it, it is a cost you pay in wall-clock time.
 
 **Discussion Questions:**
 
@@ -1036,7 +1055,7 @@ measured against the real bottleneck.
    you want in place before removing similar guards in a kernel whose dynamic range is *not*
    already well-characterized?
 3. If SOL Compute had risen from 14% to 80% instead of 41%, would the diagnosis change, and
-   what would you check next given SOL Memory was still at 94%?
+   what would SOL Memory have had to read for the bytes-moved figure to stay constant?
 4. How would you adapt this investigation for a kernel running inside a larger fused
    attention pipeline (see [`build_a_flash_attention_kernel`](../case_studies/build_a_flash_attention_kernel.md))
    where `ncu -k` might match many similarly-named kernel instantiations?
