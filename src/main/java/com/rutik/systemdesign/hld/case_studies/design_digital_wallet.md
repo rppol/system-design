@@ -199,8 +199,14 @@ public class WalletLedgerService {
      * the debit side (the side that can fail due to a concurrent update).
      * Idempotency is enforced by the caller (§4.2) BEFORE this is invoked --
      * this method assumes the idempotency key has already been claimed.
+     *
+     * READ_COMMITTED is pinned deliberately, not left to the database default.
+     * The retry below re-SELECTs inside the SAME transaction, which only sees
+     * the winner's new `version` under statement-level snapshots. Under
+     * REPEATABLE READ (MySQL InnoDB's default) the re-SELECT would keep
+     * returning the stale version and every retry would fail.
      */
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public TransferResult transfer(UUID transactionId, long fromWallet, long toWallet,
                                     long amountMinor, String currency) {
 
@@ -292,6 +298,26 @@ public class WalletLedgerService {
     }
 }
 ```
+
+**Money requests and bill splits sit entirely outside the ledger** (§1's "split / request money"). A request is *not* money movement — it moves no balance, writes no `ledger_entries` row, and must never be allowed to, because an unpaid request is a social fact, not a financial one. It lives in its own table with its own state machine:
+
+```sql
+CREATE TABLE transfer_requests (
+    request_id       BIGINT PRIMARY KEY,
+    split_group_id   BIGINT,                 -- NULL for a 1:1 request; set for a split
+    requester_wallet BIGINT      NOT NULL REFERENCES wallets(wallet_id),
+    payer_wallet     BIGINT      NOT NULL REFERENCES wallets(wallet_id),
+    amount_minor     BIGINT      NOT NULL CHECK (amount_minor > 0),
+    currency         CHAR(3)     NOT NULL,
+    status           VARCHAR(20) NOT NULL,   -- PENDING | PAID | DECLINED | EXPIRED | CANCELLED
+    transaction_id   UUID,                   -- set only on PAID; FK into ledger_entries
+    expires_at       TIMESTAMPTZ NOT NULL,
+    CONSTRAINT no_self_request CHECK (requester_wallet <> payer_wallet)
+);
+CREATE INDEX idx_requests_payer ON transfer_requests (payer_wallet, status);
+```
+
+Three properties fall out of keeping it separate. **Accepting a request is just a normal transfer**: the payer's client calls the same `POST /transfers` endpoint (§4.2) with its own `Idempotency-Key`, and the request row is flipped to `PAID` with the resulting `transaction_id` recorded — inside the *same* transaction as the debit/credit, so the request table can never claim a payment the ledger doesn't have. **A split is N independent rows sharing a `split_group_id`**, one per payer, which makes partial payment the normal state rather than an error case — three of four roommates paying is three `PAID` rows and one `PENDING`, with no half-committed group state to reconcile. And **the requester is never trusted with the payer's money**: nothing in this table can debit anyone; only the payer's own authenticated `transfer()` call can. That matters because requests are a **social-engineering surface** — a scammer mass-requesting small amounts hoping for a mis-tap — so request creation gets its own velocity limits (requests sent per hour, distinct new payers per day) alongside the transfer limits in §4.6, and `expires_at` bounds how long a stale request can sit in a payer's inbox waiting to be tapped by accident.
 
 ### 4.2 Idempotency: Client-Generated Key + Dedup Table
 
@@ -423,7 +449,7 @@ Unlike the instant, single-transaction P2P transfer (§4.1-§4.3), top-up and wi
 
 1. User initiates "Add $100 from linked bank account." The Top-Up Service writes a `topups` row with `status='PENDING'` and an `outbox` row (`TopUpInitiated`) **in one local transaction** — no ledger entry yet, because the wallet doesn't have the money.
 2. The PSP/bank-rail adapter initiates an ACH debit (or an instant card-network debit) against the linked account, carrying the **same idempotency key** through to the rail (mirroring [`./design_payment_system.md`](./design_payment_system.md) §4.3's PSP idempotency-header passthrough).
-3. **ACH path (slow)**: the debit is submitted to the ACH network and typically takes **1-3 business days** to settle (and can still be reversed via an ACH return for up to 60 days for consumer accounts — a critical fraud surface, §4.6). The wallet balance is credited **optimistically** at step 2 (most users expect "Add Money" to reflect immediately) but the `topups` row stays `PENDING` until settlement, and a **reversal** (ACH return) triggers a new offsetting ledger entry (`entry_type='REVERSAL'`) that debits the wallet — which can drive the balance negative if the user already spent the optimistically-credited funds (handled via the `non_negative_balance` CHECK being relaxed for `REVERSAL` entries specifically, with the resulting negative balance frozen for collection, §8).
+3. **ACH path (slow)**: the debit is submitted to the ACH network and typically takes **1-3 business days** to settle. Two distinct return windows follow, and conflating them is a common sizing error: an **insufficient-funds return (`R01`)** comes back fast — the receiving bank must return it by the opening of the second banking day — while an **unauthorized consumer return (`R10`/`R11`)** can arrive up to **60 calendar days** after settlement under the Nacha rules. The short window bounds the fraud pattern in §9 War Story 3; the long one bounds how long a settled top-up can still be clawed back (§4.6). The wallet balance is credited **optimistically** at step 2 (most users expect "Add Money" to reflect immediately) but the `topups` row stays `PENDING` until settlement, and a **reversal** (ACH return) triggers a new offsetting ledger entry (`entry_type='REVERSAL'`) that debits the wallet — which can drive the balance negative if the user already spent the optimistically-credited funds (handled via the `non_negative_balance` CHECK being relaxed for `REVERSAL` entries specifically, with the resulting negative balance frozen for collection, §8).
 4. **Instant debit-card path (fast)**: the card network authorizes in seconds; the wallet credit becomes `CONFIRMED` immediately, no optimistic-credit risk window.
 
 **Withdrawal (wallet -> bank)**:
@@ -585,7 +611,7 @@ Covered in full in §4.3; summary: **optimistic locking is the default for all w
 
 | Product | Distinguishing Feature | Relevance to This Design |
 |---|---|---|
-| **Venmo** | Social feed (transfers are semi-public by default) + "Instant Transfer to bank" via **Visa Direct** (minutes, ~1.5% fee) vs. standard ACH (1-3 days, free) | The standard-vs-instant withdrawal tiering in §4.4 is modeled directly on Venmo's two withdrawal options; the social feed is an orthogonal feature layered on top of the same ledger (each P2P transfer's `description` field and a `visibility` flag would drive the feed, not shown in §4.1's minimal schema) |
+| **Venmo** | Social feed (transfers are semi-public by default) + "Instant Transfer to bank" via **Visa Direct** (minutes, **1.75%** of the amount, minimum $0.25, maximum $25) vs. standard ACH (1-3 business days, free) | The standard-vs-instant withdrawal tiering in §4.4 is modeled directly on Venmo's two withdrawal options; the social feed is an orthogonal feature layered on top of the same ledger (each P2P transfer's `description` field and a `visibility` flag would drive the feed, not shown in §4.1's minimal schema) |
 | **PayPal** | Two-sided ledger with a hard distinction between **"Goods & Services"** (buyer protection, fees apply, dispute-eligible) and **"Friends & Family"** (no protection, no fees, P2P) transfers | The `entry_type` field in §4.1's `ledger_entries` schema is exactly the extension point for this distinction — a `P2P_TRANSFER` entry with `entry_type='GOODS_AND_SERVICES'` would carry different fee and dispute-eligibility logic downstream, without changing the core debit/credit mechanics |
 | **Alipay** | **Huabei** (a Buy-Now-Pay-Later credit line integrated into the wallet, letting a "balance" be partially credit-funded) and **QR-code offline payments** (a static or dynamic QR code encodes a wallet ID, scannable without a live network connection at the point of scan) | Huabei is the canonical example of why §1 scopes out "credit/lending products" — a credit-funded balance breaks the `non_negative_balance` invariant (§4.1) in a fundamentally different way than an ACH-reversal-driven negative balance (§4.4), requiring a separate "credit line" ledger account type entirely; QR offline payments are a *client-side* UX feature that still resolves to the same online `transfer()` call (§4.1) once connectivity returns |
 | **Cash App** | Wallet balance can be used to buy **Bitcoin and stocks** directly from the balance — the wallet is a funding source for an investment account, not just a P2P tool | This is the cleanest real-world example of "wallet balance as a funding source for a *different* product" — structurally, a Cash App "buy $50 of Bitcoin" debits the wallet via the same `WalletLedgerService.transfer()`-style atomic debit (§4.1), crediting an internal `BROKERAGE_CLEARING` account instead of another user's wallet, then the brokerage system takes over from there |
@@ -676,14 +702,16 @@ A non-zero `SUM(ledger_entries) - wallets.balance_minor` for any wallet means th
 
 ## 9. Common Pitfalls & War Stories
 
+> **How to read these**: the three war stories below are **composite, illustrative incidents**. The mechanisms and the fixes are real and recurring, but the specific dollar amounts, transaction counts, durations and rates are constructed to make each mechanism concrete — they are archetypes to reason from, not citable post-mortems of any named company.
+
 ### War Story 1: A Viral Giveaway Account Triggers an Optimistic-Lock Retry Storm — Broken, Then Fixed
 
-**Broken**: A marketing promotion gave a single corporate wallet account a balance of $500,000 and instructed it to send $5 to each of the first 100,000 users who completed a sign-up action, as a one-time "welcome bonus." The promotion went viral; within a 20-minute window, roughly **8,000 transfer requests/sec** targeted the *same* `from_wallet_id` (the promo account), each one a `WalletLedgerService.transfer()` call (§4.1) attempting the optimistic-locked `UPDATE wallets SET balance = balance - 500, version = version + 1 WHERE wallet_id = PROMO AND version = ?`.
+**Broken**: A marketing promotion gave a single corporate wallet account a balance of $500,000 and instructed it to send $5 to each of the first 100,000 users who completed a sign-up action, as a one-time "welcome bonus." The promotion went viral; the 100,000 sign-ups arrived in a burst over a few minutes, and with automatic and manual retries piled on top, transfer requests against the *same* `from_wallet_id` (the promo account) peaked at roughly **2,000/sec**, each one a `WalletLedgerService.transfer()` call (§4.1) attempting the optimistic-locked `UPDATE wallets SET balance = balance - 500, version = version + 1 WHERE wallet_id = PROMO AND version = ?`.
 
-**Impact**: At that request rate against a single row, the optimistic-lock `version` column became a **write hotspot** — every one of the 8,000 concurrent transactions/sec read some `version = V`, but by the time each one issued its conditional `UPDATE`, the version had already advanced past `V` (often many times over) due to the sheer concurrency. The overwhelming majority of attempts hit `rowsUpdated == 0` and retried; with `MAX_RETRIES = 3` (§4.1), a large fraction of requests **exhausted all retries and threw `TransferContentionException`**, surfacing to users as "transfer failed, please try again" — for a $5 welcome bonus that the *system* was trying to send *to* them, not the other way around. Users retried manually, multiplying the request rate further. The promo account's row became so contended that even *unrelated* read queries against it (balance checks for the promo dashboard) experienced elevated latency due to lock contention on the underlying database page. The promotion had to be paused after 35 minutes, with roughly 60% of intended recipients having received their bonus and the rest needing a manual backfill.
+**Impact**: At that request rate against a single row, the optimistic-lock `version` column became a **write hotspot** — every one of those ~2,000 concurrent transactions/sec read some `version = V`, but by the time each one issued its conditional `UPDATE`, the version had already advanced past `V` (often many times over) due to the sheer concurrency. The overwhelming majority of attempts hit `rowsUpdated == 0` and retried; with `MAX_RETRIES = 3` (§4.1), a large fraction of requests **exhausted all retries and threw `TransferContentionException`**, surfacing to users as "transfer failed, please try again" — for a $5 welcome bonus that the *system* was trying to send *to* them, not the other way around. Users retried manually, multiplying the request rate further. Even *unrelated* read queries against that row (balance checks for the promo dashboard) got slower — not from lock contention, since under MVCC "reading never blocks writing and writing never blocks reading," but because thousands of updates per second to one row leave a long chain of dead row versions that every reader must walk past (dead tuples bloating the heap page in PostgreSQL, undo-log traversal to reconstruct the snapshot in InnoDB), and autovacuum could not keep up with the churn. The promotion had to be paused after 35 minutes, with roughly 60% of intended recipients having received their bonus and the rest needing a manual backfill.
 
 **Fixed**: Two changes, one tactical and one structural:
-1. **Tactical (immediate)**: the promo account was switched to the **per-wallet sharded queue fallback** described in §4.3/§4.5 — all outbound transfers from `wallet_id = PROMO` were routed through a single ordered queue (one consumer, strictly sequential processing), eliminating concurrent writes to that row entirely. Throughput dropped to the queue's sequential processing rate (~500-1,000 transfers/sec, bounded by per-transfer latency, not by contention), but **zero requests failed** — they simply queued and were processed in order, each completing in well under the original system's worst-case retry-exhaustion latency.
+1. **Tactical (immediate)**: the promo account was switched to the **per-wallet sharded queue fallback** described in §4.3/§4.5 — all outbound transfers from `wallet_id = PROMO` were routed through a single ordered queue (one consumer, strictly sequential processing), eliminating concurrent writes to that row entirely. Throughput dropped to the queue's sequential processing rate — bounded by per-transfer latency, not by contention, so at §10's ~3-8ms per `transfer()` a single-consumer queue sustains roughly **125-330 transfers/sec** — but **zero requests failed** — they simply queued and were processed in order, each completing in well under the original system's worst-case retry-exhaustion latency.
 2. **Structural (post-incident)**: a new **"high fan-out sender" wallet flag** was added to the `wallets` schema (§4.1), settable by an internal admin tool. Any wallet flagged this way automatically routes through the per-wallet queue (§4.3's alternative) instead of optimistic locking, and the platform's promo/payroll/bulk-disbursement tooling **requires** this flag to be set before allowing a bulk-send operation to begin — turning "did anyone think about contention" from a per-promotion judgment call into a structural gate.
 
 ### War Story 2: A Missing Idempotency Key Causes a Duplicate P2P Transfer on Client Retry — Broken, Then Fixed
@@ -770,8 +798,8 @@ flowchart LR
 
 ### Database Connection Pool and Throughput
 
-- At ~116 transfers/sec average (§2, peak ~600/sec) spread across 64 shards, each shard sees roughly **2-10 transfers/sec average**, peaking at **~10-15/sec** — each `transfer()` (§4.1) taking ~3-8ms (one SELECT, two conditional UPDATEs, two INSERTs, in-region commit).
-- Following the HikariCP default pool size of 10 (this repo's convention): a pool of 10 connections per shard, each sustaining 100-300 transfers/sec, gives **1,000-3,000 transfers/sec capacity per shard** — vastly exceeds the per-shard peak of ~15/sec, meaning **connection pool size is not the bottleneck** at this scale; the bottleneck (if any) would be the optimistic-lock retry rate on individual hot wallets (War Story 1), not aggregate throughput.
+- At ~116 transfers/sec average (§2, peak ~600/sec) spread across 64 shards, each shard sees roughly **2 transfers/sec average**, peaking at **~10/sec** — each `transfer()` (§4.1) taking ~3-8ms (one SELECT, two conditional UPDATEs, two INSERTs, in-region commit).
+- Following the HikariCP default pool size of 10 (this repo's convention): a pool of 10 connections per shard, each sustaining 100-300 transfers/sec, gives **1,000-3,000 transfers/sec capacity per shard** — vastly exceeds the per-shard peak of ~10/sec, meaning **connection pool size is not the bottleneck** at this scale; the bottleneck (if any) would be the optimistic-lock retry rate on individual hot wallets (War Story 1), not aggregate throughput.
 
 ### Idempotency Cache and Velocity-Limit Counters
 
@@ -788,7 +816,7 @@ flowchart LR
 | Cross-shard transfer rate | 80% same-shard (affinity-aware placement) | ~16/sec average requiring saga path |
 | Idempotency cache | 10M keys/day x ~100 bytes, 24h TTL | ~1GB |
 | Velocity-limit counters | 100M wallets x ~50 bytes, 10-min TTL | ~5GB |
-| DB connections per shard | ~15/sec peak / ~100-300/sec per connection | 10 connections (HikariCP default) per shard |
+| DB connections per shard | ~10/sec peak / ~100-300/sec per connection | 10 connections (HikariCP default) per shard |
 
 ### Disaster Recovery: A Wallet Shard Fails
 
@@ -820,7 +848,7 @@ A: Because the entire operation — checking the sender's balance, debiting it, 
 A: A nightly reconciliation job (§8) computes `SUM(ledger_entries.signed_amount)` per wallet and compares it to `wallets.balance_minor` — **any non-zero difference is a CRITICAL page**, not a warning, because it means the system's two sources of truth for "how much money does this person have" disagree. The fix is to freeze the affected wallet, determine whether a ledger entry is missing or a balance update was skipped, and write a new offsetting `REVERSAL` entry that brings the two back into agreement — never directly edit `balance_minor` without a corresponding ledger row, preserving the append-only audit guarantee.
 
 **Q: What's the difference between this design's top-up flow and a merchant "charge a card" flow?**
-A: Structurally, both are sagas with an outbox and async settlement confirmation — but the **destination of funds differs**: a merchant charge's successful settlement credits a `MERCHANT_PAYABLE` account ([`./design_payment_system.md`](./design_payment_system.md) §4.2-§4.3), while a wallet top-up's settlement credits the **user's own wallet** (§4.4). The wallet-specific wrinkle is the **optimistic-credit window**: a wallet top-up via ACH typically credits the user's balance *before* the ACH debit actually settles (because users expect "Add Money" to be instant), creating a reversal-risk window of up to 60 days that a merchant-payment system doesn't have in the same form (a merchant charge's settlement webhook arrives, then the ledger entry is written — no "credit first, confirm later" ordering).
+A: Structurally, both are sagas with an outbox and async settlement confirmation — but the **destination of funds differs**: a merchant charge's successful settlement credits a `MERCHANT_PAYABLE` account ([`./design_payment_system.md`](./design_payment_system.md) §4.2-§4.3), while a wallet top-up's settlement credits the **user's own wallet** (§4.4). The wallet-specific wrinkle is the **optimistic-credit window**: a wallet top-up via ACH typically credits the user's balance *before* the ACH debit actually settles (because users expect "Add Money" to be instant), creating a reversal-risk window that runs to two banking days for an insufficient-funds return (`R01`) and up to 60 calendar days for an unauthorized consumer return (`R10`/`R11`, §4.4) — an exposure a merchant-payment system doesn't have in the same form (a merchant charge's settlement webhook arrives, then the ledger entry is written — no "credit first, confirm later" ordering).
 
 **Q: Why does this design use a maintained `balance` column instead of computing the balance as `SUM(ledger_entries)` on every read, given that the ledger is supposed to be the source of truth?**
 A: Because of the **20:1 balance-read:write ratio** (§2) — users check their balance far more often than they move money, so optimizing the read path with an O(1) indexed lookup on `balance_minor` is the right tradeoff, while `SUM(ledger_entries)` would make read latency grow with each wallet's lifetime transaction count. The ledger remains the *audit* source of truth — the nightly reconciliation job (§8) verifies `balance_minor` against `SUM(ledger_entries)` for every wallet, so "the ledger is the source of truth" is preserved as a **verified invariant**, not violated by the existence of a cache.

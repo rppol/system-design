@@ -221,11 +221,12 @@ sequenceDiagram
 The canonical 64-bit layout (Twitter's original split, also used by this repo's [Snowflake Java case study](../../java/case_studies/design_snowflake_id_generator_java.md)):
 
 ```
- 63          22 21     17 16     12 11              0
+ 62          22 21     17 16     12 11              0
   |-----------|---------|---------|----------------|
   | 41-bit ts | 5-bit DC | 5-bit W |  12-bit seq   |
   |-----------|---------|---------|----------------|
-   bit 63 (sign) is always 0 -> ID is always a positive signed long
+   bit 63 (sign) sits above this layout and is always 0
+   -> ID is always a positive signed long
 
  ts  = currentTimeMillis() - CUSTOM_EPOCH_MS
  DC  = datacenter ID   (0-31)
@@ -842,7 +843,7 @@ With synchronized critical section overhead (companion file §10):
 Realistic sustained throughput ~= 1,000,000 - 2,000,000 IDs/sec/node
 ```
 
-For the §2 scenario (1,000 nodes, 500,000 IDs/sec cluster-wide demand, ~500 IDs/sec/node average), the fleet is operating at roughly **0.01-0.05% of its theoretical ceiling** and **0.025-0.05% of its realistic ceiling** — throughput is never the binding constraint at this scale. It *would* become binding only in pathological cases: a single hot tenant or a batch job concentrating all 500,000 IDs/sec onto a handful of nodes rather than spreading across the fleet.
+For the §2 scenario (1,000 nodes, 500,000 IDs/sec cluster-wide demand, ~500 IDs/sec/node average), the fleet is operating at roughly **0.012% of its theoretical ceiling** and **0.025-0.05% of its realistic ceiling** — throughput is never the binding constraint at this scale. It *would* become binding only in pathological cases: a single hot tenant or a batch job concentrating all 500,000 IDs/sec onto a handful of nodes rather than spreading across the fleet.
 
 ### ID-Space Exhaustion Timeline (41-bit Timestamp)
 
