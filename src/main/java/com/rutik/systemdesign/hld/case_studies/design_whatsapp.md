@@ -6,7 +6,7 @@
 
 **Key insight**: WhatsApp stores messages only until delivered — once a message reaches the recipient's device, it's deleted from servers. This is what enables end-to-end encryption: messages exist on servers only transiently, and in encrypted form. Server design is built around this "store and forward" with delivery receipts model.
 
-**System at a glance**: WhatsApp is a cross-platform messaging application with 2 billion monthly active users, 100 billion messages sent per day (65B+ at peak), 1-to-1 and group messaging (up to 1024 members), voice/video calls, end-to-end encryption for all messages, media sharing (photos, videos, documents, voice notes), and read receipts (single tick -> double tick -> blue ticks).
+**System at a glance**: WhatsApp is a cross-platform messaging application with 3 billion monthly active users and over 2 billion daily actives (Meta, 2025), 100+ billion messages sent per day, 1-to-1 and group messaging (up to 1024 members), voice/video calls, end-to-end encryption for all messages, media sharing (photos, videos, documents, voice notes), and read receipts (single tick -> double tick -> blue ticks).
 
 ---
 
@@ -19,14 +19,14 @@
 - Online presence and "last seen" status
 - Message history (accessible after app reinstall)
 - Push notifications for offline users
-- Voice and video calls (out of scope for this design)
+- Voice and video calls (media path out of scope; signaling and TURN capacity are sized in §10 and §11)
 
 ### Non-Functional Requirements
 - **Availability**: 99.99% (52 min/year downtime)
 - **Latency**: Messages delivered in < 500ms for online users
 - **Consistency**: Eventual consistency acceptable (messages may arrive slightly out of order)
 - **Durability**: Messages must not be lost in transit
-- **Scale**: 65 billion messages/day peak
+- **Scale**: 100+ billion messages/day, ~3.5M messages/sec at peak
 
 ### Out of Scope
 - Payment features, status/stories, business API
@@ -36,16 +36,20 @@
 ## 2. Scale Estimation
 
 ```
-Users: 2 billion MAU, ~500M DAU
-Messages: 65 billion/day = 750,000 messages/sec at peak
-           Average: 750K/sec, peak: ~2.5M/sec
-Media: ~20% of messages contain media
-       130B media messages/day × avg 500KB = 65 PB/day (WAY too much!)
-       → Media stored on S3/CDN, messages only store URLs
-       → Realistic: 65B × 300 bytes (avg text) = ~19 TB/day for message text
+Users: 3 billion MAU, 2 billion+ daily actives
+Messages: 100 billion/day / 86,400 = ~1.16M messages/sec average
+          Peak factor ~3x (evenings across populous timezones): ~3.5M/sec
 
-Connections: 500M DAU online simultaneously ≈ 200M concurrent WebSocket connections
-             (users aren't all online at the same time; assume 40% online)
+Media: ~1 billion photo/video/document shares per day (see §10)
+       1B x ~500KB uncompressed = 500 TB/day of bytes -- far more than the
+       message path should ever carry
+       -> Media goes to blob storage + CDN; the message itself carries only a
+          URL and a decryption key (§4, Media Sharing)
+       -> Message path alone: 100B x ~1KB (ciphertext + envelope + routing
+          metadata) = ~100 TB/day
+
+Connections: ~500M concurrent WebSocket connections at peak
+             (2B+ daily actives, roughly 25% of them connected at once)
 ```
 
 ---
@@ -271,7 +275,7 @@ Cons: 1024× write amplification per group message
 
 *Optimization for large groups*: Don't fan out to offline members immediately. Only deliver to online members. Offline members pull group messages on reconnect from a group message log.
 
-**Maximum group size evolution**: 100 (2014) → 256 (2018) → 512 (2022) → 1024 (2023) → 2048 (Communities, 2024).
+**Maximum group size evolution**: 100 → 256 → 512 (May 2022) → 1024 (November 2022, announced alongside Communities, and still the limit).
 
 #### Group State Storage
 
@@ -326,7 +330,7 @@ Add/remove member, change name/avatar, modify settings: special protocol stanzas
 
 #### Communities (2022 Feature)
 
-A "community" groups up to 100 sub-groups under a parent identity. Each sub-group still uses its own Signal session and sender keys — the community layer is purely an organizational wrapper, not a new encryption layer. Total reach: 100 sub-groups × 1024 members = ~100K users in one community.
+A "community" links up to 100 groups under a parent identity, plus an announcement group admins can broadcast to. Each sub-group still uses its own Signal session and sender keys — the community layer is purely an organizational wrapper, not a new encryption layer. The binding limit is on people, not groups: WhatsApp caps a community at **2,000 members total**, counting every member across its sub-groups and announcement group, so a community is a coordination construct rather than a broadcast megaphone.
 
 #### Broadcast Lists
 
@@ -423,7 +427,7 @@ WhatsApp's server stores only ciphertext plus minimal metadata (sender, recipien
 
 #### Key Transparency (2023 Initiative)
 
-A directory service publishes verifiable logs of identity keys, so users can verify "is the key I'm encrypting to actually Bob's, not a server-substituted MITM key?" The design is based on CONIKS / Key Transparency research and is currently an opt-in feature.
+A directory service publishes verifiable logs of identity keys, so users can verify "is the key I'm encrypting to actually Bob's, not a server-substituted MITM key?" The design is based on CONIKS / Key Transparency research and ships as WhatsApp's open-sourced **Auditable Key Directory (AKD)**. Verification is automatic — a user tapping "verify security code" gets the check for free, with no extra opt-in step — and since September 2024 Cloudflare has acted as an independent third-party auditor of the directory's append-only proofs, so a tampered directory is externally detectable rather than only self-attested.
 
 **Key storage challenge**: Private keys are stored ONLY on device. If the phone is lost, messages are gone unless backed up — backup encryption is a separate system (iCloud/Google Drive with a user-controlled key).
 
@@ -507,7 +511,14 @@ Media on S3 is encrypted with a randomly generated key. The key travels with the
 
 **Option B: On-device storage with transient server-side queueing (WhatsApp's approach)** — the server holds a message only until it has been delivered to all of a user's devices, then deletes it (capped at 30 days for undelivered messages).
 
-**Decision**: On-device storage. This is what makes end-to-end encryption meaningful — if the server retained plaintext-equivalent copies, a subpoena or breach would expose history regardless of transport encryption. The trade-off is durability: losing a phone without a configured backup means losing message history. WhatsApp mitigates this with optional encrypted cloud backups (iCloud/Google Drive), which are a separate trust boundary from the messaging system itself.
+**Decision**: On-device storage. This is what makes end-to-end encryption meaningful — if the server retained plaintext-equivalent copies, a subpoena or breach would expose history regardless of transport encryption. The trade-off is durability: losing a phone without a configured backup means losing message history.
+
+**Closing the durability gap without reopening the plaintext gap** — this is how §1's "message history accessible after app reinstall" is actually delivered. The backup archive goes to the platform's cloud (iCloud/Google Drive), but it is encrypted on-device first with a key the cloud provider never sees, so the archive is opaque to Apple, Google *and* WhatsApp. The user picks how that key is held:
+
+- **64-digit key**: the client generates it, shows it once, and stores it nowhere. Recovery means typing it back in. Zero server involvement, zero recovery path if it is lost.
+- **User password**: the key is sealed into a **Backup Key Vault** built on hardware security modules. WhatsApp learns only that *a* key exists in the HSM, never the key itself; the HSM verifies the password and releases the key, and it permanently destroys the key after a small number of failed attempts.
+
+That attempt limit is the whole design. A password short enough for a human to remember has far too little entropy to survive offline brute force, so the HSM converts it into an *online-only* guessing problem with a hard cap — trading "unguessable secret" for "guessable secret plus tamper-resistant hardware that refuses to be guessed at." The backup system is therefore a genuinely separate trust boundary from the messaging pipeline: compromising the chat servers yields nothing that decrypts an archive.
 
 ### Group Fanout: Write-Time vs. Read-Time
 
@@ -531,7 +542,7 @@ Media on S3 is encrypted with a randomly generated key. The key travels with the
 
 **Option B: Persistent WebSocket connection (WhatsApp's approach)** — a single bidirectional TCP connection per online user, held open for the session.
 
-**Decision**: WebSocket. Long polling re-establishes a TCP+TLS handshake on every cycle (prohibitively expensive at 500M concurrent users) and adds HTTP header overhead per round trip. A persistent WebSocket amortizes connection setup across the entire session and lets the server push messages with sub-100ms latency. The cost is operational: ~500M long-lived connections require careful connection-table management (the Redis routing table with TTL) and graceful draining during deploys.
+**Decision**: WebSocket. Long polling re-establishes a TCP + Noise handshake on every cycle (prohibitively expensive at 500M concurrent users) and adds HTTP header overhead per round trip. A persistent WebSocket amortizes connection setup across the entire session and lets the server push messages with sub-100ms latency. The cost is operational: ~500M long-lived connections require careful connection-table management (the Redis routing table with TTL) and graceful draining during deploys.
 
 ### Presence Tracking: Redis TTL vs. Persistent Store
 
@@ -549,7 +560,7 @@ WhatsApp's architecture is unusually well-documented for a messaging system at t
 
 ### Erlang/OTP and the Actor Model
 
-WhatsApp's choice of Erlang/OTP at its founding (2009) is foundational to understanding how 50 engineers served 450M users in 2014 — roughly **9M users per engineer**, an efficiency ratio unmatched in the industry.
+WhatsApp's choice of Erlang/OTP at its founding (2009) is foundational to understanding how **32 engineers** served 450M users at the time of the 2014 acquisition — roughly **14M users per engineer**, an efficiency ratio unmatched in the industry.
 
 #### Why Erlang?
 - **Lightweight processes**: Each Erlang process consumes ~2KB of memory (vs ~1MB for a JVM thread or ~8MB for a native pthread). A single BEAM VM hosts millions of processes.
@@ -566,7 +577,7 @@ At WhatsApp, each registered phone number maps to a long-lived Erlang process (a
 Each server (typically a FreeBSD box with 96GB RAM) handled **2M+ concurrent connections**. In 2012 WhatsApp announced a single server hitting 2M TCP connections — a benchmark few competitors matched.
 
 #### Mnesia → Custom Storage Evolution
-- **Early (2009–2012)**: Mnesia (Erlang's built-in distributed DB) held offline message queues. Excellent for sub-millisecond reads but caps out at ~4GB per table.
+- **Early (2009–2012)**: Mnesia (Erlang's built-in distributed DB) held offline message queues. Excellent for sub-millisecond reads, but a `disc_only_copies` table caps out at **2 GB** — DETS stores file offsets as signed 32-bit integers — and past that limit DETS silently discards the write rather than erroring, so growth had to be handled by table fragmentation.
 - **Mid (2012–2016)**: Sharded Mnesia, then custom on-disk storage built directly on raw block devices (bypassing the file system overhead).
 - **Post-Facebook acquisition**: Migration to RocksDB-based stores and integration with Facebook's TAO/Cassandra infrastructure.
 
@@ -581,19 +592,21 @@ Example standard XMPP message stanza:
 </message>
 ```
 
-WhatsApp's binary-encoded variant compresses this to ~30 bytes using:
+WhatsApp's binary-encoded variant compresses a stanza like this to a few dozen bytes (illustrative — WhatsApp publishes no wire-format figures) using:
 - **Dictionary-based token compression**: Common XML tag names ("message", "from", "to") are encoded as single-byte tokens.
 - **Length-prefixed strings**: Avoids parser overhead.
 - **Binary integer encoding** for IDs and timestamps.
 
-Bandwidth savings: ~70% over standard XMPP — critical for users on 2G/Edge in emerging markets where data costs are prohibitive.
+The saving over verbatim XML is large — token-substituting every repeated tag name is close to a best case for dictionary compression — and it is critical for users on 2G/Edge in emerging markets where data costs are prohibitive.
 
 #### Connection Establishment
-1. Client opens a TCP connection on port 5222 (XMPP standard) or 443 (TLS-wrapped, used by ~90% of clients to bypass restrictive firewalls).
-2. TLS handshake (uses 0-RTT resumption when possible to save round trips).
-3. Authentication via SRP or token-based auth after initial registration (no plaintext password ever sent).
-4. Resume the previous session if a `<resume>` token is presented (avoids re-authenticating after brief disconnects).
+1. Client opens a TCP connection on port 443 (which traverses restrictive firewalls) or the XMPP-standard port 5222.
+2. Client and server run a **Noise Protocol Framework** handshake — Noise Pipes over Curve25519, AES-GCM and SHA-256 — which sets up the client-server encrypted channel and authenticates the client's long-term static key in the same round trips. There is no separate TLS layer and no password on the wire.
+3. Noise Pipes is exactly the `IK` + `XX` pair: a returning client that already knows the server's static key completes the handshake in one round trip via `IK`, and a first-time or key-mismatched client falls back to `XX`.
+4. Resume the previous session if a `<resume>` token is presented (avoids re-fetching state after a brief disconnect).
 5. Server sends queued offline messages.
+
+Note that this client-server channel is a *separate* layer from the Signal Protocol end-to-end encryption below: Noise protects the hop to the server, Signal protects the payload from the server.
 
 #### Resumption and Reliability
 - Each connection has a unique session ID; the server holds the session state for ~30s after a TCP disconnect.
@@ -605,7 +618,7 @@ Bandwidth savings: ~70% over standard XMPP — critical for users on 2G/Edge in 
 - Two ticks (double grey): server delivered to the recipient device.
 - Two blue ticks: recipient client confirmed READ (sent only if the user has Read Receipts enabled).
 
-Each receipt is a separate protocol stanza. Delivery receipts add ~30% overhead to total message traffic but are essential UX.
+Each receipt is a separate protocol stanza, so a single delivered-and-read message costs three stanzas on the wire rather than one — a material share of total message traffic, and the reason receipts are batched and coalesced rather than sent one per message.
 
 #### Multi-Device Architecture (2021 Rewrite)
 - Pre-2021: the phone was the source of truth; web/desktop clients were just mirrors that required the phone online.
@@ -617,7 +630,7 @@ Each receipt is a separate protocol stanza. Delivery receipts add ~30% overhead 
 
 | System | Similarity | Key Difference |
 |--------|-----------|-----------------|
-| **Signal** | Same E2E protocol (Signal Protocol), pioneered X3DH + Double Ratchet | Smaller scale (~40M users), minimal metadata retention by policy, fully open source |
+| **Signal** | Same E2E protocol (Signal Protocol), pioneered X3DH + Double Ratchet | Far smaller scale (Signal publishes no MAU figure; independent estimates put it in the tens of millions), minimal metadata retention by policy, fully open source |
 | **Telegram** | Similar client/server chat architecture, custom binary protocol (MTProto) | Cloud chat history is NOT E2E by default — only "Secret Chats" are; the server can read regular chat content |
 | **Facebook Messenger** | Shares post-acquisition infrastructure lineage (TAO, RocksDB) with WhatsApp | E2E ("Secret Conversations", later default) was added later; historically optimized for rich media and bots over minimal metadata |
 | **iMessage** | Apple-ecosystem E2E messaging with a similar per-device key model | Falls back to SMS for non-Apple recipients; key directory historically less transparent than WhatsApp's Key Transparency |
@@ -653,9 +666,9 @@ WhatsApp operates from multiple datacenters globally, with users "homed" to the 
 - Cross-region delivery uses a global routing fabric: a chat server in the EU receives a message destined for a US user → forwards via the WAN link to a US chat server → the US server pushes to the recipient.
 
 #### Data Residency and Regulatory Compliance
-- **Brazil, India, Indonesia, EU**: Local data residency requirements pin user metadata (contact lists, last-seen, profile) to in-country DCs.
-- E2E encryption simplifies compliance: WhatsApp servers never see plaintext, so most jurisdictions accept "ciphertext-in-transit storage" as not constituting personal data under GDPR Article 4(1).
-- The **2021 Brazil ruling** required local data storage for user metadata; WhatsApp built a São Paulo DC in response.
+- Data-localization obligations are narrower than "store everything in-country" and vary by data class: India's RBI circular forces *payment* data for WhatsApp Pay to be stored in India, and several jurisdictions constrain where subscriber and law-enforcement-response records may sit. Design for a per-class residency policy, not a blanket one.
+- E2E encryption **reduces** exposure but does not remove the data from scope: under GDPR, ciphertext that the controller can still tie back to an identifiable person is pseudonymised personal data (Art. 4(5)), and the EDPB's 2025 pseudonymisation guidelines are explicit that it remains fully subject to the Regulation. The right claim is "a breach or subpoena yields no message content", not "this is not personal data."
+- In August 2024 a São Paulo federal court barred WhatsApp from sharing Brazilian users' data with other Meta companies for advertising, ordering its Brazilian data-processing rules aligned with the EU's — a reminder that the regulatory pressure on a messenger at this scale usually lands on *metadata flows between products*, not on message content.
 
 #### Cross-Region Replication
 - **Synchronous within a region**: Cassandra LOCAL_QUORUM for low-latency writes (~5ms).
@@ -725,9 +738,9 @@ If the EU region is fully lost (rare — earthquake, cable cut, AWS-style region
 
 #### Future Capabilities
 - **Multi-device E2E without phone**: Currently each linked device requires the phone to be online to bootstrap keys. Migrate to per-device key trees so the phone can be permanently offline.
-- **Federation (interoperability with Signal / iMessage)**: The EU's Digital Markets Act mandates interop by 2027, requiring standardization of the Signal protocol layer across providers.
-- **On-device AI features**: Smart reply and language translation running locally via small models (e.g., Llama 3.2 1B on-device) — avoids server-side plaintext exposure but is constrained by phone compute.
-- **Quantum-resistant cryptography**: The Signal protocol is being upgraded to PQXDH (Post-Quantum Extended Diffie-Hellman); WhatsApp will follow.
+- **Third-party chat interoperability**: required by the EU's Digital Markets Act and now live — WhatsApp opened opt-in one-to-one third-party chats to European users in November 2025, with BirdyChat and Haiket as the first partners; partners must meet WhatsApp's E2E encryption bar. Group interoperability is the remaining obligation, and it is the harder one: sender keys (§4) assume a single provider owns the member list.
+- **On-device AI features**: Smart reply and language translation running locally via a small on-device model (Llama 3.2 1B is the reference-scale example) — avoids server-side plaintext exposure but is constrained by phone compute and battery.
+- **Quantum-resistant cryptography**: the Signal Protocol's post-quantum work has shipped in two stages — PQXDH replaced the classical X3DH handshake with a hybrid X25519 + ML-KEM key agreement, and in October 2025 Signal added the Sparse Post-Quantum Ratchet (SPQR), which combines with the Double Ratchet into a "Triple Ratchet" so that *ongoing* sessions, not just their setup, are quantum-resistant. Meta has a company-wide post-quantum migration underway (published April 2026); adopting the Triple Ratchet is the corresponding step for WhatsApp's E2E layer.
 
 ---
 
@@ -743,7 +756,7 @@ If the EU region is fully lost (rare — earthquake, cable cut, AWS-style region
 | Ignoring Cassandra hinted-handoff TTL | A node down for >3 hours misses writes permanently unless a manual repair runs | Alert on node-down duration approaching the 3-hour hint TTL and trigger `nodetool repair` proactively |
 | Un-throttled push notification retries after a provider outage | When APNs/FCM recovers, a thundering herd of queued pushes can get the app's token rate-limited or blocklisted | Rate-limit push delivery on recovery (e.g., 10K/sec per app token) with exponential backoff |
 | Removing a member from a large group without batching | Sender-key rotation is O(N²) — every remaining member re-distributes a new key to every other member | Batch admin removals and rotate/redistribute keys asynchronously rather than synchronously per removal |
-| Verbose XML-based protocol on mobile networks | Standard XMPP stanzas waste ~70% more bandwidth than necessary — a real cost on 2G/Edge | Binary-encode the protocol with dictionary-based token compression |
+| Verbose XML-based protocol on mobile networks | Repeated XML tag names dominate a small stanza's bytes — a real cost on 2G/Edge | Binary-encode the protocol with dictionary-based token compression |
 
 ### War Story 1: Chat Server Crashes Mid-Send
 
@@ -807,17 +820,18 @@ If the EU region is fully lost (rare — earthquake, cable cut, AWS-style region
 Back-of-envelope numbers for a WhatsApp-scale deployment. These are the numbers a principal engineer should be able to derive in an interview without referring to notes.
 
 ### Messaging Throughput
-- **2B users, 100B messages/day** = 100,000,000,000 ÷ 86,400 = **~1.16M messages/sec average**.
+- **3B users, 100B messages/day** = 100,000,000,000 ÷ 86,400 = **~1.16M messages/sec average**.
 - Peak factor 3× (evenings in populous timezones) = **~3.5M messages/sec peak**.
-- Average message size = 5KB (mostly small text + protocol overhead).
-- **Inbound bandwidth average**: 1.16M × 5KB = 5.8 GB/sec = **~50 TB/day** of message payload.
+- Average message size on the wire = **~1KB** — the ciphertext of a short text message plus the protocol envelope and routing metadata. (Media never travels this path; see Media Storage below.)
+- **Inbound bandwidth average**: 1.16M × 1KB = 1.16 GB/sec = **~100 TB/day** of message payload.
 - Outbound fanout (group chats avg 5 recipients × 0.2 of all msgs are group) = ~1.4× write-side fan-out.
 
 ### Storage Math
-- **Server-side retention until delivery**: 7 days for undelivered messages (then dropped).
-- Working set assumption: 5% of messages stay undelivered > 1 hour (users offline) × 7 days × 5KB ≈ **3.5 PB** of in-flight queue storage.
-- After Cassandra RF=3: **10.5 PB** raw disk required.
-- After compression (Snappy ~2.5× on text): **~4.5 PB** physical.
+- **Server-side retention until delivery**: undelivered messages are held **30 days**, then dropped (§5, §9 War Story 3).
+- Working set assumption: 5% of messages stay undelivered > 1 hour (recipient offline), so 100B/day × 0.05 × 30 days = **150B messages resident**.
+- 150B × ~1KB = **~150 TB** of in-flight queue storage.
+- After Cassandra RF=3: **~450 TB** raw disk required.
+- Compression buys almost nothing here, and that is a direct consequence of the E2E design: the payload column is ciphertext, which is incompressible by construction. Only the metadata columns compress, so plan on **~400 TB physical**, not the 2-3× reduction a plaintext message store would enjoy.
 
 ### Media Storage
 - **1B photo/video shares/day**, average 50KB after WebP/H.264 compression → **50 TB/day** ingest.
@@ -832,17 +846,18 @@ Back-of-envelope numbers for a WhatsApp-scale deployment. These are the numbers 
 - Add 50% headroom + multi-DC redundancy → ~500 physical chat servers.
 
 ### Voice/Video Calls
-- **2B call minutes/day** = 2B ÷ 1,440 = **~1.4M concurrent call legs** at peak.
+- **2B call minutes/day** = 2B ÷ 1,440 min/day = **~1.4M concurrent call legs averaged over the day**; evening peaks run several times higher, so size the TURN fleet off the peak, not off this figure.
 - Voice call: ~32 kbps Opus = 4 KB/sec/leg.
 - Video call: ~500 kbps VP9 = 62 KB/sec/leg.
 - Most call traffic is **peer-to-peer (WebRTC)**; TURN relay needed for ~20% (NAT traversal failures).
-- TURN bandwidth at peak: 1.4M × 0.2 × 30 KB/sec avg = **~8 GB/sec relay throughput** across the TURN fleet.
+- TURN bandwidth at average concurrency: 1.4M × 0.2 × 30 KB/sec avg = **~8 GB/sec relay throughput** across the TURN fleet, with peak provisioning a multiple of that.
 
 ### Cost Estimate (Order-of-Magnitude)
 - Compute: 500 chat servers + 200 Cassandra nodes + 100 Kafka brokers + 50 Redis nodes ≈ **~1000 boxes** at ~$30k/year fully loaded = **$30M/year compute**.
-- Bandwidth: 50 TB/day inbound × 2 (egress fanout) = 100 TB/day egress at $0.02/GB blended = **~$700M/year** (most heavily discounted via private peering and Facebook's own network).
+- Message bandwidth: 100 TB/day inbound × 2 (egress fanout) = 200 TB/day egress; at $0.02/GB blended that is 200,000 GB × $0.02 × 365 = **~$1.5M/year** — lower still in practice, since most of it rides private peering on Meta's own network.
+- Media bandwidth: 50 TB/day ingest plus roughly 1.5× that on download = ~75 TB/day CDN egress = **~$0.5M/year** at the same blended rate.
 - Blob storage: 18 PB/year × $0.023/GB-month × 12 = **~$5M/year** for S3-equivalent.
-- Total infra envelope: **~$1B/year** at this scale — efficient relative to Facebook Messenger's larger spend.
+- Total infra envelope for these components: **~$40M/year**. The counter-intuitive result is that at messenger scale **compute dominates and bandwidth is nearly free**: a 1KB text message is four orders of magnitude smaller than a second of video, so a service moving 100B of them a day still moves less data than a mid-sized video platform. The bill is driven by holding 500M idle TCP connections open, not by the bytes crossing them.
 
 ---
 
@@ -851,7 +866,7 @@ Back-of-envelope numbers for a WhatsApp-scale deployment. These are the numbers 
 ### How to Structure a 45-Minute Answer
 
 1. **Clarify scope** (2-3 min): 1:1 messaging vs. groups vs. calls; confirm end-to-end encryption is in scope (it should be — it's WhatsApp's defining feature).
-2. **Establish scale** (3-5 min): 2B users, 100B messages/day -> derive ~1.16M messages/sec average, ~3.5M peak; note ~500M users online concurrently.
+2. **Establish scale** (3-5 min): 3B users (2B+ daily), 100B messages/day -> derive ~1.16M messages/sec average, ~3.5M peak; note ~500M users online concurrently.
 3. **Sketch the high-level architecture** (5 min): clients -> load balancer -> chat server fleet -> Redis (presence + connection routing) + Kafka (durability buffer) + Cassandra (in-flight message store) + S3/CDN (media).
 4. **Deep dive on connection management and message flow** (8-10 min): persistent WebSocket per user, the Redis-based routing table, the three delivery states (sent/delivered/read), and the offline-recipient path via push notifications.
 5. **Address group messaging fanout** (5 min): write-time fanout for online members, read-time pull for offline members; discuss the up-to-1024x write amplification trade-off.
@@ -868,16 +883,16 @@ It's an intentional trade-off, not an oversight. WhatsApp uses a transient-stora
 Broadcasting to 1B recipients is inherently expensive regardless of architecture, so the practical answer combines scope-limiting and tiered delivery. WhatsApp caps broadcast lists at 256 contacts, sends to online users immediately via the normal chat path, and queues offline users for push-notification-triggered pull on reconnect. For true platform-wide announcements, a CDN-based "pull" model (publish once, clients fetch on next connect) avoids a synchronous fanout entirely.
 
 **Q: How do you guarantee message ordering in group chats?**
-Each message gets a server-assigned TIMEUUID (time-ordered) when it's written to Cassandra, and clients display messages by this timestamp — occasional reordering across different senders is acceptable and usually invisible to users. For stricter per-group ordering, all messages for a given group are routed to the same Kafka partition, which guarantees they're processed in send order by a single consumer — "good enough" ordering without a global sequencer.
+You don't: you get per-group ordering, not global ordering, and that is deliberate. Each message gets a server-assigned TIMEUUID (time-ordered) when written to Cassandra, and clients display by that timestamp — occasional reordering across different senders is acceptable and usually invisible to users. For stricter per-group ordering, all messages for a given group are routed to the same Kafka partition, which guarantees they're processed in send order by a single consumer — "good enough" ordering without a global sequencer.
 
 **Q: Why is WhatsApp built on Erlang/OTP, and would you choose it today?**
-Erlang's process model is an unusually good fit for "millions of mostly-idle, long-lived connections" — each Erlang process costs ~2KB of memory versus ~1MB for a JVM thread, so a single 96GB server can host 2M+ concurrent WebSocket sessions, each backed by its own process. The "let it crash" supervision model also means individual session crashes are isolated and self-healing rather than requiring defensive code everywhere. Whether you'd choose it *today* depends on team expertise: Go or Rust with an async runtime can approach similar connection density with a more mainstream hiring pool, but neither matches Erlang's decades-proven hot-code-reload story for zero-downtime deploys across millions of live connections.
+Erlang's process model is an unusually good fit for "millions of mostly-idle, long-lived connections". Each Erlang process costs ~2KB of memory versus ~1MB for a JVM thread, so a single 96GB server can host 2M+ concurrent WebSocket sessions, each backed by its own process. The "let it crash" supervision model also means individual session crashes are isolated and self-healing rather than requiring defensive code everywhere. Whether you'd choose it *today* depends on team expertise: Go or Rust with an async runtime can approach similar connection density with a more mainstream hiring pool, but neither matches Erlang's decades-proven hot-code-reload story for zero-downtime deploys across millions of live connections.
 
 **Q: Walk me through what happens, step by step, when Alice sends her very first message to Bob.**
 This is the X3DH handshake. Alice fetches Bob's identity key, signed pre-key, and one of his one-time pre-keys from the server (Bob doesn't need to be online). Alice computes a shared secret by combining four Diffie-Hellman exchanges between her and Bob's various keys, then sends Bob her identity key, an ephemeral key, and the first encrypted message. Bob, when he comes online, looks up the one-time pre-key Alice consumed, performs the same DH computations to derive the identical shared secret, and decrypts. From here, both sides hold a shared session, and the Double Ratchet takes over for all subsequent messages.
 
 **Q: How does the Double Ratchet provide forward secrecy, and why does that matter if a phone is compromised?**
-Every message is encrypted with a unique key derived by "ratcheting" forward a key chain (RootKey -> ChainKey -> MessageKey), combining a DH ratchet (renewed on each direction change) with a per-direction symmetric chain ratchet. If an attacker compromises a device and extracts the current key state, they can decrypt messages going forward (until the next DH ratchet step) but *cannot* decrypt previously sent messages, because earlier message keys were already derived and discarded — they aren't recoverable from the current state. This is forward secrecy, and it limits the blast radius of a single compromised device to a narrow window of messages.
+Every message is encrypted with a unique key that is derived, used once, and then discarded, so a stolen key state can't unlock the past. The keys come from "ratcheting" forward a chain (RootKey -> ChainKey -> MessageKey), combining a DH ratchet renewed on each direction change with a per-direction symmetric chain ratchet. If an attacker compromises a device and extracts the current key state, they can decrypt messages going forward (until the next DH ratchet step) but *cannot* decrypt previously sent messages, because earlier message keys were already derived and discarded — they aren't recoverable from the current state. This is forward secrecy, and it limits the blast radius of a single compromised device to a narrow window of messages.
 
 **Q: Why is removing a member from a 1024-person group an expensive operation?**
 Group messages use per-member "sender keys" — each member encrypts once with their own sender key, which was distributed point-to-point to every other member at setup, avoiding O(N²) per-message encryption. But when a member is *removed*, every remaining member must rotate their sender key (so the removed member can no longer decrypt future messages — forward secrecy for the group) and re-distribute the new key to every other remaining member. That re-distribution is O(N²) in the group size, which is why WhatsApp batches admin removals rather than processing them synchronously one at a time.
@@ -886,7 +901,7 @@ Group messages use per-member "sender keys" — each member encrypts once with t
 Since the 2021 multi-device rewrite, each linked device (phone, web, desktop) has its own independent Signal Protocol identity. The server maintains a per-user device list, and a sender encrypts N separate copies of each message — one per recipient device, typically 1-4. The phone is no longer required to be online to relay messages to other devices (pre-2021 it was the single source of truth); each device can operate independently for up to 14 days before needing to resync.
 
 **Q: How would you design the voice/video call feature?**
-It's architecturally separate from messaging: call setup uses a signaling server (structurally similar to a chat server) to exchange SDP offers/answers over the existing WebSocket, and the actual media streams flow peer-to-peer via WebRTC. TURN servers provide a relay fallback for the ~20% of calls where NAT traversal fails directly. At WhatsApp's scale (2B call-minutes/day, ~1.4M concurrent call legs at peak), the TURN relay fleet alone needs to handle roughly 8 GB/sec of throughput.
+Keep it architecturally separate from messaging: signaling rides the existing connection, but media does not touch your servers. Call setup uses a signaling server (structurally similar to a chat server) to exchange SDP offers/answers over the existing WebSocket, and the media streams flow peer-to-peer via WebRTC. TURN servers provide a relay fallback for the ~20% of calls where NAT traversal fails directly. At WhatsApp's scale (2B call-minutes/day, ~1.4M concurrent call legs on average), the TURN relay fleet alone needs to handle roughly 8 GB/sec of throughput, and several times that at evening peak.
 
 **Q: A user in Brazil messages a user in Germany. Walk through the cross-region path, and what happens if the transatlantic link drops mid-conversation.**
 Each user has a "home region" assigned by phone country code — the Brazilian user's session lives in a São Paulo (or US) DC, the German user's in an EU DC. The Brazilian user's chat server forwards the message over the WAN link to the EU DC, which delivers it to the German user's chat server and WebSocket. If the transatlantic link drops, each DC keeps serving its local users normally; the message gets queued in the Brazilian DC's Kafka and cross-DC replication buffers the write. When the link heals, queued messages drain in arrival order — the German user sees a burst of "delayed" messages, but because the 30-day offline-queue retention vastly exceeds any realistic outage, there's no message loss, only added latency.
@@ -895,20 +910,20 @@ Each user has a "home region" assigned by phone country code — the Brazilian u
 Presence is treated as soft, ephemeral state rather than durable state: each online user's connection is represented by a Redis key with a 30-second TTL, refreshed by a heartbeat every 10 seconds. No database write happens per heartbeat — only Redis TTL renewals. If the TTL expires (heartbeat stops, e.g., the user closes the app or their connection drops), the key disappears and the user is considered offline; "last seen" is written to the user's profile in the durable database only at that offline transition, which happens far less often than heartbeats.
 
 **Q: How would you scale this design to 20 billion users (10x growth)?**
-The connection layer scales roughly linearly — going from ~500 to ~5,000 chat servers, each still handling ~2M connections via Erlang/BEAM — though operational complexity (deploys, monitoring, capacity planning) grows non-linearly and would push toward more automation. Cassandra clusters would grow from ~200 to ~2,000 nodes per region, where gossip-protocol overhead becomes a real concern and more aggressive re-sharding is needed. Presence would likely move off single-shard Redis to a CRDT-based distributed store to remove per-shard single points of failure, and message routing would push toward edge compute — 50+ points of presence instead of ~5 datacenters — to keep p99 latency under 15ms globally instead of today's ~50ms.
+The connection layer scales roughly linearly, going from ~500 to ~5,000 chat servers, each still handling ~2M connections via Erlang/BEAM. Operational complexity (deploys, monitoring, capacity planning) grows non-linearly, though, and would push hard toward more automation. Cassandra clusters would grow from ~200 to ~2,000 nodes per region, where gossip-protocol overhead becomes a real concern and more aggressive re-sharding is needed. Presence would likely move off single-shard Redis to a CRDT-based distributed store to remove per-shard single points of failure, and message routing would push toward edge compute — 50+ points of presence instead of ~5 datacenters — to keep p99 latency under 15ms globally instead of today's ~50ms.
 
 ### Numbers to Remember
 
-- MAU: 2B users; ~500M concurrently online at peak
+- MAU: 3B users, 2B+ daily actives; ~500M concurrently online at peak
 - Messages/day: 100B (1.16M/sec avg, 3.5M/sec peak)
-- Voice/video minutes/day: 2B minutes (~1.4M concurrent call legs at peak)
+- Voice/video minutes/day: 2B minutes (~1.4M concurrent call legs on average; peak is a multiple of that)
 - Concurrent connections per server: 2M+ (Erlang/BEAM)
 - Chat server fleet: ~500 servers today, ~5,000 at 10x scale
 - Cassandra cluster: ~200 nodes per region; LOCAL_QUORUM write latency ~5ms p99
-- Message storage (in-flight): ~3.5 PB; media storage (30-day hot): ~1.5 PB
+- Message storage (in-flight, 30-day undelivered retention): ~150 TB (~450 TB at RF=3); media storage (30-day hot): ~1.5 PB
 - Cross-region replication lag: 50-200ms typical
 - E2E protocol: Signal (X3DH + Double Ratchet + Sender Keys)
-- Group size limit: 1024 members (2048 for Communities, 2024)
+- Group size limit: 1024 members per group; a Community links up to 100 groups but caps at 2,000 members total
 - Offline queue retention: 30 days
 - Push notification latency (APNs/FCM): 200-500ms typical, can spike to hours during provider outages
 

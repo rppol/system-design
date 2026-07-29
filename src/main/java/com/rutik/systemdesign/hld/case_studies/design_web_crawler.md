@@ -181,6 +181,12 @@ public class PolitenessFrontier {
     private final PriorityQueue<HostSchedule> readyHeap =
             new PriorityQueue<>(Comparator.comparingLong(h -> h.nextAllowedFetchTime));
 
+    /** Hosts currently sitting in readyHeap -- the heap has no contains() of its own. */
+    private final Set<String> scheduled = new HashSet<>();
+
+    /** Hosts handed to a worker but not yet reported back via onFetchComplete. */
+    private final Set<String> inFlight = new HashSet<>();
+
     private static final class HostSchedule {
         final String host;
         long nextAllowedFetchTime;
@@ -193,12 +199,21 @@ public class PolitenessFrontier {
     /** Enqueue a URL discovered for the given host. */
     public synchronized void enqueue(String host, String url) {
         backQueues.computeIfAbsent(host, h -> new ArrayDeque<>()).addLast(url);
-        // If this is a brand-new host, it's immediately eligible.
-        if (!nextAllowedFetchTime.containsKey(host)) {
-            nextAllowedFetchTime.put(host, 0L);
-            crawlDelayMs.putIfAbsent(host, DEFAULT_CRAWL_DELAY_MS);
-            readyHeap.offer(new HostSchedule(host, 0L));
+        nextAllowedFetchTime.putIfAbsent(host, 0L);
+        crawlDelayMs.putIfAbsent(host, DEFAULT_CRAWL_DELAY_MS);
+        // A host sits in the heap only while it has pending, not-in-flight work.
+        // Re-add it on every empty-to-non-empty transition, not just on first
+        // sight: a host whose queue drained once would otherwise never be
+        // scheduled again, and its later URLs would be starved forever.
+        if (!scheduled.contains(host) && !inFlight.contains(host)) {
+            readyHeap.offer(new HostSchedule(host, nextAllowedFetchTime.get(host)));
+            scheduled.add(host);
         }
+    }
+
+    /** Restore a host's politeness clock, e.g. from a checkpoint (§4.7). */
+    public synchronized void restoreNextAllowedFetchTime(String host, long time) {
+        nextAllowedFetchTime.put(host, time);
     }
 
     /**
@@ -215,6 +230,7 @@ public class PolitenessFrontier {
             if (queue == null || queue.isEmpty()) {
                 // Nothing left for this host right now; drop it from the heap.
                 readyHeap.poll();
+                scheduled.remove(top.host);
                 continue;
             }
 
@@ -223,8 +239,11 @@ public class PolitenessFrontier {
                 return null;
             }
 
-            // This host is due. Pop it, dequeue its next URL.
+            // This host is due. Pop it, dequeue its next URL, and mark it
+            // in-flight so a second worker can't claim it before the delay.
             readyHeap.poll();
+            scheduled.remove(top.host);
+            inFlight.add(top.host);
             String url = queue.pollFirst();
             return new FetchTask(top.host, url);
         }
@@ -241,13 +260,14 @@ public class PolitenessFrontier {
         long delay = crawlDelayMs.getOrDefault(host, DEFAULT_CRAWL_DELAY_MS);
         long next = now + delay;
         nextAllowedFetchTime.put(host, next);
+        inFlight.remove(host);
 
         Deque<String> queue = backQueues.get(host);
-        if (queue != null && !queue.isEmpty()) {
+        if (queue != null && !queue.isEmpty() && scheduled.add(host)) {
             readyHeap.offer(new HostSchedule(host, next));
         }
-        // If the queue is empty, the host simply isn't re-added; enqueue()
-        // will re-add it when (if) a new URL for this host arrives.
+        // If the queue is empty the host isn't re-added here; enqueue() re-adds
+        // it, carrying this same clock, when the next URL for the host arrives.
     }
 
     /** Update the crawl delay for a host, e.g. after parsing robots.txt. */
@@ -329,6 +349,16 @@ public class UrlBloomFilter {
     /** m = -n * ln(p) / (ln 2)^2 */
     private static int optimalNumBits(long n, double p) {
         double m = -n * Math.log(p) / (Math.log(2) * Math.log(2));
+        // BitSet indexes bits with an int, so one instance tops out at
+        // 2^31-1 bits, about 224M URLs at p=0.01. Fail loudly rather than
+        // narrowing to Integer.MAX_VALUE and silently shipping a filter
+        // several times smaller -- and far leakier -- than the one requested.
+        if (m > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                    "needs " + (long) m + " bits; one BitSet holds at most "
+                    + Integer.MAX_VALUE + ". Size this filter per frontier shard "
+                    + "(§4.6) or delegate to RedisBloom (§7).");
+        }
         return (int) Math.ceil(m);
     }
 
@@ -665,6 +695,10 @@ public class FrontierCheckpoint {
         long lastCheckpointedOffset = restoreSnapshot(backQueues, nextAllowedFetchTime);
 
         PolitenessFrontier frontier = new PolitenessFrontier();
+        // Restore the politeness clocks BEFORE enqueuing: a host recovered with
+        // a future nextAllowedFetchTime must not become fetchable immediately,
+        // or the restart itself becomes the politeness violation of §9's War Story 3.
+        nextAllowedFetchTime.forEach(frontier::restoreNextAllowedFetchTime);
         for (Map.Entry<String, Deque<String>> entry : backQueues.entrySet()) {
             String host = entry.getKey();
             for (String url : entry.getValue()) {
@@ -737,13 +771,13 @@ public class FrontierCheckpoint {
 
 - **Mercator** (Heydon & Najork, DEC/Compaq Systems Research Center, late 1990s): the canonical academic reference architecture for exactly the politeness-frontier design used in this case study. Mercator's frontier introduced the front-queue/back-queue split (§4.1) specifically to decouple "what order should we crawl in" (front queues, priority-based) from "how do we guarantee politeness per host" (back queues, one per host, with a minimum-delay gate). Mercator was written in Java and was notable for being extensible via pluggable modules for protocol handling (HTTP, FTP, gopher), content processing, and link extraction — a design philosophy that influenced essentially every general-purpose crawler built afterward, including the open-source Apache Nutch.
 
-- **Common Crawl**: a non-profit that runs open, periodic, planet-scale crawls and publishes the results as public datasets on AWS S3 (the `s3://commoncrawl` bucket), free for anyone to use. Each monthly Common Crawl snapshot covers roughly **3-5 billion pages** and produces tens of terabytes of compressed WARC (Web ARChive) files — a useful real-world data point that validates the "1 billion pages/month, 100 TB raw HTML" scale estimate in §2 is actually on the *conservative* end for a planet-scale crawl. Common Crawl's dataset is widely used as pretraining data for large language models, which has made crawler design (and the `robots.txt`/licensing questions around it) a topic of broader public discussion in recent years.
+- **Common Crawl**: a non-profit that runs open, periodic, planet-scale crawls and publishes the results as public datasets on AWS S3 (the `s3://commoncrawl` bucket), free for anyone to use. A recent monthly snapshot (CC-MAIN-2026-25, June 2026) covers **2.10 billion pages** and ships **~83 TiB of compressed WARC** (Web ARChive) files, ~105 TiB including the derived WAT/WET sets — a useful real-world data point that puts the "1 billion pages/month, 100 TB raw HTML" scale estimate in §2 on the *conservative* end for a planet-scale crawl, and shows the real blended page size is closer to ~170 KB than §2's deliberately conservative 100 KB. Common Crawl's dataset is widely used as pretraining data for large language models, which has made crawler design (and the `robots.txt`/licensing questions around it) a topic of broader public discussion in recent years.
 
 - **Bingbot**: Microsoft's crawler for Bing, operating at a scale comparable to Googlebot. Bingbot publishes its IP ranges and user-agent strings so site operators can identify and, if desired, configure `robots.txt` rules specifically for it — a practical illustration of §4.2's robots.txt parsing needing to handle *per-user-agent* `Disallow`/`Crawl-delay` blocks (a site might allow Googlebot a faster crawl rate than other bots via separate `User-agent:` sections in the same `robots.txt` file).
 
 - **Apache Nutch**: the direct open-source successor to the Mercator design philosophy (§6, Mercator), and historically the crawl layer beneath early Lucene/Solr search deployments. Nutch implements the same front-queue/back-queue politeness split (§4.1) and a pluggable-module architecture for protocol handlers (HTTP, FTP), parsers (HTML, PDF, Office formats), and "scoring filters" that compute the importance score driving §4.1's prioritization — Nutch's `generate -> fetch -> parse -> updatedb` cycle is essentially the offline-batch equivalent of this design's continuously-running pipeline, run in discrete passes over a Hadoop cluster rather than as always-on services.
 
-- **Heritrix vs. StormCrawler — two opposite points on the freshness/completeness spectrum**: the Internet Archive's **Heritrix** is an *archival* crawler — its goal is a complete, faithful snapshot of a site at a point in time (every page, every asset, preserved verbatim in WARC files for the Wayback Machine), so it deliberately runs in long, deep, batch-oriented crawl jobs per site rather than continuously balancing freshness against importance. **StormCrawler**, by contrast, is built on a streaming framework (Apache Storm) specifically to minimize the seed-to-fetch latency for *individual* URLs, making it a better fit for "freshness-first" use cases (§1's explicitly out-of-scope streaming-crawl variant) than for planet-scale breadth. Contrasting these two against this design's priority/freshness hybrid (§5) is a useful interview move: it shows the "crawl what matters first" architecture is a deliberate middle point between "crawl everything, slowly and completely" (Heritrix) and "crawl this one thing, as fast as possible" (StormCrawler), not the only valid design.
+- **Heritrix vs. Apache StormCrawler — two opposite points on the freshness/completeness spectrum**: the Internet Archive's **Heritrix** is an *archival* crawler — its goal is a complete, faithful snapshot of a site at a point in time (every page, every asset, preserved verbatim in WARC files for the Wayback Machine), so it deliberately runs in long, deep, batch-oriented crawl jobs per site rather than continuously balancing freshness against importance. **Apache StormCrawler** (incubating at the ASF, Java 17+), by contrast, is built on a streaming framework (Apache Storm) specifically to minimize the seed-to-fetch latency for *individual* URLs, making it a better fit for "freshness-first" use cases (§1's explicitly out-of-scope streaming-crawl variant) than for planet-scale breadth. Contrasting these two against this design's priority/freshness hybrid (§5) is a useful interview move: it shows the "crawl what matters first" architecture is a deliberate middle point between "crawl everything, slowly and completely" (Heritrix) and "crawl this one thing, as fast as possible" (StormCrawler), not the only valid design.
 
 ---
 
@@ -847,17 +881,17 @@ stateDiagram-v2
 
 **Scenario**: The visited-URL Bloom filter was sized at launch for 1 billion URLs at a 1% false-positive rate (~1.2 GB, per §2's worked example). The crawl ran continuously for over a year, and the *cumulative* number of distinct URLs ever inserted into the filter (crawled, queued, and rejected-as-duplicate URLs all get inserted to prevent re-discovery) grew to roughly **4 billion** — 4x the design capacity — with no resize.
 
-**Impact**: The false-positive-rate formula `p ~= (1 - e^(-kn/m))^k` is sharply non-linear in `n/m`. At 4x the design cardinality (`n/m` quadrupled relative to the design point), the *actual* false-positive rate climbed from the targeted ~1% to **roughly 30%**. In practice, this meant that for every ~3 genuinely new URLs the Link Extractor discovered, the Bloom filter incorrectly reported "already seen" for **roughly 1 of them**, silently dropping it from the frontier forever. Because a Bloom filter false positive produces *no error, no log entry, and no metric by default* (it just looks like "this URL was already crawled"), this degradation went undetected for weeks — discovered only when crawl-coverage audits noticed entire categories of new content (e.g., a news site's articles published in the last few months) were missing from the index despite the site being actively crawled.
+**Impact**: The false-positive-rate formula `p ~= (1 - e^(-kn/m))^k` is sharply non-linear in `n/m`. At 4x the design cardinality (`n/m` quadrupled relative to the design point), the *actual* false-positive rate climbed from the targeted ~1% to **roughly 68%** — `(1 - e^(-7*4/9.585))^7 ~= 0.679`. In practice, this meant that of every ~3 genuinely new URLs the Link Extractor discovered, the Bloom filter incorrectly reported "already seen" for **roughly 2 of them**, silently dropping them from the frontier forever. Because a Bloom filter false positive produces *no error, no log entry, and no metric by default* (it just looks like "this URL was already crawled"), this degradation went undetected for weeks — discovered only when crawl-coverage audits noticed entire categories of new content (e.g., a news site's articles published in the last few months) were missing from the index despite the site being actively crawled.
 
 ```mermaid
 xychart-beta
     title "Bloom Filter False-Positive Rate vs. Cardinality Growth"
-    x-axis ["1x design (1B URLs)", "4x actual (4B URLs)"]
-    y-axis "False-positive rate (%)" 0 --> 35
-    bar [1, 30]
+    x-axis ["1x design (1B URLs)", "2x (2B URLs)", "4x actual (4B URLs)"]
+    y-axis "False-positive rate (%)" 0 --> 75
+    bar [1, 16, 68]
 ```
 
-**The non-linearity made this dangerous**: cardinality only grew 4x, but the false-positive rate grew roughly 30x (1% to 30%) — a small, unmonitored overrun of design capacity produced a wildly disproportionate spike in silently dropped URLs.
+**The non-linearity made this dangerous**: cardinality only grew 4x, but the false-positive rate grew roughly 68x (1% to 68%, already ~16% at only 2x) — a small, unmonitored overrun of design capacity produced a wildly disproportionate spike in silently dropped URLs.
 
 **Fixed**: Two changes:
 1. **Monitoring**: added a metric tracking *observed insertions* into each Bloom filter against its *designed capacity*, with an alert when observed insertions exceed ~75% of design capacity (giving lead time before the false-positive rate becomes problematic) — this is the kind of metric that should sit alongside the frontier-queue-depth and dedup-hit-rate metrics in §8.
@@ -878,7 +912,7 @@ xychart-beta
 ### Frontier Partitioning
 
 - Partition the frontier by `consistent_hash(domain)` into a number of shards large enough that no single shard becomes a hotspot from one or a few very large domains, but small enough to keep operational overhead (monitoring, rebalancing) manageable
-- A common starting point: **a few thousand shards** (e.g., 2,000-4,000), each handling on the order of a few million distinct hosts (the long tail of the web is enormous — hundreds of millions of distinct domains exist, but the *active, worth-crawling* set is a much smaller fraction)
+- A common starting point: **a few thousand shards** (e.g., 2,000-4,000), each owning on the order of **a couple of thousand distinct hosts** — the ~5 million actively-tracked hosts of §4.7 divided across ~3,000 shards is ~1,700 hosts per shard (the long tail of the web is enormous — hundreds of millions of distinct domains exist, but the *active, worth-crawling* set is a much smaller fraction)
 - Virtual nodes (e.g., 100-200 per physical shard) on the consistent-hashing ring keep the host-to-shard distribution balanced even though individual domains vary wildly in size (a domain with 10 million pages and a domain with 10 pages both map to exactly one shard each, but the *aggregate* assignment across thousands of domains per shard averages out)
 
 ### Bloom Filter Sizing (Worked Example, §2 recap)
@@ -893,7 +927,7 @@ m = -n*ln(p) / (ln2)^2
   -> ~9.6 bits/element
 ```
 
-Practical guidance: provision the filter for **2-3x the expected steady-state cardinality** (e.g., size for 2-3 billion URLs, ~2.4-3.6 GB) so that the §9 War Story 4 saturation scenario doesn't occur within the filter's expected operational lifetime, and pair this with the monitoring + scalable-filter mitigation from §9 regardless.
+Practical guidance: provision for **2-3x the expected steady-state cardinality** (e.g., size for 2-3 billion URLs, ~2.4-3.6 GB) so that the §9 War Story 4 saturation scenario doesn't occur within the filter's expected operational lifetime, and pair this with the monitoring + scalable-filter mitigation from §9 regardless. Note that this is an *aggregate* budget, not one instance: a filter backed by a Java `BitSet` is capped at `Integer.MAX_VALUE` bits, roughly 224M URLs at p=0.01, so the visited set is held as one filter per frontier shard (§4.6) or in RedisBloom (§7), which is exactly why `UrlBloomFilter` in §4.3 rejects an oversized request instead of silently truncating it.
 
 ### Fetcher Fleet Sizing — The Politeness Gotcha
 
@@ -933,40 +967,40 @@ max sustainable rate ~= (number of hosts being actively crawled) / (average craw
 ## 11. Interview Discussion Points
 
 **Q: How do you guarantee politeness across a distributed fleet of hundreds of fetcher machines — won't multiple machines independently hit the same host?**
-A: The fix isn't local rate-limiting on each fetcher — it's sharding the URL frontier by `consistent_hash(host)` so that *every* URL for a given host, regardless of which machine discovered it, is routed to the same frontier shard's back queue (§4.6). That shard maintains a single `nextAllowedFetchTime[host]` value, and only the fetchers attached to that shard ever dequeue URLs for that host. This turns a distributed coordination problem (which would otherwise require a shared lock or rate-limit service consulted on every fetch) into a local in-memory map lookup, because the routing key and the politeness key are the same. §9's War Story 3 is the cautionary tale of what happens when this isn't the case.
+A: Shard the URL frontier by `consistent_hash(host)`, not by URL, so a host has exactly one politeness clock fleet-wide. Every URL for a given host, regardless of which machine discovered it, is routed to the same frontier shard's back queue (§4.6). That shard maintains a single `nextAllowedFetchTime[host]` value, and only the fetchers attached to that shard ever dequeue URLs for that host. This turns a distributed coordination problem (which would otherwise require a shared lock or rate-limit service consulted on every fetch) into a local in-memory map lookup, because the routing key and the politeness key are the same. §9's War Story 3 is the cautionary tale of what happens when this isn't the case.
 
 **Q: How do you avoid crawler traps like infinite calendar pages or session-ID URLs?**
-A: Three heuristics applied before a discovered URL is even enqueued (§4.5): detect repeating path segments (`/a/a/a/a/...`), detect monotonically incrementing or out-of-range query parameters (`?month=99999999`) by tracking the observed range per `(host, path, param)`, and enforce a per-host max-crawl-depth cutoff (e.g., depth 20) so that even a trap pattern not caught by the other two heuristics can't consume unbounded crawl budget. §9's War Story 1 (the infinite calendar) shows what happens without these — a single small site consumed millions of requests over three days.
+A: Apply three cheap URL-shape heuristics before a discovered URL is ever enqueued, so a trap never consumes a fetch slot. The heuristics (§4.5) are: detect repeating path segments (`/a/a/a/a/...`), detect monotonically incrementing or out-of-range query parameters (`?month=99999999`) by tracking the observed range per `(host, path, param)`, and enforce a per-host max-crawl-depth cutoff (e.g., depth 20) so that even a trap pattern not caught by the other two heuristics can't consume unbounded crawl budget. §9's War Story 1 (the infinite calendar) shows what happens without these — a single small site consumed millions of requests over three days.
 
 **Q: How do you detect near-duplicate content vs. exact duplicates, and why do you need both?**
-A: Exact duplicates (the same URL, or byte-identical content at a different URL) are caught cheaply: a Bloom filter on the URL itself (§4.3) prevents re-crawling the same URL, and content-addressed blob storage (key = hash of raw bytes) naturally dedups byte-identical content regardless of URL. *Near*-duplicates — the same article syndicated across multiple sites with a different byline or footer ad, or a page with tracking parameters appended — won't have identical bytes or identical URLs, so they need SimHash (§4.4): hash overlapping word-shingles into a 64-bit signature where similar content produces signatures differing in only a few bits, then flag pages as near-duplicates if their Hamming distance is below a threshold (e.g., <= 3 of 64 bits).
+A: Exact duplicates are caught cheaply by hashing, but near-duplicates need a similarity fingerprint, so you need both. A Bloom filter on the URL itself (§4.3) prevents re-crawling the same URL, and content-addressed blob storage (key = hash of raw bytes) dedups byte-identical content regardless of URL. *Near*-duplicates — the same article syndicated across multiple sites with a different byline or footer ad, or a page with tracking parameters appended — won't have identical bytes or identical URLs, so they need SimHash (§4.4): hash overlapping word-shingles into a 64-bit signature where similar content produces signatures differing in only a few bits, then flag pages as near-duplicates if their Hamming distance is below a threshold (e.g., <= 3 of 64 bits).
 
 **Q: How do you prioritize which pages to crawl or recrawl first?**
-A: Each URL gets a priority score combining (a) an importance estimate — a PageRank-like score based on the link graph, since a page linked from many important pages is more likely to be valuable — and (b) a freshness/recrawl-urgency term based on how long it's been since the last crawl relative to that page's *observed* historical change frequency (§4.1). This score determines which front queue (priority tier) the URL is placed in; the front-to-back router then biases dequeuing toward higher-priority tiers. A page that historically changes hourly (a news homepage) accumulates recrawl urgency much faster than a page that hasn't changed in years (an archived PDF), so it naturally gets recrawled more often without any manual scheduling.
+A: Score every URL on importance times recrawl urgency, and let the score pick its front-queue priority tier. The score combines (a) an importance estimate — a PageRank-like score based on the link graph, since a page linked from many important pages is more likely to be valuable — and (b) a freshness term based on how long it's been since the last crawl relative to that page's *observed* historical change frequency (§4.1). This score determines which front queue (priority tier) the URL is placed in; the front-to-back router then biases dequeuing toward higher-priority tiers. A page that historically changes hourly (a news homepage) accumulates recrawl urgency much faster than a page that hasn't changed in years (an archived PDF), so it naturally gets recrawled more often without any manual scheduling.
 
 **Q: How do you handle and cache robots.txt?**
-A: Before the first fetch to any host, fetch `GET http://{host}/robots.txt`, parse its `Disallow` rules (filter against these before enqueueing any URL for that host) and `Crawl-delay` directive (sets `crawlDelayMs[host]` directly, §4.2). Cache the parsed result with its own TTL (commonly 24 hours) — independent of any individual page's caching, since a stale "fully disallowed" robots.txt could permanently block a site that later opened itself up, while a stale "fully allowed" robots.txt could violate a site's newly-added restrictions. If `Crawl-delay` is absent, default to a conservative 1 request/sec/host (`DEFAULT_CRAWL_DELAY_MS = 1000`) rather than assuming an unbounded rate.
+A: Fetch it once per host before the first request and cache the parsed result under its own 24-hour TTL. Before the first fetch to any host, `GET http://{host}/robots.txt`, then parse its `Disallow` rules (filter against these before enqueueing any URL for that host) and its `Crawl-delay` directive (sets `crawlDelayMs[host]` directly, §4.2). Cache the parsed result with its own TTL (commonly 24 hours) — independent of any individual page's caching, since a stale "fully disallowed" robots.txt could permanently block a site that later opened itself up, while a stale "fully allowed" robots.txt could violate a site's newly-added restrictions. If `Crawl-delay` is absent, default to a conservative 1 request/sec/host (`DEFAULT_CRAWL_DELAY_MS = 1000`) rather than assuming an unbounded rate.
 
 **Q: What happens when the Bloom filter's false-positive rate grows too high, and how do you fix it?**
-A: As the number of inserted URLs grows past the filter's design capacity, the false-positive rate climbs sharply and non-linearly — §9's War Story 4 saw it go from a designed ~1% to ~30% after the cardinality reached ~4x the design point (1B designed, 4B actual). A high false-positive rate means genuinely new URLs get incorrectly classified as "already seen" and silently dropped — no error, no log, just missing coverage. The fix is twofold: monitor *observed insertions vs. designed capacity* per filter and alert well before saturation (e.g., at 75%), and use a scalable/layered Bloom filter (a chain of progressively larger filters, with `mightContain` checking the whole chain) so capacity grows incrementally without a disruptive full rebuild.
+A: It starts silently dropping genuinely new URLs, and the only fixes are monitoring insertions against capacity and switching to a layered filter. The rate climbs sharply and non-linearly past the design capacity — §9's War Story 4 saw it go from a designed ~1% to ~68% once cardinality reached ~4x the design point (1B designed, 4B actual). A high false-positive rate means genuinely new URLs get incorrectly classified as "already seen" and silently dropped — no error, no log, just missing coverage. The fix is twofold: monitor *observed insertions vs. designed capacity* per filter and alert well before saturation (e.g., at 75%), and use a scalable/layered Bloom filter (a chain of progressively larger filters, with `mightContain` checking the whole chain) so capacity grows incrementally without a disruptive full rebuild.
 
 **Q: How do you handle a host that's down or returning errors?**
-A: Apply the circuit-breaker pattern (cross-ref [`../resilience_patterns/README.md`](../resilience_patterns/README.md)) at the host level (§8): when a host's error rate exceeds a threshold over a sustained window, exponentially back off its `crawlDelayMs` (double it on each consecutive failure, up to a cap) and demote its remaining frontier entries to the lowest priority tier, so a struggling host doesn't continue consuming fetch slots that healthy hosts could use. Periodically probe the host with a single request; on success, restore normal `crawlDelayMs` and priority. A spike specifically in 403/429 (rather than 5xx) from a previously-healthy host is a different signal — possible IP-ban — and warrants a much longer cooldown (§8's IP-ban runbook).
+A: Apply the circuit-breaker pattern at the host level, backing off and deprioritizing rather than continuing at the configured rate. Concretely (§8, cross-ref [`../resilience_patterns/README.md`](../resilience_patterns/README.md)): when a host's error rate exceeds a threshold over a sustained window, exponentially back off its `crawlDelayMs` (double it on each consecutive failure, up to a cap) and demote its remaining frontier entries to the lowest priority tier, so a struggling host doesn't continue consuming fetch slots that healthy hosts could use. Periodically probe the host with a single request; on success, restore normal `crawlDelayMs` and priority. A spike specifically in 403/429 (rather than 5xx) from a previously-healthy host is a different signal — possible IP-ban — and warrants a much longer cooldown (§8's IP-ban runbook).
 
 **Q: How do you decide recrawl frequency for freshness?**
-A: Track each page's *observed* change rate over time — compare successive crawls' content hashes (or SimHash signatures, §4.4) and maintain a rolling estimate of "how often does this page actually change." Combine this with the page's importance score to compute recrawl urgency: a high-importance page that changes daily gets recrawled close to daily; a low-importance page that hasn't changed across the last five crawls gets its recrawl interval extended (e.g., doubled, with a cap) each time it's observed unchanged — an adaptive backoff in the *opposite* direction from error backoff, but the same exponential-backoff mechanism.
+A: Let each page's own observed change rate drive its recrawl interval, rather than a fixed schedule. Compare successive crawls' content hashes (or SimHash signatures, §4.4) and maintain a rolling estimate of "how often does this page actually change." Combine this with the page's importance score to compute recrawl urgency: a high-importance page that changes daily gets recrawled close to daily; a low-importance page that hasn't changed across the last five crawls gets its recrawl interval extended (e.g., doubled, with a cap) each time it's observed unchanged — an adaptive backoff in the *opposite* direction from error backoff, but the same exponential-backoff mechanism.
 
 **Q: How would you scale this to a distributed fleet of fetchers across many machines?**
-A: Consistent hashing of domains to frontier shards (§4.6) is the core mechanism — each shard owns a disjoint set of hosts, with co-located back queues, robots.txt cache, and DNS cache, and a dedicated slice of fetcher worker capacity. Adding shards (to add capacity) remaps only ~1/N of hosts to new shards, the same property that makes consistent hashing attractive for cache clusters (cross-ref [`../consistent_hashing/README.md`](../consistent_hashing/README.md)). The key property to call out in an interview: this sharding scheme scales *and* enforces politeness as the same mechanism (§5) — that dual benefit is usually the "aha" the interviewer is listening for.
+A: Consistent hashing of domains to frontier shards (§4.6) is the core mechanism. Each shard owns a disjoint set of hosts, with co-located back queues, robots.txt cache, and DNS cache, and a dedicated slice of fetcher worker capacity. Adding shards (to add capacity) remaps only ~1/N of hosts to new shards, the same property that makes consistent hashing attractive for cache clusters (cross-ref [`../consistent_hashing/README.md`](../consistent_hashing/README.md)). The key property to call out in an interview: this sharding scheme scales *and* enforces politeness as the same mechanism (§5) — that dual benefit is usually the "aha" the interviewer is listening for.
 
 **Q: How do you handle JavaScript-rendered single-page applications (SPAs)?**
 A: The default fetch path (plain HTTP GET, parse raw HTML) returns a near-empty shell for many SPAs — the actual content is rendered client-side after JS execution. The extension is to route such pages to a separate, much more expensive headless-browser fetch pool (Puppeteer/Playwright driving headless Chrome, §7) that executes the page's JS and extracts the *rendered* DOM. Because this is 10-100x more costly per page than a plain HTTP fetch, it's applied selectively — typically triggered by a heuristic (e.g., the raw HTML body is suspiciously small relative to its `<script>` tag footprint, or the host is on an allowlist of known JS-framework-heavy sites). Googlebot's "Web Rendering Service" (§6) is the production-scale example of this two-tier fetch strategy.
 
 **Q: What's your storage strategy for raw HTML vs. parsed/extracted content?**
-A: Raw HTML goes to content-addressed blob storage (S3-compatible, key = hash of the raw bytes, §7) — this gives free deduplication of byte-identical content across different URLs, supports lifecycle policies (move cold raw HTML to cheaper storage tiers after N days), and preserves the original for re-parsing if extraction logic improves later. Parsed/extracted content (visible text, metadata, outbound links, content hash, SimHash signature) goes to a wide-column document store (Cassandra/HBase, the Nutch/Mercator precedent, §7) keyed by URL or URL-hash — this is the schema that the downstream search-indexing pipeline consumes (cross-ref [`../../database/search_engines/README.md`](../../database/search_engines/README.md)), and it's far smaller and more queryable than the raw HTML.
+A: Raw HTML goes to content-addressed blob storage; parsed content goes to a wide-column store keyed by URL-hash. Content-addressing the raw bytes (S3-compatible, key = hash of the raw bytes, §7) gives free deduplication of byte-identical content across different URLs, supports lifecycle policies (move cold raw HTML to cheaper storage tiers after N days), and preserves the original for re-parsing if extraction logic improves later. Parsed/extracted content (visible text, metadata, outbound links, content hash, SimHash signature) goes to a wide-column document store (Cassandra/HBase, the Nutch/Mercator precedent, §7) keyed by URL or URL-hash — this is the schema that the downstream search-indexing pipeline consumes (cross-ref [`../../database/search_engines/README.md`](../../database/search_engines/README.md)), and it's far smaller and more queryable than the raw HTML.
 
 **Q: How do you avoid hammering DNS servers given how many distinct hosts you're resolving?**
-A: A shared DNS Resolver/Cache service (§3, §7) with TTL-based caching, consulted by all fetchers — without it, every fetch performs a synchronous ~100ms+ DNS lookup, which §9's War Story 2 showed can consume 40-60% of a fetcher thread's wall-clock time, effectively halving fetch throughput. The fix combines caching (since a small number of hosting providers/CDNs back a large fraction of all domains, cache hit rates exceed 95% in steady state) with *asynchronous, ahead-of-time* resolution — as soon as a URL becomes "next up" in the politeness queue (§4.1) but before its `nextAllowedFetchTime` actually arrives, kick off DNS resolution so the IP is ready by the time the fetch can proceed.
+A: Put a shared, TTL-respecting DNS resolver/cache (§3, §7) in front of every fetcher and resolve ahead of the politeness gate. Without it, every fetch performs a synchronous ~100ms+ DNS lookup, which §9's War Story 2 showed can consume 40-60% of a fetcher thread's wall-clock time, effectively halving fetch throughput. The fix combines caching (since a small number of hosting providers/CDNs back a large fraction of all domains, cache hit rates exceed 95% in steady state) with *asynchronous, ahead-of-time* resolution — as soon as a URL becomes "next up" in the politeness queue (§4.1) but before its `nextAllowedFetchTime` actually arrives, kick off DNS resolution so the IP is ready by the time the fetch can proceed.
 
 **Q: What happens if a frontier shard crashes — do you lose crawl progress?**
 A: It depends entirely on whether the shard's back queues and `nextAllowedFetchTime` map were checkpointed (§4.7). Without checkpointing, a restart wipes every queued-but-not-yet-fetched URL for that shard's ~1,700 hosts — §9's War Story 5 describes exactly this happening silently during a routine rolling restart, with the loss undetected for weeks because a Bloom-filter miss isn't an error, just a missing entry. With checkpointing, each shard periodically (every 30-60 seconds) serializes its back queues and `nextAllowedFetchTime` map to durable storage alongside a Kafka offset; on restart, it loads the snapshot and replays frontier-update events after that offset, bounding the loss to the last 30-60 seconds rather than the entire queue. Note what's deliberately *not* checkpointed: the robots.txt and DNS caches (§4.2, §4.6) are safe to lose because they're cheaply rebuildable from an external source of truth — only state representing "discovered but not yet acted on" work needs durability.

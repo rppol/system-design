@@ -4,7 +4,7 @@
 
 > **Design intuition**: A URL shortener is the "Hello World" of system design — it seems simple (store a mapping, redirect on lookup) but teaches all the fundamentals: hash function choice, database schema, caching strategy (reads are 100:1 over writes), and analytics pipeline. Master this and you understand distributed system basics.
 
-**Key insight**: The redirect is the hot path — 1 billion redirects/day means ~12,000 RPS. A Redis cache in front of the database turns this from a 10ms database lookup into a 1ms cache hit, enabling the system to handle massive read scale on modest hardware.
+**Key insight**: The redirect is the hot path — 10 billion redirects/day means ~116,000 RPS. A Redis cache in front of the database turns this from a 10ms database lookup into a 1ms cache hit, enabling the system to handle massive read scale on modest hardware.
 
 ---
 
@@ -133,20 +133,22 @@ short_code = hash[:7] = "e3d70bc"
 
 **Cons**:
 - **Hash collisions**: Two different URLs can produce same first 7 chars
-  - With 3.5T possibilities and birthday paradox, collisions become likely after ~2.5M URLs
+  - With 3.5T possibilities, the birthday bound puts a 50% chance of at least one collision at ~2.2M URLs (1.177 x sqrt(62^7))
 - Must query DB to check if short_code is taken (on collision, take next 7 chars)
 - Non-sequential: no natural ordering
 
 ### Option B: Base62 Encoding of Auto-Increment ID
 ```
+alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            index 0-9 -> '0'-'9',  10-35 -> 'a'-'z',  36-61 -> 'A'-'Z'
+
 auto_increment_id = 100000
-Base62 encoding:
-  100000 % 62 = 18 → 'S'
-  1612   % 62 = 8  → '8'
-  26     % 62 = 26 → 'Q'
-  0      % 62 = 0  → 'a'
-  ...
-short_code = "aaQ8Sa"  (padded to 6-7 chars)
+  100000 / 62 = 1612  remainder 56  -> alphabet[56] = 'U'
+    1612 / 62 =   26  remainder  0  -> alphabet[0]  = '0'
+      26 / 62 =    0  remainder 26  -> alphabet[26] = 'q'
+
+Digits fall out least-significant first, so read them back to front:
+short_code = "q0U"   (left-pad to the fixed 7-char width: "0000q0U")
 ```
 **Pros**: No collisions, predictable length, naturally unique
 
@@ -205,7 +207,7 @@ sequenceDiagram
     API->>CS: request next ID
     CS->>CS: atomically increment local counter
     CS-->>API: return ID (e.g., 1000042)
-    Note over API: Base62-encode 1000042 to 4c92<br/>pad to 7 chars: 4c9200a (or zero-pad: 000c92)
+    Note over API: Base62-encode 1000042 to 4c9I<br/>left-pad to 7 chars: 0004c9I
     API->>DB: write short_code, long_url, metadata
 
     opt Counter Server exhausts its range
@@ -229,7 +231,7 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     Start{"Generate a 7-char<br/>short code"} -->|"Option A"| HashOpt("Hash the URL<br/>truncate to 7 chars")
-    HashOpt -->|"collisions past<br/>~2.5M URLs"| HashRej(["Rejected"])
+    HashOpt -->|"collisions past<br/>~2.2M URLs"| HashRej(["Rejected"])
 
     Start -->|"Option B"| CounterOpt("Single auto-increment<br/>counter + Base62")
     CounterOpt -->|"guessable +<br/>single-writer bottleneck"| CounterRej(["Rejected"])
@@ -247,7 +249,7 @@ flowchart LR
     class Chosen train
 ```
 
-*Each rejected branch traces back to the Pros/Cons above: hashing collides past ~2.5M URLs (birthday paradox on the 62^7 ~ 3.5T-code space, §2), a plain counter is sequential and single-writer, and a pre-generated pool works but adds ongoing maintenance — leaving the distributed counter as the only option with no collisions and no write bottleneck.*
+*Each rejected branch traces back to the Pros/Cons above: hashing collides past ~2.2M URLs (birthday bound on the 62^7 ~ 3.5T-code space, §2), a plain counter is sequential and single-writer, and a pre-generated pool works but adds ongoing maintenance — leaving the distributed counter as the only option with no collisions and no write bottleneck.*
 
 ---
 
@@ -267,10 +269,10 @@ flowchart LR
 HTTP Request:  GET http://short.url/abc1234
 HTTP Response: HTTP/1.1 302 Found
                Location: https://original-long-url.com/path
-               Cache-Control: no-cache
+               Cache-Control: public, max-age=0, s-maxage=3600
 ```
 
-For link owners who prefer performance over analytics, offer an option to use 301 (common in enterprise plans).
+A 302 is not cacheable by default under RFC 9110, so the response must opt in explicitly. `s-maxage` lets the shared CDN cache hold it (the edge-caching path in §8 and War Story 4) while `max-age=0` keeps the *browser* coming back, preserving per-click analytics. For link owners who prefer performance over analytics, offer an option to use 301 (common in enterprise plans).
 
 ### Redirect Flow
 ```mermaid
@@ -300,13 +302,13 @@ sequenceDiagram
         R-->>API: (miss)
         API->>DB: query "abc1234"
         DB-->>API: not found or expired
-        API-->>C: 404 Not Found
+        API-->>C: 404 Not Found (410 Gone if expired)
     end
 
     Note over C: On a 302, the browser follows<br/>the redirect to the original URL
 ```
 
-*The redirect hot path: a cache hit returns in about 1ms with the click logged asynchronously; a miss falls through to Cassandra and repopulates the cache before returning, so only the next request for that code benefits — only a missing or expired mapping ever reaches 404.*
+*The redirect hot path: a cache hit returns in about 1ms with the click logged asynchronously; a miss falls through to Cassandra and repopulates the cache before returning, so only the next request for that code benefits — only a missing mapping reaches 404, and an expired one 410 Gone (§4, Expiration and Cleanup).*
 
 ---
 
@@ -321,47 +323,48 @@ sequenceDiagram
 
 ### Schema
 ```sql
--- Primary URL mapping
+-- Primary URL mapping. CQL has no length-parameterized types and no
+-- NOT NULL / DEFAULT column constraints: both live in the application layer.
 CREATE TABLE url_mapping (
-    short_url   VARCHAR(7) PRIMARY KEY,
-    long_url    TEXT NOT NULL,
-    user_id     UUID,
-    created_at  TIMESTAMP,
-    expires_at  TIMESTAMP,        -- NULL means no expiration
-    is_active   BOOLEAN DEFAULT TRUE,
-    custom_alias BOOLEAN DEFAULT FALSE
+    short_url    text PRIMARY KEY,
+    long_url     text,
+    user_id      uuid,
+    created_at   timestamp,
+    expires_at   timestamp,       -- null means no expiration
+    is_active    boolean,
+    custom_alias boolean
 );
 
 -- User's URL history (lookup all URLs by user)
 CREATE TABLE urls_by_user (
-    user_id     UUID,
-    created_at  TIMESTAMP,
-    short_url   VARCHAR(7),
-    long_url    TEXT,
-    click_count BIGINT,
+    user_id     uuid,
+    created_at  timestamp,
+    short_url   text,
+    long_url    text,
+    click_count bigint,
     PRIMARY KEY (user_id, created_at, short_url)
 ) WITH CLUSTERING ORDER BY (created_at DESC);
 
 -- Analytics: click events (time-series)
 CREATE TABLE click_events (
-    short_url   VARCHAR(7),
-    clicked_at  TIMESTAMP,
-    country     VARCHAR(50),
-    device      VARCHAR(20),    -- mobile, desktop, tablet
-    browser     VARCHAR(50),
-    referrer    TEXT,
-    ip_address  INET,
+    short_url   text,
+    clicked_at  timestamp,
+    country     text,
+    device      text,           -- mobile, desktop, tablet
+    browser     text,
+    referrer    text,
+    ip_address  inet,
     PRIMARY KEY (short_url, clicked_at)
 ) WITH CLUSTERING ORDER BY (clicked_at DESC)
   AND default_time_to_live = 7776000;  -- 90 days TTL for raw click events
 
 -- Analytics: aggregated stats
 CREATE TABLE url_stats_hourly (
-    short_url   VARCHAR(7),
-    hour_bucket TIMESTAMP,       -- truncated to hour
-    click_count BIGINT,
-    country_counts MAP<TEXT, BIGINT>,
-    device_counts  MAP<TEXT, BIGINT>,
+    short_url   text,
+    hour_bucket timestamp,       -- truncated to hour
+    click_count bigint,
+    country_counts map<text, bigint>,
+    device_counts  map<text, bigint>,
     PRIMARY KEY (short_url, hour_bucket)
 ) WITH CLUSTERING ORDER BY (hour_bucket DESC);
 ```
@@ -381,7 +384,7 @@ CREATE TABLE url_stats_hourly (
 SET url:abc1234 "https://original-url.com/path" EX 86400  # 1 day TTL
 
 # For URLs with explicit expiration: TTL = time until expiry
-SET url:xyz789 "https://example.com" EXAT 1735689600  # Unix timestamp of expiry
+SET url:xyz789 "https://example.com" EXAT 1798761600  # Unix timestamp of expiry (2027-01-01)
 
 # For permanent URLs: use long TTL (30 days), rely on LRU eviction for cold URLs
 SET url:pqr123 "https://example.com" EX 2592000  # 30 days
@@ -391,8 +394,10 @@ SET url:pqr123 "https://example.com" EX 2592000  # 30 days
 - Use **LRU (Least Recently Used)** eviction — evict the least recently accessed URLs
 - In Redis: `maxmemory-policy allkeys-lru`
 - Memory sizing:
-  - 20% of 100M URLs = 20M URLs * (7 + 100 bytes avg) = **~2 GB**
-  - Allocate 10-20 GB Redis cluster to cache the hot 20% comfortably
+  - 20% of 100M URLs = 20M keys * (7 + 100 bytes of payload) = ~2.1 GB of *data*
+  - Redis charges roughly 60-100 bytes per key on top of that (`dictEntry`, `robj`, SDS
+    headers, expire table), so budget ~20M * ~200 bytes = **~4 GB resident**
+  - Allocate a 10-20 GB Redis cluster to cache the hot 20% with room to grow
 
 ### Cache-Aside Pattern
 ```
@@ -431,7 +436,7 @@ Multiple Redis cache nodes. When we add or remove a node, how do we redistribute
        240 |            | 120
             \    (B)   /
              \        /
-          180 \      / (C)
+              \      / (C)
                \    /
                 180
 ```
@@ -600,9 +605,12 @@ stateDiagram-v2
 - Protect service from overload
 - Enforce plan limits (free tier: 100 URLs/hour, paid: unlimited)
 
-### Implementation (Token Bucket per User)
+### Implementation (Fixed-Window Counter per User)
 ```bash
-# Redis-based rate limiter (sliding window approach)
+# Redis-based rate limiter: INCR + EXPIRE is a FIXED-window counter -- not a
+# token bucket and not a sliding window. It admits up to 2x the limit across a
+# window boundary; use a sorted-set sliding log or a Lua token bucket when that
+# burst matters (see ../rate_limiting/README.md).
 function is_rate_limited(user_id, limit=100, window=3600):
     key = "ratelimit:" + user_id
     count = redis.INCR(key)
@@ -658,11 +666,11 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 ### URL Shorteners in Production
 
-- **Bitly**: The reference implementation for this case study. Bitly serves billions of redirects per month from a sharded MySQL backend behind a heavy Memcached/Redis caching layer, with a custom Base62 encoder over an internal sequence generator. Bitly's API exposes click analytics (geography, referrer, device) as a first-class product feature, not an afterthought.
+- **Bitly**: The reference implementation for this case study, serving billions of redirects per month. Bitly does not publish its storage topology, so treat the specific backend in §4 and §10 as *this design's* choice rather than a description of Bitly's; what is public and worth copying is the shape — a separate hot redirect path, an out-of-band analytics pipeline (Bitly wrote and open-sourced NSQ, a distributed messaging platform, for exactly this kind of decoupling), and click analytics (geography, referrer, device) exposed as a first-class product feature rather than an afterthought.
 - **TinyURL**: One of the oldest URL shorteners (since 2002), historically built on a single large MySQL instance with an auto-increment primary key directly Base36/Base62-encoded — a textbook example of the "Option B" approach in §4, simple enough to run for two decades with minimal re-architecture because read traffic, while large, is geographically less concentrated than a viral-content platform.
 - **t.co (Twitter/X)**: Every link posted to Twitter is automatically rewritten to a `t.co/...` short link — not for brevity (the t.co link is often *longer* than the original), but for **security scanning** (malicious URL detection at click-time, not just post-time) and **click analytics**. This is the canonical example of a shortener used as a security/analytics proxy rather than a length-reduction tool.
-- **goo.gl (Google, shut down 2019)**: A cautionary tale. Google deprecated goo.gl after eight years, breaking millions of existing short links across the web (QR codes on physical signage, printed materials, embedded app links). The lesson for any shortener design: **short URLs are a long-term commitment** — the "Expiration and Cleanup" design decision (§4) has product and reputational consequences that outlive the original engineering team.
-- **Firebase Dynamic Links (Google, deprecated 2025)**: A more recent repeat of the same lesson — a "dynamic" shortener (the "Dynamic destination" future capability in §8) that resolved differently per platform (iOS deep link vs. Android vs. web) was sunset, again forcing every dependent app to migrate. Reinforces that "Custom Aliases" and "Dynamic destination" features (§4, §8) need an explicit, published deprecation policy from day one.
+- **goo.gl (Google)**: A cautionary tale in two acts. Google stopped accepting new URLs to shorten in 2018-19, then announced in 2024 that *every* goo.gl link would stop resolving on 25 August 2025 — which would have broken links baked into printed signage, QR codes and shipped app binaries. After the backlash Google narrowed the plan: on 25 August 2025 it deactivated only links that had shown no activity in late 2024, and all other goo.gl links (including those minted by Google apps such as Maps sharing) still resolve. The lesson for any shortener design: **short URLs are a long-term commitment** — the "Expiration and Cleanup" design decision (§4) has product and reputational consequences that outlive the original engineering team, and the retirement policy you publish is itself part of the product.
+- **Firebase Dynamic Links (Google, deprecation announced August 2023, shut down 25 August 2025)**: A repeat of the same lesson with no reprieve — every FDL link, on `page.link` subdomains and custom domains alike, began returning 404 on the shutdown date — a "dynamic" shortener (the "Dynamic destination" future capability in §8) that resolved differently per platform (iOS deep link vs. Android vs. web) was sunset, again forcing every dependent app to migrate. Reinforces that "Custom Aliases" and "Dynamic destination" features (§4, §8) need an explicit, published deprecation policy from day one.
 
 ### Comparable Systems for Cross-Reference
 
@@ -679,7 +687,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 | ID generation | Distributed counter (Zookeeper-coordinated ranges) + Base62 | No collisions, no central bottleneck, predictable 7-character length |
 | Hot redirect cache | Redis Cluster (`allkeys-lru`) | Sub-millisecond reads for the >95% cache-hit hot path |
 | Primary URL store | Cassandra | Simple key-value access by `short_url`, write-heavy, horizontal scale, `IF NOT EXISTS` LWT for custom aliases |
-| Edge / CDN | CloudFlare / Fastly | Caches 301/302 responses at 200+ PoPs; near-zero origin latency for repeat clicks |
+| Edge / CDN | CloudFlare / Fastly | Caches 301/302 responses at the edge (Cloudflare: 330+ cities); near-zero origin latency for repeat clicks |
 | Analytics ingestion | Kafka | Decouples click recording from the redirect response; absorbs viral-link bursts |
 | Stream aggregation | Flink | Real-time per-minute click aggregation by country, device, referrer |
 | Analytics store | ClickHouse / Cassandra (time-series) | Compressed columnar storage for billions of click events |
@@ -695,7 +703,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 #### Edge-First Architecture
 - URL shorteners are read-heavy and globally consumed → **CDN at edge is critical**.
-- 301/302 redirects cached at CloudFlare/Fastly PoPs (200+ globally).
+- 301/302 redirects cached at CloudFlare/Fastly PoPs (Cloudflare alone runs in 330+ cities).
 - **Cache hit at edge**: 0ms origin latency, ~10ms p99 globally.
 - **Cache miss**: ~15ms to origin (regional) + ~5ms DB/cache lookup = **~20ms p99**.
 
@@ -706,7 +714,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 - Reads served from local region only (no cross-region read needed because edge cache handles freshness).
 
 #### Replication
-- Postgres logical replication or DB-specific (Patroni for HA, BDR for multi-master) cross-region.
+- Cassandra `NetworkTopologyStrategy` with a replica set in each origin region; writes at `LOCAL_QUORUM`, cross-region replication asynchronous.
 - Replication lag: typically 50–500ms; acceptable because edge cache hides this.
 - Redis cross-region: not replicated; each region builds its own cache on read.
 
@@ -810,7 +818,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 - Cascading: API gateway timeouts, client retries amplify load further.
 
 **Mitigation**:
-- **Cache warming**: Before re-enabling traffic post-Redis restart, run a batch job to pre-populate top 20% of URLs (those that account for 80% of traffic) from Postgres.
+- **Cache warming**: Before re-enabling traffic post-Redis restart, run a batch job to pre-populate top 20% of URLs (those that account for 80% of traffic) from Cassandra.
 - **Request coalescing**: 1000 simultaneous misses for the same short code result in a single DB query (singleflight pattern).
 - **Probabilistic early expiration**: Keys near TTL expiry have a small chance of being treated as expired by individual requests, spreading refresh load.
 
@@ -831,7 +839,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 **Behavior without mitigation**:
 - All 100K requests miss Redis simultaneously.
-- All 100K queries hit Postgres for the same key → DB melts down.
+- All 100K queries hit Cassandra for the same key → the owning partition's replicas melt down.
 
 **Mitigation**:
 - **Singleflight**: Application layer ensures only 1 of the 100K concurrent requests actually queries the DB; the rest wait for the result.
@@ -869,12 +877,14 @@ function is_rate_limited(user_id, limit=100, window=3600):
 
 ## 10. Capacity Planning
 
+**Basis note**: §2 sizes the *design ceiling* asked for in §1 (100M new URLs/day, 10B redirects/day). This section sizes a running deployment at roughly one-tenth of that — ~300M URLs and ~10B redirects per **month** — because that is the order of magnitude a production shortener of this kind actually operates at, and it is the basis the cost envelope below is built from. Where §2 and §10 differ by 10-30x, that is the gap between the ceiling and the running system, not an inconsistency.
+
 ### URL Generation
 - **300M URLs/month** (Bitly public number) = 300M / 30 / 86400 = **~115 URLs/sec average**, ~1K/sec peak.
 - 6-character base62: 62^6 = **56.8 billion combinations**.
 - At 300M/month = 3.6B/year, exhaustion approaches in ~16 years.
-- **Birthday-paradox collision math**: 50% collision probability at ~sqrt(56.8B) = ~240K codes generated (for *random* generation). At 1% collision rate: ~33M codes.
-- **Conclusion**: random 6-char generation is impractical past ~10M URLs without retry-on-collision. Use 7-char (3.5 trillion combos) or sequential-counter-encoded-to-base62.
+- **Birthday-paradox collision math**: for *random* generation, `n ~= sqrt(2m*ln(1/(1-p)))`. A 50% chance of at least one collision arrives at ~280K codes (~1.177 x sqrt(56.8B), where sqrt(56.8B) = 238K); a **1%** chance arrives far earlier, at only **~34K codes**.
+- **Conclusion**: random 6-char generation needs retry-on-collision from almost the first day, and by ~10M live codes roughly 1 in 5,700 inserts collides and must be retried. Use 7-char (3.5 trillion combos) or a sequential counter encoded to base62 (§4), which collides never.
 
 ### Storage
 - 6-char short code (6 bytes) + URL (~150 bytes average) + metadata (user_id, created_at, expires_at, click_count: ~50 bytes) = **~200 bytes/record**.
@@ -888,7 +898,7 @@ function is_rate_limited(user_id, limit=100, window=3600):
 - 80/20 rule: 20% of URLs (720M URLs) generate 80% of clicks (8B/month = 3K/sec).
 - Hot 20%: 720M × 500 bytes = **~360 GB** → fits in a 500GB Redis cluster (4-8 nodes).
 - Cache hit rate target: >95%.
-- Cache misses to DB: 20K × 0.05 = 1K/sec → easily handled by a single Postgres replica.
+- Cache misses to DB: 20K × 0.05 = 1K/sec → comfortably inside one Cassandra replica set.
 
 ### Bandwidth
 - Each redirect response: ~500 bytes (HTTP headers + Location header).
@@ -899,12 +909,12 @@ function is_rate_limited(user_id, limit=100, window=3600):
 - 10B click events/month = **3,800 events/sec average, 20K peak**.
 - Each event: ~200 bytes (short_code, timestamp, IP, user agent, referrer, geo).
 - Kafka throughput: easily handled by 3 brokers (~50K events/sec capacity each).
-- ClickHouse storage: 10B events × 200 bytes × 5 years compression 5× = **~2 TB** raw analytics store; with redundancy ~6 TB.
+- ClickHouse storage: 10B events × 200 bytes = **2 TB/month** raw, so **~120 TB** over 5 years; at ~5× columnar compression that is **~24 TB** on disk, ~48 TB with a second replica.
 
 ### Cost Envelope
 - App servers (URL gen + redirect handling): ~20 servers at $5K/year = **$100K/year**.
 - Redis cluster: 8 nodes at $10K/year = **$80K/year**.
-- Postgres/MySQL primary + 10 replicas: **$200K/year**.
+- Cassandra ring (RF=3, ~12 nodes across 3 regions): **$200K/year**.
 - Kafka + Flink + ClickHouse: **$150K/year**.
 - CDN egress: ~$50K/year.
 - **Total**: ~$600K/year for a Bitly-scale system. Order-of-magnitude cheaper than the WhatsApp/Netflix scale.
@@ -922,17 +932,17 @@ function is_rate_limited(user_id, limit=100, window=3600):
 6. **Caching strategy** (5 min): Redis cache-aside, LRU eviction, the 80/20 rule.
 7. **Database design** (5 min): Cassandra schema with partition-key reasoning.
 8. **Analytics pipeline** (3 min): Kafka -> Flink -> Cassandra/ClickHouse.
-9. **Rate limiting** (3 min): token bucket / Redis INCR.
+9. **Rate limiting** (3 min): Redis INCR fixed-window counter, and when to upgrade it to a token bucket.
 10. **Trade-offs and wrap-up** (1 min).
 
 **Q: Why is hashing the long URL with MD5/SHA256 and truncating it a bad approach for short-code generation?**
-A: Truncating a cryptographic hash to 7 characters throws away most of its collision resistance — with only 62^7 ~ 3.5 trillion possible 7-character codes, the birthday paradox means collisions become likely after roughly the square root of that space (~1.9 million URLs), far below the 100M URLs/day this system needs to handle. Every collision requires a database round-trip to detect and a retry with a different hash slice, adding latency and complexity exactly on the write path. A counter-based or pre-generated-pool approach (§4) avoids collisions entirely by construction.
+A: Truncating a cryptographic hash to 7 characters throws away almost all of its collision resistance. With only 62^7 ~ 3.5 trillion possible codes, the birthday bound puts a 50% chance of at least one collision at ~2.2 million URLs (1.177 x sqrt(62^7)) — reached in under an hour at the 100M URLs/day this system targets. Every collision requires a database round-trip to detect and a retry with a different hash slice, adding latency and complexity exactly on the write path. A counter-based or pre-generated-pool approach (§4) avoids collisions entirely by construction.
 
 **Q: Walk through Base62 encoding — why base62 and not base64 or base36?**
 A: Base62 uses [a-z, A-Z, 0-9] — 62 characters, all URL-safe without escaping, unlike base64's `+`, `/`, and `=` characters which need percent-encoding in a URL path. Base36 (lowercase letters + digits only) would need 8 characters instead of 7 to cover a comparable ID space (36^8 ~ 2.8 trillion vs. 62^7 ~ 3.5 trillion), making URLs longer for no benefit. Base62 is the sweet spot: maximum information density per character while staying URL-safe.
 
 **Q: 301 vs. 302 redirect — which do you choose and why?**
-A: 302 (temporary redirect), because it forces the browser to hit your server on every click, which is required for per-click analytics — a 301 gets cached by the browser after the first visit, and subsequent clicks never reach your servers again. The trade-off is a small latency cost on every redirect (a server round-trip instead of a browser-cached jump), acceptable because the redirect itself is already optimized to ~1ms via cache. Some shorteners offer 301 as an opt-in for users who explicitly don't need analytics and want maximum redirect speed.
+A: Choose 302, because per-click analytics requires the browser to reach your server on every click. A 301 gets cached by the browser after the first visit, and subsequent clicks never reach your servers again. The trade-off is a small latency cost on every redirect (a server round-trip instead of a browser-cached jump), acceptable because the redirect itself is already optimized to ~1ms via cache. Some shorteners offer 301 as an opt-in for users who explicitly don't need analytics and want maximum redirect speed.
 
 **Q: How do you prevent the ID generator from becoming a write bottleneck or single point of failure?**
 A: Run multiple counter servers, each pre-allocated a disjoint range of IDs by Zookeeper (e.g., server A gets IDs 1-1,000,000, server B gets 1,000,001-2,000,000). Each server issues IDs from its local range without coordination, only contacting Zookeeper when its range is exhausted — turning a potential per-request bottleneck into an infrequent, amortized coordination cost. If a counter server crashes mid-range, its remaining unused IDs are simply abandoned, a tiny acceptable waste given 3.5 trillion total IDs available.
@@ -944,22 +954,22 @@ A: The access pattern is pure key-value — look up `long_url` by `short_url`, w
 A: On a request, the read API checks Redis first (`GET url:abc1234`); a hit returns the long URL immediately (~0.1-1ms) and logs the click event asynchronously to Kafka. On a miss, the API queries Cassandra, checks the `expires_at` field, populates Redis with an appropriate TTL if the URL is still valid, and then returns the redirect — so the *next* request for that code becomes a cache hit. The cache is populated lazily and never holds data the database doesn't also have, so a cache wipe is recoverable (just slower), not a data-loss event.
 
 **Q: How do you handle a cache stampede when a previously-cold link suddenly goes viral?**
-A: Use request coalescing (the "singleflight" pattern): when 100,000 concurrent requests miss the cache for the same short code, only the first request actually queries the database — the other 99,999 wait on that single in-flight query and share its result. Combine this with auto-detection of high request-rate keys so that key's cache TTL is extended preemptively, and with edge-CDN caching of the 301/302 response itself so repeat requests from the same region never reach the origin after the first one.
+A: Collapse the concurrent misses into one database query with the "singleflight" request-coalescing pattern. When 100,000 concurrent requests miss the cache for the same short code, only the first actually queries the database; the other 99,999 wait on that single in-flight query and share its result. Combine this with auto-detection of high request-rate keys so that key's cache TTL is extended preemptively, and with edge-CDN caching of the 301/302 response itself so repeat requests from the same region never reach the origin after the first one.
 
 **Q: How do you implement custom aliases without a race condition between two users requesting the same alias?**
 A: The check ("is this alias available?") and the write ("claim this alias") must be a single atomic operation, not two separate steps — otherwise two concurrent requests can both pass the check before either writes. Cassandra's `INSERT INTO url_mapping (...) VALUES (...) IF NOT EXISTS` is a lightweight transaction (Paxos-based) that performs both atomically: it succeeds for exactly one of the two concurrent requests and fails for the other, which then returns an "alias already taken" error to its user.
 
 **Q: How do you handle URL expiration cleanly — both in cache and in the database?**
-A: Set the Redis TTL to match (or be shorter than) the URL's `expires_at` so the cache entry disappears on its own at the right time; on a cache miss, the database read checks `expires_at` directly and returns 410 Gone for expired URLs, marking them `is_active = false` (lazy deletion). A nightly background sweep then hard-deletes URLs inactive for 30+ days, freeing the short code for reuse — the 30-day grace period exists so a user who set the wrong expiration date can recover their link.
+A: Tie the cache TTL to `expires_at` and delete lazily in the database, with a nightly sweep behind it. Set the Redis TTL to match (or undercut) the URL's `expires_at` so the cache entry disappears on its own; on a cache miss, the database read checks `expires_at` directly, returns 410 Gone for expired URLs, and marks them `is_active = false`. A nightly background sweep then hard-deletes URLs inactive for 30+ days, freeing the short code for reuse — the 30-day grace period exists so a user who set the wrong expiration date can recover their link.
 
 **Q: How would you detect and block malicious or phishing URLs without slowing down legitimate URL creation?**
 A: Don't put the check on the synchronous creation path — publish every newly-created URL to a Kafka topic, and have async consumers check it against the Google Safe Browsing API and an internal phishing classifier. If a URL is flagged within the first few minutes, mark it inactive and serve a warning page on subsequent redirects instead of the destination; if a domain accumulates a high flag rate across many short URLs, blocklist the entire domain and flag the originating account for review.
 
 **Q: Why is consistent hashing needed for the Redis cache layer, and what would happen without it?**
-A: With a naive `hash(key) % N` scheme, adding or removing one Redis node changes the target node for almost every key — effectively a full cache wipe, which (per War Story 2) can multiply database load by 20x or more for the duration of the rewarm. Consistent hashing with virtual nodes (~150 per physical node) means adding or removing a node only remaps the keys in the affected arc of the hash ring — roughly 1/N of all keys — so the cache stays mostly warm through routine scaling and node failures.
+A: Without it, adding or removing a single Redis node remaps almost every key and effectively wipes the whole cache. Under a naive `hash(key) % N` scheme that is exactly what happens, and (per War Story 2) it can multiply database load by 20x or more for the duration of the rewarm. Consistent hashing with virtual nodes (~150 per physical node) means adding or removing a node only remaps the keys in the affected arc of the hash ring — roughly 1/N of all keys — so the cache stays mostly warm through routine scaling and node failures.
 
 **Q: At 10x scale (3B URLs/month, 100B redirects/month), what's the first thing that breaks, and what changes?**
-A: Origin infrastructure cost becomes the binding constraint — at ~1M redirects/sec average, even a 99% edge-cache hit rate still sends ~10K requests/sec to origin, so edge cache hit rate has to push toward 99.9%+ via longer TTLs and smarter pre-warming of trending links. The URL table needs sharding (Cassandra handles this natively, but operational complexity grows), counter coordination moves toward a Snowflake-style per-datacenter ID allocation to avoid cross-region coordination, and the analytics pipeline likely moves from a batch-aggregated ClickHouse model to a fully streaming architecture for near-real-time dashboards.
+A: Origin infrastructure cost becomes the binding constraint, and edge cache hit rate becomes the lever that controls it. At ~1M redirects/sec average, even a 99% edge-cache hit rate still sends ~10K requests/sec to origin, so the hit rate has to push toward 99.9%+ via longer TTLs and smarter pre-warming of trending links. The URL table needs sharding (Cassandra handles this natively, but operational complexity grows), counter coordination moves toward a Snowflake-style per-datacenter ID allocation to avoid cross-region coordination, and the analytics pipeline likely moves from a batch-aggregated ClickHouse model to a fully streaming architecture for near-real-time dashboards.
 
 ### Numbers to Remember
 - 100M URL creations/day -> ~1,200 writes/sec average, ~3,600/sec peak.
