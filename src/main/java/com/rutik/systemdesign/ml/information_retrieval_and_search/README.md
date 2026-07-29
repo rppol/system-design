@@ -703,69 +703,91 @@ print("mean NDCG@10:", sum(per_query_ndcg) / len(per_query_ndcg))   # 0.61 -- th
 ## 12. Interview Questions with Answers
 
 **Why can a ranker with high offline accuracy still fail completely when it ships?**
+**Short:** Row-level accuracy ignores rank position entirely, so a model can score every row correct while still ranking the best document below the second.
 Accuracy on a binary relevant/irrelevant label ignores rank position entirely, so a model can label every row "correctly" while still placing the best document below the second-best. This gap is compounded when the train/test split is random by row instead of grouped by query, because the same query's other candidates leak across the split and inflate the offline number. Always gate ranking models on NDCG or MAP computed per query, not on row-level accuracy.
 
 **Why must a learning-to-rank train/test split be grouped by query rather than randomized by row?**
+**Short:** A random row split lets a query's own candidates leak across train and test, inflating offline metrics with no real online lift.
 A random row split lets some of a query's candidate documents fall into training while others fall into test, so the model has effectively already seen part of that query's answer set before being evaluated on it. This inflates every offline metric, and the inflation is invisible until an online A/B test shows no real lift. Use a grouped split (`GroupShuffleSplit` or `GroupKFold` keyed on query id) so an entire query's candidates land on only one side.
 
 **Why does BM25 outperform raw TF-IDF cosine similarity for ranked retrieval?**
+**Short:** BM25 saturates term-frequency scoring and normalizes length explicitly, while raw TF-IDF's term frequency is unbounded and rewards keyword-stuffing.
 BM25 bounds the contribution of term frequency and explicitly normalizes for document length, while raw TF-IDF's term-frequency component is unbounded and its length handling is a single fixed L2 norm. Concretely, with k1=1.2 a term repeated 1, 2, 4, 8, 16 times in the same document scores 2.51, 3.20, 3.71, 4.02, 4.20 -- clearly saturating -- while raw TF x IDF scores those same counts 2, 4, 8, 16, 32, rewarding keyword-stuffing 16x over a single mention. Prefer BM25 over plain TF-IDF cosine for anything an SEO-motivated author might try to game.
 
 **What do BM25's k1 and b parameters actually control?**
+**Short:** k1 controls how fast repeated term occurrences stop adding score, and b controls how strongly document length relative to average penalizes it.
 k1 controls how quickly additional occurrences of a term stop adding score, and b controls how strongly a document's length relative to the corpus average penalizes its score. At k1=1.2 (Lucene and Elasticsearch's default), score approaches an asymptote of IDF times 2.2 no matter how many times a term repeats; at b=0.75, a document four times the average length needs proportionally more genuine hits to match a same-relevance average-length document. Tune b toward 0 for corpora of short, unevenly-lengthed documents like titles, and tune k1 down where any repetition is already meaningful, such as code or structured records.
 
 **Why can't a reranker fix a document that first-stage retrieval never found?**
+**Short:** A cross-encoder reranker only scores candidates it's handed, so a true best document missing from that set can never be promoted.
 A cross-encoder reranker only ever scores the candidates handed to it, so if the true best document is outside that candidate set, reranking cannot mathematically promote it. This is a recall ceiling: analysis of a real pipeline found the correct answer missing from the top-10 sparse candidates for 18% of queries, a gap no reranking sophistication could close. Widen first-stage retrieval to several hundred candidates and track Recall@N as its own metric so the ceiling is visible instead of hidden inside a disappointing final NDCG.
 
 **Why does including a document's shown position or click count as an LTR feature quietly leak the label?**
+**Short:** Position and click-count features partly reflect the old ranker's own placement, so the model learns to reproduce past decisions, not relevance.
 Both signals are partly a consequence of where the previous ranker already placed the document, not a pure measure of relevance. A model trained on them partly learns to reproduce the old ranker's decisions rather than discover genuine relevance signal, and can show suspiciously high offline NDCG while performing no better, or worse, online. Exclude features that are themselves downstream of past ranking decisions, or correct them with inverse propensity weighting before training.
 
 **Why does dense retrieval often fail on rare identifiers, product codes, or legal citations?**
+**Short:** A learned embedding represents rarely-seen tokens by surface similarity rather than exact identity, while sparse retrieval matches the literal string exactly.
 A learned embedding model represents text as a smooth vector space fit to its training distribution. A token it rarely saw during training gets an embedding that reflects surface-level similarity rather than the exact identity the query needs, and sparse retrieval has no such gap because it matches the literal string via the inverted index regardless of how rare the token is. Pair dense retrieval with a sparse channel whenever the corpus contains exact identifiers users will search for verbatim.
 
 **Why do offline NDCG gains sometimes fail to translate into online metric improvements?**
+**Short:** Offline NDCG fits historical, policy-biased relevance judgments, while online metrics measure real user behavior under the new ranking.
 Offline NDCG measures fit to historical relevance judgments or logged clicks, generated under the old ranking policy's own biases. Online metrics measure what actually happens when real users see the new ranking, and a model can better fit the old, biased judgments without serving users better, or the offline judgment set can simply be too small or stale. Treat offline metrics as a promotion gate, not a launch decision, and confirm with an online A/B test before a full rollout.
 
 **What is an inverted index and why is it faster than scanning every document?**
+**Short:** An inverted index maps each term to a postings list of containing document ids, turning a query into hash lookups instead of scanning every document.
 An inverted index maps each vocabulary term to a sorted postings list of the document ids that contain it, built once at index time. A query for a term becomes a single hash lookup into that term's postings list instead of reading every document in the corpus, so a query touching t terms costs roughly the sum of those t postings lists' sizes rather than O(N) per term. This is the structural reason web-scale search returns results in milliseconds against a corpus of billions.
 
 **What is the difference between boolean and ranked retrieval?**
+**Short:** Boolean retrieval returns an unordered set matching a logical query, while ranked retrieval scores and orders every candidate by estimated relevance.
 Boolean retrieval evaluates a query as a logical expression over postings lists and returns an unordered set of documents that either match or do not. Ranked retrieval scores every candidate document against the query and returns them ordered by estimated relevance, which is what almost every modern search product needs, since users only look at the first handful of results. Boolean retrieval still matters for exact-recall use cases like legal discovery, where a missed document is unacceptable regardless of ranking.
 
 **How does Reciprocal Rank Fusion combine a sparse and a dense ranking, and why does it use rank instead of score?**
+**Short:** RRF sums 1/(k+rank) across lists using only rank position, sidestepping the fact that BM25 and cosine scores live on incompatible scales.
 RRF assigns each document a score of 1/(k + rank) in each list it appears in and sums across lists, using only rank position rather than the raw similarity scores. This sidesteps the problem that BM25 scores and cosine similarities live on completely different, uncalibrated scales, so no score-normalization tuning is required to combine them. The constant k (60 is the common default) softens the difference between adjacent ranks so a document at rank 1 does not completely dominate one at rank 2.
 
 **Why is a cross-encoder more accurate than a bi-encoder, and why is it confined to reranking?**
+**Short:** A cross-encoder lets every query and document token attend to each other via joint self-attention, but needs a full forward pass per pair so it can't scale to full-corpus retrieval.
 A cross-encoder feeds the query and document into the same transformer together, so every query token can attend to every document token through full self-attention before producing a single relevance score. A bi-encoder embeds query and document independently and only compares the two resulting vectors afterward, which is faster but loses that token-level interaction. Because a cross-encoder needs a full forward pass per pair, it can only afford to score the few hundred candidates retrieval already found, never the whole corpus.
 
 **How is NDCG computed, and why does it use a log2 discount?**
+**Short:** NDCG is DCG@k over ideal DCG, where DCG sums gain over a log2(rank+1) discount so a slightly-misplaced relevant document still keeps most of its credit.
 NDCG at rank k is DCG@k divided by the DCG of the ideal ordering, where DCG sums each retrieved document's gain (2^relevance - 1) divided by log2(rank + 1). The log2 discount decreases smoothly and slowly with rank, so a highly relevant document a few ranks too low still contributes most of its gain, matching how real users scan a page rather than only ever looking at rank 1. In a worked example with graded relevances [3, 2, 0, 1, 2] against the ideal [3, 2, 2, 1, 0], DCG@5 = 10.484 against an ideal IDCG@5 = 10.824, giving NDCG@5 = 0.969.
 
 **What is the difference between MAP and MRR?**
+**Short:** MRR averages 1/rank of only the first relevant result per query, while MAP averages precision at every rank a relevant document appears.
 MRR looks only at the rank of the first relevant result and averages 1/rank across queries, answering how quickly the user finds one good answer. MAP averages precision computed at every rank where a relevant document appears, crediting a list for surfacing many relevant documents, not just the first one. Use MRR for tasks where one correct answer is enough, such as a factoid lookup, and MAP or NDCG when a full page of relevant results matters.
 
 **What is the difference between pointwise, pairwise, and listwise learning-to-rank?**
+**Short:** Pointwise LTR scores each document independently, pairwise learns relative order between two documents, and listwise optimizes the whole ranked list at once.
 Pointwise LTR predicts an absolute relevance score or class for each (query, document) row independently, ignoring every other candidate for that query. Pairwise LTR instead learns which of two documents for the same query should rank higher, directly targeting relative order. Listwise LTR optimizes an objective defined over the entire ranked list at once, which correlates best with metrics like NDCG but costs the most to train -- LambdaMART is the standard production choice because gradient-boosted trees make that cost manageable.
 
 **How does RankNet's loss work, and what specific problem does LambdaRank fix in it?**
+**Short:** RankNet's pairwise cross-entropy treats every rank swap identically, while LambdaRank scales each pair's gradient by the NDCG change that swap would cause.
 RankNet trains on pairs of documents for the same query and applies a cross-entropy loss to the difference between their predicted scores, pushing the higher-relevance document's score above the lower one's. Its blind spot is that this loss treats every pair identically regardless of where in the ranked list the pair sits, spending as much gradient fixing a swap at rank 40 as one at rank 1, even though only the latter changes NDCG. LambdaRank keeps RankNet's pairwise cross-entropy but multiplies each pair's gradient by the change in NDCG that swapping the pair would cause, concentrating effort where it actually moves the metric.
 
 **What does LambdaMART add on top of LambdaRank?**
+**Short:** LambdaMART fits LambdaRank's metric-aware lambda gradients with gradient-boosted trees instead of a neural network, handling sparse tabular features natively.
 LambdaMART keeps LambdaRank's lambda gradients but fits them with gradient-boosted decision trees instead of a neural network. Trees handle the heterogeneous, often sparse tabular features typical of search ranking without the feature scaling or architecture tuning a neural model needs. It is the default production learning-to-rank model precisely because it combines a metric-aware objective with a model family that is fast to train and easy to feature-engineer around.
 
 **How does HNSW's graph structure trade memory and build time for search speed, and what does ef_search control?**
+**Short:** HNSW's multi-layer graph lets a query skip via long-range edges before refining locally, and ef_search trades higher latency for higher recall by exploring more candidates.
 HNSW organizes vectors into a multi-layer navigable graph, letting a query skip through long-range edges before refining via short-range edges instead of scanning every vector. ef_search controls how many candidates are explored during that graph search, so a higher ef_search trades latency for recall -- roughly 82% recall at ef_search=10 rising to 99.3% at ef_search=400, while p50 latency rises from about 0.3ms to 5.1ms over the same range. Pick the smallest ef_search that clears your recall SLA rather than defaulting to the highest setting, since the last few points of recall are the most expensive.
 
 **What is BM25F and why do multi-field documents need it?**
+**Short:** BM25F computes length-normalized, per-field-weighted term frequency separately per field, so a title match isn't diluted by a much longer body field's normalization.
 BM25F extends BM25 to multi-field documents by computing a length-normalized, per-field weighted term frequency before applying the same saturation and IDF formula. This replaces naively scoring one field or concatenating fields together, and without it a term match in a short, highly-important title field is diluted by the same length-normalization tuned for a much longer body field. Use BM25F, or separate per-field BM25 scores combined with learned weights, whenever documents have structurally different fields.
 
 **What is query understanding, and what failure mode can overly aggressive query rewriting cause?**
+**Short:** Query understanding covers spell correction, expansion, and intent classification before retrieval, but overly aggressive stemming can collapse distinct intents into one.
 Query understanding covers spell correction, query expansion or rewriting, segmentation, and intent classification applied before retrieval runs. Overly aggressive stemming or synonym expansion can collapse genuinely distinct intents into one, for example stemming and expanding a proper-noun title query into unrelated synonym terms and burying the correct result under an entirely different topic. Gate aggressive rewriting behind an entity or capitalization check, and A/B test changes to query understanding with the same rigor as a ranking model change.
 
 **Why might a system choose IVF over HNSW despite HNSW's higher recall?**
+**Short:** IVF's flat, quantizable clusters use far less memory per vector than HNSW's graph edges, mattering once corpus size makes memory the binding constraint.
 IVF stores vectors in flat, quantizable clusters rather than a graph with many edges per node, so it uses substantially less memory per vector and is straightforward to shard across machines by cluster. HNSW's graph edges give it better recall at a given latency but at higher memory cost per vector, which matters when the corpus reaches billions of vectors and memory, not raw recall, becomes the binding constraint. Choose IVF, or IVF-PQ for even tighter memory, when corpus size or budget rules out keeping a full navigable graph in memory.
 
 **When does hybrid retrieval outperform either pure sparse or pure dense retrieval alone?**
+**Short:** Hybrid retrieval wins whenever a query workload mixes exact-match needs like identifiers with semantic paraphrase needs that no single representation covers.
 Hybrid retrieval wins whenever a query workload mixes exact-match needs like identifiers, rare terms, and numbers with semantic or paraphrase needs, because no single representation handles both well. Fusing BM25 and dense rankings with Reciprocal Rank Fusion recovers whichever channel would have missed the answer, at the cost of running two retrieval paths instead of one. Default to hybrid in production search unless the query distribution is narrow enough, such as pure part-number lookup, that one channel already covers it.
 
 ---

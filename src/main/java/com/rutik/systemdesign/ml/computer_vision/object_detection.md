@@ -806,54 +806,71 @@ Detection models with FPN and RPN are sensitive to batch normalization statistic
 ## 12. Interview Questions with Answers
 
 **Q: What is IoU and what threshold is used for COCO vs PASCAL VOC?**
+**Short:** IoU is intersection over union between predicted and ground-truth boxes; PASCAL VOC uses a 0.5 threshold while COCO averages mAP over thresholds 0.5 to 0.95.
 IoU (Intersection over Union) measures the overlap between a predicted box and a ground-truth box: IoU = intersection area / union area. A value of 1.0 means perfect overlap; 0.0 means no overlap. PASCAL VOC considers IoU >= 0.5 as a true positive and reports mAP@0.5. COCO computes mAP averaged over 10 thresholds from 0.5 to 0.95 in steps of 0.05 (written mAP@[0.5:0.95]), which is a stricter metric that rewards precise localization.
 
 **Q: Explain the Region Proposal Network (RPN) in Faster R-CNN.**
+**Short:** The RPN slides over the backbone feature map evaluating anchors at each location for objectness and box offsets, sharing features instead of running a separate CNN.
 The RPN is a small fully convolutional network that slides a 3x3 window over the backbone feature map. At each location it evaluates k anchor boxes (typically 9: 3 scales × 3 aspect ratios), predicting: (1) a two-class objectness score (object vs background) and (2) four box offsets (dx, dy, dw, dh) relative to the anchor. High-scoring proposals (top 1000 training / 300 inference) are passed downstream after NMS with IoU threshold 0.7. The key insight is weight sharing: the RPN reuses backbone features rather than running a separate CNN.
 
 **Q: Why does YOLO divide the image into a grid? What is a limitation of this approach?**
+**Short:** YOLO assigns each grid cell responsibility for objects whose center falls inside it, but this causes missed detections when multiple same-class object centers collide in one cell.
 YOLO assigns responsibility for detecting an object to the grid cell that contains the object's center. Each cell predicts B bounding boxes and C class probabilities simultaneously in one forward pass, making the model very fast. The limitation is that each cell can predict at most one object per scale, causing missed detections when multiple objects of the same class have overlapping centers — this is called the grid cell collision problem and is partially mitigated by multi-scale prediction in YOLOv3+.
 
 **Q: What is the Hungarian algorithm and why does DETR use it?**
+**Short:** The Hungarian algorithm finds the minimum-cost one-to-one bipartite match between predictions and ground truths, letting DETR skip NMS and anchor heuristics entirely.
 The Hungarian algorithm solves the assignment problem: find the minimum-cost one-to-one matching between N predictions and M ground-truth objects. DETR uses it to compute a bipartite matching between the 100 output slots and the ground-truth boxes, ensuring each GT is matched to exactly one prediction (no duplicates). This replaces the need for NMS and anchor matching heuristics. The matching cost combines class probability and box GIoU.
 
 **Q: What is the difference between GIoU, DIoU, and CIoU?**
+**Short:** GIoU adds an enclosing-box penalty so non-overlapping boxes still get gradient, DIoU adds a center-distance term, and CIoU further adds an aspect-ratio term.
 Standard IoU loss is zero when boxes don't overlap, giving no gradient signal to move a completely wrong box. GIoU (Generalized IoU) adds a term penalizing the fraction of the enclosing box not covered by either box, providing gradient even for non-overlapping cases. DIoU (Distance IoU) adds a term for the normalized distance between box centers, promoting faster convergence. CIoU adds an aspect ratio consistency term on top of DIoU, further stabilizing box shape. YOLOv8 uses CIoU as its regression loss.
 
 **Q: How does NMS work and when does it fail?**
+**Short:** NMS suppresses boxes overlapping a kept high-confidence box beyond an IoU threshold, but it wrongly removes real detections in dense crowds of adjacent objects.
 NMS sorts boxes by confidence, keeps the highest-scoring box, then suppresses all remaining boxes whose IoU with the kept box exceeds a threshold (0.45 is YOLO default). It fails in dense crowds where legitimate adjacent objects have high mutual IoU — the suppression removes real detections. Solutions: Soft-NMS (decays scores by a Gaussian function of IoU instead of hard removal), DIoU-NMS (uses center distance instead of IoU), or DETR (no NMS needed).
 
 **Q: What is an FPN and why is it important for detection?**
+**Short:** A Feature Pyramid Network merges a bottom-up backbone with a top-down pathway so the detector gets both semantic richness and spatial precision at every scale.
 A Feature Pyramid Network (FPN) creates a multi-scale feature hierarchy by combining a bottom-up CNN backbone with a top-down pathway and lateral connections. The bottom-up pass captures semantics (rich features at low resolution); the top-down pass up-samples and merges with high-resolution features that retain spatial detail. This gives the detector access to both semantic richness and spatial precision at every scale, enabling detection of both small and large objects simultaneously.
 
 **Q: What is the role of anchor boxes and what are their disadvantages?**
+**Short:** Anchor boxes let the detector predict small offsets instead of absolute coordinates, but they require per-dataset tuning and create severe positive/negative imbalance.
 Anchor boxes are pre-defined boxes of various aspect ratios and scales placed at each grid location. The detector predicts offsets relative to anchors, which stabilizes training (predicting small offsets is easier than absolute coordinates). Disadvantages: anchor hyperparameters (sizes, aspect ratios, number) require careful tuning for each dataset; anchor mismatch causes misses; the large number of anchors (100k+) creates a severe class imbalance between positive and negative anchors (addressed by focal loss in RetinaNet). Anchor-free methods (FCOS, YOLOv8) eliminate this complexity.
 
 **Q: How does Focal Loss address class imbalance in one-stage detectors?**
+**Short:** Focal loss multiplies cross-entropy by (1-p_t)^gamma to automatically down-weight the vast number of easy background anchors relative to hard foreground ones.
 One-stage detectors evaluate ~100k anchor locations per image but have only a handful of true objects. Most anchors are easy negatives (background), which dominate the loss and swamp gradients from hard positives. Focal Loss modifies cross-entropy by multiplying by (1 - p_t)^gamma, where p_t is the model's estimated probability for the correct class. Easy examples (high confidence) have small (1-p_t) and are down-weighted automatically. Hard examples (low confidence, typical of foreground objects) retain high loss weight. Gamma=2.0 is the standard setting.
 
 **Q: What metrics beyond mAP are important for production detection systems?**
+**Short:** Average Recall at a fixed detection budget, size-stratified AP for small/medium/large objects, FPS, P50/P99 latency, and false negative rate all matter beyond mAP.
 AR (Average Recall) measures the coverage at a fixed number of detections per image (AR@100 in COCO). Small/medium/large AP (AP_S, AP_M, AP_L) breaks down performance by object size. FPS (throughput) and latency (P50/P99 per image) are critical for real-time systems. False negative rate is often more important than precision in safety-critical applications (e.g., pedestrian detection in AV). Memory footprint matters for edge deployment.
 
 **Q: How do you fine-tune a pretrained COCO detector on a custom dataset?**
+**Short:** Replace the classification head, re-cluster anchors if object sizes differ from COCO, and use a lower backbone LR with a higher head LR during fine-tuning.
 Start from COCO-pretrained weights which provide rich detection priors. Replace the classification head with a new linear layer sized for your number of classes (including background). If your object sizes differ significantly from COCO, re-cluster anchor sizes from your dataset. Use a lower learning rate for the backbone (1e-4) and higher for the new head (1e-3). Apply the same augmentation pipeline used during COCO pretraining. Train for 12–24 epochs with cosine LR schedule; evaluate mAP@[0.5:0.95] on a held-out validation set.
 
 **Q: What is the difference between mAP@0.5 and mAP@[0.5:0.95]?**
+**Short:** mAP@0.5 accepts any box with 50% overlap, while mAP@[0.5:0.95] averages across ten stricter thresholds, rewarding precise rather than merely roughly correct boxes.
 mAP@0.5 considers a detection correct if IoU with the ground truth exceeds 0.5. mAP@[0.5:0.95] averages mAP over 10 thresholds: 0.50, 0.55, ..., 0.95. The higher thresholds (0.75, 0.90, 0.95) reward precise localization. A detector with sloppy but roughly correct boxes scores well on mAP@0.5 but poorly on mAP@[0.5:0.95]. COCO uses the latter as its primary metric, making it a stricter and more informative evaluation.
 
 **Q: What is Soft-NMS and when should you use it?**
+**Short:** Soft-NMS decays overlapping boxes' scores by a Gaussian function of IoU instead of hard-suppressing them, improving AP in dense crowd detection scenarios.
 Soft-NMS decays the confidence score of overlapping boxes by a Gaussian function of their IoU with the selected box, rather than hard suppression. Boxes that strongly overlap the selected box get low scores and are filtered out at the final score threshold. Boxes with moderate overlap survive with reduced scores. Use Soft-NMS in dense crowd detection (pedestrian counting, sports tracking) where hard NMS suppresses legitimate adjacent detections. It typically improves AP by 1–2 points in dense scenarios.
 
 **Q: How does Faster R-CNN handle multi-scale detection?**
+**Short:** FPN attaches the RPN to five feature-pyramid levels, assigning small anchors to high-resolution levels and each RoI to a level chosen by its box size.
 Modern Faster R-CNN uses FPN: the RPN attaches to all five FPN levels (P2–P6). Anchor sizes are assigned to levels — small anchors to high-resolution P2, large anchors to low-resolution P6. RoI pooling is replaced by RoI Align, which uses bilinear interpolation to extract features without quantization artifacts. The level for each RoI is assigned based on its size using the formula: level = clip(floor(lvl_0 + log2(sqrt(wh)/224)), P2, P5). This ensures each object is detected at the appropriate feature scale.
 
 **Q: What is the COCO benchmark and what does AP_S, AP_M, AP_L measure?**
+**Short:** COCO covers 80 categories across 330k images and breaks accuracy down by object area into small, medium, and large AP, with small objects remaining hardest.
 COCO (Common Objects in Context) is the primary detection benchmark with 80 object categories, 330k images, and 1.5M object instances. AP_S measures AP for small objects (area < 32x32 pixels), AP_M for medium (32x32 to 96x96), and AP_L for large (> 96x96). Small object detection is the hardest sub-problem — state-of-the-art models still struggle with AP_S < 30. Models with FPN significantly outperform those without on AP_S.
 
 **Q: What is the core difference between one-stage and two-stage object detectors?**
+**Short:** Two-stage detectors first propose regions then classify them for higher accuracy on small objects, while one-stage detectors predict directly for much higher speed.
 Two-stage detectors first generate region proposals and then classify each one, while one-stage detectors predict boxes and classes directly in a single pass over a dense grid. Two-stage models like Faster R-CNN are more accurate on small and overlapping objects because the second stage refines a focused set of proposals, but they run at only ~5 fps. One-stage models like YOLO, SSD, and RetinaNet are far faster (100+ fps) and lean on focal loss to fight the massive background imbalance, trading a few mAP points for speed. Choose two-stage for offline high-accuracy work and one-stage for real-time.
 
 **Q: Why does DETR converge slowly and how does Deformable DETR fix it?**
+**Short:** DETR needs about 500 epochs because global attention and Hungarian matching are slow to stabilize; Deformable DETR's sparse key-point sampling cuts that to about 50.
 DETR needs roughly 500 training epochs because its global attention must learn from scratch which image regions each object query should attend to. The Hungarian matching is also unstable early in training, and dense self-attention over every feature token is expensive at high resolution. Deformable DETR replaces dense attention with deformable attention that samples a small set of key points per query, cutting training to about 50 epochs and markedly improving small-object AP.
 
 ---

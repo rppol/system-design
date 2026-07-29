@@ -618,60 +618,98 @@ Because SSL sometimes *hurts*, a good-looking absolute number is meaningless wit
 ## 12. Interview Questions with Answers
 
 **Q: What is semi-supervised learning and when does it actually help?**
+**Short:** SSL helps only when smoothness, cluster/low-density, or manifold structure makes the unlabeled data informative about labels.
+
 SSL trains on a small labeled set plus a large unlabeled set jointly, and it helps only when the data's structure (`p(x)`) is informative about the labels (`p(y|x)`). Concretely, that means one of the three assumptions — smoothness, cluster/low-density separation, or manifold — must hold, so the unlabeled cloud reveals where the decision boundary should go. When they hold, methods like FixMatch reach ~88–94% on CIFAR-10 with 40 labels vs ~95% fully-supervised; when they are violated, SSL can perform *worse* than the supervised baseline. Always keep a supervised-only baseline to detect that failure.
 
 **Q: What are the three assumptions semi-supervised learning relies on?**
+**Short:** SSL relies on smoothness, cluster/low-density separation, and manifold structure, each licensing a different family of methods.
+
 Smoothness (nearby points share a label), cluster/low-density separation (the boundary lies in sparse regions), and manifold (data lies on a low-dimensional manifold with labels smooth along it). Smoothness licenses consistency regularization, low-density licenses pseudo-labeling and entropy minimization, and the manifold assumption licenses graph-based label propagation. If none holds for your data, unlabeled data adds noise, not signal.
 
 **Q: What is confirmation bias in pseudo-labeling and how do you prevent it?**
+**Short:** Confirmation bias is a model reinforcing its own wrong confident predictions, prevented by high thresholds, calibration, and capped pseudo-labels.
+
 It is when a model trains on its own confident-but-wrong predictions, reinforcing and amplifying those errors each round. It arises because self-training treats predictions as ground truth, so a low confidence bar admits mistakes that get baked into the training set. Prevent it with a high confidence threshold (tau ~0.95), calibrated probabilities before thresholding, strong augmentation on the loss view (FixMatch), capping pseudo-labels added per round, and watching held-out test accuracy for the tell-tale drop while pseudo-label accuracy rises.
 
 **Q: How does FixMatch work?**
+**Short:** FixMatch keeps a weakly-augmented prediction as a pseudo-label above a 0.95 confidence threshold and trains on it via a strongly-augmented view.
+
 FixMatch predicts on a weakly-augmented view of an unlabeled image, keeps it only if the max softmax exceeds tau=0.95, then trains the model to reproduce that hardened pseudo-label on a strongly-augmented view. It unifies confidence-thresholded pseudo-labeling with strong-augmentation consistency. The confidence mask self-paces training (near-zero unlabeled loss early, rising as the model improves), which is why it needs no consistency ramp-up.
 
 **Q: Why does FixMatch use weak augmentation for the pseudo-label but strong augmentation for the loss?**
+**Short:** The weak view yields a trustworthy pseudo-label while the strong view forces the model to learn genuine invariance, not trivial matching.
+
 Because the weak view gives a *reliable* target while the strong view is the *hard* input the model must learn to be invariant to. A weakly-augmented image is close to the original, so the model's prediction on it is trustworthy enough to use as a label; the strongly-augmented view (RandAugment + Cutout) is what the model is then forced to classify correctly, which teaches genuine generalization rather than memorizing its own guess. If both views were weakly augmented, the consistency task is trivial and provides almost no signal.
 
 **Q: What is consistency regularization?**
+**Short:** Consistency regularization forces matching predictions on two label-preserving perturbations of an unlabeled input, encoding the smoothness assumption.
+
 It is a loss that forces a model to give the same prediction to two label-preserving perturbations of the same unlabeled input, using no labels at all. It operationalizes the smoothness assumption: since the transform (crop, flip, dropout, back-translation) does not change the true label, the prediction should not change either. Pi-model, Temporal Ensembling, Mean Teacher, UDA, and FixMatch are all consistency methods differing mainly in how they produce the stable target.
 
 **Q: What is the Mean Teacher and why use an EMA of weights as the target?**
+**Short:** Mean Teacher averages the student's weights via EMA into a teacher network, giving a smoother target with no per-example memory cost.
+
 Mean Teacher keeps a "teacher" network whose weights are an exponential moving average (decay ~0.999) of the trained "student", and enforces consistency between student and teacher predictions. Averaging in weight space gives a smoother, more accurate target than any single noisy forward pass or stored past prediction, and it scales to large unlabeled sets without per-example memory (unlike Temporal Ensembling). The teacher is updated only by the EMA, never by gradients.
 
 **Q: How is semi-supervised learning different from self-supervised pretraining?**
+**Short:** SSL jointly trains on labels and unlabeled data for one task, while self-supervised pretraining first learns a reusable label-free representation.
+
 SSL uses labels and unlabeled data jointly in one training objective; self-supervised pretraining first learns a task-agnostic representation from unlabeled data via a pretext task and only sees labels when fine-tuning. Self-supervised produces a reusable representation across many downstream tasks; SSL produces one task-specific model. In practice they stack: pretrain self-supervised, then fine-tune with SSL consistency when labels are scarce.
 
 **Q: When does semi-supervised learning hurt performance?**
+**Short:** SSL hurts when labeled and unlabeled data come from different distributions, since out-of-distribution pseudo-labels inject systematic bias.
+
 When its assumptions are violated or when the labeled and unlabeled sets come from different distributions. If the unlabeled pool contains out-of-distribution classes or domains absent from the labeled set, pseudo-labels and consistency inject systematic bias and can push accuracy below the supervised-only baseline. Fine-grained interleaved classes break smoothness, and data with no cluster/manifold structure gives SSL nothing to exploit — which is why you always benchmark against a supervised baseline.
 
 **Q: What is the difference between the Pi-model and Temporal Ensembling?**
+**Short:** The Pi-model targets a second stochastic forward pass each step, while Temporal Ensembling targets an EMA of each example's past predictions.
+
 The Pi-model gets its consistency target from a second stochastic forward pass (different dropout/augmentation) in the same step, so the target is noisy and requires two forward passes per step. Temporal Ensembling instead maintains an exponential moving average of each example's *past predictions* as the target, which is far more stable but needs memory proportional to dataset size times number of classes. Mean Teacher improves on both by averaging *weights* rather than predictions.
 
 **Q: What is label propagation / label spreading, and what does transductive mean?**
+**Short:** Label propagation diffuses known labels across a similarity graph so unlabeled nodes inherit neighbors' labels, but only for points already in the graph.
+
 They diffuse a few known labels across a similarity graph (kNN or RBF) over all labeled and unlabeled points, so unlabeled nodes inherit labels from their neighbors — using the manifold assumption. Transductive means they output labels only for the specific points in the graph, not a reusable function for new data. To generalize, you train an inductive model on the propagated labels; this graph diffusion is the conceptual precursor to graph neural networks.
 
 **Q: How does semi-supervised learning relate to active learning?**
+**Short:** SSL exploits unlabeled data to improve a fixed labeled set, while active learning instead selects which unlabeled points deserve a new label.
+
 They are complementary ways to cope with scarce labels: SSL exploits unlabeled data without asking for more labels, while active learning selects which unlabeled points a human should label next. SSL improves the model given a fixed labeled set; active learning improves the labeled set itself. A strong pipeline stacks them — use SSL to get value from all unlabeled data, and active learning to spend the small gold budget on the most informative points (see the parent module).
 
 **Q: What is entropy minimization and how does it connect to the low-density assumption?**
+**Short:** Entropy minimization pushes the decision boundary into sparse regions by forcing confident unlabeled predictions, directly encoding low-density separation.
+
 Entropy minimization adds a loss that makes unlabeled predictions confident (low entropy), pushing the decision boundary out of dense regions into sparse ones — the low-density assumption as a loss. On its own it can collapse all predictions to a single class, so it is always paired with a supervised anchor. It appears implicitly in FixMatch's hard pseudo-labels and explicitly in MixMatch's sharpening step.
 
 **Q: How do you choose the confidence threshold tau, and what does raising or lowering it trade off?**
+**Short:** A high tau trades pseudo-label coverage for correctness, while a low tau admits more examples but risks compounding wrong labels.
+
 A high tau (0.9–0.95) admits fewer but more reliable pseudo-labels, trading coverage for correctness and guarding against confirmation bias; a low tau admits more examples but risks wrong labels compounding. FixMatch fixes tau=0.95 because early over-confident mistakes are catastrophic in self-training. FlexMatch improves on the fixed value with per-class adaptive thresholds so hard classes are not starved of pseudo-labels.
 
 **Q: What is MixMatch and how do sharpening and mixup contribute?**
+**Short:** MixMatch sharpens averaged multi-augmentation predictions into low-entropy pseudo-labels, then trains on mixup-interpolated labeled and unlabeled data.
+
 MixMatch averages predictions over K augmentations of an unlabeled image, sharpens the average into a low-entropy pseudo-label, then mixes up labeled and unlabeled examples and trains on the interpolated targets. Sharpening implements entropy minimization (low-density assumption); mixup enforces that predictions vary linearly between examples (a strong smoothness prior). ReMixMatch adds distribution alignment so pseudo-label class frequencies match the labeled set.
 
 **Q: What is co-training and when is it applicable?**
+**Short:** Co-training trains two classifiers on conditionally-independent feature views that each label examples for the other, requiring genuinely complementary views.
+
 Co-training trains two classifiers on two conditionally-independent feature *views* of the data, such as a page's text versus its inbound-link text. Each classifier labels the examples it is most confident about and adds them to the other's training set. It applies only when you genuinely have two complementary views that are each individually sufficient — a strong requirement rarely met. Tri-training relaxes it by using three models and majority agreement instead of explicit views.
 
 **Q: What is UDA (Unsupervised Data Augmentation)?**
+**Short:** UDA enforces consistency between an unlabeled input and its advanced-augmentation version, showing stronger augmentation drives stronger SSL.
+
 UDA is consistency regularization that enforces the same prediction on an unlabeled input and on an *advanced-augmentation* version of it — RandAugment for images, back-translation for text. Its key insight is that consistency is only as strong as the augmentation, so swapping weak noise for state-of-the-art augmentation dramatically improves results; UDA matched supervised BERT on IMDb with ~20 labels per class. It is the method that made consistency-based SSL work well for NLP.
 
 **Q: Why must you calibrate probabilities before thresholding pseudo-labels?**
+**Short:** Deep networks are systematically overconfident, so calibrating probabilities before thresholding keeps the confidence gate actually meaningful.
+
 Because deep networks are systematically over-confident, so a raw max softmax of 0.97 does not mean 97% likely correct, and thresholding on it admits wrong pseudo-labels that drive confirmation bias. Temperature scaling on a held-out set (or ensemble/MC-dropout confidence) aligns predicted probabilities with true correctness rates, making the confidence gate meaningful. This is the same calibration machinery used in uncertainty quantification.
 
 **Q: How should you weight the unlabeled loss and schedule it during training?**
+**Short:** Ramp the consistency weight up from zero early in training, since enforcing consistency against a near-random early model hurts more than helps.
+
 Start the consistency weight near zero and ramp it up over the first epochs, because early on the model's targets are essentially random and enforcing consistency with them hurts. Mean Teacher and Pi-model rely on this ramp-up; FixMatch instead lets its confidence mask self-pace (near-zero coverage early), so it fixes the weight at 1 with no explicit schedule. Over-weighting unlabeled loss can drown the supervised anchor and cause collapse.
 
 ---

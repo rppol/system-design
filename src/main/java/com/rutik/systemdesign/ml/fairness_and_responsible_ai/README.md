@@ -769,63 +769,83 @@ A team facing a failing four-fifths ratio reached for the fastest fix — an exp
 ## 12. Interview Questions with Answers
 
 **Why can't a classifier satisfy both calibration and equalized odds when base rates differ across groups?**
+**Short:** A fixed algebraic identity linking PPV, TPR, FPR, and base rate means calibration and equalized odds can only both hold when base rates match or the classifier is perfect.
 Because a fixed algebraic identity links PPV, TPR, FPR, and the base rate, so calibration and equalized odds can only both hold across groups if the base rates match or the classifier is perfect. The identity is FPR = (p/(1-p)) x ((1-PPV)/PPV) x TPR, so holding PPV and TPR equal while p differs forces FPR to differ. This is the Kleinberg-Mullainathan-Raghavan / Chouldechova impossibility result behind the ProPublica-vs-Northpointe COMPAS dispute — both sides read real numbers correctly, and no further tuning reconciles them; pick the metric that matches the harm you are preventing and document why.
 
 **Why isn't removing the protected attribute from the training data enough to make a model fair?**
+**Short:** Removing the protected attribute doesn't remove its influence when a correlated proxy feature, like ZIP code standing in for race, remains in the data.
 Removing the protected column does not remove its influence whenever a correlated proxy feature remains, such as ZIP code standing in for race or first name standing in for ethnicity. The model reconstructs the missing signal through the proxy just as effectively, which is why the Apple Card gender-limit controversy occurred on a model that never saw a gender field. Always run a proxy audit — mutual information or a simple classifier predicting the protected attribute from each engineered feature — rather than trusting "fairness through unawareness."
 
 **What's wrong with using a single global decision threshold across every protected group?**
+**Short:** A single global decision threshold can hide a large per-group TPR or FPR gap even when overall AUC looks excellent, so per-group confusion matrices are mandatory.
 A single threshold can produce a large true-positive-rate or false-positive-rate gap between groups even when the overall AUC looks excellent. The aggregate ROC curve averages away exactly the subgroup detail that matters — in one worked example a global 0.5 cutoff produced an 81% TPR for one group and 61% for another, a 20-point gap invisible in the topline metric. Compute per-group confusion matrices as a mandatory check, not an optional deep-dive, before any model ships.
 
 **Why can optimizing for demographic parity sometimes make outcomes worse, not better?**
+**Short:** Forcing demographic parity when groups have a genuinely different, non-biased base rate degrades the true-positive rate for the higher-prevalence group.
 Demographic parity forces equal positive-prediction rates across groups regardless of whether the true underlying rates actually differ for a legitimate, non-biased reason. In a medical-screening context with genuinely different disease prevalence by age group, forcing parity degrades the true-positive rate in the higher-prevalence group, trading real missed diagnoses for a metric mismatch. Confirm why base rates differ before choosing demographic parity, and prefer equalized odds or equal opportunity when the difference is genuine prevalence rather than bias.
 
 **Why is "we don't collect race or gender, so we can't be biased" a dangerous position?**
+**Short:** Not collecting protected attributes makes fairness unmeasurable rather than unbiased, since group-fairness metrics require the group labels to compute.
 It is dangerous because you cannot compute a single group-fairness metric without the group labels, so the claim of safety is actually a claim of unmeasurability. Several regulated domains, such as US mortgage lending under HMDA, require lenders to collect self-reported demographic data specifically so bias can be audited, precisely because omission hides rather than prevents disparate impact. Collect the protected attribute for audit purposes even when it is excluded from the model's feature set.
 
 **What is the difference between disparate treatment and disparate impact?**
+**Short:** Disparate treatment is intentionally treating someone differently by a protected characteristic, while disparate impact is a neutral practice with an unequal outcome.
 Disparate treatment is intentionally treating someone differently because of a protected characteristic, while disparate impact is a facially neutral practice with a statistically unequal outcome. A model that never sees gender can still create disparate impact through a proxy, and a post-processing step that explicitly sets a different threshold per protected group can itself be read as disparate treatment even though its intent is remedial. Knowing which doctrine applies changes which mitigation stage (Section 8.2) is legally safer to deploy.
 
 **Can you legally set different decision thresholds per protected group in the US?**
+**Short:** Explicit per-group decision thresholds are legally risky as disparate treatment in several US contexts, so upstream pre- or in-processing fixes are safer than post-processing.
 Sometimes not: several US employment and lending contexts treat an explicit per-group decision threshold as disparate treatment, even when the goal is remedial. This is why post-processing per-group thresholds carry higher legal risk than pre- or in-processing methods, which change the model once, upstream, with the same threshold applied to everyone afterward. When in doubt, push the fix upstream and keep a single serving-time rule for every individual.
 
 **What is the EEOC four-fifths (80%) rule and how do you compute the disparate impact ratio?**
+**Short:** The EEOC's four-fifths rule flags adverse impact when a group's selection rate falls below 80% of the highest group's rate, computed as lowest divided by highest rate.
 The four-fifths rule flags adverse impact when a group's selection rate falls below 80% of the highest-selected group's rate, per the EEOC's 1978 Uniform Guidelines on Employee Selection Procedures. The disparate impact ratio is simply the lowest group's selection rate divided by the highest group's rate — for example 45% versus 60% gives a ratio of 0.75, which fails the 80% threshold. It is a screening heuristic, not a legal safe harbor, and is noisy at small sample sizes, so pair it with a statistical-significance test before drawing conclusions.
 
 **What is the difference between demographic parity, equalized odds, equal opportunity, and predictive parity?**
+**Short:** Demographic parity equalizes prediction rate, equalized odds equalizes both error rates, equal opportunity equalizes only true-positive rate, and predictive parity equalizes precision.
 Each holds a different rate equal across groups: demographic parity the prediction rate, equalized odds both error rates, equal opportunity the true-positive rate alone, and predictive parity precision. Demographic parity ignores the true label entirely, equalized odds and equal opportunity condition on it (the "separation" family), and predictive parity conditions on the prediction instead (the "sufficiency" family). Separation and sufficiency are mutually exclusive whenever base rates differ, which is exactly the tension the impossibility result formalizes.
 
 **What are the six sources of bias across the ML lifecycle?**
+**Short:** The six ML-lifecycle bias sources are historical, representation/sampling, measurement, label, aggregation, and deployment bias, each needing a different fix.
 The six are historical, representation/sampling, measurement, label, aggregation, and deployment bias. Historical bias means the world itself is inequitable before any data is collected; representation and measurement bias enter during data collection and feature choice; label bias comes from biased human judgments used as ground truth; aggregation bias comes from pooling heterogeneous subgroups into one model; and deployment bias comes from using the model in a context it was never validated for. Each requires a different fix — auditing only the trained model catches none of the first five, since they are baked in before training starts.
 
 **How does reweighing (Kamiran & Calders) work mechanically?**
+**Short:** Kamiran-Calders reweighing upweights underrepresented group-label combinations and downweights overrepresented ones without changing any labels or rows.
 Reweighing assigns every training row a weight equal to its expected frequency under group-label independence divided by its observed frequency. Rows from underrepresented (group, label) combinations get upweighted and overrepresented combinations get downweighted, with no labels or rows changed or dropped, pushing a model trained on the reweighted data toward demographic parity. It is the simplest mitigation to explain to a non-technical auditor, since "we reweighted the training data" needs no further justification of model internals.
 
 **How does the reductions approach (exponentiated gradient) enforce a fairness constraint during training?**
+**Short:** The reductions approach frames fairness-constrained learning as a two-player game, alternating classifier training with per-group constraint-weight updates within a slack eps.
 It reformulates fairness-constrained learning as a two-player game between a classifier and a set of per-group constraint weights. Training alternates between fitting the classifier to minimize error given the current weights and updating those weights to penalize whichever group violates the constraint most, converging to the best accuracy achievable within an allowed slack `eps`. It needs the protected attribute only at training time, unlike post-processing.
 
 **How does adversarial debiasing work?**
+**Short:** Adversarial debiasing penalizes the main predictor whenever an adversary network can successfully predict the protected attribute from its output.
 An adversary network is trained to predict the protected attribute from the main predictor's output. The main predictor is penalized in proportion to how well the adversary succeeds, pushing it toward outputs that do not encode group membership, while a `lambda` weight controls how strongly that penalty is applied. It has no closed-form guidance for choosing `lambda` and is harder to audit than reweighing, so it is best reserved for cases where a simpler reductions-style constraint underperforms.
 
 **How does post-processing per-group threshold optimization work, and what does it cost?**
+**Short:** Post-processing threshold optimization searches for a separate per-group decision threshold on an already-trained model without retraining, but needs the attribute at serving time.
 A `ThresholdOptimizer`-style method takes an already-trained model and searches for a separate decision threshold per group that satisfies a target constraint, such as equalized odds, exactly. It requires no retraining and works on any black-box model, but needs the protected attribute available at every individual decision, which is the source of its higher disparate-treatment risk relative to pre- or in-processing. Use it when retraining is infeasible and the legal context clearly permits explicit group-conditioned rules.
 
 **What is a proxy feature and how do you audit for one?**
+**Short:** A proxy feature correlates strongly enough with a protected attribute to let a model reconstruct group membership, detected via mutual information or a predicting classifier.
 A proxy feature is a column that is not the protected attribute itself but correlates strongly enough to let the model reconstruct group membership through it. ZIP code standing in for race via historical redlining is the canonical example; audit by computing mutual information, or by training a simple classifier that predicts the protected attribute from each candidate feature, flagging any feature that performs well above chance. Run this audit every time features are re-engineered, since new features can silently become strong proxies even if earlier ones were clean.
 
 **What's the difference between individual fairness and group fairness?**
+**Short:** Group fairness constrains an average statistic over a demographic group, while individual fairness requires similar individuals to receive similar predictions.
 Group fairness constrains an average statistic over a demographic group, while individual fairness requires similar individuals to receive similar predictions. A model can satisfy every group-level metric while still treating two nearly identical people very differently, because group averages can mask individual-level disparity — exactly the gap individual fairness targets. It sidesteps that failure mode but shifts the hard problem onto defining a defensible similarity metric, which is itself a value judgment.
 
 **What is counterfactual fairness?**
+**Short:** Counterfactual fairness asks whether a prediction would change had an individual's protected attribute been different, all else held fixed, using a causal model.
 Counterfactual fairness asks whether a prediction would change if the individual's protected attribute had been different, all else held fixed. It requires a causal model of how the protected attribute propagates into other features, which is rarely fully known, so practical implementations are approximate diagnostics rather than certified proofs. It is the formalism regulators and courts implicitly reach for when asking whether a specific applicant would have been treated differently under a different protected-attribute value.
 
 **What is a model card and what must it document?**
+**Short:** A model card records a model's intended use, per-subgroup performance, and the fairness metric and mitigation method chosen, unlike a dataset-focused datasheet.
 A model card (Mitchell et al., 2019) is a structured document that records a model's intended use, per-subgroup performance, and known limitations. It also names the fairness metric and mitigation method chosen, so a future engineer, auditor, or regulator can see the tradeoff made and why without re-deriving it from scratch. Treat it as a generated artifact tied to the same per-group metrics computed during evaluation, not a document written from memory after the fact.
 
 **How does a "datasheet for datasets" differ from a model card?**
+**Short:** A datasheet for datasets documents the data's collection process, composition, and gaps, while a model card documents the trained model's behavior and subgroup performance.
 A datasheet for datasets documents the data itself, not the trained model. Per Gebru et al. (2018/2021) it covers collection process, composition, known gaps, and intended versus inappropriate uses, while a model card instead documents the trained model's behavior and per-subgroup performance — a dataset can have a clean datasheet and still produce an unfair model if the modeling stage introduces aggregation or measurement bias. The two documents are complementary, and both are typically required together for a defensible EU AI Act high-risk conformity file.
 
 **Where do hiring and credit-scoring models fall under the EU AI Act's risk tiers, and what does that trigger?**
+**Short:** Hiring and credit-scoring models are explicitly listed as high-risk under Annex III of the EU AI Act, triggering conformity assessment and mandatory bias testing.
 Both are explicitly listed as high-risk use cases under Annex III of the EU AI Act, alongside categories like biometric identification and access to essential services. High-risk classification triggers a conformity assessment, a documented risk-management system, mandatory bias testing and technical documentation, and human-oversight requirements before deployment. See [`../../llm/ai_regulations_and_compliance/README.md`](../../llm/ai_regulations_and_compliance/README.md) for the full risk-tier structure and compliance-engineering detail.
 
 ---

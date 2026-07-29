@@ -596,57 +596,75 @@ When fine-tuning with a small batch (< 16) on a new domain, BatchNorm running st
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between top-1 and top-5 accuracy on ImageNet?**
+**Short:** Top-1 requires the single highest-scoring class to be correct, while top-5 counts a correct prediction if the true label is anywhere in the top five.
 Top-1 accuracy counts a prediction as correct only if the highest-scoring class matches the ground truth. Top-5 accuracy counts it as correct if the ground truth appears anywhere in the top 5 predicted classes. Top-5 is more lenient and was reported alongside top-1 in early ImageNet papers because some classes are visually ambiguous (e.g., dog breeds). ResNet-50 achieves 76.1% top-1 and 92.9% top-5.
 
 **Q: Why do we normalize images with ImageNet mean and std even when fine-tuning on a different dataset?**
+**Short:** Pretrained weights were optimized for that specific input distribution, so matching normalization keeps the learned features transferable without forcing early layers to re-adapt.
 Pretrained weights were optimized assuming inputs in that specific distribution. Applying the same normalization keeps the input statistics consistent with what the pretrained backbone expects, allowing the learned feature representations to transfer without disruption. Deviating from it forces the early layers to re-adapt, slowing convergence and typically reducing final accuracy.
 
 **Q: What is the receptive field and why does it matter?**
+**Short:** It is the input region that influences a neuron's activation, and it must be large enough to cover the objects a detector or segmenter needs to recognize.
 The receptive field of a neuron is the region of the input image that influences its activation. Deeper neurons have larger receptive fields. For object detection, a neuron must have a receptive field at least as large as the objects it detects; for semantic segmentation, global context often improves boundary accuracy. Dilated (atrous) convolutions expand the receptive field without increasing parameters.
 
 **Q: Explain residual connections and why they matter.**
+**Short:** A residual connection adds a block's input to its output so the block only has to learn the residual, letting gradients flow directly through the identity path in deep networks.
 A residual connection adds the input of a block directly to its output: `output = F(x) + x`. This means the block only needs to learn the residual `F(x)`, not the full mapping. During backpropagation, gradients flow directly through the identity path, avoiding vanishing gradients in deep networks. ResNet-50 (25M params) outperforms VGG-16 (138M params) because 50 layers of residual learning beat 16 layers of plain learning.
 
 **Q: What is transfer learning and when does it fail?**
+**Short:** Transfer learning reuses ImageNet-pretrained features on a new task, and it fails when the domain gap is too large, as with satellite or medical histology imagery.
 Transfer learning pretrained on ImageNet and fine-tunes on a target dataset, reusing learned visual features. It fails when the domain gap is too large — e.g., satellite imagery, medical histology, or infrared images have different low-level statistics than natural photos, so early layers may need retraining. It also fails when the target task structure is fundamentally different (e.g., counting rather than classification requires architectural changes).
 
 **Q: How do you handle class imbalance in image classification?**
+**Short:** Use a weighted sampler to oversample minority classes, weighted cross-entropy, or focal loss to down-weight easy majority examples.
 Three main approaches: (1) weighted random sampler — oversample minority classes so each batch is balanced; (2) weighted cross-entropy loss — assign higher loss weight to minority classes; (3) focal loss — down-weights easy examples dynamically, forcing the model to focus on hard minority examples. Always verify per-class recall in addition to global accuracy.
 
 **Q: What is data augmentation and what are its limits?**
+**Short:** Data augmentation applies random label-preserving transforms to expand the training set, but it breaks when a transform changes the label, like flipping a 6 into a 9.
 Data augmentation synthetically expands the training set by applying random transformations (crops, flips, color jitter, cutout). It regularizes the model and improves generalization. Its limits: augmentations must preserve label semantics (horizontal flip is invalid for digit recognition of 6/9; heavy crops may remove the object); too-strong augmentation on very small datasets can increase training noise rather than helping.
 
 **Q: Compare CNNs and ViTs in terms of inductive bias.**
+**Short:** CNNs bake in locality, weight sharing, and spatial hierarchy, while ViTs have almost no such bias and must learn spatial relationships purely from data.
 CNNs have strong inductive biases: local connectivity (nearby pixels are more related), weight sharing (same filter applied everywhere), and spatial hierarchy (pooling builds scale invariance). ViTs have almost no such inductive bias — every patch attends to every other patch from layer one, so they must learn spatial relationships from data. This makes ViTs data-hungry but gives them superior scaling behavior with large datasets or pretraining.
 
 **Q: What is mAP and how is it computed for object detection?**
+**Short:** Mean Average Precision ranks predicted boxes by confidence, computes the precision-recall curve's area per class at an IoU threshold, then averages across classes.
 Mean Average Precision (mAP) is the standard detection metric. For each class: (1) rank all predicted boxes by confidence score; (2) compute precision and recall at each rank using IoU >= 0.5 (COCO uses 0.5:0.05:0.95) to determine TP vs FP; (3) compute Average Precision (AP) as the area under the precision-recall curve; (4) average AP across all classes. COCO mAP averages over 10 IoU thresholds from 0.5 to 0.95.
 
 **Q: What is the difference between semantic and instance segmentation?**
+**Short:** Semantic segmentation labels every pixel by class without distinguishing objects, while instance segmentation gives each individual object instance its own mask.
 Semantic segmentation assigns a class label to every pixel but does not distinguish between different instances of the same class — all cars are the same color. Instance segmentation assigns both a class label and a unique instance ID to each object, so two adjacent cars get different masks. Panoptic segmentation combines both: it produces instance-level masks for countable objects (things) and semantic labels for uncountable regions (stuff like sky, road).
 
 **Q: What is FID (Frechet Inception Distance) and what does it measure?**
+**Short:** FID measures generated-image quality and diversity as the Frechet distance between Inception-v3 feature distributions of real and generated images, where lower is better.
 FID measures the quality and diversity of generated images by comparing the distribution of real and generated images in the feature space of Inception-v3. It computes the Frechet distance between two multivariate Gaussians fit to the Inception features. Lower FID is better. A FID of 0 means generated images are indistinguishable from real ones. StyleGAN3 achieves FID ~2.79 on FFHQ; Stable Diffusion achieves FID ~12.6 on COCO.
 
 **Q: How do you deploy a computer vision model to production?**
+**Short:** Export to ONNX or TorchScript, optimize with TensorRT, serve via Triton with GPU-side preprocessing, and monitor latency, throughput, and accuracy drift.
 Standard pipeline: export model to TorchScript or ONNX for portability; optimize with TensorRT for NVIDIA GPUs (typically 2-4x faster than PyTorch eager); serve via Triton Inference Server for multi-model batching; implement preprocessing on GPU using DALI or torchvision GPU transforms; monitor latency (P50/P99), throughput (imgs/sec), and accuracy drift on production samples. ResNet-50 achieves ~4ms on V100 with TorchScript and ~2ms with TensorRT FP16.
 
 **Q: Why must you switch a model to eval mode before inference, and what breaks if you forget?**
+**Short:** BatchNorm and Dropout behave differently in train mode, so forgetting model.eval() makes inference batch-dependent and can collapse accuracy on small batches.
 BatchNorm and Dropout behave differently in training versus evaluation mode, so forgetting to switch to eval mode makes inference depend on the batch and turn nondeterministic. In eval mode BatchNorm uses its fixed running mean and variance instead of per-batch statistics, and Dropout is disabled. If the model is left in train mode, a batch of size 1 produces degenerate BatchNorm normalization and accuracy collapses. Always call `model.eval()` and wrap scoring in `torch.no_grad()` before running inference.
 
 **Q: What is mixed-precision (AMP) training and what can go wrong?**
+**Short:** AMP runs most ops in FP16/BF16 with an FP32 master copy for speed and memory savings, but FP16 gradients can underflow to zero without a GradScaler.
 Mixed-precision training runs most operations in FP16 or BF16 while keeping a master copy of weights in FP32, roughly halving memory and doubling throughput. PyTorch autocast plus a GradScaler handle the casting and loss scaling automatically. The classic failure is FP16 gradient underflow to zero — GradScaler multiplies the loss so small gradients stay representable, then unscales before the optimizer step. BF16 has a wider exponent range and usually needs no scaler; numerically sensitive ops like softmax and normalization stay in FP32.
 
 **Q: What is a 1x1 convolution used for?**
+**Short:** A 1x1 convolution mixes channels at a single spatial location without touching spatial extent, cheaply changing depth as in ResNet bottleneck blocks.
 A 1x1 convolution mixes information across channels at a single spatial location, acting as a per-pixel fully connected layer that changes channel depth cheaply. It is the workhorse of ResNet bottleneck blocks — shrink channels, run an expensive 3x3, then expand back — and of network-in-network designs. With a following ReLU it adds nonlinearity, and it cuts compute by reducing channels before costly spatial convolutions.
 
 **Q: Why use global average pooling instead of flatten plus a fully connected layer at the end of a CNN?**
+**Short:** Global average pooling collapses each feature map to one value with zero parameters, avoiding the huge overfitting-prone weight count of a flatten-plus-FC head.
 Global average pooling collapses each feature map to a single value, removing the huge parameter count of a flatten-plus-FC head and accepting variable input sizes. A flatten+FC on a 7x7x512 map needs millions of weights and overfits, whereas GAP has zero parameters and regularizes strongly. It also produces a fixed-length vector regardless of input resolution and improves localization (the basis of Class Activation Maps). The tradeoff is that it discards spatial layout.
 
 **Q: What is a depthwise separable convolution and why does MobileNet use it?**
+**Short:** It factors a convolution into a per-channel spatial filter plus a 1x1 pointwise mix, cutting compute roughly 8-9x versus a standard 3x3 convolution.
 A depthwise separable convolution factors a standard convolution into a per-channel spatial filter followed by a 1x1 pointwise convolution, cutting compute roughly 8-9x for a 3x3 kernel. The depthwise step applies one filter per input channel; the pointwise step then mixes channels. This lets MobileNet and EfficientNet-Lite reach real-time latency on mobile CPUs with only a small accuracy tradeoff versus dense convolutions.
 
 **Q: What is Grad-CAM and what is it used for?**
+**Short:** Grad-CAM weights a CNN's final feature maps by the target class gradient to produce a heatmap showing which image regions drove the prediction.
 Grad-CAM produces a class-specific heatmap that highlights which image regions most influenced a CNN's prediction. It weights the final convolutional feature maps by the gradient of the target class score, then overlays the result on the input image. Engineers use it to debug whether the model attends to the object or the background, to build trust, and to catch spurious correlations like watermarks or dataset artifacts driving predictions.
 
 ---

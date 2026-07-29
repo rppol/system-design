@@ -874,54 +874,71 @@ A knowledge graph GNN ignored relation types on edges (is-a, works-for, located-
 ## 12. Interview Questions with Answers
 
 **Q: What is the message passing framework and how does it unify different GNN architectures?**
+**Short:** Message passing frames every GNN as aggregate-then-update, with GCN, GraphSAGE, GAT, and GIN differing only in their aggregation function.
 Message passing defines GNN computation as: aggregate messages from neighbors, then update the node's own state. GCN uses symmetric-normalized weighted mean aggregation with a shared weight matrix. GraphSAGE samples neighborhoods and uses mean/max/LSTM aggregation with concatenation. GAT learns per-neighbor attention weights. GIN uses sum aggregation with an MLP. All are special cases of the MPNN formulation from Gilmer et al. 2017.
 
 **Q: Why does GCN use symmetric normalization D^(-1/2) A_hat D^(-1/2) instead of row normalization D^-1 A?**
+**Short:** GCN's symmetric normalization D^(-1/2) A_hat D^(-1/2) downweights high-degree hub nodes as both source and target, unlike row normalization which treats every neighbor equally.
 Symmetric normalization preserves the graph's spectral properties and produces a symmetric, PSD normalized adjacency. Row normalization (D^-1 A) is asymmetric — it treats each neighbor equally regardless of their degree. Symmetric normalization downweights contributions from high-degree nodes both as sources and targets, preventing hub nodes from dominating all embeddings. Spectral interpretation: it is the first-order approximation of spectral graph convolution with Chebyshev polynomials.
 
 **Q: What is oversmoothing and how do you fix it?**
+**Short:** Oversmoothing is when stacking many GNN layers collapses all node embeddings toward the same vector, fixed mainly by limiting depth to 2-4 layers or adding residual connections.
 Oversmoothing occurs when stacking many GNN layers causes all node embeddings to converge to the same vector — the dominant eigenvector of the graph's normalized Laplacian. After 6+ layers, cosine similarity between node pairs approaches 1.0, destroying discriminative information. Fixes: (1) limit depth to 2–4 layers (most effective), (2) residual connections (add H^(l-1) to H^(l)), (3) Jumping Knowledge Networks (concatenate all layer outputs), (4) GCNII (initial residual — blend with H^0 at every layer), (5) DropEdge (randomly drop edges during training).
 
 **Q: Why is GIN more expressive than GCN or GraphSAGE?**
+**Short:** GIN matches the Weisfeiler-Leman test's expressive power because sum aggregation is injective over neighbor multisets, while GCN's or GraphSAGE's mean/max aggregation can collapse distinct neighborhoods.
 GIN achieves the same discriminative power as the Weisfeiler-Leman (WL) graph isomorphism test — the theoretical upper bound for standard MPNNs. The key is sum aggregation: sum is injective over multisets (it preserves count information), while mean and max are not. If two neighborhood multisets differ, sum produces different aggregated values, while mean could collapse them. The (1+epsilon) factor ensures the center node is counted distinctly from its neighbors, making the full update injective.
 
 **Q: How does GAT compute attention weights and why does multi-head attention help?**
+**Short:** GAT computes per-neighbor attention weights via a learned vector over concatenated transformed features, and multiple heads stabilize training by preventing collapse onto one neighbor.
 GAT computes attention as: e_ij = LeakyReLU(a^T [W h_i || W h_j]), then alpha_ij = softmax_j(e_ij). The shared weight vector a and matrix W are learned end-to-end. Multi-head attention (K=8 heads typically) runs K independent attention mechanisms and concatenates (hidden layers) or averages (output layer) results. This stabilizes training — a single attention head can get stuck in degenerate solutions (all weight on one neighbor). Different heads specialize in different structural patterns.
 
 **Q: What is the difference between transductive and inductive GNN settings?**
+**Short:** Transductive GNNs like GCN require the full adjacency at training time and can't handle new nodes without retraining, while inductive models like GraphSAGE generalize to unseen nodes.
 Transductive: the model sees all nodes (including test nodes) during training — just without their labels. GCN is transductive because it needs the full adjacency matrix for normalization. New nodes cannot be handled without retraining. Inductive: the model learns a function mapping node neighborhoods to embeddings, generalizing to unseen nodes and graphs. GraphSAGE and GAT are inductive — they sample and aggregate from a node's local neighborhood, which can be computed for any new node at inference time.
 
 **Q: How would you scale GNN training to a graph with 1 billion nodes?**
+**Short:** Scaling GNN training to a billion nodes requires neighborhood sampling like GraphSAGE's fixed per-batch fanout or ClusterGCN's METIS-partitioned mini-batches, since full-batch adjacency is infeasible.
 Full-batch GCN is infeasible — the adjacency matrix alone is TBs. Use neighborhood sampling (GraphSAGE/NeighborSampler): sample k1=15 hop-1 and k2=5 hop-2 neighbors per batch node, giving fixed computation per mini-batch regardless of graph size. For better cluster locality, use ClusterGCN (partition graph into 1000+ clusters with METIS, sample mini-batches within clusters to reduce cross-partition edges). Distributed: partition graph across machines with PyG + torch.distributed. Pinterest uses this to train on 3B nodes.
 
 **Q: What is the WL test and why does it matter for GNNs?**
+**Short:** The 1-WL graph isomorphism test bounds standard GNN expressivity, since any two graphs indistinguishable by 1-WL coloring are also indistinguishable by GCN or GraphSAGE.
 The Weisfeiler-Leman (1-WL) graph isomorphism test iteratively colors nodes based on their neighbor multisets. If two graphs produce different colorings, they are non-isomorphic. Standard GNNs are at most as powerful as 1-WL — two non-isomorphic graphs that fool 1-WL (e.g., regular graphs with same degree sequence) also fool GCNs and GraphSAGEs. GIN achieves 1-WL expressivity. Higher-order GNNs (k-WL, k=3) can distinguish more graphs but have O(N^k) complexity.
 
 **Q: How do you handle heterogeneous graphs (multiple node/edge types)?**
+**Short:** Heterogeneous graphs are handled with Relational GCN's per-relation-type weight matrices, using basis decomposition to control parameter count when there are many relation types.
 Use Relational GCN (R-GCN): separate weight matrices W_r per relation type r, aggregate as sum_r sum_{u in N_r(v)} (1/|N_r(v)|) W_r h_u. For many relation types, use basis decomposition (W_r = sum_b a_{rb} V_b) to reduce parameters. PyG supports heterogeneous graphs via `HeteroData` and `to_hetero()` wrapper. Knowledge graph link prediction (TransE, RotatE) is a simpler alternative when you only need entity/relation embeddings without neighborhood aggregation.
 
 **Q: What are common approaches for link prediction with GNNs?**
+**Short:** GNN link prediction scores an edge by combining two node embeddings via dot product, an MLP over concatenation, or a Hadamard product, with hard negatives usually beating random ones.
 After computing node embeddings h_u and h_v, score an edge as: (1) dot product h_u^T h_v — fast but limited, (2) MLP([h_u || h_v]) — more expressive, (3) Hadamard product h_u * h_v passed through MLP. Training: positive edges from the graph, negative edges sampled uniformly (random negative sampling) or hard negatives (nodes close in embedding space). Loss: binary cross-entropy or margin-based hinge loss. Key pitfall: negative sampling strategy heavily impacts performance — hard negatives (~5x positive count) typically outperform random negatives.
 
 **Q: How does PinSage differ from standard GraphSAGE?**
+**Short:** PinSage samples neighbors by importance via random-walk visit counts instead of GraphSAGE's uniform sampling, focusing computation on the most relevant neighbors at production scale.
 PinSage uses importance-based neighbor sampling: instead of uniform random sampling, run short random walks from a node, accumulate visit counts, sample the top-T most-visited neighbors. This focuses computation on the most relevant neighbors. It also uses curriculum learning (progressively harder negatives during training) and production engineering (map-reduce for offline embedding generation, approximate nearest neighbor for online retrieval). These changes translate a research algorithm into a system serving billions of recommendations daily.
 
 **Q: Why does a random train/test node split leak labels in a GNN, and how do you split correctly?**
+**Short:** A random node split leaks labels in a GNN because message passing lets test nodes pull signal from training-node neighbors across shared edges, so splits must be inductive or time-based.
 Because message passing lets a test node pull information from its training-node neighbors, a random node split leaks label signal across edges. A fraud GNN once reported test AUC 0.97 that collapsed to 0.71 in production for exactly this reason — test transactions shared edges with labeled training transactions. Use an inductive split where test nodes (and ideally their timestamps) are disconnected from the training subgraph, or split by time so no future edge can inform a past prediction.
 
 **Q: Why does mean aggregation fail for graph classification while working fine for node classification?**
+**Short:** Mean aggregation normalizes away neighbor counts, so graphs differing only in how often a substructure repeats collapse to the same embedding, which is why graph classification needs sum aggregation.
 Mean aggregation normalizes away counts, so two graphs that differ only in how many times a substructure repeats collapse to identical embeddings. For node classification the neighborhood's average feature is often enough signal, but graph-level tasks like molecular property prediction depend on counts — three carbon rings must differ from six. GIN uses sum aggregation precisely because sum is injective over multisets and preserves count information; switch to sum (or a count-sensitive readout) whenever quantity matters.
 
 **Q: What is over-squashing and how does it differ from oversmoothing?**
+**Short:** Over-squashing compresses an exponentially growing receptive field into a fixed-size vector so long-range signals can't get through, the opposite of oversmoothing's too-similar-embeddings problem.
 Over-squashing is the compression of an exponentially growing receptive field into a fixed-size node vector, throttling information from distant nodes. Oversmoothing makes embeddings too similar as depth grows; over-squashing is the opposite failure — long-range signals cannot reach a node because too many messages funnel through bottleneck edges into a fixed-width representation. It hurts tasks needing long-range dependencies. Fixes: add virtual/global nodes, rewire the graph (e.g., by Ricci curvature), or use graph transformers with full attention.
 
 **Q: Why must a GNN's aggregation be permutation-invariant, and why can't you just run an MLP on the adjacency matrix?**
+**Short:** GNN aggregation must be permutation-invariant because a graph has no canonical node ordering, which an MLP over a flattened adjacency matrix cannot guarantee since row permutations change its output.
 Because a graph has no canonical node ordering, the output must not change when you relabel nodes, which an MLP over a flattened adjacency matrix cannot guarantee. Such an MLP would learn order-dependent weights, so permuting the rows yields a different prediction for the same graph. Sum, mean, and max are permutation-invariant by construction, so a GNN produces the same embedding regardless of node indexing — this inductive bias is what lets GNNs generalize across graphs of different sizes and orderings.
 
 **Q: How does GraphSAGE produce an embedding for a node it never saw during training?**
+**Short:** GraphSAGE embeds an unseen node by sampling and aggregating its neighbors' features at inference with shared learned weights, unlike transductive methods tied to a fixed training node set.
 It learns aggregation functions, not per-node embeddings, so any new node is embedded by sampling and aggregating its neighbors' features at inference time. Transductive methods like vanilla GCN tie parameters to a fixed node set and must retrain to embed new nodes. GraphSAGE instead trains shared AGGREGATE and UPDATE weights; a fresh node's embedding is computed from its local neighborhood in one forward pass — LinkedIn embeds 500K new accounts daily this way in about 74ms each with no retraining.
 
 **Q: When does the homophily assumption break, and which models handle heterophilous graphs?**
+**Short:** The homophily assumption breaks when connected nodes tend to have different labels, as in fraud rings linking to legitimate accounts, which blurs GCN's smoothing but not GAT's attention.
 It breaks when connected nodes tend to have different labels, as in fraud graphs where fraudsters link to legitimate accounts rather than to each other. GCN's low-pass smoothing assumes neighbors share labels, so on heterophilous graphs (homophily ratio below 0.3) it blurs the very signal you need. GAT can down-weight misleading neighbors via attention, and heterophily-specific models (H2GCN, FAGCN) separate ego and neighbor representations or add high-pass filters. Always measure the homophily ratio before assuming a plain GCN will work.
 
 

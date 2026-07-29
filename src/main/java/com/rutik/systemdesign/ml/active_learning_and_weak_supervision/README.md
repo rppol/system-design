@@ -586,60 +586,98 @@ Adding a labeling function that fires often but is barely better than chance inj
 ## 12. Interview Questions with Answers
 
 **Q: What problem does active learning solve, and how?**
+**Short:** Active learning cuts labeling cost by letting the model choose which unlabeled examples are most worth a human label.
+
 Active learning targets the high cost of labeled data by letting the model choose which unlabeled examples are most worth labeling, rather than labeling a random sample. It trains on a small seed set, scores the unlabeled pool with an acquisition function (usually uncertainty), sends the most informative examples to a human, adds those labels, and repeats. By concentrating expensive labeling effort near the decision boundary, it typically reaches a target accuracy with 2-5x fewer labels than random sampling.
 
 **Q: What are the main acquisition functions and how do they differ?**
+**Short:** Acquisition functions split into uncertainty (margin, entropy), disagreement (query-by-committee, BALD), and diversity (core-set) strategies.
+
 Uncertainty-based: least confidence (`1 - max p`), margin sampling (`p_top1 - p_top2`, smaller = more ambiguous), and entropy (uses the whole distribution). Disagreement-based: query-by-committee picks points where an ensemble disagrees, and BALD picks points of maximum mutual information (Bayesian). Diversity-based: core-set methods pick points that best cover the feature space regardless of uncertainty. In practice, batch active learning uses hybrids (e.g. BADGE) that multiply uncertainty by diversity so a batch is both informative and non-redundant.
 
 **Q: What is stream-based active learning and when is it preferable to pool-based?**
+**Short:** Stream-based active learning decides label-or-not per incoming example, which suits online or storage-constrained systems that cannot store a full pool.
+
 Stream-based active learning decides label-or-not for each incoming example on the fly, rather than scoring a fixed pool. Because it sees examples one at a time and cannot rank the whole dataset, it uses a threshold or a query-probability on the acquisition score to accept or discard each item as it arrives. Prefer it over pool-based when data arrives as a stream and you cannot store or repeatedly rescore a large pool — online systems, edge devices, or storage-constrained settings — accepting that its per-example decisions are less globally optimal than pool ranking.
 
 **Q: Why can't you evaluate an active-learning model on the examples it queried?**
+**Short:** Queried examples are the model's hardest, most boundary-heavy points, so scoring accuracy on them understates true performance.
+
 Because those examples were selected *because the model was uncertain about them* — they are the hardest, most boundary-heavy points, not a representative sample of real traffic. Measuring accuracy on them understates true performance and is biased by the acquisition policy. You must keep a separate, randomly sampled i.i.d. test set for evaluation and never test on the queries.
 
 **Q: What is the danger of pure-uncertainty sampling in batch active learning?**
+**Short:** Top-k uncertainty sampling in one batch often clusters near-duplicate ambiguous points, wasting labels for little new information.
+
 If you simply take the top-k most uncertain points in one batch, they are often near-duplicates clustered in the same ambiguous region, so you pay for k labels but gain roughly the information of one. The fix is to add a diversity/representativeness term (core-set, BADGE) so the batch spans distinct regions of the input space — combining "where is the model unsure" with "what does the data look like."
 
 **Q: What is weak supervision and how does it differ from active learning?**
+**Short:** Weak supervision programmatically generates noisy labels via labeling functions, while active learning selects which few examples get a human label.
+
 Weak supervision generates training labels *programmatically* via labeling functions (heuristics, patterns, KB lookups, existing models) that emit noisy, conflicting, partial labels, then denoises them with a label model into probabilistic labels — producing a large training set without hand-labeling. Active learning instead reduces the *number* of gold labels a human must provide by choosing the most informative ones. They are complementary: weak supervision gives broad noisy coverage cheaply; active learning spends scarce gold labels where they matter most.
 
 **Q: How does a label model combine noisy labeling functions better than majority vote?**
+**Short:** A label model estimates each labeling function's accuracy and correlations from agreement patterns, so it outweighs noisy correlated functions.
+
 Majority vote treats every labeling function as an equally-reliable, independent voter, so it over-trusts correlated or inaccurate functions. A label model (e.g. Snorkel's) estimates each function's accuracy and the correlations between functions — typically without ground truth, using the agreement/disagreement structure across the label matrix — and weights them accordingly, so a reliable independent function can outvote several noisy correlated ones. The output is a probabilistic label per example.
 
 **Q: Why train a downstream model on weak labels instead of just using the label model's output?**
+**Short:** A downstream model trained on weak labels generalizes beyond labeling-function coverage and can label examples no function fired on.
+
 The label model only labels examples that at least one labeling function covers, and only as well as the functions allow. Training a downstream model (e.g. BERT) on the probabilistic labels lets it *generalize beyond LF coverage* — it learns the underlying features and can label examples no function fired on, smoothing over individual LF noise. This generalization is the whole point: LFs are a means to a training set, not the final classifier.
 
 **Q: Why train on soft probabilistic weak labels instead of hard-thresholding them to 0/1 first?**
+**Short:** Hard-thresholding discards the label model's confidence and injects overconfident noise that a soft-label loss instead down-weights.
+
 Hard-thresholding weak labels to 0/1 discards the label model's confidence and forces the downstream model to treat a 0.55 label exactly like a 0.99 one. Weak supervision produces *probabilistic* labels precisely because the sources disagree; collapsing a 0.55 to a hard 1 injects overconfident noise the downstream model then fits as if it were certain. Train with a noise-aware/soft-label loss (e.g. cross-entropy against the probabilistic target) so uncertain examples contribute less gradient and the model naturally down-weights the label model's borderline calls.
 
 **Q: What metrics describe a labeling function's quality?**
+**Short:** Coverage, empirical accuracy where it fires, and conflict/overlap with other functions together describe a labeling function's quality.
+
 Coverage (the fraction of examples it labels rather than abstains on), empirical accuracy where it fires (measured on a small dev set), and its conflict/overlap with other functions. A high-coverage low-accuracy function injects noise; a low-coverage high-accuracy function is a precise but narrow signal. You want a portfolio of functions that together cover the data while the label model resolves their conflicts; track all three and prune functions that are high-coverage but near-chance.
 
 **Q: What is distant supervision and how does it generate weak labels?**
+**Short:** Distant supervision heuristically labels text by aligning it to a knowledge base, trading noisy coverage for zero hand-annotation.
+
 Distant supervision aligns unlabeled text to an external knowledge base to generate noisy labels automatically, without any hand-annotation. The classic use is relation extraction: if a KB says two entities are related, every sentence mentioning both entities is heuristically labeled with that relation — cheap coverage at the cost of noise (many such sentences do not actually express the relation). In practice it becomes one labeling function among several (e.g. billing-code or SNOMED/ICD lookups for medical text), and a label model denoises it against the other sources rather than trusting it outright.
 
 **Q: What is the feedback-loop/bias risk in active learning?**
+**Short:** Uncertainty-driven querying can ignore regions where the model is confidently wrong, entrenching blind spots and skewing the labeled set.
+
 Because the model selects its own labeling targets based on its current uncertainty, it can systematically ignore regions where it is *confidently wrong* (low uncertainty, high error), entrenching blind spots and never discovering an entire under-represented class. The labeled set also becomes non-representative of the data distribution. Mitigate by mixing in random/diverse samples each round, monitoring the labeled distribution against the unlabeled pool, and never reusing the queried set as a test set.
 
 **Q: How does active learning relate to uncertainty quantification?**
+**Short:** Good active learning targets epistemic uncertainty, which more labels resolve, rather than aleatoric noise that labeling cannot fix.
+
 Active learning's uncertainty-based acquisition *is* an uncertainty estimate, and it specifically wants *epistemic* uncertainty — the model's ignorance, which more labels can fix — not aleatoric noise, which they cannot. Querying high-aleatoric (inherently ambiguous) points wastes budget on examples no amount of labeling resolves. So good active learning uses epistemic signals (ensemble/BALD disagreement) rather than raw softmax. See `../uncertainty_quantification_and_conformal_prediction/`.
 
 **Q: What is pseudo-labeling and what is its main risk?**
+**Short:** Pseudo-labeling trains on the model's own confident predictions on unlabeled data, risking confirmation bias that amplifies its mistakes.
+
 Pseudo-labeling (self-training) uses the current model's confident predictions on unlabeled data as if they were true labels, adds them to training, and repeats. Its main risk is confirmation bias: the model reinforces its own mistakes, since wrong-but-confident pseudo-labels get baked in and amplified each round. Mitigations include high confidence thresholds, calibration before thresholding, only adding a limited number per round, and consistency regularization (FixMatch) that ties pseudo-labels to agreement across augmentations.
 
 **Q: What is consistency regularization (e.g. FixMatch) and how does it use unlabeled data?**
+**Short:** FixMatch pseudo-labels a weakly augmented view above a confidence threshold, then trains the model to match it on a strongly augmented view.
+
 Consistency regularization enforces that a model gives the same prediction to two augmentations of the same unlabeled input, turning unlabeled data into a training signal. FixMatch operationalizes this: it takes a *weakly* augmented view, keeps its prediction as a pseudo-label only when confidence exceeds a threshold, then trains the model to match that pseudo-label on a *strongly* augmented view of the same image. It combines pseudo-labeling with consistency, and the confidence gate plus strong augmentation are what keep it from collapsing into the confirmation bias that plagues naive self-training.
 
 **Q: You have 200 labeled examples and 2 million unlabeled. How do you build a production NER model?**
+**Short:** Bootstrap a BERT-CRF NER model with weak-supervision labeling functions for coverage, then refine it with active learning on uncertain sentences.
+
 Bootstrap with weak supervision: write gazetteer LFs (known entity lists), pattern LFs (capitalization plus trigger words), and use an off-the-shelf NER as one noisy voter; denoise with a label model to get probabilistic labels over a large slice of the 2M. Train a BERT-CRF on those weak labels so it generalizes beyond the gazetteers. Then run active learning: have the model flag its most uncertain sentences, have a human gold-label a few hundred (entity-level), fold them in, and iterate. Keep a separate randomly-sampled gold test set throughout.
 
 **Q: What is data-centric AI and why has it gained traction?**
+**Short:** Data-centric AI fixes label errors and coverage gaps instead of tuning architecture, since label noise now caps accuracy more than model choice.
+
 Data-centric AI holds the model architecture fixed and systematically improves the *data* — fixing label errors, improving coverage and consistency, and balancing classes — as the primary way to raise performance. It gained traction because, on many real problems, label noise and gaps cap accuracy more than model choice does, and modern architectures are mature enough that another tweak yields less than cleaner data. Active learning, weak supervision, and label-error detection (e.g. cleanlab) are its core tools.
 
 **Q: How do you decide between buying more labels, active learning, and weak supervision?**
+**Short:** Buy labels when they are cheap and automatic, use active learning when experts must label sparingly, use weak supervision when rules can scale.
+
 If labels are cheap/automatic (logged outcomes, clicks), just collect more — the overhead of clever selection is not worth it. If labels require expensive experts and you have abundant unlabeled data and a workable model, active learning maximizes accuracy per label. If experts can express rules but cannot label at scale, or you need a large set fast and can tolerate denoised noise, weak supervision wins. They combine well: weak supervision for broad coverage, active learning to spend the scarce gold labels at the boundary.
 
 **Q: What is the cold-start problem in active learning and how do you handle it?**
+**Short:** Early on an untrained model's uncertainty is meaningless, so seed with random or diversity sampling before switching to uncertainty-based acquisition.
+
 At the start there is no reliable model, so uncertainty estimates are meaningless — everything looks uncertain or the model is confidently wrong everywhere. Bootstrapping with uncertainty sampling can pick useless or outlier points. Handle it by seeding with a random or diversity-based (core-set) sample to cover the space, or by using weak supervision to produce an initial model, and only switch to uncertainty-based acquisition once the model is good enough for its uncertainty to be informative.
 
 ---

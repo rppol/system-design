@@ -893,57 +893,75 @@ df["amount_transformed"] = pt.fit_transform(df[["amount"]])
 ## 12. Interview Questions with Answers
 
 **Q: What is data leakage in feature engineering and how do you prevent it?**
+**Short:** Data leakage happens when test or future information contaminates training, commonly via full-dataset scaling or non-CV target encoding, prevented with a Pipeline and time-based splits.
 Data leakage occurs when information from outside the training set (including the test set or future data) contaminates the training process, producing overly optimistic validation metrics that fail in production. Common forms include: scaling on the full dataset before splitting, target encoding without cross-validation, and including future-derived features (e.g., 30-day average computed using future rows). Prevention: always use sklearn `Pipeline` so all transformers are fit only on training data, and use time-based splits for temporal data.
 
 **Q: When would you use target encoding versus one-hot encoding?**
+**Short:** Target encoding suits categorical features above roughly 15-50 unique values with a real target relationship, while one-hot stays simpler and transparent below that cardinality.
 Use target encoding when a categorical feature has more than ~15–50 unique values (high cardinality) and the category has a meaningful relationship with the target. One-hot becomes impractical at high cardinality due to dimensionality explosion. Target encoding requires cross-validation guards to prevent leakage — fit the encoder on k-1 folds and apply to the kth fold. For very low cardinality (2–15 categories) with no natural order, one-hot is simpler and transparent.
 
 **Q: Explain the target encoding formula with smoothing.**
+**Short:** Smoothed target encoding blends a category's own target mean with the global mean via (n_c*mean_c + m*global_mean)/(n_c+m), pulling low-count categories toward the global mean.
 Smoothed target encoding blends a category's own target mean with the global mean, weighted by how many rows back the category up. The formula is `(n_c * mean_c + m * global_mean) / (n_c + m)`, where `n_c` is the count of observations with category c, `mean_c` is the mean target for category c, `global_mean` is the overall target mean, and `m` is the smoothing parameter. When `n_c` is small (few samples for that category), the estimate pulls strongly toward the global mean (regularization). When `n_c` is large, the category-level mean dominates. `m=10` is a common default.
 
 **Q: What is the difference between StandardScaler, MinMaxScaler, and RobustScaler?**
+**Short:** StandardScaler centers to zero mean and unit variance, MinMaxScaler bounds to [0,1], and RobustScaler uses median/IQR so outliers barely affect the result.
 `StandardScaler` subtracts the mean and divides by standard deviation; output is unbounded with mean 0 and variance 1; sensitive to outliers because outliers inflate the standard deviation. `MinMaxScaler` scales to [0, 1]; sensitive to outliers (one extreme value compresses all others). `RobustScaler` uses median and interquartile range (IQR) instead of mean and std — outliers have minimal effect. Use RobustScaler when data has meaningful outliers that you want to keep, StandardScaler for roughly normal distributions, MinMaxScaler for neural networks expecting bounded inputs.
 
 **Q: How would you handle a categorical feature with 50,000 unique user IDs?**
+**Short:** A 50,000-category ID column is best handled with out-of-fold target encoding, a learned embedding, the hashing trick, or user-level aggregate features, never one-hot.
 One-hot would create 50,000 columns — infeasible. Options: (1) target encoding with out-of-fold CV (effective if IDs have distinct behavior patterns), (2) embedding layer if using a neural network (represent each ID as a dense 32-dim vector learned during training), (3) hashing trick (hash IDs to a fixed-size space of, e.g., 1,000 buckets — fast but loses some information via collisions), (4) aggregate features at the user level (mean spend, count of actions) to replace the raw ID.
 
 **Q: When should you add a missing indicator column instead of just imputing?**
+**Short:** Add a missing-indicator column before imputing whenever the absence of a value itself carries predictive signal, such as a missing credit_score meaning no credit history.
 Add a missing indicator when the fact that a value is absent carries predictive signal (missing not at random, MNAR). Examples: a missing `credit_score` field often means no credit history (different risk than a low score); a missing `response_time` in an API log often means the request timed out (different from a fast response). Always add the indicator before imputing so the signal is preserved regardless of what imputation fills in.
 
 **Q: What is the difference between filter, wrapper, and embedded feature selection methods?**
+**Short:** Filter methods rank features independently of the model, wrapper methods retrain the model on subsets to capture interactions, and embedded methods select features during training itself.
 Filter methods (correlation, mutual information) rank features independently of the model — fast but ignore feature interactions. Wrapper methods (RFE, RFECV) train the model repeatedly with different feature subsets — expensive but find interaction-aware subsets. Embedded methods (L1 penalty, tree feature importance) perform selection during model training itself — efficient and model-specific. For production, use embedded methods (L1 or tree importance) for initial reduction, then RFECV to fine-tune the final subset.
 
 **Q: How does RFECV work and what estimator should you use inside it?**
+**Short:** RFECV repeatedly removes the lowest-importance feature and cross-validates, so pair it with a fast linear estimator rather than gradient boosting to keep the cost manageable.
 RFECV (Recursive Feature Elimination with Cross-Validation) starts with all features, trains the estimator, removes the feature with the lowest importance/coefficient magnitude, and repeats. At each step it cross-validates to measure performance, ultimately selecting the feature count that maximizes CV score. Use a fast linear estimator (`LogisticRegression`, `LinearSVC`) to keep runtime manageable — avoid `GradientBoosting` inside RFECV on large datasets (O(n_features * cv_folds) fits, each potentially slow).
 
 **Q: What is the curse of dimensionality and how does feature selection address it?**
+**Short:** High dimensionality makes points equidistant, crippling distance-based algorithms, so feature selection restores discriminative power and reduces overfitting from noise-fitting weights.
 In high dimensions, data points become equidistant from each other — distance-based algorithms (k-NN, SVM with RBF kernel, k-means) lose discriminative power. Feature selection removes irrelevant and redundant dimensions, concentrating signal. Additionally, models with many irrelevant features overfit (high variance) because the optimizer assigns weight to noise. L1 regularization and tree importance-based selection are the most efficient mitigations.
 
 **Q: How do you prevent the one-hot encoder from crashing on unseen categories at inference?**
+**Short:** Setting handle_unknown="ignore" in OneHotEncoder turns unseen inference categories into an all-zero row instead of crashing, or you can bucket rare categories into an "other" class.
 Set `handle_unknown="ignore"` in sklearn's `OneHotEncoder`. Unseen categories produce an all-zero row for that feature (as if the category does not exist), which is the safest fallback for most models. Alternatively, add an "other" category during training to catch rare categories, and map any unseen inference value to "other". Always wrap encoders inside a Pipeline so the same fitted encoder is used at inference as during training.
 
 **Q: What are polynomial features and when are they risky?**
+**Short:** Polynomial features add every feature combination up to a degree, so degree=2 on 100 features balloons to about 5,000 columns, sharply raising overfitting and training cost.
 Polynomial features create all combinations of input features up to a specified degree (e.g., degree=2 adds x1^2, x2^2, x1*x2 for every pair). They allow linear models to fit non-linear decision boundaries. Risks: with d features and degree=2, output is O(d^2) features — 100 input features become ~5,000; with degree=3, ~170,000. This dramatically increases overfitting risk and training time. Prefer tree-based models (which find interactions natively) or domain-driven manual interaction features over automated polynomial expansion above degree=2.
 
 **Q: Why don't tree-based models require feature scaling?**
+**Short:** Tree-based models split on raw thresholds, so they're invariant to monotonic rescaling, unlike distance- or gradient-based models such as k-NN, SVM, or neural nets.
 Tree-based models split on feature thresholds, so they are invariant to any monotonic rescaling — scaling changes nothing about which split points are chosen. A decision tree asks "is age > 30?"; whether age is stored as raw years or standardized z-scores, the same rows fall on each side, so random forests, gradient boosting, and XGBoost see identical trees. Distance-based and gradient-based models (k-NN, SVM, logistic/linear regression, neural nets, PCA) do need scaling because a large-range feature dominates the distance metric or the gradient. Scaling tree inputs is harmless but wasted effort.
 
 **Q: When should you use a log transform versus Box-Cox versus Yeo-Johnson?**
+**Short:** Use log1p for right-skewed non-negative data, Box-Cox only when all values are strictly positive, and Yeo-Johnson when the feature contains zeros or negative values.
 Use log1p for right-skewed non-negative data, Box-Cox when all values are strictly positive, and Yeo-Johnson when the feature contains zeros or negatives. Plain `np.log` produces `-inf` at zero and `nan` on negatives, so `log1p(x) = log(1 + x)` is the safe default for counts and amounts. Box-Cox searches for the power parameter lambda that best normalizes strictly-positive data, and Yeo-Johnson extends that same optimization to the whole real line — making it the most general choice when signs are mixed.
 
 **Q: What is the difference between fit, transform, and fit_transform, and why does it matter for leakage?**
+**Short:** Calling fit_transform on test data or the full dataset before splitting leaks test statistics into features, so fit must run only on the training set.
 `fit` learns parameters (mean, std, category means, IQR) from data, `transform` applies them, and `fit_transform` does both in one call — and you must call fit only on the training set. Calling `fit_transform` on the test set (or on the full dataset before splitting) lets test statistics leak into your features, inflating validation scores that then collapse in production. The safe pattern is `scaler.fit_transform(X_train)` followed by `scaler.transform(X_test)`, best enforced by wrapping every transformer in a sklearn Pipeline.
 
 **Q: What is the difference between normalization and standardization?**
+**Short:** Normalization (min-max) fits models needing bounded inputs like neural nets, while standardization (z-score) suits Gaussian-ish features and PCA or logistic regression.
 Normalization (min-max scaling) rescales features to a fixed bounded range such as [0, 1], while standardization (z-score) centers to zero mean and unit variance with an unbounded range. Normalization is preferred when a model expects bounded inputs (neural-net activations, image pixels) but a single extreme outlier compresses all other values toward zero. Standardization suits roughly Gaussian features and algorithms that assume centered data (PCA, logistic regression), and RobustScaler (median/IQR) is the outlier-resistant middle ground.
 
 **Q: What is the hashing trick and when do you use it?**
+**Short:** The hashing trick maps categories into a fixed number of buckets with constant memory and no stored vocabulary, at the cost of collisions and needing a hash stable across processes.
 The hashing trick maps categories to a fixed number of buckets via a hash function, giving constant memory regardless of cardinality. Because it is stateless — no fitted vocabulary to store — it handles previously unseen categories automatically and works in streaming or online-learning settings where the category set grows over time. The cost is collisions: two distinct categories can hash to the same bucket and become indistinguishable, so you size the bucket count to trade memory against collision rate, and you lose the interpretability that named one-hot columns provide. One trap: the hash must be *stable across processes*. Python's built-in `hash()` on `str` and `bytes` is salted per interpreter process (PEP 456), so `hash(x) % n_buckets` returns different buckets in the training job than in the serving process and silently destroys the feature — use `zlib.crc32`, `hashlib.md5`, or sklearn's `FeatureHasher` (which uses MurmurHash3), never the builtin.
 
 **Q: How do you encode cyclical features like hour of day or month?**
+**Short:** Cyclical features like hour or month are encoded as paired sine and cosine values so adjacent times, like hour 23 and hour 0, stay adjacent in feature space.
 Encode cyclical features with paired sine and cosine transforms so that the values wrap around — hour 23 sits right next to hour 0. Raw integer encoding tells the model that hour 23 and hour 0 are 23 units apart when they are actually one hour apart, distorting any distance- or gradient-based model. Mapping each value to `(sin(2*pi*x / period), cos(2*pi*x / period))` places it on a circle so adjacent times are adjacent in feature space; the same trick applies to day-of-week, month, and compass bearing.
 
 **Q: How do you detect and handle multicollinearity among features?**
+**Short:** Multicollinearity is detected via a correlation matrix or Variance Inflation Factor and fixed by dropping or combining features above |correlation| 0.95 or VIF 10.
 Detect multicollinearity with a correlation matrix or the Variance Inflation Factor (VIF), then drop or combine features with |correlation| > 0.95 or VIF > 10. Highly correlated inputs make linear-model coefficients unstable and hard to interpret — the model cannot attribute effect between two features that move together — even though predictive accuracy may be unaffected. Tree-based models are far more robust to it, but for interpretability and coefficient stability you remove one of each redundant pair or replace the group with a PCA component or a domain-derived ratio feature.
 
 ---

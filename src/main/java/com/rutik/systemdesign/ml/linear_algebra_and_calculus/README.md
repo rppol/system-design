@@ -813,57 +813,75 @@ W += lr * grad
 ## 12. Interview Questions with Answers
 
 **Q: Why is matrix multiplication not commutative (AB ≠ BA)?**
+**Short:** Matrix multiplication composes linear transformations in a fixed order, so applying rotation then scaling differs from scaling then rotation.
 Matrix multiplication is a composition of linear transformations, and the order in which you apply transformations matters — rotating then scaling is different from scaling then rotating. Additionally, AB may not even be defined if shapes don't match, while BA is defined only when the inner dimensions work out the other way. In neural networks, the order of weight matrices determines which transformation is applied first.
 
 **Q: Why is computing a matrix inverse O(n^3), and when should you avoid it?**
+**Short:** Matrix inversion costs O(n^3) like Gaussian elimination, but solving Ax=b directly via LU decomposition is faster and more numerically stable than inverting.
 Gaussian elimination, LU decomposition, and most inversion algorithms require O(n^3) floating point operations because each elimination step processes one row but affects all remaining rows. In practice, you almost never want the inverse explicitly: to solve Ax = b, `np.linalg.solve(A, b)` uses LU decomposition and is twice as fast and more numerically stable than computing `A^{-1} @ b`. The exception is when you need to solve the same system for many different right-hand sides — then it may be worth factorizing once.
 
 **Q: What is the relationship between eigendecomposition and PCA?**
+**Short:** PCA eigendecomposes the covariance matrix into eigenvectors as principal directions and eigenvalues as the variance captured along each one.
 PCA finds the directions of maximum variance in a dataset. The covariance matrix C = X^T X / (n-1) is symmetric PSD, so eigendecomposition gives C = Q Lambda Q^T where eigenvectors (columns of Q) are the principal directions and eigenvalues are the corresponding variances. Projecting data onto the top-k eigenvectors gives the best rank-k linear dimensionality reduction in terms of minimizing reconstruction error.
 
 **Q: Why does SVD always exist but eigendecomposition does not?**
+**Short:** Eigendecomposition needs n independent eigenvectors and fails for defective matrices, while SVD uses two separate orthogonal bases and exists for any real matrix.
 Eigendecomposition A = Q Lambda Q^{-1} requires n linearly independent eigenvectors, which fails for defective matrices (repeated eigenvalues with insufficient eigenvectors). SVD uses two separate orthogonal bases (U and V) rather than a single basis, and the singular values are always real and non-negative. This means SVD exists for any real matrix, including non-square matrices, making it universally applicable.
 
 **Q: What is the chain rule in the context of backpropagation?**
+**Short:** The chain rule multiplies each layer's local derivative backward from the scalar loss, letting reverse-mode autodiff compute all gradients in one backward pass.
 The chain rule states d(f(g(x)))/dx = f'(g(x)) * g'(x). In a neural network with layers L1, L2, ... Ln, the gradient of loss w.r.t. weights in layer L1 is the product of Jacobians from Ln back to L1. Reverse-mode autodiff computes these products efficiently in one backward pass because the loss is a scalar — each intermediate gradient is a vector, not a full Jacobian matrix.
 
 **Q: What is the difference between a Jacobian and a Hessian?**
+**Short:** A Jacobian holds first-order partials of a vector-valued function, while a Hessian holds second-order partials of a scalar function and encodes curvature.
 The Jacobian of a vector-valued function f: R^n -> R^m is the m x n matrix of first-order partial derivatives J_{ij} = df_i/dx_j. The Hessian of a scalar function f: R^n -> R is the n x n matrix of second-order partial derivatives H_{ij} = d^2f/(dx_i dx_j). The Hessian encodes curvature and is used in Newton's method. In deep learning, the Hessian is n x n where n can be billions — computing it exactly is infeasible, so diagonal approximations (Adam's second moment) or rank-1 approximations (L-BFGS) are used.
 
 **Q: What does a singular value of zero in SVD tell you about the matrix?**
+**Short:** A zero singular value means the matrix doesn't span the full space; near-zero singular values across many indicate redundancy exploited by low-rank methods like LoRA.
 A zero singular value means the matrix does not span the full space — the rank of the matrix equals the number of non-zero singular values. If a weight matrix in a neural network has many near-zero singular values, its effective rank is low, indicating redundancy. This motivates LoRA (Low-Rank Adaptation) for fine-tuning: the weight update delta W is parameterized as AB (two low-rank matrices) because the fine-tuning updates tend to be low-rank.
 
 **Q: How is the L1 norm related to sparse solutions in Lasso regression?**
+**Short:** The L1 ball's corners sit on the coordinate axes, so the constrained optimum tends to land on a corner where many coordinates are exactly zero.
 The L1 ball (unit sphere in L1 norm) has corners at the coordinate axes. When you project the unconstrained minimum onto the L1 ball (or equivalently, minimize loss + lambda * ||w||_1), the optimum tends to land on a corner where many coordinates are exactly zero. This is a geometric argument: corners are the points on the L1 ball closest to most unconstrained optima. L2 balls are smooth spheres with no corners, so the projected optimum has all non-zero (but small) coordinates.
 
 **Q: Why do transformers use scaled dot-product attention (dividing by sqrt(d_k))?**
+**Short:** Dividing by sqrt(d_k) renormalizes the dot product's variance back to 1, keeping softmax out of its near-zero-gradient saturation region.
 Without scaling, the dot products QK^T grow in magnitude as d_k increases because each of the d_k dimensions contributes to the sum. For d_k = 64, the standard deviation of the dot product (for unit-variance Q and K) is sqrt(64) = 8. Passing large values through softmax pushes the output into regions of near-zero gradient (saturation), making training slow. Dividing by sqrt(d_k) normalizes the variance back to 1, keeping softmax in its informative gradient regime.
 
 **Q: What is the Frobenius norm and when is it used in ML?**
+**Short:** The Frobenius norm is the square root of summed squared matrix entries, used in weight decay, SVD reconstruction error, and matrix factorization losses.
 The Frobenius norm of a matrix A is ||A||_F = sqrt(sum_{i,j} A_{ij}^2) = sqrt(trace(A^T A)) = sqrt(sum of squared singular values). It generalizes the L2 vector norm to matrices. In ML it appears in: weight decay regularization (||W||_F^2), measuring reconstruction error in SVD approximation (||A - A_k||_F^2), and as a loss function for matrix factorization problems.
 
 **Q: How does the condition number of a matrix affect numerical stability?**
+**Short:** A high condition number, the ratio of largest to smallest singular value, means small input perturbations get amplified into large output errors.
 The condition number kappa(A) = sigma_max / sigma_min (ratio of largest to smallest singular value). A high condition number (ill-conditioned matrix) means small perturbations in the input cause large changes in the output — numerical errors are amplified. In linear systems Ax = b with high kappa(A), even double-precision arithmetic may give wrong answers. Feature scaling (normalizing inputs) reduces the condition number of the data matrix X, which is why standardization improves the convergence of gradient descent.
 
 **Q: What does an eigenvector geometrically represent, and what does its eigenvalue tell you?**
+**Short:** An eigenvector is a direction a matrix only stretches or shrinks without rotating, and its eigenvalue is the amount of that stretch.
 An eigenvector is a direction that a matrix only stretches or shrinks, never rotates, and its eigenvalue is that stretch factor. Formally A v = lambda v, so applying A keeps v on the same line through the origin. Eigenvalues greater than 1 amplify that direction, values in (0,1) shrink it, and negative values flip it. In PCA the eigenvectors of the covariance matrix are the axes of maximum variance and the eigenvalues are the variance captured along each axis.
 
 **Q: Why are covariance matrices always symmetric and positive semi-definite?**
+**Short:** Covariance matrices are symmetric because Cov(X,Y) equals Cov(Y,X), and PSD because any linear combination's variance can never be negative.
 Covariance matrices are symmetric because Cov(X,Y) equals Cov(Y,X), and positive semi-definite because no variance can be negative. Symmetry follows directly from the definition C_{ij} = E[(x_i - mu_i)(x_j - mu_j)] = C_{ji}. For PSD, any linear combination satisfies w^T C w = Var(w^T x) >= 0 for all w. This guarantees real, non-negative eigenvalues, which is exactly why `eigh` is valid for PCA and why the variance explained by each principal component is never negative.
 
 **Q: How does positive-definiteness of the Hessian relate to convexity?**
+**Short:** A function is convex exactly when its Hessian is positive semi-definite everywhere, making a positive-definite Hessian at a critical point a strict local minimum.
 A function is convex exactly when its Hessian is positive semi-definite everywhere, and strictly convex when it is positive definite. The Hessian encodes curvature, so PSD means the surface curves upward in every direction, making any local minimum global. A positive-definite Hessian at a critical point guarantees a strict local minimum, while an indefinite Hessian (mixed-sign eigenvalues) marks a saddle point. This is why linear and logistic regression have a single optimum, while deep networks with indefinite Hessians are dominated by saddle points rather than local minima.
 
 **Q: What does the determinant of a matrix tell you geometrically?**
+**Short:** The determinant is the signed volume-scaling factor of a transformation, with zero meaning the matrix collapses space and is non-invertible.
 The determinant is the signed volume-scaling factor of the linear transformation the matrix represents. A determinant of 2 doubles areas and volumes; a negative sign means orientation was flipped (a reflection). A determinant of exactly zero means the transformation collapses space into a lower dimension, so the matrix is singular, non-invertible, and has at least one zero eigenvalue. It also equals the product of all the eigenvalues.
 
 **Q: Why do we standardize or normalize features before training?**
+**Short:** Standardizing puts features on a common scale so the loss surface becomes more spherical, letting one learning rate converge quickly in every direction.
 Standardizing features puts them on a common scale so gradient descent converges faster and no single feature dominates distance-based methods. When features span very different ranges, the loss surface becomes elongated (high condition number) and gradient descent zig-zags slowly down a narrow valley. Subtracting the mean and dividing by the standard deviation makes the surface more spherical, so one learning rate works across all directions. It is also essential for KNN, SVM RBF kernels, and any L2-regularized model, whose penalty implicitly assumes comparable feature scales.
 
 **Q: What is the difference between a gradient and a Jacobian?**
+**Short:** A gradient is the vector of partials for a scalar-valued function, while a Jacobian is the full matrix of partials for a vector-valued function.
 A gradient is the vector of partials of a scalar-valued function, while a Jacobian is the matrix of partials of a vector-valued function. For f: R^n -> R the gradient is n x 1 and equals the transpose of the 1 x n Jacobian, so the gradient is the single-output special case of a Jacobian. In backpropagation each layer contributes a Jacobian and reverse-mode autodiff multiplies them right-to-left; because the final loss is scalar, every accumulated quantity stays a vector (a gradient) rather than a full matrix, which is what makes backprop cheap.
 
 **Q: Why do repeated matrix multiplications cause vanishing or exploding gradients?**
+**Short:** Repeated multiplication by the same weight matrix scales gradients by powers of its eigenvalues, exploding above spectral radius 1 and vanishing below it.
 Repeatedly multiplying by the same weight matrix scales gradients by powers of its eigenvalues, so they explode when the spectral radius is above 1 and vanish when it is below 1. The backward pass of an RNN or deep net multiplies many Jacobians together, so if the largest singular value exceeds 1 gradients grow exponentially with depth, and if it is below 1 they decay to zero. This motivates gradient clipping, orthogonal initialization (singular values near 1), and gated architectures like LSTM and GRU. The governing quantity is the spectral radius, the largest eigenvalue magnitude.
 
 ---

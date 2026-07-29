@@ -653,57 +653,93 @@ Robustness is not a train-once property. Attackers adapt, data drifts, and new a
 ## 12. Interview Questions with Answers
 
 **Q: What is an adversarial example and why do they exist?**
+**Short:** Adversarial examples exploit models' near-linear behavior in high dimensions, where many tiny aligned perturbations sum across the decision boundary.
+
 An adversarial example is an input modified by a small, often imperceptible perturbation that causes a model to misclassify it while a human still sees the original class. They exist largely because models behave too linearly in high-dimensional space: many tiny per-feature changes, each nudging the output in the same direction, sum to a large shift across the decision boundary. They are not rare glitches — they exist densely around almost every input.
 
 **Q: Explain FGSM and how PGD improves on it.**
+**Short:** FGSM takes one gradient-sign step of size epsilon, while PGD iterates many such steps with projection, making it the standard strong attack.
+
 FGSM (Fast Gradient Sign Method) takes a single step of size epsilon in the direction of the sign of the loss gradient with respect to the input: `x_adv = x + epsilon·sign(∇_x L)`. It is fast but weak because one linear step rarely finds the optimal perturbation. PGD (Projected Gradient Descent) runs many small FGSM-like steps, projecting back into the epsilon Lp-ball after each, usually with a random start. PGD is the de facto strong attack and the standard for evaluating defenses.
 
 **Q: What is the Carlini-Wagner (C&W) attack and how does it differ from PGD?**
+**Short:** C&W optimizes directly for the smallest perturbation that flips the label, rather than maximizing loss inside a fixed epsilon-ball like PGD.
+
 The Carlini-Wagner (C&W) attack is a strong optimization-based evasion that minimizes the perturbation size subject to a misclassification constraint. Where PGD fixes an epsilon-ball and maximizes loss inside it, C&W directly searches for the *smallest* perturbation that flips the label, using a smooth surrogate objective (e.g. logit-margin loss) solved with an optimizer like Adam and a binary search over the trade-off constant. It is slower than PGD but often finds lower-distortion adversarial examples and is a favorite for *breaking* proposed defenses, so treat a defense that only survives FGSM/PGD as unproven until it also survives C&W and AutoAttack.
 
 **Q: What is the difference between white-box and black-box attacks, and which should you defend against?**
+**Short:** White-box attacks assume full model access and are strongest, so defenses are evaluated white-box even though black-box is the realistic deployed threat.
+
 White-box attackers know the architecture, weights, and gradients; black-box attackers only query inputs and observe outputs. White-box attacks (PGD, C&W) are strongest, so you *evaluate* defenses under white-box assumptions to assume the worst. Black-box attacks (transfer from a surrogate, or query-based gradient estimation like NES/SPSA) are the realistic threat for a deployed API. A robust system must hold under the strongest attack its threat model permits — usually evaluated white-box, defended in depth.
 
 **Q: Why is clean accuracy a misleading metric for a security-relevant model?**
+**Short:** Clean accuracy on benign data says nothing about robustness, since a model can score 95% clean yet near 0% under a PGD attack.
+
 Clean accuracy measures performance on benign, in-distribution data, which says nothing about an adversary actively crafting inputs. A model can have 95% clean accuracy and ~0% robust accuracy under PGD. For any model facing an adversary, the headline number must be robust accuracy under a strong adaptive attack; clean accuracy alone gives a false sense of security.
 
 **Q: What is gradient masking and why is it a trap?**
+**Short:** Gradient masking hides gradients to defeat white-box attacks while leaving the model genuinely non-robust to black-box or adaptive attacks.
+
 Gradient masking is any defense that hides or obscures gradients (non-differentiable preprocessing, extreme nonlinearity, randomization) so that white-box gradient attacks fail — making robust accuracy *look* high. It is a trap because the model is not actually robust: black-box, transfer, or backward-pass-differentiable-approximation (BPDA) attacks bypass it. The "Obfuscated Gradients" paper broke most defenses of its year this way. Always test with adaptive and black-box attacks.
 
 **Q: How does adversarial training work and what does it cost?**
+**Short:** Adversarial training solves a min-max objective by training on PGD-perturbed examples each step, costing 3-30x training time and some clean accuracy.
+
 Adversarial training (Madry) formulates a min-max objective: an inner maximization (PGD) finds the worst-case perturbation of each training example, and the outer minimization updates weights to classify those perturbed inputs correctly. In practice you generate PGD examples each step and train on them. It is currently the most reliable empirical defense, but it costs 3-30x normal training time and typically drops clean accuracy 5-10 points.
 
 **Q: What is certified robustness, and how does randomized smoothing provide it?**
+**Short:** Randomized smoothing certifies a provable robustness radius by majority-voting over Gaussian-noised copies of the input.
+
 Certified robustness gives a provable guarantee that no perturbation within a radius can change a prediction, unlike empirical defenses that merely resist known attacks. Randomized smoothing classifies an input by majority vote over many Gaussian-noised copies; if the top class wins by a sufficient margin, you can certify an L2 radius `R = sigma·Φ⁻¹(p_top)`. The cost is that each prediction needs thousands of noisy samples, making inference expensive.
 
 **Q: What is a backdoor/trojan attack and why is it hard to detect?**
+**Short:** A backdoor attack poisons training data so the model misbehaves only on a hidden trigger, leaving clean validation accuracy unaffected.
+
 A backdoor attack poisons a small fraction of training data so the model misclassifies *only* when a specific trigger (e.g. a sticker or pixel pattern) is present, behaving normally otherwise. It is hard to detect because clean validation accuracy is unaffected — the malicious behavior is dormant until the trigger appears. Detection requires specialized tools (e.g. Neural Cleanse, which searches for unusually small triggers) and data-provenance controls.
 
 **Q: What is data poisoning and how do you defend against it?**
+**Short:** Data poisoning corrupts training data to bias or degrade the model, defended against via provenance controls, outlier filtering, and differential privacy.
+
 Poisoning corrupts training data to degrade or bias the deployed model — flipping labels, inserting outliers, or planting triggers. Because training data is increasingly crowd-sourced or scraped, this is a live threat. Defenses include data provenance and trust scoring, robust statistics and influence-function/outlier filtering to remove high-impact samples, differentially private training (which bounds any single sample's effect), and trigger scanning before deployment.
 
 **Q: What is model extraction and why is rate limiting a defense?**
+**Short:** Model extraction clones a deployed model by querying it heavily, so rate limiting and returning only top-k labels raise the cost of stealing it.
+
 Model extraction (stealing) clones a deployed model's functionality by querying it enough to train a surrogate, defeating the IP and training cost of the original. Each query leaks a labeled example. Rate limiting and query-pattern monitoring raise the cost and detectability of the thousands-to-millions of queries extraction needs, while returning top-k labels instead of full probability vectors reduces information per query. It is cheap and high-value for any public ML API.
 
 **Q: What is membership inference and what enables it?**
+**Short:** Membership inference exploits a model's higher confidence on training examples to determine whether a record was used to train it.
+
 Membership inference determines whether a specific record was in the training set, a privacy violation (e.g. revealing a patient was in a disease cohort). It exploits the fact that models are more confident on training examples than unseen ones, so high-precision confidence outputs leak membership. Defenses include differentially private training, regularization to reduce overfitting, and coarsening or adding noise to confidence outputs.
 
 **Q: How do you choose the perturbation budget epsilon, and why does the norm matter?**
+**Short:** Epsilon must be set within a specific Lp norm, since L-infinity, L2, and L0 bound perturbations differently and change what counts as imperceptible.
+
 Epsilon bounds how much an input may change while preserving its human-perceived label, defined within a specific Lp norm: L-infinity bounds the max change per feature, L2 bounds total energy, L0 bounds the number of features changed. For [0,1] images, L-infinity epsilon ~0.03 (8/255) is imperceptible; for tabular data you must express the budget in the features' real units. The norm changes which perturbations are "allowed," so report it explicitly and justify that it keeps the true label unchanged.
 
 **Q: Adversarial training hardened your model at epsilon=0.03 — why does it fail at epsilon=0.06?**
+**Short:** Adversarial training is epsilon-specific, so robustness learned inside one perturbation budget collapses once an attacker exceeds that trained radius.
+
 Adversarial training is epsilon-specific: a model hardened at one perturbation budget offers little protection against a larger one. The min-max objective only teaches the model to be robust inside the epsilon-ball it trained on, so an attacker who spends a bigger budget simply steps outside that learned safe region and the robust accuracy collapses. This is why you must define the operational threat budget up front and train (and evaluate) at or above it; there is no "train once, robust to everything" — larger epsilon means both harder training and a bigger clean-accuracy sacrifice.
 
 **Q: Why is there a robustness-accuracy trade-off?**
+**Short:** Robust decision boundaries must stay far from data points, forcing simpler boundaries that fit clean data less tightly and cost accuracy.
+
 Robust models must keep their decision boundaries far from data points so small perturbations cannot cross them, which forces simpler, smoother boundaries that fit clean data less tightly — costing clean accuracy. Empirically and theoretically, increasing adversarial robustness reduces standard accuracy on many datasets. It is a deliberate engineering trade, not a defect to eliminate.
 
 **Q: How do adversarial attacks transfer across models, and why does that matter for black-box attacks?**
+**Short:** Adversarial examples transfer across models with similar features, letting a black-box attacker craft attacks on a surrogate and apply them to the target.
+
 Adversarial examples crafted on one model often fool a *different* model trained on similar data, because both learn similar features and boundaries. This transferability lets a black-box attacker train a surrogate model, craft white-box attacks on it, and apply them to the target without ever seeing the target's gradients. It is why "the attacker can't see our weights" is not a sufficient defense.
 
 **Q: How does adversarial ML in classical models relate to LLM security?**
+**Short:** Evasion, poisoning, extraction, and membership inference in classical ML map directly to prompt injection, RAG poisoning, distillation, and data extraction in LLMs.
+
 The threat-model vocabulary transfers directly. Evasion (crafting inputs that bypass a classifier) maps to prompt injection and jailbreaks (crafting prompts that bypass an LLM's guardrails); data poisoning maps to training-data and RAG-corpus poisoning; model extraction maps to distilling a proprietary LLM via its API; membership/inversion maps to training-data extraction from LLMs. The defenses also rhyme: input validation, robust training/alignment, monitoring, and rate limiting. See `../../llm/llm_security/` and `../../llm/guardrails_and_content_safety/`.
 
 **Q: A deployed fraud model's accuracy is fine but fraud is rising. How do you reason about adversarial adaptation?**
+**Short:** Rising fraud despite stable accuracy signals adaptive adversarial drift, addressed with frequent retraining, adversarial training, and human review of the risky tail.
+
 Fraud is an adaptive adversary, so a static model degrades as attackers probe and shift tactics — this is adversarial concept drift, not random drift. Investigate whether recent fraud clusters near the decision boundary (evidence of probing), monitor for spikes in borderline/low-confidence cases and near-duplicate query patterns, and respond with frequent retraining on fresh labels, adversarial training against the observed evasion patterns, and ensembling. Pair the model with rules and human review for the highest-risk tail.
 
 ---

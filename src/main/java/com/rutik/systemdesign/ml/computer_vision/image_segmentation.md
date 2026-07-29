@@ -728,54 +728,71 @@ Mask R-CNN predicts a binary mask for each class at 28x28 resolution, then bilin
 ## 12. Interview Questions with Answers
 
 **Q: What is the difference between semantic and instance segmentation?**
+**Short:** Semantic segmentation labels every pixel by class only, while instance segmentation assigns each detected object instance its own separate mask.
 Semantic segmentation assigns a single class label to every pixel but treats all instances of a class identically — two adjacent cars are both labeled "car" with no distinction. Instance segmentation gives each detected object instance a unique binary mask in addition to a class label, so two cars get separate masks. Panoptic segmentation combines both: instance masks for countable "things" (car, person) and semantic labels for uncountable "stuff" (sky, road).
 
 **Q: What is mIoU and how is it computed?**
+**Short:** Mean IoU averages per-class intersection-over-union, computed from a confusion matrix's diagonal for true positives versus row and column sums for false negatives and positives.
 Mean Intersection over Union (mIoU) is the primary metric for semantic segmentation. For each class, IoU = (true positives) / (true positives + false positives + false negatives), where TP/FP/FN are counted at pixel level. mIoU averages IoU across all classes. A confusion matrix is the efficient implementation: TP for class c is the diagonal element C[c,c]; FP is the column sum minus diagonal; FN is the row sum minus diagonal.
 
 **Q: Why do U-Net skip connections help segmentation?**
+**Short:** Skip connections concatenate the encoder's high-resolution features into the decoder, restoring precise pixel-level spatial detail lost during downsampling.
 The encoder downsamples to build semantic feature maps but loses spatial resolution. The decoder upsamples to recover resolution, but the upsampled features are blurry. Skip connections concatenate the encoder's high-resolution features directly into the corresponding decoder stage, providing precise spatial information (exact pixel positions of edges, structures) alongside the semantic content from deeper layers. This is especially critical in medical imaging where 1-pixel boundary accuracy matters for volumetric calculations.
 
 **Q: Explain the Dice loss formula and when to prefer it over cross-entropy.**
+**Short:** Dice loss directly optimizes the overlap ratio 2|A∩B|/(|A|+|B|), making it insensitive to class imbalance and preferred when foreground pixels are under 5%.
 Dice loss = 1 - (2 * |A ∩ B|) / (|A| + |B|), where A is the predicted mask and B is the ground-truth mask. It directly optimizes the overlap ratio, making it insensitive to class imbalance — the dominant background class does not swamp the loss. Use Dice loss when foreground is rare (< 5% of pixels), as in medical lesion segmentation, skin lesion detection, or road crack detection. Cross-entropy works better early in training and for multi-class tasks; combining both (50% CE + 50% Dice) is the standard approach.
 
 **Q: What is atrous (dilated) convolution and why does DeepLab use it?**
+**Short:** Dilated convolution inserts gaps between kernel weights to expand the receptive field without downsampling, letting DeepLab keep high-resolution feature maps.
 A dilated convolution inserts spaces (zeros) between kernel weights, expanding the receptive field without downsampling spatial resolution. A 3x3 kernel with dilation d=6 has an effective receptive field of 13x13 but only 9 parameters. DeepLab uses dilation instead of additional pooling layers to maintain high-resolution feature maps (stride 8 or 16 instead of 32), which is critical for precise boundary localization. ASPP runs multiple parallel atrous convolutions at rates [6, 12, 18] to capture context at multiple scales simultaneously.
 
 **Q: What is RoI Align and how does it improve over RoI Pooling?**
+**Short:** RoI Align uses bilinear interpolation instead of RoI Pooling's integer quantization, avoiding the pixel misalignment that degrades Mask R-CNN's mask quality.
 RoI Pooling quantizes the RoI boundary to the nearest integer pixel, introducing a misalignment of up to 1 pixel. RoI Align instead uses bilinear interpolation at four regularly sampled points within each pooling bin, producing a smooth, continuous extraction without quantization. For detection, the misalignment is tolerable; for pixel-level mask prediction in Mask R-CNN, even a 1-pixel offset degrades mask quality significantly. RoI Align improves mask AP by ~2 points over RoI Pooling.
 
 **Q: What is Panoptic Quality (PQ) and how is it calculated?**
+**Short:** PQ equals segmentation quality, the average IoU of matched segments, times recognition quality, an F1 score over instances, rewarding both precision and completeness.
 PQ = SQ × RQ, where SQ (Segmentation Quality) is the average IoU of matched segment pairs (only counts TP segments), and RQ (Recognition Quality) is the F1 score over segment instances: RQ = TP / (TP + 0.5*FP + 0.5*FN). A segment pair is matched if IoU > 0.5. PQ ranges from 0 to 1; state-of-art Mask2Former achieves PQ = 0.578 on COCO. PQ rewards both precise segmentation (high SQ) and complete detection (high RQ).
 
 **Q: What is SAM and what makes it different from traditional segmentation models?**
+**Short:** SAM is a promptable foundation model that segments any point-, box-, or mask-prompted region into a class-agnostic binary mask instead of fixed predefined classes.
 SAM (Segment Anything Model) is a foundation model for promptable segmentation trained on 1 billion masks. Unlike traditional models trained for specific classes on specific datasets, SAM accepts a prompt (point, box, or mask) and segments the indicated region without class labels. The architecture has three components: a ViT-H image encoder (run once per image), a prompt encoder (for points/boxes/masks), and a lightweight mask decoder (run per prompt, < 50ms). SAM does not assign class labels — it only produces binary masks. SAM 2 extends this to video with a memory bank for temporal consistency.
 
 **Q: How does Mask R-CNN extend Faster R-CNN?**
+**Short:** Mask R-CNN adds a third parallel head that applies convolutions plus a transposed convolution to each RoI-Aligned region to predict a per-class binary mask.
 Mask R-CNN adds a third parallel head to Faster R-CNN's existing classification and box regression heads. After RoI Align extracts a 14x14 feature map per region proposal, the mask head applies 4 convolutional layers (3x3) to produce a 14x14 feature map, then a 2x transposed convolution produces a 28x28 output with C channels (one per class). During inference, only the mask for the predicted class is used. The mask head is trained independently of the box/class heads, with binary cross-entropy loss per class.
 
 **Q: What data augmentation strategies are most important for segmentation?**
+**Short:** Geometric augmentations must be applied identically to image and mask, while color augmentations like brightness and contrast apply only to the image.
 Geometric augmentations (random horizontal flip, random crop, random scale jitter) must be applied identically to both image and mask — any spatial transform that is not synchronized will corrupt the annotation. Color augmentations (brightness, contrast, color jitter) apply to the image only. For medical imaging, elastic deformations are especially effective at simulating anatomical variation. For aerial/satellite images, random rotation at arbitrary angles (not just 90°) is important. Albumentations library handles synchronized transforms correctly and runs ~10x faster than torchvision.
 
 **Q: How do you handle class imbalance in segmentation?**
+**Short:** Use median frequency balancing, Dice loss, or focal loss to keep dominant background pixels from swamping the loss on rare foreground classes.
 Three approaches: (1) median frequency balancing — weight each class loss by the inverse frequency of that class in the training set; (2) Dice loss — inherently handles imbalance by directly maximizing overlap ratio, unaffected by dominant background; (3) focal loss — dynamically down-weights easy background pixels based on prediction confidence. For binary tasks (e.g., tumor vs background), weighting the minority class by the background/foreground area ratio is a simple and effective starting point.
 
 **Q: What is the output stride in DeepLab and how does it affect the model?**
+**Short:** Output stride is the ratio of input to feature-map resolution, and lowering it from 32 to 8 via dilated convolutions sharpens boundaries at roughly 4x the VRAM cost.
 Output stride is the ratio of the input image resolution to the final feature map resolution. A standard ResNet has output stride 32 (32x downsampling). DeepLab replaces the last 1-2 pooling layers with dilated convolutions to reduce output stride to 16 or 8, preserving more spatial resolution in the feature map. Output stride 8 gives sharper boundaries (+1–2 mIoU) but requires ~4x more VRAM than stride 16. For production, stride 16 is the common compromise.
 
 **Q: When would you choose SegFormer over DeepLab v3+?**
+**Short:** Choose SegFormer's hierarchical transformer encoder with a lightweight MLP head for higher mIoU at fewer FLOPs when you can afford 17k+ fine-tuning images.
 SegFormer uses a hierarchical transformer encoder (Mix Transformer, MiT) with a lightweight all-MLP decoder head. It outperforms DeepLab v3+ on Cityscapes (84.0% vs 82.1% mIoU) with fewer FLOPs when using the B0-B2 backbones. SegFormer-B5 achieves SOTA at comparable parameter count. Choose SegFormer when: (1) you want SOTA accuracy without complex ASPP heads; (2) you can afford 17k+ images for fine-tuning (transformers need more data); (3) your GPU is large enough for transformer attention. Use DeepLab v3+ when you need a well-understood, easily debuggable CNN pipeline with strong priors on local features.
 
 **Q: How does the Tversky loss differ from Dice loss and when do you use it?**
+**Short:** Tversky loss generalizes Dice with separate false-positive and false-negative weights, letting you penalize missed tumors more than false alarms in medical screening.
 Tversky loss generalizes Dice: Tversky = TP / (TP + alpha*FP + beta*FN). When alpha=beta=0.5, it equals Dice. Setting alpha=0.3, beta=0.7 makes the loss penalize false negatives more heavily than false positives — useful in medical screening where missing a tumor (FN) is far worse than a false alarm (FP). Use Tversky loss in safety-critical medical applications where the FN/FP cost asymmetry is known and meaningful.
 
 **Q: What is the standard pipeline to train a semantic segmentation model on a new domain?**
+**Short:** Start from an ImageNet or Cityscapes-pretrained backbone, fine-tune with combined CE+Dice loss and synchronized augmentations, then evaluate per-class mIoU.
 Start from a backbone pretrained on ImageNet (ResNet-50, MiT-B2). If a segmentation model pretrained on ADE20K or Cityscapes exists, load it and replace the final classification head. Fine-tune with a low learning rate for the backbone (1e-4) and higher for the head (1e-3). Use combined CE + Dice loss with label smoothing 0.1. Apply Albumentations augmentations synchronized across image and mask. Train with output stride 16 for efficiency; switch to 8 for final evaluation. Evaluate with mIoU per class and overall; examine confusion matrix to identify commonly confused class pairs.
 
 **Q: What is the difference between transposed convolution and bilinear upsampling, and which avoids checkerboard artifacts?**
+**Short:** Transposed convolution learns its upsampling kernel and can produce checkerboard artifacts, while fixed bilinear upsampling is cheaper and artifact-free.
 Transposed convolution learns its upsampling kernel while bilinear upsampling is fixed, so only transposed convolution can produce checkerboard artifacts. Those artifacts appear when the transposed-conv kernel size is not divisible by the stride (for example kernel 3 with stride 2), causing uneven overlap in the output. The common fixes are to use kernel 2 with stride 2, or to bilinearly upsample and then apply a 3x3 convolution (or PixelShuffle). Bilinear upsampling is cheaper and artifact-free but cannot learn task-specific detail.
 
 **Q: Why is sliding-window inference used for large images in segmentation?**
+**Short:** Sliding-window inference processes overlapping crops of a large image and averages predictions in overlaps, trading extra compute for bounded GPU memory.
 Sliding-window inference runs the model on overlapping crops of a large image and stitches the outputs, because a single full-resolution forward pass often exceeds GPU memory. A typical setup uses 50% overlap and averages predictions in the overlapping regions to avoid seams and inconsistent patch boundaries. It trades extra compute — each pixel is processed several times — for bounded memory, and is standard for gigapixel pathology slides and large satellite scenes.
 
 ---
