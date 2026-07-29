@@ -144,3 +144,24 @@ The `game/` directory is an application, not study content — see
   + `STUDY_ORDER.book` entries**; a missing label degrades to a title-cased slug (no
   author/short), never a broken screen. No other section may nest — the picker and
   sidebar grouping activate only when module ids match `book/*/*`.
+- **Module ids are 2 segments; a module's FILES may sit one level deeper.** `book` is the
+  only section whose module ids nest (above). But several sections keep files in
+  sub-directories of a module — the `lld` pattern folders, e.g.
+  `lld/creational/prototype/README.md`. `extract.py` folds those into the parent module
+  (`lld/creational`) and puts the extra path in `sourceFile` (`prototype/README.md`),
+  exactly the way a flat deep-dive sub-file already folds in. Emitting a 3-segment key
+  instead would fail `check_wiring()` (absent from `STUDY_ORDER`) and break the Pages
+  deploy.
+
+  Consequence for `app.js`: **`dirname(path)` is not the module id.** Use
+  `splitModulePath(path)` — a longest-prefix match against `state.index.files` returning
+  `{ mod, file }`, where `file` IS the bank's `sourceFile`. Three call sites depend on it
+  (`appendEvalBlock`, `appendWhatNext`, `navCtx`'s current-index lookup); each would
+  silently lose its quiz or its nav on a nested page without it. `fileLabel(file)` is the
+  matching display helper — a nested `README.md` is named for its folder, since every one
+  of them is called README.md. Regression test: `test_split.mjs` in `audit-state/` runs
+  both helpers over every real `(module, sourceFile)` pair in `questions/index.json`.
+- **Answers may be written as blockquotes.** `parse_md` strips a leading `> ` per line when
+  accumulating an answer. The lines are flattened into one space-joined string, so the
+  marker could never render as a blockquote anyway — it would only leak a literal `"> "`
+  into the MCQ option, which it did for 9 `lld/pattern_comparisons` questions.

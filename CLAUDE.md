@@ -142,10 +142,17 @@ bank. If a question is genuinely a general interview question, it belongs in
 `## 12. Interview Questions with Answers` on its merits, not because it was hidden.
 
 **What IS a real loss** is a Q&A under a mislabeled *interview* heading — see the game
-compatibility section below. Measured 2026-07-28: **229 such Q&As, 223 of them in `lld`.**
+compatibility section below. Measured 2026-07-28 at **229, 223 of them in `lld`**;
+**fixed 2026-07-29 (commit 18e2328), recovering 217 and taking `lld` from 198 to 415.**
 Measure these directly (bold `**Q:` lines outside any `interview q` span, excluding
 `case_studies/` and `## N. Case Study` sections); a scan for modules with a ZERO question
 count cannot see a partial loss inside an otherwise-healthy module.
+
+Not every mislabeled-looking heading is a loss. `## Interview Relevance` in the five
+`lld/anti_patterns/` files was deliberately left alone: it sits over bullet lists of
+question *prompts* with no answers, so renaming it would inject answerless fragments into
+the bank. **Read the content before renaming a heading** — the heading is the trigger, the
+content is the test.
 
 ### Planned: authored one-line summaries (NOT YET ACTIVE — do not author these yet)
 
@@ -385,6 +392,19 @@ silently dropped from the game or renders wrong. These rules are derived from
   missing from `STUDY_ORDER` or a `STUDY_PATHS` array stops being an ordered
   subset. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
   under their parent module's existing position.)
+- **A module id is always `<section>/<module>` — exactly two segments.** `book` is the
+  single exception (`book/<book>/<chapter>`). A file living in a sub-directory of a module
+  — `lld/creational/prototype/README.md` — folds into its parent module the same way a
+  deep-dive sub-file does, carrying the extra path inside `sourceFile`
+  (`prototype/README.md`). So a nested folder needs **no** `STUDY_ORDER` entry either. Do
+  not "fix" this by adding 3-segment keys: they are absent from `STUDY_ORDER`,
+  `check_wiring()` treats that as fatal, and `--strict` fails the Pages deploy.
+
+  The reader resolves a page back to its module with `splitModulePath()` in `app.js`
+  (longest-prefix match against the real module list), which is what keeps the
+  "Evaluate yourself" quiz, "What next", and prev/next nav working on a nested page.
+  Anything new that needs a module id from a reader path must use it rather than
+  assuming `dirname(path)`.
 
 ### Q&A format required for extraction (Section 12)
 
@@ -393,10 +413,12 @@ silently dropped from the game or renders wrong. These rules are derived from
   **`## NN. Interview Tips` does NOT match**, and neither does any heading without the
   word "questions" after "interview". A file using one contributes **zero** questions to
   the bank, silently — no error, no warning, it simply never appears in the quiz. This is
-  not hypothetical: 23 `lld` pattern modules use `Interview Tips` and are losing 213 Q&As
-  between them, which is why `lld` shows ~198 questions against `llm`'s 1,987. When adding
-  a module, confirm it reached the bank (`python3 game/extract.py` prints a per-section
-  count) rather than assuming the heading was close enough.
+  not hypothetical: 23 `lld` pattern modules used `Interview Tips` and 5
+  `lld/pattern_comparisons/` files used `Interview Answer Template(s)`, losing 217 Q&As
+  between them — `lld` sat at 198 questions against `llm`'s 2,052 until they were renamed
+  on 2026-07-29. When adding a module, confirm it reached the bank
+  (`python3 game/extract.py` prints a per-section count) rather than assuming the heading
+  was close enough.
 - Each **question line starts with `**`** and is one of: fully bold `**question?**`
   (optional trailing `:`/`.`), a `**Qn:` / `**Q:` label, or an opening `**` that
   wraps across lines. This is why the "bold the question" rule is load-bearing,
