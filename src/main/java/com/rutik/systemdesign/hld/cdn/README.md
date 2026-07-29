@@ -22,7 +22,7 @@
 
 **Mental model**: Without a CDN, a user in Tokyo requesting images from a US-hosted website waits for a round-trip across the Pacific (~150ms one-way). With a CDN, the same images are cached at a Tokyo edge server — served in <10ms. The CDN's global network of "Points of Presence" (PoPs) caches static content close to users. When the edge cache misses, it fetches from origin once and caches for all subsequent users in that region.
 
-**Why it matters**: CDNs are essential for any globally used service with static assets (images, CSS, JS, videos). They reduce origin server load (99% of static requests never reach origin), improve latency (serve from 10-50ms instead of 150-300ms), and provide DDoS protection (attacks absorbed at edge, far from origin). Netflix serves 100M+ users with ~800 CDN PoPs.
+**Why it matters**: CDNs are essential for any globally used service with static assets (images, CSS, JS, videos). They reduce origin server load (99% of static requests never reach origin), improve latency (serve from 10-50ms instead of 150-300ms), and provide DDoS protection (attacks absorbed at edge, far from origin). Netflix serves its 325M+ paid memberships from Open Connect appliances installed in over 1,000 locations inside ISP networks and internet exchanges.
 
 **Key insight**: Cache invalidation (how quickly edge caches pick up content updates) is the main CDN tradeoff. Short TTLs mean fresh content but more origin traffic; long TTLs mean fewer origin hits but stale content risk. Cache busting (include content hash in URL) solves this for static assets.
 
@@ -72,7 +72,7 @@ Notice the floor: even at 99% you cannot get below the 10ms hit latency itself. 
 The public internet has congested backbone routes, especially for transoceanic traffic. CDN providers own or peer with major internet exchange points (IXPs) and have optimized private networks between PoPs, bypassing public internet congestion.
 
 **4. Availability**
-CDNs provide redundancy. If one PoP fails, traffic is routed to the next closest. Origin failures can be masked by serving stale content ("stale-while-revalidate").
+CDNs provide redundancy. If one PoP fails, traffic is routed to the next closest. Origin failures can be masked by serving stale content — that is `stale-if-error`, a different directive from `stale-while-revalidate`, and the distinction matters (see "Serving Stale When the Origin Is Down" below).
 
 ### What CDNs Serve
 - Static assets: images, CSS, JavaScript, fonts, videos
@@ -189,7 +189,7 @@ flowchart LR
     class Origin frozen
 ```
 
-*Two regional users hit two different edge PoPs; both fall back to the same backbone and origin only on a cache miss. Major CDNs run roughly 200-300 such PoPs — e.g. Americas: New York, Los Angeles, São Paulo, Toronto; Europe: London, Frankfurt, Amsterdam, Paris; Asia: Tokyo, Singapore, Mumbai, Sydney (Cloudflare/Akamai scale).*
+*Two regional users hit two different edge PoPs; both fall back to the same backbone and origin only on a cache miss. Major CDNs run hundreds to thousands of such PoPs — e.g. Americas: New York, Los Angeles, São Paulo, Toronto; Europe: London, Frankfurt, Amsterdam, Paris; Asia: Tokyo, Singapore, Mumbai, Sydney (Cloudflare/Akamai scale).*
 
 ---
 
@@ -367,6 +367,23 @@ Splitting the two is what makes long freshness windows safe. Without `stale-whil
 ```
 
 The 10-minute TTL costs 144 origin fetches a day per object, but with a 24-hour stale window not one of those 144 users waits for it. Cut the stale window to zero and 144 users a day eat the full miss latency instead.
+
+### Serving Stale When the Origin Is Down
+
+RFC 5861 defines **two** stale-serving extensions, and they cover different failures. Using one where you needed the other is a common and expensive mistake.
+
+```http
+Cache-Control: max-age=600, stale-while-revalidate=86400, stale-if-error=86400
+```
+
+| Directive | Fires when | Question it answers |
+|-----------|-----------|---------------------|
+| `stale-while-revalidate=N` | the object is merely **expired** | "may I serve stale while I refresh in the background?" |
+| `stale-if-error=N` | the refresh **fails** | "may I serve stale because the origin is broken?" |
+
+`stale-if-error` permits the cache to answer from a stale copy for N seconds past staleness when an attempt to reach origin would produce a 500, 502, 503, or 504. That is the mechanism behind the availability claim above: with it, an origin outage shorter than N is invisible to users on cached paths; without it, the first expiry after the outage begins converts every cached URL into a 5xx.
+
+Two practical notes. First, the windows are independent — `stale-while-revalidate=60, stale-if-error=86400` is a perfectly sensible pairing that says "refresh aggressively, but ride out a full day of origin downtime rather than serve an error." Second, `stale-if-error` only helps for content the edge has already seen; a cold URL during an origin outage is still a 5xx, which is the availability argument for pre-warming (Best Practices item 1) and for an origin shield that keeps a second, warmer copy behind the edge.
 
 ### ETag and Conditional Requests
 
@@ -548,7 +565,7 @@ async function handleRequest(request) {
 
 ### Dynamic Caching Strategies
 
-**Micro-caching**: Cache even dynamic content for 1-5 seconds. A page generating 10,000 req/s with 1s micro-caching only hits origin once per second — 9,999x reduction in origin load, with at most 1 second of staleness.
+**Micro-caching**: Cache even dynamic content for 1-5 seconds. A page generating 10,000 req/s with 1s micro-caching only hits origin once per second — a 10,000x cut in origin load, with 9,999 of every 10,000 requests never leaving the edge, at the cost of at most 1 second of staleness.
 
 **Fragment Caching (ESI — Edge Side Includes)**
 ```html
@@ -604,7 +621,7 @@ flowchart LR
 ### DDoS Protection at Edge
 
 CDN edge servers absorb volumetric DDoS attacks by:
-- Having far more bandwidth capacity than any single origin (Cloudflare: 197 Tbps aggregate)
+- Having far more bandwidth capacity than any single origin (Cloudflare: 500 Tbps of external capacity as of April 2026)
 - Distributing attack traffic across all PoPs (Anycast)
 - Applying rate limiting at edge before traffic reaches origin
 - IP reputation filtering
@@ -699,7 +716,7 @@ Netflix built its own CDN called Open Connect rather than using commercial CDN p
 
 | Feature | Cloudflare | AWS CloudFront | Akamai |
 |---------|-----------|----------------|--------|
-| PoPs | ~300 cities | ~450 PoPs | ~4,000 PoPs |
+| PoPs | 330+ cities, 125+ countries | 750+ PoPs plus 1,140+ embedded PoPs, 15 regional edge caches | 4,300+ PoPs, ~700 cities |
 | Model | Anycast | GeoDNS-based | GeoDNS-based |
 | Edge compute | Workers (V8 isolates) | Lambda@Edge | EdgeWorkers |
 | DDoS protection | Best-in-class, free | Separate Shield service | Enterprise tier |
@@ -856,7 +873,7 @@ A: Cache poisoning occurs when an attacker causes the CDN to cache a malicious r
 
 **Q10: Explain the concept of "Origin Shield" in CDN.**
 
-A: Origin Shield adds an additional caching layer between CDN edge nodes and the origin. Without it, each of 300+ PoPs might independently request a cache miss from origin, creating a large fan-out. With Origin Shield, all PoP cache misses are routed through a single designated shield node, which is the only one that contacts origin. This dramatically reduces origin traffic (especially for low-traffic content) at the cost of slightly higher latency for shield-miss requests. AWS CloudFront calls this "Origin Shield"; Cloudflare calls it "Argo Tiered Caching."
+A: Origin Shield adds an additional caching layer between CDN edge nodes and the origin. Without it, each of hundreds of PoPs might independently request a cache miss from origin, creating a large fan-out. With Origin Shield, all PoP cache misses are routed through a single designated shield node, which is the only one that contacts origin. This dramatically reduces origin traffic (especially for low-traffic content) at the cost of slightly higher latency for shield-miss requests. AWS CloudFront calls this "Origin Shield"; Cloudflare calls it "Tiered Cache" — Smart Tiered Cache picks the single closest upper tier per origin automatically, and Regional Tiered Cache inserts a regional hub between the lower and upper tiers.
 
 **Q11: How do CDNs support HTTPS and certificate management?**
 
@@ -872,11 +889,15 @@ A: `max-age` applies to every cache in the chain, including the browser, while `
 
 **Q14: How do you cache dynamic content that changes every second without hammering the origin on every request?**
 
-A: Use micro-caching — cache the dynamic response at the edge for just 1-5 seconds instead of not caching it at all. The "Dynamic Caching Strategies" section gives the concrete payoff: a page generating 10,000 requests/second with a 1-second micro-cache TTL sends only 1 request/second to origin, a 9,999x reduction in origin load, at the cost of at most 1 second of staleness. This works because most "dynamic" pages (news homepages, trending lists, stock summaries) don't actually need per-request freshness — the perceived staleness window is invisible to users but the origin-load reduction is massive. Combine micro-caching with `stale-while-revalidate` so the very first request after expiry is also served instantly while a background fetch refreshes the cache.
+A: Use micro-caching — cache the dynamic response at the edge for just 1-5 seconds instead of not caching it at all. The "Dynamic Caching Strategies" section gives the concrete payoff: a page generating 10,000 requests/second with a 1-second micro-cache TTL sends only 1 request/second to origin, a 10,000x cut in origin load with 9,999 of every 10,000 requests never leaving the edge, at the cost of at most 1 second of staleness. This works because most "dynamic" pages (news homepages, trending lists, stock summaries) don't actually need per-request freshness — the perceived staleness window is invisible to users but the origin-load reduction is massive. Combine micro-caching with `stale-while-revalidate` so the very first request after expiry is also served instantly while a background fetch refreshes the cache.
 
 **Q15: What went wrong when an engineer ran a blanket "purge everything" to clear one stale CSS file, and how do you prevent it?**
 
 A: A cache-wide purge clears every cached object, not just the one file you intended to invalidate, so a routine CSS fix can accidentally evict your entire image cache along with it. In the media-platform case study's second lessons-learned pitfall, `cf purge --everything` to clear stale CSS also wiped 200TB of cached images; the next hour saw 500k requests/sec hit origin — exceeding the 500k/sec budget the whole architecture was sized around — and end-user p99 latency rose to 4 seconds. The fix was tag-based purging (`cf purge --tag css:v423`), which clears only the ~200MB of objects carrying that surrogate key and leaves unrelated content untouched. Always scope a purge to a cache tag or URL pattern in production, and reserve "purge everything" for a true full-cache emergency, since its blast radius is every cached byte you have.
+
+**Q: Your origin goes down for ten minutes. Which Cache-Control directive keeps the CDN serving users, and why is `stale-while-revalidate` not it?**
+
+A: `stale-if-error` is the directive that survives an origin outage; `stale-while-revalidate` only covers ordinary expiry. RFC 5861 defines both, and they trigger on different conditions: SWR says "the object expired, serve the stale copy while I refresh in the background", whereas SIE says "the refresh itself failed, keep serving the stale copy anyway" for a stated number of seconds past staleness, where a failure means a request that would produce a 500, 502, 503, or 504. Set only SWR and the very first expiry after the outage starts turns every cached URL into a 5xx, because the background refresh fails and there is no permission to keep the stale bytes. The windows are independent, so `max-age=600, stale-while-revalidate=60, stale-if-error=86400` is a sensible combination — refresh aggressively, but ride out a full day of origin downtime rather than serve an error. The limit to remember is that neither directive helps for a URL the edge has never fetched, which is why cache pre-warming and an origin shield are part of the same availability story.
 
 **Q16: Why would a company run multiple CDN providers simultaneously instead of picking one?**
 
@@ -965,8 +986,8 @@ A photo-sharing platform (Unsplash-like) delivers images globally with on-the-fl
 - **Transformations:** WEBP/AVIF conversion, dynamic resize (50+ size variants per image), EXIF stripping, watermarking
 - **Latency SLA:** p99 < 100ms globally, p50 < 30ms in-region
 - **Cache hit-rate target:** > 95% (origin bandwidth budget is 500k req/sec max)
-- **Origin egress cost:** $0.09/GB vs CDN egress $0.02/GB — a 95% hit rate saves $14M/year
-- **PoPs:** Cloudflare's 310+ edge locations
+- **Origin egress cost:** $0.09/GB vs CDN egress $0.02/GB — a 95% hit rate blends to $0.0245/GB, a 3.7x lower unit cost per delivered byte
+- **PoPs:** Cloudflare's 330+ edge cities
 - **Cert coverage:** 1.4M customer subdomains (white-label sites pointing CNAMEs at us)
 
 ### Architecture Overview
@@ -990,7 +1011,7 @@ flowchart LR
         Tier1 -->|"miss"| Workers
     end
 
-    Workers -->|"miss"| Tier2(Tier-2 Regional<br/>Argo tiered cache)
+    Workers -->|"miss"| Tier2(Tier-2 Regional<br/>Tiered Cache)
     Tier2 -->|"miss"| Origin
 
     Origin@{ icon: "logos:aws-s3", form: "square", label: "Origin: S3<br/>300TB originals", pos: "b", h: 44 }
@@ -1006,7 +1027,7 @@ flowchart LR
 
 ### Key Design Decisions
 
-1. **Tiered cache (edge -> regional -> origin).** 310 edge PoPs cache locally; regional Argo tier consolidates misses, multiplexing 1000 edge misses into 1 origin fetch for the same asset. *Alternative rejected:* flat edge-only — cold edges hammer origin in parallel; tiered cache reduces origin requests by 60%.
+1. **Tiered cache (edge -> regional -> origin).** 330+ edge cities cache locally; a regional Tiered Cache tier consolidates misses, multiplexing 1000 edge misses into 1 origin fetch for the same asset. *Alternative rejected:* flat edge-only — cold edges hammer origin in parallel; tiered cache reduces origin requests by 60%.
 
 2. **Cloudflare Workers for on-the-fly image transformation.** Resize/format conversion runs at the edge in a V8 isolate (~5ms cold start, ~50ms transform). *Alternative rejected:* pre-generate all variants at upload — 50 variants x 8B images = 400B objects, 15PB storage, infeasible.
 
@@ -1174,20 +1195,20 @@ The `$0.021` blended figure reconciles only against the 99.1% combined hit rate,
    - *Broken:* `cf purge --everything` for any cache change.
    - *Fix:* `cf purge --tag css:v423` — tag-based purge clears only CSS assets (200MB), leaving images intact. Combined with surrogate-key strategy enforced at deploy time.
 
-3. **HTTPS certificate propagation delay.** Onboarding a new white-label customer (`images.customer.com`) issued a per-domain cert; propagation across 310 PoPs took 30+ minutes. During that window, 12% of edges served HTTPS errors. Customer churn spiked.
+3. **HTTPS certificate propagation delay.** Onboarding a new white-label customer (`images.customer.com`) issued a per-domain cert; propagation across every edge city took 30+ minutes. During that window, 12% of edges served HTTPS errors. Customer churn spiked.
    - *Broken:* lazy per-domain cert issuance at first request.
    - *Fix:* wildcard cert `*.imgcdn.example` for default CNAME path; Cloudflare for SaaS pre-provisions per-customer certs via background job; new customers go live in < 90s with valid HTTPS.
 
 ### Interview Discussion Points
 
 **Q: Why not use S3 + CloudFront instead of a custom CDN?**
-For 90% of CDN workloads, CloudFront is the right choice. We chose Cloudflare specifically for: (1) Workers running V8 isolates (1ms cold start vs Lambda@Edge 100ms), (2) 310 PoPs vs CloudFront's 600+ but with lower egress price, (3) Cloudflare Images native transform API. The decision is workload-specific.
+For 90% of CDN workloads, CloudFront is the right choice. We chose Cloudflare specifically for: (1) Workers running V8 isolates (1ms cold start vs Lambda@Edge 100ms), (2) 330+ edge cities against CloudFront's 750+ PoPs, but with lower egress price, (3) Cloudflare Images native transform API. The decision is workload-specific.
 
 **Q: How do you handle a viral image causing a hot key?**
-Cloudflare PoPs already shard the cache by hash within a PoP, so a single hot URL hits multiple cache nodes per PoP. For truly extreme cases (a single image at > 100k RPS in one PoP), Cloudflare's "tiered cache" plus Argo Smart Routing front-loads the response into all PoPs proactively.
+Cloudflare PoPs already shard the cache by hash within a PoP, so a single hot URL hits multiple cache nodes per PoP. For truly extreme cases (a single image at > 100k RPS in one PoP), Cloudflare's Tiered Cache plus Argo Smart Routing front-loads the response into all PoPs proactively.
 
 **Q: How do you invalidate a single image globally?**
-For content-addressed URLs, you don't — you publish a new URL. For mutable URLs, `cf purge --url https://...` propagates to all 310 PoPs within ~30 seconds via Cloudflare's central control plane. For larger invalidations, use surrogate-key purge to clear groups atomically.
+For content-addressed URLs, you don't — you publish a new URL. For mutable URLs, `cf purge --url https://...` propagates to every edge city within ~30 seconds via Cloudflare's central control plane. For larger invalidations, use surrogate-key purge to clear groups atomically.
 
 **Q: What is `stale-while-revalidate` and when should you use it?**
 SWR (RFC 5861) tells the cache to serve stale content immediately while fetching fresh in background. Use for content where staleness is acceptable but availability is critical — product thumbnails, profile avatars. Do NOT use for pricing, security tokens, or personalized content.

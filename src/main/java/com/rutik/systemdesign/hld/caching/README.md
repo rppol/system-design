@@ -377,6 +377,18 @@ flowchart LR
 
 All three look like "the DB got slammed," but the trigger differs — one key (stampede), a key that never existed (penetration), or many keys at once (avalanche) — which is why TTL jitter shows up as a fix for two of the three but not penetration.
 
+### Keeping Cache Nodes Coherent
+
+Section 2 lists cache coherence as a core property. In a single-node cache it is free; across a fleet of cache nodes plus a local L1 in every application process, it is the hardest thing the tier does. Three mechanisms, in increasing order of guarantee:
+
+**1. Invalidate from the write path (weakest).** The service that writes the row also deletes the key. Simple, and wrong the moment anything else writes that row — a migration script, a DBA fixing data by hand, a second service sharing the table. Every such writer must remember to invalidate, and one that forgets leaves stale data until TTL.
+
+**2. Invalidate from the database's replication log (the production answer).** Instead of trusting writers, tail the authoritative change stream. Facebook's `mcsqueal` daemon reads the MySQL commit log, extracts the deletes implied by each committed statement, and broadcasts them to the memcache tier in every frontend cluster. Because the log is the same record the replicas consume, no writer can bypass it, and the invalidation is batched over a link that already exists rather than fanning out from every application server. The generic form of this is CDC — Debezium plus a Kafka topic per table does the same job.
+
+**3. Leases (closing the stale-set race).** Log-driven invalidation still loses the race in Section 10's pitfall #3: a reader that missed *before* the write can land its stale value in the cache *after* the delete. Facebook's fix is a lease: a miss returns a token, the delete invalidates outstanding tokens for that key, and a `set` presenting a token issued before the invalidation is rejected outright. The same token doubles as stampede protection — a memcached server issues a lease for a given key only once every 10 seconds, so the second through thousandth concurrent misser is told to wait or serve stale instead of querying the database.
+
+An in-process L1 cache does not participate in any of this. It has no connection to the invalidation stream, so its coherence budget is exactly its TTL — which is why the case study's Caffeine layer runs a 5-second TTL while the Redis tier runs 24 hours.
+
 ---
 
 ## 7. Real-World Examples
@@ -384,16 +396,16 @@ All three look like "the DB got slammed," but the trigger differs — one key (s
 ### Netflix
 - Uses **EVCache** (built on Memcached) for session data, user preferences, and metadata.
 - Caches at multiple layers: CDN (video chunks), API gateway (rate limiting), microservices (user state).
-- Handles ~30 million cache requests per second across thousands of nodes.
+- Handles ~30 million cache requests per second at peak, across tens of thousands of memcached instances.
 - Uses cache-aside with aggressive TTLs for recommendation data.
 
 ### Twitter
-- **Twemcache** (Twitter's Memcached fork) for timeline caching.
-- A single tweet can be fanned out to millions of followers' caches.
-- Uses a "flock" approach: pre-computed home timelines cached per user.
+- **Twemcache** (Twitter's Memcached fork) for general object caching; home timelines were moved to Redis, whose native list type appends a tweet without re-parsing the whole value.
+- A single tweet is fanned out to millions of followers' home timelines by a fan-out daemon.
+- **FlockDB** — the "Flock" social-graph service — supplies the follower list the daemon iterates. Each pre-computed home timeline is capped at 800 entries and held in three Redis replicas.
 
 ### Facebook
-- **Memcached** at massive scale (thousands of servers, exabytes of cache).
+- **Memcached** at massive scale — the NSDI 2013 paper "Scaling Memcache at Facebook" describes a tier serving billions of requests per second and holding trillions of items.
 - **TAO** (The Associations and Objects) — a distributed data store with built-in caching for the social graph.
 - Landmark paper: "Scaling Memcache at Facebook" — describes regional pools, cold cluster warmup, and lease-based cache invalidation.
 
@@ -543,6 +555,9 @@ A: A concurrent reader can slip in between the DB write and the cache delete, re
 **Q15: How do you protect a cache cluster from a single "hot key" receiving millions of requests per second?**
 A: Add an in-process L1 cache (like Caffeine) in front of the distributed L2 cache so the hottest keys are served from local memory without a network hop, and cap or skip expensive per-key operations above a threshold. Section 10's pitfall #4 flags this directly — a single key like a celebrity tweet can overwhelm the one Redis shard it hashes to, since a shard has a practical per-key ceiling (the Twitter case study cites ~100k QPS). The case study's fix layered a 100MB, 5-second-TTL Caffeine cache on each app server for the top 1000 accounts, eliminating roughly 80% of Redis hits for celebrity content, and skipped fan-out entirely for authors above 1M followers instead of writing to every follower's key. A single distributed cache tier alone cannot fix a hot key — replicate the hot value locally (L1) or shard the key itself (key plus random suffix on write, merged on read).
 
+**Q: Why is invalidating the cache from the database's replication log better than invalidating it from the application's write path?**
+A: The replication log is the one record every writer must pass through, so no code path can update a row without producing an invalidation. Application-path invalidation depends on every writer remembering to delete the key — and a migration script, a manual DBA fix, or a second service sharing the table will not, leaving stale data until TTL. Section 6 describes Facebook's `mcsqueal` daemon doing exactly this: it reads the MySQL commit log, extracts the deletes implied by each committed statement, and broadcasts them to the memcache tier in every frontend cluster, batching over a replication link that already exists instead of fanning out from every application server. The generic form is change data capture — Debezium plus a Kafka topic per table. Log-driven invalidation still does not close the stale-set race in pitfall #3, where a reader that missed before the write completes its `set` after the delete; for that you need leases, where the miss hands out a token, a delete invalidates outstanding tokens, and a `set` presenting a pre-invalidation token is rejected.
+
 **Q16: How would you estimate the memory footprint of a distributed timeline cache?**
 A: Multiply the per-entity cache size by the number of active entities, then add headroom for data-structure overhead and burst or retention buffers. In the Twitter case study, each user's timeline caps at 800 tweet IDs (Key Design Decision #3); at 8 bytes per ID that's 6.4KB raw, but Redis sorted-set overhead brings it to roughly 12KB per user, and multiplying by 200M DAU gives a 2.4TB theoretical minimum. Yet the design provisions a 50TB/200-node cluster (38TB actually used, 76% utilization) to cover celebrity-merge buffers and 30 days of inactive-user retention. Compute the theoretical minimum first, then size the real cluster several times higher once you account for overhead, replication, and retention beyond the "active" set — provisioning exactly to the minimum leaves no room for growth or failover.
 
@@ -638,7 +653,7 @@ The read path forks on two cache tiers — an L1 Caffeine miss falls through to 
 
 3. **Redis sorted sets with tweet_id as score.** ZADD with timestamp-derived score; ZREVRANGEBYSCORE returns latest N tweets in O(log N). Cap each timeline at 800 entries (ZREMRANGEBYRANK). *Alternative rejected:* Redis list (LPUSH/LTRIM) — sorted set allows efficient merge with celebrity tweets by timestamp.
 
-4. **Two-tier caching (L1 Caffeine + L2 Redis).** Hot celebrity tweets cached in JVM-local Caffeine (100MB, 5s TTL). Eliminates ~80% of Redis hits for top 1000 accounts. *Alternative rejected:* Redis-only — single Redis shard holding a celebrity's tweet sees 50k QPS, exceeding the 100k single-key limit.
+4. **Two-tier caching (L1 Caffeine + L2 Redis).** Hot celebrity tweets cached in JVM-local Caffeine (100MB, 5s TTL). Eliminates ~80% of Redis hits for top 1000 accounts. *Alternative rejected:* Redis-only — a single shard holding a celebrity's tweet sees roughly 150k QPS, well past the ~100k practical single-key ceiling.
 
 5. **Jittered TTL + XFetch probabilistic early expiration.** Each timeline cached with TTL = 24h + uniform(-1h, +1h). Reads with `now > expiry - delta * log(rand())` trigger early background refresh. *Alternative rejected:* fixed 24h TTL — after a Redis failover, all 200M entries repopulate simultaneously (stampede).
 

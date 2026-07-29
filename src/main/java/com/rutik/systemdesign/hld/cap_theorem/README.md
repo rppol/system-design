@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-The CAP Theorem, proven by Eric Brewer in 2000 and formally proven by Gilbert and Lynch in 2002, states that a distributed data store can only guarantee two of the following three properties simultaneously:
+The CAP Theorem, conjectured by Eric Brewer in his 2000 PODC keynote and formally proven by Gilbert and Lynch in 2002, states that a distributed data store can only guarantee two of the following three properties simultaneously:
 
 - **Consistency (C)** — Every read receives the most recent write or an error. All nodes see the same data at the same time.
 - **Availability (A)** — Every request receives a response (not an error), though it may not contain the most recent write.
@@ -56,7 +56,9 @@ CAP only describes behavior during a partition. During normal operation (no part
 ### CP Systems (Consistency + Partition Tolerance)
 During a partition, CP systems refuse to return potentially stale data. They may become unavailable (return errors or block) until consistency can be re-established.
 
-**Examples:** HBase, Zookeeper, etcd, MongoDB (with majority write concern), Redis (single-master mode), CockroachDB
+**Examples:** HBase, ZooKeeper, etcd, Consul, MongoDB (with majority write concern), CockroachDB, Spanner
+
+Redis is a common wrong answer here. Redis Sentinel and Redis Cluster replicate asynchronously, so a promoted replica can be missing acknowledged writes — that is a lost write, not a CP guarantee. Treat Redis as an AP store with a short convergence window unless you are running a consensus-backed variant.
 
 **Pattern:** Uses a consensus protocol (Raft, Paxos, Zab) to ensure all writes are acknowledged by a quorum before being considered committed. Reads that cannot be served from a quorum node return an error.
 
@@ -84,6 +86,8 @@ CAP defines linearizability, but real systems operate on a spectrum:
 | Read-your-writes | Client always reads its own writes | Sticky sessions, session tokens |
 | Monotonic reads | Once a value is seen, older values are never returned | Read from same replica |
 | Eventual | Writes will propagate to all nodes eventually | Cassandra, DNS |
+
+The four session guarantees in the middle of that table (read-your-writes, monotonic reads, monotonic writes, writes-follow-reads) and the mechanics of enforcing each one are developed in [database/consistency_models_and_consensus](../../database/consistency_models_and_consensus/); this module stops at the CAP-relevant distinction between linearizable and eventual.
 
 ---
 
@@ -227,6 +231,18 @@ Options:
 - **Return error or block** (CP: consistent, unavailable)
 - **There is no third option** that satisfies both
 
+### How a System Decides a Partition Is Happening
+
+Every sentence above assumes the system *knows* it is partitioned. It never does. On an asynchronous network a partitioned peer and a merely slow peer produce the identical observation — silence — and no algorithm can tell them apart, because any bound you pick could be exceeded by a GC pause, a saturated NIC, or a hypervisor stealing the CPU. Every real system therefore runs an *unreliable failure detector*: it guesses, and it is sometimes wrong in both directions.
+
+**Fixed timeout (binary).** Declare a peer dead after T seconds of silence. The tuning is a straight tradeoff and neither end is safe: a short T convicts healthy-but-busy nodes, triggering elections and failovers that cause the very outage they were meant to prevent; a long T means the CP system keeps blocking, or the AP system keeps writing to a replica nobody can reach, for the whole of T.
+
+**Phi accrual (continuous).** Cassandra replaces up/down with a suspicion score. It fits a distribution to the observed heartbeat inter-arrival times and emits `phi`, calibrated so that `phi = X` means the probability this suspicion is wrong is about `10^-X`. A node is convicted when `phi` exceeds `phi_convict_threshold` (default `8`, i.e. roughly a one-in-10^8 false-positive rate). The value of the design is that the detector adapts: on a link that is normally jittery it becomes patient on its own, without an operator retuning a constant.
+
+**Leader leases (bounding the other side).** Quorum arithmetic proves only one side *can* hold a majority; a lease is what makes that true in wall-clock time. A Raft or ZAB leader serves only while its lease is unexpired, and must step down when it cannot renew — which is exactly the mechanism behind Q6's "leader steps down and a new election starts."
+
+The practical consequence is that a CP system's unavailability window is **detection time plus election time**, and detection usually dominates. A cluster with a 10-second convict threshold and a 200ms election is unavailable for about 10.2 seconds, and it is the detector, not the consensus protocol, that you tune to change that.
+
 ### Quorum-Based Consistency
 
 Many CP systems use quorum reads and writes. With N replicas:
@@ -317,7 +333,7 @@ Data structures that can be merged without conflict resolution logic:
 - **OR-Set**: observed-remove set, supports add and remove without conflict
 - **LWW-Register**: last-write-wins register with logical timestamps
 
-Used by Riak, Redis CRDT mode, collaborative editing tools (like Figma's multiplayer).
+Used by Riak, Redis Enterprise active-active databases, and collaborative-editing libraries such as Yjs and Automerge. Figma's multiplayer is a common but wrong example — Figma's server is the central authority that orders events, so it is a last-writer-wins design *inspired by* CRDT registers, not a CRDT.
 
 ### Eventual Consistency Mechanisms
 
@@ -333,7 +349,7 @@ Used by Riak, Redis CRDT mode, collaborative editing tools (like Figma's multipl
 
 **Apache Cassandra (AP)** — Designed for active-active multi-datacenter deployments. No single point of failure. Tunable consistency: you can request `QUORUM` reads/writes for stronger guarantees at the cost of availability, or `ONE` for maximum availability. Used by Netflix, Instagram, Apple (for iCloud metadata).
 
-**Apache ZooKeeper (CP)** — Distributed coordination service. Used for leader election, distributed locks, configuration management. Uses ZAB (ZooKeeper Atomic Broadcast) protocol — a Paxos variant. During partition where leader cannot reach quorum, ZooKeeper stops serving requests. Used by Hadoop, Kafka (older versions).
+**Apache ZooKeeper (CP)** — Distributed coordination service. Used for leader election, distributed locks, configuration management. Uses ZAB (ZooKeeper Atomic Broadcast) — an atomic broadcast protocol for primary-backup replication. ZAB is often called a Paxos variant, but its authors designed it precisely because Paxos does not guarantee *primary order*: ZAB replicates incremental state changes, so a prefix of one primary's changes must be delivered in order, which Paxos permits to be violated when there are multiple outstanding proposals. During a partition where the leader cannot reach quorum, ZooKeeper stops serving requests. Used by Hadoop, Kafka (older versions).
 
 **etcd (CP)** — Uses Raft consensus. Backbone of Kubernetes control plane. All writes go through the Raft leader. Reads can be stale (linearizable reads are more expensive). Prefers consistency over availability.
 
@@ -481,6 +497,9 @@ Hinted handoff temporarily stores a write meant for an unreachable node on anoth
 
 **Q15: What is a CRDT, and why does it eliminate the need for explicit conflict-resolution logic?**
 A CRDT (Conflict-free Replicated Data Type) is a data structure whose merge operation mathematically converges to the same result regardless of the order updates arrive in. Section 5 lists three: a G-Counter merges by taking the max of each node's count, an OR-Set supports concurrent add/remove without lost updates, and an LWW-Register uses logical timestamps for last-write-wins at the field level. The shopping-cart case study (§15) uses exactly this pattern — each cart is an OR-Set where concurrent adds from two regions both survive the merge as a union, and a "remove wins" rule keeps a deleted item deleted even if another region concurrently touched it. Reach for a CRDT when conflicting concurrent writes are expected and mergeable, such as counters, sets, or flags — they don't help when resolving a conflict requires business logic, like deciding which of two concurrent balance updates is correct.
+
+**Q: How does a distributed system actually detect that a partition has occurred, and why can it never be certain?**
+It cannot be certain — on an asynchronous network a partitioned peer and a slow peer both produce silence, so every system guesses with a timeout. Section 5 walks the three mechanisms. A fixed timeout is binary and both ends hurt: too short and a GC pause or a saturated NIC convicts a healthy node, triggering the failover it was meant to prevent; too long and the CP side blocks for the full window. Cassandra's phi accrual detector replaces up/down with a continuous suspicion score fitted to observed heartbeat inter-arrival times, calibrated so `phi = X` means roughly a `10^-X` chance the suspicion is wrong, and convicts above `phi_convict_threshold` (default `8`) — so it becomes patient by itself on a link that is normally jittery. Leader leases then bound the other side: a Raft or ZAB leader serves only while its lease is renewable and must step down otherwise, which is what turns the quorum argument into a wall-clock guarantee. The number that matters operationally is that a CP system's unavailability window is detection time plus election time, and detection almost always dominates — so tune the detector, not the consensus protocol, when the outage window is too long.
 
 **Q16: Why wasn't a Redis distributed lock enough to enforce a non-negative balance invariant on top of an AP database?**
 A distributed lock is not a substitute for database-level serializability because it can fail under the same partition the database itself would need to tolerate. The financial-ledger case study's first lessons-learned pitfall hit this directly: during a Redis failover, two concurrent withdrawal requests on the same wallet both acquired what they believed was the lock — a split-brain — and both passed the `balance >= amount` check, producing an overdraft. The fix moved the ledger to Spanner (CP), where `CHECK (balance >= 0)` is enforced transactionally by Paxos consensus rather than by an external lock that can itself partition. Whenever a strong invariant must hold under concurrent writes, enforce it inside the transactional boundary of a CP datastore rather than bolting an application-level lock onto an AP one.
@@ -682,7 +701,7 @@ flowchart LR
 
 6. **Regional read replicas with `EXACT_STALENESS 5s` for non-critical reads.** Account-summary screens (display only) use bounded-stale reads to cut latency from 40ms to 8ms. *Alternative rejected:* always-strong reads — unnecessary cost; user does not perceive 5s staleness on a static summary view.
 
-7. **Explicit accept of higher write latency.** Cross-region transfer p99 is 80ms (Spanner 2PC across 2 regions), accepted as the cost of correctness. *Alternative rejected:* single-region writes with async replication — risk of lost commits on regional failover.
+7. **Explicit accept of higher write latency.** Cross-region transfer p99 is 80ms inside the US multi-region config (`nam3`) and 240ms us-east to eu-west, where the speed of light alone costs most of the budget. Both are accepted as the cost of correctness, and both sit inside the 300ms SLA. *Alternative rejected:* single-region writes with async replication — risk of lost commits on regional failover.
 
 ### Implementation
 
@@ -759,7 +778,7 @@ public TransferResult transfer(String from, String to, long amount) {
 |---------------------|--------------------|--------------------|-------------------------|
 | Overdraft risk      | Possible           | Impossible         | Impossible (CP ledger)  |
 | Write p99 (regional)| 2ms                | 10ms               | 10ms (ledger)           |
-| Cross-region write  | Saga (~200ms)      | 80ms atomic        | 80ms                    |
+| Cross-region write  | Saga (~200ms)      | 80ms US / 240ms EU | 80ms US / 240ms EU      |
 | Read scale          | Excellent          | Good (replicas)    | Excellent (feed via AP) |
 | Availability target | 99.999%            | 99.999% in-region  | 99.99% (weakest link)   |
 | Monthly cost        | $8k                | $48k               | $19k                    |

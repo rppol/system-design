@@ -315,13 +315,39 @@ Responses include links to related actions, allowing clients to discover capabil
 
 Rarely implemented fully in practice, but link inclusion is common.
 
+### Webhook Delivery
+
+A webhook inverts the call direction — your service becomes the HTTP *client* and the consumer's registered URL becomes the endpoint. That inversion is why the five hard problems are all on the delivery side, not the request side.
+
+**Signature verification.** The receiver cannot trust that a POST to its public callback URL came from you, so every event carries an HMAC. Stripe's scheme is the reference: the `Stripe-Signature` header carries `t=<unix timestamp>,v1=<hex>`, where `v1` is HMAC-SHA256 over the string `"<t>.<raw request body>"` keyed by the endpoint's signing secret. The receiver recomputes it over the *raw* bytes (any JSON re-serialization breaks the comparison) and compares in constant time.
+
+**Replay protection.** A valid signature alone does not make a request fresh — a captured POST can be resent forever. Binding the timestamp into the signed string lets the receiver reject anything outside a tolerance window; Stripe's default is 5 minutes.
+
+**At-least-once, never exactly-once.** A delivery whose response is lost is indistinguishable from one that never arrived, so the sender retries and the receiver sees duplicates. Stripe retries a failing endpoint with exponential backoff for up to 3 days in live mode. The receiver's contract is therefore the mirror of the idempotency-key contract above: log the event ID and skip anything already processed.
+
+**No ordering guarantee.** Retries and parallel dispatch mean `invoice.paid` can land before `invoice.created`. Handlers must be order-independent: key off the object's own version or `created` timestamp, or re-fetch current state from the API rather than reconstructing it from the event stream.
+
+**Ack fast, work later.** The receiver must return `2xx` before doing anything slow — a handler that writes to three downstream systems inline will eventually exceed the sender's timeout, get marked failed, and be retried, multiplying the very work that made it slow. Enqueue and return.
+
+```
+POST /hooks/stripe                       receiver pseudocode
+Stripe-Signature: t=1492774577,v1=5257a8...
+
+  1. body   = raw bytes (do NOT parse first)
+  2. expect = hmac_sha256(secret, f"{t}.{body}")
+  3. if not constant_time_eq(expect, v1):        -> 400
+  4. if abs(now - t) > 300:                      -> 400   (replay)
+  5. if seen(event.id):                          -> 200   (duplicate)
+  6. enqueue(event); mark_seen(event.id)         -> 200   (ack fast)
+```
+
 ---
 
 ## 6. Real-World Examples
 
 **Stripe** — widely considered the gold standard for REST API design. Consistent error objects, idempotency keys on all write operations, webhook signatures for security, excellent versioning (`Stripe-Version` header + date-based versions), comprehensive SDK generation.
 
-**GitHub** — offers both REST v3 and GraphQL v4. GraphQL v4 was introduced because the REST API required many requests to fetch PR data with associated reviews, checks, and comments. Power users migrated to GraphQL for efficiency.
+**GitHub** — offers both a REST API and a GraphQL API. The REST API is versioned by date via the `X-GitHub-Api-Version` header (currently `2022-11-28`); the GraphQL API exists because REST required many requests to fetch PR data with associated reviews, checks, and comments. Power users migrated to GraphQL for efficiency.
 
 **Twitter/X** — moved from REST to GraphQL-like patterns internally. Public API uses REST with cursor-based pagination (`next_token` in responses).
 
@@ -465,6 +491,9 @@ Sequential integer IDs let attackers enumerate resources by incrementing the ID 
 **Q15: What problem does an API gateway solve, and what risk does it create as more logic gets pushed into it?**
 An API gateway centralizes cross-cutting concerns — authentication, rate limiting, routing — so individual services don't reimplement them. It acts as a Facade over the service mesh (see Cross-Perspective: LLD Connections). In the REST request lifecycle diagram (§4), the gateway authenticates via JWT and applies a token bucket before the request ever reaches the User Service, meaning all client traffic funnels through one component. The risk is twofold: it becomes a single point of failure that needs its own horizontal scaling and HA setup, and it becomes a dumping ground for business logic — once teams add service-specific transformations, independently deployable services get recoupled at the edge into something close to a monolith. Keep the gateway limited to genuinely cross-cutting concerns and push domain-specific validation back into the owning service.
 
+**Q: How does a webhook receiver prove the request really came from the sender, and how does it stop the same signed request being replayed forever?**
+It verifies an HMAC over the raw body and rejects any request whose signed timestamp falls outside a short tolerance window. Section 5's webhook mechanics use Stripe's scheme as the reference: the `Stripe-Signature` header carries `t=<unix timestamp>,v1=<hex>`, where `v1` is HMAC-SHA256 over the literal string `"<t>.<raw body>"` keyed by the endpoint's signing secret. Two details are load-bearing. First, the HMAC must be recomputed over the exact bytes received — parsing the JSON and re-serializing it changes whitespace or key order and breaks the comparison — and the comparison itself must be constant-time so an attacker cannot use response timing to guess the digest byte by byte. Second, a signature alone only proves authenticity, not freshness: without binding the timestamp into the signed string, a captured POST stays valid forever, which is why the timestamp is part of the signed payload and why Stripe rejects anything more than 5 minutes old by default. A signature check is authentication, not deduplication — you still need the event ID and a seen-set, because retries deliver the same correctly-signed event more than once.
+
 **Q16: What security risk is unique to GraphQL's flexible querying model?**
 A single GraphQL query can request deeply nested or duplicated fields that fan out into an enormous number of resolver calls — a query-complexity denial-of-service. One request can do the database work of thousands of REST calls. The GraphQL tradeoffs table (§7) already flags that server-side query execution is complex to analyze; that complexity is exactly what an attacker exploits by nesting fields like `friends { friends { friends { ... } } }` a few levels deep. Mitigate with query depth limits, a cost/complexity scoring system that rejects queries above a threshold, per-field resolver timeouts, and persisted queries (allow-listing known query shapes) for public-facing schemas. Never expose an unbounded GraphQL schema to untrusted clients without depth limiting and complexity analysis in front of it.
 
@@ -569,7 +598,7 @@ API keys are `sk_live_...` (secret, server-side only) or `pk_live_...` (publisha
 Payment processing is async. `POST /payment_intents` returns immediately with `status: processing`. The client registers a webhook URL. Stripe sends `payment_intent.succeeded` or `payment_intent.payment_failed` events. Webhooks include a `Stripe-Signature` header (HMAC-SHA256) for verification.
 
 **Step 6 — Rate Limiting**
-Per API key: 100 read requests/second, 100 write requests/second. Return `429` with `Retry-After: 1`. Stripe also uses exponential backoff with jitter in their SDKs.
+Stripe's published global limit is 100 requests/second per account in live mode (25/second in a sandbox), with individual endpoints capped at 25 requests/second unless documented otherwise. Return `429` with `Retry-After: 1` and a `Stripe-Rate-Limited-Reason` header naming which limit was hit. Stripe also uses exponential backoff with jitter in their SDKs.
 
 **Step 7 — Error Design**
 All errors return a consistent shape:
@@ -739,8 +768,9 @@ public class IdempotencyFilter extends OncePerRequestFilter {
             return;
         }
 
-        // Acquire lock
-        String ok = redis.set(key, "STARTED",
+        // Acquire lock on a SEPARATE key -- `key` itself holds a hash,
+        // and a string SET on it would fail every later HSET with WRONGTYPE
+        String ok = redis.set(key + ":lock", "STARTED",
                               SetArgs.Builder.nx().px(LOCK_MS));
         if (ok == null) {
             res.setStatus(409); res.setHeader("Retry-After", "1"); return;

@@ -457,12 +457,12 @@ Ring: -[A1]-[B1]-[C1]-[A2]-[B2]-[C2]-[A3]-[B3]-[C3]-...
 
 ### Configuring vnode count:
 
-- **Amazon Dynamo**: 150 virtual nodes per physical node.
-- **Apache Cassandra**: configurable, default 256 vnodes per node.
+- **Amazon Dynamo**: many tokens per node. The paper's final scheme ("Strategy 3") divides the ring into `Q` equal-sized partitions and gives each of `S` nodes `Q/S` tokens, so vnode count falls out of the cluster size rather than being a fixed constant. The paper does not name a single number.
+- **Apache Cassandra**: configurable via `num_tokens`. The default was 256 through Cassandra 2.x; 4.0 introduced a deterministic token allocator and lowered the default to **16**, which reaches comparable balance with far less repair and gossip overhead.
 - **More vnodes**: better load balance, but more overhead (ring size, rebalancing tracking).
 - **Fewer vnodes**: less overhead, but uneven distribution.
 
-Rule of thumb: 100–200 vnodes per physical node is a good default.
+Rule of thumb: 100–200 vnodes per physical node when tokens are placed **randomly** — that is where the `1/sqrt(V)` averaging below is doing all the work. If your system places tokens **deterministically** to equalize ownership (Cassandra's allocator, Riak's fixed partition table), you get the same balance from an order of magnitude fewer vnodes, and the low count is strictly better because vnode count also drives repair, gossip, and streaming cost.
 
 ### Effect of vnode count on distribution:
 
@@ -474,7 +474,7 @@ xychart-beta
     bar [45, 15, 5, 3]
 ```
 
-Standard deviation of load drops from 45% at 1 vnode/node to just 3% at 256 — this is why Cassandra defaults to hundreds of vnodes per physical node.
+Standard deviation of load drops from 45% at 1 vnode/node to just 3% at 256 — this is why every ring-based system uses many vnodes per physical node, and why Cassandra could only cut its default to 16 once a deterministic token allocator replaced random placement.
 
 **The idea behind it.** "Owning one random arc is a single coin flip and can go badly wrong; owning `V` independent random arcs averages `V` coin flips, and averages of `V` samples spread out about `sqrt(V)` times less than one sample does."
 
@@ -482,7 +482,7 @@ That is the standard averaging result — imbalance shrinks with `1/sqrt(V)`, no
 
 | Symbol | What it is |
 |--------|------------|
-| `V` | Virtual nodes per physical node — 150 in Dynamo, 256 in Cassandra |
+| `V` | Virtual nodes per physical node — 160 in ketama, 16 by default in Cassandra 4.0+ |
 | load std dev | Spread of per-node load around the fair share, as a percent |
 | `1/sqrt(V)` | The shrink factor. Quadruple `V` to halve the spread |
 | `sqrt(V)` | 1, 3.16, 10, 16 for V = 1, 10, 100, 256 |
@@ -591,6 +591,25 @@ At the application layer, rate-limit requests for known hot keys and serve from 
 **4. Dedicated hot key handling**
 
 Detect hot keys dynamically (e.g., keys with > 1000 req/sec). Route them to a dedicated tier of nodes rather than the general ring.
+
+**5. Consistent hashing with bounded loads (cap the node, not the key)**
+
+The first four fixes all require you to identify the hot key. Bounded-load consistent hashing does not: it caps how overloaded *any* node may become, whatever the key distribution, and does so inside the ring lookup itself.
+
+The rule is a single parameter `c = 1 + epsilon`. Compute the average load across the cluster, multiply by `c` to get a per-node ceiling, then do the normal clockwise walk — but if the node you land on is already at its ceiling, keep walking to the next node that is not. Because every node applies the same deterministic rule to the same ring state, all clients agree on where an overflowing key goes; nothing is centrally coordinated.
+
+Mirrokni, Thorup and Zadimoghaddam ("Consistent Hashing with Bounded Loads", arXiv:1608.01350) prove the cost of that cap is small: node addition or removal moves only `O(1/epsilon^2)` times as many keys as plain consistent hashing for `epsilon <= 1`. You are trading a bounded amount of extra data movement for a hard ceiling on imbalance — a much better deal than the unbounded tail that plain consistent hashing leaves you with.
+
+This is not theoretical. Both major L7 proxies ship it against the same paper:
+
+| Proxy | Setting | Meaning |
+|-------|---------|---------|
+| Envoy | `hash_balance_factor` (default 0 = off) | `150` caps any host at 1.5x the cluster's average load; typical values 120-200, minimum 100 |
+| HAProxy | `hash-balance-factor` with `hash-type consistent` | Same semantics; documented reasonable range 125-200 |
+
+The tuning intuition is that `c` is a dial between the two failure modes. `c` near 1 forces near-perfect balance but spills keys off their natural node constantly, destroying the cache locality the ring existed to provide. Large `c` restores locality and lets hotspots re-form. Start around 1.25-1.5, which is where both proxies point you.
+
+Note what it does *not* fix: a single key hotter than one node's entire capacity. Bounded load spreads *distinct* keys off an overloaded node; one key is indivisible, so that case still needs salting (fix 1) or a replicated local cache.
 
 ---
 
@@ -756,7 +775,7 @@ class ConsistentHashRing:
 ### Amazon Dynamo (2007 Paper)
 
 The original paper that popularized consistent hashing for distributed databases. Key design choices:
-- Each node is assigned 150 virtual nodes on the ring.
+- Each node is assigned multiple tokens (virtual nodes) on the ring; the paper's final scheme gives each of `S` nodes `Q/S` of a fixed `Q` equal-sized partitions.
 - Replication factor of 3: a key is stored on the node responsible for it plus the next 2 nodes clockwise (preference list).
 - Nodes detect ring membership changes via a gossip protocol.
 - Eventual consistency with vector clocks for conflict resolution.
@@ -765,8 +784,8 @@ The Dynamo paper is one of the most influential system design papers. DynamoDB, 
 
 ### Apache Cassandra
 
-Cassandra uses consistent hashing with configurable vnodes (default: 256 per node). Key choices:
-- Uses Murmur3 hash function for better distribution than MD5.
+Cassandra uses consistent hashing with configurable vnodes (`num_tokens`, default **16** since 4.0; it was 256 in the 2.x era, before the deterministic token allocator arrived). Key choices:
+- Uses the Murmur3 partitioner for **speed**, not for better distribution — MD5's cryptographic strength is unnecessary here and Murmur3 hashes 3-5x faster with comparable uniformity.
 - Token assignment is managed by the Cassandra cluster itself (vnodes).
 - Replication factor (RF) configurable per keyspace; keys replicate to RF consecutive ring owners.
 - Gossip protocol for node discovery and ring state propagation.
@@ -808,7 +827,7 @@ Memcached does not have built-in consistent hashing — it is implemented in the
 
 ### Riak
 
-Riak is a distributed key-value store based on the Dynamo paper. It uses a fixed ring of **160-bit hash space** divided into **2^10 = 1024 equal partitions**. Physical nodes are assigned partitions round-robin. Adding a node reassigns a proportional number of partitions to the new node.
+Riak is a distributed key-value store based on the Dynamo paper. It hashes each bucket/key pair into a **160-bit ring**, divided into a fixed number of equal partitions set at cluster creation (`ring_creation_size`) — a power of two, **64 by default**, raised to 256 or 1024 for larger clusters. Physical nodes are assigned partitions round-robin. Adding a node reassigns a proportional number of partitions to the new node.
 
 ### Redis Cluster
 
@@ -844,6 +863,8 @@ def get_node_rendezvous(key, nodes):
 
 Rendezvous hashing has better natural load balance but O(N) lookup cost makes it impractical for very large node sets. Consistent hashing with vnodes is preferred for distributed databases and caches.
 
+A third family worth knowing is **Maglev hashing** (Google), which replaces the ring with a fixed lookup table — 65,537 entries in Envoy's implementation — populated so each host claims entries in proportion to its weight. Lookup is a single array index rather than a binary search, and Envoy measures table build and host selection roughly 10x and 5x faster than a 256K-entry ring; the price is more disruption when the host set changes. Maglev as a load-balancing policy is covered in [load_balancing](../load_balancing/README.md).
+
 ---
 
 ## Tradeoffs and Considerations
@@ -851,7 +872,7 @@ Rendezvous hashing has better natural load balance but O(N) lookup cost makes it
 | Consideration               | Notes                                                                      |
 |-----------------------------|----------------------------------------------------------------------------|
 | Vnode count vs overhead     | More vnodes = better balance, more ring management cost                    |
-| Hash function choice        | MD5 is common but Murmur3/xxHash are faster and better distributed         |
+| Hash function choice        | MD5 distributes fine; Murmur3/xxHash are chosen because they are far faster|
 | Replication complexity      | Replication across ring adds complexity; prefer next-K-nodes strategy      |
 | Hot key handling            | Consistent hashing does not solve popularity skew; need separate mechanism |
 | Node heterogeneity          | Assign proportional vnodes to more powerful nodes for weighted distribution|
@@ -864,13 +885,13 @@ Rendezvous hashing has better natural load balance but O(N) lookup cost makes it
 ## Best Practices
 
 ### Vnode Count
-Use 150–256 virtual nodes per physical node. More than 256 provides diminishing returns on distribution while increasing ring management overhead. Tune based on the actual standard deviation of key distribution observed in production.
+With randomly placed tokens, use 150–256 virtual nodes per physical node; more than 256 provides diminishing returns on distribution while increasing ring management overhead. With a deterministic token allocator, start far lower — Cassandra 4.0+ defaults `num_tokens` to 16 for exactly this reason. Either way, tune on the actual standard deviation of key distribution observed in production, not on the default.
 
 ### Replication Factor
 Set replication factor (RF) to 3 for production systems. RF=3 tolerates 2 simultaneous node failures while still achieving a read/write quorum of 2. Never use RF=1 in production.
 
 ### Hash Function
-Prefer Murmur3 or xxHash over MD5 or SHA-1. They are faster (critical in high-throughput lookups), have better avalanche properties, and are deterministic across platforms.
+Prefer Murmur3 or xxHash over MD5 or SHA-1. The reason is speed, not distribution quality: MD5 spreads keys uniformly, but its cryptographic strength buys you nothing here and costs 3-5x the CPU on a path executed on every lookup. Pick a non-cryptographic hash with good avalanche and a deterministic definition across platforms and language bindings.
 
 ### Monitoring
 - **Ring balance**: monitor the percentage of ring owned by each physical node. Alert if any node owns more than `2x * (1/N)` of the ring.
@@ -1011,7 +1032,7 @@ Note the second row is still marginally above the 50,000 q/s ceiling on paper �
 ## Interview Questions
 
 **Q1: What is the problem with using `hash(key) % N` for distributed systems?**
-When N changes (node added or removed), nearly all keys remap to different nodes (up to `(N-1)/N` fraction). For a distributed cache this means a thundering herd of cache misses simultaneously hitting the backend database, causing overload and cascading failures.
+When N changes (node added or removed), nearly all keys remap to different nodes — going from N to N+1 servers moves `N/(N+1)` of them. For a distributed cache this means a thundering herd of cache misses simultaneously hitting the backend database, causing overload and cascading failures.
 
 **Q2: How does consistent hashing solve the remapping problem?**
 Both nodes and keys are mapped to the same circular hash space. A key is assigned to the first node clockwise from its hash position. When a node is added, only keys in the arc immediately preceding it move (to the new node). When a node is removed, only its keys move (to the next node). Total disruption is O(1/N) — the theoretical minimum.
@@ -1020,13 +1041,13 @@ Both nodes and keys are mapped to the same circular hash space. A key is assigne
 The new node's position on the ring is determined by hashing its ID. It takes ownership of keys in the arc between its predecessor and its position. Only those keys need to migrate from the predecessor to the new node. All other nodes are unaffected.
 
 **Q4: What are virtual nodes and why are they needed?**
-Virtual nodes (vnodes) are multiple positions on the ring assigned to each physical node. With only a few physical nodes, the ring arc sizes are highly uneven due to hash collisions — one node might own 60% of the ring. Vnodes distribute each physical node's ownership across many small arcs, resulting in even load distribution. Amazon Dynamo uses 150 vnodes per physical node.
+Virtual nodes (vnodes) are multiple positions on the ring assigned to each physical node. With only a few physical nodes, the ring arc sizes are highly uneven due to hash collisions — one node might own 60% of the ring. Vnodes distribute each physical node's ownership across many small arcs, resulting in even load distribution. ketama, the reference Memcached client implementation, uses 160 points per server.
 
 **Q5: What is the time complexity of a lookup in a consistent hash ring?**
 O(log(N * V)) where N is the number of physical nodes and V is the number of virtual nodes per physical node. The ring is a sorted data structure (TreeMap / sorted array); lookup uses binary search to find the first node at or after the key's hash position.
 
 **Q6: How do you handle replication in consistent hashing?**
-The standard approach (used by Dynamo, Cassandra) is to store copies on the next R nodes clockwise from the primary node, forming a "preference list." For a key mapping to node A, with RF=3, the key is also stored on nodes B and C (next two clockwise). Reads and writes require a quorum (typically RF/2 + 1 nodes).
+Store copies on the next R distinct physical nodes clockwise from the primary — the Dynamo paper calls this set the preference list. For a key mapping to node A with RF=3, the key is also stored on nodes B and C (the next two clockwise), and reads and writes require a quorum of `floor(RF/2) + 1` nodes. Two details bite in practice: with vnodes you must skip successor positions that belong to a physical node already in the set, or your three "replicas" land on one machine; and rack- or AZ-aware placement (Cassandra's NetworkTopologyStrategy) further skips positions in a rack already represented, so the replica set is derived from the ring but is not simply the next R ring entries.
 
 **Q7: What is a hotspot in consistent hashing and how do you mitigate it?**
 A hotspot occurs when a single node receives disproportionate traffic, either due to uneven ring arc sizes (mitigated by vnodes) or because certain keys are much more popular than others (popularity skew). For popular keys, solutions include: key splitting (appending a shard suffix), maintaining a dedicated hot-key cache tier, or application-level rate limiting.
@@ -1035,7 +1056,7 @@ A hotspot occurs when a single node receives disproportionate traffic, either du
 Both achieve O(1/N) key disruption on node changes. Rendezvous hashing has better natural load balance without needing vnodes, but has O(N) lookup cost (must score all nodes per key). Consistent hashing with vnodes has O(log N) lookup and is preferred for large clusters. Rendezvous hashing suits CDN routing where N is small.
 
 **Q9: Why does Cassandra use Murmur3 instead of MD5 for hashing?**
-Murmur3 is significantly faster than MD5 (no cryptographic overhead), has better avalanche properties (small key changes produce very different hashes), and produces a more uniform distribution across the hash space. MD5 has measurable clustering bias that leads to uneven partition assignment. SHA-1/SHA-256 are even slower and unnecessary since cryptographic security is not needed.
+Murmur3 is chosen for speed, not for better distribution — Cassandra documents a 3-5x performance improvement over the MD5-based RandomPartitioner. Both partitioners spread partition keys equally well; MD5 has no clustering bias to fix. What Murmur3 removes is cryptographic work Cassandra never needed: an attacker cannot meaningfully bias partition placement, so paying MD5's cost on every read and write is pure overhead. SHA-1/SHA-256 are slower still for the same non-benefit, which is why no partitioner uses them.
 
 **Q10: How do you handle heterogeneous nodes (different hardware capacities) in a consistent hash ring?**
 Assign vnodes proportionally to the node's capacity. A node with 2x the RAM and CPU receives 2x the number of virtual nodes, so it naturally owns twice the arc space and handles twice the traffic. This is supported natively in Cassandra via manual token assignment or proportional vnode allocation.
@@ -1054,6 +1075,9 @@ Too few vnodes means each node's ownership is just a handful of randomly-placed 
 
 **Q15: How does Redis Cluster's hash-slot design differ from a classic consistent-hash ring?**
 Redis Cluster divides the keyspace into a fixed 16,384 hash slots instead of a continuous ring. Each key maps to a slot via `CRC16(key) % 16384`, and each node owns an explicit, administrator-assigned range of slots rather than deriving ownership from virtual-node ring positions. This is simpler to operate — you can query which node owns slot 12182 directly — but it loses the ring's automatic "add a node, only 1/(N+1) of keys move" property, since slot migration is a manual (or externally orchestrated) `MIGRATE` operation per slot. It achieves similar minimal-disruption results to a ring in practice, but through explicit slot ownership rather than hash-position math, trading automation for operational transparency.
+
+**Q: What is consistent hashing with bounded loads, and what does the balancing factor actually trade away?**
+It caps every node at `c = 1 + epsilon` times the cluster's average load, and the walk simply continues clockwise past any node already at its ceiling. Because every client applies the same deterministic rule to the same ring state, they all agree on where an overflowing key lands — no coordination needed. The Hotspot Problem section explains why this is different from the other four fixes: salting, dedicated hot-key tiers and per-key rate limits all require you to *identify* the hot key first, whereas bounded load caps the damage from any key distribution. Mirrokni, Thorup and Zadimoghaddam (arXiv:1608.01350) show the cost is bounded too — node addition or removal moves only `O(1/epsilon^2)` times as many keys as plain consistent hashing for `epsilon <= 1`. The tradeoff is cache locality: a `c` near 1 forces near-perfect balance but constantly spills keys off their natural node, which is exactly the locality the ring existed to provide, so both Envoy (`hash_balance_factor`, typical 120-200) and HAProxy (`hash-balance-factor`, reasonable 125-200) point you at roughly 1.25-1.5. It does not help with a single key hotter than one node's whole capacity — one key is indivisible, so that case still needs salting or a replicated local cache.
 
 **Q16: Salting a hot key spreads its writes across multiple shards — what does that cost you on the read path?**
 Salting turns one logical key into several physical keys, so a single GET becomes a scatter-gather read across every shard. The Hotspot Problem section's key-splitting fix appends a random suffix before hashing (`hash("celebrity_user_123_" + random_suffix(0, num_shards))`), which requires the application to know the shard count and merge the scattered results back into one value. This moves cost rather than eliminating it: a hot key that used to cost one GET now costs `num_shards` parallel GETs plus an application-side merge, and any change to the shard count means re-salting existing data. Reserve salting for keys specifically detected as hot — the module's dedicated hot-key handling suggests a >1000 req/sec threshold — rather than applying it preemptively, since most keys don't need the scatter-gather overhead it introduces.
@@ -1088,7 +1112,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     wr(["Write / Read"]) --> coord("Coordinator<br/>any Cassandra node")
-    coord -->|"partition_key → murmur3 → token"| ring["Token Ring<br/>range 2^-63 .. 2^63-1<br/>N1...N20, 256 vnodes each"]
+    coord -->|"partition_key → murmur3 → token"| ring["Token Ring<br/>range -2^63 .. 2^63-1<br/>N1...N20, 256 vnodes each"]
     ring --> r1["Replica 1<br/>AZ-a"]
     ring --> r2["Replica 2<br/>AZ-b"]
     ring --> r3["Replica 3<br/>AZ-c"]
@@ -1108,7 +1132,7 @@ The coordinator hashes the partition key to a token and routes to the ring posit
 ### Key Design Decisions
 
 1. **256 vnodes per physical node** — With 20 nodes × 256 vnodes = 5120 token ranges, std dev of arc size is ~6% of mean. With only 1 vnode per node, std dev would be ~22% — one node would own 30%+ of data.
-   - *Alternative rejected*: 32 vnodes (Cassandra 4.0 default). Lower repair amplification but worse balance for clusters this small.
+   - *Alternative rejected*: 16 vnodes (the Cassandra 4.0+ default). Lower repair amplification but worse balance for clusters this small.
 
 2. **Murmur3 partitioner over RandomPartitioner (MD5)** — Murmur3 hashes ~3x faster than MD5 (cryptographic overhead unnecessary). At 80k writes/sec the CPU saving is ~8% per node.
    - *Alternative rejected*: ByteOrderedPartitioner enables range scans but causes catastrophic hot spots on monotonic keys (timestamp, user_id auto-increment).
@@ -1131,7 +1155,7 @@ Token assignment with vnodes (Cassandra `cassandra.yaml`):
 
 ```yaml
 cluster_name: 'event-analytics'
-num_tokens: 256
+num_tokens: 16
 partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 endpoint_snitch: GossipingPropertyFileSnitch
 seed_provider:
@@ -1199,7 +1223,7 @@ session.execute(ps.bind(userId, today, Instant.now(), "click", json));
 - Data balance across nodes: 480–530 GB per node (std dev 4.8%)
 - Bootstrap of new node: 87 min for 500 GB at 10 Gbps
 - Single-AZ failure drill: zero data loss, p99 read rose to 32 ms during recovery
-- Cost: ~$8,400/month for 20× i3.2xlarge EC2 instances
+- Cost: ~$9,100/month for 20x i3.2xlarge EC2 instances (on-demand Linux, us-east-1, $0.624/hour)
 
 ### Common Pitfalls / Lessons Learned
 
