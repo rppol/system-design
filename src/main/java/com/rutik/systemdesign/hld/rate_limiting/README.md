@@ -1128,6 +1128,13 @@ A payments platform exposes a public REST API used by millions of integrations. 
 - Availability: 99.99% — rate limiter outage must not block API requests (fail-open with logging)
 - Distributed across 3 datacenters, requests can land on any of them
 
+```
+average_rate = calls_per_day / 86,400
+
+  peak_factor  = peak_rate / average_rate
+  blast_radius = 1 / nodes
+```
+
 **Put simply.** "Convert every daily total into a per-second rate, then check that no single tenant and no single Redis shard is left carrying a number that could hurt."
 
 Scale estimation in a rate-limiter design is really two questions: what rate must the limiter sustain, and what is the worst thing one abusive key can do to the limiter itself. The bullet list answers the first; the shard count answers the second.

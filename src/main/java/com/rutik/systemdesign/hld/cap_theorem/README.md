@@ -568,6 +568,10 @@ A distributed lock is not a substitute for database-level serializability becaus
 | Node Availability | % of cluster nodes healthy | < 100% (alert immediately) |
 | Read Repair Rate | Background repairs triggered | High rate = high inconsistency |
 
+```
+failures/sec = QPS x t
+```
+
 **Read it like this.** "A percentage alert threshold is meaningless until you multiply it by your traffic — 0.1% sounds negligible, but at fourteen thousand reads per second it is fourteen users per second getting an error, which is an incident, not a blip."
 
 This is why error-budget thresholds must always be restated in absolute terms before they are agreed to. The same 0.1% is a rounding error on a batch job and a pager-worthy outage on a user-facing read path.
@@ -658,6 +662,13 @@ A FinTech startup (digital wallet, B2C) migrating from a single-region PostgreSQ
   - Cross-wallet transfers atomic (debit + credit succeed or fail together)
 - **Soft requirements:** activity feed, search, transaction history — eventual consistency acceptable (~5s lag OK)
 - **Regions:** us-east, us-west, eu-west (regulatory data residency)
+
+```
+avg = V / 86,400
+
+  burst factor = peak / avg
+  read:write   = V_r / V_w
+```
 
 **What it means.** "Daily totals tell you how much data you will accumulate; peak QPS tells you how much hardware you must own. The gap between them — the burst factor — is the number that actually sets the bill, and here it is nearly fifty on the write path."
 

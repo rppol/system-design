@@ -1216,6 +1216,13 @@ A photo-sharing platform stores photo metadata for 1B users with 100B photos. Ph
 
 The strategy: 1000 logical shards mapped to 100 physical PostgreSQL instances (10 shards/instance). Shard key is `user_id`, so all of a user's photos live on one shard, enabling profile-page queries with a single shard hit. The logical-to-physical mapping is stored in a lookup table cached in Redis, so resharding is a metadata-only operation (remap logical shards to physical hosts) rather than data movement.
 
+```
+per_unit_load = total_load / units
+
+  shards_per_host = logical_shards / physical_hosts
+  peak_factor     = peak / sustained
+```
+
 **The idea behind it.** "Take the headline numbers, divide them by the shard count, and check that what one machine is left holding is boring."
 
 That is the entire point of a scale estimation: the design is validated not by the big numbers but by the small ones they reduce to. If the per-host figure is not obviously survivable on commodity hardware, the shard count is wrong.

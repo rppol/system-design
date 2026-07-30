@@ -260,6 +260,10 @@ A 6-week plan over the Interview-Specific Path. Each week pairs modules with one
 | 99.99% | 52 minutes | 4.4 minutes |
 | 99.999% | 5.2 minutes | 26 seconds |
 
+```
+downtime = (1 - SLA) x period
+```
+
 **In plain terms.** "Allowed downtime is just the failure fraction multiplied by the length of the period — every extra nine divides that allowance by ten."
 
 Memorizing the table is fine, but deriving it is faster under interview pressure and works for any window an interviewer names (a quarter, a 28-day SLO period, a single day).

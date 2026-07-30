@@ -214,6 +214,13 @@ Indexes are data structures that trade storage and write overhead for faster rea
 - Excellent for equality and range predicates on ordered data.
 - Used by: PostgreSQL, MySQL, SQL Server.
 
+```
+f = page / entry
+
+  depth    = ceil(log_f(N))
+  capacity = f ^ depth
+```
+
 **What it means.** "`O(log n)` understates how good this is in practice — a B-tree node is a whole disk page holding hundreds of keys, not two, so the tree is astonishingly shallow and a lookup in a hundred-million-row table costs about three page reads."
 
 The reason the base of the logarithm matters so much here is that it is set by hardware, not by the algorithm: the page size divided by the entry size *is* the branching factor. That is why B-trees, not binary search trees, are what databases actually use on disk.
@@ -521,6 +528,14 @@ flowchart LR
 8. **Not using EXPLAIN**: Assuming queries are using indexes without verifying via query planner.
 9. **Storing large blobs in DB**: Images, PDFs in database columns waste memory and slow replication. Use object storage (S3) and store URLs.
 10. **Poor shard key selection**: Monotonically increasing keys (auto-increment) cause hot partitions in distributed systems.
+
+```
+total = Q x rt
+
+  Q_naive = 1 + N
+  Q_batch = 2
+  Q_join  = 1
+```
 
 **Stated plainly.** "The N+1 problem is not that any single query is slow — it is that you pay the network round trip `N` extra times, so a page that renders 100 rows spends 100 round trips doing what one round trip could have done."
 

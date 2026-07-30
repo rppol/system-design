@@ -124,6 +124,12 @@ Castro & Liskov, 1999. Tolerates *Byzantine* faults — nodes that lie, equivoca
 - **Three phases:** Pre-prepare (leader assigns a sequence number and broadcasts the ordered request), Prepare (replicas broadcast agreement on the ordering so 2f+1 agree on "this request goes in this slot"), Commit (replicas broadcast that they will execute). A replica executes only after collecting 2f+1 matching Commit messages. Message complexity is **O(n²)** because every phase is an all-to-all broadcast.
 - **Why 3f+1 and not 2f+1?** With Byzantine nodes you must tolerate `f` liars *and* tolerate `f` honest nodes being slow/unreachable simultaneously, while still having a majority of honest responses you can trust. The math works out to needing `2f+1` honest nodes out of `3f+1` total, so any quorum of `2f+1` contains at least `f+1` honest nodes — an honest majority within every quorum.
 
+```
+N = 3f + 1
+
+  Q = 2f + 1        <- quorum size needed before acting
+```
+
 **What this actually says.** "Budget one group of `f` nodes that lie, a second group of `f` nodes that are simply unreachable, and still leave an honest majority in whatever is left."
 
 Crash tolerance only budgets for the second group, which is exactly why `2f+1` is enough there and not here.
@@ -780,6 +786,12 @@ Consensus algorithms are CP: they choose Consistency and Partition-tolerance ove
 - 1000 writes/s × 86,400 s ≈ 86M writes/day through a single Raft leader.
 - Each write = 1 fsync on the leader + replication to a quorum. fsync budget must stay < 1ms (target 100–300µs on NVMe).
 - Keyspace: hundreds of thousands of objects; with history, etcd DB size must be bounded by compaction (keep under the 8GB default quota).
+
+```
+daily_volume = writes/s x 86,400
+
+  headroom = leader_ceiling / writes/s
+```
 
 **The idea behind it.** "Every one of those 86 million daily writes is funnelled through one leader's disk, so the whole cluster's write ceiling is just one machine's fsync rate."
 

@@ -654,6 +654,12 @@ events (game launches, esports tournaments). Design targets:
 - **Availability:** 99.95% (4.4 hours downtime/year budget)
 - **Reconnection storm scale:** 1M users may reconnect within 60s after backend deploy
 
+```
+sent_QPS = daily_volume / 86,400
+
+  fan_out_factor = delivered_volume / daily_volume
+```
+
 **In plain terms.** "Divide the daily volume by 86,400 to get the sustained rate, then multiply by the fan-out to get what the system actually moves — the two numbers differ by 5.6x here."
 
 Every capacity estimate in system design starts with this one division, and the fan-out multiplier is what separates the number the product team quotes from the number the infrastructure must carry.

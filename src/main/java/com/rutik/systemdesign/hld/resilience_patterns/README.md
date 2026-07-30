@@ -859,6 +859,12 @@ A travel-booking platform's flight search feature fans out a single user search 
 - Airline APIs are wildly heterogeneous: 2 are fast and reliable (p99 ~300ms, >99.9% success), 2 are moderate (p99 ~800ms, ~99% success), and 2 are historically unreliable (p99 ~2-4 seconds, occasional multi-minute outages, ~95% success on a good day)
 - **Current (broken) behavior**: the aggregator calls all 6 airlines with a single shared HTTP client (no per-airline timeout configuration — all use the client's default 30-second timeout), waits for ALL 6 responses (or timeout) before returning anything, and a single airline's failure causes the ENTIRE search to return an error page to the user
 
+```
+outbound_rate = inbound_rate x fan_out_width
+
+  L = lambda x W    <- Little's Law: concurrent slots = arrival rate x hold time
+```
+
 **The idea behind it.** "Fan-out multiplies your inbound rate before anything else happens — 8,000 searches per minute is 48,000 outbound calls per minute, and every pool you size is sized against the second number."
 
 The single most common sizing mistake in a fan-out service is provisioning against the request rate the users generate rather than the call rate the architecture generates. The two differ by exactly the fan-out width.

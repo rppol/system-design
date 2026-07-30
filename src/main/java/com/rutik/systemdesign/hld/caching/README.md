@@ -38,6 +38,10 @@ In distributed systems, caching reduces:
 
 ### Decoding the hit rate and what it buys you
 
+```
+L_eff = h x L_cache + (1 - h) x L_db
+```
+
 **In plain terms.** "Hit rate is the fraction of requests you never had to ask the database about — and because a miss costs roughly 100x a hit, the average latency your users feel is dominated by the small slice that misses, not the large slice that hits."
 
 That framing matters because hit rate is not a vanity metric: it is the weight in a weighted average. Going from 90% to 96% sounds like a 6-point improvement, but it more than halves the misses, and misses are the only expensive thing happening.
@@ -441,6 +445,10 @@ An in-process L1 cache does not participate in any of this. It has no connection
 - Data is expensive to compute or retrieve (complex joins, API calls, ML inference).
 - Tolerable staleness window exists (e.g., displaying follower count 30s stale is fine).
 - Rate limiting, session management, leaderboards — all naturally fit caching.
+
+```
+memory = D x p x s
+```
 
 **Read it like this.** "You do not size a cache to hold the dataset — you size it to hold the working set, and the Pareto principle says a fifth of the data carries four fifths of the reads, so a fifth of the storage bill buys you most of the benefit."
 

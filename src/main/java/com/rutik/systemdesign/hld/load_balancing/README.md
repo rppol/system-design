@@ -744,6 +744,10 @@ An e-commerce platform preparing for Black Friday:
 - **Deployment cadence:** 8 deploys/day, zero downtime required
 - **Hot products:** 1 SKU may receive 80% of read traffic during a flash sale
 
+```
+per_instance_load = peak x share / tier_fleet
+```
+
 **Read it like this.** "Fleet size per tier is not the traffic share — it is traffic share divided by what one instance of *that* tier can absorb, which is why the 60% tier gets fewer boxes than the 30% tier."
 
 The instinct is to split 500 instances 60/30/10 to match the traffic mix. The actual split (150/200/150) is the opposite for static versus API, and the per-instance arithmetic below is what justifies it.

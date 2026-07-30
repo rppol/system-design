@@ -40,6 +40,10 @@ The speed of light is a hard physical limit. A user in Tokyo requesting content 
 **2. Origin Server Overload**
 Without a CDN, every user request hits the origin server. For a popular website with millions of users, this creates massive load. A CDN absorbs 80-99% of requests by serving cached content, acting as a shield for the origin.
 
+```
+effective latency = H x hit + (1 - H) x miss
+```
+
 **In plain terms.** "What a user actually experiences is not the hit latency or the miss latency — it is the two blended in proportion to how often each happens, so the last few percent of hit rate carry far more weight than they look like they should."
 
 The blend is a weighted average, and the weights are wildly lopsided: a miss costs roughly 15x what a hit costs here. That asymmetry is why CDN teams fight for a point of hit rate rather than shaving milliseconds off the hit path.

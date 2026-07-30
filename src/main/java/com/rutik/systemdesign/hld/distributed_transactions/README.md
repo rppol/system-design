@@ -583,6 +583,10 @@ flowchart TD
 A payments platform used a JTA transaction manager (2PC) to atomically update an `orders` table and a `ledger` table across two Postgres instances on every checkout. The transaction manager's host had a disk failure mid-recovery after a routine restart. Both Postgres instances had participants sitting in the `PREPARED` state — row locks held, connections held — for **45 minutes** while the on-call team manually inspected the transaction manager's recovery log to determine the correct decision (commit, in this case, since both had voted yes). During those 45 minutes, the connection pool (size 50) on both databases was exhausted by blocked transactions, and **all checkout traffic returned 503s** — not just the original transaction's traffic.
 *Fix*: migrated to Saga + Outbox. Order creation and ledger update became two independent local transactions, each publishing an event via outbox; a saga coordinated "ledger entry created" as the trigger for "mark order paid." A coordinator crash now means "an event is delayed," not "every database connection pool is exhausted."
 
+```
+time_to_exhaustion = pool_size / arrival_rate
+```
+
 **Read it like this.** "A stuck 2PC does not exhaust the pool slowly over 45 minutes — it exhausts it in seconds, and the remaining 44 minutes are pure downtime."
 
 The 45-minute figure is the recovery time, not the time to failure. The number that actually explains the 503s is much smaller, and it is just pool size divided by arrival rate.
@@ -790,6 +794,13 @@ Scale:
 - p99 latency target: 800ms end-to-end (the external payment network call itself is 200-400ms)
 - Availability target: 99.95% (~4.4 hours downtime/year budget)
 - Regulatory requirement: every wallet debit must have a corresponding ledger entry — no "phantom debits"
+
+```
+average_rate = daily_volume / 86,400
+
+  peak_factor  = peak_rate / average_rate
+  error_budget = (1 - target) x 8,760 hours
+```
 
 **Put simply.** "Two divisions turn this bullet list into a design brief: daily volume over seconds-in-a-day gives the sustained rate, and the availability target over a year gives the entire error budget."
 

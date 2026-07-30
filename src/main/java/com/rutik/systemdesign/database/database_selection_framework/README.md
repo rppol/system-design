@@ -310,6 +310,13 @@ Context: Strong consistency required, SQL queries, moderate scale, no NoSQL expe
 
 Same scorecard with: no consistency requirement, 1M writes/second, managed cloud → DynamoDB might score higher (flip operational and scale weights).
 
+```
+weighted_score = Sigma over i of (weight_i x score_i)
+
+  weight_i = share of the decision dimension i owns (weights sum to 1.00)
+  score_i  = candidate's rating on dimension i, on a 1-5 scale
+```
+
 **What this actually says.** "Make each candidate earn its score on the dimensions you actually care about, weighted by how much you care — so the decision is settled by the requirements you agreed on before anyone had a favourite." The scorecard's value is not the number it produces; it is that it forces the weights to be argued first, in the abstract, rather than reverse-engineered to justify a preferred answer.
 
 | Symbol | What it is |

@@ -99,6 +99,12 @@ Rebuilding aggregate state from event zero is O(N) in the number of events. For 
 
 **Snapshot storage**: Same event store (as a special event type) or a separate KV store keyed by `aggregateId + version`. Snapshots are never the source of truth — if a snapshot is corrupt, fall back to full replay.
 
+```
+replay_cost = N mod k
+
+  speedup = N / replay_cost
+```
+
 **Put simply.** "Without a snapshot, loading an aggregate costs you its entire lifetime of events; with one, it costs only the events since the last snapshot — a bounded number, no matter how old the aggregate is."
 
 The snapshot interval converts an unbounded `O(N)` load into a constant-bounded one. That is the whole trade: a little write amplification in exchange for a read cost that stops growing.
@@ -800,6 +806,12 @@ stateDiagram-v2
 - Projection rebuild time at 100M events (~250 days of accumulation at this rate): ~8.3 minutes at 200K events/second processing rate
 - Snapshot threshold: every 50 events (Order aggregate rarely exceeds 20 events; Payment aggregate rarely exceeds 5)
 - Eventual consistency lag under normal load: 15–50ms (KurrentDB catch-up subscription to PostgreSQL projector)
+
+```
+events/day = orders/day x events_per_order
+
+  annual_growth = events/day x payload_size x 365
+```
 
 **Stated plainly.** "Business volume times events-per-transaction gives you an event rate; that rate times payload size gives you a storage bill that never goes down, because nothing is ever deleted."
 

@@ -236,6 +236,13 @@ sigmoid over an inner-node vector, dropping cost from `O(V)` to `O(log V)`. Freq
 paths, so they are cheaper. In practice negative sampling wins on frequent words and small `k`; hierarchical
 softmax wins on rare words and very large vocabularies.
 
+```
+P(w | v_c) = Pi over j = 1..log2(V) of sigmoid(u_j . v_c)
+
+  u_j     = inner-node vector at step j of the root-to-leaf path   <- learned per internal node
+  log2(V) = number of binary decisions (tree depth)                <- ~20 at V = 1,000,000
+```
+
 **Put simply.** "Instead of asking 'which of a million words?', ask about twenty yes/no questions and follow
 the answers down to a leaf."
 

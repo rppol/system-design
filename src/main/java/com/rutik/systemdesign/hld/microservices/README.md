@@ -1300,6 +1300,10 @@ In August 2008, Netflix suffered a 3-day outage when database corruption took do
 - p99 API latency budget: 250 ms end-to-end for the playback start path
 - Multi-region failover capability (US-East ↔ US-West)
 
+```
+end_to_end_availability = availability ^ N
+```
+
 **Read it like this.** "Nines are a downtime allowance in minutes, and when a request has to cross several services those allowances multiply together instead of holding steady."
 
 Availability compounding is the single most important arithmetic in a microservices design review. It is why 700+ services cannot each be held to the same target as the product, and why fallbacks and circuit breakers are load-bearing rather than nice-to-have.
@@ -1486,6 +1490,12 @@ public class PlaybackServiceApplication {
 3. **Eureka registry staleness during rolling deploy** — Broken: instances took 30 seconds to deregister after termination. Clients kept sending requests to dead instances; connection failures spiked. Fix: tuned heartbeat to 10s, registry refresh to 5s, and added client-side AvailabilityFilteringRule that excludes hosts after 3 consecutive failures. Also added pre-deregistration drain (deregister, wait 30s, then SIGTERM).
 
 4. **Synchronous chain of 8 service calls = 8 × p99 latency** — Broken: a single API request fan-out: User → Auth → Profile → Recs → Catalog → Pricing → DRM → Logging. Each at 50 ms p99; chained p99 was 1200 ms. Fix: parallelized non-dependent calls with `CompletableFuture`, moved logging async via Kafka, pre-fetched auth and profile into the request context, cached pricing.
+
+```
+naive_sum = hops x per_hop_p99
+
+  P(all hops <= p99) = success_rate ^ hops
+```
 
 **Put simply.** "Adding up the per-hop p99s gives you 400 ms and it still is not pessimistic enough, because the chain only has to be unlucky once."
 

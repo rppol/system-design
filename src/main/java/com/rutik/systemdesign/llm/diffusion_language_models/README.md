@@ -223,6 +223,14 @@ forward pass over the *entire* sequence (`O(L)` attention), so total compute is 
 `O(T x L^2)` for the diffusion model vs. `O(L)` sequential passes each costing `O(L)` amortized via
 KV-cache for AR — the diffusion model trades sequential *latency* for parallel *throughput*.
 
+```
+AR total work        = L x O(L) = L^2          <- L sequential steps, O(L) work each
+Diffusion total work = T x O(L^2) = T x L^2    <- T sequential steps, O(L^2) work each
+
+  work ratio  = (T x L^2) / L^2 = T    <- diffusion does T times the raw arithmetic
+  depth ratio = L / T                  <- but needs only L/T times as many sequential steps
+```
+
 **What the formula is telling you.** "`O(T x L^2)` versus AR's `O(L)`-per-step-times-`L`-steps says
 diffusion does *more total arithmetic*, but stacks it into far fewer sequential steps — and
 wall-clock latency is paid per step, not per FLOP."
