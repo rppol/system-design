@@ -120,7 +120,8 @@ jobs:
           for f in assets/www/game/index.html assets/www/game/app.js \
                    assets/www/game/style.css assets/www/game/sw.js \
                    assets/www/game/vendor/mermaid.min.js \
-                   assets/www/game/questions/index.json; do
+                   assets/www/game/questions/index.json \
+                   assets/www/game/questions/paths.json; do
             unzip -l "$APK" "$f" > /dev/null || { echo "MISSING from APK: $f"; exit 1; }
           done
           # The JS that ships is the JS that parses (post-rsync copy, not the source).
@@ -132,7 +133,9 @@ jobs:
           GRAPHS=$(zipinfo -1 "$APK" 'assets/www/game/graph/*.json' | wc -l)
           BANKS=$(zipinfo -1 "$APK" 'assets/www/game/questions/*.json' | wc -l)
           [ "$GRAPHS" -eq "$SEC" ] || { echo "graphs $GRAPHS != sections $SEC"; exit 1; }
-          [ "$BANKS" -eq $((SEC + 1)) ] || { echo "banks $BANKS != sections+index ($SEC+1)"; exit 1; }
+          # +2 for the two section-independent artifacts: index.json and paths.json
+          # (the Study tier map). Keep in step with want_banks in build_banks.sh.
+          [ "$BANKS" -eq $((SEC + 2)) ] || { echo "banks $BANKS != sections+index+paths ($SEC+2)"; exit 1; }
           # The APK must never receive the Pages-only service-worker stamp.
           unzip -p "$APK" assets/www/game/sw.js | grep -q '__BUILD__' \
             || { echo "sw.js in the APK was Pages-stamped"; exit 1; }

@@ -78,9 +78,26 @@ for sec in sections:
     if "pairs" not in g:
         fail.append(f"graph {graph} has no 'pairs' key")
 
+# paths.json drives the Study tier tabs (app.js fetches it at boot into
+# STUDY_PATHS). Missing or unparseable, it degrades to {} — every section
+# silently loses its Senior/Principal tabs and falls back to Full. No visible
+# error, so check it here.
+try:
+    with open("questions/paths.json") as f:
+        tiers = json.load(f)
+    if not tiers:
+        fail.append("questions/paths.json is empty — Study tier tabs would vanish")
+except FileNotFoundError:
+    fail.append("missing questions/paths.json — Study tier tabs would vanish")
+except json.JSONDecodeError as e:
+    fail.append(f"unparseable questions/paths.json: {e}")
+
 # Stale files from a removed/renamed section would rsync into the APK payload
 # and confuse the loaders, so demand an exact match both ways.
-want_banks = {f"{s}.json" for s in sections} | {"index.json"}
+# index.json and paths.json are the two section-INDEPENDENT artifacts extract.py
+# emits into questions/. Everything else in there must name a real section, so a
+# new non-section artifact has to be declared here or it reads as stale junk.
+want_banks = {f"{s}.json" for s in sections} | {"index.json", "paths.json"}
 have_banks = {f for f in os.listdir("questions") if f.endswith(".json")}
 for extra in sorted(have_banks - want_banks):
     fail.append(f"stale bank questions/{extra} (no such section) — delete it: rm questions/{extra}")
