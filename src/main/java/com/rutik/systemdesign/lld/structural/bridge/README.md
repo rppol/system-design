@@ -1,7 +1,4 @@
 # Bridge Pattern
-
-<!-- tiers: principal -->
-
 ## 1. Pattern Name & Category
 
 **Pattern:** Bridge

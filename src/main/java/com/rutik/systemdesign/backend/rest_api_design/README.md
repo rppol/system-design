@@ -1,7 +1,10 @@
 # REST API Design
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 REST (Representational State Transfer) is an architectural style for distributed hypermedia systems, defined by Roy Fielding in his 2000 dissertation. A RESTful API exposes resources (nouns, not verbs) over HTTP, uses standard HTTP methods for operations, and is stateless. REST is the dominant paradigm for public and internal APIs because it leverages HTTP's universal adoption, caching infrastructure, and tooling.

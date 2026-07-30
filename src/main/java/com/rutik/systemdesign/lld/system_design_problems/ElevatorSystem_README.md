@@ -1,7 +1,4 @@
 # Elevator System — Low-Level Design
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **One-line analogy**: Elevator design is a scheduling problem in a state machine costume — the real challenge isn't modeling the elevator, it's deciding which elevator should answer which call.

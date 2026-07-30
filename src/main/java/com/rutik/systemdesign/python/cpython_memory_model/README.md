@@ -1,7 +1,9 @@
 # CPython Memory Model
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 CPython's memory model is the full machinery that governs how Python objects are created,

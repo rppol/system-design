@@ -1,7 +1,4 @@
 # Design a Dynamic Pricing System
-
-<!-- tiers: principal -->
-
 > "Dynamic pricing is like a thermometer that adjusts the price dial in real time — but instead of measuring temperature, it measures supply-demand tension and willingness to pay."
 
 **Key insight:** Dynamic pricing is not a prediction problem — it is a *decision* problem under uncertainty. The model predicts demand as a function of price; the optimizer then selects the price that maximizes revenue (or profit) subject to business constraints. Treating it purely as a regression problem (predict the best price) without an explicit optimization layer leads to myopic pricing that ignores margin, inventory, and competitive context.

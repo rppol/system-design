@@ -1,7 +1,10 @@
 # Inference & Decoding
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, kv_cache_optimization.md, speculative_decoding.md, sampling_and_decoding_strategies.md, constrained_decoding_and_structured_outputs.md
+principal: README.md, kv_cache_optimization.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | File | Topic |

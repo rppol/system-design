@@ -1,7 +1,9 @@
 # Sorting and Searching
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Putting things in order and finding things fast — the two most pervasive operations in all of computing.
 
 ---

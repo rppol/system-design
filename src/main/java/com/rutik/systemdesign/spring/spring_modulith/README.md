@@ -1,7 +1,9 @@
 # Spring Modulith (Modular Monolith)
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > How Spring Modulith lets you build a *modular monolith*: enforce module boundaries
 > at the package level, verify them with ArchUnit, decouple modules through
 > application events instead of direct calls, test one module in isolation, and

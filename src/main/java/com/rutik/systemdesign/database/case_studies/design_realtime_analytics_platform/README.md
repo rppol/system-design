@@ -1,7 +1,4 @@
 # Case Study: Design a Real-Time Analytics Platform
-
-<!-- tiers: principal -->
-
 ## Problem Statement
 
 Design the database architecture for a real-time analytics platform for a SaaS product:

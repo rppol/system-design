@@ -1,7 +1,10 @@
 # Spring Testing
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Spring Testing is the comprehensive framework for writing automated tests against Spring Boot applications. It covers everything from unit tests of individual components to full integration tests that load the complete ApplicationContext, spin up embedded HTTP servers, and interact with real (or containerized) databases.

@@ -1,7 +1,4 @@
 # Design: Snowflake ID Generator (Java)
-
-<!-- tiers: senior -->
-
 > **"A timestamp on a highway lane."**
 > A snowflake ID is a 64-bit integer whose leftmost bits are a millisecond timestamp and whose
 > rightmost bits encode the lane (node) and sequence position. Two generators on different nodes

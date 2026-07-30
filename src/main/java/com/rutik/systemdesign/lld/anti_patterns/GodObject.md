@@ -1,7 +1,4 @@
 # Anti-Pattern: God Object (God Class)
-
-<!-- tiers: senior -->
-
 ## What It Is
 
 The God Object anti-pattern occurs when a single class takes on too many responsibilities — it "knows too much" or "does too much." The class becomes the central hub of an application, with most other classes depending on it or delegating work to it.

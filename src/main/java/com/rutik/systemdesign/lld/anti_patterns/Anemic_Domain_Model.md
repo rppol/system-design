@@ -1,7 +1,4 @@
 # Anti-Pattern: Anemic Domain Model
-
-<!-- tiers: principal -->
-
 ## What It Is
 
 The Anemic Domain Model (ADM) anti-pattern describes a domain model where the domain objects (entities) contain only data — fields and getters/setters — with no business logic. All business logic is pushed into a separate layer of service classes that operate on these data containers.

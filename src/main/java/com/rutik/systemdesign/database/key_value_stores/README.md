@@ -1,7 +1,9 @@
 # Key-Value Stores
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Key-value stores are the simplest NoSQL data model: a distributed hash map mapping keys to values. Redis is the dominant in-memory key-value store, combining sub-millisecond latency with rich data structures, persistence, pub/sub, Lua scripting, and clustering. Understanding Redis data structures and their internal encodings is critical for building efficient caching, session, rate limiting, and real-time systems.

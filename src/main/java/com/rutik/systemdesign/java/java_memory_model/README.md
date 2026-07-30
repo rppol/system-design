@@ -1,7 +1,9 @@
 # Java Memory Model
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 The Java Memory Model (JMM) is the formal specification that defines how multithreaded Java programs behave with respect to memory visibility and instruction ordering. Without the JMM, the behavior of concurrent programs would be platform-dependent — a program could work on one processor architecture and silently produce wrong results on another.

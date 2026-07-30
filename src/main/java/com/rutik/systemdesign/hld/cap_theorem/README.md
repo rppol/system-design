@@ -1,7 +1,10 @@
 # CAP Theorem
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 The CAP Theorem, conjectured by Eric Brewer in his 2000 PODC keynote and formally proven by Gilbert and Lynch in 2002, states that a distributed data store can only guarantee two of the following three properties simultaneously:

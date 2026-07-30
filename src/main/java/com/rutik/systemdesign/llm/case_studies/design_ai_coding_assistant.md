@@ -1,7 +1,4 @@
 # Case Study: Design an AI Coding Assistant (Cursor/Devin-Style)
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: An AI coding assistant (Cursor/Devin-style) has three distinct interaction modes with fundamentally different latency requirements: inline completions (300ms), chat (2-5s), and autonomous agents (minutes). Each mode requires different models, different context assembly, and different serving infrastructure.

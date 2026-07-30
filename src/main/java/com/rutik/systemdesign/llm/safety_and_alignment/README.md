@@ -1,7 +1,10 @@
 # Safety & Alignment
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

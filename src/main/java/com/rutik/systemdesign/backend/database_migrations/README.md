@@ -1,7 +1,10 @@
 # Database Migrations
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Database migrations are version-controlled schema changes that transform the database structure from one state to another. As applications evolve, schemas must evolve — new tables, columns, indexes, constraints. Migrations must be: reversible (to support rollbacks), tested (to prevent production disasters), and zero-downtime-compatible (to avoid service interruptions during deployment). The tools that manage migrations (Flyway, Liquibase) provide versioning, checksums, and execution tracking.

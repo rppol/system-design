@@ -1,7 +1,10 @@
 # LLD System Design Problems
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, ParkingLot_README.md, ElevatorSystem_README.md, VendingMachine_README.md, LRUCache_README.md, RateLimiter_README.md, OnlineBookingSystem_README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 Canonical low-level design interview problems. Each problem exercises pattern identification, state machine design, and the ability to deliver a class design in 30 minutes under pressure.
 
 ---

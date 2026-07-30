@@ -1,7 +1,9 @@
 # Design Principles
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md, DRY.md, KISS.md, YAGNI.md, Composition_over_Inheritance.md, ProgramToInterface.md, LawOfDemeter.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 General-purpose design principles that apply across all layers of software — not tied to a specific pattern or framework.
 
 ---

@@ -1,7 +1,4 @@
 # Single Responsibility Principle (SRP)
-
-<!-- tiers: senior -->
-
 **Part of the SOLID series** | [Back to Overview](README.md)
 
 ---

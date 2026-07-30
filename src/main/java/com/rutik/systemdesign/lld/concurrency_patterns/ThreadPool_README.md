@@ -1,7 +1,4 @@
 # Thread Pool Pattern
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **One-line analogy**: Thread Pool is like a restaurant kitchen — instead of hiring and firing a cook for every single order, you keep a fixed crew who handle all orders in sequence; new orders queue up when everyone is busy.

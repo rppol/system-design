@@ -1,7 +1,4 @@
 # System Design: Twitter/X
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: Twitter's core challenge is the "fan-out problem" — when a celebrity with 10M followers tweets, you can't query all their followers' feeds on read (too slow). You must precompute (fan-out on write) or find a hybrid. The feed generation architecture is the heart of Twitter's system design.

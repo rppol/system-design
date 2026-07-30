@@ -1,7 +1,4 @@
 # Design a Customer Churn Prediction System
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > A churn prediction system is like a hospital triage unit: the goal is not to predict who will get sick — it is to identify who is sick *right now* and route them to the most cost-effective intervention before they leave.

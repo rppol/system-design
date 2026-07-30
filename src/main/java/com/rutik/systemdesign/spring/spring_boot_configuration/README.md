@@ -1,7 +1,10 @@
 # Spring Boot Configuration
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Spring Boot's configuration system provides a unified, hierarchical way to externalize application settings. It supports properties files, YAML files, environment variables, command-line arguments, and remote config servers — all merged into a single `Environment` with a well-defined priority order. `@ConfigurationProperties` provides type-safe, validated binding of configuration to Java classes with IDE support, relaxed binding, and structured documentation.

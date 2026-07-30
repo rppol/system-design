@@ -1,7 +1,10 @@
 # Replication and High Availability
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Replication is the process of maintaining copies of data on multiple database servers so that the system continues to function when individual nodes fail. High availability (HA) combines replication with automated failover to eliminate (or minimize) downtime from hardware failures, software crashes, or planned maintenance. The key tension is between consistency (synchronous replication = zero data loss, high latency) and availability/performance (asynchronous replication = low latency, potential data loss on failover).

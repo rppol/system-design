@@ -1,7 +1,4 @@
 # Case Study: Design GitHub Copilot
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: Copilot is a real-time system with < 300ms latency requirements — this means aggressive caching, small fast models for completions, debouncing to avoid wasting calls, and Fill-in-the-Middle (FIM) model architecture. The engineering challenge is delivering sub-second IDE-integrated AI while managing cost and maintaining quality.

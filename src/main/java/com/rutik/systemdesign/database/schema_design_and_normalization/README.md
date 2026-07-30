@@ -1,7 +1,10 @@
 # Schema Design and Normalization
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, surrogate_vs_natural_keys.md
+principal: README.md, surrogate_vs_natural_keys.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

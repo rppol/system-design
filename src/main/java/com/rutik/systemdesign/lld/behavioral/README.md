@@ -1,7 +1,10 @@
 # Behavioral Patterns — Category Index
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, strategy/README.md, observer/README.md, state/README.md, command/README.md, template_method/README.md, chain_of_responsibility/README.md, iterator/README.md
+principal: README.md, observer/README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 Behavioral patterns define how objects communicate and distribute responsibility. They focus on algorithms and the assignment of responsibilities between objects. This is the navigation index for all 11 behavioral GoF patterns in this section.
 
 ---

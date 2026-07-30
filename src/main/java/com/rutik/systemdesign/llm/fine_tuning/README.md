@@ -1,7 +1,10 @@
 # Fine-Tuning
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, lora.md, qlora.md, peft_methods.md, instruction_tuning.md
+principal: README.md, lora.md, domain_adaptation.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Fine-tuning is the process of taking a pre-trained LLM and continuing its training on a smaller, more targeted dataset to make it better at specific tasks, domains, or behaviors. Rather than training from scratch (weeks and millions of dollars), fine-tuning adapts an existing model in hours or days at a fraction of the cost.

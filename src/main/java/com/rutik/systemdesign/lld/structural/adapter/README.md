@@ -1,7 +1,4 @@
 # Adapter Pattern
-
-<!-- tiers: senior -->
-
 ## 1. Pattern Name & Category
 
 **Pattern:** Adapter (also known as Wrapper)

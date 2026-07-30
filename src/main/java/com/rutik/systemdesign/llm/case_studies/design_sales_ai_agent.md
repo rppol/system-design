@@ -1,7 +1,4 @@
 # Case Study: Design a Sales AI Agent Platform
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: A sales AI agent is like a tireless junior SDR (Sales Development Representative) who never sleeps — it researches prospects, personalizes outreach emails, follows up six times over three weeks, handles objections via email and SMS, books calendar meetings, and updates Salesforce automatically. The engineering challenge is not conversation quality but durability and compliance: a sales sequence runs for 3-6 weeks with 8-12 touchpoints per prospect, must not spam the same prospect twice, must respect TCPA/GDPR do-not-contact laws, and must maintain coherent memory of every prior interaction across a months-long pipeline.

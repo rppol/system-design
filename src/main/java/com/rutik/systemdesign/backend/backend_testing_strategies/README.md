@@ -1,7 +1,9 @@
 # Backend Testing Strategies
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Backend testing encompasses multiple complementary approaches to verify correctness, reliability, and behavior of server-side systems. The testing pyramid defines the ideal distribution: unit tests (70%) for fast feedback on individual components, integration tests (20%) for verifying interactions with infrastructure (databases, caches, queues), contract tests for verifying API compatibility across service boundaries, and end-to-end tests (10%) for critical user journeys. Each layer provides different confidence at different cost.

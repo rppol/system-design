@@ -1,7 +1,4 @@
 # System Design: Leaderboard
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: A leaderboard is fundamentally **one sorted collection that two very different audiences hammer simultaneously**: writers (every player whose score just changed) need their update reflected in the ordering within seconds, and readers (everyone viewing the "Top 100" or checking "where do I rank") need that ordering returned in single-digit milliseconds at enormous read volume. The data structure that makes both sides cheap is a **sorted set backed by a skip list** — `O(log N)` insert/update and `O(log N)` rank lookup, with `O(log N + M)` range scans for "give me the top M" or "give me the M players around rank R." Redis's `ZSET` is the textbook embodiment of this structure, which is why it is the default answer to "design a leaderboard" in nearly every systems interview.

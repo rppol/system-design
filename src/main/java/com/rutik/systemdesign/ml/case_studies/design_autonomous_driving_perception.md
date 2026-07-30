@@ -1,7 +1,4 @@
 # Design an Autonomous Driving Perception System
-
-<!-- tiers: principal -->
-
 ## Problem Statement
 
 Design the perception system for a Level 4 autonomous vehicle. The system must detect all objects

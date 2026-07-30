@@ -1,7 +1,9 @@
 # Secrets Management
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Phase 4 — Infrastructure as Code & Config · Difficulty: Advanced
 
 A secret is any credential that grants access — database passwords, API keys, TLS private keys, cloud access keys, signing keys. Secrets management is the discipline of **storing them encrypted, distributing them to workloads without exposing them, rotating them regularly, and auditing every access** — instead of the default failure mode of hardcoding them in source, env files, or Kubernetes manifests. The dominant tools are **HashiCorp Vault** (with its killer feature, *dynamic secrets*), the cloud-native managers (**AWS Secrets Manager**, **GCP Secret Manager**, **Azure Key Vault**), and the Kubernetes glue that delivers them — **External Secrets Operator (ESO)**, **Sealed Secrets**, and **SOPS**.

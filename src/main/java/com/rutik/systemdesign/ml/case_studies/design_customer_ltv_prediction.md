@@ -1,7 +1,4 @@
 # Design a Customer Lifetime Value (LTV) Prediction System
-
-<!-- tiers: principal -->
-
 > "Predicting LTV is like weather forecasting: you are estimating a probability distribution over future behavior, not a single point — and the forecast degrades the further out you look."
 
 **Key insight:** LTV prediction is fundamentally a *censored* regression problem — most active customers have not yet churned, so you only observe partial lifetimes. Models that ignore censoring systematically under-predict LTV by treating incomplete observations as complete ones.

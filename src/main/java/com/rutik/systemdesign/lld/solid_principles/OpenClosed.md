@@ -1,7 +1,4 @@
 # Open/Closed Principle (OCP)
-
-<!-- tiers: principal senior -->
-
 **Part of the SOLID series** | [Back to Overview](README.md)
 
 ---

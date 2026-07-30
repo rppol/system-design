@@ -1,7 +1,9 @@
 # Dependency Injection in FastAPI
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md, yield_dependencies_and_scopes.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Dependency Injection (DI) in FastAPI is a first-class mechanism for declaring shared logic — database sessions, auth checks, configuration objects, pagination parameters — as reusable callables that the framework resolves automatically before each request handler runs.

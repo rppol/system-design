@@ -1,7 +1,9 @@
 # Context Managers & Exceptions
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Context managers provide a structured protocol for acquiring and releasing resources — file handles, database connections, locks, timers — guaranteeing that cleanup runs even when exceptions occur. The `with` statement is the syntactic sugar that drives context managers; under the hood it calls `__enter__` at the start of the block and `__exit__` at the end, whether the block exits cleanly or via an exception.

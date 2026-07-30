@@ -1,7 +1,9 @@
 # Spring MVC Architecture
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Spring MVC is a web framework built on the Front Controller pattern. A single `DispatcherServlet` receives all HTTP requests, delegates to the appropriate handler (controller method), and renders the response. Every request flows through a well-defined pipeline: handler mapping → handler adapter → handler execution → view resolution (or direct response body writing). Understanding this pipeline is essential for debugging request failures, adding cross-cutting behavior, and tuning performance.

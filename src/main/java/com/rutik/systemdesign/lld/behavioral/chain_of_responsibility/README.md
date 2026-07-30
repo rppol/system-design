@@ -1,7 +1,4 @@
 # Chain of Responsibility Pattern
-
-<!-- tiers: senior -->
-
 ## 1. Pattern Name & Category
 
 **Pattern:** Chain of Responsibility

@@ -1,7 +1,10 @@
 # LLM Security
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, privacy_and_data_governance.md
+principal: README.md, privacy_and_data_governance.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | File | Topic |

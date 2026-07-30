@@ -1,7 +1,4 @@
 # System Design: Stock Exchange
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > **Design intuition**: A stock exchange is, at its core, **a single auctioneer standing in front of a crowd, for each stock separately**. For any given symbol — say AAPL — there is exactly one "person" (the matching engine instance) who decides, in a strict order, who gets to trade with whom and at what price. Every buyer and seller shouts their order to that one auctioneer; the auctioneer processes shouts **one at a time, in the exact order received**, matching a new shout against the standing offers already on the board (price-time priority), and immediately announces the result. The auctioneer never multitasks across two simultaneous shouts for the same stock — if it did, two people could "win" the same trade, or the same share could be sold twice. The system scales not by giving AAPL's auctioneer more helpers, but by giving **every symbol its own dedicated, single-threaded auctioneer**, running in parallel with every other symbol's auctioneer. Fairness and determinism for a single symbol matter more than raw parallelism within that symbol — which is the opposite of almost every other system in this repository, where the instinct is "add more threads/replicas to go faster."

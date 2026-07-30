@@ -1,7 +1,10 @@
 # Recommender Systems
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, collaborative_filtering.md, retrieval_and_ranking.md, deep_learning_recommenders.md
+principal: README.md, retrieval_and_ranking.md, online_learning_and_bandits.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | Sub-File | Topic | Q&As |

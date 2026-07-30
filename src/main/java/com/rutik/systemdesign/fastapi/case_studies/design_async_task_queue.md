@@ -1,7 +1,4 @@
 # Design an Async Task Queue System
-
-<!-- tiers: principal senior -->
-
 ## Problem Statement
 
 An e-commerce platform creates thousands of orders per hour. Every successful order triggers three slow,

@@ -1,7 +1,4 @@
 # Design: Event-Driven Order Processing Microservice
-
-<!-- tiers: principal -->
-
 > "A choreography saga is a distributed relay race where each runner hands the baton to the
 > next without a referee. If a runner drops the baton, every runner from that point
 > backwards must undo their leg — coordinated by reaction, not by command."

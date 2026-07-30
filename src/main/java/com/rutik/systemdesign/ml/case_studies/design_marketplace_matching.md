@@ -1,7 +1,4 @@
 # Design a Marketplace Matching System
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > A marketplace matching system is like an air traffic controller: it must coordinate hundreds of moving entities in real time, each with different destinations, capacities, and priorities — making irreversible decisions under uncertainty while maximizing global throughput, not just individual trip quality.

@@ -1,7 +1,4 @@
 # DRY — Don't Repeat Yourself
-
-<!-- tiers: principal -->
-
 ## Origins
 
 Coined by Andrew Hunt and David Thomas in **"The Pragmatic Programmer" (1999)**:

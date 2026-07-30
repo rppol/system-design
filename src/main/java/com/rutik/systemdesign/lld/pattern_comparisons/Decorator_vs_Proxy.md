@@ -1,7 +1,4 @@
 # Decorator vs Proxy
-
-<!-- tiers: senior -->
-
 ## Overview
 
 Both Decorator and Proxy wrap a target object and implement the same interface. The structural similarity is almost perfect. The difference is in **intent** and **who manages the wrapped object's lifecycle**.

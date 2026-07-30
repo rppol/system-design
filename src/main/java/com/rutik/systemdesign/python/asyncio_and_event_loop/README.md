@@ -1,7 +1,9 @@
 # asyncio & Event Loop
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md, event_loop_internals.md, structured_concurrency.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ---
 
 ## 1. Concept Overview

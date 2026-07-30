@@ -1,7 +1,9 @@
 # Packaging & Project Tooling
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Python packaging is the set of standards, tools, and workflows that turn a collection of `.py` files into a distributable, installable unit with declared dependencies, metadata, and build instructions. It answers three questions: how do you declare what your project is, how do you install it into an environment, and how do you share it with others.

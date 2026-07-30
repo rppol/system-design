@@ -1,7 +1,9 @@
 # DSA Pattern Playbooks — The Recognition Engine
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md, backtracking.md, bit_manipulation.md, cyclic_sort.md, dynamic_programming.md, fast_and_slow_pointers.md, graph_traversal.md, greedy.md, hashing_patterns.md, in_place_linked_list_reversal.md, interview_execution_playbook.md, k_way_merge.md, matrix_traversal.md, merge_intervals.md, modified_binary_search.md, monotonic_stack.md, prefix_sum.md, shortest_path.md, sliding_window.md, study_plans.md, top_k_elements.md, topological_sort.md, tree_bfs.md, tree_dfs.md, trie_patterns.md, two_heaps.md, two_pointers.md, union_find.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 The pattern-recognition and strategy-selection layer for coding interviews. This section answers the question every L5 candidate must answer in under 5 minutes: *"Given this problem, what pattern do I apply, and why?"*
 
 > **Prerequisites**: [Phase 1–3 concept modules](../) (complexity, data structures, algorithms). Those teach *what* a heap or sliding window is. This section teaches *when* to reach for which one.

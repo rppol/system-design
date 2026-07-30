@@ -1,7 +1,4 @@
 # Case Study: Design an Autonomous SWE Agent
-
-<!-- tiers: principal senior -->
-
 ## Intuition
 
 > **Design intuition**: An autonomous SWE agent is like a junior engineer on probation — it gets a GitHub issue, checks out the repo, writes code, runs tests, iterates, and opens a PR, all without human help. The engineering challenge is not the LLM intelligence but the scaffolding: durable execution across 50+ tool calls, repo-level context management within a finite context window, sandboxed code execution, and test-driven self-correction loops that catch regressions before the PR is opened.

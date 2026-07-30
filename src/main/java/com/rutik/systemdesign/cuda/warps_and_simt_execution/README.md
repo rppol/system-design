@@ -1,7 +1,9 @@
 # Warps & SIMT Execution
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 A **warp** is the unit of execution the GPU hardware actually schedules: a group of exactly **32 threads** launched together from the same block, executed together, and retired together. CUDA's programming model lets you write code as if you had `blockDim.x` independent threads, but the streaming multiprocessor (SM) never issues an instruction for a single thread — it issues one instruction for an entire warp, and every lane (the hardware's word for a thread's slot within a warp) either executes that instruction or sits masked out. This execution style is called **SIMT** (Single Instruction, Multiple Threads): the *appearance* of independent scalar threads, built on top of the *reality* of one instruction stream shared by 32 lanes.

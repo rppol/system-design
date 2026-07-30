@@ -1,7 +1,9 @@
 # Supervised Learning
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md, linear_models.md, decision_trees.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

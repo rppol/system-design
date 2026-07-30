@@ -1,5 +1,11 @@
 # Python + FastAPI — Case Studies Learning Path
 
+<!-- study-paths
+senior: design_rate_limited_api_fastapi.md, design_realtime_chat_fastapi.md, design_async_task_queue.md, design_async_web_scraper.md, design_ml_inference_api_fastapi.md
+principal: design_multi_tenant_saas_api.md, design_async_task_queue.md
+case studies in each curated path; the Level filter reads this
+-->
+
 End-to-end system design case studies demonstrating production Python and FastAPI architecture. Each case study follows the 7-section legacy template: Problem Statement, Architecture Overview (Mermaid diagram), Key Design Decisions, Implementation (Python code), Python/FastAPI Components Used, Tradeoffs and Alternatives, Interview Discussion Points.
 
 ---

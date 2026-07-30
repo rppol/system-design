@@ -1,7 +1,4 @@
 # Surrogate vs Natural Keys — Deep Dive
-
-<!-- tiers: principal senior -->
-
 Companion to [Schema Design and Normalization](README.md). The parent tells you to use
 `BIGINT GENERATED ALWAYS AS IDENTITY` and discusses how *wide* an integer column should be. This
 file argues the part it skips: which **value** goes in that column, why a natural key is a liability

@@ -1,7 +1,4 @@
 # Case Study: Design an Event Bus in Pure Java
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > An event bus is a post office inside the JVM: components drop letters (events) into a central exchange without knowing who will read them; the bus routes each letter to every subscriber who asked for that type. No one holds a direct reference to anyone else.

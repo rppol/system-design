@@ -1,7 +1,4 @@
 # Design an Async Web Scraper
-
-<!-- tiers: senior -->
-
 ## Problem Statement
 
 Build a web scraper that processes 10,000 product pages per hour from multiple e-commerce sites. The system must:

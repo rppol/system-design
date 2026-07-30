@@ -1,7 +1,9 @@
 # Knowledge Distillation and Model Merging
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ---
 
 ## 1. Concept Overview

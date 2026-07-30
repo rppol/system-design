@@ -1,7 +1,4 @@
 # Multimodal RAG
-
-<!-- tiers: senior -->
-
 ## 1. Concept Overview
 
 Multimodal RAG extends the standard text-based RAG pipeline (see [RAG Fundamentals](../rag_fundamentals/README.md)) to handle documents that contain non-text content: images, charts, tables, diagrams, equations, and slides. Enterprise documents are rarely purely textual — PDFs contain embedded charts, research papers include figures, presentations are image-heavy, and technical documentation mixes diagrams with prose.

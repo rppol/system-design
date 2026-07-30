@@ -1,7 +1,9 @@
 # Service Mesh and Service Discovery
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 A service mesh is a dedicated infrastructure layer for handling service-to-service communication in a microservices architecture. It handles traffic management, security (mTLS), and observability without requiring changes to application code. In Istio's sidecar mode an Envoy proxy is injected alongside each service instance and intercepts all inbound and outbound traffic; in ambient mode a per-node `ztunnel` handles L4 and mTLS with optional per-service `waypoint` proxies for L7, so pods carry no sidecar at all. Either way a single control-plane binary, `istiod`, computes and pushes the proxy configuration. Service discovery is the mechanism by which services locate each other's network addresses, which can be client-side (service queries a registry directly), server-side (a load balancer queries the registry), or DNS-based (Kubernetes Services).

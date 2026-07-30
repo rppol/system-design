@@ -1,7 +1,4 @@
 # Case Study: Design a Banking Ledger
-
-<!-- tiers: senior -->
-
 ## Problem Statement
 
 Design a double-entry accounting ledger system for a global payments company processing 10,000 transactions per second with the following requirements:

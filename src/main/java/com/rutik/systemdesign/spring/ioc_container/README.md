@@ -1,7 +1,9 @@
 # IoC Container
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 The Spring IoC (Inversion of Control) container is the core of the Spring Framework. It manages the complete lifecycle of Spring beans — creating them, wiring their dependencies, and destroying them when the application shuts down. "Inversion of Control" means the container, not your code, controls when and how objects are created and connected.

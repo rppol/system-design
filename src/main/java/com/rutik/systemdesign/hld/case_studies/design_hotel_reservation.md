@@ -1,7 +1,4 @@
 # System Design: Hotel Reservation System
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: A hotel reservation system looks, on the surface, like a search problem — "find me a room in Paris for these three nights under $200." But search is the easy 95% of the traffic and the easy 5% of the engineering risk. The hard part is the other direction: **"available" is a claim about the future, made by reading a number that two people can read at the same moment and both believe is true.** A search result that says "1 room left" is a snapshot, not a promise — and the system must arbitrate, in the few seconds between two people seeing that snapshot and clicking "Book," who actually gets the room without either selling it twice or leaving it empty. Every other piece of this design — the inventory model, the hold-with-TTL mechanism, the booking saga, the cache-staleness tradeoffs — exists in service of resolving that race correctly, cheaply, and at a scale where the read traffic outnumbers the write traffic by a factor not unlike a URL shortener.

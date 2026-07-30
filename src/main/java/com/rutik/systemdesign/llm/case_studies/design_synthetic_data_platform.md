@@ -1,7 +1,4 @@
 # Case Study: Design a Synthetic Data Platform for LLM Training
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > **Design intuition**: A synthetic data platform is an assembly line for AI training signal — the LLM is simultaneously the worker assembling parts and the quality inspector rejecting defects, while human labelers audit random samples to catch systemic failures the LLM cannot see in itself.

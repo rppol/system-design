@@ -1,7 +1,9 @@
 # GPU Hardware Architecture
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 A GPU is not "one big fast processor" — it is an array of dozens to hundreds of small,

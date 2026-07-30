@@ -1,7 +1,9 @@
 # Request Handling
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Request handling in Spring MVC covers everything from mapping HTTP requests to controller methods, extracting data from requests (path variables, query params, headers, request bodies), validating input, returning responses, and handling exceptions. `RequestMappingHandlerAdapter` drives this pipeline using `HandlerMethodArgumentResolver`s for input and `HandlerMethodReturnValueHandler`s for output.

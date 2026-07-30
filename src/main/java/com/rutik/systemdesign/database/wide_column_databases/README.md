@@ -1,7 +1,10 @@
 # Wide-Column Databases
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Wide-column databases (also called column-family stores) store data in rows with dynamic columns, where different rows can have different columns. Apache Cassandra is the dominant open-source wide-column database, offering leaderless distributed architecture, tunable consistency, and linear scalability. Unlike relational tables, Cassandra's data model is designed around query patterns, not entity relationships.

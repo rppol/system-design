@@ -1,7 +1,9 @@
 # Security and Authentication/Authorization
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Every system design interview eventually reaches the question: "how do you secure this?" The answer has two distinct halves that are constantly conflated:

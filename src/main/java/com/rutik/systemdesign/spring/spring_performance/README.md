@@ -1,7 +1,10 @@
 # Spring Performance
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Spring Boot performance engineering encompasses startup time, connection pool management, caching, JVM tuning, and emerging approaches like GraalVM native images and virtual threads. For senior engineers and architects, performance is not just about making things faster — it is about understanding where time is spent, what resources are being consumed, and what the trade-offs are between throughput, latency, memory, and operational complexity.

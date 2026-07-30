@@ -1,7 +1,4 @@
 # Design a Rate-Limited API with FastAPI
-
-<!-- tiers: senior -->
-
 ---
 
 ## Problem Statement

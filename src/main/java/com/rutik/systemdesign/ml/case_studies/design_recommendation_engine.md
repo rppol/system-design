@@ -1,7 +1,4 @@
 # Design a Recommendation Engine (Netflix/YouTube Scale)
-
-<!-- tiers: senior -->
-
 ## Problem Statement
 
 Design a real-time recommendation engine for a video streaming platform. For every user session, return 10 personalized video recommendations within 100ms P99. The system must serve 200M registered users across 10M videos, processing 1B events per day (watches, clicks, skips, ratings). Handle cold start for new users (no history) and new videos (no interactions). Support A/B testing of different recommendation strategies.

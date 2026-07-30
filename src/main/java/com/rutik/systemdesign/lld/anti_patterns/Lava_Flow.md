@@ -1,7 +1,4 @@
 # Lava Flow Anti-Pattern
-
-<!-- tiers: principal -->
-
 ## Overview
 
 The Lava Flow anti-pattern describes the accumulation of dead, obsolete, or poorly understood code that persists in a codebase because no one knows what it does or whether it is safe to remove. Like solidified lava that hardens over time into an immovable rock layer, this code becomes a permanent fixture of the system — untouched, undocumented, and quietly dangerous. It typically originates from rapid prototyping sessions that were never cleaned up, departed engineers who left no documentation, or fear-driven development where removing something "just in case it breaks production" feels riskier than leaving it. The result is a codebase that grows heavier with every release cycle while delivering less and less business value per line of code.

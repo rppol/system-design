@@ -1,7 +1,10 @@
 # JVM Internals
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 The Java Virtual Machine is the invisible engine under every Java program. It manages memory through garbage collection, compiles hot bytecode to native machine code (JIT), enforces the Java Memory Model to give multithreaded programs well-defined behavior, and loads/links/initializes classes dynamically.

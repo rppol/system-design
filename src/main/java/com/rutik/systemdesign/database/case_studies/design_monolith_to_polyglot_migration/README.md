@@ -1,7 +1,4 @@
 # Case Study: Monolith to Polyglot Migration
-
-<!-- tiers: principal -->
-
 ## Problem Statement
 
 Migrate a 5TB MySQL monolith to purpose-built databases without downtime:

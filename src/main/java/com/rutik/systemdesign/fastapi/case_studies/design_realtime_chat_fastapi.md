@@ -1,7 +1,4 @@
 # Design a Real-Time Chat System with FastAPI
-
-<!-- tiers: senior -->
-
 ---
 
 ## Problem Statement

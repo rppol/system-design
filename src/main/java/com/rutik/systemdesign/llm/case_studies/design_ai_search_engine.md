@@ -1,7 +1,4 @@
 # Case Study: Design an AI Search Engine (Perplexity-Style)
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: An AI search engine (Perplexity-style) is RAG over live web search — the novelty is real-time retrieval (web crawl → search API → retrieved pages) rather than a static document corpus. The challenge is latency: searching the web + reading pages + generating an answer must complete in 2-4 seconds.

@@ -1,7 +1,9 @@
 # Database Selection Framework
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Database selection is one of the highest-leverage architectural decisions in a system. The choice of database engine shapes data models, query capabilities, operational complexity, scaling behavior, and team expertise requirements for years. Unlike most software components, migrating between database engines is enormously expensive — a decision made at system inception with 100 rows often proves catastrophic (or irreversible without significant rework) at 100 billion rows.

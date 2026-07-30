@@ -1,7 +1,9 @@
 # Graph and String Algorithms
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Traversal, shortest paths, spanning trees, and pattern matching — the algorithms every backend system quietly relies on.
 
 ---

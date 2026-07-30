@@ -447,17 +447,30 @@ def _readme_tier_path(section, tier):
 #   no marker            -> not in any curated tier (Full path only)
 #
 # ORDER still comes from STUDY_ORDER in app.js. A marker says WHETHER, never WHERE.
-TIER_MARK = re.compile(r"^<!--\s*tiers:\s*([a-z\s]+?)\s*-->\s*$", re.M)
+TIER_MARK = re.compile(r"^<!--\s*study-paths\s*\n(.*?)^-->\s*$", re.M | re.S)
+TIER_LINE = re.compile(r"^\s*([a-z]+)\s*:\s*(.+?)\s*$", re.M)
 
 
-def _file_tiers(abs_path):
-    """The tiers a single file declares, or empty set."""
+def _declared_paths(abs_path):
+    """{tier: [file, ...]} from a `<!-- study-paths ... -->` block, or {}.
+
+    The block lives ONCE per module README (and once per section case-study index) and
+    names the files that module contributes to each tier. Deep-dive sub-files and
+    case-study files carry NO metadata of their own -- study content stays study content.
+    """
     try:
-        head = open(abs_path, encoding="utf-8").read(4000)
+        head = open(abs_path, encoding="utf-8").read(6000)
     except OSError:
-        return set()
+        return {}
     m = TIER_MARK.search(head)
-    return set(m.group(1).split()) & set(TIERS) if m else set()
+    if not m:
+        return {}
+    out = {}
+    for line in TIER_LINE.finditer(m.group(1)):
+        tier, rest = line.group(1), line.group(2)
+        if tier in TIERS:
+            out[tier] = [x.strip() for x in rest.split(",") if x.strip()]
+    return out
 
 
 def build_paths_from_markers(order):
@@ -470,28 +483,29 @@ def build_paths_from_markers(order):
         cfg.update({t + "Files": {} for t in TIERS})
         cfg["cases"] = {t: [] for t in TIERS}
         for mod in mods:                                   # STUDY_ORDER order == path order
-            readme = os.path.join(BASE_DIR, mod, "README.md")
-            mt = _file_tiers(readme)
-            if not mt:
+            decl = _declared_paths(os.path.join(BASE_DIR, mod, "README.md"))
+            if not decl:
                 continue
-            subs = sorted((_module_sourcefiles(mod) or set()) - {"README.md"})
-            for tier in mt:
+            real = _module_sourcefiles(mod) or set()
+            for tier, keep in decl.items():
                 cfg[tier].append(mod)
-                keep = ["README.md"] + [f for f in subs
-                                        if tier in _file_tiers(os.path.join(BASE_DIR, mod, f))]
-                if subs:                                   # only record when there is a choice
-                    cfg[tier + "Files"][mod] = keep
-        csroot = os.path.join(BASE_DIR, sec, "case_studies")
-        if os.path.isdir(csroot):
-            for name in sorted(os.listdir(csroot)):
-                if name in CS_EXCLUDE_DIRS:
-                    continue
-                cand = (os.path.join(csroot, name, "README.md") if os.path.isdir(os.path.join(csroot, name))
-                        else os.path.join(csroot, name))
-                if not (cand.endswith(".md") and os.path.isfile(cand)) or os.path.basename(cand) == "README.md" and not os.path.isdir(os.path.join(csroot, name)):
-                    continue
-                for tier in _file_tiers(cand):
-                    cfg["cases"][tier].append(os.path.relpath(cand, BASE_DIR))
+                for fn in keep:
+                    if fn not in real:
+                        problems.append(f"{mod}/README.md study-paths[{tier}]: '{fn}' is not a file in this module")
+                if "README.md" not in keep:
+                    problems.append(f"{mod}/README.md study-paths[{tier}]: must list README.md -- the module page is never optional")
+                if len(real) > 1:                          # only record when there is a choice
+                    cfg[tier + "Files"][mod] = [f for f in keep if f in real]
+        csidx = os.path.join(BASE_DIR, sec, "case_studies", "README.md")
+        for tier, names in _declared_paths(csidx).items():
+            for name in names:
+                rel = os.path.join(sec, "case_studies", name)
+                if any(p in CS_EXCLUDE_DIRS for p in rel.split(os.sep)):
+                    problems.append(f"{sec}/case_studies/README.md study-paths[{tier}]: '{name}' is under an excluded dir")
+                elif not os.path.isfile(os.path.join(BASE_DIR, rel)):
+                    problems.append(f"{sec}/case_studies/README.md study-paths[{tier}]: no such case study '{name}'")
+                else:
+                    cfg["cases"][tier].append(rel)
         if any(cfg[t] for t in TIERS):
             out[sec] = cfg
     return out, problems
@@ -572,28 +586,16 @@ def check_wiring(questions, strict):
         # ordered-subset property holds by construction -- what remains worth checking is
         # that every marker names a real tier, that a curated module's README carries one,
         # and that the section READMEs still describe what the markers say.
-        derived, _ = build_paths_from_markers(order)
+        derived, _derive_problems = build_paths_from_markers(order)
         if derived:
             tier_arrays = {t: {s: c[t] for s, c in derived.items()} for t in TIERS}
             tier_files = {t: {s: c[t + "Files"] for s, c in derived.items()} for t in TIERS}
             cases_map = {s: c["cases"] for s, c in derived.items()}
             path_secs = sorted(derived)
 
-            # a marker naming something that is not a tier is a silent no-op otherwise
-            for dp, dn, fs in os.walk(BASE_DIR):
-                dn[:] = [d for d in dn if d not in SKIP_SECTIONS and not d.startswith(".")]
-                for f in fs:
-                    if not f.endswith(".md"):
-                        continue
-                    fp = os.path.join(dp, f)
-                    try:
-                        mm = TIER_MARK.search(open(fp, encoding="utf-8").read(4000))
-                    except OSError:
-                        continue
-                    if mm:
-                        unknown = set(mm.group(1).split()) - set(TIERS)
-                        if unknown:
-                            errors.append(f"{os.path.relpath(fp, BASE_DIR)}: unknown tier(s) in marker: {sorted(unknown)}")
+            # a study-paths block naming a missing file, an unknown tier, or omitting
+            # README.md is a silent no-op otherwise -- surface it
+            errors.extend(_derive_problems)
 
             for sec in path_secs:
                 o = order.get(sec, [])

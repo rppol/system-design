@@ -1,7 +1,4 @@
 # Adapter vs Bridge vs Facade
-
-<!-- tiers: principal senior -->
-
 ## Overview
 
 All three patterns involve wrapping or composing other objects, but they serve fundamentally different purposes at different points in the software lifecycle.

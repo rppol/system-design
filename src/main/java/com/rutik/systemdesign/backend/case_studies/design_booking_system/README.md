@@ -1,7 +1,4 @@
 # Case Study: Seat Reservation System Under Concurrency
-
-<!-- tiers: senior -->
-
 ## Problem Statement
 
 Build a seat reservation system for high-demand events — concert ticketing, flight seat selection, or

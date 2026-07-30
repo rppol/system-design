@@ -1,7 +1,9 @@
 # Event Sourcing and CQRS
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Event sourcing is a persistence pattern where the application state is derived from an ordered, immutable log of events rather than storing the current state directly. Instead of `UPDATE orders SET status = 'SHIPPED'`, you append `OrderShipped{orderId, timestamp, trackingNumber}`. Current state is reconstructed by replaying events from the beginning. CQRS (Command Query Responsibility Segregation) separates the write model (commands that change state) from the read model (queries that return data), allowing each to be optimized independently. Event sourcing and CQRS are complementary and frequently combined.

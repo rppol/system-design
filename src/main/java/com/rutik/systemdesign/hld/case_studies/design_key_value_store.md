@@ -1,7 +1,4 @@
 # System Design: Distributed Key-Value Store
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: A distributed key-value store (Dynamo, Cassandra, Riak, Voldemort) is what you get when you take a single-node hash map — `put(key, value)`, `get(key)`, `delete(key)` — and ask "what happens when the machine holding this hash map dies?" The answer is **replication**, and replication immediately collides with the **CAP theorem**: if a network partition separates a client from two of a key's three replicas, do you (a) refuse the write/read until the partition heals (favoring Consistency), or (b) serve it from whatever replica is reachable and reconcile later (favoring Availability)? The Dynamo-lineage systems covered here choose **(b)** — they are **AP systems** — and the entire design is the set of mechanisms needed to make "write now, reconcile later" safe, fast, and operationally tractable at a scale of hundreds of nodes and hundreds of terabytes.

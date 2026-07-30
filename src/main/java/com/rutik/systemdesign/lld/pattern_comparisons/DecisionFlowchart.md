@@ -1,7 +1,4 @@
 # Design Pattern Decision Flowchart
-
-<!-- tiers: principal senior -->
-
 A comprehensive guide to choosing the right design pattern for your problem.
 
 ---

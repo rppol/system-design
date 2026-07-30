@@ -1,7 +1,4 @@
 # Proxy Pattern
-
-<!-- tiers: senior -->
-
 ## 1. Pattern Name & Category
 
 **Pattern:** Proxy

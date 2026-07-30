@@ -1,7 +1,4 @@
 # Instruction Tuning
-
-<!-- tiers: senior -->
-
 ## 1. Concept Overview
 
 Instruction tuning (also called supervised fine-tuning, SFT) is the process of fine-tuning a base language model on (instruction, response) pairs to teach it to follow natural language instructions. A base language model (e.g., LLaMA-3-8B-Base) predicts the next token given a sequence — it completes text but doesn't follow instructions or answer questions in a user-friendly way. Instruction tuning transforms this into an assistant model that responds helpfully to user requests.

@@ -1,7 +1,4 @@
 # System Design: Payment System
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > **Design intuition**: A payment system is the financial nervous system of every e-commerce, ride-share, or marketplace platform — and it is the one place in a system design interview where "eventually consistent" and "best effort" are not acceptable answers for the *ledger*, even though they're perfectly fine for the *notifications*. The entire design is an exercise in drawing a hard line between the parts that must be exactly-once and strongly consistent (the ledger, the charge itself) and the parts that can be asynchronous and eventually consistent (webhooks, analytics, reconciliation). Get that line wrong in either direction and you either build something that can't scale or something that can double-charge a customer.

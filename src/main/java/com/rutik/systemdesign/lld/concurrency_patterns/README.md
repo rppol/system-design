@@ -1,7 +1,9 @@
 # Concurrency Patterns
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md, ThreadSafeSingleton_README.md, ProducerConsumer_README.md, ReadWriteLock_README.md, ThreadPool_README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 Low-level design patterns that address coordination between threads sharing a JVM process. Each pattern targets a specific coordination failure mode.
 
 ---

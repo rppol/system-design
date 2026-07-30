@@ -1,7 +1,9 @@
 # Microservices Patterns in Java
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Pure-Java implementations of the distributed-systems patterns a senior engineer
 > is expected to reason about: Saga, transactional outbox, idempotency keys,
 > distributed tracing context propagation, the strangler fig migration, and the

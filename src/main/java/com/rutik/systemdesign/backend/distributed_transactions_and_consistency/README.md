@@ -1,7 +1,10 @@
 # Distributed Transactions and Consistency
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 **Cross-references:**
 - [Spring Transactions](../../spring/spring_transactions/README.md)
 - [Kafka Deep Dive](../kafka_deep_dive/README.md)

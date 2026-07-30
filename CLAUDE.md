@@ -450,24 +450,36 @@ silently dropped from the game or renders wrong. These rules are derived from
   subset, or when a section's **Interview-Specific Path drifts between its two
   sources**. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
   under their parent module's existing position.)
-- **Curated study paths live in a `<!-- tiers: -->` MARKER inside each file — that marker
-  is the single source of truth.** Directly under a file's H1:
+- **Curated study paths are declared ONCE per module, in a `<!-- study-paths -->` block in
+  that module's `README.md` — never scattered through the content.** Study files carry no
+  metadata of their own; a deep-dive sub-file is study content and stays study content.
 
-      # Strategy Pattern
+      # Creational Patterns — Master Index
 
-      <!-- tiers: senior -->
+      <!-- study-paths
+      senior: README.md, singleton/README.md, factory_method/README.md, builder/README.md
+      principal: README.md
+      files this module contributes to each curated path; omit a tier to leave it out
+      -->
 
-  An HTML comment renders as nothing on GitHub and in the reader, so it is invisible to a
-  human and greppable to a tool. Valid values: `senior`, `principal`, or both space-separated.
+  One line per tier, naming every file that tier takes — the module page plus whichever
+  sub-files that level actually needs. **Listing a tier puts the module in it; omitting the
+  tier leaves the module out.** `README.md` must always be listed (the module page is never
+  optional), and every named file must exist — both are FATAL under `--strict`. Nested
+  pattern READMEs are named as `singleton/README.md`; module ids stay 2 segments.
 
-  | Marker on… | Means |
-  |---|---|
-  | a module `README.md` | the module is in those tiers |
-  | a deep-dive sub-file | ONLY those tiers see that sub-file |
-  | a case-study file | that case study is in those tiers |
-  | *no marker* | Full path only — not in any curated tier |
+  Case studies work the same way, declared once in the section's
+  `<section>/case_studies/README.md`:
 
-  **The marker says WHETHER, never WHERE.** Order still comes from `STUDY_ORDER` in
+      <!-- study-paths
+      senior: design_banking_ledger/README.md, design_ecommerce_catalog/README.md
+      principal: design_monolith_to_polyglot_migration/README.md
+      -->
+
+  That block drives the **Level filter** on the Case Studies tab (All / Senior N / Principal
+  N), which persists in `sd_case_tier` independently of the module path.
+
+  **The block says WHETHER, never WHERE.** Order still comes from `STUDY_ORDER` in
   `game/app.js`, so a derived path is an ordered subset by construction and cannot drift
   out of order. `extract.py` walks the tree, reads every marker, and emits
   `game/questions/paths.json` — generated and gitignored exactly like the question banks,
@@ -488,11 +500,11 @@ silently dropped from the game or renders wrong. These rules are derived from
   each principal list is material senior never sees. Do not "promote" a module to principal
   because it is advanced.
 
-  **Adding a module or sub-file:** decide its tiers and write the marker. That is the whole
-  wiring step — no array to edit, nothing to keep in sync. Omitting it is a real choice
-  (Full-path only), and `--strict` WARNS when a tiered module has sub-files that are all
-  unmarked, so a new deep-dive cannot silently re-inflate a curated path. An unknown tier
-  name in a marker is a FATAL error.
+  **Adding a module:** write the block in its README. **Adding a deep-dive sub-file:** add
+  its filename to whichever tier lines in the PARENT module's block should carry it — and to
+  neither, if it is Full-path depth. That is the whole wiring step; there is no array to edit
+  and nothing to keep in sync. A sub-file that exists but appears in no tier line is simply
+  Full-path only, which is a legitimate and common choice.
 
 - **Legacy note — the interview subset used to be a DUAL-SOURCE list.** It
   lives in `game/app.js` (`STUDY_PATHS.<section>.interview`, driving the Study

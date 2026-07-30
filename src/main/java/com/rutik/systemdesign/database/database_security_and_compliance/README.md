@@ -1,7 +1,9 @@
 # Database Security and Compliance
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Database security protects data from unauthorized access, modification, and leakage. Compliance ensures the database meets regulatory requirements (GDPR, PCI DSS, HIPAA, SOC 2) around data handling, access control, audit logging, and data lifecycle management. Security and compliance overlap extensively: most compliance requirements translate directly to technical security controls.

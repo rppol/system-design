@@ -1,7 +1,4 @@
 # Rate Limiter — Low-Level Design
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: A rate limiter is a single decision: given a client identifier and the current time, return `true` (allow) or `false` (deny). The entire interview is about *how that decision is made and stored* — four classic algorithms (Fixed Window Counter, Sliding Window Log, Sliding Window Counter, Token Bucket / Leaky Bucket) answer the question differently, trading off accuracy, memory, and burst tolerance.

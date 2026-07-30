@@ -1,7 +1,9 @@
 # Container and Deployment Patterns
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Container and deployment patterns address how to package, configure, and deploy backend services reliably and repeatedly. Docker multi-stage builds produce minimal, secure container images. Kubernetes deployment strategies (rolling update, blue-green, canary) control how new versions replace old ones with varying tradeoffs of speed, risk, and resource cost. Health probes gate traffic and trigger restarts. Resource requests and limits govern scheduling and throttling behavior. These patterns collectively enable zero-downtime deployments and predictable system behavior.

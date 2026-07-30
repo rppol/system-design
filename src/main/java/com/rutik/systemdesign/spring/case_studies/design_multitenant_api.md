@@ -1,7 +1,4 @@
 # Case Study: Multi-Tenant SaaS REST API with Schema-per-Tenant
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > Think of schema-per-tenant as giving every customer their own walled garden inside one greenhouse. The greenhouse (PostgreSQL server) is shared, but each garden's soil, plants, and layout are completely separate — a bug in garden A cannot accidentally pull up plants in garden B.

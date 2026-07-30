@@ -1,7 +1,4 @@
 # Singleton Pattern
-
-<!-- tiers: senior -->
-
 ## 1. Pattern Name & Category
 
 **Name:** Singleton

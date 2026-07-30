@@ -1,7 +1,10 @@
 # Reasoning Models
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Reasoning models are LLMs that spend significantly more computation at inference time by generating extended internal "thinking" before producing a final answer. Unlike standard LLMs that generate the next token as fast as possible, reasoning models simulate deliberate, step-by-step thinking — exploring multiple approaches, self-correcting errors, and verifying answers before committing.

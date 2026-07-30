@@ -1,7 +1,4 @@
 # Interface Segregation Principle (ISP)
-
-<!-- tiers: senior -->
-
 **Part of the SOLID series** | [Back to Overview](README.md)
 
 ---

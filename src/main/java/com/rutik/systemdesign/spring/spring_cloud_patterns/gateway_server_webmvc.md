@@ -1,7 +1,4 @@
 # Gateway Server WebMVC — the Servlet Flavour of Spring Cloud Gateway
-
-<!-- tiers: principal senior -->
-
 Deep dive under [Spring Cloud Patterns](README.md), whose every code sample is the reactive
 flavour: Netty, `Mono`, `GlobalFilter`. This file is the other half — the Servlet flavour,
 `spring-cloud-gateway-server-webmvc`, where a route is a WebMvc.fn `RouterFunction`, a filter

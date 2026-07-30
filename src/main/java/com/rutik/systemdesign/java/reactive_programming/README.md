@@ -1,7 +1,9 @@
 # Reactive Programming (Project Reactor & RxJava 3)
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > **Pure Java only.** This module covers Reactor Core and RxJava 3 as standalone
 > libraries — the reactive *foundation* underneath Spring WebFlux. Spring integration
 > lives in [`../../spring/spring_webflux/`](../../spring/spring_webflux/README.md).

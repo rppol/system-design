@@ -1,7 +1,10 @@
 # Foundations & Architecture
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, attention_mechanisms.md, positional_encoding.md, state_space_models_and_linear_attention.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

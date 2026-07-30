@@ -1,7 +1,4 @@
 # Vending Machine — State Pattern Deep Dive
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **One-line analogy**: Vending Machine design is the canonical State pattern demonstration — the same physical button does completely different things depending on whether you've inserted money yet.

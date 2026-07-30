@@ -1,7 +1,9 @@
 # Pydantic v2 — Deep Dive
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md, pydantic_core_and_performance.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > See `../../the_type_system_and_typing/README.md` for `TypeVar`, `Protocol`, and `Annotated` types used by Pydantic.
 > See `../dependency_injection_in_fastapi/README.md` for how Pydantic models are used as request bodies in FastAPI routes.
 

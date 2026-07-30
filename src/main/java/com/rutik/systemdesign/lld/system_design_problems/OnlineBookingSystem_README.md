@@ -1,7 +1,4 @@
 # Online Booking System — Builder + Strategy + Observer
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **One-line analogy**: Online Booking is a concurrency problem dressed as a design problem — the interesting challenge isn't the class hierarchy, it's preventing two users from booking the same seat simultaneously at scale.

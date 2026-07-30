@@ -1,7 +1,9 @@
 # Processes, Threads, and Context Switching
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > A process is a sealed container with its own world; a thread is a worker sharing the container with siblings.
 
 ---

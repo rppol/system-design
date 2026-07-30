@@ -1,7 +1,10 @@
 # Design Pattern Comparisons - Master Reference
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, Strategy_vs_State.md, Decorator_vs_Proxy.md, Factory_vs_AbstractFactory_vs_Builder.md, Observer_vs_Mediator.md, Adapter_vs_Bridge_vs_Facade.md, DecisionFlowchart.md, InterviewQuestions.md
+principal: README.md, Strategy_vs_State.md, Observer_vs_Mediator.md, Adapter_vs_Bridge_vs_Facade.md, Template_vs_Strategy.md, DecisionFlowchart.md, PatternCombinations.md, InterviewQuestions.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 This directory contains deep-dive comparisons of commonly confused GoF design patterns. Each file provides side-by-side analysis, code examples, and interview guidance.
 
 ---

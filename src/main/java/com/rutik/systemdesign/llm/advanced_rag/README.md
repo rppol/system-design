@@ -1,7 +1,10 @@
 # Advanced RAG
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, agentic_rag.md, graph_rag.md, multimodal_rag.md, query_transformation.md
+principal: README.md, agentic_rag.md, graph_rag.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 [Standard RAG](../rag_fundamentals/README.md) (retrieve → generate) works well for simple Q&A but breaks down on complex queries: multi-hop questions, queries requiring synthesis across many documents, questions about structured data, or tasks where the LLM needs to iteratively refine its retrieval strategy.

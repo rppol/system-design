@@ -1,7 +1,9 @@
 # Kubernetes Workloads & Objects
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Phase 2 — Containers & Kubernetes · Difficulty: Intermediate
 
 If [kubernetes_architecture](../kubernetes_architecture/) explains *how* the cluster works, this module covers *what you actually declare*: Pods, the controllers that manage them (Deployment, StatefulSet, DaemonSet, Job/CronJob), and the objects that connect and configure them (Service, Ingress, ConfigMap, Secret). Choosing the right workload object and configuring probes and update strategy correctly is the difference between a self-healing system and one that drops traffic on every deploy.

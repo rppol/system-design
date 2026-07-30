@@ -1,7 +1,9 @@
 # Prompt Engineering
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Prompt engineering is the practice of designing inputs to LLMs to elicit the best possible outputs. It is the highest-leverage, lowest-cost way to improve LLM performance — no training required, just smarter input construction.

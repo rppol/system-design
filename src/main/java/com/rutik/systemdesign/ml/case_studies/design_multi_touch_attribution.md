@@ -1,7 +1,4 @@
 # Design a Multi-Touch Attribution System
-
-<!-- tiers: principal -->
-
 > "Attribution is like dividing credit for a team goal — the question is whether you use a rule (the scorer gets 100%) or a model (everyone who touched the ball gets partial credit proportional to their causal contribution)."
 
 **Key insight:** All rule-based attribution models (first-touch, last-touch, linear, time-decay) are wrong by construction — they assign credit deterministically without estimating what would have happened without each channel. The only valid attribution framework is counterfactual: "how much did this channel *cause* conversions that would not have happened otherwise?" Getting this right is worth tens of millions in annual media budget reallocation.

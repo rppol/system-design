@@ -1,7 +1,4 @@
 # Design a Social Media Content Feed Ranking System (Twitter/LinkedIn Scale)
-
-<!-- tiers: principal -->
-
 ## Problem Statement
 
 Design a content feed ranking system for a social media platform with 500 million users and

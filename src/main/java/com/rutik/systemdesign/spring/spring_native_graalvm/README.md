@@ -1,7 +1,9 @@
 # Spring Native & GraalVM (AOT)
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > How Spring Boot 3 turns a reflection-and-proxy-heavy framework into a GraalVM
 > native executable: ahead-of-time (AOT) processing, reachability metadata
 > (reflection/resource/proxy hints), build-time vs runtime initialization, and the

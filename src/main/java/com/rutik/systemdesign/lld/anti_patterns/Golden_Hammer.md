@@ -1,7 +1,4 @@
 # Anti-Pattern: Golden Hammer
-
-<!-- tiers: principal -->
-
 ## What It Is
 
 The Golden Hammer anti-pattern occurs when a developer or team over-applies a familiar technology, tool, or technique to every problem, regardless of whether it is the right fit. The name comes from the saying: "If all you have is a hammer, everything looks like a nail."

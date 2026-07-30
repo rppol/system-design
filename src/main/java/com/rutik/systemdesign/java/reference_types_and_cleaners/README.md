@@ -1,7 +1,9 @@
 # Reference Types & Cleaners
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Every object in a Java program is reachable through a graph of references rooted at thread stacks, static fields, and JNI handles — and the garbage collector's entire job is to walk that graph and reclaim whatever it cannot reach. By default, every reference is a *strong* reference: as long as one exists, the object is off-limits to the collector, no matter how much memory pressure the JVM is under. There is no `retain`/`release`, no reference counting — only reachability.

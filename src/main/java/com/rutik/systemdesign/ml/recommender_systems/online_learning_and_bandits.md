@@ -1,7 +1,4 @@
 # Online Learning and Bandit Algorithms
-
-<!-- tiers: principal -->
-
 ## 1. Concept Overview
 
 Bandit algorithms solve the explore-exploit dilemma in real-time recommendation: should the system exploit known good options (show items it believes the user will like) or explore uncertain options (show items where it has little information, potentially discovering something better)? This tradeoff is mathematically formalized as regret minimization — minimizing the cumulative reward lost by not always choosing the optimal action.

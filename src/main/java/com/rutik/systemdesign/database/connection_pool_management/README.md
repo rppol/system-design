@@ -1,7 +1,9 @@
 # Connection Pool Management
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 A database connection is expensive: TCP handshake (~0.3ms), TLS negotiation (~1ms), PostgreSQL authentication + session init (~2–5ms) add up to ~5–10ms per connection. Under load, establishing a new connection per request would consume more time than many queries take. A connection pool maintains a pre-established set of connections that are checked out, used, and returned — amortizing the connection overhead across thousands of requests.

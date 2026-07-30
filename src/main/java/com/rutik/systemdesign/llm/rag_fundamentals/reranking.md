@@ -1,7 +1,4 @@
 # Reranking
-
-<!-- tiers: principal senior -->
-
 ## 1. Concept Overview
 
 Reranking is a second-stage retrieval step that takes a large pool of candidate documents from initial retrieval (typically top-100) and reorders them to select the most relevant for LLM context (typically top-5 to 10). The key insight is a two-stage architecture: fast [bi-encoders](../embeddings_and_similarity_search/README.md) retrieve broadly with high recall; slower but more accurate cross-encoders rerank to achieve high precision.

@@ -1,7 +1,9 @@
 # CI/CD Platforms
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Phase 3 — CI/CD & GitOps · Difficulty: Intermediate
 
 Knowing CI/CD *principles* (see [ci_cd_fundamentals](../ci_cd_fundamentals/)) is necessary but not sufficient — you must also know the *platforms* that implement them and how to choose between them. GitHub Actions, GitLab CI, Jenkins, and Kubernetes-native engines (Tekton, Argo Workflows) make very different tradeoffs around hosting, configuration model, ecosystem, and where they run. This module compares them and covers the cross-cutting concerns (runners, secrets, reusability) that apply to all.

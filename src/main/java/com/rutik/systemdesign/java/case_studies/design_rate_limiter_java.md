@@ -1,7 +1,4 @@
 # Case Study: Design a Rate Limiter in Pure Java
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > A token bucket is a cookie jar that refills at a fixed rate. Each request grabs one cookie; the jar cannot hold more than `B` cookies. If it's empty, you wait or leave. The filling speed sets your sustained rate; the jar size grants short bursts.

@@ -1,7 +1,4 @@
 # System Design: Uber
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: Uber's core challenge is real-time geospatial matching at scale — matching millions of driver locations (updating every 4 seconds) to millions of ride requests, with sub-second response time. The key data structures are geohashing (for proximity queries) and the dispatch algorithm (ETA-based matching).

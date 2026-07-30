@@ -1,7 +1,4 @@
 # Case Study: Design ChatGPT
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: ChatGPT is a conversational interface over a streaming LLM API — the complexity lies not in the model calls but in the serving infrastructure: continuous batching to handle millions of concurrent users, KV cache management for conversation history, and the real-time streaming architecture that makes responses feel instant.

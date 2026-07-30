@@ -1,7 +1,4 @@
 # Text Classification
-
-<!-- tiers: senior -->
-
 > This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
 > It covers the classifier side of NLP: task framing, feature representations, the classical linear
 > baselines (Naive Bayes, logistic regression, linear SVM, fastText), the first neural text model

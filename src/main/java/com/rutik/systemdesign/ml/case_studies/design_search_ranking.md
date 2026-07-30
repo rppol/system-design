@@ -1,7 +1,4 @@
 # Design a Search Ranking System (E-commerce Scale)
-
-<!-- tiers: senior -->
-
 ## Problem Statement
 
 Design a search ranking system for an e-commerce platform. Given a text query (e.g., "red running shoes size 10"), return the top 20 most relevant products within 100ms P99. The system must balance three objectives: relevance (match user intent), conversion (surface products users actually buy), and business objectives (margin, inventory clearance). The system processes 50K queries per second across 100M users and 10M product listings. Click data is abundant but biased toward top positions; purchase signal is sparse but high-quality.

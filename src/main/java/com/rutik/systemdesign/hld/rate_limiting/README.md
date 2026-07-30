@@ -1,7 +1,9 @@
 # Rate Limiting
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 **Rate limiting** is a control mechanism that caps how many requests a client — identified by IP address, user ID, API key, or tenant — can make to a service within a given time window. It is one of the first lines of defense in any production system: a gate between untrusted traffic and the resources (compute, database connections, third-party API budgets) that traffic would otherwise consume without bound.

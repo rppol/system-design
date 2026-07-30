@@ -1,7 +1,4 @@
 # Observer vs Mediator
-
-<!-- tiers: principal senior -->
-
 ## Overview
 
 Both Observer and Mediator address communication between multiple objects. Observer creates a direct publish-subscribe relationship between objects. Mediator introduces a central hub to eliminate direct dependencies between objects.

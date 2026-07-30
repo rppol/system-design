@@ -1,7 +1,10 @@
 # Spring Messaging
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Spring Messaging provides a unified abstraction layer over message-oriented middleware (MOM), enabling applications to send, receive, and process messages asynchronously across different transport technologies. The Spring ecosystem covers Kafka (via spring-kafka), RabbitMQ (via spring-amqp), and a binder-agnostic abstraction (Spring Cloud Stream). Additionally, Spring's @Async mechanism enables within-process asynchronous execution, and Spring WebSocket enables full-duplex, real-time communication over STOMP.

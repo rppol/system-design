@@ -1,7 +1,9 @@
 # Collections Internals
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Java's collections framework is the most-used part of the standard library. Every Java developer uses `HashMap`, `ArrayList`, `HashSet`, and `LinkedList` daily — but senior engineers understand *why* they work the way they do. HashMap internals, the treeification threshold, ArrayList growth factor, and the fail-fast iterator mechanism appear in nearly every senior Java interview.

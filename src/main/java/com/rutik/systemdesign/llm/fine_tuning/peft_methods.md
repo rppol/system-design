@@ -1,7 +1,4 @@
 # PEFT Methods
-
-<!-- tiers: senior -->
-
 ## 1. Concept Overview
 
 Parameter-Efficient Fine-Tuning (PEFT) is a family of techniques that fine-tune large pre-trained models by training only a small fraction of parameters (0.001-1%) while keeping most of the model frozen. This contrasts with full fine-tuning, which updates all parameters. PEFT methods enable adapting large models on limited hardware while preserving the majority of pre-trained knowledge.

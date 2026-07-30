@@ -1,7 +1,10 @@
 # Distributed Transactions
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 A distributed transaction is an atomic operation spanning multiple independent services, databases, or nodes. ACID guarantees (atomicity, consistency, isolation, durability) that are trivially enforced within a single database become fundamentally hard when data lives across service boundaries. The core challenge: no single node controls all the resources, so "commit or abort together" requires coordination, and coordination introduces failure scenarios that cannot be fully eliminated.

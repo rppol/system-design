@@ -1,7 +1,9 @@
 # Build Tools — Maven & Gradle
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > How Maven's fixed lifecycle and Gradle's task graph actually compile, test,
 > cache, and package a JVM project — the POM and the build script, the
 > dependency-mediation algorithm that silently picks a transitive version for

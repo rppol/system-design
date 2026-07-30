@@ -1,7 +1,4 @@
 # Yield Dependencies and Scopes in FastAPI
-
-<!-- tiers: senior -->
-
 ---
 
 ## 1. Concept Overview

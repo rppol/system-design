@@ -1,7 +1,4 @@
 # ML Training Pipeline Design
-
-<!-- tiers: senior -->
-
 ## 1. Concept Overview
 
 An ML training pipeline is an automated, repeatable workflow that takes raw data and produces a validated, registered model artifact ready for deployment. Unlike a one-off Jupyter notebook training run, a production training pipeline is a versioned, monitored system that runs on a schedule or in response to triggers.

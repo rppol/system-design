@@ -1,7 +1,10 @@
 # Structural Patterns
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, adapter/README.md, decorator/README.md, proxy/README.md, facade/README.md, composite/README.md
+principal: README.md, bridge/README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 Structural patterns deal with object composition — how classes and objects are combined to form larger, more capable structures. They answer the question: "How do these pieces fit together?"
 
 ---

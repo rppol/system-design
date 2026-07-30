@@ -1,7 +1,4 @@
 # CPython Event Loop Internals
-
-<!-- tiers: senior -->
-
 Deep-dive sub-file extending [asyncio & Event Loop](../README.md).
 
 ---

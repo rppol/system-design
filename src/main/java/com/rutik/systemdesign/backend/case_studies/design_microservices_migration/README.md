@@ -1,7 +1,4 @@
 # Case Study: Microservices Migration via Strangler Fig
-
-<!-- tiers: principal -->
-
 ## Problem Statement
 
 A mid-size e-commerce platform runs on a Spring Boot monolith (500K lines of Java, 50 tables in one PostgreSQL database, deployed as a single WAR). Symptoms:

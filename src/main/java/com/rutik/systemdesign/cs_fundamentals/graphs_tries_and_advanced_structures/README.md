@@ -1,7 +1,9 @@
 # Graphs, Tries, and Advanced Structures
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 This module covers the data structures that appear in the hardest tier of coding interviews: **graphs** (for modelling relationships), **tries** (for prefix/string search), **union-find / DSU** (for connectivity), **segment trees** (for range queries with updates), **Fenwick trees / BITs** (for prefix sums), and **Bloom filters** (for probabilistic membership).

@@ -1,7 +1,9 @@
 # Adversarial Machine Learning and Robustness
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Phase 7 (Advanced Topics). This module covers attacks against ML models (evasion,
 > poisoning, extraction, inference) and the defenses that harden them. The LLM analog —
 > prompt injection, jailbreaks, and content safety — lives in `llm/llm_security/` and

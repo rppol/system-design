@@ -1,7 +1,4 @@
 # Design a Custom Thread Pool (Java)
-
-<!-- tiers: senior -->
-
 > **A thread pool is a pre-paid workforce.**  
 > Creating a platform thread costs tens of microseconds of CPU (~35 µs measured for
 > create + start + join on a modern machine) plus a fresh ~1 MB native stack. A pool

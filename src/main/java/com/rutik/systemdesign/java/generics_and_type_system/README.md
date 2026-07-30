@@ -1,7 +1,9 @@
 # Generics & Type System
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md, type_inference_and_bounds.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | File | Topic | Q&As |

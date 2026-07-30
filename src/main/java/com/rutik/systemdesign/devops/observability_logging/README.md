@@ -1,7 +1,9 @@
 # Logging & Log Aggregation
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Phase 6 — Observability & SRE · Difficulty: Intermediate
 
 Logs are the **per-event, high-cardinality record of what a system did** — the pillar you reach for when metrics tell you *that* something broke and you need to know *exactly what and why*. Log aggregation collects logs from thousands of ephemeral containers into a central, searchable store. This module covers the two dominant architectures (index-everything EFK/ELK vs. label-and-store Loki), structured logging, parsing pipelines, and the retention/sampling discipline that keeps logging from bankrupting you.

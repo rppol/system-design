@@ -1,7 +1,4 @@
 # Agentic RAG
-
-<!-- tiers: principal senior -->
-
 ## 1. Concept Overview
 
 Agentic RAG (also called iterative or self-reflective RAG) replaces the single retrieve-then-generate step with a loop in which the LLM actively decides what to retrieve, evaluates whether it has sufficient information, and continues retrieving until it can answer confidently. The LLM acts as an agent directing the retrieval process rather than a passive consumer of a single retrieval result.

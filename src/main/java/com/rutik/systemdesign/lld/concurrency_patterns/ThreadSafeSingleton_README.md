@@ -1,7 +1,4 @@
 # Thread-Safe Singleton Pattern
-
-<!-- tiers: senior -->
-
 ## Table of Contents
 1. [What is Singleton?](#what-is-singleton)
 2. [Why Thread Safety Matters](#why-thread-safety-matters)

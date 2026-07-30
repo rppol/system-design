@@ -1,7 +1,9 @@
 # Collections & Data Structures
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Python's built-in collections (`list`, `dict`, `set`, `tuple`) are implemented in CPython as highly optimized C structures. The `collections` module extends these with specialized containers designed for common algorithmic patterns. The `heapq`, `bisect`, and `array` modules round out the standard library toolkit for performance-critical code.

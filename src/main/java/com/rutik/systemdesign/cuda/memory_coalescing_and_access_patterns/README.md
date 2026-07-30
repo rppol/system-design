@@ -1,7 +1,9 @@
 # Memory Coalescing & Access Patterns
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Memory coalescing is the hardware mechanism by which a GPU's memory controller merges the individual global-memory requests issued by the 32 threads of a warp into the smallest possible number of physical bus transactions. It is the single highest-leverage performance topic in CUDA: on nearly every profiled "slow kernel" ticket, the first thing a senior GPU engineer checks is whether the warp's addresses are coalesced, because an uncoalesced access pattern can silently throw away 50-87.5% of the memory bandwidth a kernel actually has available.

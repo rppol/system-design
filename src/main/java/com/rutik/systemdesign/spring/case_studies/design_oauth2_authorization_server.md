@@ -1,7 +1,4 @@
 # Design: OAuth 2.1 Authorization Server (Spring Authorization Server)
-
-<!-- tiers: principal -->
-
 > **"A trusted notary that issues time-limited credentials."**
 > An authorization server is the single source of trust for "who are you and what can you do."
 > It does not know your business logic — it only issues signed tokens that downstream services

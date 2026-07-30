@@ -1,7 +1,4 @@
 # Read-Write Lock Pattern
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **One-line analogy**: Read-Write Lock is like a library reading room — many people can read the same book simultaneously, but when someone needs to rewrite it, everyone must leave and no one enters until they're done.

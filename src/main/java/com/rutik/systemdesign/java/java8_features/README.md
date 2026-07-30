@@ -1,7 +1,9 @@
 # Java 8 Features
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Java 8 (March 2014) was the most significant Java release since Java 5. It introduced **lambdas**, **functional interfaces**, the **Stream API**, **Optional**, **default/static interface methods**, and the **new Date/Time API**. Together, these features brought first-class functional programming to Java without breaking backward compatibility.

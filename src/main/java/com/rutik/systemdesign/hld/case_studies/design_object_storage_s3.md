@@ -1,7 +1,4 @@
 # System Design: Distributed Object Storage (S3-Style)
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > **Design intuition**: An object storage system is what you get when you strip a filesystem down to its absolute essentials — `PUT(key, bytes)`, `GET(key)`, `DELETE(key)` — and then rebuild durability and scale from scratch on top of that minimal interface. There is no directory tree, no in-place edit, no `seek()`-and-overwrite; every object is an immutable blob identified by a flat `(bucket, key)` pair. That simplicity is the entire point: by refusing to support POSIX semantics (partial writes, file locks, hierarchical renames), the system can shard objects across tens of thousands of machines with almost no coordination, replicate or erasure-code each object independently, and scale a single bucket to trillions of keys without ever needing a global lock. Everything else — multipart upload, versioning, lifecycle tiering, strong consistency — is built on this one constraint.

@@ -1,5 +1,11 @@
 # Spring Case Studies — Learning Path
 
+<!-- study-paths
+senior: design_api_gateway.md, design_distributed_caching.md, design_distributed_rate_limiter_spring.md, design_batch_pipeline.md, design_realtime_notification_service.md
+principal: design_multitenant_api.md, design_oauth2_authorization_server.md, design_event_driven_microservice.md, design_idempotent_payment_api.md
+case studies in each curated path; the Level filter reads this
+-->
+
 Nine end-to-end case studies covering senior Spring engineer and backend system design interview scenarios. All nine use the 11-section principal template (requirements → scale → architecture → deep dives → design decisions → real world → tools → playbook → pitfalls → capacity → interview). Four cross-cutting shared-primitive files in `cross_cutting/` cover operational patterns referenced by multiple case studies.
 
 ---

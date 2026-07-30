@@ -1,7 +1,4 @@
 # Case Study: Payment Processor with Saga Orchestration
-
-<!-- tiers: principal senior -->
-
 ## Intuition
 
 > **Design intuition**: A payment processor is not a service that moves money. It is a service that *remembers* money movement so precisely that any two parties who disagree — you, the PSP, the card network, the merchant, the customer's bank — can be shown, from an immutable record, which one of them is wrong. The distributed-systems work (saga, outbox, idempotency) exists only to make that record trustworthy while four services and one external gateway all try to fail at different moments.

@@ -1,7 +1,9 @@
 # Information Retrieval & Search
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Information retrieval (IR) is the problem of taking a query and a corpus of documents and returning the subset most relevant to that query, ordered so the best answers appear first. Formally: given a query q and a corpus D = {d1, ..., dN} (N often in the millions or billions), produce a ranked top-K list by an estimated relevance score rel(q, d). This is the machinery behind every search box — web search, e-commerce product search, code search, enterprise document search — and, since 2023, the "R" in every RAG system: an LLM only answers correctly if the ranked list handed to it actually contains the answer near the top.

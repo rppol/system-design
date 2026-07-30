@@ -1,7 +1,9 @@
 # Greedy Algorithms and Divide & Conquer
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > Greedy bets on the local optimum; divide and conquer bets on clean sub-problem independence.
 
 ---

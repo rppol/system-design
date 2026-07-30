@@ -1,7 +1,4 @@
 # System Design: Notification System
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: A notification system is a *fan-out and routing* problem dressed up as a messaging problem. Every other service in the company (Order, Chat, Marketing, Fraud, Payments) wants to tell a user "something happened" — but each user has different channels they're reachable on (push, SMS, email, in-app), different preferences (opt-in/out per category), different timezones (quiet hours), and different urgency tolerances (a fraud alert can't wait, a "30% off" promo can). The system's job is to take a flood of "something happened" events from dozens of producers and turn each one into the *right* message, on the *right* channel, at the *right* time, exactly once — without letting a slow SMS provider block a time-critical push, and without tripping a third-party rate limit when 100 million users need to hear about something at once.

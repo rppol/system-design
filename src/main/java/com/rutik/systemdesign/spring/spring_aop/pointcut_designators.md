@@ -1,7 +1,4 @@
 # Pointcut Designators — Deep Dive
-
-<!-- tiers: senior -->
-
 Reference baseline for every claim on this page: **Spring Boot 4.1.x / Spring Framework 7.0.8 / AspectJ weaver 1.9.25.1 / Java 25 LTS**. Spring Framework 7 keeps a JDK 17 baseline while recommending JDK 25, and it still generates class proxies with its own repackaged CGLIB (`org.springframework.cglib.proxy.Enhancer`, shaded into `spring-core`) — not Byte Buddy.
 
 ---

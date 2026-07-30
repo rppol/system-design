@@ -1,7 +1,4 @@
 # Pattern Combinations Guide
-
-<!-- tiers: principal -->
-
 Design patterns rarely appear in isolation. Real systems use them together — some combinations are so common they're practically standard idioms. This guide documents the most powerful pattern pairs, how they interact, and warns about combinations that cause problems.
 
 ---

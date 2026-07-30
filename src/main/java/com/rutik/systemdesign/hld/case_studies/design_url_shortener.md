@@ -1,7 +1,4 @@
 # System Design: URL Shortener (like bit.ly)
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: A URL shortener is the "Hello World" of system design — it seems simple (store a mapping, redirect on lookup) but teaches all the fundamentals: hash function choice, database schema, caching strategy (reads are 100:1 over writes), and analytics pipeline. Master this and you understand distributed system basics.

@@ -1,7 +1,4 @@
 # Design a Credit Risk Scoring System
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > A credit risk model is like a judge who must explain every ruling in plain language and whose decisions are reviewed by regulators who can overturn them. Accuracy matters, but so does the ability to articulate the reasoning — even when the reasoning is uncomfortable.

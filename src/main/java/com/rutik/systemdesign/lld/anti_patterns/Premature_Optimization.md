@@ -1,7 +1,4 @@
 # Premature Optimization Anti-Pattern
-
-<!-- tiers: principal -->
-
 ## Overview
 
 Premature Optimization is the practice of investing engineering effort in performance improvements before identifying, measuring, or confirming that a performance problem actually exists. It is one of the most costly anti-patterns because it trades two valuable assets — code readability and development velocity — for a performance gain that may be immeasurable, irrelevant, or in the wrong place entirely. The anti-pattern was most famously characterized by Donald Knuth in "Structured Programming with go to Statements" (ACM Computing Surveys 6:4, December 1974, p.268). The sentence is almost always quoted with its two halves cut off, which reverses the advice; in full it reads: *"We should forget about small efficiencies, say about 97% of the time: premature optimization is the root of all evil. Yet we should not pass up our opportunities in that critical 3%."* Knuth is not saying never optimize — he is saying find the 3% first, and he says so in the same breath. Engineers who fall into this trap often do so with good intentions — they want the system to be fast — but they optimize based on intuition rather than evidence, wasting time on micro-optimizations while true bottlenecks go unaddressed. The result is code that is harder to read, harder to maintain, and often no faster than the naive solution.

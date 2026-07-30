@@ -1,7 +1,4 @@
 # Case Study: Design Notion AI (Permission-Aware AI Assistant for Collaborative Workspace)
-
-<!-- tiers: senior -->
-
 ## Intuition
 
 > **Design intuition**: Notion AI is a permission-aware RAG system embedded in a collaborative document workspace -- the core challenge is not LLM generation quality but ensuring every AI response respects the requesting user's exact permission set across a deeply nested workspace hierarchy. A wrong answer is bad; an answer that leaks content from a page the user cannot access is a security incident.

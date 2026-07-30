@@ -1,7 +1,10 @@
 # Testing — JUnit 6 (Jupiter) & Mockito
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Testing in Java is a discipline built on three interacting tools: **JUnit** (the test framework — lifecycle, assertions, parameterization), **Mockito** (the mocking framework — replacing collaborators with controllable doubles), and design principles that make code testable in the first place.

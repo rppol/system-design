@@ -1,7 +1,4 @@
 # Multi-Agent Security: Cross-Agent Injection, Collusion, and Capability Scoping
-
-<!-- tiers: principal senior -->
-
 > Extends [Agent-to-Agent Protocols](agent_to_agent_protocols.md) §5.6 (Trust Boundary Model) and
 > Pitfall 5 (confused deputy) from "which credentials does an HTTP request carry" to "what should
 > an agent DO when another agent's natural-language output might itself be an attack." For the

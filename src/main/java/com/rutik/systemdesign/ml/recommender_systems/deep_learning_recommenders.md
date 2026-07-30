@@ -1,7 +1,4 @@
 # Deep Learning Recommenders
-
-<!-- tiers: senior -->
-
 ## 1. Concept Overview
 
 Deep learning recommenders replace hand-crafted similarity functions and shallow matrix factorization with learned neural representations that can capture complex, non-linear interactions between users, items, and context. They are the foundation of modern large-scale recommendation systems at Google (Wide & Deep, YouTube deep candidate generation and its two-tower successors), Meta (DLRM), and Pinterest (PinSage).

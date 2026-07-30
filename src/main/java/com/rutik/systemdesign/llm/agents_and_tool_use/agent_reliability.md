@@ -1,7 +1,4 @@
 # Agent Reliability — Deep Dive
-
-<!-- tiers: senior -->
-
 ---
 
 ## 1. Concept Overview

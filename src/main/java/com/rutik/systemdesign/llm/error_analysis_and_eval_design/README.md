@@ -1,7 +1,10 @@
 # Error Analysis & Eval Design
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Most teams shipping an LLM product can measure. Very few can say **what they should be measuring**.

@@ -1,7 +1,4 @@
 # Template Method vs Strategy Pattern
-
-<!-- tiers: principal -->
-
 ## Quick Summary
 
 - **Template Method**: Defines the *skeleton* of an algorithm in a base class; subclasses override specific steps (uses inheritance).

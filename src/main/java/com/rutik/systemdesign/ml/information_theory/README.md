@@ -1,7 +1,9 @@
 # Information Theory for ML
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Information theory, founded by Claude Shannon in his 1948 paper "A Mathematical Theory of Communication" (Bell System Technical Journal), provides the mathematical framework for quantifying information, uncertainty, and the cost of encoding messages. In machine learning, information theory concepts appear throughout: entropy measures the uncertainty in a label distribution, cross-entropy loss is the standard classification objective, KL divergence regularizes variational autoencoders and knowledge distillation, mutual information drives feature selection, and information gain is the splitting criterion in decision tree learning.

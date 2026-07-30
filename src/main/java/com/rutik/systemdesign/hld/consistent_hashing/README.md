@@ -1,7 +1,9 @@
 # Consistent Hashing — High-Level Design
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Table of Contents
 1. [Overview and Motivation](#overview-and-motivation)
 2. [The Problem with Naive Modulo Hashing](#the-problem-with-naive-modulo-hashing)

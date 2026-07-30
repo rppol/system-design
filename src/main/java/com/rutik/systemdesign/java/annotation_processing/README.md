@@ -1,7 +1,9 @@
 # Annotation Processing & Compile-Time Code Generation
 
-<!-- tiers: principal -->
-
+<!-- study-paths
+principal: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 > How `javac`'s annotation processing rounds work, how to write an
 > `AbstractProcessor`, how Lombok and MapStruct use (and abuse) the API, and why
 > compile-time code generation is preferred over runtime reflection for performance,

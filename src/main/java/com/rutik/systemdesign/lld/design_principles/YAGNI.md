@@ -1,7 +1,4 @@
 # YAGNI — You Aren't Gonna Need It
-
-<!-- tiers: principal -->
-
 ## Origins
 
 YAGNI comes from **Extreme Programming (XP)**, articulated by **Ron Jeffries** (one of XP's founders) and popularized by **Kent Beck** in "Extreme Programming Explained" (1999).

@@ -1,7 +1,4 @@
 # Iterator Pattern
-
-<!-- tiers: senior -->
-
 ## 1. Pattern Name & Category
 
 **Pattern:** Iterator

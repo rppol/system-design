@@ -1,7 +1,10 @@
 # Optimization & Quantization
 
-<!-- tiers: principal senior -->
-
+<!-- study-paths
+senior: README.md, gpu_architecture_and_roofline.md
+principal: README.md, gpu_architecture_and_roofline.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## Deep Dive Files
 
 | File | Topic |

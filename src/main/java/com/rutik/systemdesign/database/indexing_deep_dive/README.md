@@ -1,7 +1,9 @@
 # Indexing Deep Dive
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 A database index is a separate data structure that enables efficient data retrieval without scanning every row in a table. Indexes trade write overhead and storage space for dramatically faster reads. The choice of index type, column ordering, and covering strategy can be the difference between a 5ms query and a 50-second full table scan on a 100M-row table.

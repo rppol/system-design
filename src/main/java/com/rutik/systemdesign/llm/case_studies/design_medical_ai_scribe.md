@@ -1,7 +1,4 @@
 # Case Study: Design a Medical AI Scribe
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > **Design intuition**: A medical AI scribe is a highly trained stenographer who sits invisibly in every patient-doctor encounter, listens to the conversation, and produces a structured clinical note in SOAP format (Subjective, Objective, Assessment, Plan) — automatically, within seconds of the visit ending, ready for the physician to review and sign. The engineering challenge is usually not raw transcription quality — Whisper-large-v3 is close enough to human transcription on clean English audio that it is rarely the binding constraint — but regulatory compliance: every system component must be HIPAA-compliant, the PHI (Protected Health Information) must never leave the HIPAA boundary without explicit authorization, and a wrong diagnosis code in the EHR is a patient safety incident.

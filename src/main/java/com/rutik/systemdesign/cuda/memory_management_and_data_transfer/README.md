@@ -1,7 +1,9 @@
 # Memory Management & Data Transfer
 
-<!-- tiers: senior -->
-
+<!-- study-paths
+senior: README.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
 ## 1. Concept Overview
 
 Every CUDA program begins and ends at the same boundary: the host (CPU) and the

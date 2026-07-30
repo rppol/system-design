@@ -1,7 +1,4 @@
 # Case Study: Design an LLM Evaluation Platform
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > **Design intuition**: An LLM eval platform is the Datadog of AI — just as Datadog ingests billions of metrics and traces to tell you when your service is degrading, an eval platform ingests LLM traces, runs automated quality checks, and alerts when your model's output quality is regressing, before your users notice. The hard part is not the metrics themselves but the evaluation infrastructure: LLM-as-judge is expensive and noisy, human labels are slow and costly, and regressions on subjective quality metrics are genuinely hard to detect with statistical confidence.

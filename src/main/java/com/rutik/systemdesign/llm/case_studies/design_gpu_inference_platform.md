@@ -1,7 +1,4 @@
 # Case Study: Design a Multi-Tenant GPU Inference Platform
-
-<!-- tiers: principal -->
-
 ## Intuition
 
 > **Design intuition**: A GPU inference platform is the picks-and-shovels layer of the LLM gold rush — it abstracts GPU scarcity, cold-start latency, and multi-tenancy so application developers can call an API with a base_url swap and never think about NCCL topology, KV-cache pressure, or LoRA adapter eviction. The hard problems are not model quality but operational: how do you serve 1,000 customer LoRA adapters on 4 GPUs without reloading the 140 GB base model for each request, and how do you provision a 70B model in under 60 seconds on a cold pod?

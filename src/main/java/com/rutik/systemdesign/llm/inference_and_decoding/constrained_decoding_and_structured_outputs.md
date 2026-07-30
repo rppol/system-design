@@ -1,7 +1,4 @@
 # Constrained Decoding & Structured Outputs — Internals
-
-<!-- tiers: senior -->
-
 Deep-dive sub-file of [Inference & Decoding](README.md). Covers how guided decoding actually works — logit masking, FSM/CFG compilation, XGrammar and llguidance internals, jump-forward decoding, provider "structured outputs" features — plus the quality tradeoffs and failure modes.
 
 ---

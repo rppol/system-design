@@ -1,7 +1,4 @@
 # Random Forests — Deep Dive
-
-<!-- tiers: senior -->
-
 ## 1. Concept Overview
 
 Random Forest is a bagging ensemble that trains B decision trees, each on a bootstrap sample of the training data, with an additional source of randomness: at each split, only a random subset of features is considered. Predictions are aggregated by majority vote (classification) or averaging (regression). The two sources of randomness — bootstrap sampling and feature subsampling — de-correlate the trees, enabling variance reduction far beyond what simple bagging of full decision trees achieves.
