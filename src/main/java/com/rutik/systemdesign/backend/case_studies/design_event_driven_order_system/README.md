@@ -405,7 +405,7 @@ The CQRS read model has a lag of 100-500ms between event publication and read mo
 **Kafka vs RabbitMQ**:
 Kafka was chosen for: replay capability (rebuild the read model by replaying all events from offset 0), high throughput, and retention-based storage (Kafka's default `log.retention.hours` is 168, i.e. 7 days). RabbitMQ would provide lower latency per message and richer routing, but classic and quorum queues offer no replay — the read model would be unrebuildable from events after a failure.
 
-The most-cited head-to-head is Confluent's OpenMessaging benchmark on three i3en.2xlarge brokers with 3x replication and 1 KB messages: **Kafka 605 MB/s vs RabbitMQ 38 MB/s** peak (roughly 605K vs 38K msg/s, about 15x). Treat this as directional, not universal — it is vendor-run, RabbitMQ was measured with mirrored queues, and RabbitMQ **Streams** (which do support replay) reach far higher rates than the queue figure below.
+The most-cited head-to-head is Confluent's OpenMessaging benchmark on three i3en.2xlarge brokers with 3x replication, 1 KB messages, four producers and four consumers over 100 partitions: **Kafka 605 MB/s vs RabbitMQ 38 MB/s** peak stable throughput — Confluent's own summary is "15x faster than RabbitMQ and 2x faster than Pulsar" (Pulsar landed at 305 MB/s). Confluent reports MB/s only; dividing by the stated 1 KB message size puts that at roughly 605K vs 38K msg/s, which is our arithmetic, not a published figure. Treat this as directional, not universal — it is vendor-run, RabbitMQ was measured with mirrored queues, and RabbitMQ **Streams** (which do support replay) reach far higher rates than the queue figure below.
 
 ```mermaid
 xychart-beta

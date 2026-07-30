@@ -640,30 +640,38 @@ async def get_product(product_id: int, request: Request, response: Response) -> 
     return product
 ```
 
-### 6.8 Serialization Performance with `orjson`
+### 6.8 Serialization Performance — Rust Encoders
 
 ```python
-# requirements: orjson>=3.9.0
-import orjson
-from fastapi.responses import ORJSONResponse
 from fastapi import FastAPI
+from pydantic import BaseModel
 
-app = FastAPI(default_response_class=ORJSONResponse)
+app = FastAPI()
 
-# Per-endpoint override:
-@app.get("/large-dataset", response_class=ORJSONResponse)
-async def large_dataset() -> list[dict]:
+class Row(BaseModel):
+    id: int
+    name: str
+
+# Declaring the return type is the fast path: FastAPI hands the value to
+# Pydantic, whose Rust core writes JSON bytes directly. No jsonable_encoder
+# round trip, no custom response class.
+@app.get("/large-dataset")
+async def large_dataset() -> list[Row]:
     return await db.fetch_large_dataset()
 ```
 
-`orjson` is implemented in Rust and serializes Python objects 3–5x faster than the stdlib
-`json` module. Anchor figures used throughout this section (illustrative — measure on your own
-hardware): for a 10KB JSON payload, `json.dumps` takes approximately 120µs while `orjson.dumps`
-takes approximately 30µs. The benefit scales roughly linearly with payload size, so a 1MB
-response — 100x the bytes — saves about 100 × 90µs = 9ms of pure serialization time per request.
+Rust-backed encoders serialize Python objects 3–5x faster than the stdlib `json` module. Anchor
+figures used throughout this section (illustrative — measure on your own hardware): for a 10KB
+JSON payload, `json.dumps` takes approximately 120µs while `orjson.dumps` takes approximately
+30µs. The benefit scales roughly linearly with payload size, so a 1MB response — 100x the bytes
+— saves about 100 × 90µs = 9ms of pure serialization time per request.
 
-Setting `default_response_class=ORJSONResponse` on the `FastAPI` constructor applies `orjson`
-to all routes without per-endpoint changes.
+`fastapi.responses.ORJSONResponse` and `UJSONResponse` are **deprecated** — both raise
+`FastAPIDeprecationWarning` on use. FastAPI's own guidance is that a declared return type or
+`response_model` is the faster path, because Pydantic writes JSON bytes in Rust without the
+intermediate `jsonable_encoder` step a custom response class still pays. Call `orjson.dumps`
+directly only for payloads that never pass through a response model — cache values written to
+Redis, log lines, message-bus envelopes.
 
 **What this actually says.** "A per-response microsecond count means nothing until you multiply
 it by RPS. Do that and it becomes CPU cores; multiply the payload size by RPS instead and it

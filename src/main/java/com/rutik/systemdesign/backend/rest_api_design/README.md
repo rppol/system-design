@@ -213,7 +213,7 @@ RFC 9457 (2023) defines a machine-readable error body carried as `application/pr
 
 ### 6.1 Idempotency
 
-An operation is idempotent if applying it N times has the same effect as applying it once.
+An operation is idempotent if applying it N times has the same effect as applying it once. `Idempotency-Key` below is a **vendor convention**, popularised by Stripe, not a standard: the IETF's `draft-ietf-httpapi-idempotency-key-header` has been in the HTTP APIs working group since 2021, sits at revision 07, and is currently in the *expired* draft state with no RFC number. Implement it because your clients expect the Stripe shape, and do not cite a specification for it.
 
 ```mermaid
 sequenceDiagram
@@ -354,7 +354,7 @@ private String encodeCursor(Long id) {
 
 ## 7. Real-World Examples
 
-**GitHub REST API**: Versions via the date-based `X-GitHub-Api-Version` request header, not a path segment — there is no `/v3/` in `api.github.com` URLs, and requests that omit the header default to `2022-11-28`. Unsupported versions get a 410 Gone, and each version is supported for at least 24 months after its successor ships. It sends ETags for conditional GETs and a `Link` header with `rel=next/prev/first/last`; the underlying scheme is per-endpoint — `page`/`per_page` (offset) on most endpoints, `before`/`after` cursors or `since` timestamps on others. Validation errors return 422 with a `message` + `errors` array.
+**GitHub REST API**: Versions via the date-based `X-GitHub-Api-Version` request header, not a path segment — there is no `/v3/` in `api.github.com` URLs, and requests that omit the header default to `2022-11-28`. Unsupported versions get a 410 Gone, and each version is supported for at least 24 months after its successor ships. On conditional requests GitHub's own wording is "most endpoints return an `etag` header, and many endpoints return a `last-modified` header" — most, not all, so do not build a client that assumes universal ETag coverage. Where one is returned, an `If-None-Match` that yields 304 Not Modified does not count against the primary rate limit provided the request was correctly authorized, which is the real reason to use conditional GETs against this API. GitHub also sends a `Link` header with `rel=next/prev/first/last`; the underlying scheme is per-endpoint — `page`/`per_page` (offset) on most endpoints, `before`/`after` cursors or `since` timestamps on others. Validation errors return 422 with a `message` + `errors` array.
 
 **Stripe API**: A widely copied reference for API design. Uses idempotency keys for POST requests, cursor-based pagination with `starting_after`/`ending_before`, and webhook signatures with HMAC-SHA256 in the `Stripe-Signature` header. Its errors are **not** RFC 9457 Problem Details — Stripe uses its own envelope, `{"error": {"type", "code", "message", "param", "doc_url", ...}}`. Versioning is date-based with a release name: major releases carry a codename and monthly releases reuse it, giving strings like `2026-06-24.dahlia`.
 
@@ -490,7 +490,7 @@ The client uses the Accept header to specify acceptable response formats: `Accep
 **Q: How do you implement rate limiting in a REST API?**
 **Short:** Implement rate limiting at the gateway or filter layer and return 429 with Retry-After and X-RateLimit headers.
 
-Implement at the API gateway or a filter/middleware layer. Return 429 Too Many Requests when the limit is exceeded, with headers: `X-RateLimit-Limit: 100`, `X-RateLimit-Remaining: 0`, `X-RateLimit-Reset: 1735689600` (epoch when window resets), `Retry-After: 60` (seconds). Use sliding window or token bucket algorithms. Limit by API key, user ID, or IP depending on the use case.
+Implement at the API gateway or a filter/middleware layer. Return 429 Too Many Requests when the limit is exceeded, with headers: `X-RateLimit-Limit: 100`, `X-RateLimit-Remaining: 0`, `X-RateLimit-Reset: 1735689600` (epoch when window resets), `Retry-After: 60` (seconds). Know which of those are standardised and which are not: `Retry-After` is defined by RFC 9110, while the three `X-RateLimit-*` fields are a de facto convention with no specification behind them — clients guess at their semantics, and different APIs disagree on whether `Reset` is an epoch or a delta. The IETF work to replace them, `draft-ietf-httpapi-ratelimit-headers` (`RateLimit` and `RateLimit-Policy`), is still an active working-group draft at revision 11 and has **not** been published as an RFC, so keep emitting the `X-` fields and treat the standardised pair as something to add later, not to switch to. Use sliding window or token bucket algorithms. Limit by API key, user ID, or IP depending on the use case.
 
 ---
 

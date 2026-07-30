@@ -503,7 +503,7 @@ public class FallbackController {
 | Cross-cutting concerns | Centralized (auth, rate limiting once) | Duplicated in every service |
 | Client simplicity | One endpoint, aggregated responses | Multiple service calls per page |
 | Operational complexity | Additional component to deploy and monitor | Simpler topology |
-| Latency | One extra proxy hop per request. Kong markets sub-millisecond processing latency and its own published benchmark shows ~3.8ms at p95 under saturation; a managed gateway adds more | Direct service calls are faster |
+| Latency | One extra proxy hop per request. Kong markets sub-millisecond processing latency; its own published Gateway 3.6 benchmark (Kubernetes on AWS) records 3.82ms p95 at 137,850 RPS for a basic proxy config, and 96,290 RPS once rate limiting and key auth are enabled. A managed gateway adds more | Direct service calls are faster |
 | SPOF risk | High if gateway is single instance | No gateway = no gateway SPOF |
 | Service discoverability | Hidden behind gateway (good for security) | Services directly exposed |
 | BFF flexibility | Per-client tailoring possible | All clients hit same APIs |
@@ -567,7 +567,7 @@ The `$3.50/million` figure looks trivially small per request and stops looking s
 
 | Symbol | What it is |
 |--------|------------|
-| `$3.50/million` | AWS API Gateway REST-API price for the **first 333M** requests/month; then `$2.80/M` for the next 667M and `$2.38/M` beyond 1B. HTTP APIs are cheaper: `$1.00/M` for the first 300M, `$0.90/M` after |
+| `$3.50/million` | AWS API Gateway REST-API price (us-east-1) for the **first 333M** requests/month; then `$2.80/M` for the next 667M, `$2.38/M` from 1B to 20B, and `$1.51/M` above 20B. HTTP APIs are cheaper: `$1.00/M` for the first 300M, `$0.90/M` after. Rates from the AWS Price List API, `AmazonApiGateway` offer published 2026-07-24 |
 | requests/month | `rps x 86,400 seconds/day x 30 days` |
 | managed cost | The **tiered sum**, not `requests/month / 1,000,000 x 3.50` |
 | self-hosted cost | Roughly flat: instance hours + the engineer-time to operate it |
@@ -586,10 +586,12 @@ The `$3.50/million` figure looks trivially small per request and stops looking s
   cost                    $3,737.58 / month
 
   at the 10,000 rps default account throttle ceiling (25,920M/month):
-    333M x $3.50 + 667M x $2.80 + 24,920M x $2.38
-                          ----------
-                        $62,342.70 / month  (upper bound: AWS tiers
-                                             again at very high volume)
+    first    333M x $3.50 =  $1,165.50
+    next     667M x $2.80 =  $1,867.60
+    next  19,000M x $2.38 = $45,220.00   (the 1B-20B tier)
+    last   5,920M x $1.51 =  $8,939.20   (the over-20B tier)
+                            -----------
+                            $57,192.30 / month
 ```
 
 $3,738/month buys a lot of Spring Cloud Gateway instances, which is why high-volume shops self-host and low-volume or spiky serverless shops do not. The break-even is not about features — both gateways do the same job — it is about whether your traffic is high enough that a per-request price beats a per-instance one.

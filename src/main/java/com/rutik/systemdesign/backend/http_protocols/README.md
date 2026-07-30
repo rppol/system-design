@@ -185,7 +185,7 @@ flowchart LR
         b2 --> b3[("Dynamic table<br/>store new values")]
         b3 --> b4(["Request 1 on wire<br/>full headers"])
         b5(["Request 2..N headers<br/>mostly unchanged"]) --> b6[("Dynamic table<br/>index lookup")]
-        b6 --> b7(["Request 2..N on wire<br/>30-50 bytes"])
+        b6 --> b7(["Request 2..N on wire<br/>30-50 bytes (best case)"])
     end
 
     class a1,b1,b5 io
@@ -195,7 +195,7 @@ flowchart LR
     class b4,b7 train
 ```
 
-HPACK's dynamic table turns the Authorization header into a one-time cost: sent in full on request 1 and added to the table, then referenced by a 2-byte index on every request after — cutting header bytes from 400-800 down to 30-50.
+HPACK's dynamic table turns the Authorization header into a one-time cost: sent in full on request 1 and added to the table, then referenced by a 2-byte index on every request after. The byte figures above are the *best case* — a header set that is entirely repeated and fully indexed — and 400-800 down to 30-50 implies roughly 92% compression, which you should not expect on average. The number to plan against is Cloudflare's measurement across its own network: **76% compression on ingress headers and 69% on egress**. Because requests are header-heavy and responses are body-heavy, that ingress figure was worth 53% of total ingress traffic while the egress figure moved total egress HTTP/2 traffic by only 1.4%. Header compression is a request-side win.
 
 ---
 
@@ -638,7 +638,7 @@ That distinction is the whole lesson. The naive model — multiply the handshake
       of which killing the second request wave          =  150 ms
 ```
 
-So round trips account for only ~300 ms of the ~2600 ms improvement. The rest is bytes and congestion windows, not handshakes: 8 KB of the ~9.6 KB uplink header total disappears once the debug headers are dropped and HPACK indexes the JWT, and a single connection's window ramps once and stays warm for all 8 requests instead of six windows each starting cold at ~14.6 KB. **Connection consolidation still beats the TLS version bump — but through congestion-window sharing and header compression, not through saved handshakes.** That ranking is invisible if you model six parallel handshakes as six serial ones.
+So round trips account for ~300 ms, and that is the *only* part of the win this arithmetic derives. The rest is bytes and congestion windows, not handshakes: 8 KB of the ~9.6 KB uplink header total disappears once the debug headers are dropped and HPACK indexes the JWT, and a single connection's window ramps once and stays warm for all 8 requests instead of six windows each starting cold at ~14.6 KB. **Connection consolidation still beats the TLS version bump — but through congestion-window sharing and header compression, not through saved handshakes.** That ranking is invisible if you model six parallel handshakes as six serial ones.
 
 **Fixes applied**:
 1. Migrated to TLS 1.3 with session resumption: handshake reduced from 2 RTTs to 1 (300ms to 150ms), 0-RTT on resume.
@@ -646,9 +646,10 @@ So round trips account for only ~300 ms of the ~2600 ms improvement. The rest is
 3. Removed debug headers from production requests: ~1.2 KB down to ~800 bytes per request.
 4. HPACK then indexed the repeated JWT: request 1 carries it in full, requests 2-8 reference it in a couple of bytes, so ~9.6 KB of header bytes per cold start drops to roughly 1 KB.
 
-**Results** (illustrative, from the composite above — not a published measurement):
-- Cold start: 3.5s → 0.9s (74% reduction)
-- Warm start: 200ms → 95ms (53% reduction, primarily from 0-RTT TLS + HPACK)
-- Uplink header bytes per cold start: ~9.6 KB → ~1 KB
+**Results** — deliberately only what the ledger above derives, with no headline app-level percentage:
+- Network time until all 8 responses have started, cold: **750ms → 450ms**, a 300ms / 40% cut. Every millisecond of that is traceable to a line in the walk-through.
+- Warm start once TLS 1.3 0-RTT resumption applies: **450ms → 150ms**, the TCP handshake alone.
+- Uplink header bytes per cold start: **~9.6 KB → ~1 KB**, roughly 90% less, which is also what stops the request wave stalling behind a cold congestion window.
+- The app's end-to-end 3.5s cold start also contains rendering, asset fetch and client-side work that this ledger says nothing about, so no whole-app percentage is quoted. Quoting one off a network-layer change is exactly the error the ledger exists to prevent — if you want that number, measure the app, not the protocol.
 
 **Lesson**: On a high-latency link, count round trips *and* count cold congestion windows — they are different costs and the second one is usually larger. Parallel connections hide their handshakes behind each other but cannot hide their slow starts or their duplicated headers, which is exactly what HTTP/2 multiplexing and HPACK remove.

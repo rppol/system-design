@@ -169,7 +169,7 @@ flowchart LR
         BK1 -->|"OrderPlaced"| IV1(["Inventory Svc"])
         BK1 -->|"OrderPlaced"| PV1(["Payment Svc"])
         IV1 -.->|"InventoryReserved"| BK1
-        PV1 -.->|"PaymentRequired"| BK1
+        PV1 -.->|"PaymentCharged"| BK1
     end
 
     subgraph ORCH["Orchestration (central coordinator)"]
@@ -393,6 +393,8 @@ public class OrderPlacedIntegrationEvent {
 **Uber — durable orchestration for long-running workflows**: Uber built Cadence, a distributed, durable workflow orchestration engine, and open-sourced it in 2017 (v1.0 announced June 2023). Uber describes it as powering over 1,000 services across T0 to T5 criticality tiers, for long-running workflows, microservice orchestration, batch processing, distributed cron, data pipelines, and model training. Multi-step flows with compensation — sign-up, order fulfillment — are the shape an orchestrator suits; real-time ride matching (DISCO) is a matching service, not a saga.
 
 **Event-Carried State Transfer as a pattern**: Martin Fowler defines ECST as the pattern that "shows up when you want to update clients of a system in such a way that they don't need to contact the source system in order to do further work". The stated benefits are resilience (recipients keep working when the source is unavailable), lower latency, and reduced load on the source; the stated costs are "lots of data schlepped around and lots of copies" plus more complexity on the receiver, which now maintains its own state. A fulfillment pipeline is the canonical illustration: order events carry full item details, shipping addresses, and pricing so warehouse, logistics, and notification services can build their own projections — this is a worked example of the pattern, not a description of any specific company's internal design.
+
+**Zalando — choreography, and the honest asymmetry in this section**: Zalando's engineering blog describes building its Fashion Platform event-first rather than as request/response services, with no coordinator in the loop: the shift is "from a top-down, request oriented system to one where data flows from the bottom up, with changes to data causing new snapshot events to be published", so that "clients requiring the data in question can process it appropriately for their own needs, at their own pace". Notice what is being choreographed, though — data distribution, not a multi-step business transaction with compensations. That distinction is worth sitting with, because it explains why the two examples above are both orchestrators. Choreography at scale is real and common, but it leaves behind no engine to open-source and no state machine to draw, so it is systematically under-represented in public engineering writing. Do not read the shortage of write-ups as evidence that nobody does it.
 
 **Capital One — event storming for service decomposition**: Andrew Bonham (Distinguished Engineer, Capital One) documented using event storming to decompose a monolith into microservices, published on the Capital One Tech blog in November 2019. The method identifies bounded contexts — clusters of related events — as the basis for service boundaries, on the principle "if it changes together it should go together"; a shift in the language used between event clusters signals a different bounded context, and therefore a different service.
 

@@ -774,8 +774,8 @@ CREATE INDEX ix_bookings_expiry ON bookings(expires_at) WHERE status = 'PENDING'
 |---|---|
 | Spring Boot 4.1 | Application framework |
 | Spring Data JPA | ORM with optimistic/pessimistic locking annotations |
-| PostgreSQL 15 | Primary data store; row-level locking, CHECK constraints |
-| Redis 7 | Distributed lock (SET NX EX), seat hold TTL tracking |
+| PostgreSQL 18 | Primary data store; row-level locking, CHECK constraints |
+| Redis 8 | Distributed lock (SET NX EX), seat hold TTL tracking |
 | Kafka 4.x (KRaft) | Event streaming for booking lifecycle events |
 | Spring Kafka | @KafkaListener, KafkaTemplate |
 | Spring Scheduler | Outbox poller, expired hold cleanup |
@@ -818,10 +818,12 @@ tie lock lifetime to the DB connection, which is expensive and can exhaust the c
 
 ### Seat Hold Duration
 
-10 minutes is a common starting point for concert tickets. Ticketmaster deliberately publishes no
-fixed number — its help centre states only that "we set the time length according to ticket demand,
-so it can differ depending on time of day or for different events"; reported checkout timers cluster
-in the 5-10 minute range. Too short (under
+10 minutes is a common starting point for concert tickets, but treat that as a design default you
+will tune, not an industry figure. Ticketmaster deliberately publishes no number at all: its help
+centre says only that a timer runs "at the top of every page in the checkout process" and that "we
+set the time length according to ticket demand, so it can differ depending on time of day or for
+different events." Every specific duration you will read about their checkout is third-party
+observation, so do not anchor your own design on one. Too short (under
 5 minutes) frustrates users entering payment details. Too long (over 15 minutes) reduces effective
 inventory for other buyers during high-demand windows. The duration should be configurable per event
 type and tunable in production.

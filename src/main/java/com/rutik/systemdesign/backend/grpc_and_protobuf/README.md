@@ -205,7 +205,7 @@ flowchart LR
     Decision -->|"safe"| S3["add new RPC"]
     Decision -->|"safe"| S4["rename field<br/>number unchanged"]
     Decision -->|"breaking"| B1["remove field<br/>without reserving number"]
-    Decision -->|"breaking"| B2["change field type"]
+    Decision -->|"breaking"| B2["change to an<br/>incompatible field type"]
     Decision -->|"breaking"| B3["reuse a field number"]
 
     class Change io
@@ -410,7 +410,7 @@ public class RetryInterceptor implements ClientInterceptor {
 
 **Google internal use**: gRPC is the open-source successor to Google's internal Stubby RPC system, and Google uses it across its cloud products and public APIs. The framework handles load balancing, health checking, retries, and deadline propagation automatically.
 
-**Netflix gRPC adoption**: Netflix's Runtime Platform team adopted and extended gRPC for internal service-to-service calls, replacing hand-written REST clients with generated stubs. Netflix has publicly described qualitative wins — client creation dropping from weeks to minutes, and improved p99s on gRPC-oriented services — but has not published a specific CPU- or latency-reduction percentage, so treat any circulating figure as unsourced.
+**Netflix gRPC adoption**: Netflix's Runtime Platform team adopted and extended gRPC for internal service-to-service calls, replacing hand-written REST clients with generated stubs. The CNCF case study on Netflix records the wins in exactly these terms: client creation time fell "from 2-3 weeks to minutes", hundreds of lines of hand-written cache-management code collapsed to two or three lines of proto config per client, and on latency the strongest claim made is qualitative — "we've seen an incredible reduction in P99s for gRPC-oriented services" and "a squishing and a narrowing of our latency windows consistently across the board." No CPU- or latency-reduction *percentage* appears there or in Netflix's own gRPC write-ups, so treat any circulating figure (50% CPU, 35% p99 and similar) as unsourced.
 
 **Kubernetes API server**: kubectl, controllers and kubelets talk to the API server over its **HTTP REST API**, not gRPC — including `watch`, which is a long-lived `GET ...?watch=true` streamed with HTTP chunked transfer encoding (JSON or protobuf-encoded objects), with an optional WebSocket variant. gRPC is used elsewhere in the ecosystem: the API server to etcd, and the kubelet to the CRI, CSI and device-plugin sockets.
 
@@ -594,7 +594,7 @@ service MarketDataService {
 
 **Results after migration**:
 - Protobuf serialization: 200 KB JSON → 34 KB protobuf (83% reduction)
-- Parsing CPU: 40% reduction (protobuf vs JSON parsing)
+- Parsing CPU: a large reduction, but no figure is offered here — the direction is safe (protobuf decodes fixed-width fields by tag with no text scanning, no string-to-number conversion and no key interning), while the magnitude swings wildly with message shape, language and library. Nobody publishes a number that transfers, so measure your own rather than inheriting one
 - Latency: each update delivered within 50ms vs 10s batch polling
 - Connection overhead: 500 persistent HTTP/2 streams vs 500 * 6 polling connections/minute
 - Total bandwidth: 10 MB/s → 1.7 MB/s (the same 83%, since the payload shrank and the fan-out did not change)

@@ -568,7 +568,7 @@ kafka-consumer-groups.sh \
 
 **Netflix — Change Data Capture to Kafka**: Netflix built its **own** CDC framework, **DBLog** ("DBLog: A Watermark Based Change-Data-Capture Framework", Netflix Tech Blog, 2019), after evaluating Maxwell, SpinalTap, Yelp's MySQL Streamer and Debezium. DBLog reads the MySQL binlog and publishes changes so downstream services can keep read caches, search indexes, and analytics pipelines in sync with the database of record. Netflix's watermark-based chunked-snapshot technique was later adopted *by* Debezium (incremental snapshots), which is the likely source of the common "Netflix uses Debezium" claim.
 
-**Robinhood — Exactly-Once Financial Events**: Robinhood has publicly described writing stock purchase events to Kafka and Postgres, with downstream services consuming them via Kafka Streams under exactly-once semantics, and a sub-one-second trade confirmation SLA across 5-10 Kafka hops. Note the precise guarantee: the idempotent producer dedupes *retries* within a session, and transactions make a multi-partition write plus its consumer offsets atomic — neither makes an external side effect exactly-once.
+**Robinhood — Exactly-Once Financial Events**: Robinhood has described writing stock purchase events to Kafka and Postgres, with downstream services consuming them via Kafka Streams under exactly-once semantics, and a sub-one-second trade confirmation SLA across 5-10 Kafka hops depending on product type. Source discipline matters here: those numbers come from third-party write-ups of Robinhood conference talks (Kafka Summit 2019 and Kafka Summit Americas 2021), not from a Robinhood engineering-blog post you can cite, so quote the architecture confidently and the figures with that caveat attached. Note the precise guarantee: the idempotent producer dedupes *retries* within a session, and transactions make a multi-partition write plus its consumer offsets atomic — neither makes an external side effect exactly-once.
 
 **Confluent Schema Registry in Production** *(illustrative composite, not a published incident)*: a breaking schema change (removing a required field from an Avro schema) takes down a downstream consumer service during trading hours. The recovery pattern is to enable BACKWARD compatibility enforcement in Schema Registry and have CI reject non-compatible schema PRs before they reach production.
 
@@ -621,6 +621,8 @@ Compression ratios below are directional only; the achieved ratio depends entire
 - Your team is small and operational overhead of a Kafka cluster is not justified (use Amazon SQS or RabbitMQ).
 - Messages must be delivered to specific consumers based on content-based routing (RabbitMQ headers exchange or SNS filter policies are simpler).
 - You need sub-millisecond latency. Kafka's floor is single-digit milliseconds end-to-end even when heavily tuned — Confluent's published tier-1-bank trading case study reports sustaining **sub-5 ms p99** at 1.6 M msg/sec with sub-5 KB messages, and that took dedicated tuning. Ordinary untuned deployments sit well above that.
+
+**One entry that used to be on the "do NOT" list and no longer belongs there: plain queue semantics.** KIP-932 share groups shipped early-access in Kafka 4.0 and reached production-ready in **4.2** (February 2026). A share group lets many consumers cooperatively read one topic *without* partition-exclusive assignment, and adds per-record acknowledgement plus delivery-attempt counting — which is point-to-point queue consumption, the thing Kafka historically could not do. It also means consumer count is no longer capped by partition count for that workload. What share groups still do not give you is content-based routing or exchange-style topologies, so the RabbitMQ entries above stand; "Kafka cannot be a queue" does not.
 
 **Use log compaction when:**
 - The topic represents the latest state of a key (product prices, user preferences).
@@ -738,7 +740,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 - Apache Kafka — core broker; cluster metadata is owned by the built-in KRaft controller quorum. Java 17, 21 and 25 are fully supported; Java 11 covers only a subset of modules (clients, Streams and related). Run brokers on the most recent LTS, Java 25.
 - Kafka Streams — embedded Java library for stateful stream processing. No separate cluster required.
 - ksqlDB — SQL-like query engine for Kafka streams. Suitable for simpler aggregations without full Java code.
-- Kafka Connect — scalable framework for source and sink connectors. 200+ connectors available (JDBC, Elasticsearch, S3, Debezium CDC).
+- Kafka Connect — scalable framework for source and sink connectors, with a large catalogue on Confluent Marketplace (formerly Confluent Hub): JDBC, Elasticsearch, S3, Debezium CDC and so on. Do not quote a connector count — Confluent's own pages state 120+, 150+ and 200+ depending on which product surface is being counted, so there is no figure worth carrying.
 - Kafka MirrorMaker 2 — cross-cluster replication for disaster recovery and geo-replication.
 
 **Schema Management**

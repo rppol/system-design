@@ -426,7 +426,7 @@ management:
 - **Google**: Four Golden Signals (latency, traffic, errors, saturation) from the SRE book; internal Monarch TSDB for metrics
 - **Weaveworks / Grafana**: the RED method (Rate, Errors, Duration) — coined by Tom Wilkie in 2015 as a request-driven adaptation of Google's Four Golden Signals, and the standard per-microservice dashboard shape; Brendan Gregg's USE method (Utilization, Saturation, Errors) is its resource-side counterpart
 - **Uber**: M3 (open-source TSDB for aggregated metrics), Jaeger (open-source distributed tracer originated at Uber), structured logging with correlation IDs across 4000+ microservices
-- **Cloudflare**: Workers observability exposes a configurable head sampling rate (`head_sampling_rate`, 0-1, defaulting to 1) for normal traffic, while Tail Workers are invoked after a producer Worker runs and receive its logs and uncaught exceptions — the general pattern of sampling the boring traces hard while keeping the error path on a separate, unsampled channel
+- **Cloudflare**: Workers observability exposes a configurable head sampling rate (`head_sampling_rate`, 0-1, defaulting to 1) for normal traffic, while Tail Workers are a separate mechanism, automatically invoked after a producer Worker runs and receiving its logs and uncaught exceptions. The pattern worth taking from it is having the error path travel a different channel from the sampled one. Do not go further and claim that channel is unsampled: `head_sampling_rate` is documented only against a Worker's own logs, and Cloudflare's Tail Workers and `tail_consumers` references say nothing either way about whether it applies to them, so verify against your own configuration before relying on it
 
 ---
 
@@ -448,7 +448,7 @@ management:
 
 **Use structured logging** when logs go to an aggregation system (ELK, Loki, Splunk). Use plain text only for local development.
 
-**Use distributed tracing** when you have multiple services and need to track a request's path. Overhead is ~1-5% with sampling; acceptable in production.
+**Use distributed tracing** when you have multiple services and need to track a request's path. Do not budget from a published overhead band — no vendor or CNCF source publishes a general one, because the cost is a product of your sampling rate, spans per request and exporter batching, which vary by orders of magnitude between services. Measure it yourself, and measure the right thing: the SDK's span creation is usually cheap, and the OTLP exporter is where the CPU and the tail latency actually go.
 
 **Do NOT** put high-cardinality values (userId, orderId, requestId) in metric labels. This explodes cardinality and crashes Prometheus. Put them in log fields or trace span tags.
 

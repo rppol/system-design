@@ -151,7 +151,7 @@ flowchart LR
     class SB5 base
 ```
 
-For 1000 concurrent requests, ~1-2 MB platform-thread stacks cost ~1-2 GB of RAM versus a few MB for ~few-KB virtual-thread stacks; the unmount/remount trick (~100 ns JVM-level switch instead of a ~1-10 μs kernel context switch) is what lets Spring Boot 4.1 serve 10,000 concurrent requests. Note that with `spring.threads.virtual.enabled=true` Tomcat swaps its bounded 200-thread pool for a virtual-thread executor — the 200 threads are not what carries the 10,000 requests; the carrier pool is the JVM's virtual-thread scheduler, whose default parallelism is `availableProcessors()`.
+For 1000 concurrent requests, ~1-2 MB platform-thread stacks cost ~1-2 GB of RAM versus a few MB for ~few-KB virtual-thread stacks; the unmount/remount trick — a JVM-level switch commonly estimated at ~100 ns against a kernel context switch of ~1-10 μs, so roughly two orders of magnitude cheaper — is what lets Spring Boot 4.1 serve 10,000 concurrent requests. Note that with `spring.threads.virtual.enabled=true` Tomcat swaps its bounded 200-thread pool for a virtual-thread executor — the 200 threads are not what carries the 10,000 requests; the carrier pool is the JVM's virtual-thread scheduler, whose default parallelism is `availableProcessors()`.
 
 **Stated plainly.** "Platform threads make you pay a megabyte to sit and wait; virtual threads make waiting nearly free, so the limit stops being memory and starts being the downstream service."
 
@@ -161,7 +161,7 @@ Two separate ceilings are in play. The memory ceiling is how many threads fit in
 |--------|------------|
 | platform thread stack | `~1 MB` reserved per thread, whether it works or waits |
 | virtual thread stack | `~few KB`, heap-allocated, grows only as deep as the call stack |
-| switch cost | `~1-10 us` kernel context switch vs `~100 ns` JVM unmount |
+| switch cost | A JVM unmount is roughly two orders of magnitude cheaper than a kernel context switch. The figures usually quoted are `~100 ns` against `~1-10 us`, but both are estimates that move with CPU, kernel and working-set size, not measured constants |
 | `L = λ x W` | Concurrency = throughput x latency — the throughput ceiling |
 
 **Walk one example.** Serving 10,000 concurrent requests, each waiting 50ms on a database:
@@ -616,7 +616,7 @@ In a ForkJoinPool, each thread has a deque (double-ended queue) of tasks. Work s
 **Q: How do you implement a timeout for a CompletableFuture?**
 **Short:** Use orTimeout to fail after a deadline, or completeOnTimeout to supply a default value on an internal JDK scheduler.
 
-`CompletableFuture` provides `orTimeout(long, TimeUnit)`: if the future does not complete within the specified time, it completes with a TimeoutException. Or `completeOnTimeout(defaultValue, long, TimeUnit)`: complete with a default value instead of exception. Both schedule the timeout on an internal JDK delay scheduler that you do not supply or control — do not assume it is your executor, and never do blocking work in the timeout path. Note that `orTimeout` does not interrupt or cancel the work already in flight; it only completes the future, so the underlying task keeps running and still occupies its pool thread.
+`CompletableFuture` provides `orTimeout(long, TimeUnit)`: if the future does not complete within the specified time, it completes with a TimeoutException. Or `completeOnTimeout(defaultValue, long, TimeUnit)`: complete with a default value instead of exception. Both schedule the timeout on an internal JDK delay scheduler that you do not supply or control — do not assume it is your executor, and never do blocking work in the timeout path. The concrete mechanism changed in Java 25: through Java 24 it was a package-private `CompletableFuture.Delayer` holding one daemon `ScheduledThreadPoolExecutor`, while JDK-8319447 made `ForkJoinPool` implement `ScheduledExecutorService` and routes delayed work through its `DelayScheduler`, which made cancelling an unfired timeout much cheaper. Note that `orTimeout` does not interrupt or cancel the work already in flight; it only completes the future, so the underlying task keeps running and still occupies its pool thread.
 ```java
 CompletableFuture<User> user = CompletableFuture
     .supplyAsync(() -> fetchUser(id), ioExecutor)

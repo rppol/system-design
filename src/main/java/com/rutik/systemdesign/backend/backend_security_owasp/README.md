@@ -355,8 +355,9 @@ Two limits worth stating precisely, because both are routinely misremembered:
 ```java
 // BCrypt cost factor 10 = ~55ms per hash  (2^10 rounds) — OWASP's stated minimum
 // BCrypt cost factor 12 = ~210ms per hash (2^12 rounds) — a common production choice
-// Timings measured on a 2026 laptop CPU, single-threaded; re-measure on YOUR
-// verification server and raise the cost until login latency is your budget.
+// Timings measured single-threaded on one 2026 laptop core with a reference bcrypt
+// implementation, NOT with this encoder on a server; re-measure on YOUR verification
+// box and raise the cost until login latency, not the number, is what binds.
 // Never store plaintext or MD5/SHA-1 hashes of passwords
 
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -382,7 +383,7 @@ This is the rare security control where a one-character config change buys a 2x 
 | time per hash | Wall clock for one hash. Roughly doubles per `+1` of cost |
 | logins/sec | `1 ÷ time per hash` on one core. Your *serving* cost, not the attacker's rate |
 
-**Walk one example.** Cost 10 versus cost 12, measured single-threaded on a 2026 laptop CPU:
+**Walk one example.** Cost 10 versus cost 12, measured single-threaded on one 2026 Apple Silicon laptop core using a reference bcrypt implementation. The *shape* — a doubling per `+1` of cost — is the fact; the absolute milliseconds are machine- and implementation-specific, and a server-class x86 core running Spring Security's own `BCryptPasswordEncoder` will land somewhere else:
 
 ```
   cost   2^cost rounds   time per hash   logins/sec on one core
@@ -397,17 +398,17 @@ This is the rare security control where a one-character config change buys a 2x 
                   login    55 ms -> 209 ms  = +154 ms, once, at sign-in
 ```
 
-**Now put that beside the unsalted-SHA-256 alternative — on the attacker's hardware, not yours.** This is the comparison that matters, and it is easy to get wrong by pitting your server's single-core rate against a GPU. Both columns below are one NVIDIA RTX 5090 running hashcat, from a published benchmark; the bcrypt figure is the mode-3200 result (304.8 kH/s at cost 5 = 32 iterations) scaled linearly to cost 12's 4,096 iterations:
+**Now put that beside the unsalted-SHA-256 alternative — on the attacker's hardware, not yours.** This is the comparison that matters, and it is easy to get wrong by pitting your server's single-core rate against a GPU. Both columns below are one NVIDIA RTX 5090 running hashcat, from Chick3nman's published v6.2.6-851 benchmark (mode 1400 SHA2-256 at 28,353.3 MH/s; mode 3200 bcrypt at 304.8 kH/s, which hashcat benchmarks at cost 5 = 32 iterations). The bcrypt figure is that result scaled linearly to cost 12's 4,096 iterations — bcrypt's cost is a straight iteration count, and the model checks out against community cost-10 runs on the same card reporting ~9,900 H/s where linear scaling predicts ~9,500:
 
 ```
-  SHA-256, one RTX 5090        : 28,400,000,000 guesses/sec
-  BCrypt cost 12, same GPU     :          2,400 guesses/sec
+  SHA-256, one RTX 5090        : 28,353,000,000 guesses/sec
+  BCrypt cost 12, same GPU     :          2,381 guesses/sec
   ------------------------------------------------------------
-  defensive ratio              : ~11,800,000x
+  defensive ratio              : ~11,900,000x
 
   cracking an 8-char lowercase password (26^8 = 208.8 billion combinations):
-    SHA-256 @ 28.4e9/sec  : 208.8e9 / 28.4e9   =    7.3 seconds
-    BCrypt  @ 2,400/sec   : 208.8e9 / 2,400    =    2.8 years
+    SHA-256 @ 28.353e9/sec : 208.8e9 / 28.353e9 =    7.4 seconds
+    BCrypt  @ 2,381/sec    : 208.8e9 / 2,381    =    2.8 years
 ```
 
 Note what the honest numbers say: cost 12 buys about seven orders of magnitude, but a *single consumer GPU* still grinds an 8-character lowercase password in under three years, and a hundred of them in about ten days. The work factor buys time for detection and rotation; it does not make a weak password safe. That is why OWASP now puts Argon2id ahead of BCrypt for new systems — its memory-hardness attacks the GPU advantage itself rather than just taxing it.
@@ -521,7 +522,7 @@ mvn dependency-check:check
 
 **Log4Shell (2021) — A03 + A05:** CVE-2021-44228 in Log4j allowed unauthenticated remote code execution through JNDI lookup in log messages. Any application that logged a user-supplied string (such as the HTTP User-Agent header) was vulnerable. Mass scanning and exploitation began within days of disclosure; the number of systems actually compromised was never established, and figures quoted for it are estimates rather than measurements.
 
-**Uber (2022) — A07 + A02:** An attacker bought an Uber contractor's corporate password on the dark web (the contractor's personal device had been infected with malware) and then defeated two-factor authentication by **repeated push-approval prompts** until the contractor accepted one — Uber's own incident write-up describes exactly this sequence. Note that MFA *was* enforced; it was worn down, not absent. Widely published analyses of the intrusion (not confirmed in Uber's own statement) report that the attacker then found a PowerShell script on an over-permissive internal network share containing hard-coded admin credentials for Uber's privileged-access-management system, which unlocked further internal tooling. Root cause pattern: hard-coded credentials (CWE-798, A07), a share ACL that was far too broad (A02), and MFA that could be satisfied by a tired human tapping "approve" — the argument for number-matching or phishing-resistant factors.
+**Uber (2022) — A07 + A02:** An attacker bought an Uber contractor's corporate password on the dark web (the contractor's personal device had been infected with malware) and then defeated two-factor authentication by **repeated push-approval prompts** until the contractor accepted one — Uber's own incident write-up describes exactly this sequence. Note that MFA *was* enforced; it was worn down, not absent. What happened next is the part to treat carefully: vendor analyses agree that the attacker then found a PowerShell script on an over-permissive internal network share containing hard-coded admin credentials for Uber's privileged-access-management system, which unlocked further internal tooling — but that mechanism appears in *no* primary document. Uber's own write-up does not describe it, and neither does the Cyber Safety Review Board's Lapsus$ report. Take it as the consensus reconstruction, not an established fact. Root cause pattern: hard-coded credentials (CWE-798, A07), a share ACL that was far too broad (A02), and MFA that could be satisfied by a tired human tapping "approve" — the argument for number-matching or phishing-resistant factors.
 
 ---
 
@@ -703,7 +704,7 @@ Least privilege means every entity operates with only the minimum permissions re
 **Q: How do you prevent log injection attacks?**
 **Short:** Log injection forges log entries from unsanitized input; prevent it with parameterized logging and structured JSON logs.
 
-Log injection occurs when unsanitized user input is logged and the logging system reads special characters as log delimiters, letting the attacker forge entries. In Log4j's case the injected text was instead read as a JNDI lookup expression, which escalated the same bug to remote code execution. Prevention: (1) use parameterized logging — `log.info("User: {}", username)` instead of `log.info("User: " + username)`; (2) sanitize newline characters from input before logging (`\n`, `\r`, `%0a`, `%0d`); (3) use a JSON-structured logging format so there is no line-delimiter concept; (4) run a current Log4j 2.x release (2.26.x) — message lookups are gone from the layout and JNDI is disabled unless explicitly enabled.
+Log injection occurs when unsanitized user input is logged and the logging system reads special characters as log delimiters, letting the attacker forge entries. In Log4j's case the injected text was instead read as a JNDI lookup expression, which escalated the same bug to remote code execution. Prevention: (1) use parameterized logging — `log.info("User: {}", username)` instead of `log.info("User: " + username)`; (2) sanitize newline characters from input before logging (`\n`, `\r`, `%0a`, `%0d`); (3) use a JSON-structured logging format so there is no line-delimiter concept; (4) run a current Log4j 2.x release (2.26.x) — message lookups are gone from the layout and JNDI is disabled unless explicitly enabled, both since 2.16.0, which is the release that fixed CVE-2021-45046 after 2.15.0's fix proved incomplete.
 
 **Q: What are the risks of verbose error messages and how do you handle errors securely?**
 **Short:** Verbose error messages leak stack traces and internals to attackers; return only a generic error and a correlation ID instead.

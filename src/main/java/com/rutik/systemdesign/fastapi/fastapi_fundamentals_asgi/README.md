@@ -90,10 +90,15 @@ the loop. You pay for thread overhead only when you opt in to synchronous code.
 | WebSocket support   | not supported natively                            | first-class (`scope["type"] == "websocket"`)      |
 | Long-polling / SSE  | requires gevent/eventlet monkey-patching          | native streaming via `send` events                |
 | Servers             | gunicorn, uWSGI, mod_wsgi                         | uvicorn, hypercorn, daphne                        |
-| Python version      | 2.7+                                              | 3.6+ (practical minimum 3.10)                     |
+| Python version      | 2.7+                                              | none in spec; 3.10+ via the servers               |
 | Startup/shutdown    | no standard lifecycle hook                        | `lifespan` scope with startup/shutdown events     |
 | Django support      | Django 1.0+ (primary interface)                   | Django 3.0+ (Channels or ASGI entry point)        |
 | Flask support       | native                                            | Quart (async reimplementation)                    |
+
+The ASGI specification itself names no Python floor — it only requires that applications be
+`async`/`await` coroutines. The real floor comes from the implementations: uvicorn 0.52,
+Hypercorn 0.18, Starlette 1.3 and `asgiref` 3.12 all declare `requires-python >= 3.10`, so 3.10
+is the practical minimum for any ASGI stack you would deploy today.
 
 ### Response Class Hierarchy
 

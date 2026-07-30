@@ -85,7 +85,11 @@ GROUP BY u.id, u.name
 ORDER BY order_count DESC
 LIMIT 10;
 
--- Output (note the nesting: every child sits one level deeper than its parent):
+-- Output. This plan is SYNTHESIZED to teach the anatomy, not captured from a server: the
+-- structure, the nesting and the cost relationships are correct and internally consistent
+-- (every parent's startup cost exceeds its child's total), but no run produced these exact
+-- numbers. Read it for how to walk a plan; run your own for figures you intend to quote.
+-- Note the nesting: every child sits one level deeper than its parent.
 Limit  (cost=5678.34..5678.36 rows=10) (actual time=234.123..234.125 rows=10)
   -> Sort  (cost=5678.34..5698.34 rows=8000) (actual time=234.123..234.124 rows=10)
         Sort Key: (count(o.id)) DESC
@@ -420,12 +424,12 @@ right in review and disappears in the plan.
 ```mermaid
 xychart-beta
     title "OFFSET Pagination Degrades With Depth, Keyset Stays Flat"
-    x-axis ["Keyset (any depth)", "OFFSET 200K", "OFFSET 9.9M"]
-    y-axis "Latency (seconds)" 0 --> 45
-    bar [0.001, 0.8, 45]
+    x-axis ["Keyset (any depth)", "OFFSET 200K", "OFFSET 9.9M (extrapolated)"]
+    y-axis "Latency (seconds)" 0 --> 4
+    bar [0.00016, 0.071, 3.5]
 ```
 
-*Illustrative, not measured: the chart uses the export-endpoint scenario from section 7 (about 800ms at OFFSET 200,000, climbing to 45-second timeouts at OFFSET 9,900,000) to show the shape. Keyset stays flat at any depth because it is a single index seek on the cursor; OFFSET grows linearly with depth. The absolute values depend on row width, cache state and storage — the measured table above records 71ms at OFFSET 200,000 and 0.16ms for keyset on a warm 1.25M-row table.*
+*Plotted from the measured table above, not from the anecdote: 0.16ms for keyset and 71ms at OFFSET 200,000 on a warm, correctly indexed 1.25M-row table. The third bar is the only extrapolation — OFFSET is linear in the offset, so 49.5x the depth gives 71ms x 49.5 = ~3.5s. Keyset stays flat at any depth because it is a single index seek on the cursor; OFFSET grows linearly with depth. Absolute values move with row width, cache state and storage, so read the shape rather than the numbers.*
 
 ### 6.4 Batch Inserts with JDBC and Spring
 
@@ -725,6 +729,8 @@ In PostgreSQL that exact query does not fail — the quoted literal is untyped a
 ## 14. Case Study
 
 **Problem** (illustrative walkthrough; the numbers are internally consistent, not a published incident): An order management system had a "Get Orders with Customer Details" endpoint taking 8 seconds to return 50 orders. The dashboard auto-refreshed roughly once a second for about 200 concurrent managers, so ~200 requests/s x 51 queries per request ≈ **10,200 DB queries/s**.
+
+**Where every latency below comes from.** All of them are *derived from the query-count model*, not captured from a server, and it is worth seeing the derivation so you can check the arithmetic rather than trust the figures. The endpoint issues 51 serial round trips, and at ~10,200 queries/s the database is saturated at 85% CPU, so each round trip costs roughly `8,000ms / 51 ≈ 157ms` — overwhelmingly queueing delay, not query work. That is the single number the rest follows from, and it is also why the fixes compound: collapsing 51 round trips to 1 removes 98% of them *and* takes the database out of saturation, so the one surviving query returns in ~180ms instead of the 157ms it cost while queued behind fifty others.
 
 **Investigation**:
 1. datasource-proxy logging showed 51 queries per request (50 orders + 1 for order list).

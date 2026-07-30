@@ -568,10 +568,15 @@ None of the four strategies lands in the "fast and safe" quadrant — every real
 
 | Cache Tier | Latency | Capacity | Shared |
 |-----------|---------|---------|--------|
-| Local (in-process, Caffeine) | ~100ns | Limited (JVM heap) | No |
-| Redis (same DC) | ~1ms | Large (RAM) | Yes |
-| Redis (cross-DC) | ~50ms | Large | Yes |
-| CDN edge cache | ~5ms | Very large | Yes |
+| Local (in-process, Caffeine) | ~100ns — a heap lookup, no syscall | Limited (JVM heap) | No |
+| Redis (same DC) | ~1ms — one intra-DC round trip plus O(1) server work | Large (RAM) | Yes |
+| Redis (cross-region) | Tens of ms, set by the RTT: CloudPing's measured p50 for `us-east-1` to `eu-west-1` is ~70ms, and `us-east-1` to `ap-southeast-1` is ~220ms | Large | Yes |
+| CDN edge cache | Single-digit ms from a nearby PoP, but it is the PoP distance that decides, not the CDN | Very large | Yes |
+
+Read this as four orders of magnitude, not four measurements. Only the cross-region row has a
+published number behind it; the others are the shape of the operation — no syscall, one local
+round trip, one intercontinental round trip. The lesson is the gap between the rows, and it is
+why a cross-region cache read is usually slower than just querying the local database.
 
 ---
 

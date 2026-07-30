@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-A connection pool maintains a set of pre-established database connections that are reused across requests. Creating a TCP connection, performing the TLS handshake, and completing the database authentication handshake takes 20–100ms. For a service handling 1,000 requests/second, creating a new connection per request would spend more time on connection overhead than on actual queries.
+A connection pool maintains a set of pre-established database connections that are reused across requests. Opening a fresh one is not a single round trip — count them for PostgreSQL over TLS: TCP handshake, the `SSLRequest` negotiation packet, the TLS 1.3 handshake, then the startup message and a SCRAM-SHA-256 exchange that is itself two client-server round trips, and finally the server forking a backend process. That is five or six serial round trips plus a fork, so the wall-clock cost is *your RTT times six*: single-digit milliseconds on a same-AZ link, and well past 100ms across a region boundary. Do not memorise a number here — count round trips and multiply by the latency you actually have. A pool borrow, by contrast, is microseconds and touches no network at all, which is the entire point.
 
 HikariCP is the fastest, most widely used JDBC connection pool for Java. Spring Boot auto-configures HikariCP. Understanding its internals — the ConcurrentBag pool data structure, pool sizing formulas, connection validation, and leak detection — is essential for avoiding connection exhaustion, timeout cascades, and subtle connection bugs.
 
@@ -85,7 +85,7 @@ HikariCP benchmarks show it handles 100,000s of borrow/return operations per sec
 | connectionTestQuery | none | Legacy drivers only — HikariCP "strongly recommends not setting this" if the driver supports JDBC4 `isValid()` |
 | validationTimeout | 5,000 ms | Timeout for isValid() check (min 250 ms) |
 
-Defaults above are from the HikariCP 7.x README and `HikariConfig` source; Spring Boot 4.1 manages HikariCP 7.0.2. `keepaliveTime` is the one default that moved late (it was 0/disabled through HikariCP 6.2.0), so confirm the version your build actually resolves with `mvn dependency:tree` before assuming keepalive is on.
+Defaults above are from the HikariCP 7.x README and `HikariConfig` source. `keepaliveTime` is the one default that moved late: `DEFAULT_KEEPALIVE_TIME` was `0L` (disabled) through HikariCP 6.2.0 and became 2 minutes in 6.3.0. Which one you get is decided by your Spring Boot line, and the managed versions in `spring-boot-dependencies` are: Boot 3.2.x -> HikariCP 5.0.1, Boot 3.3.x and 3.4.x -> 5.1.0, Boot 3.5.x -> 6.3.0, Boot 4.0 and 4.1 -> 7.0.2. So the keepalive default flips on exactly at Boot 3.5. Confirm what your build actually resolves with `mvn dependency:tree` rather than trusting the table.
 
 ### 4.3 PgBouncer Connection Modes
 
@@ -150,7 +150,7 @@ flowchart LR
 ```mermaid
 xychart-beta
     title "HikariCP pool size: naive estimate vs. formula vs. danger zone"
-    x-axis ["Little's Law raw", "+50% headroom", "HikariCP formula", "Degradation starts"]
+    x-axis ["Little's Law raw", "+50% headroom", "HikariCP formula", "Over-provisioned (illustrative)"]
     y-axis "Connections needed" 0 --> 30
     bar [1, 1.5, 9, 25]
 ```
@@ -489,7 +489,7 @@ Hold time, not query time, is the denominator. A transaction that spends 5ms que
 
 No database work changed and no connection was added; only the checkout window moved. This is why "the database is slow" is so often wrong — at 20 req/s the database in this example is 99% idle, and adding read replicas or a bigger instance would improve nothing. Watch `hikaricp_connections_acquire_seconds` alongside actual query timings: a large gap between them is exactly this pattern.
 
-**minimumIdle causing connection thrashing**: If minimumIdle is set to 0 (no warm connections), every incoming request must create a new connection. Connection creation takes 20-100ms, adding latency to the first request after an idle period. HikariCP's documented advice is to leave minimumIdle unset, which makes it equal maximumPoolSize and gives you a fixed-size pool "for maximum performance and responsiveness to spike demands."
+**minimumIdle causing connection thrashing**: If minimumIdle is set to 0 (no warm connections), every incoming request must create a new connection — five or six serial round trips plus a server-side fork (see Section 1), so tens of milliseconds on a same-AZ link and far more across a region — and that lands as latency on the first request after an idle period. HikariCP's documented advice is to leave minimumIdle unset, which makes it equal maximumPoolSize and gives you a fixed-size pool "for maximum performance and responsiveness to spike demands."
 
 **Ignoring connectionTimeout in error handling**: When the pool exhausts, HikariCP itself throws `java.sql.SQLTransientConnectionException` with the message `<poolName> - Connection is not available, request timed out after Nms (total=…, active=…, idle=…, waiting=…)`; Spring's `DataSourceUtils` then wraps it in `CannotGetJdbcConnectionException`. (There is no `HikariPool$PoolTimeoutException` class — do not catch by that name.) Many applications treat all DataAccessException as retriable — retrying a pool exhaustion exception will not help (the pool is still exhausted). Detect this specific exception and return 503 Service Unavailable rather than retrying.
 
@@ -513,9 +513,9 @@ No database work changed and no connection was added; only the checkout window m
 ## 12. Interview Questions with Answers
 
 **Q: What is a connection pool and why is it necessary?**
-**Short:** A connection pool reuses pre-established DB connections, avoiding the 20-100ms cost of creating one per request.
+**Short:** A connection pool reuses pre-established DB connections, avoiding the five-or-six-round-trip cost of creating one per request.
 
-A connection pool pre-establishes and maintains a set of database connections for reuse. Creating a JDBC connection involves TCP handshake, TLS (if SSL is enabled), authentication (username/password), session setup — totaling 20–100ms. For applications handling 100+ requests/second, creating a connection per request is prohibitively expensive. A pool reduces this to microseconds per borrow by reusing established connections.
+A connection pool pre-establishes and maintains a set of database connections for reuse. Creating a JDBC connection involves a TCP handshake, TLS negotiation (if SSL is enabled), authentication, and session setup — five or six serial network round trips before a single query runs, plus a backend process fork on PostgreSQL. The wall-clock cost is therefore whatever your round-trip time is, multiplied: tens of milliseconds inside one availability zone, well over 100ms across a region. For applications handling 100+ requests/second, paying that per request is prohibitively expensive. A pool reduces it to microseconds per borrow, with no network involved at all.
 
 **Q: How does HikariCP's ConcurrentBag work?**
 **Short:** ConcurrentBag borrows via a thread-local list, then a CAS-scanned shared list, then a SynchronousQueue handoff.
@@ -588,9 +588,9 @@ Compare query duration against pool wait time — `hikaricp_connections_pending`
 This PostgreSQL error means total connection attempts across all app instances exceeded max_connections, and the fix is a pooling proxy like PgBouncer, not smaller per-service pools. In the illustrative scenario in section 14, 30 instances each running a 20-connection HikariCP pool attempted 600 connections against a PostgreSQL server left at the default max_connections=100 — six times over the limit — and every excess attempt failed with this exact error. Deploying PgBouncer in transaction mode let the applications keep their existing pool sizes while multiplexing the real traffic down to 50 actual PostgreSQL connections, because PgBouncer only holds a real connection for the duration of one transaction rather than one client session. Put a pooling proxy in front of PostgreSQL before assuming the fix is a bigger database instance or smaller application pools.
 
 **Q: What happens if you set HikariCP's minimumIdle to 0?**
-**Short:** With no warm idle connections kept, every request after an idle gap pays the full 20-100ms connection creation cost.
+**Short:** With no warm idle connections kept, every request after an idle gap pays the full connection-creation cost of five or six round trips.
 
-Setting minimumIdle to 0 means the pool keeps no warm connections ready, so a request arriving after any idle period pays the full cost of creating a new connection first. Connection creation involves a TCP handshake, optional TLS negotiation, and database authentication — 20 to 100ms — which becomes added latency on the first request after any idle gap instead of being hidden ahead of time. This connection thrashing is worst for bursty traffic patterns, where the pool repeatedly drains to zero idle connections and then pays the creation cost again for the next burst. Keep minimumIdle equal to maximumPoolSize, HikariCP's own recommended default, so the pool maintains warm connections sized to expected steady-state concurrency.
+Setting minimumIdle to 0 means the pool keeps no warm connections ready, so a request arriving after any idle period pays the full cost of creating a new connection first. Connection creation involves a TCP handshake, optional TLS negotiation, and database authentication — five or six serial round trips, so tens of milliseconds even inside one availability zone — which becomes added latency on the first request after any idle gap instead of being hidden ahead of time. This connection thrashing is worst for bursty traffic patterns, where the pool repeatedly drains to zero idle connections and then pays the creation cost again for the next burst. Keep minimumIdle equal to maximumPoolSize, HikariCP's own recommended default, so the pool maintains warm connections sized to expected steady-state concurrency.
 
 ---
 

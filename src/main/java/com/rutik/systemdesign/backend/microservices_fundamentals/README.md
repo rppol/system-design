@@ -493,7 +493,7 @@ flowchart LR
 Splitting services before domain boundaries are understood. Six months later you need to move a field from ServiceA to ServiceB, but now you have 200 consumers of ServiceA's API and a database migration that requires coordinating two teams. A monolith refactoring would have been a two-hour PR.
 
 **Chatty Services (Nano-Services)**
-Services so small that a single user action requires 20 sequential service calls. Each hop adds 5-20ms of network latency. A checkout flow that calls inventory, pricing, coupon, tax, payment, fraud, shipping, notification, loyalty, analytics — 10 sequential hops — adds 50-200ms to every checkout. Merge cohesive nano-services or use async/parallel calls.
+Services so small that a single user action requires 20 sequential service calls. Budget 5-20ms per hop of network and serialization cost. Be clear about what that band is: a deliberately conservative **planning rule of thumb**, not a measured figure — nobody publishes a per-hop RPC latency band, plain intra-AZ gRPC often lands at 1-10ms, and if you run a service mesh the sidecar pair adds its own hardware-dependent cost on top (Istio publishes its own sidecar benchmarks, and even they caution that different hardware gives different values). Measure your own p50 and p99 per hop and substitute them. With the rule of thumb, a checkout flow that calls inventory, pricing, coupon, tax, payment, fraud, shipping, notification, loyalty, analytics — 10 sequential hops — adds 50-200ms to every checkout. Merge cohesive nano-services or use async/parallel calls.
 
 **Stated plainly.** "Split a call chain in series and the latencies add up; but the availabilities multiply — and multiplying numbers below 1 drives the product down fast."
 
@@ -502,7 +502,7 @@ Those are two different arithmetic operations on the same decomposition, and the
 | Symbol | What it is |
 |--------|------------|
 | hop | One synchronous service-to-service call in the chain |
-| per-hop latency | 5-20 ms of network and serialization cost, before any business logic |
+| per-hop latency | 5-20 ms of network and serialization cost, before any business logic. A planning band, not a measurement — replace it with your own |
 | chain latency | `hops × per-hop latency` when sequential; `max(hops)` when parallel |
 | per-service availability | Probability one service answers correctly, e.g. `0.999` |
 | chain availability | `per-service ^ hops`. Every dependency is a multiplication |

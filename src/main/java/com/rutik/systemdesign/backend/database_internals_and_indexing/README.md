@@ -108,10 +108,13 @@ data and costs you two extra page reads. That flatness is the entire reason inde
 and 16 to the B-tree special area, leaving `8192 - 40 = 8152` usable bytes, and each entry
 costs 20 bytes (an 8-byte index-tuple header, an 8-byte `bigint` key, and a 4-byte line
 pointer) — so `8152 / 20 = 407` slots if a page were packed solid. PostgreSQL deliberately
-does not pack them: leaf pages use fillfactor 90 and internal pages a fixed 70, so a real
-internal page carries about `407 × 0.70 = 285` downlinks. Measured on PostgreSQL 16 with a
-5-million-row `bigint` index: 367 entries per leaf page, at most 285 per internal page, and
-3 levels in total.
+does not pack them: `src/include/access/nbtree.h` defines `BTREE_DEFAULT_FILLFACTOR 90` for
+leaf pages and a fixed `BTREE_NONLEAF_FILLFACTOR 70` for internal ones, so a real internal
+page carries roughly `407 × 0.70 = 285` downlinks. Measured on PostgreSQL 16 with a
+5-million-row **sequentially inserted** `bigint` index: 367 entries per leaf page, at most 285
+per internal page, and 3 levels in total. Read 285 as the top of the range rather than a
+constant — randomly inserted, wider, variable-length or deduplicated indexes all land lower,
+which raises the height but never changes the shape of the argument below.
 
 **Walk one example.** Watch the table size explode while the height crawls:
 
@@ -126,7 +129,12 @@ internal page carries about `407 × 0.70 = 285` downlinks. Measured on PostgreSQ
 ```
 
 **Walk the cost that actually matters.** Height is random page reads; multiply by SSD latency
-and compare against streaming the whole table:
+and compare against streaming the whole table. The two device figures below are stand-ins for
+a device class, not a datasheet: `~1 GB/s` sits above SATA III's ~550 MB/s interface ceiling
+and well below a Gen4 NVMe's 5-7 GB/s, and real PostgreSQL sequential-scan throughput lands
+*below* whichever raw number your device quotes, because tuple deforming is CPU-bound and the
+ring buffer caps how much of shared_buffers a scan may use. Both effects push the ratio the
+same way, so treat 160,000x as a conservative order of magnitude:
 
 ```
   1 billion rows, ~100 rows per 8 KB heap page,
@@ -394,9 +402,12 @@ SELECT * FROM products WHERE attributes @> '{"color": "red", "size": "L"}';
 **BRIN index for time-series**: A table with 10 billion sensor readings ordered by timestamp can use a BRIN index that is roughly four orders of magnitude smaller than a B-tree while still providing good performance for range queries on timestamp (because physical order correlates with timestamp order):
 ```sql
 CREATE INDEX idx_readings_ts ON sensor_readings USING BRIN (recorded_at);
--- Index size: ~20 MB vs ~210 GB for B-tree on 10B rows
--- (measured on PostgreSQL 16 at 40M rows: 80 KB BRIN vs 857 MB B-tree,
---  both of which scale linearly with row count)
+-- Index size: ~20 MB vs ~210 GB for B-tree on 10B rows -- EXTRAPOLATED, not measured.
+-- The measured anchor is PostgreSQL 16 at 40M rows: 80 KB BRIN vs 857 MB B-tree.
+-- 10B/40M = 250x, and both structures are linear in row count above BRIN's small-index
+-- revmap floor: BRIN stores one summary tuple per pages_per_range (default 128) heap
+-- pages, so its size tracks heap pages directly. 80 KB x 250 = 20 MB; 857 MB x 250 = 214 GB.
+-- Re-measure at your own scale before quoting these as absolutes.
 -- Works because rows are naturally inserted in time order
 ```
 
