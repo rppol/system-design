@@ -342,6 +342,26 @@ let STUDY_PATHS = {};
 // boot() STARTS the fetch without awaiting it and renderTech() awaits the same
 // promise. Boot latency is untouched; by the time anyone reaches the screen it is
 // warm. Absent (offline before the first fetch) -> the screen shows an empty state.
+// [BANK] The technology KNOWLEDGE BANK (tech_index.json): what each tool IS and what
+// problems it solves, independent of which module happens to teach it. Multi-label by
+// design -- Redis is a distributed cache AND a key-value store AND a rate-limit backend
+// AND a message broker, and all four are true, so `r` is a list of [tierId/roleId, weight].
+//
+// Unlike tech.json this is NOT CI-regenerable: deriving roles needs a judgement pass over
+// every tool's usage blurbs (a 96-pattern keyword attempt reached 44.6% coverage with bad
+// precision -- Prometheus drew 6 spurious roles of 10 while MongoDB got none). So it is
+// COMMITTED, and fetched relatively like the rest -- no new APK seam.
+//
+// Absent or stale, the screen degrades to the flat provenance list rather than blanking.
+let TECH_BANK = null;
+let _bankPromise = null;
+function loadTechBank() {
+  if (!_bankPromise) _bankPromise = fetchJSON("tech_index.json", null, "default")
+    .then((d) => (TECH_BANK = d && d.tools && d.tiers ? d : null))
+    .catch(() => null);
+  return _bankPromise;
+}
+
 let TECH_INDEX = null;
 let _techPromise = null;
 function loadTechIndex() {
@@ -4058,7 +4078,10 @@ async function renderTech() {
   refreshStats();
   app.innerHTML = skeletonHTML("topics");
   const idx = TECH_INDEX || await loadTechIndex();
-  if (location.hash !== "#/tech") return;              // navigated away during the fetch
+  const bank = TECH_BANK || await loadTechBank();
+  // startsWith, NOT equality: the facets live in a query string (#/tech?t=data-stores).
+  // With `!==` any faceted URL painted the skeleton and then returned, freezing it.
+  if (!location.hash.startsWith("#/tech")) return;      // navigated away during the fetch
   if (!idx || !idx.tech || !idx.modules) {
     errorScreen("Technologies index unavailable",
       `It's generated with the question bank, so an offline first visit won't have it yet.${devDetail(`Run <code>python3 extract.py</code> then reload.`)}`,
@@ -4099,6 +4122,58 @@ async function renderTech() {
           : "full module &middot; 14 sections"}</span>
       </button>`).join("")}</div>` : "";
 
+  // ---- [BANK] facet state ------------------------------------------------------
+  // Tier/role/language/kind live in the HASH QUERY STRING so a filtered view is
+  // linkable, and mirror to localStorage so the screen reopens where you left it.
+  // Facets commute, so they are query params rather than path segments.
+  const bankOn = !!(bank && bank.tools);
+  const TIERS = bankOn ? bank.tiers : [];
+  const KINDS = bankOn ? bank.kinds : [];
+  // The data declares its own default kind, so no guess is needed about kind ordering.
+  const defaultKind = (KINDS.find((k) => k.default) || KINDS[0] || {}).id || "tech";
+  const roleTier = new Map();            // "tier/role" -> {tier, role}
+  TIERS.forEach((t) => t.roles.forEach((r) => roleTier.set(`${t.id}/${r.id}`, { t, r })));
+
+  function readFacets() {
+    const qs = new URLSearchParams((location.hash.split("?")[1] || ""));
+    const stored = (() => { try { return JSON.parse(localStorage.getItem("sd_tech_facets")) || {}; } catch { return {}; } })();
+    const pick = (k, d) => (qs.has(k) ? qs.get(k) : (stored[k] !== undefined ? stored[k] : d));
+    const csv = (v) => String(v || "").split(",").filter(Boolean);
+    return { t: csv(pick("t", "")), r: csv(pick("r", "")),
+             l: pick("l", "") || "", k: pick("k", defaultKind) || defaultKind };
+  }
+  let F = readFacets();
+  function writeFacets(replace) {
+    const qs = new URLSearchParams();
+    if (F.t.length) qs.set("t", F.t.join(","));
+    if (F.r.length) qs.set("r", F.r.join(","));
+    if (F.l) qs.set("l", F.l);
+    if (F.k && F.k !== defaultKind) qs.set("k", F.k);
+    const q = qs.toString();
+    safeSet("sd_tech_facets", JSON.stringify(F));
+    const next = "#/tech" + (q ? "?" + q : "");
+    // replaceState, not a hash assignment: a facet click is a refinement, not a
+    // navigation, and pushing one history entry per chip makes Back unusable.
+    if (location.hash !== next) history.replaceState(null, "", next);
+  }
+  // A tool qualifies for a language if it is bound to it OR is polyglot. 67% of the
+  // index is "*", so without the union a language view would hide every database.
+  const langOK = (b) => !F.l || !b || b.l.includes(F.l) || b.l.includes("*");
+  const kindOK = (b) => !F.k || !b || b.k === F.k;
+  // Best (lowest) weight this tool carries inside the active tier/role selection.
+  // 1 = the tool is built for this, 3 = loosely related. null = not in the selection.
+  function facetWeight(b) {
+    if (!b) return null;
+    if (!F.t.length && !F.r.length) return 1;
+    let best = null;
+    for (const [rid, w] of b.r) {
+      const inRole = F.r.includes(rid);
+      const inTier = F.t.includes(rid.split("/")[0]);
+      if (inRole || (inTier && !F.r.length)) best = best === null ? w : Math.min(best, w);
+    }
+    return best;
+  }
+
   let tab = techTab();
   let secPick = techSecFilter();
   if (secPick !== "all" && !secsPresent.includes(secPick)) secPick = "all";
@@ -4127,6 +4202,8 @@ async function renderTech() {
       </label>
       <span class="selcount" id="techCount" role="status"></span>
     </div>
+    ${bankOn ? `<div id="techFacets" class="tx-facets"></div>` : ""}
+    <div id="techShelf" class="tx-shelf"></div>
     <div id="techList" class="tx-list"></div>
     <div class="row" style="margin-top:18px"><button class="ghost" id="techHome">&larr; Home</button></div>`;
 
@@ -4158,6 +4235,85 @@ async function renderTech() {
     return 4;                       // matched only via r.hay (a module title or a blurb)
   }
 
+  const facetEl = () => el("#techFacets"), shelfEl = () => el("#techShelf");
+  const bankOf = (name) => (bankOn ? bank.tools[name] : null);
+
+  // Live counts against the OTHER active facets, so a chip showing 0 is genuinely
+  // empty rather than merely unselected -- zero-count chips are disabled, which is
+  // what makes it impossible to click your way into an empty screen.
+  function tierCounts(q) {
+    const c = new Map();
+    for (const row of techRows) {
+      const b = bankOf(row.n);
+      if (!b || !kindOK(b) || !langOK(b)) continue;
+      if (q && !row.hay.includes(q)) continue;
+      for (const t of new Set(b.r.map(([rid]) => rid.split("/")[0]))) c.set(t, (c.get(t) || 0) + 1);
+    }
+    return c;
+  }
+  function roleCounts(q) {
+    const c = new Map();
+    for (const row of techRows) {
+      const b = bankOf(row.n);
+      if (!b || !kindOK(b) || !langOK(b)) continue;
+      if (q && !row.hay.includes(q)) continue;
+      for (const [rid] of b.r) if (!F.t.length || F.t.includes(rid.split("/")[0])) c.set(rid, (c.get(rid) || 0) + 1);
+    }
+    return c;
+  }
+
+  function renderFacets(q) {
+    if (!bankOn) return;
+    const tc = tierCounts(q), rc = roleCounts(q);
+    const tierChips = TIERS.map((t) => {
+      const n = tc.get(t.id) || 0, on = F.t.includes(t.id);
+      return `<button class="tx-chip${on ? " on" : ""}" data-tier="${esc(t.id)}"${n || on ? "" : " disabled"}
+        aria-pressed="${on}">${esc(t.label)} <span class="tx-chipn">${n}</span></button>`;
+    }).join("");
+    // The role row appears only once a tier is chosen: 95 role chips at once is not a
+    // second level, it is the same wall with more words.
+    const roles = F.t.length
+      ? TIERS.filter((t) => F.t.includes(t.id)).flatMap((t) => t.roles.map((r) => ({ t, r, id: `${t.id}/${r.id}` })))
+      : [];
+    const roleChips = roles.map(({ r, id }) => {
+      const n = rc.get(id) || 0, on = F.r.includes(id);
+      return `<button class="tx-chip tx-rolechip${on ? " on" : ""}" data-role="${esc(id)}"${n || on ? "" : " disabled"}
+        aria-pressed="${on}">${esc(r.label)} <span class="tx-chipn">${n}</span></button>`;
+    }).join("");
+    const langs = ["", "python", "java", "js", "go", "cpp", "csharp", "rust"];
+    const langSel = `<label class="tx-seclabel">Language
+      <select class="filter tx-secsel" id="techLang" aria-label="Filter by language">
+        ${langs.map((L) => `<option value="${L}"${L === F.l ? " selected" : ""}>${L ? esc(L) : "Any language"}</option>`).join("")}
+      </select></label>`;
+    const kindSel = `<label class="tx-seclabel">Kind
+      <select class="filter tx-secsel" id="techKind" aria-label="Filter by kind">
+        ${KINDS.map((k) => `<option value="${esc(k.id)}"${k.id === F.k ? " selected" : ""}>${esc(k.label)}</option>`).join("")}
+      </select></label>`;
+    const active = F.t.length || F.r.length || F.l || F.k !== defaultKind;
+    facetEl().innerHTML = `
+      <div class="tx-chiprow" role="group" aria-label="Problem area">${tierChips}</div>
+      ${roleChips ? `<div class="tx-chiprow tx-rolerow" role="group" aria-label="Within this area">${roleChips}</div>` : ""}
+      <div class="tx-facetfoot">${langSel}${kindSel}
+        ${active ? `<button class="ghost tx-clear" id="techClear">Clear filters</button>` : ""}</div>`;
+  }
+
+  // Landing: one card per tier, its roles as mini-chips. A bare chip row cannot show
+  // the second level, and the second level is the thing the owner asked for.
+  function renderShelf(q) {
+    const showShelf = bankOn && tab === "tech" && !q && !F.t.length && !F.r.length;
+    const host = shelfEl();
+    if (!showShelf) { host.innerHTML = ""; return; }
+    const tc = tierCounts("");
+    host.innerHTML = `<div class="grid tx-tiergrid">${TIERS.map((t) => `
+      <div class="tile tx-tiercard">
+        <button class="tx-tiername" data-tier="${esc(t.id)}">${esc(t.label)}
+          <span class="tx-chipn">${tc.get(t.id) || 0}</span></button>
+        <div class="tx-tierroles">${t.roles.slice(0, 6).map((r) => `
+          <button class="tx-minirole" data-role="${esc(t.id)}/${esc(r.id)}">${esc(r.label)}</button>`).join("")}
+          ${t.roles.length > 6 ? `<span class="tx-morerole">+${t.roles.length - 6}</span>` : ""}</div>
+      </div>`).join("")}</div>`;
+  }
+
   function paint() {
     const q = findEl.value.trim().toLowerCase();
     if (tab === "tech") {
@@ -4170,9 +4326,22 @@ async function renderTech() {
       // so under Section=LLM the list read 5, 4, 3, 20, 3, 2 ... with LangSmith (20 in
       // llm) fourth and vLLM (15) tenth, below Grafana (3).
       let scoped = rows.map((r) => ({
-        r,
+        r, b: bankOf(r.n),
         uses: secPick === "all" ? r.u : r.u.filter((u) => secOf(u[0]) === secPick),
       }));
+      // [BANK] facet narrowing. Kind is suspended while searching -- it is the only
+      // facet carrying a default the user never chose, so it must not silently hide
+      // a tool someone typed the name of.
+      if (bankOn) {
+        scoped = scoped.filter(({ b }) => b && langOK(b) && (q || kindOK(b)));
+        if (F.t.length || F.r.length) {
+          scoped = scoped.map((x) => ({ ...x, w: facetWeight(x.b) })).filter((x) => x.w !== null);
+          // Sort by how central the tool is to what you asked for, then by breadth.
+          // Under "db", PostgreSQL (built for it) outranks Redis (also does it) --
+          // which is the point of multi-label: Redis still appears, correctly placed.
+          scoped.sort((a, z) => a.w - z.w || z.uses.length - a.uses.length);
+        }
+      }
       // techRows already arrives global-count desc and Array.sort is STABLE, so a single
       // scoped-count key behaves as (scoped count, then repo-wide prominence). No
       // comparator chain needed, and the unfiltered/unsearched case needs no sort at all.
@@ -4183,15 +4352,35 @@ async function renderTech() {
         ? (q ? `${scoped.length} match${scoped.length === 1 ? "" : "es"}`
              : `${slice.length} of ${scoped.length} tool${scoped.length === 1 ? "" : "s"}`)
         : "no matches";
-      listEl.innerHTML = scoped.length ? slice.map(({ r, uses }) => {
+      const BAND = { 1: "Built for this", 2: "Also does this", 3: "Loosely related" };
+      let lastBand = null;
+      listEl.innerHTML = scoped.length ? slice.map(({ r, uses, b, w }) => {
         // "Redis 5/29" vs "LangSmith 20/20" is the whole story the section filter can
         // tell: one is a general tool that turns up in LLM work, the other is an LLM tool.
         const all = uses.length < r.u.length ? `<span class="tx-count-all">/${r.u.length}</span>` : "";
-        return `<details class="tx-item">
+        // A band caption, printed once when the weight changes. This is what turns
+        // multi-membership from noise into information: under "db" Redis appears under
+        // "Also does this", which reads as a fact about Redis rather than a bad result.
+        let head = "";
+        if (w && w !== lastBand) { lastBand = w; head = `<h3 class="tx-band">${BAND[w]}</h3>`; }
+        // Every role the tool carries, not just the matched ones -- the out-of-facet
+        // ones are how you discover that your cache is also a message broker.
+        const badges = b ? b.r.map(([rid, rw]) => {
+          const rt = roleTier.get(rid); if (!rt) return "";
+          const hit = F.r.includes(rid) || F.t.includes(rid.split("/")[0]);
+          return `<button class="tx-role${hit ? " on" : ""}${rw === 3 ? " tx-role-weak" : ""}"
+            data-role="${esc(rid)}" title="${esc(rt.t.label)}">${esc(rt.r.label)}</button>`;
+        }).join("") : "";
+        const langTag = b && !b.l.includes("*")
+          ? `<span class="tx-lang">${b.l.map(esc).join(" / ")}</span>` : "";
+        return `${head}<details class="tx-item${b ? " tx-item2" : ""}">
           <summary>
-            <span class="tx-name">${esc(r.n)}</span>
-            <span class="tx-dots">${[...new Set(uses.map((u) => secOf(u[0])))].map(secChip).join("")}</span>
-            <span class="tx-count">${uses.length}${all}</span>
+            <span class="tx-line1">
+              <span class="tx-name">${esc(r.n)}</span>${langTag}
+              <span class="tx-dots">${[...new Set(uses.map((u) => secOf(u[0])))].map(secChip).join("")}</span>
+              <span class="tx-count">${uses.length}${all}</span>
+            </span>
+            ${b ? `<span class="tx-sum">${esc(b.s)}</span><span class="tx-roles">${badges}</span>` : ""}
           </summary>
           <ul class="tx-uses">${uses.map(useRow).join("")}</ul>
         </details>`;
@@ -4226,13 +4415,57 @@ async function renderTech() {
         : `<p class="tx-empty">No tradeoff table matches &ldquo;${esc(findEl.value.trim())}&rdquo;.</p>`;
     }
   }
-  paint();
+  // paint() renders the results; the facet chips and the tier shelf are their own
+  // surfaces because their counts depend on the OTHER facets, not on the result slice.
+  function repaint() {
+    const q = findEl.value.trim().toLowerCase();
+    renderFacets(q); renderShelf(q); paint();
+  }
+  function toggle(list, v) {
+    const i = list.indexOf(v);
+    if (i >= 0) list.splice(i, 1); else list.push(v);
+  }
+  function onFacetClick(e) {
+    const tierBtn = e.target.closest("[data-tier]"), roleBtn = e.target.closest("[data-role]");
+    if (!tierBtn && !roleBtn) return;
+    if (tierBtn) {
+      toggle(F.t, tierBtn.dataset.tier);
+      // Dropping a tier must drop its roles too, or an invisible role chip keeps
+      // filtering and the screen looks broken for a reason nothing on it explains.
+      F.r = F.r.filter((rid) => F.t.includes(rid.split("/")[0]));
+    } else {
+      const rid = roleBtn.dataset.role, tid = rid.split("/")[0];
+      if (!F.t.includes(tid)) F.t.push(tid);      // a role always shows its tier as active
+      toggle(F.r, rid);
+    }
+    shown = { tech: TECH_PAGE, trade: TRADE_PAGE };
+    writeFacets(); repaint();
+  }
+  if (bankOn) {
+    facetEl().addEventListener("click", onFacetClick);
+    shelfEl().addEventListener("click", onFacetClick);
+    facetEl().addEventListener("change", (e) => {
+      if (e.target.id === "techLang") F.l = e.target.value;
+      else if (e.target.id === "techKind") F.k = e.target.value;
+      else return;
+      shown = { tech: TECH_PAGE, trade: TRADE_PAGE };
+      writeFacets(); repaint();
+    });
+    facetEl().addEventListener("click", (e) => {
+      if (!e.target.closest("#techClear")) return;
+      F = { t: [], r: [], l: "", k: defaultKind };
+      writeFacets(); repaint();
+    });
+  }
+  repaint();
 
   // One delegated listener for the whole list: a tech row fans out to ~4,000 buttons
   // across paging, and binding each one would cost more than the render.
   listEl.addEventListener("click", (e) => {
     const more = e.target.closest(".tx-more");
     if (more) { shown[more.dataset.more] += more.dataset.more === "tech" ? TECH_PAGE : TRADE_PAGE; paint(); return; }
+    const roleBadge = e.target.closest(".tx-role");
+    if (roleBadge) { onFacetClick(e); return; }   // a badge in a row is a filter control
     const go = e.target.closest("[data-p]");
     if (!go) return;
     reader.back = [];
@@ -8137,7 +8370,7 @@ function updateTabbar() {
   const bar = el("#tabbar");
   if (!bar) return;
   const h = location.hash || "#/home";
-  const active = h.startsWith("#/study") ? "study" : h === "#/tech" ? "tech" : h === "#/progress" ? "progress" : h.startsWith("#/quiz") || h.startsWith("#/reader") ? null : "home";
+  const active = h.startsWith("#/study") ? "study" : (h === "#/tech" || h.startsWith("#/tech?")) ? "tech" : h === "#/progress" ? "progress" : h.startsWith("#/quiz") || h.startsWith("#/reader") ? null : "home";
   bar.querySelectorAll(".tab").forEach((t) => {
     const on = t.dataset.tab === active;
     t.classList.toggle("active", on);
@@ -8201,7 +8434,7 @@ function dispatch(route) {
   if (route.startsWith("#/topics/")) { openTopics(route.slice("#/topics/".length)); return; }
   if (route.startsWith("#/study/")) { openStudySection(route.slice("#/study/".length)); return; }
   if (route === "#/study") { renderStudy(); return; }
-  if (route === "#/tech") { renderTech(); return; }   /* [TECH] repo-wide technology index */
+  if (route === "#/tech" || route.startsWith("#/tech?")) { renderTech(); return; }   /* [TECH] repo-wide technology index; ?-suffix carries the facet state */
   if (route === "#/progress") { renderProgress(); return; }
   if (route === "#/debrief") { renderDebrief(); return; }   /* [D] Friday Debrief */
   renderHome();                                     // #/home and any unknown route
@@ -8955,6 +9188,7 @@ async function boot() {
   // gzipped and nothing on the first screen needs it. renderTech() awaits this exact
   // promise, so the screen is warm on arrival and boot never waits for it.
   loadTechIndex();
+  loadTechBank();          // [BANK] warmed with the index; renderTech awaits the same promise
   if (!state.index) {
     errorScreen("No question bank found", `Check your connection, or the question bank hasn't been built yet.${devDetail(`Run <code>python3 extract.py</code> then reload.`)}`, () => location.reload());
     return;

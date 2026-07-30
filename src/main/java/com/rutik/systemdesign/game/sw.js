@@ -80,7 +80,12 @@ self.addEventListener("fetch", (e) => {
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== location.origin) return;   // let cross-origin (none expected) pass through
-  if (/\/(questions|graph)\/[^/]+\.json$/.test(url.pathname)) {
+  // tech_index.json sits at the game root rather than under questions/, so it needs
+  // naming explicitly -- without it the knowledge bank fell through to networkFirst and
+  // blocked on the network every visit, making it SLOWER than the flat screen it replaces.
+  // It is deliberately NOT in SHELL: cache.addAll is atomic, so one missing file there
+  // would take offline support for the whole app down, not just this screen.
+  if (/\/(questions|graph)\/[^/]+\.json$/.test(url.pathname) || /\/tech_index\.json$/.test(url.pathname)) {
     e.respondWith(staleWhileRevalidate(req));
   } else if (/\.md$/i.test(url.pathname)) {
     e.respondWith(networkFirstMd(req));           // [W5] capped content-page bucket

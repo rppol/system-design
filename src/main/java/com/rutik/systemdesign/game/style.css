@@ -3038,3 +3038,65 @@ body.interview-mode #app::before {
 :root.vt-qnext::view-transition-new(root) { animation: q-in-right 0.24s var(--ease-out) both; }
 @keyframes q-out-left { to { opacity: 0; transform: translateX(-16px); } }
 @keyframes q-in-right { from { opacity: 0; transform: translateX(16px); } }
+
+/* ---- [BANK] faceted technology browse ------------------------------------
+   Tier chips are the entry point; roles appear only once a tier is chosen (95
+   role chips at once is not a second level, it is the same wall with more
+   words). All colour via tokens, and every APK adaptation is a CSS rule under
+   html.is-apk so app.js gains no seam. */
+.tx-facets { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 4px; }
+.tx-chiprow { display: flex; flex-wrap: wrap; gap: 6px; }
+.tx-chip {
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 999px; padding: 5px 11px; font-size: var(--fs-xs); cursor: pointer;
+  display: inline-flex; align-items: baseline; gap: 6px; transition: background .12s, border-color .12s;
+}
+.tx-chip:hover:not(:disabled) { border-color: var(--accent); }
+.tx-chip.on { background: color-mix(in srgb, var(--accent) 22%, var(--card)); border-color: var(--accent); }
+.tx-chip:disabled { opacity: .32; cursor: default; }
+.tx-chipn { font-family: var(--mono); font-size: .85em; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tx-rolerow { padding-left: 10px; border-left: 2px solid var(--line); }
+.tx-facetfoot { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+
+/* landing shelf: one card per tier, roles as mini-chips */
+.tx-tiergrid { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.tx-tiercard { display: flex; flex-direction: column; gap: 6px; align-items: stretch; text-align: left; padding: 12px; }
+.tx-tiername {
+  background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+  color: var(--text); font-weight: 600; font-size: var(--fs-sm);
+  display: flex; justify-content: space-between; gap: 8px;
+}
+.tx-tiername:hover { color: var(--accent); }
+.tx-tierroles { display: flex; flex-wrap: wrap; gap: 4px; }
+.tx-minirole {
+  background: none; border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); font-size: 11px; padding: 2px 8px; cursor: pointer;
+}
+.tx-minirole:hover { color: var(--text); border-color: var(--accent); }
+.tx-morerole { color: var(--muted); font-size: 11px; align-self: center; }
+
+/* two-line row: the summary is what makes this a knowledge bank and not a list */
+.tx-item2 > summary { display: flex; flex-direction: column; gap: 3px; align-items: stretch; }
+.tx-line1 { display: flex; align-items: baseline; gap: 9px; width: 100%; }
+.tx-sum { color: var(--muted); font-size: var(--fs-xs); line-height: 1.45; }
+.tx-roles { display: flex; flex-wrap: wrap; gap: 4px; }
+.tx-role {
+  background: none; border: 1px solid var(--line); border-radius: 999px;
+  color: var(--muted); font-size: 10.5px; padding: 1px 7px; cursor: pointer;
+}
+.tx-role.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.tx-role-weak { opacity: .55; }
+.tx-lang { font-family: var(--mono); font-size: 10.5px; color: var(--accent); }
+.tx-band {
+  font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase;
+  letter-spacing: .06em; margin: 14px 0 4px; font-weight: 600;
+}
+.tx-band:first-child { margin-top: 2px; }
+
+@media (max-width: 640px) {
+  .tx-tiergrid { grid-template-columns: 1fr 1fr; }
+  .tx-tiercard { padding: 9px; }
+  .tx-chip { padding: 6px 10px; }        /* thumb target, not a denser row */
+}
+/* the phone WebView gets larger hit areas; presentation only, never a JS branch */
+html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-height: 30px; }
