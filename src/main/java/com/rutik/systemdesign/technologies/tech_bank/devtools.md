@@ -81,6 +81,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/text-encoding-and-regex @3
 
+You write a `.g4` grammar naming lexer tokens and parser rules, and ANTLR generates the tokenizer, a recursive-descent parser, and listener/visitor base classes for walking the resulting parse tree in Java, Python, Go, C# or JavaScript. Its adaptive LL(*) strategy resolves alternatives with runtime lookahead, so it accepts directly left-recursive expression rules that classic LL parsers force you to rewrite by hand.
+
+Reach for it when the language is yours — a DSL, a query or filter syntax, an expression evaluator, a tool that has to read legacy source. For a format that already has a mature parser, use that instead; a generated grammar is a maintenance commitment worth making only when nobody else has written one.
+
 ### ANTLR 4
 **Short:** Parser generator: a .g4 grammar becomes a lexer, parser, parse tree and visitor/listener base classes.
 **Kind:** tech
@@ -129,6 +133,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, devtools/testing-and-mocking @1, apis-frameworks/design-patterns-and-principles @3
 
+Rules read as fluent predicates over the compiled classes on the test classpath - no classes in the domain package may depend on the infrastructure package, no package cycles, no controller may reference a repository type directly. Because a rule is an ordinary test, a violation fails the build exactly like a broken assertion, which is what turns an architecture diagram nobody enforces into something that cannot be merged past.
+
+It reasons about bytecode, so it sees types, packages and method calls but not string-based or reflective wiring; rules must be expressed structurally. For a codebase that already violates a rule in many places, freeze the current set of violations and fail only on new ones, so the rule can go in today rather than after a cleanup that never happens.
+
 ### argparse
 **Short:** Python standard-library command-line argument parser with subcommands, types and generated help.
 **Kind:** api
@@ -159,6 +167,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1
 
+AssertJ gives you one entry point, `assertThat(actual)`, that returns an assertion object typed to whatever you passed, so completion offers only the assertions that make sense — collection assertions for a list, temporal ones for an `Instant` — and they chain into a single readable line. The practical payoff is the failure message: instead of "expected true but was false" you get the actual value, the expected value and the diff, which is often enough to diagnose without rerunning under a debugger.
+
+Beyond simple values it covers exceptions with `assertThatThrownBy`, soft assertions that collect several failures in one run instead of stopping at the first, and recursive field-by-field comparison for whole object graphs. It is the default assertion library in Spring Boot's test starter.
 ### AutoValue
 **Short:** Google annotation processor that generates immutable value classes with equals/hashCode/toString and builders.
 **Kind:** tech
@@ -201,11 +212,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/build-and-dependency-management @1, platform-delivery/ci-cd-and-release @3
 
+A build is a graph of fine-grained targets whose inputs and outputs are declared explicitly, so every action is hermetic and content-addressed. That buys two things a monorepo needs: results cache locally and in a shared remote cache so an unchanged target is never rebuilt, and querying the reverse dependency graph tells CI precisely which targets a commit can affect - so CI time scales with the size of the change rather than the size of the repository.
+
+The price is that everything must be declared. Undeclared dependencies a Makefile tolerated become hard errors, and non-JVM ecosystems need rulesets and pinned lockfiles that somebody has to maintain. Reach for it for a large polyglot repository where build times or flaky incremental builds are actually hurting; a single-language project is nearly always better served by its native tool.
+
 ### bison
 **Short:** GNU parser generator that turns a grammar file into an LALR bottom-up parser, usually paired with flex for lexing.
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/text-encoding-and-regex @3
+
+You write a grammar of tokens and production rules with semantic actions attached, and it generates a table-driven LALR(1) parser that reduces bottom-up as input arrives; the lexer normally comes from flex. It targets C, C++ or Java, and offers a GLR mode for grammars that are genuinely ambiguous at any fixed lookahead.
+
+Reading its diagnostics is the actual skill. A shift/reduce or reduce/reduce conflict means the grammar is ambiguous at one token of lookahead, and the fix is precedence declarations or restructuring the rules - never suppressing the warning, because the generator resolves it silently and the parser then accepts the wrong tree. Most modern production compilers hand-write recursive-descent parsers instead, for better error messages and recovery, but a generator is still the fastest route to a correct parser for a grammar specification you control.
 
 ### Bruno
 **Short:** Open-source API client that stores collections as plain files in your repo, a git-friendly Postman alternative.
@@ -219,11 +238,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/design-patterns-and-principles @2, devtools/testing-and-mocking @3
 
+Byte Buddy generates bytecode at runtime through a fluent, type-checked API — `new ByteBuddy().subclass(Service.class).method(named("charge")).intercept(...)` — so you express the transformation you want instead of writing ASM visitor callbacks and hand-computing stack frames. It can define the class into a live classloader, emit it at build time, or apply it through a Java agent that transforms classes as they are loaded.
+
+This is the machinery under a lot of the JVM ecosystem: Mockito creates mock subclasses with it, and most APM and tracing agents use it to weave instrumentation into methods they do not own. Reach for it when you must proxy a concrete class — JDK dynamic proxies only implement interfaces — or instrument third-party code. For ordinary application logic, generated types are hard to debug and hard for the next reader to find, and plain composition wins.
+
 ### ByteBuddy
 **Short:** Runtime bytecode generation library used to build dynamic proxies and subclasses; powers Mockito and Hibernate.
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @2, devtools/testing-and-mocking @3
+
+A fluent API describes the class you want - subclass this type, intercept methods matching this matcher, delegate them to this interceptor - and it emits the bytecode, so you get code generation without writing ASM visitors by hand. The same API drives Java agents: `AgentBuilder` can retransform classes that are already loaded, which is how APM and tracing agents instrument an application they never compiled against.
+
+Reach for it when you need a proxy over a concrete class, since JDK dynamic proxies only cover interfaces. The subclassing approach carries its own limits, and they are the ones people are surprised by: final and private methods cannot be intercepted, and a call from one method of the target to another goes to the real object, bypassing the proxy entirely - the same self-invocation trap as Spring AOP.
 
 ### Bytecode Viewer
 **Short:** GUI tool that decompiles and edits Java class files so you can inspect the bytecode the compiler emitted.
@@ -243,6 +270,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/design-patterns-and-principles @2, apis-frameworks/aop-middleware-and-scheduling @2
 
+It generates a subclass of your class at runtime and overrides the non-final methods to insert interception, which is the mechanism behind Spring AOP on a class with no interface. Two consequences follow directly: a final class or final method cannot be advised at all, and a self-invocation through `this` never leaves the object so it never crosses the proxy, which is the usual reason an inner `@Transactional` call quietly does nothing.
+
+You almost never call it yourself; Spring repackages it inside `spring-core` and picks it over JDK dynamic proxies when there is no interface to proxy. Understanding it matters because it explains proxy behaviour you will otherwise treat as a Spring bug.
+
 ### Chaos Monkey
 **Short:** Netflix tool that randomly kills production instances to prove failover and circuit breakers actually work.
 **Kind:** tech
@@ -261,6 +292,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/testing-and-mocking @1, traffic-edge/rate-limiting-and-resilience @2
 
+An experiment is a declarative document with a steady-state hypothesis, a method of actions and probes that injects the fault, and rollbacks that undo it. The probes are checked before and after, so a run either confirms the system tolerated the fault or fails with a deviation -- which is what makes it runnable as a job in CI rather than a manual game day. Drivers exist for Kubernetes, the major clouds, Prometheus and Gremlin.
+
+Reach for it when you want chaos experiments reviewed and versioned like tests. It is only as useful as your observability: without a metric that defines steady state, the hypothesis is a guess.
+
 ### Chaos tools
 **Short:** Umbrella label for fault-injection tooling used to validate SLOs and resilience under induced failure.
 **Kind:** concept
@@ -278,6 +313,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, apis-frameworks/design-patterns-and-principles @3
+
+It parses Java source into an AST and applies a configured rule set, so everything it can tell you is syntactic: it will fail a build over a 400-line class, a nine-parameter method, four levels of nesting or a bare magic number, and it has no opinion at all on whether the code is correct. That narrowness is the strength, because it is fast, deterministic and the cheapest first gate to put in CI, and those metrics are decent proxies for the design smells that SRP and KISS arguments circle around. Pair it with a semantic analyzer for real bug and security findings, and adopt it incrementally on a large codebase: a full rule set switched on at once produces thousands of violations that everyone promptly learns to ignore.
 
 ### clang
 **Short:** LLVM's C/C++/Objective-C compiler front end: AOT native compilation plus sanitizers and static analysis.
@@ -369,11 +406,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, devtools/compiler-toolchain-and-codegen @3
 
+It hooks into javac as a plugin and inspects the compiler's own AST, so its checks run on every build and a violation is a compile error rather than a report someone reads later. The catalogue is bug patterns rather than style: reference equality on boxed types, a missing `@Override`, a format string that does not match its arguments, an `equals` inconsistent with `hashCode`, a mutable field escaping through a getter. Many checks carry a suggested fix the build can apply for you.
+
+Adopt it on an existing codebase by demoting the noisy checks to warnings first, since enabling the full set at error severity usually stops the build on day one.
+
 ### factory_boy
 **Short:** Python test-object factory library that builds model/ORM instances for fixtures instead of hand-written setup.
 **Kind:** tech
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1
+
+A factory is a class describing how to build one model instance: fields get defaults or sequences, `SubFactory` builds the related object a foreign key needs, and `post_generation` hooks fill many-to-many links -- so a test asks for `UserFactory(is_admin=True)` and receives a valid object with every other field filled plausibly. That is the point: a test should state only the attribute it is about, whereas hand-written fixtures restate every required column and therefore all break together the next time the model changes. It has ORM-specific bases for Django, SQLAlchemy, MongoEngine and plain objects, and pairs with Faker for realistic values. Reach for it once test setup turns repetitive; keep factories minimal and let each test override what it cares about, and remember `build()` never touches the database while `create()` does.
 
 ### fail_under = 80
 **Short:** Coverage threshold setting that makes pytest exit non-zero, and CI fail, below the given percentage.
@@ -429,6 +472,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1
 
+`@freeze_time("2024-01-01")` on a test, or `with freeze_time(...) as clock: clock.tick(60)`, patches `datetime.now`, `date.today` and `time.time` for the duration, including in modules that already imported them. That makes tests of token expiry, cache TTLs, retention windows and "created 30 days ago" logic deterministic without threading a clock object through the code under test.
+
+Know its edges. It patches this process only, so a timestamp generated by the database server or a subprocess is unaffected, and code that captured a time at import can escape it. Where you own the design, injecting a clock is still cleaner and faster; freezegun is what you reach for when the code already calls `datetime.now()` in twenty places.
+
 ### FunctionModel
 **Short:** Pydantic AI test double replacing the LLM with your own function so agent logic is deterministic.
 **Kind:** api
@@ -440,6 +487,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1, observability/profiling-and-performance @3
+
+A Gatling test is code — a Scala, Java or Kotlin class describing scenarios (a sequence of requests, with feeders supplying data and checks asserting responses) and an injection profile such as ramping to N concurrent users over two minutes. It runs on non-blocking I/O rather than a thread per virtual user, so a single machine sustains far more concurrency than a thread-bound tool, and the output is an HTML report with percentile latency plotted against time and load.
+
+That time axis is what you actually read: it shows the point where the response-time curve bends and where errors begin, which is the saturation point you were looking for. Because the simulation lives in the repository next to the service, it can be reviewed, refactored, and run as a performance gate in CI instead of being a manual exercise before each release.
 
 ### gcc
 **Short:** The GNU Compiler Collection: ahead-of-time compiler turning C/C++ source into native machine code.
@@ -458,6 +509,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/version-control-and-workbench @1
+
+Every clone holds the entire object database and history, so commit, branch, diff, blame and log are local operations and the network appears only at fetch, pull and push. That model is why branching is cheap enough to be the default unit of work, and why history can be rewritten freely before it is shared and only with care afterwards. Beyond code it is the honest baseline for versioning anything textual, including prompts, Terraform, Kubernetes manifests and config, which get review, blame and rollback for free; GitOps is built on exactly that observation. Large binaries are its weak spot, which is what LFS exists to patch.
 
 ### git filter-repo
 **Short:** Fast git history rewriter that purges leaked secrets or large blobs from every commit; replaces filter-branch.
@@ -524,6 +577,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1
+
+It performs closed-world static analysis over your application and its dependencies, compiles everything reachable into a single native executable with a small embedded runtime, and snapshots the build-time-initialized heap into the binary. Startup drops from seconds to milliseconds and memory footprint falls sharply, because there is no class loading, no bytecode verification, and no JIT warmup at run time.
+
+The closed-world assumption is the whole cost: reflection, dynamic proxies, JNI, and resources must be declared in configuration or the class is simply not in the binary. Frameworks solve this with build-time AOT processing — Spring Boot generates most of the hints for you — but an unprepared library will still fail at run time rather than at build time. Reach for it for CLIs and scale-to-zero or serverless services; a long-lived throughput-bound server usually does better on the JVM, where C2 eventually out-optimizes the AOT compiler.
 
 ### GraalVM Reachability Metadata Repository
 **Short:** Shared reflection/resource metadata for popular libraries so native-image builds work without hand-written hints.
@@ -657,6 +714,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1
 
+Instead of asserting on the examples you happened to think of, you state a property that should hold for all inputs and let Hypothesis generate them from strategies — integers, text, composites you build up, or a strategy derived from a schema. When it finds a counterexample it shrinks it to the smallest input that still fails, so you get an empty string or a zero rather than the 400-character blob that first broke, and it saves the failing case so the same input is retried on every later run.
+
+The skill is choosing properties that are not just a reimplementation of the code under test. Round-trip identities, invariants that must always hold, and comparison against a slow obviously-correct reference are the three that consistently pay.
+
 ### hypothesis-jsonschema
 **Short:** Generates Hypothesis property-test inputs directly from a JSON Schema, such as a Pydantic model's schema.
 **Kind:** tech
@@ -674,6 +735,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/design-patterns-and-principles @2
+
+An interface or abstract class annotated `@Value.Immutable` triggers an annotation processor at compile time, which generates a final class with private fields, a builder, `equals`/`hashCode`/`toString`, and defensive copies of collections. Mandatory attributes are checked in `build()`, which throws listing every field still unset, so forgetting to set an amount fails at construction rather than as a null three layers away.
+
+Reach for it for value types where construction correctness matters and there are enough optional fields that telescoping constructors have stopped scaling. Records cover the simple cases in modern Java with no dependency; Immutables earns its keep when you want the generated builder, defaults, derived attributes and staged builders that force required fields to be supplied in order.
 
 ### incremental APT
 **Short:** Declaring an annotation processor incremental so Gradle can rerun it only for changed sources, not the whole build.
@@ -698,6 +763,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/version-control-and-workbench @1, devtools/static-analysis-and-linting @3, observability/profiling-and-performance @3
+
+The IDE builds a resolved index of the project, so navigation, find-usages, and refactorings like rename, extract method and change signature operate on the type graph rather than on text — which is why they are safe across a large codebase in a way that search-and-replace is not. Inspections flag likely bugs as you type, and generation covers the boilerplate that is easy to get subtly wrong, notably `equals`/`hashCode`/`toString` from selected fields.
+
+Its debugger is the part worth learning deliberately: conditional and field-watch breakpoints, expression evaluation in a paused frame, and the stream trace view, which shows the elements entering and leaving each stage of a Stream pipeline — the fastest way to find which `filter` or `flatMap` dropped what you expected. Community Edition covers Java and Kotlin; Ultimate adds the Spring, JPA, HTTP client and database tooling.
 
 ### IntelliJ IDEA inspections and refactorings
 **Short:** IDE static analysis with one-click fixes such as replace inheritance with delegation and duplicate detection.
@@ -729,6 +798,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1, devtools/static-analysis-and-linting @2
 
+JaCoCo attaches as a JVM agent and instruments bytecode as classes load, recording which lines and branches actually executed; the Maven or Gradle plugin merges that execution data into HTML and XML reports and can fail the build below a threshold. It answers one narrow question well: which code did the test suite never touch at all.
+
+Read it as a hint about where invariants are untested — an anemic domain model or a god object usually shows up as a large uncovered region — and never as a target. Line coverage is trivially gamed by tests with no assertions, and even branch coverage says nothing about whether the combination of states that actually breaks was exercised.
 ### japicmp
 **Short:** Build plugin that diffs two JARs and fails the build on binary- or source-incompatible API changes.
 **Kind:** tech
@@ -843,6 +915,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1, runtime-systems/concurrency-and-async @2
 
+A test is a tiny class with two or more actor methods that touch shared state plus an arbiter that records what was observed; the harness runs the pair millions of times across real threads with fuzzed timing and interleavings, then reports which outcomes actually occurred against the ones you declared acceptable or forbidden.
+
+This is effectively the only practical way to catch a memory-model bug. A missing `volatile`, a broken double-checked lock or an unsafe publication is correct on x86's strong ordering and fails on ARM or under a different JIT decision, and an ordinary unit test will never observe it - the reordering needs specific timing that only brute force finds. Reach for it when you write lock-free code, a custom synchronizer, or anything whose correctness rests on happens-before reasoning, and read the result honestly: zero forbidden outcomes is evidence, not a proof.
+
 ### jdeprscan
 **Short:** JDK CLI that scans class files or jars for uses of deprecated and removed JDK APIs before an upgrade.
 **Kind:** tech
@@ -855,11 +931,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, devtools/build-and-dependency-management @2, runtime-systems/runtime-internals-and-types @3
 
+It reads class files or a jar and reports the package and class dependencies it finds, flags uses of internal JDK APIs such as `sun.misc.Unsafe` with `-jdkinternals`, and can emit a `module-info` skeleton for a jar you are modularising. It ships in the JDK, so there is nothing to install.
+
+Reach for it before a module-path migration, a JDK upgrade, or a GraalVM native-image attempt, to see what a library actually depends on. Its blind spot is that the analysis is static: reflection, service loading and dynamic proxies are invisible to it, so a clean report is evidence and not proof.
+
 ### Jepsen
 **Short:** Distributed-systems correctness harness that injects partitions and clock skew, then checks histories for anomalies.
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/testing-and-mocking @1, data-access/transactions-and-consistency @2
+
+A Jepsen test drives a real cluster with concurrent client operations while a nemesis process injects faults — network partitions, clock skew, process pauses and kills — recording a history of every operation's invocation and completion, including the ones whose outcome is genuinely unknown. A checker then searches that history for anomalies the claimed isolation or consistency level forbids: lost updates, stale reads, cycles in the dependency graph that prove the run was not serializable.
+
+It matters to engineers who will never write a test with it, because its published reports are the reason many databases' real guarantees are documented at all. Read the report for a datastore before believing its marketing on consistency.
 
 ### jextract
 **Short:** JDK tool generating Java FFM bindings straight from C header files, replacing hand-written JNI glue.
@@ -879,6 +963,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/build-and-dependency-management @1, platform-delivery/container-and-image @2, platform-delivery/ci-cd-and-release @2
 
+It hosts every artifact type behind one server: local repositories for your own builds, remote repositories that proxy and cache Maven Central, npm, PyPI, or Docker Hub, and virtual repositories that expose both under a single URL your build tools point at. The cache alone earns it — builds stop breaking when an upstream registry has an outage or yanks a version.
+
+The other half is promotion: a binary is built once and moved between repositories as it passes stages, rather than rebuilt per environment, with build-info metadata linking each artifact back to the source revision and the dependencies that went into it. Reach for it when many teams and languages need one governed artifact store with access control and retention; a single-language team is usually fine with GitHub Packages or the language's native registry.
+
 ### JGit
 **Short:** Pure-Java Git implementation; Spring Cloud Config Server uses it to clone and pull the config repository.
 **Kind:** tech
@@ -891,11 +979,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, devtools/build-and-dependency-management @2, runtime-systems/runtime-internals-and-types @2, platform-delivery/container-and-image @3
 
+Given a set of root modules it resolves their transitive `requires` graph and links just those modules into a self-contained runtime image with its own `bin/java`, so a service ships without the full JDK and without needing one installed on the target host. The usual result is tens of megabytes instead of a few hundred, which matters most in container images and cold-start-sensitive deployments. The blocker on a classpath-era codebase is that everything must be resolvable as real modules, so `jdeps` comes first to find what your dependencies actually need, then `jlink`, then `jpackage` on top if you want a platform installer.
+
 ### JMeter
 **Short:** Long-established load and performance testing tool with a GUI, broad protocol support and distributed load generation.
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/testing-and-mocking @1, observability/profiling-and-performance @3
+
+A test plan is a tree of thread groups, samplers, timers, assertions and listeners, built in the GUI and then run headless for the actual load, with a controller coordinating several load generators when one box is not enough. Its breadth is the reason it survives: alongside HTTP it drives JDBC, JMS, FTP, LDAP and more, so it can load-test the parts of a system that a browser-shaped tool cannot reach.
+
+Reach for it when you need those protocols or you have inherited a plan. For HTTP-only work, code-first tools such as k6 or Gatling give you tests that live in version control and read like programs. Two practical traps: never run the GUI for a real test, since it distorts the results, and remember each virtual user is an OS thread, so one JMeter host saturates far earlier than an event-loop-based generator.
 
 ### jmod
 **Short:** JDK tool and packaging format for modules carrying native libraries or config, consumed as jlink input.
@@ -915,6 +1009,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, apis-frameworks/design-patterns-and-principles @3
 
+Both tools read your compiled code and build metadata and turn it into a dependency graph you can interrogate, rather than reading imports by hand. jQAssistant scans the artifact into a graph database and lets you write rules as queries — no package under `domain` may reference `infrastructure`, no cycles between modules — and fail the build when a rule matches. Structure101 is a commercial visual tool for the same material: you see the tangles and cycles, model the architecture you intended, and measure drift from it.
+
+Use them at architecture review cadence rather than per commit. The findings are structural and slow-moving, and the value is in noticing that a layering rule everyone believes in stopped being true three releases ago.
 ### jqwik
 **Short:** QuickCheck-style property-based testing engine for JUnit 5: generators, shrinking and statistics.
 **Kind:** tech
@@ -926,6 +1023,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/version-control-and-workbench @1
+
+Typing `jshell` opens a REPL that evaluates Java snippets — expressions, statements, declarations — with no class, no `main` and no build; it prints the value and inferred type of each expression, keeps history, and lets you redefine a method and carry on. `/env --class-path` puts a jar on the path so you can poke at a real library, and `/save` and `/open` move a session to and from a file.
+
+It is the fastest way to settle a small question with certainty instead of a guess: what a `Cipher` transformation string actually accepts, how a regex behaves on an edge case, whether `LocalDate` rounds the way you assumed. It is not a testbed for anything concurrent or long-running — that still belongs in a real project.
 
 ### JSR 269: javax.annotation.processing
 **Short:** Java's standard annotation processing API, letting a processor read declarations and generate sources at compile time.
@@ -975,6 +1076,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/testing-and-mocking @1, observability/profiling-and-performance @3
 
+Tests are JavaScript modules -- a default exported function each virtual user runs in a loop, plus an `options` object declaring stages, ramps and thresholds -- executed by a Go runtime, so VUs are goroutines rather than OS threads and one machine drives far more concurrency than a thread-per-user tool. Thresholds are what make it CI-native: a rule such as a p95 request duration under 300 ms fails the run with a non-zero exit code, so a performance regression breaks the build instead of sitting in a report nobody opens. Its executors include constant and ramping arrival rate, not just VU counts, which is the correct shape when you care about requests per second rather than concurrency, and results stream out to Prometheus and other backends. Reach for it when load tests should live in the pipeline beside the code; note the script runtime is not Node, so most npm libraries do not work, and browser-level testing needs its separate browser module.
+
 ### k6 Cloud
 **Short:** Managed service that runs k6 load tests distributed across regions and stores the result timeseries.
 **Kind:** tech
@@ -998,6 +1101,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1, apis-frameworks/data-formats-and-api-contracts @3
+
+Its Gherkin steps are HTTP verbs and JSON assertions rather than sentences you have to bind to code, so there are no step definitions to write. Payload matching is its strongest feature: you compare against an expected JSON document with wildcards and type markers for the fields you cannot predict, which is far shorter than asserting field by field. It also stands up mock servers from the same syntax and runs scenarios in parallel.
+
+Reach for it on the JVM when API tests should be readable and maintainable by people who are not writing the service, or when contract-style checks live beside the build. The tradeoff is a bespoke DSL: complex logic ends up awkward, and you are relying on the framework's own expression language rather than plain Java.
 
 ### KotlinPoet
 **Short:** Kotlin source-generation library used by annotation processors and KSP to emit type-safe generated code.
@@ -1023,6 +1130,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/static-analysis-and-linting @1, runtime-systems/collections-and-algorithms @3
 
+Lean 4 is a dependently typed functional language that doubles as an interactive proof assistant. Because types can express propositions, a term of that type is a proof of it, and the ordinary type checker is what verifies the argument — nothing is accepted unless every step checks mechanically. Mathlib supplies a large body of already-formalized mathematics to build on, and tactics automate the routine steps.
+
+Reach for it where being confident is not enough and correctness must be established: an induction proof over an algorithm, a protocol invariant, a safety property. It is also the checker in automated theorem-proving loops, where a model proposes proofs and Lean decides which ones are real. The cost is time — a proof takes far longer to write than a test that probably would have caught the same bug.
 ### Liberica NIK
 **Short:** BellSoft's Native Image Kit: a GraalVM-based AOT compiler producing native executables from Java applications.
 **Kind:** tech
@@ -1082,6 +1192,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, data-access/orm-and-data-mapping @2, apis-frameworks/design-patterns-and-principles @3
+
+You declare a `@Mapper` interface with method signatures such as `TargetDto toDto(SourceEntity e)`, and the annotation processor writes the implementation at compile time -- plain field assignments, no reflection -- so the mapping costs what hand-written code costs and appears in stack traces and debuggers as ordinary Java. Matching names and types map automatically; `@Mapping` covers renames, nested paths, expressions and formatting, and unmapped target properties can be escalated from a warning to a build error. That escalation is the real value: adding a field to a DTO and forgetting to populate it fails the build instead of shipping a null. Reach for it wherever entity-to-DTO conversion is repetitive and wide; for two small objects a hand-written mapper is less machinery, and any mapping with genuine branching logic should stay hand-written anyway.
 
 ### Maven annotationProcessorPaths
 **Short:** maven-compiler-plugin setting that declares annotation processors separately from the compile classpath.
@@ -1149,6 +1261,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1
 
+Mockito builds test doubles at runtime: `mock()` returns an object whose methods return type defaults until you stub one with `when(...).thenReturn(...)`, and `verify()` asserts that a collaborator was called the way you expected, with the arguments you expected. The point is isolating the class under test from collaborators that are slow, remote or nondeterministic, so a failure names one unit.
+
+Since 5.0 the inline mock maker is the default, so final classes and final methods mock without an extra dependency. Two habits keep it healthy: prefer stubbing types you own — wrap a third-party client in your own interface rather than mocking its API surface — and treat heavy use of `mockStatic` as a signal that a static dependency should have been injected.
 ### Mockito and other test doubles
 **Short:** Mocking libraries that generate proxies recording invocations and returning stubbed values to isolate a unit under test.
 **Kind:** tech
@@ -1209,6 +1324,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** devtools/static-analysis-and-linting @1, runtime-systems/runtime-internals-and-types @2
 
+mypy reads your annotations and checks the program without running it: argument and return types at every call site, `Optional` handling, generics and variance, and structural conformance to `Protocol` classes. Most of what it catches is the None that was never handled and the refactor that missed a caller, which is exactly the class of bug that unit tests reach last.
+
+It is gradual by design — unannotated functions are skipped, so a large codebase can adopt it module by module — and that also means the default configuration proves very little. `--strict` is where it starts being load-bearing, since it disallows untyped definitions and implicit `Any`. Plugins cover frameworks whose types only exist at runtime, such as the pydantic plugin that teaches it what a model's generated `__init__` looks like.
 ### MySQL Workbench
 **Short:** MySQL's GUI client for schema design, query editing and visual EXPLAIN plans against a live server.
 **Kind:** tech
@@ -1268,6 +1386,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** js
 **Roles:** devtools/build-and-dependency-management @1, platform-delivery/ci-cd-and-release @2
+
+It derives a project graph from imports and configuration, and combines it with a git diff to work out which projects a change can actually affect, so CI runs the tests and builds for those projects only. On top of that it hashes each task's inputs and caches its outputs, locally and optionally on a shared remote cache, so an unchanged target is replayed from cache instead of executed, including across machines and CI runs.
+
+Reach for it when a monorepo's pipeline has grown to rebuilding everything on every commit and the feedback loop is the bottleneck. It is strongest in the JavaScript and TypeScript ecosystem it grew from, with plugins extending it to other toolchains; a repo built around Bazel or Gradle already has its own answer to the same problem.
 
 ### objdump
 **Short:** binutils CLI that disassembles binaries and dumps ELF sections and symbols to see what the compiler actually emitted.
@@ -1347,17 +1469,27 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** js, python
 **Roles:** devtools/testing-and-mocking @1, llm-apps/agentic-environments @1
 
+It drives browsers over their own debug protocols rather than the WebDriver wire protocol, which is what lets it auto-wait for an element to be actionable, intercept and stub network requests, capture traces and video, and run isolated browser contexts inside one process. The auto-waiting is the practical difference day to day, because it removes most of the arbitrary sleeps that make an end-to-end suite flaky. It is the default choice for a new browser test suite, and the same API underpins LLM browser agents, which run it headless and read the accessibility tree instead of pixels. Bindings for Python, Java and .NET track the JavaScript API closely, though the JavaScript ecosystem sees new features first.
+
 ### plotly
 **Short:** Interactive charting library for notebooks and Dash dashboards; common for 2-D/3-D cluster and result visualization.
 **Kind:** tech
 **Lang:** python
 **Roles:** devtools/version-control-and-workbench @1, observability/alerting-and-incident-response @3
 
+A figure is a JSON specification rendered by plotly.js, so charts are interactive by default -- hover values, zoom, toggling series from the legend, rotating a 3-D scatter -- inside a notebook or exported as a self-contained HTML file. `plotly.express` produces a chart from a dataframe in one line, and Dash turns the same figures into a full web dashboard.
+
+Reach for it when interaction is what makes the plot useful, which is exactly the case for exploring clusters or projected embeddings where a static image hides the structure. For figures destined for a paper, a PDF or a README, matplotlib is lighter and prints better.
+
 ### PMD
 **Short:** Java-centric static analyzer with tunable rulesets for long methods, excessive coupling, god classes and dead code.
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, apis-frameworks/design-patterns-and-principles @3
+
+PMD parses source into an AST and runs rules over it — long methods, long parameter lists, unused private members, cyclomatic complexity, `CouplingBetweenObjects`, `GodClass`, `ExcessivePublicCount` — alongside CPD, its copy-paste detector, which finds duplicated blocks across the codebase. Rules are XPath expressions or small Java classes, so a project can encode its own conventions instead of only the shipped ones.
+
+That is how design smells get numbers attached: an SRP or ISP argument stops being a matter of taste once a class trips a coupling threshold. Run it with a tuned ruleset, though — the defaults are noisy on real code, and a build failing on hundreds of low-value warnings gets ignored, which is worse than not running it at all.
 
 ### poetry
 **Short:** All-in-one Python project tool: dependency resolution with a lockfile, virtualenv management, build and publish.
@@ -1377,11 +1509,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/testing-and-mocking @1, apis-frameworks/data-formats-and-api-contracts @3
 
+Requests are saved into collections with folders, variables and per-environment values, so the same call runs against local, staging and production by switching an environment instead of editing URLs. Pre-request and test scripts run JavaScript around each call -- capture a token from a login response into a variable, assert a status code and response shape afterwards -- and a whole collection can be executed headlessly by Newman, which is how those assertions become a CI smoke test. It imports and generates OpenAPI, and speaks gRPC (building a request from a `.proto` file or from server reflection), GraphQL and WebSocket, not only REST. Reach for it to explore and share an API and to keep a runnable example of every endpoint; treat it as a client and a light test harness, not as your API documentation or your load-testing tool.
+
 ### pre-commit
 **Short:** Git hook manager that runs language-agnostic lint, format and secret-scan checks before a commit lands.
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/static-analysis-and-linting @1, devtools/version-control-and-workbench @2, platform-delivery/ci-cd-and-release @3
+
+A config file names hook repositories and pinned revisions, and the framework clones each one into its own isolated environment — so a Python formatter, a Go secret scanner and a shell linter coexist without anyone installing three toolchains globally. Hooks run against staged files only, which keeps the commit-time check fast, and a run-all-files mode is what you use when adopting it or when a hook set changes.
+
+Run it in CI as well as locally. A developer can bypass the hook with a no-verify flag, so the local run is a convenience and the CI run is the actual gate.
 
 ### Profile-Guided Optimization
 **Short:** Compiling with a recorded execution profile so the compiler optimizes the branches and paths that actually run hot.
@@ -1395,17 +1533,27 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, devtools/build-and-dependency-management @2, apis-frameworks/rpc-graphql-and-streaming @2
 
+It wires `protoc` into the Maven lifecycle: the plugin resolves a pinned protoc binary (and the gRPC codegen plugin) as a platform-classified artifact, compiles every `.proto` under `src/main/proto`, and adds the generated sources to the compile path so message classes and service stubs simply exist as ordinary Java types. The `compile` goal produces the message classes; `compile-custom` runs the gRPC plugin for the service base classes and stubs.
+
+The point is that generated code never gets committed: the `.proto` file is the single source of truth and drift between schema and Java becomes impossible. Pin the protobuf runtime dependency alongside the protoc version, since generated code and the runtime library it calls into have to agree.
+
 ### protoc
 **Short:** Protocol Buffers compiler: turns .proto contracts into generated message and gRPC stub code for many languages.
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/data-formats-and-api-contracts @2, apis-frameworks/rpc-graphql-and-streaming @2
 
+It reads `.proto` files and emits language-specific message classes with generated serialization and parsing code, and with the gRPC plugin it also emits client stubs and server base classes. Plugins are the extension mechanism — `--plugin` plus a `--<lang>_out` flag is how every non-core language, and every extra codegen step like validation or documentation, hooks into the same compile.
+
+In practice you rarely run it by hand: a Maven or Gradle plugin, a Bazel rule, or `buf` drives it, and `buf` adds the two things bare `protoc` lacks, linting and breaking-change detection against a stored schema. What the tool really buys is that the `.proto` file, not any implementation, is the contract between services. The classic build failure is version skew between the compiler, the plugin, and the runtime library, so pin all three.
+
 ### protoc-gen-grpc-java
 **Short:** protoc plugin that generates Java gRPC service stubs and clients from .proto definitions.
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/rpc-graphql-and-streaming @2
+
+protoc itself generates the message classes for a `.proto`; this plugin generates the service side -- for each service a `FooGrpc` class holding the abstract base you extend to implement the server, the blocking, future and async client stubs, and the method descriptors and marshallers binding them to the wire. It runs as a protoc plugin, which in practice means it is wired into the Gradle or Maven protobuf plugin and downloaded as a platform-specific binary rather than invoked by hand. The generated code is a build artifact: it belongs in the build directory and on the generated-source path, not in version control, and its version must line up with the grpc-java runtime you depend on. Reach for it in any JVM project speaking gRPC -- it is not optional, it is how a `.proto` becomes callable Java.
 
 ### ptxas
 **Short:** NVIDIA's PTX-to-SASS assembler invoked by nvcc; -v reports per-kernel registers, spills and shared memory.
@@ -1437,11 +1585,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** devtools/static-analysis-and-linting @1, runtime-systems/runtime-internals-and-types @2
 
+Pyright type-checks a Python codebase from its annotations and inference without importing or running it, and it is fast enough to re-check on every keystroke, which is why it powers the type analysis in VS Code's Python extension. Its narrowing is thorough — `isinstance` checks, walrus assignments, `assert`, literal comparisons and `TypeGuard` all refine a type along a branch — and it implements `Protocol` structural typing fully, so a class satisfies a protocol without inheriting from it.
+
+Expect it to reject code that mypy accepts, particularly around generics, variance and unreachable branches; `basic` and `strict` modes let you pick how much of that you want. Types are erased at runtime, so it catches contract mistakes rather than bad data — validating untrusted input still needs Pydantic or explicit checks.
+
 ### pytest
 **Short:** Python test runner and fixture engine; the standard harness for unit, integration and parametrized golden-dataset tests.
 **Kind:** tech
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1
+
+A test is a plain function whose checks are plain `assert` statements -- pytest rewrites them so a failure prints the actual operand values instead of a bare assertion error -- and setup comes from fixtures: functions marked `@pytest.fixture` that a test requests by naming them as parameters, with scopes (function, class, module, session) controlling how often they are built and `yield` providing teardown. `@pytest.mark.parametrize` turns one function into many separately reported cases, which is how a golden dataset or a table of edge cases becomes a suite rather than a loop that stops at the first failure. Its plugin ecosystem carries much of the practical value: `pytest-asyncio` for coroutine tests, `pytest-cov`, `pytest-mock`, `pytest-timeout`, `pytest-xdist` for parallel runs -- none of them built in, so a `--timeout` flag that is rejected means the plugin is missing rather than the flag being wrong. Reach for it as the default Python runner; it also executes `unittest`-style classes, so an existing suite can migrate without being rewritten first.
 
 ### pytest fixtures
 **Short:** pytest's dependency-injected setup/teardown mechanism; yield fixtures tear down even when the test fails.
@@ -1455,17 +1609,28 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1, runtime-systems/concurrency-and-async @3
 
+Async tests need someone to start an event loop and run the coroutine, which plain pytest will not do. This plugin does it through an anyio marker plus a backend fixture, and because the backend is a fixture you can parametrize it so the very same test body runs once on asyncio and once on trio.
+
+Reach for it when your library must support both, which is the case for anything written against AnyIO's abstractions rather than asyncio directly. If you only ever target asyncio, pytest-asyncio is the narrower dependency and the more common choice.
+
 ### pytest-asyncio
 **Short:** pytest plugin that runs async test functions and fixtures on an event loop.
 **Kind:** tech
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1
 
+Without this plugin an `async def` test is collected, never awaited, and reported as passing while executing nothing — a silent false green. pytest-asyncio runs such tests on an event loop and does the same for async fixtures, and setting `asyncio_mode = "auto"` in your config removes the need for a per-test marker.
+
+Use it for anything exercising asyncio code: async database drivers, an async HTTP client, async agent or chain calls. The trap is loop scope. By default each test gets a fresh event loop, so a session-scoped fixture holding a connection bound to an earlier loop fails at use, and the fix is matching the fixture's loop scope to the resource's lifetime.
 ### pytest-cov
 **Short:** pytest plugin that measures code coverage via coverage.py and reports missing lines or enforces a threshold.
 **Kind:** tech
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1, devtools/static-analysis-and-linting @3
+
+`pytest --cov=app --cov-report=term-missing` runs coverage.py under pytest and prints, per file, the exact line numbers no test executed — which is the output you act on, unlike the headline percentage. It combines data correctly across `pytest-xdist` workers and subprocesses, `--cov-branch` adds branch coverage so a half-taken `if` stops counting as covered, and `--cov-fail-under=80` turns the number into a CI gate.
+
+Use it to find code no test touches — error paths and fallbacks are the usual finds. Do not manage it as a target: coverage records that a line ran, not that its behaviour was asserted, so a suite with no assertions can report very high numbers while testing nothing.
 
 ### pytest-mock
 **Short:** Pytest plugin exposing unittest.mock through a mocker fixture that undoes every patch at test teardown.
@@ -1539,11 +1704,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/build-and-dependency-management @1, platform-delivery/ci-cd-and-release @2, security/supply-chain-and-runtime-security @3
 
+Renovate scans a repository for every manifest it recognizes — npm, Maven, Gradle, pip and Poetry, Go modules, Dockerfiles and base images, GitHub Actions, Terraform providers — and opens a pull request per update with the version diff and release notes attached, so CI decides whether the bump is safe rather than a human guessing. `renovate.json` controls the policy: group related packages into one PR, restrict runs to a schedule, automerge patch and dev-dependency updates, pin digests, or hold a package back.
+
+The point is turning upgrades into a continuous trickle instead of a yearly migration, which is also what keeps known-vulnerable transitive dependencies out. The failure mode is PR volume on a large repo, and grouping plus a schedule is the fix. Dependabot is GitHub's built-in equivalent with less configuration surface.
+
 ### respx
 **Short:** Mock layer for httpx that intercepts requests at the transport level instead of monkey-patching.
 **Kind:** tech
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1
+
+respx patches httpx at the transport layer, so a mocked route intercepts the request an httpx client would send and returns a response you declared -- routes match on method, URL, host, path pattern, query parameters, headers or JSON body, and each records the calls it received so you can assert on what was sent, not only on what came back. Intercepting at the transport is what keeps the rest of httpx real: your own client configuration, timeouts, base URL, auth flows and event hooks still run, whereas monkey-patching `client.get` skips exactly the layer where the bugs live. It supports sync and async clients and streaming responses, and works as a decorator, a context manager or a pytest fixture. Reach for it to test code that calls external HTTP APIs, and turn on the assertion that all declared routes were called so a mocked route cannot quietly outlive the code path that used it.
 
 ### RestAssured
 **Short:** Java DSL for black-box REST API testing: given/when/then request building with JSON path assertions.
@@ -1562,6 +1733,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** devtools/static-analysis-and-linting @1
+
+It is a single compiled binary that reimplements the rules of flake8 and a long list of its plugins, along with isort, pyupgrade and pydocstyle checks, plus a formatter that matches Black's style. Many rules carry autofixes, so a check run can rewrite the code, and it is fast enough to run on every save and over the whole repository in a pre-commit hook rather than only on changed files.
+
+Reach for it to collapse a stack of lint and format tools into one configured in pyproject.toml. Be clear about what it is not: it does not do type inference, so it cannot tell you a call violates a Protocol or that a variable is the wrong type. It complements mypy or pyright rather than replacing them.
 
 ### ruff linter
 **Short:** Rust-based Python linter and formatter that reimplements flake8, isort and pyupgrade rules at very high speed.
@@ -1593,6 +1768,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/testing-and-mocking @1, llm-apps/agentic-environments @2
 
+It talks the W3C WebDriver protocol to a per-browser driver process, and that explains both its strength and its weakness. The protocol is a standard the browser vendors implement themselves, so coverage across browsers, languages and cloud device grids is unmatched, and Grid fans a suite out across many machines. The cost is that WebDriver is request/response with no notion of "wait until this element is ready", so suites accumulate explicit waits and turn flaky under load. Reach for it when you need an unusual browser or language binding, or when a Grid already exists; for a new suite Playwright is the easier default.
+
 ### Semgrep
 **Short:** Pattern-based multi-language static analysis; rules look like the code they match, so custom SAST rules are cheap.
 **Kind:** tech
@@ -1623,11 +1800,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/static-analysis-and-linting @1
 
+It runs the same rule engine as SonarQube inside the editor, so cognitive complexity, duplicated blocks, magic numbers, god classes and the smells that signal a SOLID break surface while you type rather than in a pipeline an hour later. In connected mode it pulls the quality profile and rule set from the server, so what the IDE flags and what the build gate enforces cannot drift apart.
+
+Reach for it on any team already running SonarQube. Point the quality gate at new code only: a gate applied to a whole legacy codebase produces thousands of findings, which everybody mutes on the first day.
+
 ### SonarQube
 **Short:** Static-analysis server that gates a build on code smells, complexity, duplication and SAST security findings.
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/static-analysis-and-linting @1, security/supply-chain-and-runtime-security @2
+
+A scanner runs in CI and uploads findings to the server, which applies a quality gate, a pass/fail rule set over the analysis, and blocks the pull request that introduces new bugs, security hotspots, duplication or untested lines. It mixes lint-style smells with taint-tracking analysis that follows untrusted input from a request parameter through to a sink, which is how it flags injection and XSS rather than only style. The operational lesson is to gate on new code only, because a strict gate switched on over a legacy codebase produces a backlog nobody will ever burn down and the gate gets muted within a week. The self-hosted server is now branded SonarQube Server, with SonarQube Cloud as the hosted equivalent and SonarQube for IDE as the editor plugin.
 
 ### SonarQube duplicate code detection
 **Short:** SonarQube's copy-paste detector reporting duplicated blocks and density, the mechanical proxy for DRY violations.
@@ -1647,11 +1830,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** devtools/build-and-dependency-management @1, platform-delivery/container-and-image @3, security/supply-chain-and-runtime-security @3
 
+Nexus hosts three kinds of repository: proxies that cache an upstream registry so your build does not depend on the public internet being reachable, hosted repositories for artifacts you publish yourself, and groups that present several of them behind one URL that build tools point at. That single choke point is where you enforce which versions may be consumed, promote a build from a staging repository to release, and replicate artifacts to another site.
+
+Point every build at the group URL rather than at Maven Central or npm directly. Both the reproducibility and the supply-chain control come from the fact that nothing enters the build without passing through it.
+
 ### SpotBugs
 **Short:** Bytecode-level static analyser for Java bug patterns: equals/hashCode gaps, null derefs, synchronisation errors.
 **Kind:** tech
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1
+
+SpotBugs is the maintained continuation of FindBugs: it analyses compiled bytecode rather than source, matching several hundred bug patterns grouped into categories -- correctness, bad practice, multithreaded correctness, performance, security -- each reported with a confidence and a priority. Working on bytecode is what lets it catch what a reader skims past: an `equals` with no `hashCode`, boxed types compared with `==`, a resource not closed on every path, a field read outside synchronization that is written inside it, a null dereference on one branch. It is also the limitation -- it sees what the compiler emitted, so generated or heavily rewritten code produces noise, and the `find-sec-bugs` plugin is what adds injection and crypto-misuse detectors. Wire it into the build with an exclusion filter and a failure threshold, and treat it as a complement to a source-level linter and never as a substitute for tests.
 
 ### Spring Boot @MockitoBean
 **Short:** Spring Boot annotation replacing a bean with a Mockito mock in a slice test, without static-state surgery.
@@ -1719,6 +1908,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1, security/authentication-and-identity @2
 
+Testing a secured endpoint otherwise means either disabling security, so the rules are never tested, or hand-building tokens in every test. This artifact populates the SecurityContext before the test method runs, so a method annotated with @PreAuthorize or a MockMvc call to a protected route sees an authenticated principal with the roles you asked for; @WithUserDetails goes through your real UserDetailsService when the test depends on the actual user object.
+
+For MockMvc it adds request post-processors that attach a CSRF token, an OAuth2 login or a JWT to a request, which is what makes a POST against a CSRF-protected endpoint pass for the right reason. Reach for it so authorization rules are covered by the same slice tests as the controllers, and remember to test the denial path as well as the allowed one.
+
 ### spring-test
 **Short:** Spring's test module: MockMvc, cached test contexts, @Sql, @DirtiesContext and @MockitoBean bean overrides.
 **Kind:** tech
@@ -1772,6 +1965,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java, python, go
 **Roles:** devtools/testing-and-mocking @1, platform-delivery/container-and-image @3
+
+A test declares the dependency it needs — `PostgreSQLContainer`, `KafkaContainer`, or `GenericContainer` for anything else — and the library starts that image, waits on a real readiness signal, hands the test a generated JDBC URL or bootstrap-servers string, and tears the container down afterwards. The test therefore runs against the actual engine, so migrations, dialect quirks, isolation-level behavior and serializer wiring are exercised rather than approximated by H2 or an embedded broker.
+
+The cost is startup time and a Docker daemon in CI; container reuse and singleton containers exist to amortize it across a class or a suite. Reach for it for integration tests where fidelity is the point, and keep unit tests container-free.
 
 ### Testcontainers 1.20.x
 **Short:** Library that starts real dependencies (Postgres, Kafka, Redis) in throwaway containers for integration tests.
@@ -1833,6 +2030,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** js
 **Roles:** devtools/build-and-dependency-management @1, platform-delivery/ci-cd-and-release @2
 
+Turborepo runs tasks across a JavaScript or TypeScript monorepo in dependency order. Each task's inputs — source files, dependencies' outputs, environment variables — are hashed, and if that hash already has a stored result the task is skipped and its output replayed from cache, locally or from a cache shared with CI. Combined with filtering by what changed since a git ref, a pull request rebuilds and retests only the packages it can affect.
+
+Reach for it when the full monorepo build has become the CI bottleneck and most pull requests touch one package. It orchestrates and caches; the actual compiling and bundling is still your existing toolchain, and cache correctness depends on declaring each task's inputs and outputs honestly.
 ### twine
 **Short:** CLI that uploads built Python distributions to PyPI or a private index.
 **Kind:** tech
@@ -1850,6 +2050,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** devtools/build-and-dependency-management @1
+
+A single Rust binary that covers what pip, pip-tools, virtualenv, pipx and a version manager used to do between them: `uv venv` and `uv add` manage the project, `uv lock` and `uv sync --frozen` install exactly the locked set, `uv run` executes a script with its dependencies, and it downloads CPython builds itself when the required version is absent. The speed comes from a fast resolver and a global cache that hardlinks packages into each environment rather than recopying them.
+
+Reach for it for new projects and, particularly, for Docker builds and CI, where install time dominates the pipeline. Use `--frozen` in images so a build never silently resolves a different version than the one you tested.
 
 ### valkey-benchmark
 **Short:** Valkey's load-generation CLI, command-compatible with redis-benchmark, for measuring throughput and latency.
@@ -1911,6 +2115,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** devtools/testing-and-mocking @1, apis-frameworks/data-formats-and-api-contracts @3
 
+WireMock starts a real HTTP server on a local port and answers requests according to stubs you define by method, URL, headers or body matchers. Because it is real HTTP, the code under test uses its real client, real serialization, real connection pool and real timeout configuration — all the machinery that is skipped when you mock the client object instead, which is where integration bugs hide.
+
+It also does the awkward cases: stateful scenarios where the second call returns something different, injected latency and dropped connections for resilience tests, request verification after the fact, and record-and-playback against a live API to seed stubs. Reach for it to test outbound HTTP clients and to develop against an API that does not exist yet.
 ### xargs
 **Short:** Shell tool building command lines from stdin, with -P to run the resulting commands in parallel.
 **Kind:** tech
@@ -1928,3 +2135,7 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** devtools/compiler-toolchain-and-codegen @1
+
+yacc takes a grammar written as BNF-like productions with fragments of C attached to each rule, and emits the source of a bottom-up LALR(1) parser — the tables, the state machine, and the driver loop — traditionally paired with lex, which generates the tokenizer it pulls from. Instead of hand-writing a parser you declare the language's structure and its operator precedence and let the tool derive the automaton.
+
+Its vocabulary outlived it: shift-reduce and reduce-reduce conflicts, precedence declarations to resolve the dangling else, and the whole LALR mental model come from here, and they still describe what modern generators do. New work normally uses a descendant such as bison or a parser-combinator library, but reading a conflict report is the same skill.

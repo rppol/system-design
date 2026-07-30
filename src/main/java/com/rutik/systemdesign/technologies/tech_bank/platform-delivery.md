@@ -33,6 +33,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/cloud-platform-and-cost @2
 
+Azure runs and upgrades the Kubernetes control plane — API server, etcd, scheduler — and you manage only node pools, so what you get is conformant upstream Kubernetes with the control-plane operations removed. Nodes are VM scale sets that autoscale, and the cluster wires into the surrounding Azure services: Entra ID as the identity source for RBAC subjects, Azure CNI or kubenet for pod networking, managed disks and Azure Files for volumes.
+
+Reach for it when you are already on Azure and want real Kubernetes rather than a proprietary container service. It removes the control-plane ops, not the need to understand Kubernetes itself.
+
 ### Amazon ECS/Fargate
 **Short:** AWS container orchestrator, with Fargate running tasks serverlessly so there are no nodes to manage.
 **Kind:** tech
@@ -81,11 +85,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, platform-delivery/kubernetes-and-orchestration @2
 
+It replaces the `Deployment` with a `Rollout` resource that owns the same pod template but walks a declared strategy: shift five percent of traffic, pause, run an `AnalysisTemplate` that queries Prometheus, Datadog, CloudWatch or a job, and abort automatically if error rate or latency crosses the threshold. That automated gate is the whole difference from a rolling update, which only knows whether pods became ready, not whether they are serving correctly. Weighted traffic shifting needs an ingress or mesh that can do it, such as NGINX, Istio, Gateway API or an ALB, so confirm that before planning a canary. It pairs naturally with Argo CD, since a Rollout is just another manifest in Git.
+
 ### ArgoCD
 **Short:** Pull-based GitOps controller that reconciles Kubernetes clusters against manifests in git.
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, platform-delivery/kubernetes-and-orchestration @2
+
+An `Application` resource names a git repo, a path and a revision; the controller renders whatever it finds there (plain YAML, Helm, Kustomize), diffs it against live cluster state, and either reports the drift or reconciles it away. Because it pulls from inside the cluster, CI never holds cluster credentials — it only pushes a commit — and git history becomes the deploy audit trail.
+
+Use it when desired state should be reviewable and revertible like code, with the app-of-apps pattern when one root Application bootstraps many. It fits badly anything git cannot describe: imperative one-off jobs, and secrets, which need a sealed-secret or external-secret layer since the manifests live in a repository.
 
 ### ArgoCD Image Updater
 **Short:** Argo CD companion that watches a registry and writes new image tags back to Git so GitOps reconciles the deploy.
@@ -110,6 +120,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/ci-cd-and-release @2
+
+Atlantis is a webhook server wired to your VCS: opening a pull request that touches Terraform makes it run `terraform plan` and post the output as a PR comment, and a reviewer types `atlantis apply` to run the apply from the server and get the result in the same thread. It locks the workspace while a PR is open, so two concurrent PRs cannot plan against the same state and surprise each other.
+
+The value is that credentials live on the Atlantis host, not on engineers' laptops — nobody needs production cloud keys locally, the plan everyone reviewed is exactly the plan that runs, and every apply has an audit trail attached to a reviewed change. The corollary is that Atlantis holds the keys to your infrastructure and must be treated as production-grade infrastructure itself: locked down, patched, and with its VCS webhook authenticated.
 
 ### Auto Scaling
 **Short:** AWS service that adds and removes compute instances against target metrics or schedules to track demand.
@@ -243,6 +257,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/cloud-platform-and-cost @1, apis-frameworks/web-framework-and-http-client @3
 
+Azure Functions is Azure's function-as-a-service runtime. A function declares a trigger — HTTP request, timer, queue or Service Bus or Event Hub message, blob creation — plus input and output bindings, and the platform handles connecting to those services, deserializing the payload and scaling instances out as the backlog grows. The Consumption plan bills per execution and gigabyte-second and scales to zero, which is why cold starts appear; Premium and Dedicated plans keep instances warm and add virtual network integration.
+
+Durable Functions layer stateful orchestration on top of the stateless model, so fan-out/fan-in, retries with backoff and waits for human approval survive process restarts by replaying an event history. Reach for it for event-driven glue and spiky workloads. Steady high-throughput or latency-sensitive services are usually cheaper and more predictable on a container platform.
 ### Azure SDKs
 **Short:** Azure's per-language client libraries, with built-in retry, backoff and throttling behaviour for its managed services.
 **Kind:** tech
@@ -351,6 +368,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/cloud-platform-and-cost @1
 
+You deploy a single function with a trigger, either an HTTP endpoint or an event source such as a Pub/Sub message or an object written to a bucket, and the platform builds the container, routes invocations to it, adds instances as concurrency rises and removes them when traffic stops. Billing follows invocations and the memory-seconds consumed, so an idle service costs nothing. Newer generations run on the same serverless container infrastructure as Cloud Run, which is why the two converged in configuration and limits.
+
+Reach for it for event-driven glue: reacting to a storage event, handling a webhook, running a small scheduled job. What pushes work off it is a cold start budget you cannot meet, a request duration or a memory ceiling you exceed, or a service with steady high traffic, where a long-running container is both cheaper and more predictable.
+
 ### Cloud Native Buildpacks
 **Short:** Standard for turning source into an OCI image without a Dockerfile: detect, build and rebase reproducible layers.
 **Kind:** tech
@@ -399,6 +420,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/cloud-platform-and-cost @3
 
+It watches for pods stuck Pending because no node can fit them and asks the cloud provider to add an instance to a node group whose shape would satisfy them; nodes that stay underutilized for a configured period get drained and removed. Because it works within pre-declared groups, the instance shapes have to be modeled up front, and a heterogeneous fleet - GPU types, spot versus on-demand, architectures - means one group per shape with matching labels and taints.
+
+Scale-down is where it disappoints in practice: a node is not removed if its pods have no controller, use local storage, are blocked by a PodDisruptionBudget, or are kube-system pods without one, so a single stray pod pins an expensive instance indefinitely. Karpenter is the alternative that provisions instance shapes directly from pod requirements instead of choosing among predefined groups.
+
 ### Cluster Operator
 **Short:** Strimzi's Kubernetes operator that provisions and reconciles Kafka clusters and exports their JMX metrics.
 **Kind:** tech
@@ -422,6 +447,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** go
 **Roles:** platform-delivery/kubernetes-and-orchestration @1
+
+It is the library underneath Kubebuilder and the Operator SDK. A Manager owns the shared informer cache, clients and leader election; you register a Reconciler for a resource and it delivers reconcile requests, with rate-limited retries and backoff, whenever that object or an owned or watched object changes. The cached client is what keeps a controller from hammering the API server.
+
+The discipline it forces is level-triggered reconciliation: read the desired state, compare it with the actual state, converge, and be safe to call again -- your function will be invoked repeatedly for the same object and must never assume it is seeing an event exactly once. Reach for it for any Go operator; the alternative is writing informers and workqueues yourself.
 
 ### Cost allocation tags
 **Short:** Cloud resource tags activated for billing so spend can be attributed to a team, service or environment.
@@ -465,6 +494,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/kubernetes-and-orchestration @2, platform-delivery/cloud-platform-and-cost @3
 
+Crossplane installs into a Kubernetes cluster and adds providers whose custom resources represent real cloud infrastructure — a bucket, a database instance, a VPC, an IAM role. You create infrastructure by applying YAML, and a controller then reconciles continuously against that spec, so drift is corrected rather than merely reported at the next plan. The state of the world lives in the cluster's API objects instead of a state file you have to store and lock.
+
+Compositions are what platform teams actually use it for: define one claim such as a managed Postgres instance, and let it expand into the database, subnet group, parameter group, secret and network rules with your organisation's defaults already applied, so a product team requests a database without learning the provider's surface. The tradeoff against Terraform is real in both directions — you gain a live control loop and the Kubernetes RBAC and GitOps ecosystem, and you accept that your infrastructure now depends on a healthy cluster and on provider CRDs keeping up with cloud APIs.
 ### crun
 **Short:** C-based OCI container runtime; a faster, lower-memory drop-in replacement for runc used by Podman and CRI-O.
 **Kind:** tech
@@ -507,6 +539,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/container-and-image @1, llm-apps/agentic-environments @2, platform-delivery/ci-cd-and-release @3
 
+Each Dockerfile instruction produces a cached layer, so instruction order decides rebuild time: copy the dependency manifest and install before copying source, and a code change no longer reinstalls the world. At run time there is no virtual machine, only kernel namespaces for isolation and cgroups for limits, which is why containers start in milliseconds and share the host kernel. Multi-stage builds keep compilers and build caches out of the final image, and running as a non-root user with a read-only filesystem shrinks what a compromise can reach.
+
+Beyond packaging, it is the usual sandbox for executing model-generated or otherwise untrusted code, and that use deserves care: a shared kernel makes a container a weaker boundary than a virtual machine, so untrusted workloads need the network disabled, capabilities dropped, a resource ceiling and ideally a stronger runtime underneath.
+
 ### Docker buildx
 **Short:** Docker's BuildKit-backed builder adding multi-platform images, remote cache and parallel build stages.
 **Kind:** tech
@@ -536,6 +572,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/cloud-platform-and-cost @2
+
+AWS runs and patches the control plane — API server and etcd, replicated across availability zones — while you supply capacity as managed node groups, Karpenter-provisioned instances, or serverless Fargate pods. The integrations are the reason to choose it: the VPC CNI gives each pod a routable VPC address so security groups apply to pods directly, and pod identity maps a Kubernetes service account onto an IAM role, so workloads get scoped AWS credentials with no static keys.
+
+It fits when you want conformant Kubernetes without owning etcd backups and control-plane upgrades. You still own node upgrades, add-on version skew and a per-cluster control-plane charge, so a single small service is usually better served by ECS, Fargate or Lambda.
 
 ### envsubst
 **Short:** GNU gettext CLI substituting environment variables into a template file; the simplest config templating step.
@@ -567,6 +607,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, platform-delivery/kubernetes-and-orchestration @3, traffic-edge/service-mesh-and-discovery @3
 
+Flagger watches a `Canary` custom resource pointing at a Deployment and a traffic provider -- a service mesh, an ingress controller, or Gateway API -- and drives the rollout itself: it creates the canary and primary services, shifts a small weight of traffic, waits an analysis interval, queries your metrics provider, then either steps the weight up or rolls back. Because promotion is gated on metrics (success rate, latency percentiles, or any custom query you supply) and on webhooks that can run load or conformance tests, a bad release is reverted without a human watching a dashboard at 2am. It also handles blue/green and A/B routing by header or cookie, not only weighted canaries. Reach for it when deployments are already declarative and you want the rollout policy in git beside them; Argo Rollouts is the direct alternative, and a single-replica or stateful workload gains little from either.
+
 ### Flagsmith
 **Short:** Feature-flag platform for decoupling release from deploy: targeted rollouts, segments and kill switches.
 **Kind:** tech
@@ -584,6 +626,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, applied-ml/vision-speech-and-multimodal @3
+
+Flux CD is a set of Kubernetes controllers that continuously reconcile a cluster toward manifests in a Git or OCI repository, with separate source, kustomize, helm and image-automation controllers, so drift or a manual `kubectl edit` is reverted on the next reconcile. Being pull-based means no CI system needs cluster credentials, since the cluster reaches out instead, which is the main security argument for GitOps. It renders Helm charts and Kustomize overlays natively, and Argo CD is the usual alternative, offering a first-class UI where Flux is more composable and CLI-driven.
+
+FLUX, unrelated except by name, is a family of open-weight text-to-image diffusion transformer models from Black Forest Labs, published in several variants under different licenses. Check which one a document means before reading anything into the word.
 
 ### Flux image automation
 **Short:** Flux CD controllers that scan a registry for new image tags and commit the bump back to Git.
@@ -633,11 +679,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1
 
+A workflow is YAML committed under `.github/workflows`, triggered by repository events - push, pull request, release, schedule, manual dispatch, or another workflow - and made of jobs that run on GitHub-hosted runners or on self-hosted runners you scale yourself. Reuse comes from marketplace actions, composite actions and reusable workflows; OIDC federation lets a job assume a cloud role for a few minutes instead of storing long-lived access keys as secrets.
+
+The security model is where teams get hurt. A third-party action runs with your workflow token, so pin it to a commit SHA rather than a moving tag; `pull_request_target` and workflows triggered by forks execute in a privileged context and are the classic escalation path; and concurrency groups are what stop two deploys of the same environment overlapping.
+
 ### GitLab CI
 **Short:** All-in-one platform bundling Git hosting, YAML-defined CI/CD pipelines and a container/package registry.
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, devtools/version-control-and-workbench @2, platform-delivery/container-and-image @3
+
+Pipelines are declared in a `.gitlab-ci.yml` in the repository, so the build changes in the same merge request as the code; jobs are grouped into stages, run on runners you host or GitLab hosts, and pass artifacts and caches between each other. Because the same project also holds issues, merge requests, the container registry and environment/deployment tracking, a release is traceable end to end without integrating separate tools.
+
+Reach for it when you want one platform rather than stitching source control, CI and a registry together. Self-managing GitLab is a real operational commitment; the SaaS tier avoids that but ties you to their runners and quotas.
 
 ### GitLab Registry
 **Short:** Container and package registry built into GitLab projects, sharing their permissions and CI credentials.
@@ -650,6 +704,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/cloud-platform-and-cost @2
+
+Google runs and upgrades the control plane and etcd; you choose between Standard mode, where you manage node pools, machine types, and autoscaling, and Autopilot, where Google manages nodes and bills per pod resource request. Release channels decide how aggressively your cluster tracks new Kubernetes versions, and node auto-upgrade and auto-repair keep the fleet current.
+
+The integration is the real reason to use it over self-managed Kubernetes on GCP: Workload Identity maps a Kubernetes service account to a Google service account so pods get cloud credentials without static keys, Ingress provisions Cloud Load Balancing, and logs and metrics land in Cloud Operations by default. Reach for it whenever you are on GCP and want Kubernetes without owning control-plane operations.
 
 ### Goldilocks
 **Short:** Fairwinds tool that runs VPA in recommendation mode and dashboards suggested CPU/memory requests per workload.
@@ -675,11 +733,18 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/container-and-image @1, security/supply-chain-and-runtime-security @2
 
+Harbor is a registry you run yourself, storing OCI images and other OCI artifacts such as Helm charts, with projects as the unit of RBAC and quota. On top of plain storage it adds the controls a regulated pipeline needs: vulnerability scanning on push with a policy that can block pulling an image with a critical CVE, signature verification so unsigned images are refused, tag immutability and retention rules with garbage collection, and replication to or from another registry.
+
+That replication is what makes it practical in air-gapped or multi-region setups — mirror upstream images inward so builds do not depend on a public registry's availability or rate limits, and push outward to a regional registry so nodes pull locally. Reach for it when images must stay inside your network, or when a managed registry's policy controls are not enough.
 ### Helm
 **Short:** Kubernetes package manager: templated, versioned chart releases of manifests with values-driven overrides.
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/infrastructure-as-code-and-config @2, platform-delivery/ci-cd-and-release @3
+
+A chart is a directory of templated manifests plus a `values.yaml` of defaults. Installing one renders the templates against your overrides and records the result as a named release with revision history, so `helm rollback` restores the previous revision without you having kept the old YAML anywhere. That gives you a single versioned artifact for an application that is really a dozen objects — Deployment, Service, Ingress, ConfigMap, ServiceAccount, HPA.
+
+The standing complaint is that templating YAML with a text templating engine is fragile and indentation bugs surface as invalid manifests. Run `helm template` and review the rendered output rather than trusting the values file alone.
 
 ### Helm 3
 **Short:** Kubernetes package manager: templated charts, versioned releases, upgrade and rollback of a whole application.
@@ -711,6 +776,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/cloud-platform-and-cost @1, platform-delivery/infrastructure-as-code-and-config @2, platform-delivery/ci-cd-and-release @3
 
+It parses a Terraform plan, matches the resources against cloud price lists, and prints the monthly cost of the change -- previous total, new total, and the diff -- for every resource whose price it can determine. In CI it posts that breakdown as a pull-request comment, so cost review happens where the change is reviewed rather than on a bill six weeks later, and a policy can fail the build when the diff exceeds a threshold. The honest limitation is usage-based pricing: data transfer, S3 requests and Lambda invocations have no cost until you declare expected usage in a usage file, so an estimate is a floor for anything not billed purely by the hour. Reach for it the moment infrastructure changes are made by people who never see the bill.
+
 ### ingress
 **Short:** The Kubernetes object declaring external HTTP routing, TLS and canary traffic weights for a controller to implement.
 **Kind:** api
@@ -722,6 +789,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1
+
+A pipeline is code, a `Jenkinsfile` in the repository written declaratively or as scripted Groovy, and the controller schedules its stages onto agents that can be long-lived machines or containers provisioned per build by the Kubernetes plugin. Its reach comes from the plugin ecosystem, where essentially every tool, cloud and protocol has an integration, and from the fact that it runs entirely on infrastructure you own, which is often the deciding factor in regulated or air-gapped environments. That same ecosystem is the liability, since plugins are the main source of security advisories and upgrade breakage and the controller becomes a stateful pet nobody wants to touch. For a new project a hosted YAML-configured CI is usually less work; Jenkins earns its place where self-hosting or an unusual integration is mandatory.
 
 ### k9s
 **Short:** Terminal UI for Kubernetes: browse and edit resources, tail logs and exec into pods far faster than typing kubectl.
@@ -735,11 +804,18 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/container-and-image @1, platform-delivery/ci-cd-and-release @2
 
+Kaniko builds an image from a Dockerfile inside an ordinary unprivileged container. It extracts the base image into its own filesystem, executes each instruction in userspace, and snapshots the changed files as a layer, so there is no Docker daemon, no privileged pod, and no host docker socket mounted into a build job. Removing that socket mount is the security point: anything that can talk to the node's daemon effectively has root on the node, and CI runs untrusted-ish code by definition.
+
+Because there is no daemon there is also no local layer cache between runs, so enable caching to a registry repository or builds get slower, not faster. It is one of several daemonless builders — BuildKit in rootless mode and Buildah solve the same problem with different tradeoffs — so check which one your platform already supports before adopting it.
 ### Karpenter
 **Short:** Kubernetes node autoscaler that provisions just-in-time, right-sized, Spot-aware instances for pending pods.
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/cloud-platform-and-cost @2
+
+Instead of scaling a fixed set of node groups, Karpenter watches for unschedulable pods, reads what they actually ask for — CPU, memory, GPU, architecture, zone, taints — and provisions a matching instance directly through the cloud provider's API, usually in well under a minute. It also works in the other direction: consolidation drains and removes underutilized nodes or replaces them with cheaper ones as workloads shrink, and it drains gracefully when a Spot interruption notice arrives.
+
+Reach for it to cut cluster cost and to stop maintaining a node group per instance shape, which matters most for scarce GPU types where flexibility across instance families is the difference between getting capacity and waiting. The tradeoff is churn: nodes come and go far more often, so PodDisruptionBudgets, sensible termination grace periods and applications that survive being rescheduled stop being optional hygiene and become requirements.
 
 ### Kata Containers
 **Short:** OCI runtime that boots each container in a lightweight VM, giving hardware isolation for untrusted workloads.
@@ -752,6 +828,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, data-movement/task-queue-and-jobs @3
+
+KEDA adds a `ScaledObject` that reads an external signal — Kafka consumer lag, SQS queue depth, a Prometheus query, a cron schedule — and drives the target Deployment's replica count from it, including down to zero when there is nothing to process. It does this by feeding the Horizontal Pod Autoscaler an external metric, so it composes with the normal Kubernetes scaling machinery rather than replacing it.
+
+Use it for queue and event workers, where CPU is a poor proxy for demand: a consumer sitting 200k messages behind can look completely idle. Scale-to-zero costs a cold start on the next message, so it fits batch and asynchronous work far better than a latency-sensitive request path.
 
 ### Knative
 **Short:** Kubernetes add-on giving serverless request-driven autoscaling to zero plus an eventing mesh.
@@ -770,6 +850,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, traffic-edge/service-mesh-and-discovery @2, traffic-edge/proxy-and-load-balancer @2
+
+kube-proxy runs on every node, watches Services and EndpointSlices, and programs kernel packet rules — iptables by default, IPVS for clusters with many services — so a packet sent to a Service's ClusterIP is DNAT'd to one of the ready pod IPs. It also programs NodePort listeners and the node-side half of LoadBalancer Services.
+
+Two consequences explain most Service surprises. The balancing is L4 and per-connection, decided in the kernel on the client's node with no proxy hop, so there is no HTTP awareness and no per-request distribution: a long-lived gRPC or keep-alive connection pins to one pod and stays there regardless of load, which is why teams reach for a service mesh, client-side balancing or a headless Service. And because it is rule programming rather than a data-path process, several CNIs replace it entirely with eBPF, keeping Service semantics while removing the iptables chain-length problem at scale.
 
 ### kubeadm
 **Short:** Official CLI that bootstraps a conformant self-managed Kubernetes control plane and joins nodes to it.
@@ -794,6 +878,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1
+
+Every subcommand is an authenticated REST call to the API server using the current kubeconfig context, so RBAC constrains you exactly as it would a controller -- and `kubectl auth can-i` will tell you in advance. `apply` performs declarative updates from a manifest, `get -o yaml`, `describe` and `events` explain why an object is stuck, `logs`, `exec` and `port-forward` are the debugging loop, and `rollout status` and `rollout undo` drive a deployment.
+
+Reach for it for everything from a cluster, but prefer applying manifests that live in git over imperative `create`, `edit` and `scale`, which leave the cluster in a state nothing reproduces. Check the context before every destructive command; the usual production incident is the right command in the wrong cluster.
 
 ### kubectl describe node
 **Short:** kubectl command printing a node's allocatable versus requested resources, taints, conditions and running pods.
@@ -831,6 +919,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/container-and-image @2
 
+You declare desired state to the API server — this many replicas of this image, exposed this way — and controllers reconcile reality toward it continuously: a Deployment manages ReplicaSets which manage Pods, the scheduler places Pods by resource requests and constraints, kubelet runs the containers, and Services plus cluster DNS give stable addressing over an unstable set of Pod IPs. Cluster state lives in etcd, and the same reconcile loop underlies rollouts, rollbacks, and self-healing after a node dies.
+
+What it buys is that failure recovery and deployment mechanics stop being scripts you maintain. What it costs is a large operational surface — networking plugins, storage classes, RBAC, resource requests and limits, and a quarterly upgrade cadence. Reach for it when you run enough services that orchestration is a real problem; one small app is better served by a managed container service or a PaaS.
+
 ### Kubernetes Deployment
 **Short:** Kubernetes workload object managing a ReplicaSet, giving native rolling updates tuned by maxSurge/maxUnavailable.
 **Kind:** api
@@ -855,6 +947,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, platform-delivery/kubernetes-and-orchestration @2
 
+Configured against a cluster, the plugin turns a pipeline's `agent { kubernetes { yaml ... } }` block into a pod launched for that one build: the containers declared in the pod spec become the tool images individual stages run in, and the pod is deleted when the build ends. That replaces long-lived static agents with capacity that scales to zero, and it kills the drift problem where a build passes only on the one machine that happens to have the right JDK installed. The costs are per-build latency from scheduling and image pulls, and having to think explicitly about workspace persistence and dependency caches across ephemeral pods. Reach for it when a self-hosted Jenkins already sits beside a Kubernetes cluster; a greenfield pipeline is usually better served by a CI system with ephemeral runners built in.
+
 ### Kueue
 **Short:** Kubernetes job queueing controller adding quotas, fair sharing and gang admission for batch and training jobs.
 **Kind:** tech
@@ -867,6 +961,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/infrastructure-as-code-and-config @2, platform-delivery/ci-cd-and-release @3
 
+A base directory holds plain, valid Kubernetes YAML, and each overlay directory patches it, whether through a strategic merge patch, a JSON patch, or the built-in transformers for name prefixes, common labels, images, replica counts and config maps. It is built into kubectl, so applying an overlay is a flag rather than another tool in the chain.
+
+Because there is no templating language, the base is always applyable on its own and diffs stay readable, which is the main argument for it. That is also its limit: anything conditional or loop-shaped that Helm expresses with template logic becomes an awkward patch or a second overlay. Reach for it for environment variation on manifests your own team owns, and for Helm when you are packaging software for other people to install through a values contract.
+
 ### Lambda Powertools
 **Short:** AWS utility library for Lambda handlers: structured logging, tracing, metrics, idempotency and batch processing.
 **Kind:** tech
@@ -878,6 +976,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, ml-lifecycle/evaluation-and-benchmarks @2
+
+SDKs hold a streaming connection to the flag service, so a change takes effect in milliseconds across every running instance without a deploy, and evaluation happens locally against the rules so it is not a network call per check. Rules target on context attributes, which is what supports shipping code dark, enabling it for internal users, rolling out by percentage, and turning a bad feature off instantly rather than waiting for a rollback to build. Tying variations to metrics turns the same mechanism into an experiment.
+
+The discipline it demands is flag hygiene. Every live flag is a branch in production, and combinations of stale flags produce states nobody has tested, so removing a flag once its rollout is finished is part of the work, not an optional cleanup.
 
 ### Lens
 **Short:** Desktop IDE for Kubernetes clusters: browse resources, stream logs, exec into pods and view live metrics.
@@ -909,11 +1011,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, observability/metrics-and-monitoring @2
 
+It scrapes the resource metrics each kubelet exposes, keeps only the most recent value in memory, and serves it through the `metrics.k8s.io` aggregated API, which is what makes `kubectl top` and CPU or memory based Horizontal and Vertical Pod Autoscaling work at all. Because it keeps no history it is not monitoring: there is nothing to graph, alert on or look back at, so a cluster still needs Prometheus or an equivalent beside it. It is not present by default on every distribution, and a cluster where `kubectl top` errors and HPAs sit at `<unknown>` is usually just missing it. Scaling on a custom or external metric needs a separate adapter, since metrics-server serves only CPU and memory.
+
 ### Modal
 **Short:** Serverless container/GPU cloud for on-demand training, inference and sandboxed agent execution.
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/cloud-platform-and-cost @1, llm-apps/agentic-environments @2, ml-lifecycle/ml-platform-and-pipelines @3
+
+You write a Python function, decorate it with the container image, GPU type, timeout and concurrency it needs, and Modal builds the image and runs it remotely; replicas scale out with demand and back to zero when idle, billed by execution time. Volumes and network file systems hold model weights between runs, and sandboxes execute untrusted code — including code an agent generated — in an isolated container rather than in your process.
+
+That pricing shape fits spiky work: a fine-tune that needs an H100 for two hours, a batch inference sweep over a dataset, an endpoint with bursty traffic. It fits steady work badly — once a GPU is busy most of the day, a reserved or committed instance is cheaper than per-second serverless — and cold starts matter, because pulling and loading tens of gigabytes of weights is time your first request pays for unless you keep containers warm.
 
 ### NCC
 **Short:** Google Cloud Network Connectivity Center - a hub-and-spoke control point for connecting many VPCs and on-prem sites.
@@ -938,6 +1046,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/container-and-image @3
+
+One Go binary is both the server and the client agent, and a job is HCL describing groups of tasks with a driver - Docker, raw `exec`, Java, QEMU - so containerized and non-containerized workloads go through the same scheduler with the same bin-packing, health checks and rolling updates. Service discovery and secrets are not bundled: it integrates with Consul and Vault, or its own built-in service registry for simpler setups.
+
+Reach for it when you want scheduling without Kubernetes's API surface and operational weight, when a meaningful share of the workload is not containers, or when the team running it is small. The tradeoff is ecosystem: no operators, no CRDs, far fewer off-the-shelf integrations, and a much smaller pool of engineers who have run it before.
 
 ### NVIDIA device plugin
 **Short:** Kubernetes DaemonSet advertising nvidia.com/gpu resources, with time-slicing and MIG partition strategies.
@@ -986,6 +1098,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/infrastructure-as-code-and-config @1
+
+It speaks the same configuration language, uses the same provider and module ecosystem and reads the same state format, so moving an existing codebase is close to swapping which binary the pipeline calls. It exists because Terraform's licence moved to a source-available one; the fork is developed under the Linux Foundation and stays open source, and it has since added features of its own, state encryption among them.
+
+Reach for it when the licence matters, which it does if you embed the tool in a product or an internal platform you offer to others, or when one of the fork's own features is the deciding factor. Either way, pick one and standardize: running both against the same state is the way to get a surprise.
 
 ### Operator SDK
 **Short:** Scaffolds and builds Kubernetes operators in Go, Ansible or Helm, including CRDs and the controller loop.
@@ -1161,11 +1277,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, platform-delivery/kubernetes-and-orchestration @2
 
+A Task is a list of steps, each a container image with a command, and all steps of one task run in a single pod sharing a workspace volume; a Pipeline wires tasks into a DAG and a PipelineRun is one execution. Because those are all Kubernetes custom resources, your CI history is objects you can query with `kubectl` and secure with RBAC, rather than state locked inside a CI server. Tasks are reusable and shareable, so a pipeline becomes mostly composition of published tasks with parameters.
+
+It suits platform teams standardising delivery on Kubernetes, especially alongside signing of the artifacts a run produced. The cost is that you are assembling a CI system out of primitives rather than buying one with a finished UI.
+
 ### Terraform
 **Short:** Declarative cloud-agnostic infrastructure-as-code tool: HCL config, provider plugins, state file, plan and apply.
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/cloud-platform-and-cost @3
+
+You describe the desired infrastructure in HCL; Terraform reads the current world through provider plugins, diffs it against a state file mapping your resources to real ids, and `plan` shows exactly what it would create, change or destroy before `apply` acts. The state file is the whole operational story: it must live in remote, locked storage because two concurrent applies against one state corrupt it, and anything created outside Terraform is invisible until imported. Reach for it to make environments reproducible and reviewable across clouds and SaaS providers, and always read the plan for replacements, since a seemingly small attribute change can mean destroy-and-recreate. OpenTofu is the community fork that exists because Terraform moved from an open-source licence to the BUSL.
 
 ### Terraform CLI
 **Short:** The Terraform binary running init/plan/apply/destroy against providers and state to reconcile declared infrastructure.
@@ -1209,6 +1331,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/infrastructure-as-code-and-config @1
 
+Terragrunt addresses the problem you hit right after splitting Terraform into many small state roots: every root then needs nearly the same backend block, provider configuration and shared inputs. A small config file per root inherits those from parent files and generates the boilerplate before invoking Terraform, and dependency blocks let one root consume another's outputs so a single run-all command walks the whole tree in dependency order.
+
+Reach for it once you have dozens of environment-by-component state files and the copy-paste has become the pain. A single small stack does not need the extra layer, and the indirection makes reading a plan harder than it was.
+
 ### Test Kitchen
 **Short:** Converges Chef or Puppet code on throwaway VMs/containers and verifies the resulting machine state.
 **Kind:** tech
@@ -1239,6 +1365,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1
 
+SDKs fetch the flag configuration and evaluate it in-process, so checking a flag is a memory lookup on the request path with no network call, and usage metrics are reported back asynchronously. A flag is a set of activation strategies: gradual rollout by percentage with a stickiness field so a user does not flip between variants, explicit user or segment lists, and constraints on host, environment or arbitrary context fields.
+
+The point is decoupling deploy from release - ship the code dark, ramp it, and keep a kill switch for the risky path that does not require a rollback. The discipline that decides whether it helps or hurts is removal: a flag that outlives its rollout is an untested branch that doubles the state space, so give every flag an owner and an expiry date and delete it once the decision is made.
+
 ### validate
 **Short:** terraform validate: canonical syntax, type and reference checking of a configuration without touching state.
 **Kind:** api
@@ -1250,6 +1380,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, data-access/replication-ha-and-backup @2
+
+A controller in the cluster acts on backup and restore resources you create. A backup selects namespaces, resource types or labels, writes the object definitions to an object-store bucket, and handles persistent volumes either by asking the storage layer for a snapshot through the CSI interface or by copying the file contents when the storage has no snapshot support. A restore replays that into the same cluster or a different one, which is also the practical way to migrate a namespace between clusters or clone production into staging.
+
+Reach for it for cluster-level disaster recovery and for the migration case. Be clear about what a volume snapshot is not: a copy of a running database's files is crash-consistent at best, so use the pre and post backup hooks to quiesce or flush, and keep the database's own backup and point-in-time recovery as the real recovery path for its data.
 
 ### Virtual WAN
 **Short:** Azure's managed hub-and-spoke backbone connecting VNets, branches and VPN/ExpressRoute links through one hub.

@@ -27,6 +27,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** data-access/drivers-and-connection-pooling @1, data-stores/key-value-and-embedded @3
 
+It is a thin adapter, not a new engine: each connection runs the standard library's `sqlite3` driver on its own worker thread and exposes it as `async with aiosqlite.connect(...)`, so an asyncio application can await queries without blocking the event loop on file I/O. It is also the driver behind SQLAlchemy's `sqlite+aiosqlite:///` URLs, which is how an async FastAPI test suite runs against an in-memory database with no PostgreSQL container to start.
+
+Understand that it buys concurrency of the event loop, not of the database. SQLite still serializes writers and the work still happens on a thread, so reaching for it to make a write-heavy service faster is a misread; use it for tests, local tools and low-write embedded workloads.
+
 ### Akka Distributed Data
 **Short:** Akka module replicating CRDT key-value state across cluster nodes so concurrent writes converge without coordination.
 **Kind:** tech
@@ -57,17 +61,27 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** data-access/drivers-and-connection-pooling @1
 
+asyncpg speaks the PostgreSQL binary wire protocol directly rather than going through libpq, decoding results into Python objects without a text round-trip, and it prepares statements automatically, which is where most of its speed advantage comes from. It is built on asyncio, so a query yields to the event loop instead of occupying a thread-pool worker the way a synchronous driver does.
+
+Use it under SQLAlchemy's async engine, or directly through its own `create_pool` in an ASGI service, creating the pool once in the lifespan rather than per request. Two consequences of the binary protocol are worth knowing: parameters are numbered `$1`, `$2` rather than `%s`, and the automatic statement cache breaks against a transaction-pooling PgBouncer unless you disable it.
+
 ### Atlas
 **Short:** Two products share this name: Ariga Atlas schema-as-code migrations, and MongoDB Atlas managed document DB.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/schema-and-migration @1, data-stores/document @2
 
+Ariga's Atlas treats the schema as a declared desired state in HCL or plain SQL: it inspects the live database, diffs it against the declaration, and generates or plans the migration, which also gives it drift detection and a lint step you can run in CI before anything touches production. That is the same model Terraform uses for infrastructure, applied to tables and indexes.
+
+MongoDB Atlas is unrelated - the managed MongoDB service on AWS, Azure and GCP, providing provisioning, backups, auto-scaling, sharding and Atlas Search on top of the database. When a document reads "Atlas", the surrounding topic tells you which one: migrations and schema-as-code means Ariga, document databases and managed clusters means MongoDB.
+
 ### Atomikos
 **Short:** Java JTA/XA transaction manager coordinating two-phase commit across multiple resources.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-access/transactions-and-consistency @1
+
+It plays coordinator in two-phase commit: your code opens one JTA transaction, enlists XA-capable resources such as a database and a message broker, and Atomikos runs the prepare and commit rounds while writing a transaction log so an in-doubt branch can be recovered after a crash. That is what buys atomicity across two resources a single `Connection.commit()` cannot span. Reach for it only when you genuinely need XA inside one JVM, and note that in Spring the integration now comes from the vendor's own starter rather than Spring Boot auto-configuration. It is blocking by design, since a coordinator failure leaves participants holding locks, and across service boundaries a saga with compensating actions is the usual answer instead.
 
 ### Aurora Global Database
 **Short:** Aurora feature replicating a cluster across AWS regions with sub-second lag and fast cross-region failover.
@@ -171,11 +185,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-access/transactions-and-consistency @1, data-stores/key-value-and-embedded @1, traffic-edge/service-mesh-and-discovery @2, platform-delivery/kubernetes-and-orchestration @3
 
+A cluster of three or five members runs Raft: one leader, and a write is acknowledged only once a majority has persisted it, so the cluster tolerates a minority failing and refuses writes rather than diverging when it loses quorum. Reads are linearizable by default through a ReadIndex round trip, with serializable local reads available when you prefer speed. Keys are versioned by a global revision with watch streams that can replay from any past revision, and leases plus compare-and-swap transactions are what distributed locks and leader election are built from.
+
+It holds all Kubernetes cluster state, which is why its disk fsync latency, not CPU, is usually what decides whether a cluster feels healthy. Reach for it for coordination, service registration, and small config or metadata; it is not a general-purpose database — keep values small, watch the total data size, and defragment and snapshot on a schedule.
+
 ### Flyway
 **Short:** Versioned SQL schema migration tool that applies ordered scripts and records them in a history table.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/schema-and-migration @1
+
+Migrations are ordered SQL files applied once each in version order and recorded in a schema-history table with a checksum, so editing a script that has already run is detected and the migration fails instead of silently letting environments diverge. It executes plain SQL, which means you write the DDL your database actually supports rather than an abstraction over it, and repeatable scripts re-run whenever their checksum changes — the usual home for views and stored procedures.
+
+Wire it into application startup or the deploy pipeline so schema and code ship together. Note that it orders migrations but does not make them safe: a zero-downtime rename is still your job to split into expand-and-contract steps.
 
 ### Flyway Community 10.x
 **Short:** SQL-first database migration tool: versioned scripts applied in order, tracked in flyway_schema_history, with callbacks.
@@ -200,6 +222,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/schema-and-migration @1, data-stores/relational @3
+
+Instead of triggers, it creates a shadow copy of the table, copies rows into it, and applies concurrent changes by connecting as a replica and tailing the binlog, finishing with an atomic rename. Because that apply is asynchronous and outside the writing transaction, gh-ost can throttle or pause itself on replica lag, load or a manual flag -- something a trigger-based tool cannot do, since its work happens inside your writes.
+
+Reach for it for a large ALTER on a busy MySQL table that must stay online. It requires row-based binary logging, a suitable unique key, and no foreign keys pointing at the table, and the cutover is a brief lock, so schedule it rather than assume it is invisible.
 
 ### HashiCorp Raft library
 **Short:** HashiCorp's Go implementation of the Raft consensus protocol; the replication core of Consul, Vault and Nomad.
@@ -231,11 +257,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** data-access/drivers-and-connection-pooling @1, runtime-systems/concurrency-and-async @3
 
+A pool keeps physical connections open so a request pays a borrow rather than a TCP connect plus authentication handshake, and HikariCP is fast because it does very little: a lock-free bag of connections and a proxy layer trimmed at the bytecode level. Spring Boot uses it by default with `maximum-pool-size` 10.
+
+That number is the real ceiling on concurrent database work: the eleventh caller blocks inside `getConnection()` and, after `connection-timeout` (30 seconds by default), gets an exception rather than waiting forever. Bigger is usually not better, since a database serves a modest number of concurrent queries efficiently and thrashes past that point — the pool is deliberately a queue, and under virtual threads it is often the last thing still applying backpressure. Turn on `leak-detection-threshold` outside production to find the path that borrows a connection and never closes it.
+
 ### hypopg
 **Short:** PostgreSQL extension that creates hypothetical indexes so EXPLAIN can price them without building them.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/schema-and-migration @1, observability/profiling-and-performance @2
+
+`hypopg_create_index('CREATE INDEX ...')` registers an index definition in the current session only, reading no data and writing nothing to disk, and the planner then costs a plain `EXPLAIN` as though the index existed. That turns "would this index help?" from an hours-long build on a large table into a sub-second question, and it answers the sharper version too: whether the planner would even choose the index once it existed. Use it to triage candidates before committing to `CREATE INDEX CONCURRENTLY`. It only moves estimated cost, not real execution time, so `EXPLAIN ANALYZE` cannot see the hypothetical index and the winner still has to be confirmed for real.
 
 ### INFO replication
 **Short:** Redis INFO section reporting role, connected replicas and per-replica offset lag.
@@ -285,11 +317,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** data-access/drivers-and-connection-pooling @1, caching/distributed-cache @2
 
+Jedis is blocking and a connection is not thread-safe, so real use means a `JedisPool` -- commons-pool2 underneath -- sized against the number of threads that can call Redis at once; exhausting the pool shows up as timeouts rather than Redis being slow. It supports cluster and sentinel topologies and exposes commands almost one-to-one with the Redis protocol, which makes it easy to read.
+
+Reach for it when the calling code is plainly synchronous and you want the thinnest possible layer. Lettuce is Netty-based, thread-safe on a single shared connection and the default in Spring Data Redis, so prefer it for reactive code or high connection counts.
+
 ### jOOQ
 **Short:** Type-safe SQL DSL over JDBC: SQL-first queries generated from the schema and checked by the Java compiler.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-access/orm-and-data-mapping @1, data-access/drivers-and-connection-pooling @3
+
+A code generator reads your live database schema and emits Java classes for tables, columns and routines; you then compose SQL as a typed DSL against those classes, so a renamed column or a wrong-typed comparison is a compile error rather than a runtime SQLException. It stays SQL-shaped, exposing window functions, CTEs and vendor-specific syntax instead of hiding them behind an object graph.
+
+Reach for it when the queries are the hard part of the application, such as reporting or analytics, where JPA's entity model gets in the way; keep JPA for CRUD on an aggregate. Note the licensing model: it is free for open-source databases such as PostgreSQL and MySQL, and requires a commercial licence for Oracle, SQL Server and DB2.
 
 ### JPA @Version
 **Short:** JPA optimistic-locking column: the update fails if another transaction bumped the version, preventing lost writes.
@@ -309,11 +349,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** data-access/drivers-and-connection-pooling @1, caching/distributed-cache @2
 
+One connection is multiplexed across threads because Netty pipelines commands and correlates each reply to its caller, so a single shared connection serves an entire application safely. That is the structural difference from Jedis, where a thread needs its own connection out of a pool, and it is why Spring Data Redis defaults to it and why normal command traffic needs no pool tuning at all.
+
+The exceptions are worth knowing: blocking commands like `BLPOP`, transactions, and pub/sub subscriptions occupy a connection for their duration and therefore need dedicated ones. The same connection is exposed through synchronous, asynchronous and reactive APIs, and Cluster support includes periodic and adaptive topology refresh - which must be switched on, or the client keeps routing to a node that has already handed its slots away.
+
 ### Liquibase
 **Short:** Database schema change management using versioned XML/YAML/JSON/SQL changelogs with rollback and drift detection.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/schema-and-migration @1
+
+Schema changes are written as changesets — each identified by id, author, and file — in XML, YAML, JSON, or plain SQL. Liquibase records every applied changeset in a `DATABASECHANGELOG` table along with a checksum, so editing an already-applied changeset fails loudly instead of letting environments silently diverge. Preconditions guard a changeset, contexts and labels select which run where, and most change types can generate their own rollback.
+
+The abstract change types (`createTable`, `addColumn`) are what make one changelog portable across database engines, and what people either love or find verbose next to Flyway's plain versioned SQL. Reach for it when you need rollback support, multi-engine portability, or drift detection against a live schema; on any team, the underlying discipline matters more — migrations are forward-only, additive, and deployed before the code that needs them.
 
 ### Liquibase OSS 4.x
 **Short:** Declarative schema migration tool: changesets in XML/YAML/SQL with built-in rollback and preconditions.
@@ -344,6 +392,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/replication-ha-and-backup @1, inference/inference-engine @2
+
+As a Cassandra tool, it backs up each node's SSTables to object storage and coordinates that across the cluster, keeping the per-node schema and token information needed to restore consistently. It handles both full and differential backups and can restore into a cluster with a different topology, which is what makes it usable for cloning a production keyspace into staging.
+
+As a decoding technique, it bolts several extra prediction heads onto an existing model so one forward pass proposes tokens for the next few positions at once, and tree attention verifies many candidate continuations in a single pass. Unlike ordinary speculative decoding there is no separate draft model to serve, at the cost of training the heads for the specific base model.
 
 ### MHA
 **Short:** MySQL Master HA: an older toolkit automating primary failover and replica promotion; largely superseded today.
@@ -423,6 +475,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** data-access/transactions-and-consistency @1
 
+It coordinates two-phase commit across XA resources - typically a JDBC datasource and a JMS broker in the same JVM - so both commit or neither does. The transaction log is the operational reality: prepared-but-undecided branches are recorded before the commit phase, and after a crash the recovery manager reads that log and drives each in-doubt branch to the same outcome. That log therefore has to live on storage that outlives the process, which is exactly what makes XA awkward in a world of ephemeral containers.
+
+Reach for it when you genuinely need atomicity across two transactional resources inside one application. Across services it is usually the wrong shape - 2PC holds locks while a coordinator waits and blocks when the coordinator disappears - and a saga with explicit compensating actions is the pattern that scales instead.
+
 ### nodetool status
 **Short:** Cassandra admin command showing node up/down state, token ownership and load across the ring.
 **Kind:** api
@@ -447,6 +503,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-access/replication-ha-and-backup @1, data-access/transactions-and-consistency @3
 
+Patroni is a daemon that runs alongside each PostgreSQL instance and turns a set of them into a cluster with exactly one primary. Leadership is a key with a TTL in a distributed configuration store — etcd, Consul, ZooKeeper or Kubernetes objects — that the current leader must keep renewing; if it cannot, the key expires and the healthy replicas race to promote one. Split-brain is prevented by the store's own consensus, not by PostgreSQL, which is why the DCS needs its own quorum of nodes.
+
+Each Patroni exposes a REST endpoint reporting whether its node is primary or replica, which HAProxy or a Kubernetes service uses to route writes to whoever holds the leader key right now. Reach for it when you self-manage PostgreSQL and need automatic failover; managed services already do this for you. The failure mode to plan for is a DCS outage, which demotes the primary rather than risking two.
 ### Paxos
 **Short:** The classic consensus protocol letting a replica set agree on a value despite crashes; the ancestor of Raft and friends.
 **Kind:** concept
@@ -458,6 +517,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/replication-ha-and-backup @1
+
+It copies InnoDB's data files while the server keeps taking traffic, recording the redo log generated during the copy, and then replays that log against the copied files to reach a single consistent point — the "prepare" step. Because the result is a physical copy rather than a stream of SQL statements, restoring a large database is dramatically faster than replaying a `mysqldump`, and combined with binary logs it gives point-in-time recovery. Backups can be streamed and compressed straight to another host, which is also the fastest way to seed a new replica.
+
+The details that bite: non-InnoDB tables such as MyISAM still need a brief lock to be copied consistently, and the tool version must match the server version family. Neither is a reason to avoid it, but both are reasons to rehearse a restore rather than trusting a green backup job.
 
 ### performance_schema.data_locks
 **Short:** MySQL 8 table exposing every row and table lock currently held or waited on, for diagnosing lock contention.
@@ -501,6 +564,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-access/schema-and-migration @1, data-stores/relational @3, data-stores/time-series @3
 
+PostgreSQL gives you declarative partitioning but will not create tomorrow's partition for you, and inserting a row with no matching partition is an error. This extension closes that gap: you register a parent table with an interval and a premake count, and its maintenance routine creates future child partitions ahead of time and detaches or drops ones past the retention window.
+
+Reach for it for time-ordered data such as events, audit trails and metrics, where the real win is that expiring old data becomes an instant DROP of a child table rather than a long DELETE that bloats the heap. The operational requirement is that maintenance actually runs on a schedule, via its background worker or pg_cron, otherwise you silently run out of partitions.
+
 ### pg_repack
 **Short:** PostgreSQL extension that rebuilds bloated tables and indexes online without an exclusive lock.
 **Kind:** tech
@@ -537,11 +604,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-access/replication-ha-and-backup @1
 
+It takes physical backups of a PostgreSQL cluster — full, differential, and incremental — with parallel compression, per-file checksums, and optional client-side encryption, while continuously archiving WAL segments to local disk, S3, Azure Blob, or GCS. With both halves in place you can restore to any point in time: a timestamp, an LSN, a named restore point, or a specific transaction id.
+
+Beyond taking backups it does the parts people skip — `verify` checks that archived WAL and backup files are actually intact, retention policies expire old sets automatically, and delta restore reuses files already on disk, which is what makes rebuilding a standby fast. Reach for it once you need PITR, offsite storage, and evidence that the backups restore; `pg_dump` remains a different tool for a different job, moving one logical database between versions.
+
 ### PgBouncer
 **Short:** Lightweight PostgreSQL connection pooler/proxy with session, transaction and statement pooling modes.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/drivers-and-connection-pooling @1, traffic-edge/proxy-and-load-balancer @3, data-access/replication-ha-and-backup @3
+
+The pooling mode is the entire decision. Session mode holds a server connection for the client's whole session and saves almost nothing. Transaction mode - the usual choice - returns the server connection at COMMIT, which is what collapses thousands of application connections onto a few dozen Postgres backends, at the cost of breaking anything that spans transactions: session-level `SET`, advisory locks held across statements, `LISTEN`/`NOTIFY`, temporary tables, and server-side prepared statements unless prepared-statement support is explicitly configured.
+
+Reach for it whenever the application tier scales horizontally, because a Postgres backend is an OS process with real per-connection memory: connection count, not query volume, is often what falls over first. Operationally it is a single-threaded process, so a very busy deployment runs several instances behind a load balancer or with socket reuse, and its `SHOW POOLS` output is the first place to look when clients are queuing.
 
 ### pgpool-II
 **Short:** Older PostgreSQL middleware combining connection pooling with load-balanced read routing and failover management.
@@ -573,11 +648,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-access/drivers-and-connection-pooling @1, data-access/replication-ha-and-backup @2, traffic-edge/proxy-and-load-balancer @2
 
+ProxySQL speaks the MySQL wire protocol, so applications connect to it as though it were the server while it multiplexes thousands of frontend connections onto a small pool of backend connections -- the fix for a connection storm that a per-process application pool cannot solve. Query rules matched on regex, digest, user or schema route statements to hostgroups: the standard read/write split sends writes and anything inside a transaction to the primary and reads to replicas, and the same engine can rewrite, mirror, block, or cache a result set for a TTL. Its monitor checks replication lag and read-only status, so a promoted replica is picked up and a lagging one shunned without an application deploy. Reach for it in front of a MySQL topology where connection counts, failover transparency or sharded routing hurt -- it is another hop to operate, and its runtime configuration lives in an admin interface that must be explicitly saved to disk or it is lost on restart.
+
 ### pt-online-schema-change
 **Short:** Percona tool that rebuilds a large MySQL table online via triggers and a shadow copy, avoiding a blocking ALTER.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/schema-and-migration @1, data-access/replication-ha-and-backup @3
+
+It builds an empty copy of the table with the new definition, puts triggers on the original so every concurrent insert, update and delete is mirrored into the copy, chunk-copies the existing rows while watching replication lag and load, then swaps the two tables with an atomic rename. Reads and writes keep working throughout, and the copy pass can be paused or throttled.
+
+Reach for it when the change is one MySQL's native online DDL cannot do in place, or when you need throttling that native DDL does not offer. The triggers are the cost: they add overhead to every write for the duration, foreign keys pointing at the table need explicit handling, and a table that already has triggers of its own complicates matters. gh-ost avoids the triggers by tailing the binary log, which is the better default when you have binlog access.
 
 ### QueryDSL
 **Short:** Type-safe fluent query builder over JPA and SQL, generated from your entities; an alternative to Specifications.
@@ -633,6 +714,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** data-access/drivers-and-connection-pooling @1, caching/distributed-cache @2
 
+It is the maintained Python client for Redis, with a synchronous API and an asyncio one under `redis.asyncio` sharing the same command surface, so `INCR`, `SETEX`, pipelines, transactions, pub/sub, registered Lua scripts and cluster mode are reachable from either. Connections come from a pool held for the process lifetime, created once at startup rather than per request.
+
+In practice this is how a service acquires its distributed primitives — rate-limit counters, idempotency keys, circuit-breaker state shared across workers, a token blocklist — with atomicity coming from a single command or a registered Lua script rather than read-modify-write in Python. Set `decode_responses` deliberately: without it every reply is `bytes`, which is a recurring source of comparisons that quietly fail.
+
 ### redis-py 6+
 **Short:** The official Python Redis client with async support and connection pooling.
 **Kind:** tech
@@ -650,6 +735,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** data-access/drivers-and-connection-pooling @1, caching/distributed-cache @2, data-access/transactions-and-consistency @2, runtime-systems/concurrency-and-async @3
+
+Rather than exposing Redis commands, it implements familiar Java interfaces on top of them: RMap, RSet and RQueue behave like the collections framework, RLock and RSemaphore like java.util.concurrent, all backed by Redis so every JVM in the cluster sees the same state. RLock is a lease with a watchdog that renews it while the owner is alive, which is what stops a long critical section from expiring under its own timeout.
+
+Reach for it for distributed locking around expensive work such as cache stampede protection, and for shared HTTP session storage so you can scale out without sticky sessions. Treat the lock as an optimization, not a correctness guarantee: across a failover the same lock can be granted twice, so anything that must not run concurrently needs its own idempotency or fencing check.
 
 ### REINDEX CONCURRENTLY
 **Short:** PostgreSQL command that rebuilds a bloated index without taking a write lock on the table.
@@ -753,6 +842,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** data-access/orm-and-data-mapping @1, data-access/drivers-and-connection-pooling @2, runtime-systems/concurrency-and-async @3
 
+R2DBC is the non-blocking counterpart to JDBC, and this module puts the familiar repository derivation on top of it, so a `ReactiveCrudRepository` returns `Mono` and `Flux` instead of entities and lists. It exists so a WebFlux application never parks a request thread inside a blocking driver call, which is the usual way a reactive stack quietly gives back its advantage. It is deliberately not JPA: no lazy loading, no dirty checking, no entity manager and no automatic relationship mapping, so joins and aggregates are SQL you write. Choose it only when the whole request path is reactive, because for an ordinary servlet application JPA or plain JDBC is simpler and no slower.
+
 ### Spring Data Window/ScrollPosition
 **Short:** Spring Data keyset-pagination API returning a Window plus a ScrollPosition cursor instead of an offset page.
 **Kind:** api
@@ -789,11 +880,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** data-access/orm-and-data-mapping @1, data-access/drivers-and-connection-pooling @2, apis-frameworks/design-patterns-and-principles @3
 
+It is two layers. Core builds SQL expressions against table metadata and can be used entirely without objects; the ORM maps classes onto those tables and keeps a `Session` that acts as an identity map and unit of work, accumulating changes and flushing them in dependency order at commit. Understanding the flush-and-expire cycle prevents most of the confusing bugs: attributes are expired at commit and silently re-query on next access, and iterating a lazy relationship in a loop is the N+1 problem unless you ask for `selectinload` or `joinedload`.
+
+Async support is the same API through `AsyncSession` with an async driver such as asyncpg, with lazy loading deliberately disallowed because it would require implicit IO - relationships must be eager-loaded explicitly. Alembic generates migrations by diffing the same metadata, so schema and models stay one source of truth.
+
 ### SQLAlchemy 2.0
 **Short:** Python ORM plus Core SQL toolkit; 2.0 unifies the API and supports full async sessions, paired with Alembic.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-access/orm-and-data-mapping @1, data-access/drivers-and-connection-pooling @3
+
+Core builds SQL as composable expression objects and the ORM maps classes onto tables on top of it; 2.0 unified both behind one `select()` API, added real typing so `Mapped[int]` annotations drive the mapping, and made async first-class through `create_async_engine` and `AsyncSession` over drivers like asyncpg. Alembic generates and versions migrations by diffing your models against the database.
+
+Reach for it when you want the ORM without losing access to the SQL underneath. The async gotcha to know: lazy loading raises under `AsyncSession`, because attribute access cannot do I/O implicitly, so relationships must be eager-loaded with `selectinload` or fetched explicitly.
 
 ### SQLAlchemy 2.0 async_sessionmaker
 **Short:** Factory producing AsyncSession context managers, what a FastAPI yield-dependency hands to handlers.
@@ -825,6 +924,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** data-access/orm-and-data-mapping @1, apis-frameworks/data-formats-and-api-contracts @2
 
+A class declared with `table=True` is registered as a SQLAlchemy mapped table while still being a Pydantic model, so one declaration serves the database, request validation and the generated OpenAPI schema. It targets the triplication a FastAPI codebase accumulates, where an ORM entity, a create schema and a read schema all describe the same thing, though in practice you still subclass for those variants so fields can be optional, computed or hidden. Written by FastAPI's author, it fits small and medium services well. When you need the full SQLAlchemy mapper surface, drop to SQLAlchemy directly rather than fighting through the wrapper.
+
 ### TransactionAwareCacheManagerProxy
 **Short:** Spring cache decorator deferring cache writes until after commit so a rolled-back transaction leaves no stale entry.
 **Kind:** api
@@ -843,11 +944,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-access/replication-ha-and-backup @1, data-stores/relational @2, data-access/drivers-and-connection-pooling @3
 
+It sits between the application and MySQL. `vtgate` speaks the MySQL wire protocol, so the app connects as if to one database, and uses a vschema describing how each table is sharded to route or scatter-gather a query; `vttablet` fronts each MySQL instance, pooling connections and enforcing query limits. Resharding, backups and cutover are online operations built into the toolchain.
+
+Reach for it when a MySQL fleet has to grow past a single write primary and rewriting the application is not on the table. The costs are a large operating surface -- topology store, several component types -- and SQL restrictions, since cross-shard joins and transactions are limited or expensive.
+
 ### WAL-G
 **Short:** Backup tool that archives PostgreSQL WAL and base backups to object storage for compressed PITR restore.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/replication-ha-and-backup @1
+
+WAL-G is wired in as PostgreSQL's archive command, so each completed WAL segment is compressed and shipped to object storage as it is produced, while periodic base backups — optionally deltas against the previous one — give the starting point that a restore replays from. Those two together are point-in-time recovery: restore the base backup nearest your target, then replay WAL up to a chosen timestamp or transaction.
+
+Test the restore on a schedule rather than trusting that the archive command keeps succeeding. A backup you have never restored is a hypothesis, and this failure mode stays silent until the day it matters.
 
 ### ZAB
 **Short:** ZooKeeper Atomic Broadcast: the leader-based total-order consensus protocol keeping ZooKeeper replicas identical.
@@ -860,3 +969,7 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** data-access/transactions-and-consistency @1, traffic-edge/service-mesh-and-discovery @2, data-movement/event-streaming-and-processing @3, data-access/replication-ha-and-backup @3
+
+ZooKeeper exposes a small, strongly consistent hierarchical namespace of znodes replicated by the Zab protocol across an odd-sized ensemble, with writes going through the leader and needing a quorum. The useful primitives fall out of two features — ephemeral nodes that vanish when a session's heartbeats stop, and sequential nodes combined with watches — which together give leader election, distributed locks, membership and configuration every participant agrees on.
+
+It is for coordination metadata, not data: small values, low write rate, high durability requirements. Newer systems increasingly embed the same consensus in-process with Raft instead of depending on a separate ensemble — Kafka's KRaft mode is the well-known case — so a new design should ask whether it really wants another cluster to operate.

@@ -57,6 +57,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** js
 **Roles:** llm-apps/tool-use-and-mcp @1
 
+You declare tools, resources and prompts as typed handlers and the SDK handles the JSON-RPC framing, capability negotiation and transport, so a server is a few dozen lines rather than a protocol implementation. The same package ships the client side, which is what you use to connect a host application to somebody else's server.
+
+Reach for it when the server is Node or TypeScript; Python, and several other languages, have their own official SDK with the same shape. Because MCP is versioned, pin the SDK and check the protocol version your host negotiates.
+
 ### @modelcontextprotocol/server
 **Short:** Node package for implementing an MCP server that exposes tools, resources and prompts to any MCP client.
 **Kind:** tech
@@ -183,6 +187,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** llm-apps/agentic-environments @1, devtools/version-control-and-workbench @2
 
+You run it inside a git repository and add the files it may edit; aider builds a repository map so the model has structure beyond those files, asks for changes as diffs, applies them, and commits each change with a generated message -- so git history is the undo mechanism and reverting a bad edit is an ordinary revert. It can run your tests or linter and feed the failures back for another pass, and it works with whichever model you point it at through an API key. The explicit file-adding is deliberate: the context is what you chose, which keeps token cost predictable and stops it wandering through a large repository. Reach for it for surgical, well-scoped edits in code you already understand, from the terminal you are already in; a task that requires exploring many unfamiliar files is where more autonomous agents fit better.
+
 ### Amazon Bedrock
 **Short:** AWS managed service exposing many foundation-model providers behind one API, with guardrails, batching and VPC access.
 **Kind:** tech
@@ -260,6 +266,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** llm-apps/agent-framework @1
+
+It is the high-level layer over AutoGen's event-driven core runtime. An assistant agent wraps a model client plus a set of tools; a team decides who speaks next, and the shipped team types cover the useful topologies: round robin for a fixed rotation, a selector that asks a model to pick the next speaker, swarm for explicit handoffs between agents, and the Magentic-One team driven by an orchestrator that plans and tracks progress. Termination conditions, not a loop you write, decide when the conversation stops.
+
+Reach for it when the problem genuinely decomposes into specialists that need to talk to each other, and when you want streaming and async execution out of the box. A single agent with a good tool set is cheaper, faster and much easier to debug, so make the multi-agent structure earn its place.
 
 ### autogen-core
 **Short:** AutoGen's low-level runtime: typed messages, RoutedAgent and the event loop multi-agent topologies are built on.
@@ -339,6 +349,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/agentic-environments @1, llm-apps/tool-use-and-mcp @3
 
+It wraps Playwright and hands the model a compressed, indexed view of the page built from the DOM and accessibility tree, with interactive elements numbered so the agent can say "click element 12" instead of asking a vision model to find coordinates in a screenshot. That indexing is what makes the loop reliable and cheap enough to run for many steps, with screenshots as a fallback for pages whose structure is not enough. Reach for it when a task genuinely has no API behind it: authenticated portals, legacy internal tools, multi-step forms. Treat it as a live-web capability with real risk, because page content becomes model input, so prompt injection from a visited site is the failure mode to design around, and it should run sandboxed with narrowly scoped credentials.
+
 ### Browserbase
 **Short:** Hosted headless-browser infrastructure giving agents fresh, scalable Chrome sessions with proxies and recording.
 **Kind:** tech
@@ -386,6 +398,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** llm-apps/agentic-environments @1, llm-apps/tool-use-and-mcp @2
+
+It runs in a terminal against a real repository — reading files, editing them, running builds and tests, and iterating on the output rather than emitting a patch blind. Project conventions come from a `CLAUDE.md` it reads each session, extra capabilities from MCP servers, and long or parallelizable work can be delegated to subagents that return a summary instead of filling the main context.
+
+The skill in using it is scoping: it is strongest when done is checkable — a failing test, a lint error, a migration to apply — and weakest when the goal is vague. Every edit lands in your working tree, so a clean git state before a large change is the real undo button.
 
 ### Claude Code Agent tool
 **Short:** Claude Code's built-in tool for spawning isolated subagents with their own context to run a delegated task.
@@ -471,6 +487,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/agent-framework @1
 
+You declare agents with a role, a goal, a backstory and tools, tasks with a description and an expected output, and a crew that runs them either in sequence or hierarchically with a manager agent delegating to the others. Those descriptive fields are not decoration, they are the prompt scaffolding, so the quality of a crew depends heavily on how sharply the roles and expected outputs are written.
+
+Reach for it when you want a multi-agent prototype running quickly and the workflow is close to a linear handoff between specialists. You get less control over the loop than a graph-based framework gives you, which shows up as soon as you need conditional branching, a retry on a specific step, or a human approval gate in the middle.
+
 ### crewai-tools
 **Short:** Prebuilt tool library for CrewAI agents: web search, site scraping, file reading and retrieval-style tools.
 **Kind:** tech
@@ -494,6 +514,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** llm-apps/agentic-environments @1, devtools/version-control-and-workbench @2, llm-apps/tool-use-and-mcp @3
+
+It is a VS Code fork, so extensions, keybindings and settings mostly carry over, and the additions are the point: multi-line predictive completion, inline edit on a selection, and a chat/agent surface that plans and applies changes across several files at once. It indexes the repository so the model retrieves related files rather than seeing only the buffer you have open, which is what makes whole-codebase questions and refactors work.
+
+Being an MCP client means you can attach your own servers - an issue tracker, a database, internal docs - and have the agent call them as tools. Reach for it when the work is editing an existing codebase in place; a chat window is a poor fit for changes that span files, and a terminal agent is a better fit when the loop is build-test-fix rather than reading code.
 
 ### Cursor MCP config
 **Short:** Cursor's mcp.json configuration declaring which MCP servers the editor launches and exposes to its agent.
@@ -519,6 +543,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** llm-apps/agentic-environments @1
 
+It takes a task rather than a keystroke: given an issue, it plans, then works inside its own sandboxed VM with a shell, an editor, and a browser, running tests and iterating over a session that can last hours before opening a pull request. The plan is visible and steerable, so you can correct a wrong assumption partway rather than only judging the final diff.
+
+Reach for it when the work is well-scoped and machine-verifiable — a failing test to fix, a mechanical migration across many files, a dependency upgrade — because a test suite is what makes autonomous iteration converge. It is a commercial product billed by consumption rather than per seat, so a long autonomous session has a real cost, and reviewing what it produces is still your job.
+
 ### Docker sandboxes
 **Short:** Containers used as disposable isolated environments for executing untrusted model-generated code.
 **Kind:** concept
@@ -530,6 +558,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** llm-apps/prompting-context-and-structured-output @1, llm-apps/agent-framework @3, ml-lifecycle/evaluation-and-benchmarks @3
+
+You declare a signature such as `question -> answer` and compose modules like `ChainOfThought` or `ReAct`; the prompt text is generated rather than written, and an optimizer then searches over few-shot demonstrations and instruction wordings, scoring candidates with your own metric on your own examples. The problem it attacks is that hand-tuned prompt strings are brittle and get re-tuned every time the model changes, whereas a compiled program is simply recompiled against the new model. It fits pipelines where labelled examples and a real metric exist, such as a RAG chain whose retrieval and answer steps can both be scored. With no metric and no examples there is nothing to optimize, and a plain prompt is the honest choice.
 
 ### dspy-ai
 **Short:** DSPy framework that declares LLM programs as typed modules and compiles prompts and few-shot demos automatically.
@@ -560,6 +590,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** llm-apps/agentic-environments @1, security/supply-chain-and-runtime-security @3
+
+The SDK starts a sandbox in about a second, then you run code or shell commands inside it, read files back out, and destroy it. The isolation boundary is a Firecracker microVM rather than a container, which is what makes it defensible to execute code an unattended model just wrote.
+
+In this repo it is the code-execution tool behind agents and the runner for code-based rewards during RL training. Reach for it whenever the code is untrusted or the agent can install packages; if the code is yours and known, a subprocess or a plain container is cheaper.
 
 ### Epic
 **Short:** Electronic health record platform; the system of record LLM clinical-documentation features integrate into.
@@ -615,6 +649,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/prompting-context-and-structured-output @1
 
+A Guidance program interleaves fixed text you supply with slots the model fills, and the constraints on those slots — a regex, a grammar, a choice among options — are enforced during decoding by masking tokens that cannot continue a valid string. Structure is therefore guaranteed rather than requested, and the parts of the output you already know are not paid for as generated tokens. Token healing fixes the boundary artifact where a prompt ends mid-token and the model is pushed toward an unnatural continuation.
+
+Reach for it when you control the model and need output that parses every time — extraction into a fixed schema, forced multiple-choice, a numbered plan. With a hosted API you cannot mask logits, so the equivalent lever there is the provider's own structured-output or JSON-schema mode.
+
 ### haystack-experimental
 **Short:** Haystack's pre-release channel where new agent and RAG components ship before stabilising into core.
 **Kind:** tech
@@ -638,6 +676,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** llm-apps/prompting-context-and-structured-output @1, llm-apps/tool-use-and-mcp @3
+
+It patches a provider's client so a call takes a response model, converts that Pydantic model into a schema the model is asked to fill, validates the reply against it, and on a validation error feeds the error message back to the model and retries up to a limit. What you get back is a typed object, so downstream code accesses attributes instead of digging through a dictionary and hoping the key exists.
+
+The same call shape works across the major providers and local runtimes, which is why it is a common choice for extraction pipelines. Where a provider supports strict or constrained decoding, that guarantees the JSON is syntactically valid and matches the schema; this library still earns its place on top by handling semantic validators, field constraints and the retry loop when the model returns well-formed but wrong output.
 
 ### instructor-haystack
 **Short:** Haystack integration for Instructor, forcing generator output to validate against a Pydantic response model.
@@ -675,6 +717,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python, js
 **Roles:** llm-apps/agent-framework @1, search-retrieval/rag-and-document-processing @1, llm-apps/prompting-context-and-structured-output @2, llm-apps/tool-use-and-mcp @3
 
+It supplies the glue around a model call: prompt templates, output parsers, document loaders and splitters, retrievers, memory, and a large catalogue of provider and vector-store integrations. LCEL composes those pieces with the `|` operator into runnables that stream, batch and run branches in parallel for free, and `create_agent` wraps the tool-calling loop.
+
+Reach for it to get a RAG or agent pipeline standing quickly and to swap providers without rewriting. The abstractions also hide the prompt and the actual request, which makes debugging and cost accounting harder -- pin the version strictly, since the surface moves, and expect that a settled pipeline is often clearer rewritten against the provider SDK.
+
 ### LangChain create_agent
 **Short:** LangChain factory building a ReAct-style tool-calling agent loop with middleware hooks for guards and summarization.
 **Kind:** api
@@ -687,6 +733,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/tool-use-and-mcp @1, llm-apps/agent-framework @2
 
+It connects to one or more MCP servers over stdio or HTTP, reads the tools they advertise, and materializes each as a LangChain tool object with the schema translated into the argument format an agent expects, so a LangGraph agent calls an MCP server without any protocol code of its own. The value is that tools stop being compiled into the application: a server can be added or swapped by configuration, and the same server still serves any other MCP client. Use it when you are already on LangChain or LangGraph and want the ecosystem of existing servers; if you are not, the official MCP SDK talks to those same servers directly and adds less indirection.
+
 ### LangChain tools
 **Short:** LangChain's tool abstraction plus its catalog of prebuilt integrations that an agent can call.
 **Kind:** api
@@ -698,6 +746,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** llm-apps/agent-framework @1, llm-apps/llm-gateway-and-routing @2
+
+LangChain splits each provider integration into its own package so it can version against the vendor SDK independently; this one wraps the `anthropic` SDK and exposes `ChatAnthropic`, mapping LangChain's message, streaming and tool-calling abstractions onto the Messages API, including multimodal content blocks. Install it alongside `langchain-core` when a chain or a LangGraph agent should run on Claude. Provider-specific capabilities usually surface here before they are abstracted into the generic interface, so it is worth reading this package's own documentation rather than assuming the common `BaseChatModel` surface covers everything the model can do.
 
 ### langchain-classic
 **Short:** Compatibility package holding LangChain's pre-1.0 chains such as LLMChain and RetrievalQA; only for legacy code.
@@ -717,17 +767,29 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/agent-framework @1, llm-apps/prompting-context-and-structured-output @2
 
+langchain-core holds the abstractions everything else is built on: the Runnable protocol with its invoke, batch and stream methods, message and prompt-template types, output parsers and the tool interface — with almost no dependencies of its own. Because those interfaces compose, a chain is a pipeline of Runnables that inherits streaming, batching, async and retries without each integration implementing them separately.
+
+Depend on it directly when you are writing an integration, or when you want the primitives without pulling in the wider framework. The point of the split is that this base contract stays stable while the integration packages move quickly.
+
 ### langchain-openai
 **Short:** LangChain's OpenAI integration package supplying ChatOpenAI, embeddings and function-calling for agents.
 **Kind:** tech
 **Lang:** python
 **Roles:** llm-apps/agent-framework @1, llm-apps/llm-gateway-and-routing @3, llm-apps/tool-use-and-mcp @3
 
+This is the provider package holding LangChain's OpenAI bindings — `ChatOpenAI`, `OpenAIEmbeddings`, and the tool-calling and structured-output plumbing that maps LangChain tool definitions onto the API's function-calling schema. Provider integrations were split out of the core package, so you install only the providers you use and their SDK version bumps do not drag the framework along with them.
+
+You will meet it as the LLM behind an agent or chain in most LangChain and LangGraph examples. `ChatOpenAI` also points at any OpenAI-compatible endpoint through `base_url`, which is how local servers and gateways get used without changing application code.
+
 ### LangGraph
 **Short:** Graph runtime for stateful, checkpointed LLM agents with branching, loops and human-in-the-loop.
 **Kind:** tech
 **Lang:** python, js
 **Roles:** llm-apps/agent-framework @1, llm-apps/prompting-context-and-structured-output @2, data-movement/workflow-and-durable-execution @2, search-retrieval/rag-and-document-processing @3
+
+You declare a typed state object and register nodes that each return a partial update to it; edges — including conditional edges that choose the next node from the current state — make the control flow explicit graph structure rather than emergent behaviour of a while loop, so branching, retries and backtracking are things you can read off the graph. A checkpointer persists state after every step, which is what makes an agent resumable after a crash, interruptible for human approval before a risky tool call, and inspectable when it misbehaves.
+
+Reach for it when the agent needs durability or control flow a single prompt-and-tools loop cannot express. For a straightforward tool-calling assistant the extra graph machinery is not worth it.
 
 ### LangGraph checkpointing
 **Short:** LangGraph's state persistence layer: per-node checkpoints in memory, SQLite or Postgres, enabling interrupt and resume.
@@ -777,6 +839,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/prompting-context-and-structured-output @1
 
+It gives an agent memory that outlives a single conversation: rather than replaying a transcript, the agent extracts durable facts and reflections into a store and searches that store on later turns, so the prompt carries a consolidated view instead of everything ever said. Extraction can run in the background between turns, keeping the cost of writing memory off the user's latency path.
+
+Reach for it when an assistant must remember preferences or prior decisions across sessions. Memory written automatically also accumulates stale and contradictory entries, so decide how entries get updated and forgotten before treating any of them as authoritative.
+
 ### LangSmith Prompt Hub
 **Short:** Versioned prompt registry in LangSmith, tied to its datasets and evals so a prompt change can be scored.
 **Kind:** tech
@@ -795,11 +861,15 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/llm-gateway-and-routing @1, caching/semantic-and-llm-cache @2, observability/tracing-apm-and-llm-observability @3
 
+The library normalises every provider to the OpenAI chat-completions shape, so `litellm.completion(model=..., messages=[...])` returns the same object whether the call went to OpenAI, Anthropic, Bedrock, Vertex or a local vLLM server -- and exceptions are mapped onto the OpenAI error types too, so retry logic written once keeps working across providers. Around that it adds router behaviour: model lists with weights, fallback chains when a deployment errors or rate-limits, retries with backoff, and per-call cost computed from a maintained price map. It is the seam that turns "swap the model" into a config change rather than a code change, which matters most while you are still choosing one. Reach for it in application code; when several teams or services need the same behaviour, run its proxy server instead so keys and budgets live in one place.
+
 ### litellm Proxy
 **Short:** Self-hosted LLM gateway giving one OpenAI-shaped endpoint over many providers with keys, budgets and fallback.
 **Kind:** tech
 **Lang:** *
 **Roles:** llm-apps/llm-gateway-and-routing @1, platform-delivery/cloud-platform-and-cost @3
+
+The proxy is LiteLLM run as a server: you define model deployments in a config file, and clients point any OpenAI-compatible SDK at its base URL using a virtual key it issued, so provider credentials live only in the proxy and never in application code or a notebook. That central position is what makes governance possible -- per-key and per-team budgets and rate limits, spend attributed by key, tag and model, request logging into your observability backend, and routing policy (weighted deployments, least-busy selection, cross-provider fallback) changed without redeploying a single client. Reach for it when several teams or services share model access and somebody must answer who spent what and cut off a runaway job. The cost is a hop in the request path that is now a shared dependency, so it needs the same availability and latency budget as any other piece of production infrastructure.
 
 ### litellm Python SDK
 **Short:** Python client giving one OpenAI-shaped call signature over 100+ model providers, with fallback, retry and cost tracking.
@@ -837,6 +907,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/agent-framework @1, search-retrieval/rag-and-document-processing @2, llm-apps/tool-use-and-mcp @3
 
+This is LlamaIndex's agent layer, which turns indices, retrievers and query engines into tools an LLM can choose between. `ReActAgent` runs the reason-act-observe loop, deciding at each step which tool to call and when it has enough to answer. `SubQuestionQueryEngine` takes a compound question, decomposes it into sub-questions, routes each to whichever index can answer it, and synthesizes the parts — which is how you answer a question that spans two document collections.
+
+Reach for it when the agent's job is mostly answering over your own corpora and you want the retrieval plumbing, node postprocessing and response synthesis already assembled. When you need explicit control of the state machine — branching, retries, checkpoints, human approval mid-run — a graph-based framework gives you more, at the cost of writing more.
 ### llguidance
 **Short:** Compile-free token-trie lexer engine for constrained decoding; backs Guidance and vLLM's guidance grammar backend.
 **Kind:** tech
@@ -861,6 +934,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/prompting-context-and-structured-output @1, inference/inference-engine @3
 
+It works inside the sampling loop rather than after generation: at each step it computes which tokens could still extend the output into something matching the JSON schema or regular expression, and masks the logits of the rest. Invalid output is therefore not possible, as opposed to being asked for in the prompt and retried when the model ignores it. It plugs into `transformers`, vLLM and llama.cpp-style runtimes as a logits processor, and it deliberately allows the whitespace and token variation a strict character-level automaton would forbid, so the model stays in distribution.
+
+Reach for it whenever code downstream parses the model's output. The costs are a per-step overhead to compute the allowed set, and the subtler one that constraining hard can force a well-formed but poor answer — the schema is satisfied while the content is wrong.
+
 ### LocalPythonExecutor
 **Short:** smolagents' built-in restricted Python interpreter for running agent-written code with a limited import allowlist.
 **Kind:** api
@@ -884,6 +961,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** llm-apps/prompting-context-and-structured-output @1, llm-apps/agent-framework @3
+
+You annotate a function or hand it a Pydantic model, and it builds the prompt, calls the model, validates the result against your type and retries when parsing fails, so the call site returns a typed Python value rather than a string you have to parse. That suits extraction, classification, labelling and generating structured test data.
+
+Reach for it when the task is one call with a known output shape and you want the LLM to feel like a normal function. `instructor` is the thinner alternative if you want to keep the provider SDK in view, and anything that needs tools, memory and a loop belongs in an agent framework instead.
 
 ### Mastercard Agent Pay
 **Short:** Mastercard's agentic payment tokens, extending MDES tokenization so an AI agent can transact with scoped credentials.
@@ -926,6 +1007,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** llm-apps/tool-use-and-mcp @1, devtools/testing-and-mocking @2
+
+Run it against a server command or URL and it starts a local UI that connects as a genuine client: you can list tools, resources and prompts, invoke a tool with arbitrary arguments, and read the raw JSON-RPC messages flowing in both directions. That message log is what makes it the debugging tool, because most MCP failures are a malformed input schema, a capability the server never advertised, or a handler that throws, and all three are visible there immediately. Use it before wiring a server into an agent, so you are debugging one component rather than a server and a model at the same time.
 
 ### mcp Python SDK
 **Short:** Official Python SDK for the Model Context Protocol: build MCP servers exposing tools and resources, or clients.
@@ -993,6 +1076,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** llm-apps/prompting-context-and-structured-output @1, llm-apps/agent-framework @3, data-stores/vector-store @3
 
+Mem0 sits between the application and the model: it reads the conversation, uses an LLM to extract durable facts worth keeping ("prefers metric units", "is migrating off Postgres"), embeds and stores them, and retrieves the relevant few to inject into later prompts. The part that distinguishes it from a plain vector store is the update step — when a new message contradicts a stored fact, it revises or deletes rather than accumulating both.
+
+Reach for it when an assistant needs to feel continuous across sessions and stuffing the full history into context is too expensive or too long. Treat the extraction step as a failure source you own: a fact captured wrongly persists and quietly biases every later answer, so memories should be inspectable, editable and deletable by the user, and scoped per user so one person's context never reaches another's.
+
 ### MemGPT
 **Short:** Agent memory system (now Letta) that pages facts between a small context window and external storage, OS-style.
 **Kind:** tech
@@ -1016,6 +1103,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python, csharp
 **Roles:** llm-apps/agent-framework @1, llm-apps/tool-use-and-mcp @2, data-movement/workflow-and-durable-execution @3
+
+It is the single supported path Microsoft points at for building agents on .NET and Python, folding AutoGen's multi-agent orchestration together with Semantic Kernel's plugins, connectors and enterprise plumbing. Tools arrive over MCP and agent-to-agent messaging over A2A, so the interop surfaces are protocol-level rather than framework-specific, and it plugs into Azure's Foundry tooling for deployment, evaluation and tracing.
+
+Reach for it when the organization is already on Azure and .NET, where the alternatives are thin. Elsewhere the Python agent ecosystem is considerably denser, and Microsoft publishes a migration guide for the AutoGen code this supersedes.
 
 ### Microsoft Semantic Kernel
 **Short:** Microsoft's enterprise agent SDK for C#, Python and Java: plugins, planners, memory and multi-agent orchestration.
@@ -1064,6 +1155,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** llm-apps/tool-use-and-mcp @1
+
+Server authors publish a `server.json` describing the package, its transports and configuration, under a namespace verified by DNS or GitHub ownership, so a name provably belongs to the organisation it claims. That provenance is the point: installing an MCP server means running someone else's code against your data, and a name-squatted server is a supply-chain attack.
+
+Consume it to discover servers or to let a client or a downstream registry mirror the catalogue. It is still in preview, so expect the metadata schema and the publishing flow to move, and verify a server yourself before trusting it regardless of listing.
 
 ### OpenAI Agents SDK
 **Short:** OpenAI's agent runtime: Agent/Runner loop, typed tools, handoffs between agents, guardrails, sessions and tracing.
@@ -1137,6 +1232,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/agent-framework @1, llm-apps/tool-use-and-mcp @3
 
+An `Agent` is instructions plus tools plus an optional typed output schema, and `Runner.run` drives the loop: call the model, execute any tool calls, feed the results back, repeat until a final answer. Handoffs let one agent delegate to another as though it were a tool, which is how a triage agent routes to specialists; guardrails run validation on input or output and can abort a run; sessions persist conversation history; tracing is on by default, so a run is inspectable span by span rather than a black box.
+
+It is deliberately small - a thin typed loop rather than a framework with its own abstractions for prompts, memory and chains - and it works against Chat Completions-compatible endpoints generally, not only OpenAI's. Reach for it when you want the agent loop handled and everything else to stay ordinary Python.
+
 ### OpenAI/Anthropic APIs, open-weight LLMs
 **Short:** The general pool of hosted and open-weight LLMs used for zero/few-shot prototyping, long-tail cases and generation.
 **Kind:** model
@@ -1155,11 +1254,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** llm-apps/llm-gateway-and-routing @1
 
+You keep one key and one OpenAI-compatible base URL, and name the model in the request; OpenRouter routes to a provider, can fall back to another when one is rate-limited or down, and reports token usage and spend in one place. That makes comparing candidate models, or adding failover, a configuration change instead of another vendor integration.
+
+Reach for it during evaluation, for a routing layer that picks a cheap model for easy requests, or when you want one bill. The costs are an extra hop of latency, another party in the request path, and provider-specific features arriving late or not at all -- production traffic on one settled model is usually better pointed straight at the provider.
+
 ### Outlines
 **Short:** Structured-generation library that compiles a regex or JSON schema into an FSM constraining the decoder.
 **Kind:** tech
 **Lang:** python
 **Roles:** llm-apps/prompting-context-and-structured-output @1, inference/inference-engine @3
+
+Given a regex, a JSON Schema or a grammar, it precomputes an automaton over the tokenizer's vocabulary and, at each decoding step, masks the logits of every token that could not continue a valid string, so the output is structurally correct by construction instead of by generate-parse-retry. Because the vocabulary-to-state index is built once, the per-token cost stays close to unconstrained generation. Reach for it when you control the model and its logits and need output that always parses. It does not apply to a hosted API you cannot reach inside, and structural validity is not semantic correctness: the model can still fill a perfectly valid schema with wrong values.
 
 ### Pipecat
 **Short:** Python framework for real-time voice agents: pipelines wiring STT, LLM and TTS with interruption handling.
@@ -1185,11 +1290,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** llm-apps/llm-gateway-and-routing @1, caching/semantic-and-llm-cache @2, observability/tracing-apm-and-llm-observability @2
 
+You point the SDK, or any OpenAI-compatible base URL, at Portkey and it fronts many providers behind one endpoint, applying a config that declares retries, timeouts, fallback chains and load balancing across models, plus exact-match and semantic caching. Every call is logged with tokens, latency and cost attributed per key or user, which is usually the reason it gets adopted in the first place.
+
+Reach for it when a product calls several models and a provider outage or rate limit should become a fallback rather than an incident. It is another hop in the request path and another vendor holding your prompts, so weigh that against running a self-hosted gateway such as LiteLLM.
+
 ### PromptLayer
 **Short:** Prompt registry and logging platform: versioning, team collaboration and production request monitoring.
 **Kind:** tech
 **Lang:** *
 **Roles:** llm-apps/prompting-context-and-structured-output @1, observability/tracing-apm-and-llm-observability @2
+
+Prompts live in a registry with versions and labels, so the application fetches one by name at runtime and a non-engineer can edit or roll it back without a deploy, while every request through the SDK is logged with its inputs, output, latency and cost and can be scored or replayed against a new version. The point is decoupling: prompts become deployable configuration with an evaluation history behind a change, rather than strings buried in code and shipped on the application's release cycle. It suits teams where product or domain people own the wording. A single developer usually gets further keeping prompts in Git next to the code and adding a tracing tool for the request logs.
 
 ### Puppeteer
 **Short:** Node library driving headless Chrome over DevTools Protocol for scraping, screenshots and browser automation.
@@ -1323,6 +1434,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** llm-apps/agentic-environments @1, llm-apps/agent-framework @3
 
+Skyvern drives a real browser through Playwright and decides what to do from what is on the page -- a screenshot plus the extracted DOM handed to a vision-capable model -- rather than from selectors you wrote, so a workflow survives a site redesign that would break a scripted scraper. You give it a goal, a target URL, and a schema for the data to extract or the fields to fill; it plans and executes step by step, and it handles the tedious parts of real forms including file uploads and two-factor hand-offs. It is open source with a hosted option, and exposes runs through an API and a workflow builder. Reach for it for form-filling and extraction across many sites that offer no API -- it is slower and far more expensive per run than a scripted scraper, so it earns its place on breadth and brittleness, never on volume.
+
 ### Small OpenAI model
 **Short:** A cheap small OpenAI model (gpt-4o-mini / nano class) used for query rewriting and other bulk transformations.
 **Kind:** model
@@ -1334,6 +1447,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** llm-apps/tool-use-and-mcp @1
+
+Smithery lists MCP servers with the command needed to install each one, so adding a tool server to a client is a CLI invocation rather than hand-editing a JSON config and guessing at the arguments. Publishers can claim accounts and ship their own servers, and the listing surfaces what a server exposes before you install it.
+
+Treat an entry as a package, not a vetted component. An MCP server runs alongside your agent with whatever credentials you give it and sees the prompts and tool arguments that flow through it, so the same care you would apply to adding a dependency — who publishes it, what it can reach, what it needs access to — applies here, and appearing in a registry is not a security review.
 
 ### Smithery CLI
 **Short:** Command-line installer and manager for MCP servers, wiring them into a client's config for you.
@@ -1436,6 +1553,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** llm-apps/agentic-environments @1, ml-lifecycle/evaluation-and-benchmarks @3
+
+Its contribution is the agent-computer interface. Rather than handing a model a raw shell, it exposes a small purpose-built command set — open a file at a line, scroll a window, edit a line range with a lint check that rejects a syntactically broken patch, search the repository — because unbounded terminal output floods the context window and blind edits fail silently. That interface, not a better prompt, is what moved its SWE-bench resolve rate.
+
+It runs each task instance in a container against a real repository and is the open baseline that later agent papers compare against. Reach for it as a reference implementation to read, extend, or benchmark against; for daily engineering work a maintained commercial coding agent is more capable.
 
 ### Swift, Ruby, PHP, Kotlin SDKs
 **Short:** The community-tier MCP SDKs for Swift, Ruby, PHP and Kotlin, behind the first-party Python/TypeScript ones.

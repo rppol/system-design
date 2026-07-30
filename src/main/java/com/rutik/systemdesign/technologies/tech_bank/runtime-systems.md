@@ -57,6 +57,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/io-networking-and-syscalls @1, runtime-systems/concurrency-and-async @2
 
+File system calls block, and there is no portable asynchronous file API to build on, so a plain open and read inside a coroutine stalls the event loop and every other task on it. This library delegates each operation to a worker thread and gives you an awaitable, which keeps the loop free; the underlying system call releases the interpreter lock while it waits, so the threads are not fighting for it.
+
+Reach for it when a coroutine has to touch the filesystem on a request path, such as streaming an upload or reading a file per request. It is not free, since each call costs a thread handoff, so reading a few small configuration files at startup is better served by ordinary blocking calls before the loop is doing anything else.
+
 ### aioitertools
 **Short:** Async counterparts of itertools for async generators; used to build streaming asyncio pipelines.
 **Kind:** tech
@@ -87,11 +91,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1, devtools/testing-and-mocking @3
 
+One API - `create_task_group`, `move_on_after` and `fail_after`, `to_thread.run_sync`, memory object streams - runs unchanged on asyncio or trio, which is what lets a library support both without duplicating its concurrency code. More importantly it brings structured concurrency to asyncio: a task group's block cannot exit until every child has finished, and a failing child cancels its siblings and propagates, so tasks cannot be silently orphaned or swallowed the way a bare `create_task` whose reference is dropped can be.
+
+Starlette and FastAPI use it internally, which explains behaviour you will meet directly: a synchronous `def` endpoint or a synchronous dependency is run in anyio's worker thread pool, whose default limiter allows 40 concurrent threads - once blocking calls exceed that, requests queue there rather than in your code. Its bundled pytest plugin runs the same async tests on both backends.
+
 ### anyio 4.x
 **Short:** Backend-agnostic async library giving task groups and structured cancel scopes on top of asyncio or trio.
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1
+
+Its core idea is structured concurrency: a task group's `async with` block does not exit until every child task has finished, and an exception cancels the siblings and propagates, so a background task cannot be silently orphaned or swallow its own error. Cancel scopes make timeouts composable and nestable -- `move_on_after` and `fail_after` -- and it also provides portable sockets, files, streams, semaphores and `to_thread`.
+
+Reach for it when writing a library that must run under either asyncio or trio without picking for its caller. Plain applications may not need it any more, since asyncio ships its own `TaskGroup` and `timeout`, though anyio's cancel-scope semantics are still the more predictable model.
 
 ### Apache Commons Collections 4 IteratorUtils
 **Short:** Commons Collections helper producing filtering, chaining and looping iterator decorators over any source.
@@ -231,6 +243,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1, apis-frameworks/data-formats-and-api-contracts @2, apis-frameworks/design-patterns-and-principles @3
 
+`@define` generates `__init__`, `__repr__`, and `__eq__` from declared attributes and adds what dataclasses do not have: per-field validators and converters that run at construction, so an invalid instance cannot exist; `slots=True` by default, which cuts memory, speeds attribute access, and makes a typo'd assignment an error instead of a new attribute; and factories, aliases, and `kw_only` for awkward signatures.
+
+It deliberately stops at classes — no parsing, no serialization, no coercion of untrusted input (pair it with `cattrs` for that), which is the line between it and pydantic. Reach for attrs for internal domain models and value objects where you want cheap, strict, well-behaved classes; dataclasses are enough when you need none of the extras, and pydantic is the right tool at an API boundary where data arrives untyped.
+
 ### AVX-512 VNNI
 **Short:** x86 instruction-set extension fusing INT8 multiply-accumulate, accelerating quantized inference on Xeon.
 **Kind:** spec
@@ -260,6 +276,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1, devtools/static-analysis-and-linting @3
+
+Decorate a function, or install its import hook over a whole package, and beartype generates a wrapper that validates the annotated types at call time, so bad data fails at the boundary it entered rather than as an inscrutable error several frames later. Its speed comes from checking a constant amount of work per call: for a `list[str]` it validates a single sampled element instead of walking the list, which keeps the overhead near a microsecond and makes leaving it enabled in production defensible.
+
+Its limits follow from what Python can actually check at runtime. A `Protocol` parameter degrades to what `isinstance` can do — a shallow check that the attribute names exist, not that their signatures match — and nothing it does replaces a static checker, which finds contradictions before the code runs at all. Use both: mypy or pyright at the desk, beartype at the edges where untyped data arrives.
 
 ### big-O Python library
 **Short:** Runs a function over growing inputs and fits the timings to infer its empirical complexity class.
@@ -302,6 +322,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, devtools/testing-and-mocking @2
+
+It instruments JDK methods that are known to block — socket reads, file I/O, `Thread.sleep`, JDBC, synchronized waits — and throws an error the moment one is called from a thread marked non-blocking, which for Reactor and Netty means the event-loop threads. The failure it catches is the one that is invisible otherwise: a blocking JDBC or `RestTemplate` call buried in a reactive chain does not break correctness, it quietly serializes your whole service onto a handful of event-loop threads under load.
+
+Install it in tests with `BlockHound.install()`, add allow-list customizers for calls you know are safe, and expect to pass a JVM flag permitting the instrumentation on current JDKs. It is a test-time and development tool — the agent's overhead and its habit of failing hard make it wrong to leave enabled in production.
 
 ### boltons
 **Short:** Pure-Python utility collection filling stdlib gaps, including iterutils helpers like chunked_iter and windowed_iter.
@@ -591,6 +615,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @3
 
+The `-v` flag makes curl narrate the whole exchange: DNS resolution and connection, the TLS handshake with the negotiated protocol version, cipher and certificate chain, the exact request headers it sent, and the response status and headers it got back. That is how you separate a DNS failure from a TLS failure from a 502, and how you confirm which headers a proxy or gateway actually added, rewrote or stripped on the way through.
+
+Related flags cover the rest: `-i` includes response headers with the body, `-I` sends a HEAD request, `--resolve` pins a hostname to an address so you can test one backend directly, and `--trace-ascii` dumps raw bytes when headers are not enough. Reach for curl before reaching for a client library — if curl reproduces the problem, your application code is not the cause.
 ### curl -v --http2
 **Short:** curl invocation that negotiates HTTP/2 and prints the handshake, so you can verify protocol and headers.
 **Kind:** tech
@@ -608,6 +635,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+It exposes the same API as `toolz` — `curry`, `pipe`, `compose`, `groupby`, `partition_all`, `merge_with`, `unique`, and iterator forms that stay lazy so a pipeline over a huge file never materializes it — with the implementation rewritten in Cython. `import cytoolz as toolz` is a drop-in swap that moves the hot loops out of the interpreter.
+
+Reach for it when data-munging code is genuinely a chain of many small transformations and the per-step function-call overhead is showing up in a profile. It is not a general speedup: for numeric work, NumPy or Pandas vectorization beats any per-element functional pipeline, and for two or three steps a plain generator expression is faster to read than a composed one.
 
 ### dataclasses
 **Short:** Python stdlib decorator that generates init/repr/eq from annotations, giving structured mutable record types.
@@ -849,6 +880,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1, data-access/orm-and-data-mapping @3
 
+A greenlet is a lightweight coroutine with its own C stack that switches explicitly via `switch()`. The consequence that matters is that the switch can happen deep inside an ordinary call chain, so synchronous-looking code can be suspended without every enclosing frame being declared `async def` — the opposite of asyncio, where the colour of a function propagates all the way up.
+
+That is precisely how SQLAlchemy's async support works: its ORM internals are written synchronously and `greenlet_spawn` lets them yield to the event loop at the database-driver boundary, which is why installing async SQLAlchemy pulls in greenlet and why `run_sync` exists. gevent is built on the same primitive. You rarely call it yourself; you meet it in a traceback, in a dependency you must not remove, or in a version conflict after a Python upgrade.
+
 ### Guava BloomFilter
 **Short:** Production-grade Java Bloom filter with configurable false-positive rate for cheap probabilistic membership tests.
 **Kind:** api
@@ -903,6 +938,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @3
 
+htop is an interactive process viewer: per-core load bars, memory and swap gauges, and a sortable, scrollable process list with function keys to search, renice or kill without dropping to another command. Two toggles do most of the work — thread display, which resolves a process sitting at 400% CPU into which of its threads is actually spinning, and tree view, which attributes a runaway child to the parent that spawned it.
+
+Use it as the first ten seconds of triage on a box: is this CPU, memory pressure or one specific process. Once you know which process, move to a real profiler, because htop reads `/proc` and shows current state with no history — it tells you what is happening now, never what happened at 03:00.
 ### HTTP/2
 **Short:** Binary, multiplexed HTTP revision with header compression and server push over a single TCP connection.
 **Kind:** spec
@@ -1605,6 +1643,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1
 
+Rather than one pass like traceroute, it probes continuously and keeps a live table of every hop with packets sent, percentage lost and best, average and worst round-trip time. That is what exposes intermittent problems: a path that looks fine in a single traceroute shows two percent loss at one hop after a minute of sampling.
+
+Read the loss column carefully, because the most common misreading is treating loss at a middle hop as the fault. Routers deprioritize or rate-limit the ICMP replies they generate for themselves while forwarding traffic perfectly, so loss that appears at one hop and vanishes at later hops is an artifact; only loss that persists all the way to the final hop is real. Reach for it when a service is intermittently slow and you need to establish whether the network path or the application is responsible.
+
 ### multiprocessing
 **Short:** Python stdlib module giving true CPU-bound parallelism by running each worker in its own process, sidestepping the GIL.
 **Kind:** api
@@ -1647,6 +1689,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @3
 
+`netstat -an` lists every socket with local and remote address and TCP state, which is how you see the states that explain a failure: a pile of `TIME_WAIT` after a burst of short-lived connections, `CLOSE_WAIT` accumulating because the application never closed its side of a connection the peer already closed, or a listening socket whose accept queue is full because the process is not accepting fast enough. It is usually the first command to run when the service is up but connections are failing or hanging.
+
+On Linux it is superseded by `ss` from iproute2, which reads socket state over netlink instead of parsing `/proc` and is dramatically faster on a host with many connections; the flags are close enough that `ss -tan` reads the same as `netstat -tan`. Learn to read the states themselves - that knowledge transfers to whichever tool is installed.
+
 ### netstat -s
 **Short:** Per-protocol network statistics dump showing retransmits, resets and drops accumulated by the TCP/IP stack.
 **Kind:** api
@@ -1658,6 +1704,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/rpc-graphql-and-streaming @2, runtime-systems/concurrency-and-async @3, apis-frameworks/web-framework-and-http-client @3
+
+Netty gives you event loop groups, a `Channel` per connection, and a `ChannelPipeline` of handlers through which inbound bytes and outbound messages flow -- so a protocol is built by composing decoders, encoders and business handlers instead of managing selectors and buffers by hand. Its pooled, reference-counted `ByteBuf` avoids per-message allocation and allows zero-copy composition, which is why it holds up at connection counts where thread-per-socket blocking I/O collapses. It ships implementations of HTTP/1 and HTTP/2, WebSocket, TLS, DNS and UDP, plus native epoll and kqueue transports that beat plain NIO on their platforms.
+
+You rarely pick it directly -- it sits under Reactor Netty and Spring WebFlux, gRPC-Java, Cassandra and Elasticsearch -- but reach for it when implementing a custom or binary protocol. The two things to internalise first are that a blocking call inside a handler stalls every connection sharing that event loop, and that reference-counted buffers must be released or they leak.
 
 ### Netty ChannelPipeline
 **Short:** Netty's per-connection handler chain, separating decode, framing and business logic into reconfigurable stages.
@@ -1676,6 +1726,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, applied-ml/recommenders-and-graph-ml @2, data-stores/graph-db @3
+
+Graphs are dictionaries of dictionaries, so nodes can be any hashable Python object and both nodes and edges carry arbitrary attributes, which makes modelling a domain almost free. The algorithm coverage is the other draw: traversal, shortest paths, minimum spanning trees, centrality measures, community detection, matching and flow, all with a consistent interface.
+
+That flexibility is also the cost. It is pure Python with substantial memory per node and edge, so graphs in the hundreds of thousands of edges get slow and graphs in the millions are impractical. Reach for it for prototyping, teaching and analysis at modest scale, then move to a compiled library such as igraph when the same analysis needs to be fast, or to a graph database when the graph has to be persistent, shared and queried.
 
 ### nftables
 **Short:** The modern Linux packet filtering and NAT framework that replaces iptables, with one unified rule syntax.
@@ -1713,6 +1767,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, security/supply-chain-and-runtime-security @2
 
+It sends crafted packets and infers state from what comes back: a SYN scan tells open from closed from filtered, `-sV` matches banners and probe responses to a service and version, `-O` fingerprints the operating system from TCP/IP stack quirks, and NSE scripts run deeper checks such as enumerating TLS ciphers or known weak configurations.
+
+Reach for it to verify what a host actually exposes against what the security group or firewall rule claims -- the two disagree more often than anyone expects. Scanning infrastructure you do not own or have written permission to test is hostile traffic and in many jurisdictions illegal.
+
 ### nmap --scan-flags SYN
 **Short:** nmap invocation sending bare SYN packets to detect open ports without completing the TCP handshake.
 **Kind:** api
@@ -1737,6 +1795,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, traffic-edge/service-mesh-and-discovery @2
 
+It queries a DNS resolver directly instead of going through the C library's `getaddrinfo`, so it shows what a resolver returns for a given name and record type, and you can aim it at a specific server to prove whether a stale or split-horizon answer is the problem. In Kubernetes it is the standard way to test cluster DNS from inside a pod by resolving a service's `svc.cluster.local` name, which separates "the service has no endpoints" from "DNS is broken". Because it bypasses the resolver library, a good answer here does not guarantee the application resolves the same way, since `/etc/hosts` and NSS configuration are not consulted. `dig` shows more detail and is preferred wherever it is installed.
+
 ### ntohl
 **Short:** POSIX call converting a 32-bit integer from network byte order to host byte order when parsing wire protocols.
 **Kind:** api
@@ -1748,6 +1808,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+On a multi-socket machine each CPU socket has memory attached directly to it, and reaching another socket's memory crosses the interconnect at measurably higher latency and lower bandwidth. Printing the hardware view shows the nodes, their memory and the distance matrix, while binding a process to a node keeps its threads and its pages together — the standard fix for a latency-sensitive service that the scheduler spread across sockets.
+
+Interleaving is the opposite choice, spreading pages across all nodes for a large shared heap no single node can hold, trading locality for even bandwidth. Measure before and after, and note that none of this applies on a single-socket machine.
 
 ### numastat
 **Short:** Linux CLI reporting per-NUMA-node allocation and hit/miss counts; shows memory landing on a remote node.
@@ -1766,6 +1830,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, runtime-systems/concurrency-and-async @3
+
+An `ndarray` is one contiguous typed buffer plus a shape and a stride tuple, so slicing and reshaping produce views over the same memory and a whole-array operation runs as a single loop in C rather than a Python loop over boxed objects. That is where the speed comes from and it is also the discipline: the moment you write a `for` over elements you have given it back. Linear algebra dispatches to a BLAS or LAPACK backend, and because those loops release the GIL, numeric work in threads genuinely runs in parallel — one of the few places threading helps in CPython.
+
+Essentially every other array library in Python builds on it or copies its interface, which is why learning its broadcasting and dtype-promotion rules properly pays off once and forever.
 
 ### NumPy 2D arrays
 **Short:** Contiguous 2D ndarrays used for large DP tables; roughly 10x faster than nested Python lists for numeric work.
@@ -1826,6 +1894,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, security/secrets-and-cryptography @2
+
+Running `openssl s_client -connect host:443 -servername host` opens a real TLS connection and prints the negotiated protocol version and cipher, the certificate chain the server actually presented, the verification result, and then leaves the socket open so you can type an HTTP request into it. `-showcerts` dumps the full chain, which is how you catch a server sending a leaf without its intermediate -- the classic "works in my browser, fails in the JVM" bug.
+
+Reach for it when a client reports a TLS failure and you need the server's real view rather than a monitoring summary: expiry, chain order, SNI selection, protocol and cipher negotiation. It is a debugging tool for one endpoint, not a scanner.
 
 ### operator
 **Short:** Python stdlib module of function forms of the operators, e.g. itemgetter and attrgetter as sort and map keys.
@@ -1922,6 +1994,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, apis-frameworks/web-framework-and-http-client @3
+
+`Mono` carries zero or one value and `Flux` zero to many, and both are cold: building a chain of `map`, `flatMap`, `zip`, `timeout` and `retryWhen` only describes the pipeline, and nothing executes until something subscribes. Backpressure is part of the Reactive Streams contract, so a slow consumer requests fewer elements rather than being flooded, and `subscribeOn`/`publishOn` decide which scheduler each segment of the chain runs on.
+
+It is the engine under Spring WebFlux and the reactive Spring Data drivers, where a handful of event-loop threads carry a large number of concurrent connections because no thread is parked waiting on I/O. The costs are real and worth stating plainly: one blocking call anywhere in a chain stalls an event-loop thread and can take the service down, stack traces are hard to read without `checkpoint()` or the debug agent, and on Java 21 and later virtual threads deliver much of the same concurrency with ordinary blocking code and none of that.
 
 ### Project Reactor Flux
 **Short:** Reactor's 0..N reactive stream type: push-based with backpressure and composable map/filter/retry operators.
@@ -2085,6 +2161,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/text-encoding-and-regex @1
 
+It is a drop-in superset of the standard library's `re` — import it as `re` and existing patterns keep working — that adds what the stdlib lacks: atomic groups and possessive quantifiers, which discard backtrack points and are the direct fix for a catastrophic-backtracking pattern; variable-length lookbehind; fuzzy matching with an error budget; nested character sets and set operations; and full Unicode support including `\X` for a grapheme cluster, `\p{...}` property classes, and correct case folding.
+
+The grapheme support is why text that must respect user-perceived characters — emoji with skin-tone or ZWJ sequences, combining marks, Indic scripts — reaches for it, since `re` will happily cut such a character in half. Use the stdlib when the pattern is simple and one fewer dependency is worth more; reach for `regex` when a pattern is a backtracking hazard on untrusted input or when correctness across scripts matters.
+
 ### regex101
 **Short:** Web regex workbench with step-by-step match debugging and a backtracking step counter for catastrophic patterns.
 **Kind:** tech
@@ -2145,6 +2225,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, applied-ml/interpretability-fairness-and-causal @3, ml-lifecycle/drift-and-production-monitoring @3, applied-ml/timeseries-and-anomaly @3
 
+SciPy is the algorithm layer on top of NumPy arrays. `scipy.sparse` and its linear-algebra module handle matrices too large to store densely, including truncated decompositions such as `svds` that give you the top k singular vectors without forming the full factorization. `scipy.stats` provides distributions and hypothesis tests, `optimize` covers root finding and minimization, and there are modules for signal processing, interpolation, integration and spatial structures.
+
+In machine-learning work it is usually the statistics and sparse pieces that get used: fitting a distribution to a tail for thresholding, running a two-sample test between a reference and a live window to detect drift, or a truncated SVD over a term-document matrix. The heavy routines are compiled C and Fortran that release the interpreter lock, so they genuinely parallelize across threads.
 ### SciPy stats
 **Short:** SciPy's statistics submodule: probability distributions, hypothesis tests, confidence intervals, entropy and KL.
 **Kind:** api
@@ -2331,6 +2414,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @3
 
+`ss -tan` lists TCP sockets and their states, `ss -ltn` just the listeners, `ss -s` prints a summary by state, and `-i` adds per-socket TCP internals such as congestion window and smoothed RTT. It reads socket state over netlink rather than parsing `/proc/net/tcp`, which is why it returns instantly on a host with a hundred thousand connections where `netstat` crawls.
+
+The columns that answer real questions are `Recv-Q` and `Send-Q`. On a listening socket they are the current accept-queue depth and the backlog limit — a full queue is direct proof that the application is not accepting fast enough and connections are being dropped, not merely served slowly. Elsewhere, a large pile of `TIME_WAIT` points at connection churn from missing keep-alive, while accumulating `CLOSE_WAIT` sockets means your code is not closing sockets the peer already closed, which is a leak in your application, not a kernel problem.
+
 ### ss -tan
 **Short:** Linux socket-statistics command listing every TCP socket with its state and addresses; the modern netstat.
 **Kind:** api
@@ -2355,6 +2442,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, applied-ml/timeseries-and-anomaly @2, applied-ml/interpretability-fairness-and-causal @2, ml-lifecycle/evaluation-and-benchmarks @3
 
+It brings R-style statistical modelling to Python: an R-like formula API, and fits that return full inferential output -- coefficients with standard errors, t and p values, confidence intervals, information criteria and residual diagnostics -- which scikit-learn deliberately omits because it optimises for prediction. Alongside regression it carries time-series estimators (ARIMA and SARIMAX, STL decomposition, ADF and other tests) and econometric tools such as two-stage least squares.
+
+Reach for it when the question is whether an effect is real and how large it is: A/B significance tests, McNemar's test comparing two classifiers, difference-in-differences, or a forecasting baseline that a neural model must beat. Use scikit-learn instead when you only need the prediction.
+
 ### std::sort
 **Short:** C++ standard sort: introsort, a quicksort that falls back to heapsort on bad pivots and insertion sort on small ranges.
 **Kind:** api
@@ -2378,6 +2469,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @2, runtime-systems/memory-processes-and-os @3
+
+It attaches via `ptrace` and prints every system call a process makes with arguments, return value and errno, so a hang or an unexplained failure resolves into a concrete line: blocked in `read` on a socket, looping on `ENOENT` for a config file it cannot find, or parked on a `futex` behind a lock. `-f` follows child processes, `-c` prints a summary count per call, and `-p` attaches to something already running, which is how you diagnose production without a restart. The cost is severe, because every syscall traps into the tracer, so a syscall-heavy process can slow down by an order of magnitude and this is a targeted tool rather than something to leave attached. It is Linux-only; macOS has `dtruss`, and eBPF tooling is the lower-overhead modern route.
 
 ### Stream.of
 **Short:** Static factory creating a Stream from explicit values or a single element, for ad-hoc pipelines.
@@ -2559,11 +2652,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @3
 
+`taskset -c 0-3 ./app` launches a process with a CPU affinity mask restricting the scheduler to those cores, and `taskset -pc 0-3 <pid>` changes the mask of something already running. The reason to bother is locality: a thread that stays on one core keeps its L1 and L2 caches warm and its memory local to the right NUMA node, so you stop paying for cold caches and remote memory access after every migration — which shows up as lower tail latency rather than higher average throughput.
+
+To get the benefit you usually have to pair it with keeping other work off those cores, through `isolcpus` or a cpuset, or the scheduler will happily place everything else there anyway. Do not reach for it by default: you are taking away the scheduler's freedom to balance load, and on a general-purpose or oversubscribed machine that normally costs more than it gains.
+
 ### tcpdump
 **Short:** Command-line packet capture; the low-overhead ground truth for what actually crossed the wire.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @3
+
+tcpdump installs a BPF filter in the kernel and copies only matching packets to userspace, which is why an expression like `tcp port 5432 and host 10.0.0.7` is cheap enough to run on a production box -- the filtering happens before the copy, not after. It settles arguments logs cannot: whether the SYN ever left, who sent the RST, whether the TLS handshake completed, how long the server really took to answer, whether retransmissions or a zero receive window explain the latency. Write to a file with `-w` and open it in Wireshark rather than trying to follow a stream on a terminal, and always bound the capture with a narrow filter, a packet count, or a ring buffer so a debugging session does not fill the disk. Reach for it when the two ends of a connection disagree about what happened; it needs elevated privileges and captures payloads that may be sensitive, and on an encrypted connection you see timing and sizes rather than content.
 
 ### tcpdump -i eth0 port 5432
 **Short:** tcpdump invocation capturing PostgreSQL wire traffic on eth0 to inspect connection churn, TLS and stalls.
@@ -2679,6 +2778,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** cpp
 **Roles:** runtime-systems/concurrency-and-async @1, devtools/testing-and-mocking @2, observability/profiling-and-performance @3
 
+Build with `-fsanitize=thread` on Clang or GCC and the compiler instruments every memory access and synchronization operation; at run time TSan maintains vector clocks and shadow memory to decide whether two accesses to the same location are ordered by a happens-before edge, and prints both stacks when they are not. That makes it a real race detector rather than a heuristic -- it reports a race on the executed path even when the interleaving that would corrupt data did not occur in that run, which is precisely the bug ordinary testing misses. The price is roughly a five-to-fifteen-times slowdown and several times the memory, so it belongs in a CI job or a soak test and never in production, and it only sees code paths your tests actually execute. Its coverage is native code -- C, C++, Go, Rust -- so for a JVM application it checks the JNI and native library side, not the Java heap.
+
 ### ThreeTen-Extra
 **Short:** Add-on types for java.time by its author: Interval, Quarter, DayOfMonth and other calendar values the JDK omits.
 **Kind:** tech
@@ -2703,11 +2804,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @3
 
+A small library of composable functions over iterables, dictionaries and functions: `pipe`, `compose` and `curry` for building pipelines, `groupby`, `partition`, `sliding_window` and `unique` for sequences, `valmap`, `keyfilter` and `merge_with` for dicts, plus memoization. Everything is lazy and returns iterators, so a pipeline streams over an input far larger than memory. `cytoolz` is a drop-in C-accelerated build of the same API.
+
+Reach for it when a data-munging step would otherwise become nested comprehensions and temporary lists. Be aware that `itertools`, comprehensions and `functools` cover much of it in the standard library, and heavily point-free code is harder for the next reader.
+
 ### top
 **Short:** Live Unix process and resource monitor - load average, per-process CPU and memory, threads with the htop H toggle.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2
+
+It refreshes a sorted process table every few seconds with load average, per-process CPU and resident memory, and a breakdown of where CPU time actually goes, including the `wa` iowait and `st` steal columns that distinguish a genuinely busy machine from one waiting on disk or losing cycles to a noisy neighbour on shared hardware. Two readings mislead beginners: the CPU percentage is per core, so 400% on a four-core box means saturated, and `RES` counts shared pages in every process that maps them, so summing it double-counts memory. It is the right first command on a slow host, but it only narrows the question; `htop` is friendlier and toggles threads with `H`, and a profiler or `strace` is where the real answer comes from.
 
 ### tracepath
 **Short:** Traces the hop-by-hop path to a host and discovers the path MTU, without needing root like traceroute.
@@ -2721,6 +2828,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @3
 
+traceroute sends probes with a time-to-live of one, then two, then three, and so on. Each router that decrements the TTL to zero replies with an ICMP time-exceeded message, so the sequence of replies reveals the routers along the path and the round-trip time to each. That is how you localize where latency or loss enters — your network, your provider, a transit peer, or the far end.
+
+Read the output carefully, because it lies in a specific way: routers deprioritize or rate-limit the ICMP replies they generate, so a single hop showing asterisks or a high time is normal and means nothing on its own. Only latency or loss that appears at one hop and persists through every hop after it is evidence. For intermittent loss, `mtr` runs the same probes continuously and gives you a distribution instead of a single sample.
 ### TreeMap
 **Short:** Java red-black-tree sorted map: O(log n) operations plus ordered iteration and floorKey/ceilingKey/subMap range queries.
 **Kind:** api
@@ -2744,6 +2854,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1
+
+There is no fire-and-forget: a task is started inside a nursery opened with `async with trio.open_nursery()`, and the block cannot exit until every child has finished, so a child that crashes propagates into the parent instead of vanishing into a dropped task reference. Cancellation is equally strict - `move_on_after` and `fail_after` create cancel scopes whose deadline cancels everything inside them at the next checkpoint - which makes timeouts compose across layers rather than being a per-call argument each library invents separately.
+
+The obstacle is ecosystem. Trio has its own primitives and does not run asyncio libraries directly without a bridge, so most production Python stays on asyncio and adopts the same ideas through anyio or asyncio's own task groups. Reach for it when the concurrency structure is the hard part of the problem and you can choose the whole dependency stack.
 
 ### typeguard
 **Short:** Runtime type checker that enforces annotations on call, using ABCMeta virtual subclass checks.
@@ -2811,6 +2925,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1, apis-frameworks/web-framework-and-http-client @3
 
+uvloop replaces asyncio's pure-Python event loop with one built on libuv, the same C library behind Node.js, so the per-callback and per-socket overhead of the loop itself drops and I/O-heavy servers see roughly two to four times the throughput without a line of application code changing. You enable it by running your entry point through uvloop or installing its event loop policy; uvicorn's standard extra pulls it in and selects it automatically.
+
+It only helps where the loop is the bottleneck — CPU-bound handlers gain nothing — and it does not support Windows, so a team developing there runs a different loop than production does.
+
 ### VarHandle
 **Short:** Java 9+ typed accessor giving plain, opaque, acquire/release and volatile memory-ordering modes on fields and arrays.
 **Kind:** api
@@ -2822,6 +2940,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @3
+
+Vavr brings a functional standard library to Java: `Option` in place of nullable returns, `Either` for a result carrying a typed failure, `Try` that captures a thrown exception as a value so it composes, plus tuples and pattern matching the language does not provide. Its collections are persistent -- an update returns a new structure that shares the unchanged parts rather than copying, so repeatedly "modifying" a large immutable structure stops costing a full copy each time. The main cost is that they are a separate hierarchy from `java.util`: values cross the boundary through explicit conversions, and half-adopting it across a codebase is worse than committing to one side. Reach for it where typed error handling and immutability are central and the team is comfortable with the style; much of what it once uniquely offered -- `Optional`, records, sealed types, pattern matching -- has since arrived in the language itself.
 
 ### Virtual threads
 **Short:** JDK 21 lightweight threads scheduled by the JVM, letting blocking IO code scale to millions of tasks.
@@ -2877,6 +2997,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @3
 
+Wireshark captures frames from an interface, or opens a `pcap` someone else took, and dissects every layer, so you can follow a TCP stream as it was reassembled, read the TLS handshake and the cipher that was negotiated, and inspect individual HTTP/2 or WebSocket frames. Display filters such as `tcp.port == 443 && http2` are how you find anything at all in a capture of a busy host.
+
+Encrypted traffic you own becomes readable by pointing it at the key log file a client writes when `SSLKEYLOGFILE` is set, which is the standard way to look inside TLS 1.3 and QUIC. Reach for it when the logs on the two ends disagree and you need ground truth about what crossed the wire — retransmissions, a zero window, an RST, a handshake that failed for a reason neither side logged. In production the usual pattern is to capture headlessly with `tcpdump` on the server and analyze the file locally.
+
 ### Wireshark TCP stream stats
 **Short:** Wireshark's TCP stream graphs: round-trip time, retransmissions and window size over the life of a connection.
 **Kind:** tech
@@ -2900,6 +3024,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+You assert constraints over typed variables (integers, reals, bitvectors, arrays, uninterpreted functions) and ask whether they can all hold; Z3 answers `sat` with a concrete model, `unsat`, or `unknown`, which turns "does an input exist that makes this go wrong?" into something a machine decides rather than something a team argues about. That is why it sits underneath symbolic execution, program verification, exploit generation and some type checkers, and it is directly usable through its Python bindings for scheduling, packing and configuration problems. It is MIT-licensed and very capable, but satisfiability over these theories is undecidable in general, so expect `unknown` or a timeout on nonlinear arithmetic and heavy quantifiers and encode problems with that in mind.
 
 ### zoneinfo
 **Short:** Python stdlib access to the IANA time zone database for timezone-aware datetimes.

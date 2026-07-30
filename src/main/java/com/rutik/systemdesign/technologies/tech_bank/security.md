@@ -21,6 +21,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, platform-delivery/cloud-platform-and-cost @3
 
+A public certificate is free, and ACM handles the DNS or email validation, holds the private key, and renews automatically before expiry, so certificate expiry stops being the recurring outage it is when someone has to remember to renew. The natural fit is a certificate attached to an integrated service such as an ALB, NLB, CloudFront distribution or API Gateway, where rotation is invisible to you. Two rules bite in practice: a certificate used by CloudFront must be issued in `us-east-1` no matter where the rest of the stack lives, and DNS validation keeps renewing only while the validation CNAME stays in the zone, so deleting it silently breaks the next renewal. ACM Private CA is the separately billed offering for issuing internal certificates to your own workloads.
+
 ### AdvBench
 **Short:** Standard adversarial-prompt benchmark of harmful behaviours, used to measure jailbreak and refusal rates.
 **Kind:** dataset
@@ -63,6 +65,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** security/secrets-and-cryptography @1, security/authentication-and-identity @2
 
+Argon2id is the memory-hard password hash OWASP recommends, because raising the memory cost makes GPU and ASIC cracking expensive in a way that iteration count alone never did for bcrypt or PBKDF2. This package binds the reference C implementation and exposes a `PasswordHasher` whose `hash` and `verify` embed the parameters in the encoded string, so raising cost later still verifies old hashes and `check_needs_rehash` tells you to upgrade one at the next successful login. Tune `memory_cost`, `time_cost` and `parallelism` to what your login path can afford, and remember the memory cost is charged per concurrent verification, so a login storm becomes a capacity question. Higher-level wrappers such as `pwdlib` use it underneath if you would rather not touch the primitives.
+
 ### ARX
 **Short:** Data anonymization tool applying k-anonymity, l-diversity and t-closeness to tabular datasets before release.
 **Kind:** tech
@@ -74,6 +78,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** security/authentication-and-identity @1, security/authorization-and-policy @3, traffic-edge/api-gateway @3
+
+It hosts the parts of authentication you would otherwise build and then have to keep secure: login and password storage, MFA, social and enterprise SAML/OIDC federation, and the token endpoints. Your services stay resource servers — they fetch the tenant's JWKS and validate a JWT's signature, issuer, audience and expiry, and never see a password — while Actions run JavaScript inside the login pipeline to attach roles or tenant ids as custom claims.
+
+Reach for it when identity is table stakes rather than your product, especially with enterprise SSO on the roadmap. The tradeoffs are per-active-user pricing that grows with your success and a user directory living outside your database, which makes an eventual migration a real project.
 
 ### authlib
 **Short:** Python OAuth 2.0/OIDC and JOSE library covering full third-party login flows on both client and server sides.
@@ -105,6 +113,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/ai-safety-and-guardrails @1, platform-delivery/cloud-platform-and-cost @3
 
+A guardrail is a policy object combining content filters with per-category strength, denied topics written in natural language, word and PII filters, and contextual grounding checks; it evaluates the input prompt and the output completion as separate passes. You edit a DRAFT and publish immutable numbered versions, so pinning a version in production makes a policy change a deployable artifact rather than a live config edit. Because `ApplyGuardrail` runs a policy without invoking a model, the same policy can screen retrieved documents before they reach a prompt, or guard a model that is not hosted on Bedrock at all. Reach for it when you are already on AWS and want filtering you do not maintain -- it bills per request, and its topic definitions are coarser than a classifier trained on your own labelled data.
+
 ### AWS Cedar
 **Short:** AWS's open policy language and evaluation engine for RBAC/ABAC authorization decisions in applications.
 **Kind:** tech
@@ -116,6 +126,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** security/authentication-and-identity @1, platform-delivery/cloud-platform-and-cost @3
+
+It is two services that are easy to confuse. A user pool is the directory and OpenID Connect provider: sign-up and sign-in, password policies, multi-factor authentication, a hosted sign-in page, federation to social and SAML providers, and issued identity, access and refresh tokens. An identity pool does something different, exchanging a token from a user pool or an external provider for temporary IAM credentials so a mobile or browser client can call AWS services directly under a scoped role.
+
+Reach for it when the application lives in AWS and you want managed authentication that the surrounding services already understand, since API Gateway and the application load balancer can validate its tokens without code. The reasons teams move to Auth0, Okta or Keycloak instead are its limited customization of flows and screens, and the migration cost once every user's credentials live inside it.
 
 ### AWS Comprehend PII
 **Short:** Managed AWS API that detects and redacts personally identifiable information in text across many languages.
@@ -135,6 +149,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, security/privacy-and-compliance @3, platform-delivery/cloud-platform-and-cost @3
 
+Key material never leaves the service's HSMs. For small payloads you call `Encrypt` and `Decrypt` directly, but the pattern that matters is `GenerateDataKey`: KMS returns a fresh data key twice, once in plaintext and once encrypted under your KMS key. You encrypt the data locally with the plaintext copy, discard it from memory, and store the encrypted copy next to the ciphertext — which is why encrypting a terabyte does not mean a terabyte of traffic to KMS, and why the blast radius of a single leaked data key is one object.
+
+Access is the intersection of IAM policy and the key policy on the key itself, every operation is recorded in CloudTrail, and most AWS services integrate directly, which together make "encrypted at rest with a customer-managed key" a configuration choice with an audit trail attached. Watch two things: per-key request quotas and cost on a hot decrypt path, which is an argument for caching data keys; and rotation semantics, where new material encrypts new data while older ciphertext stays readable under the previous material.
+
 ### AWS Macie
 **Short:** AWS managed service that discovers and classifies PII and other sensitive data in S3.
 **Kind:** tech
@@ -146,6 +164,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, platform-delivery/cloud-platform-and-cost @3
+
+A secret is a versioned value with staging labels (`AWSCURRENT`, `AWSPENDING`, `AWSPREVIOUS`), and rotation is a Lambda function following a four-step contract: create a new credential, set it on the target, test it, then move the label. That sequence is what allows a credential to be rotated without a window in which the old one is already dead and the new one is not yet live. AWS supplies ready-made rotation functions for its own database services, which is where this earns its price over cheaper stores. Access is IAM-controlled and values are KMS-encrypted, and because billing is per secret per month plus per API call, the client-side caching libraries matter: fetching the secret on every request is the expensive mistake. Without managed rotation, SSM Parameter Store holds `SecureString` values for far less.
 
 ### AWS SSM Parameter Store
 **Short:** Cheap AWS store for configuration parameters and KMS-encrypted secrets, versioned and readable via IAM.
@@ -171,11 +191,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/ai-safety-and-guardrails @1, platform-delivery/cloud-platform-and-cost @3
 
+It returns per-category severity scores for text and images across hate, sexual, violence and self-harm rather than a single allow or block verdict, so you set the thresholds and can be stricter about one category than another. Two additional detectors matter for LLM applications: prompt shields flag both direct jailbreak attempts in user input and instructions smuggled inside retrieved documents, and groundedness detection checks whether a response is actually supported by the sources you provide.
+
+Reach for it when you need a moderation layer without training or hosting a classifier, and when a documented service level and regional data handling are part of the requirement. Log the raw scores rather than only the decision, because block rates vary sharply by language and category, and tuning thresholds against your own traffic is the only way to find the point where you are catching abuse without refusing legitimate requests.
+
 ### Azure Key Vault
 **Short:** Azure managed store for secrets, certificates and keys, with HSM-backed key management and rotation.
 **Kind:** tech
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, platform-delivery/cloud-platform-and-cost @3
+
+One service holds three object types with different semantics: secrets are arbitrary strings you read back, certificates bundle a key with issuance and automatic renewal, and keys never leave the vault at all — you send data or a digest and the vault performs the sign, verify, wrap or unwrap operation, HSM-backed in the Premium tier or in Managed HSM.
+
+Applications authenticate with a managed identity, so nothing but the vault URL is in configuration and no bootstrap credential ships with the app; authorization is Azure RBAC or the older per-vault access policies. Reach for it as the default secret store for anything running on Azure. Two operational details cause most incidents: fetching a secret on every request rather than caching it will hit request throttling, and soft-delete with purge protection means a deleted vault or secret name stays reserved during the retention window, which surprises teardown-and-recreate automation.
 
 ### Azure PII
 **Short:** Azure AI Language managed API that detects and redacts personally identifiable information across many languages.
@@ -189,6 +217,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, security/authentication-and-identity @2
 
+bcrypt is a deliberately slow password hash built on Blowfish's expensive key schedule, with a cost factor that doubles the work each time you raise it, so you can keep pace with faster hardware by changing one number. The salt and the cost are encoded in the output string itself, so verification simply re-derives using whatever parameters are stored with the hash, and old hashes stay verifiable after you raise the cost for new ones.
+
+Reach for it, or for Argon2id which additionally resists GPU and ASIC attack by being memory-hard, for any stored password; a plain SHA-256 is not a password hash no matter how it is salted. Two traps are worth remembering: input is truncated past 72 bytes, so long passphrases can collide unless you pre-hash, and the 100 to 300 milliseconds you tuned for is 100 to 300 milliseconds of your own CPU per login attempt, which makes the login endpoint a denial-of-service surface that needs rate limiting.
 ### BCryptPasswordEncoder
 **Short:** Spring Security password hasher applying bcrypt with a tunable cost factor and per-password salt.
 **Kind:** api
@@ -231,12 +262,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, platform-delivery/kubernetes-and-orchestration @2
 
+You install issuers describing where certificates come from, whether an ACME provider such as Let's Encrypt using an HTTP or DNS challenge, an internal certificate authority, or Vault, and then request certificates as ordinary Kubernetes resources. The controller performs the challenge, writes the key and certificate into a Secret that your Ingress or workload mounts, and renews well before expiry without anyone remembering to. An annotation on an Ingress makes the whole cycle automatic per hostname.
+
+Reach for it in any cluster that terminates TLS, including internal traffic where a private CA issues short-lived certificates. The trap when setting it up is looping on failed issuance against the production ACME endpoint and hitting its rate limits, which locks you out for a week; develop against the staging endpoint and switch over once issuance succeeds. DNS challenges are the route for wildcard certificates and for hosts not reachable from the internet.
+
 ### checkov
 **Short:** Static security scanner for Terraform, CloudFormation and Kubernetes manifests with Python-authored policy rules.
 **Kind:** tech
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, platform-delivery/infrastructure-as-code-and-config @2, security/authorization-and-policy @2, devtools/static-analysis-and-linting @2
 
+checkov scans infrastructure as code — Terraform source and plan output, CloudFormation, Kubernetes manifests, Helm charts, Dockerfiles, ARM templates — against a large built-in policy set and reports each failure with file, line and a description. The findings are the ones that keep causing incidents: a bucket readable by anyone, an unencrypted volume or snapshot, a security group open to the whole internet, logging or versioning left off.
+
+The value is where it runs: in the pull request, so the misconfiguration is discussed before apply rather than found in a quarterly audit. Custom policies are written in Python or YAML when your organisation's rules go beyond the defaults. When you must accept a finding, suppress that specific check inline with a comment so the exception is visible and reviewable, rather than dropping the rule for the whole repository.
 ### circuit-breaker tooling
 **Short:** Representation-engineering defence that ablates harmful internal directions rather than filtering the output text.
 **Kind:** concept
@@ -267,6 +305,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/authorization-and-policy @1, platform-delivery/infrastructure-as-code-and-config @2, devtools/static-analysis-and-linting @2
 
+It parses a structured file — Kubernetes YAML, a Dockerfile, `terraform show -json` plan output, a CI config — into a document, evaluates Rego rules against it, and exits non-zero when a `deny` rule fires. Policies and their fixtures live beside the code and are unit-testable with `conftest verify`, so a rule is something you can prove rather than something written on a wiki page.
+
+Put it in the pipeline before apply, to block a security group open to the world or a pod spec with no resource limits. It only sees what the file says, so pair it with an admission controller such as Gatekeeper or Kyverno when the same rules must also hold against the live cluster.
+
 ### Constitutional AI
 **Short:** Anthropic's alignment method where a model critiques and revises its own outputs against a written set of principles.
 **Kind:** concept
@@ -285,11 +327,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, security/secrets-and-cryptography @3, platform-delivery/container-and-image @3
 
+It signs a container image or any OCI artifact and stores the signature as a companion object in the same registry, so verification needs nothing beyond registry access. `cosign verify` checks it against a public key or, in keyless mode, against a short-lived certificate that Fulcio issued for an OIDC identity such as a specific GitHub Actions workflow, with the event recorded in the Rekor transparency log. Keyless is the mode that matters in practice, because it removes the long-lived signing key that was the weak point of the whole idea. It also attaches attestations, an SBOM or SLSA provenance, as signed statements about the image. Pair it with an admission controller that rejects unsigned or unattested images, because a signature nobody verifies changes nothing.
+
 ### cryptography
 **Short:** Python's standard crypto library: AES-GCM, RSA, ECDSA, X25519, X.509 and JWT-grade key operations.
 **Kind:** tech
 **Lang:** python
 **Roles:** security/secrets-and-cryptography @1
+
+The package splits deliberately into two layers: a small recipes layer — Fernet for authenticated symmetric encryption — that is hard to misuse, and a hazardous-materials layer exposing primitives such as AES-GCM, ChaCha20-Poly1305, RSA, ECDSA, Ed25519, X25519, HKDF and X.509 handling, where correctness is your responsibility. The heavy lifting is compiled native code rather than Python, and this is the package underneath most Python TLS and JWT tooling, which is why generating an RS256 key pair or publishing a JWKS endpoint lands here.
+
+Stay in the recipes layer unless you know precisely which primitive you need, and never assemble your own encrypt-then-MAC construction when an AEAD mode exists.
 
 ### Deletion ledgers
 **Short:** A durable record of deletion requests, used to fan a right-to-erasure out across every store that holds the data.
@@ -303,11 +351,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, devtools/build-and-dependency-management @2, platform-delivery/ci-cd-and-release @3
 
+Configured by a `dependabot.yml` in the repository, it watches your manifests and lockfiles and opens one pull request per outdated dependency, with the changelog and compatibility signals in the body so an upgrade gets reviewed like any other change. Security updates are driven separately by the GitHub advisory database and fire on vulnerable versions including transitive ones your manifest never names — the practice that became standard after Log4Shell, because the vulnerable library is usually one you did not choose.
+
+The failure mode is volume: without grouped updates and a sane schedule a busy repository drowns in PRs and the team stops reading them, which is worse than not running it at all.
+
 ### detect-secrets
 **Short:** Pre-commit and CI scanner that flags credentials accidentally committed into source code.
 **Kind:** tech
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, devtools/static-analysis-and-linting @2, security/supply-chain-and-runtime-security @2
+
+It runs plugins over your files — regexes for recognisable credential shapes such as cloud keys, private key headers and tokens, plus entropy checks for anything that merely looks random — but its distinguishing feature is the baseline. You audit the existing findings once, mark them, and commit the baseline file, so later runs report only what is new. That is what makes it adoptable on a repository already carrying years of false positives.
+
+Run it as a pre-commit hook and again in CI, since a local hook can be skipped. And remember it only prevents new leaks: anything it finds that was already pushed must be rotated, not merely deleted.
 
 ### did-resolver
 **Short:** JavaScript library that resolves decentralized identifiers (did:web and others) to DID Documents.
@@ -357,6 +413,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, platform-delivery/kubernetes-and-orchestration @2
 
+The operator adds two custom resources: a `SecretStore` that says where secrets live and how to authenticate — HashiCorp Vault, AWS Secrets Manager, Google Secret Manager, Azure Key Vault — and an `ExternalSecret` that names which keys to fetch and what the resulting Kubernetes Secret should look like. The controller authenticates using the workload's own identity, fetches the values, and writes an ordinary Secret that pods consume as an environment variable or mounted file with no application changes.
+
+That is what makes GitOps workable with secrets: the repository holds only a reference to a secret's name, never its value, so manifests can be public while the value stays in the vault. Two things to plan for anyway — the fetched value does land in etcd as a normal Secret, which is base64 encoding rather than encryption, so enable encryption at rest and keep RBAC tight; and refreshing a value does not restart the pods holding the old one, so pair it with a reloader or a rollout.
 ### Falco
 **Short:** CNCF runtime security tool watching kernel syscalls and flagging suspicious container behaviour against rules live.
 **Kind:** tech
@@ -387,6 +446,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/ai-safety-and-guardrails @1, ml-lifecycle/evaluation-and-benchmarks @3
 
+Garak is a scanner you point at a model, an endpoint or a whole application. It runs probe families — prompt injection, jailbreak templates, encoding and obfuscation attacks, glitch tokens, training-data replay, malware and toxic-content generation — and scores the responses with detectors, producing a report of which attacks got through and at what rate.
+
+Treat it as a red-team regression suite rather than a runtime guardrail: wire it into CI so that changing a system prompt, a model version or a filter tells you whether an attack that was previously blocked now succeeds. Its coverage is deliberately generic, so it will not know your application's own abuse cases — the payment flow that must never be talked into a refund, the agent tool that must never be reachable from user text — and those need probes you write yourself.
 ### Gatekeeper
 **Short:** OPA Gatekeeper - a Kubernetes admission controller enforcing Rego constraint templates before an object is applied.
 **Kind:** tech
@@ -411,6 +473,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, platform-delivery/cloud-platform-and-cost @3
 
+A secret is a named resource holding immutable versions: you add a version and move the `latest` alias rather than editing in place, so a bad rotation is a one-line rollback and every access is attributable in audit logs. Access control is plain IAM granted per secret, and workloads on GCP authenticate with their own service-account identity, which removes the bootstrap problem of needing a credential in order to fetch credentials.
+
+Use it for anything that must not sit in a repo or be baked into an image — database passwords, API keys, signing material. It stores and versions secrets but does not itself know how to change a database password; a rotation schedule only triggers your code, so reach for Vault's dynamic credentials when you want the store to mint short-lived ones.
+
 ### git-secrets
 **Short:** Pre-commit and CI scanner that blocks commits containing credential patterns before a secret reaches the repository.
 **Kind:** tech
@@ -423,6 +489,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, security/supply-chain-and-runtime-security @2
 
+gitleaks scans the git history as well as the working tree, which matters because a secret deleted in a later commit is still in the repository and still arrives with every clone. Detection combines a built-in rule set for common providers, extendable with your own patterns, and entropy scoring for unrecognised formats; findings can be allowlisted by fingerprint so the scan stays green without switching the rule off entirely.
+
+Run it over full history in CI and as a fast pre-commit hook locally. A hit in history means the credential is compromised and must be rotated — rewriting history does not un-clone it.
+
 ### GnuPG
 **Short:** OpenPGP CLI implementation for file encryption, detached signatures and keyring management.
 **Kind:** tech
@@ -434,6 +504,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** security/ai-safety-and-guardrails @1, security/authorization-and-policy @2, security/privacy-and-compliance @3
+
+It is a model-agnostic screening service called over REST on the way in and again on the way out, so the same policy applies whether the request goes to Gemini, a self-hosted model or a third-party API. A template bundles the filters: prompt injection and jailbreak detection, responsible-AI categories, Sensitive Data Protection for PII, malicious URL checks, and screening of document and image content. What separates it from a library-level guardrail is the organization-level floor, where a security team sets a minimum policy that individual projects inherit and cannot weaken, which is an enforcement primitive application-side filtering cannot provide. Treat it as one layer only, since classifier-based filtering is probabilistic and belongs alongside least-privilege tool design and human review for consequential actions, not instead of them.
 
 ### Google DP library
 **Short:** Google's open-source differential privacy library: DP SUM/COUNT/MEAN aggregations, including Beam and Spark pipelines.
@@ -459,6 +531,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, platform-delivery/container-and-image @3
 
+Grype inventories the packages in an image, a directory or a Syft SBOM handed to it, matches them against a vulnerability database it downloads and caches locally, and reports each hit with its severity and the version that fixes it. Because it can scan an SBOM directly, the standard pipeline generates the SBOM once at build time and rescans it later without rebuilding — which is how you learn about a CVE published after the image shipped.
+
+Gate the build with a fail-on severity, but pair it with an ignore file from the start: base-image findings that have no fix available will otherwise block every deploy and train the team to ignore the scanner.
+
 ### Guardrails AI
 **Short:** Code-first output validation for LLMs: Pydantic-style guards with validators installed from Guardrails Hub.
 **Kind:** tech
@@ -482,6 +558,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, security/authentication-and-identity @3, platform-delivery/infrastructure-as-code-and-config @3
+
+A client authenticates with an identity it already has — a Kubernetes service-account token, a cloud instance identity, an OIDC login — and receives a token bound to a lease and a policy. Secrets engines then do the work: a key-value engine stores static values, but the database engine creates a real, uniquely named PostgreSQL or MySQL user for that application on demand and drops it when the lease expires, the PKI engine issues short-lived certificates the same way, and the transit engine performs encryption and decryption so applications hold ciphertext and never key material.
+
+Dynamic, short-lived credentials are the point: a leak becomes a bounded window rather than an incident, revocation is real rather than a coordination exercise, and every access is audited to a named identity. The price is that Vault moves onto the critical path — it must be highly available or applications cannot start, unseal keys and the root token need a genuine custody process, and every consumer needs a plan for renewing leases and reconnecting when a rotated credential invalidates its existing connection pool.
 
 ### hashlib
 **Short:** Python stdlib module exposing SHA-2/SHA-3, BLAKE2 and PBKDF2 hashing primitives.
@@ -597,6 +677,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/authentication-and-identity @1, security/authorization-and-policy @2
 
+It runs the OAuth2 and OIDC flows so your services never see a password: the browser is redirected to Keycloak, and what comes back to your API is a JWT that a resource server validates against the published JWKS endpoint. Realms isolate tenants, clients define applications, and roles, groups and protocol mappers decide exactly which claims land in a token - which is the piece worth designing, since your authorization logic reads those claims.
+
+User federation to LDAP or Active Directory and brokering to upstream social or enterprise identity providers let it front an existing user store rather than replacing it. Reach for it when you want an identity provider you control instead of a managed one, and go in knowing what that means: a stateful, database-backed service on the critical path of every login, with its own upgrade and high-availability story to own.
+
 ### keytool
 **Short:** JDK CLI for managing KeyStores: generate keypairs, create CSRs, import certificates and inspect trust stores.
 **Kind:** tech
@@ -609,12 +693,18 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, platform-delivery/kubernetes-and-orchestration @2, security/privacy-and-compliance @3
 
+kube-bench runs the CIS Kubernetes Benchmark checks against a cluster: it reads the flags, configuration files and file permissions of the API server, controller manager, scheduler, etcd and kubelet, and reports each control as pass, fail or warn with the remediation text attached. It is normally deployed as a Job or DaemonSet so it can see the host filesystem and the process arguments it needs.
+
+Use it to get an honest baseline on a self-managed cluster and to re-check after upgrades, which quietly change defaults. On a managed control plane the master-node checks do not apply — you cannot see or set those flags — so run the managed profile and focus on the node and policy controls you actually own. It audits configuration only; it does not scan images, workloads or running behaviour.
 ### Kyverno
 **Short:** Kubernetes-native policy engine: YAML admission rules that validate, mutate, generate and verify image signatures.
 **Kind:** tech
 **Lang:** *
 **Roles:** security/authorization-and-policy @1, platform-delivery/kubernetes-and-orchestration @2, security/supply-chain-and-runtime-security @3
 
+Kyverno is a Kubernetes admission controller whose policies are themselves Kubernetes resources written in YAML, so there is no separate policy language to learn. A rule matches resources and then does one of four things: `validate` rejects a pod that has no resource limits or runs as root, `mutate` injects a sidecar or a default label, `generate` creates companion objects such as a default NetworkPolicy in every new namespace, and `verifyImages` requires a valid signature and refuses unsigned images.
+
+That familiarity is the main reason teams adopt it over an engine with its own language; the tradeoff is less expressive power once the logic gets genuinely complicated, where Rego-based tooling still wins. Roll every new policy out in audit mode first and read the reports, because a validate rule promoted straight to enforce will block deployments of workloads that predate it.
 ### Lakera Guard
 **Short:** Hosted API detecting prompt injection, jailbreaks, PII and unsafe content in LLM inputs and outputs.
 **Kind:** tech
@@ -626,6 +716,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, security/authentication-and-identity @3
+
+An ACME client — certbot, `lego`, Caddy or cert-manager in a cluster — proves you control the name by serving a token over HTTP on port 80 or publishing a DNS TXT record, and receives a certificate minutes later; the same client re-runs on a timer and renews long before expiry. Certificates are domain-validated only, with no organization or extended validation, and wildcards require the DNS challenge because HTTP validation cannot prove control of a whole subtree.
+
+The 90-day lifetime is deliberate: it makes unautomated renewal untenable and it caps how long a compromised key stays useful. Use the staging endpoint while getting the automation right, since the rate limits per registered domain are easy to hit with a loop of failed attempts. The classic outage is not issuance at all — it is a freshly renewed certificate sitting on disk that the web server was never told to reload.
 
 ### libsodium
 **Short:** Modern, hard-to-misuse crypto library (Curve25519, XSalsa20, Poly1305) with bindings in nearly every language.
@@ -674,6 +768,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** security/privacy-and-compliance @1, security/ai-safety-and-guardrails @2, applied-ml/nlp-and-text @3
+
+The analyzer runs a set of recognizers over text and returns typed spans with confidence scores: regex plus checksum validation for structured identifiers like credit cards and national IDs, an NER model for names, locations, and organizations, and context words nearby that boost or lower a score. The anonymizer then applies an operator per entity type — redact, replace with a placeholder, mask all but the last digits, hash, or reversibly encrypt when you need to restore the original later.
+
+It is built to be extended with your own recognizers and deny lists, and separate packages handle images and structured data. Reach for it to scrub prompts, logs, and training data before they cross a boundary; treat it as one layer of defence rather than a compliance guarantee, because recall on free-form text is never complete.
 
 ### Microsoft SEAL
 **Short:** Microsoft's homomorphic encryption library (BFV and CKKS), letting you compute on ciphertext without decrypting.
@@ -735,6 +833,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** security/ai-safety-and-guardrails @1, llm-apps/agent-framework @3
 
+Rails are declared in Colang -- canonical user intents, bot intents and flows -- plus configuration for input, output, retrieval and execution rails, and at runtime each turn is checked before and after the model call so the system can refuse, rewrite, or route the request into a defined flow. It composes with jailbreak detection, topic control, fact checking and PII filters rather than replacing them.
+
+Reach for it when policy has to be explicit, reviewable and testable instead of buried in a system prompt. Every rail is extra work per turn, usually extra model calls, so it costs latency and tokens and needs its own test set -- an over-eager rail refusing legitimate requests is the common failure.
+
 ### Neural Cleanse
 **Short:** Backdoor-detection method that reverse-engineers a minimal trigger per class to spot a trojaned classifier.
 **Kind:** concept
@@ -789,11 +891,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/authentication-and-identity @1, security/authorization-and-policy @3
 
+It plays the identity provider in an OIDC or SAML flow: your application redirects to Okta, which authenticates the user against its own directory or a federated one, applies MFA and conditional-access policy, and returns tokens your service then validates as a resource server. Centralizing that is what makes joiner-mover-leaver work, because deprovisioning one account cuts access everywhere, which a per-application user table can never do; it covers workforce SSO and customer identity, with Auth0 as the developer-oriented product under the same company. Reach for it when identity is a compliance and lifecycle problem rather than a login form. The dependency is real, since an outage at the IdP is an outage for everything behind it, so cache the signing keys and think carefully about token lifetimes.
+
 ### OPA
 **Short:** Open Policy Agent: general-purpose ABAC policy engine evaluating Rego rules over JSON input.
 **Kind:** tech
 **Lang:** *
 **Roles:** security/authorization-and-policy @1, platform-delivery/kubernetes-and-orchestration @3, platform-delivery/infrastructure-as-code-and-config @3
+
+OPA is one evaluator with a simple contract: give it a JSON `input` document, plus policies written in Rego and any reference data, and it returns a JSON decision. That decoupling is the value — authorization logic lives outside the service it protects, so it can be reviewed, unit-tested and versioned on its own, and the same engine answers "may this user call this endpoint", gates a Kubernetes admission request through Gatekeeper, checks a Terraform plan before apply, and decides whether an agent may invoke a given tool.
+
+Deployed as a sidecar or linked as a library, it evaluates in-process against a policy bundle it pulls periodically, so a decision costs no network round trip and a policy change rolls out without redeploying services. Two things account for the effort: Rego is a declarative query language whose evaluation model has to be learned rather than guessed at, and you still own the harder half of the problem, which is getting the right context — roles, resource attributes, tenancy — into `input`.
 
 ### OPA Gatekeeper
 **Short:** Kubernetes admission controller running OPA Rego as ConstraintTemplates and Constraints, with audit of existing objects.
@@ -807,6 +915,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** security/privacy-and-compliance @1, model-training/deep-learning-framework @3
 
+Opacus makes a PyTorch training loop differentially private by wrapping the model, optimizer and data loader in a `PrivacyEngine`: it computes per-sample gradients, clips each to a norm bound, adds calibrated Gaussian noise to the batch sum, and tracks the spent budget with an RDP accountant so you can ask for a target epsilon up front. Per-sample gradients are the expensive part — both memory and step time rise — and Poisson sampling replaces the ordinary shuffled loader.
+
+Reach for it when a model trains on data whose individual records must not be memorized or reconstructable, which is the concrete defense against membership-inference and some poisoning attacks. The cost is accuracy: a meaningful epsilon on a small dataset can move metrics enough that the private model is not worth shipping, so measure the drop before committing to it.
+
 ### Open Policy Agent
 **Short:** General-purpose policy engine evaluating Rego rules for ABAC authorization, Kubernetes admission control and IaC checks.
 **Kind:** tech
@@ -819,6 +931,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/ai-safety-and-guardrails @1
 
+This is a hosted classifier endpoint: send text, or text and images with the omni model, and it returns a flag and a score per category — harassment, hate, self-harm, sexual content, violence and their sub-categories. It is free to call with an API key, which makes it the cheapest possible first filter to place in front of user input and behind model output.
+
+Two limits shape how you use it. The category set is fixed and safety-oriented, so your product's own policy — competitor mentions, unlicensed advice, personal data leaking into a response — still needs a classifier you build. And any threshold you tune against the raw scores is tied to the current model version, so treat a model upgrade as a reason to re-validate the cutoffs against a labelled set rather than assuming the numbers carry over.
 ### OpenFHE
 **Short:** Open-source fully homomorphic encryption library (BFV, BGV, CKKS) for computing directly on encrypted data.
 **Kind:** tech
@@ -837,6 +952,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, runtime-systems/io-networking-and-syscalls @3
 
+Two things share the name: `libssl` and `libcrypto`, the libraries implementing TLS and the primitives underneath most Linux software, and the `openssl` command-line tool, which is the everyday way to generate an RSA or EC keypair, build a CSR, inspect a certificate chain, or open a connection with `s_client` and see exactly what a server presents. The CLI is the fastest route to "is the certificate wrong, or is it the client?", and to producing the keypair a JWT signer needs for RS256. Its argument surface is famously unfriendly and easy to get subtly wrong, so prefer a high-level library for application cryptography and keep `openssl` for inspection, key generation and debugging. LibreSSL and BoringSSL are forks; current OpenSSL is Apache-2.0 licensed.
+
 ### OTel masking hooks
 **Short:** OpenTelemetry span processors and attribute hooks that scrub PII and prompt content before traces are exported.
 **Kind:** concept
@@ -848,6 +965,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, devtools/build-and-dependency-management @3, platform-delivery/ci-cd-and-release @3
+
+It gathers evidence from the artifacts in a build - jar manifests, POM coordinates, file names, lock files - maps them to CPE identifiers, and reports the CVEs the NVD lists against them, optionally failing the build above a CVSS threshold. It runs as a Maven or Gradle plugin, a CLI, or a CI step, which is why it is the usual free baseline for software composition analysis.
+
+Two things make or break it in practice. It needs a populated local vulnerability database and an NVD API key, so the first run is slow and a stale cache silently reports old news. And CPE matching produces false positives, so a suppression file with a documented reason per entry is part of the job. Remember what the result means: it finds a known-vulnerable version on the classpath, not a vulnerable call path, so triage is still human work.
 
 ### OWASP SQLMap
 **Short:** Penetration-testing CLI that automatically finds and exploits SQL injection to prove a parameter is unsafe.
@@ -951,6 +1072,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** security/authentication-and-identity @1, security/secrets-and-cryptography @3
 
+Encoding and decoding are one call each, but the decode call is where the security lives. It verifies the signature and the registered claims, and you must pass the algorithms you accept, the expected audience and the expected issuer explicitly, because a token that merely parses is not a token you may trust. The classic vulnerability in this space is honouring the algorithm named inside the token itself, which lets an attacker downgrade to none or to HMAC using the public key as the secret; passing an explicit algorithm list is what closes it.
+
+For OpenID Connect it ships a JWKS client that fetches a provider's public keys over HTTPS, caches them and selects the right one from the token's key id, so RS256 verification with key rotation needs nothing further. Install it with the cryptography extra for RSA and ECDSA support.
+
 ### PyRIT
 **Short:** Microsoft's Python Risk Identification Toolkit: orchestrates automated multi-turn red-team attacks on generative AI.
 **Kind:** tech
@@ -981,6 +1106,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** security/authentication-and-identity @1, security/secrets-and-cryptography @2
 
+It implements the JOSE family - JWS for signed tokens, JWE for encrypted ones, and JWK/JWK sets for key material - behind a small `jwt.encode` and `jwt.decode` surface, with a pluggable cryptography backend.
+
+Decoding is where the security actually lives. Always pass the expected `algorithms` list explicitly and never trust the algorithm named in the token's own header; verify audience and issuer rather than only the signature; and fetch the issuer's JWKS and select the key by `kid` instead of pinning one public key that rotation will break. Reach for it when you need JWE or JWK-set handling in one place; for plain signed JWT verification against a provider's JWKS, PyJWT covers the same ground and is what most FastAPI codebases use.
+
 ### RBAC
 **Short:** Role-based access control: permissions attach to roles and roles to identities; the default model in K8s and clouds.
 **Kind:** concept
@@ -992,6 +1121,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** security/ai-safety-and-guardrails @1
+
+Rebuff layers cheap-to-expensive checks over an incoming prompt: heuristic patterns for known injection phrasings, a similarity lookup against a vector store of attacks seen before, a dedicated LLM call asked to judge whether the input is an injection attempt, and a canary token planted in the system prompt whose appearance in any output proves the prompt leaked.
+
+No layer is sufficient alone — a paraphrase defeats the heuristics and the judging model can itself be argued around — so treat it as a filter that raises an attacker's cost, not a boundary you can rely on. The real containment is elsewhere: least-privilege tool permissions, human approval on destructive actions, and scanning what the model is about to send back.
 
 ### Rego
 **Short:** Open Policy Agent's declarative policy language: query-style rules evaluated over JSON input to allow or deny.
@@ -1029,6 +1162,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, platform-delivery/kubernetes-and-orchestration @2, platform-delivery/ci-cd-and-release @3
 
+You encrypt a Secret with `kubeseal` against the controller's public key, producing a SealedSecret custom resource that is safe to commit to a public repository; only the controller running in that cluster holds the private key and decrypts it into a real Secret. Encryption is scoped to a namespace and name by default, so a sealed value cannot simply be copied into another namespace and unsealed there.
+
+That makes it the low-friction answer for GitOps, where the whole desired state including secrets has to live in the repository. Know the two limits before adopting it: the controller's private key is now a critical backup - lose it and every sealed value in git is unrecoverable - and rotation is manual, since the file in git does not change when the underlying credential should. For dynamic credentials, central audit or cross-cluster reuse, a real secret manager fronted by the External Secrets operator is the alternative.
+
 ### seccomp+namespaces
 **Short:** Linux kernel sandboxing primitives: syscall filtering plus namespace isolation, the base layer under containers.
 **Kind:** tech
@@ -1065,6 +1202,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, security/secrets-and-cryptography @3
 
+`cosign` authenticates you through OIDC — a CI workload identity or a developer's account — receives a short-lived certificate from Fulcio bound to that identity, signs the artifact, and records the signature in the Rekor transparency log. Because the certificate expires in minutes, there is no long-lived signing key to store, leak, or rotate, and verification checks both the identity in the certificate and the artifact's inclusion proof in the public log.
+
+Admission controllers and policy engines then enforce that only images signed by an expected identity and workflow may run, and the same mechanism signs SLSA provenance and SBOM attestations. Reach for it for container images and build attestations; the mental shift is that you are verifying which workflow built something, not merely that some key signed it.
+
 ### Sigstore/cosign
 **Short:** Keyless signing and transparency-log verification for container images, model artifacts and attestations.
 **Kind:** tech
@@ -1089,11 +1230,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, security/secrets-and-cryptography @3, platform-delivery/ci-cd-and-release @3
 
+It resolves the dependency graph from lock files rather than matching package names, so it reports which transitive path introduced a vulnerable version and, where one exists, the smallest upgrade of a direct dependency that removes it - often opened as a pull request automatically. That fix-path emphasis is the practical difference from a scanner that only hands you a CVE list. Coverage extends past libraries to container base images, infrastructure-as-code templates and first-party code.
+
+It runs as a CLI in CI, an IDE plugin and a git integration, and can break a build above a severity threshold. It is a commercial product with a limited free tier, and its curated vulnerability database is simultaneously the reason to use it and the thing you become dependent on - worth weighing against an open scanner backed by the public NVD feed.
+
 ### SOPS
 **Short:** Encrypts values inside YAML/JSON/env files with KMS/age/PGP so secrets can live safely in Git for GitOps.
 **Kind:** tech
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1, platform-delivery/infrastructure-as-code-and-config @3, platform-delivery/ci-cd-and-release @3
+
+SOPS encrypts the values in a structured file and leaves the keys and document shape in plaintext, so `git diff` still shows which setting changed and code review still works while the secret itself stays unreadable. Each file's data key is wrapped with a KMS key, an `age` or PGP key, or Vault transit, and `.sops.yaml` maps path patterns to recipients — so CI, staging and production can each decrypt with their own identity, and removing one recipient means re-encrypting rather than rotating every secret everywhere.
+
+That is what makes it fit GitOps: the whole desired state including secrets lives in the repository, and the cluster decrypts through a Flux or Argo CD integration or the SOPS operator at apply time. The residual risk is unchanged by the encryption — whoever can use the wrapping key can read every secret it wraps, so the access policy on that key is the real control, not the file.
 
 ### Spring Authorization Server
 **Short:** Spring's own OAuth2/OIDC authorization server for issuing and introspecting tokens inside your stack.
@@ -1112,6 +1261,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** security/authentication-and-identity @1, security/authorization-and-policy @1, apis-frameworks/aop-middleware-and-scheduling @3
+
+Everything happens in a chain of servlet filters that run before your controllers: one filter establishes the authentication from the request — session cookie, bearer token, client certificate — another decides whether the resulting principal may reach the endpoint, and later ones add CSRF protection and response security headers. You configure it by declaring a `SecurityFilterChain` bean with the lambda DSL, listing request matchers and their authorization rules, and add `@PreAuthorize` where the decision needs the method's arguments rather than just the URL.
+
+The recurring mistakes are both about defaults: matcher order decides the outcome, so a permissive pattern placed first wins over the stricter one below it, and disabling CSRF to make a browser-facing form work removes a protection instead of fixing the form.
 
 ### Spring Security ACL
 **Short:** Spring module storing per-domain-object permissions in ACL tables, for row-specific authorization decisions.
@@ -1209,6 +1362,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, platform-delivery/container-and-image @2
 
+Syft scans a container image, a directory or an archive and catalogs what is inside it — OS packages from the distro database plus the language ecosystems it can see (npm, pip, Go modules, Maven, gems) — emitting the result as CycloneDX or SPDX. It reads the artifact itself rather than the build's lockfile, so it also finds what was installed along the way and whatever the base image contributed.
+
+An SBOM is only worth generating because of what consumes it: pipe the output into Grype or another scanner to match components against vulnerability feeds, and store it alongside the image so that when a new CVE lands you can answer which images ship the affected library without rebuilding anything.
+
 ### TenSEAL
 **Short:** Python library wrapping Microsoft SEAL to run BFV/CKKS homomorphic encryption over tensors for encrypted inference.
 **Kind:** tech
@@ -1227,6 +1384,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** security/privacy-and-compliance @1
 
+The library provides differentially private training: optimizers that clip each individual example's gradient to a fixed norm and then add calibrated Gaussian noise to the summed batch gradient, so no single training record can move the resulting weights by more than a bounded amount and membership inference is provably limited. Alongside them ships a privacy accountant that converts your noise multiplier, sampling rate and number of steps into the epsilon and delta you can actually state in a document.
+
+Reach for it when a formal privacy claim about a model trained on personal data is a requirement rather than a preference — regulated data, a model you intend to publish, a claim you must defend. The costs are concrete: per-example gradient clipping is substantially slower than ordinary training, and accuracy falls as epsilon tightens, so the epsilon you pick is an explicit trade of utility for guarantee.
 ### Tetragon
 **Short:** eBPF runtime security for Kubernetes: observes and enforces on syscalls, process exec and network activity.
 **Kind:** tech
@@ -1257,6 +1417,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** security/supply-chain-and-runtime-security @1, platform-delivery/container-and-image @3, platform-delivery/ci-cd-and-release @3
 
+One binary scans many targets: a container image layer by layer, mapping OS packages against distro advisories and language lockfiles against advisory databases; a filesystem or git repository; an infrastructure-as-code directory of Terraform, CloudFormation, Kubernetes manifests or Dockerfiles against built-in misconfiguration policies; a running cluster; and an SBOM. It also detects hard-coded secrets and can emit SBOMs in CycloneDX or SPDX format.
+
+Practical notes: it downloads and caches a vulnerability database, which you should mirror or pre-warm in CI rather than fetch on every build; `--severity` together with `--exit-code` is how it becomes a gate; and `.trivyignore` entries want expiry dates so accepted risks do not become permanent. Reach for it as the default pipeline scanner since it is fast and needs no server -- but a scanner reports known CVEs in declared dependencies, which is a floor for supply-chain security rather than the whole of it.
+
 ### trufflehog
 **Short:** Scanner finding and live-verifying leaked credentials in git history, filesystems and CI; usual pre-commit gate.
 **Kind:** tech
@@ -1274,6 +1438,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** security/secrets-and-cryptography @1
+
+It is organized as secrets engines rather than one flat store: KV for static secrets, dynamic engines that mint a short-lived database or cloud credential on request and revoke it when the lease expires, a PKI engine that issues certificates, and transit, which encrypts and signs on your behalf so the key never leaves Vault at all. Auth methods map a workload identity — a Kubernetes service account, cloud IAM role, or OIDC subject — to policies, and every access is written to an audit log.
+
+Reach for it when credentials must be short-lived and centrally revocable instead of long-lived environment variables copied between systems; the dynamic-credential model means a leaked secret expires on its own. The costs are that unsealing, key rotation, and storage backend health become your problem, and that Vault sits on the critical path of everything that needs a credential — which is why it is run highly available.
 
 ### Vault Agent Injector
 **Short:** Kubernetes mutating webhook that adds a Vault Agent init/sidecar to pods so secrets land as files, not env vars.

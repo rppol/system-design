@@ -399,6 +399,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, runtime-systems/concurrency-and-async @2
 
+aiohttp implements HTTP on top of `asyncio`: a `ClientSession` for outbound calls and a small server framework with its own router. The client half is what most projects want, because one session pools connections and keeps sockets alive, so thousands of concurrent requests share a single thread while each awaits its own socket rather than occupying a worker.
+
+Reach for it when a service fans out to many slow upstreams and you are already inside an event loop; a blocking call made from a coroutine still stalls every other request on that loop. Its server half is rarely chosen over an ASGI framework today, and `httpx` is the usual alternative on the client side.
 ### annotated-types
 **Short:** Tiny Python package of standard constraint metadata (Gt, Lt, Len) that validators like Pydantic read from Annotated.
 **Kind:** tech
@@ -459,6 +462,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, traffic-edge/api-gateway @2
 
+Each subgraph is an ordinary GraphQL service that annotates its schema with federation directives -- `@key` declares the fields identifying an entity, `@external` and `@requires` describe fields it borrows from elsewhere -- and a composition step checks those pieces fit together into one supergraph schema. At runtime the router reads that schema, plans a query across subgraphs, and resolves cross-service references through each subgraph's entity resolver, so a client sees one endpoint and never learns the topology. The problem it solves is organisational more than technical: a single monolithic GraphQL schema becomes a merge-conflict funnel once several teams write into it, and ownership of a type's fields cannot be split. Reach for it when independent teams own separate domains behind one graph; one team with one service gains nothing but a router hop and a composition pipeline.
+
 ### Apollo GraphOS Studio
 **Short:** Hosted GraphQL schema registry and observability console: schema checks, field usage and operation metrics.
 **Kind:** tech
@@ -471,12 +476,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, traffic-edge/api-gateway @2
 
+It sits in front of a set of subgraph services, each owning a slice of one graph. A client sends a single query against the composed supergraph schema; the router builds a query plan that splits the operation into per-subgraph fetches, runs the independent ones in parallel, resolves entity references between them and stitches the result back into the shape the client asked for.
+
+Reach for it when several teams own different parts of one API and you want them to deploy independently behind one endpoint. A single GraphQL service needs no router at all, and federation adds real cost: schema composition becomes a CI gate, and a slow subgraph now shows up as a slow field on someone else's query.
+
 ### Apollo Server
 **Short:** Node.js GraphQL server implementation with schema, resolvers and subscription support.
 **Kind:** tech
 **Lang:** js
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, apis-frameworks/web-framework-and-http-client @3
 
+You give Apollo Server a schema plus a resolver map and it serves that schema over HTTP, handling parsing, validation, execution order, batching hooks and error formatting so you only write the field resolvers. Around that it adds the operational layer a GraphQL endpoint needs: persisted queries, response caching hints, subscriptions, plugins for tracing, and Federation for composing several subgraph services into one supergraph.
+
+Reach for it when the GraphQL layer itself is Node; if your services are Java or Python, use that ecosystem's GraphQL server rather than adding a Node hop purely for the schema.
 ### Apollo/Relay clients
 **Short:** Browser-side GraphQL clients that issue queries, normalize results into a local cache and manage fragments.
 **Kind:** tech
@@ -621,6 +633,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1, devtools/static-analysis-and-linting @2, devtools/compiler-toolchain-and-codegen @2
 
+Buf replaces the raw `protoc` invocation with a configured toolchain: `buf lint` enforces naming and style rules, `buf breaking` diffs your `.proto` files against a previous commit or a registry version and fails when a change would break the wire or the generated API, and `buf generate` runs plugins from a YAML config instead of a long shell line. The Buf Schema Registry hosts modules so consumers depend on a versioned schema rather than vendoring files.
+
+Reach for it in any repo where more than one team consumes the same protos — the breaking-change gate is the reason, since renumbering a field or changing a type is silent at compile time and corrupt at runtime.
 ### buf.build
 **Short:** Protobuf toolchain and schema registry: linting, breaking-change detection and remote code generation.
 **Kind:** tech
@@ -741,6 +756,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1, data-movement/event-streaming-and-processing @2
 
+The producer's serializer registers the schema once and prepends its numeric id to every message instead of the schema itself, so consumers fetch the schema by id and cache it while the bytes on the wire stay small. Registration is checked against a compatibility mode per subject — backward compatibility by default, meaning a new schema must still be able to read data written by the previous one — which turns a removed required field from a 3am consumer crash into a failed produce at deploy time.
+
+Use it as soon as more than one team reads a topic: it is the enforcement point for the event contract, and it covers Avro, Protobuf and JSON Schema alike.
+
 ### confuse
 **Short:** Python configuration library layering YAML files, env vars and CLI overrides behind a schema with typed views.
 **Kind:** tech
@@ -807,6 +826,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** js, java
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, data-access/orm-and-data-mapping @2, caching/in-process-cache @3
 
+A GraphQL resolver runs once per field per object, so a list of 50 posts each resolving `author` fires 50 identically shaped queries. A DataLoader wraps a batch function: individual `.load(id)` calls are collected within one tick of the event loop, dispatched once as `loadFn([id1, id2, ...])`, and the results scattered back to the waiting promises -- the batch function must return values in the same order as the keys it received, which is the classic implementation bug. It also memoizes per key, so the same author requested by ten posts is fetched once. Create a fresh loader per request and never a global one: a process-lifetime loader is a cache with no invalidation, and it will serve one user's data to another.
+
 ### Decorator
 **Short:** GoF structural pattern wrapping an object to add behaviour without subclassing, as java.io streams do.
 **Kind:** concept
@@ -836,6 +857,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/data-formats-and-api-contracts @2
+
+DRF layers on Django: a `Serializer` or `ModelSerializer` handles validation and the object-to-JSON conversion in both directions, a `ViewSet` bundles the list/retrieve/create/update/destroy actions for a model, and a router generates URL patterns from that viewset. Around it sit pluggable authentication and permission classes, throttling, pagination, content negotiation, and a browsable HTML API that makes hand-testing endpoints easy. The tradeoff is that the convenience assumes your API mirrors your models -- the generic views stop helping as soon as a response spans several aggregates or the write path carries real business rules, and you end up writing plain `APIView`s anyway. Reach for it when the project is already Django and the ORM is the source of truth; its views are synchronous, so a streaming or heavily concurrent API fits it poorly.
 
 ### DLPack
 **Short:** Open tensor interchange protocol letting CuPy, PyTorch, JAX and TensorFlow share device memory with no copy.
@@ -963,6 +986,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/data-formats-and-api-contracts @2, apis-frameworks/dependency-injection-and-config @2, apis-frameworks/rpc-graphql-and-streaming @3, inference/model-server @3
 
+It sits on Starlette for the ASGI machinery and Pydantic for data, and the function signature is the contract: path, query and body parameters are parsed, validated and coerced from the type hints, and the OpenAPI schema plus interactive docs are generated from the same annotations. `Depends` gives you dependency injection for database sessions, authentication and per-request setup, with overrides in tests.
+
+Reach for it for Python HTTP APIs and as the front end for a model server. The gotcha to know: a plain `def` endpoint is run in a threadpool, but blocking I/O inside an `async def` endpoint blocks the event loop and stalls every other request on that worker.
+
 ### FastAPI 0.140+
 **Short:** Current FastAPI release whose Depends/Security graph and dependency_overrides give the framework its DI container.
 **Kind:** tech
@@ -1035,6 +1062,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, inference/model-server @3
 
+Flask is a WSGI micro-framework: routes are declared with the `@app.route` decorator, request state is reached through thread-local proxies, and everything beyond routing and templating — validation, serialization, auth, database access — is an extension you add. Being WSGI means one request occupies one worker thread or process for its whole life, so you size a `gunicorn`/`uWSGI` worker pool rather than relying on an event loop, and a slow upstream call ties up a worker. Reach for it for a small internal service, a webhook receiver, or a quick endpoint wrapped around a model; choose FastAPI instead when you want async I/O, request/response validation from type hints, and generated OpenAPI docs without assembling them yourself.
+
 ### Flyweight
 **Short:** GoF structural pattern that shares immutable intrinsic state across many objects to cut heap duplication.
 **Kind:** concept
@@ -1089,6 +1118,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, devtools/version-control-and-workbench @3
 
+It loads the schema by introspection and gives you autocompletion, a documentation pane, a variables and headers editor, and a run button, so exploring an unfamiliar GraphQL API needs no client code. Most GraphQL servers, including Spring for GraphQL, can serve it at a path in development.
+
+Reach for it while designing or learning a schema and for reproducing a query a client reported. Introspection is normally disabled in production for the same reason you would not expose a schema browser, so treat it as a development and staging tool.
+
 ### GraphQL Federation spec
 **Short:** Specification for composing many GraphQL subgraphs into one supergraph schema served by a federated gateway.
 **Kind:** spec
@@ -1106,6 +1139,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1
+
+It does the language-level work: parse a query into a document, validate it against the schema, then execute field by field, invoking the `DataFetcher` registered for each field and assembling the result along with any errors. Everything above that — HTTP transport, dependency injection, subscription plumbing — is deliberately left to a framework, which is why it is nearly always used through Spring for GraphQL or DGS rather than on its own.
+
+Its `DataLoader` support is the piece worth knowing about, since it batches and per-request caches the fetches a nested field would otherwise issue one at a time. Reach for the raw library only when you are building that framework layer yourself or embedding GraphQL somewhere unusual.
 
 ### gRPC
 **Short:** HTTP/2 RPC framework using protobuf contracts, with generated stubs and unary plus bidirectional streaming.
@@ -1221,6 +1258,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, devtools/testing-and-mocking @3
 
+It calls a gRPC service from the shell: `list` enumerates services, `describe` prints a method's message types, and `-d` sends a request body as JSON which grpcurl converts to protobuf and back. It gets the schema either from the server's reflection service or, when reflection is disabled, from `.proto` files or a compiled descriptor set passed with `-proto` or `-protoset` -- which is the first thing to check when it cannot find your method. Because gRPC is binary over HTTP/2, curl is not a usable substitute, so this is the tool for confirming a service is up, reproducing a bad request, or checking TLS and metadata handling from outside the application. Reach for it during development and incident debugging, and enable reflection in non-production environments to make it far more pleasant to use.
+
 ### Gson
 **Short:** Google's JSON binding library for Java: simpler and Android-friendly, with no default-typing RCE surface.
 **Kind:** tech
@@ -1245,6 +1284,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** apis-frameworks/design-patterns-and-principles @1, data-movement/message-broker @3, apis-frameworks/aop-middleware-and-scheduling @3
 
+`register(obj)` reflects over an object's `@Subscribe` methods to build a type-to-handler map, and `post(event)` dispatches to every handler whose parameter type the event is assignable to, supertypes and interfaces included. Delivery happens on the posting thread unless you use `AsyncEventBus` with an `Executor`, and an event nobody subscribed to comes back as a `DeadEvent` — the cheapest way to catch a collaborator you forgot to wire up.
+
+It decouples publishers from subscribers inside one JVM, which makes it a practical Mediator or Observer implementation outside Spring. It is in-memory with no durability across a restart, and a handler that throws is swallowed by the exception handler rather than failing the poster, so treat it as a notification mechanism and not a broker.
+
 ### Guava ForwardingList
 **Short:** Guava abstract decorator base that delegates every List method, so you override only the behaviour you change.
 **Kind:** api
@@ -1256,6 +1299,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, runtime-systems/memory-processes-and-os @3
+
+A master process forks a fixed number of worker processes, hands each the listening socket, restarts any that die or hang past the timeout, and handles graceful reload and shutdown. For an ASGI app such as FastAPI you set a Uvicorn worker class so each worker runs its own event loop, which is how one container uses more than one CPU core.
+
+The consequence people trip over is that workers are separate processes with separate memory: an in-process cache, a rate-limit counter or a scheduler running in each worker is duplicated N times, not shared. Reach for it when you want multiple cores and a supervisor inside one container; if your platform already scales by replicas, a single Uvicorn process per container is simpler to reason about.
 
 ### gzip
 **Short:** Ubiquitous DEFLATE (LZ77 + Huffman) compressor, used for files and as an HTTP content encoding.
@@ -1341,6 +1388,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** apis-frameworks/web-framework-and-http-client @1, devtools/testing-and-mocking @3, runtime-systems/io-networking-and-syscalls @3
 
+The point of `httpie` is that the common case is short: `http POST api.example.com/users name=ada role=admin` builds a JSON body, sets the content type, and pretty-prints and colorizes the response, where the curl equivalent needs several flags and a hand-written body. `--verbose` prints the full request alongside the response so you can see exactly which headers went out, and sessions persist cookies and auth between invocations. Reach for it when exploring or debugging an API by hand; keep `curl` for scripts and containers, since it is present everywhere and its flags are what every runbook already assumes.
+
 ### HttpMessageConverter
 **Short:** Spring MVC strategy that serializes and deserializes request and response bodies by content type.
 **Kind:** api
@@ -1365,6 +1414,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, devtools/testing-and-mocking @2
 
+The module-level API mirrors `requests`, but the piece that matters is using `Client` or `AsyncClient` as a long-lived object: it owns a connection pool, so reusing one across requests avoids a TCP and TLS handshake per call, and it is where you set base URL, headers, limits and timeouts once. HTTP/2 comes with the optional extra, `client.stream(...)` yields a response incrementally rather than buffering it, and an ASGI transport lets tests drive a FastAPI application in-process with no server and no port.
+
+Two habits prevent most production incidents with it: set an explicit `timeout` on every call or on the client, because a hung upstream otherwise ties up a connection and a task indefinitely, and set `follow_redirects=False` when the URL came from a user, since redirect-following is a standard SSRF vector.
+
 ### httpx AsyncClient
 **Short:** httpx's async HTTP client with connection pooling; shared via lifespan or scoped per request in a yield dependency.
 **Kind:** api
@@ -1388,6 +1441,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/rpc-graphql-and-streaming @3
+
+It implements ASGI (and WSGI) and can run its workers on asyncio, uvloop or trio, and it terminates HTTP/2 and HTTP/3 over QUIC directly, with TLS configured at the server. That is the reason to pick it: those protocols end to end, or a trio-based application that uvicorn will not host.
+
+Reach for it in those two cases. For an ordinary HTTP/1.1 service behind nginx, an ingress or a cloud load balancer -- which already terminates HTTP/2 for you -- uvicorn is the more common default and usually a little faster.
 
 ### InitDestroyAnnotationBeanPostProcessor
 **Short:** Spring bean post-processor that invokes JSR-250 @PostConstruct and @PreDestroy callbacks.
@@ -1875,6 +1932,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/dependency-injection-and-config @2, devtools/compiler-toolchain-and-codegen @3
 
+Micronaut resolves injection points, AOP advice and configuration binding at compile time with annotation processors, generating the wiring as ordinary classes instead of discovering it by reflection during startup. That removes the reflective metadata a classic container builds on every boot, so processes start in tens of milliseconds with a smaller heap, and it makes GraalVM native images straightforward because there is little dynamic behaviour left to register.
+
+It fits serverless functions and fleets of small services where cold start and memory per instance dominate the bill. The ecosystem is much smaller than Spring's, which is usually what decides the question.
+
 ### msgpack
 **Short:** Compact binary serialization format with a JSON-like data model, used where JSON is too slow or too large.
 **Kind:** spec
@@ -1898,6 +1959,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1
+
+DGS layers annotation-driven GraphQL onto Spring Boot: `@DgsComponent` classes expose `@DgsQuery` and `@DgsData` fetchers bound to schema fields, a codegen plugin turns the SDL into Java types so schema and code cannot drift apart, and data loader support keeps nested fields from becoming N+1 queries. It runs on graphql-java underneath and supports Apollo Federation for serving a subgraph of a larger supergraph.
+
+It is a reasonable choice in a Spring estate that values its codegen and federation ergonomics. Spring for GraphQL is the framework-native option covering much of the same ground, so a new project should compare the two rather than assume it needs a second GraphQL stack.
 
 ### Node
 **Short:** The GUI Composite archetype (as in JavaFX Node): a container is itself a component, so layout and paint recurse.
@@ -1947,6 +2012,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, llm-apps/prompting-context-and-structured-output @2, inference/model-server @3
 
+The SDK wraps the HTTP API in typed methods — chat completions, embeddings, files, batches — reading the key from `OPENAI_API_KEY`, retrying transient failures with backoff, and offering both a synchronous `OpenAI` and an `AsyncOpenAI` client. Streaming is exposed as iteration over response chunks, tool/function calling as structured objects rather than hand-parsed JSON, and structured output can be parsed straight into a Pydantic model.
+
+Its wider significance is that its request and response shapes have become a de facto interchange format: point `base_url` at vLLM, Ollama, a router or an internal gateway and the same code talks to a self-hosted model, which is why the OpenAI-compatible endpoint shows up in tools that have nothing to do with OpenAI.
+
 ### OpenAPI 3.2
 **Short:** The published standard for describing REST APIs in JSON or YAML, driving docs, clients and contract tests.
 **Kind:** spec
@@ -1982,6 +2051,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1, observability/profiling-and-performance @3
+
+orjson is written in Rust and serializes straight to `bytes` rather than `str`, skipping the encode step the standard library pays, and it natively handles `datetime`, `date`, `UUID`, dataclasses and numpy arrays that `json.dumps` refuses without a custom encoder. It is not a drop-in in every respect: output is always UTF-8 bytes, behaviour is selected through option flags rather than keyword arguments, and it will not serialize subclasses of `dict` or `list` unless you supply a default hook.
+
+Reach for it on a hot serialization path — an API response, a cache write, a structured log line — where the difference is measurable. For a config file read once at startup it changes nothing.
 
 ### PagedModel
 **Short:** Spring HATEOAS wrapper carrying a page of resources plus page metadata and next/prev navigation links.
@@ -2103,17 +2176,29 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1, llm-apps/prompting-context-and-structured-output @2, runtime-systems/runtime-internals-and-types @3, apis-frameworks/design-patterns-and-principles @3
 
+Validation is not interpreted on every call: the schema is compiled when the class is created and then executed by `pydantic-core`, a Rust engine, so the Python-level cost is mostly whatever `field_validator` functions you add yourself. FastAPI builds request parsing, response serialization and its OpenAPI schema on top of it, and LLM tooling reuses the same models as JSON Schema for structured output and tool arguments.
+
+Reach for it wherever untrusted data crosses a boundary: request bodies, config files, model output. One practical trap is that v2 renamed most of the v1 surface (`model_dump`, `field_validator`, `model_config`, `Annotated` constraints), so v1-era snippets do not run unchanged.
+
 ### pydantic-core
 **Short:** The compiled Rust validation/serialization engine underneath Pydantic v2; installed automatically with it.
 **Kind:** tech
 **Lang:** python
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1
 
+Pydantic v2 compiles each model once into a core schema and executes it in Rust, which is where the large speedup over the pure-Python v1 comes from and why validation errors carry precise structured locations. You never import it directly; you meet it through `BaseModel`, `TypeAdapter`, `model_validate` and `model_dump`.
+
+It explains behaviour that otherwise looks arbitrary. Strict versus lax mode decides whether the string `"1"` becomes the integer `1`. `model_construct` skips validation entirely, which is fast and unsafe. Custom types are integrated by implementing `__get_pydantic_core_schema__` rather than the v1 validator decorators, which is the migration step people trip on. Serialization runs through the same engine, so `by_alias`, `exclude_none` and the warnings raised when a field's runtime value does not match its declared type all originate there.
+
 ### pydantic-settings
 **Short:** Pydantic BaseSettings package that loads and validates twelve-factor config from env vars and .env files.
 **Kind:** tech
 **Lang:** python
 **Roles:** apis-frameworks/dependency-injection-and-config @1, security/secrets-and-cryptography @3
+
+A `BaseSettings` subclass declares configuration as typed fields with defaults; at startup the values are read from environment variables, optionally with a prefix, from a `.env` file, or from a secrets directory, then coerced and validated by Pydantic. The point is that a missing or malformed value fails loudly at boot rather than as a `None` deep inside a request an hour later, and `SecretStr` keeps credentials out of reprs, tracebacks and logs.
+
+Reach for it for twelve-factor configuration in any Pydantic application, and instantiate the settings object once and inject it rather than reading `os.environ` at call sites. It lives in its own package since Pydantic v2, so it is a separate dependency from `pydantic` itself.
 
 ### pydantic-settings 2.x
 **Short:** Pydantic v2 settings management: typed config from env vars, dotenv and secret files, with SecretStr masking.
@@ -2139,6 +2224,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1
 
+`EmailStr` is not self-contained: the type raises an import error when a model is defined unless the `email-validator` package is present, which is exactly what this extra installs. Validation goes well beyond a regex, since the library parses the address, normalizes the domain including internationalized names, and can optionally test the domain for deliverability, though the Pydantic type itself sticks to the syntactic and normalization checks. Add it when a signup or contact payload needs a real address; a plain `str` is honest when you only care that the field is present.
+
 ### python-dotenv
 **Short:** Loads key=value pairs from a .env file into the process environment so local config stays out of the code.
 **Kind:** tech
@@ -2150,6 +2237,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/dependency-injection-and-config @2, devtools/compiler-toolchain-and-codegen @3, platform-delivery/container-and-image @3
+
+Quarkus moves work that traditional Java frameworks do at startup -- classpath scanning, annotation processing, proxy generation, configuration binding -- into build-time augmentation performed by extensions, so the running application does less and starts faster on the JVM, and can be compiled ahead of time by GraalVM into a native binary that starts in milliseconds with a fraction of the memory. It is built on Vert.x with a reactive core, supports both imperative and reactive styles, and its extensions cover the usual set (Jakarta REST, Hibernate with Panache, Kafka, gRPC, security) with the constraint that a library needs an extension to behave under native compilation. Its dev mode, which recompiles on the next request, is the day-to-day reason developers like it. Reach for it for many small Kubernetes services or serverless functions where startup time and memory per instance drive cost; Spring Boot has a far larger ecosystem, and native compilation brings its own costs in build time, reflection configuration and harder profiling.
 
 ### Quartz
 **Short:** Java job scheduler with cron triggers, JDBC job persistence and clustered execution with misfire handling.
@@ -2205,6 +2294,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1
 
+Redoc turns an OpenAPI document into a three-panel reference page: navigation on the left, prose and schema in the middle, request and response samples on the right. You either drop it on a page as a script tag pointing at your spec URL, or build a single self-contained HTML file in CI so the docs are a deploy artifact that cannot drift from the spec.
+
+The contrast with Swagger UI is what decides it: Swagger UI centres on an interactive "try it" console, Redoc centres on readability and deep schema rendering. Publish Redoc when the spec is your public contract; keep Swagger UI when developers mostly want to fire requests at a dev environment.
 ### ReflectiveMethodInvocation
 **Short:** Spring AOP's invocation object that walks the interceptor chain in proceed() before reflectively calling the target.
 **Kind:** api
@@ -2348,6 +2440,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** apis-frameworks/data-formats-and-api-contracts @1, data-movement/event-streaming-and-processing @2, data-movement/data-quality-and-lineage @3
+
+The producer registers its writer schema once and puts only a small schema id on the wire, so messages stay compact; the consumer looks the id up and deserializes against it, which is what lets an old consumer read a new message. Registration is the enforcement point: the registry rejects a schema that violates the configured compatibility mode, so an incompatible field change fails at deploy time rather than breaking every downstream consumer at 3am.
+
+Reach for it whenever a topic outlives the code that writes to it, which in practice is every event stream in a microservice estate. The discipline it demands is choosing the compatibility mode deliberately, since backward, forward and full compatibility each forbid a different class of change.
 
 ### schema validation
 **Short:** Enforcing a declared shape on a message so fields stay separated and untrusted text cannot pose as instructions.
@@ -2529,6 +2625,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/dependency-injection-and-config @1
 
+Auto-configuration inspects what is on the classpath and what beans you have not defined, then wires sensible defaults, so adding a starter dependency is usually the whole setup step. Starters bundle a coherent set of dependencies at compatible versions, an embedded server makes the application a runnable jar, and externalized configuration plus profiles keep environment differences out of code.
+
+It exists to remove the configuration boilerplate that plain Spring required. Reach for it for essentially any JVM service; the price is a large opinionated dependency graph, and debugging means learning to read the condition evaluation report to find out why a bean you expected was or was not created.
+
 ### Spring Boot JsonMapperBuilderCustomizer
 **Short:** The supported hook for adjusting Spring Boot's auto-configured Jackson JsonMapper, since the built mapper is immutable.
 **Kind:** api
@@ -2546,6 +2646,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** apis-frameworks/dependency-injection-and-config @1, platform-delivery/infrastructure-as-code-and-config @2, security/secrets-and-cryptography @3
+
+It is two halves. The server reads property and YAML files out of a Git repository (or a filesystem, or Vault) and serves them over HTTP addressed by application name, profile and label, so `orders-service` on the `prod` profile gets exactly the files that match. The client pulls its configuration during bootstrap before the rest of the context starts, and `@RefreshScope` beans can be rebuilt at runtime by hitting `/actuator/refresh` or broadcasting over Spring Cloud Bus, so a value change does not require a redeploy.
+
+Git backing is the reason to use it: configuration changes get history, review and rollback like code, and values can be stored `{cipher}`-encrypted for the server to decrypt. On Kubernetes, ConfigMaps and Secrets plus an external secrets operator usually cover the same ground with one fewer service to run and keep available.
 
 ### Spring Data REST
 **Short:** Auto-exposes Spring Data repositories as a hypermedia HAL REST API with paging, sorting and discoverable links.
@@ -2576,6 +2680,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** java
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, apis-frameworks/web-framework-and-http-client @3
+
+It is the Spring team's integration of graphql-java with Spring Boot: `@Controller` classes carry `@QueryMapping`, `@MutationMapping` and `@SchemaMapping` handlers, schema files under `resources/graphql` drive the wiring, and `@BatchMapping` or a `DataLoader` collapses the N+1 that nested fields otherwise cause. Transports come with it — HTTP, WebSocket subscriptions, RSocket — as do Spring Security integration and `GraphQlTester` for tests.
+
+Reach for it as the default in a Spring Boot application, since it fits the bean, security and observability machinery already there. It is schema-first: the SDL is the contract and resolvers are written against it, which is a discipline rather than a limitation.
 
 ### Spring Integration MessageChannel
 **Short:** Spring Integration channel abstraction giving an explicit, monitorable topology of routers and transformers.
@@ -2733,6 +2841,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** apis-frameworks/dependency-injection-and-config @1, devtools/compiler-toolchain-and-codegen @2, observability/profiling-and-performance @3
 
+Add it as an annotation processor and it writes a `META-INF/spring.components` index at compile time listing every class in that module carrying a stereotype annotation; at startup Spring reads the index instead of scanning the classpath for candidates. The saving is proportional to the scanning avoided -- a large application with wide component-scan base packages and many jars benefits, a small one barely notices -- and it only covers modules compiled with the processor, so a dependency without it is still scanned normally. Its limitation is that it indexes annotated components only: custom scan filters and other classpath-scanning mechanisms are unaffected. Reach for it when startup time matters and profiling actually points at scanning; on a modern Spring Boot application, AOT processing and native images address the same cost far more thoroughly.
+
 ### spring-core jar
 **Short:** Spring's foundation module: Resource loading, the type conversion service and shared utility classes.
 **Kind:** tech
@@ -2781,6 +2891,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1
 
+This is Spring's servlet-stack WebSocket support. At the low level you register a `WebSocketHandler` through `WebSocketConfigurer` and deal in raw text and binary frames; at the messaging level you enable STOMP over WebSocket and then work in familiar Spring terms — `@MessageMapping` methods, a destination hierarchy, and `SimpMessagingTemplate` to push to a topic or to one user.
+
+The broker behind those destinations is either the built-in simple in-memory one, which is fine for a single node, or an external relay to RabbitMQ or ActiveMQ, which is what lets several app instances share subscriptions. SockJS fallback transports cover clients or proxies that refuse the upgrade. Note this is the servlet stack only — WebFlux has its own reactive equivalent.
 ### spring.batch.jdbc.initialize-schema=always
 **Short:** Spring Boot property that auto-creates the Spring Batch BATCH_* metadata tables at startup; use never in production.
 **Kind:** api
@@ -2823,11 +2936,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, apis-frameworks/web-framework-and-http-client @3
 
+Return an `EventSourceResponse` wrapping an async generator that yields dicts or `ServerSentEvent` objects and it handles the `text/event-stream` wire format - the `event:`, `data:`, `id:` and `retry:` framing, periodic keepalive comments so an idle connection is not reaped by a proxy, and client-disconnect detection so the generator stops producing work nobody will read.
+
+It is the low-ceremony way to stream LLM tokens or long-running task progress out of FastAPI. SSE is one-way server-to-client over ordinary HTTP, so it passes through proxies and load balancers with no protocol upgrade and the browser's `EventSource` reconnects on its own - a much smaller commitment than WebSockets when the client only needs to listen. The one thing to remember at deploy time is to disable proxy response buffering, or every chunk arrives at once when the stream ends.
+
 ### Starlette
 **Short:** Lightweight ASGI toolkit FastAPI is built on: routing, request/response lifecycle, WebSockets and streaming responses.
 **Kind:** tech
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/rpc-graphql-and-streaming @2
+
+It supplies the HTTP machinery that FastAPI builds on: routing, `Request` and `Response` objects, a middleware chain, background tasks, WebSocket and `StreamingResponse` primitives, static files, sessions, and a test client — everything except the type-driven validation, dependency injection, and OpenAPI generation FastAPI adds. It speaks ASGI, so a `def` endpoint is offloaded to a thread pool while an `async def` one runs on the event loop, and `request.state` is the per-request scratch space FastAPI dependencies pass context through.
+
+Reach for Starlette directly for a small service, a proxy, or a websocket endpoint where validation buys you nothing and you want fewer moving parts. Know it either way: when a FastAPI question is about the request lifecycle, middleware ordering, or streaming, the answer lives in Starlette.
 
 ### Starlette BaseHTTPMiddleware
 **Short:** Starlette's class-based middleware: override dispatch and work with Request/Response objects instead of raw ASGI.
@@ -2985,6 +3106,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, runtime-systems/concurrency-and-async @2, apis-frameworks/rpc-graphql-and-streaming @3
 
+It implements ASGI over `httptools`/`h11` on an asyncio loop, `uvloop` where available, so a coroutine handler can hold thousands of open connections and handle the WebSocket upgrade that WSGI cannot even express. The thing that surprises people is that one Uvicorn worker is single-threaded: CPU-bound work inside a handler blocks every other connection on that process, so parallelism comes from `--workers` or from one process per container with the orchestrator replicating it, never from the event loop itself. Use it as the default runner for FastAPI or Starlette, and keep a real reverse proxy in front for TLS termination and slow-client buffering.
+
 ### Vert.x event bus
 **Short:** Vert.x's address-based in-process message bus with point-to-point and pub/sub modes, clusterable across nodes.
 **Kind:** tech
@@ -3056,6 +3179,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** *
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, devtools/testing-and-mocking @3
+
+Installed from npm, it opens a WebSocket connection from the terminal with `wscat -c ws://host/path` and gives you a prompt: what you type is sent as a frame, whatever arrives is printed, and `-H` adds headers such as an `Authorization` token used during the handshake. That is enough to answer the questions that come first in any WebSocket problem -- does the upgrade succeed, is the token accepted, does the server push anything unprompted, and is the connection being closed with which code. It also has a listen mode that runs a trivial server, useful when you need something that definitely works to point a client at. Reach for it to poke a raw endpoint by hand; if your server speaks a subprotocol such as STOMP or socket.io, wscat shows only the raw frames, so anything past the handshake needs a protocol-aware client.
 
 ### x402 v2
 **Short:** Open HTTP 402 payment protocol (Coinbase, now Linux Foundation) letting agents pay per request over HTTP, MCP or A2A.

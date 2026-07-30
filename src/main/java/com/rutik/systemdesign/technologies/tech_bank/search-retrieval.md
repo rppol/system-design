@@ -39,6 +39,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** search-retrieval/ann-index-library @1, applied-ml/recommenders-and-graph-ml @3
 
+Annoy builds a forest of random-projection trees; you trade recall against latency by adding trees at build time and inspecting more nodes at query time. Its distinguishing property is the file format: the built index is memory-mapped, so several processes on a machine share one copy in page cache and a worker starts serving immediately without loading gigabytes into its own heap.
+
+The cost of that design is immutability — adding vectors means rebuilding and swapping the file — so it suits a corpus refreshed by a batch job rather than one updated continuously. It has no GPU support and generally sits below HNSW on the recall-versus-latency curve, so choose it for operational simplicity and shared memory across read-heavy replicas, not for raw speed.
+
 ### Anserini
 **Short:** Lucene-based toolkit for reproducible sparse retrieval baselines (BM25, SPLADE) on IR benchmark collections.
 **Kind:** tech
@@ -171,6 +175,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** search-retrieval/lexical-and-hybrid-search @1, data-stores/document @2, observability/logging @2, data-stores/vector-store @3, data-stores/warehouse-and-olap @3
 
+Elasticsearch wraps Lucene in a distributed layer: documents are analyzed into an inverted index, indices are split into shards spread across nodes and replicated, and a query scatters to the shards and gathers the merged top results, so both corpus size and query throughput grow by adding nodes. Relevance defaults to BM25 and is tunable per field through analyzers, boosts and function scoring, and the same engine also serves aggregations, dense-vector nearest-neighbour search and learned sparse retrieval — which is why one cluster can back both log analytics and hybrid retrieval with rank fusion.
+
+Reach for it when you need real relevance ranking, filters and facets over text, rather than a wildcard `LIKE` scan in your relational database. Do not treat it as a system of record: there are no transactions across documents, refresh is near-real-time rather than immediate, and the primary shard count is fixed when the index is created, so capacity planning happens up front.
 ### Elasticsearch/OpenSearch
 **Short:** Distributed inverted-index search engine and JSON document store, widely used as the log-aggregation backend.
 **Kind:** tech
@@ -194,6 +201,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python, cpp
 **Roles:** search-retrieval/ann-index-library @1, data-stores/vector-store @3, applied-ml/recommenders-and-graph-ml @3, runtime-systems/collections-and-algorithms @3
+
+In FAISS the index type is the entire design decision. `IndexFlat` is exact brute force and the correctness baseline; `IVF` partitions the space into cells and searches only `nprobe` of them; `HNSW` walks a navigable small-world graph; and product quantization (`PQ`, `IVFPQ`) compresses each vector into a handful of bytes so a billion of them fit in memory, paying for it in recall. IVF and PQ indexes must be trained on a representative sample before vectors are added, and the GPU implementations make both building and searching enormously faster.
+
+It is a library, not a service, and the gap is the point: no metadata filtering, no updates in place beyond add and remove-by-id, no replication, no query language — just an index you can write to a file and load again. That is what a vector database wraps and operates for you. Reach for FAISS directly for offline retrieval, for benchmarking recall against exact search, and for embedding a searchable index inside a process.
 
 ### FlashRank
 **Short:** Tiny, fast cross-encoder reranking library for resource-constrained RAG deployments.
@@ -225,6 +236,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** search-retrieval/rag-and-document-processing @1, llm-apps/agent-framework @2, applied-ml/nlp-and-text @3
 
+A pipeline is an explicit graph of components - converter, splitter, embedder, retriever, prompt builder, generator, ranker - wired by named inputs and outputs, so a RAG application is a declarative structure you can serialize to YAML, diff, evaluate and serve rather than a chain of ad-hoc calls. Branching, looping and tool-calling agents are expressed in the same graph, and integrations cover the usual document stores and model providers.
+
+Reach for it when a retrieval application has enough moving parts that you want the wiring to be inspectable and swappable - trying a different retriever or reranker becomes a component substitution. For a single retrieve-then-generate call the framework is more structure than the problem needs.
+
 ### haystack-ai
 **Short:** Deepset's pipeline framework for composing retrievers, rankers, prompt builders and generators into RAG apps.
 **Kind:** tech
@@ -236,6 +251,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python, cpp
 **Roles:** search-retrieval/ann-index-library @1
+
+It is a header-only C++ implementation of HNSW with Python bindings, and it stays deliberately small: build an index, add vectors, query it, save and load it. The graph is layered — search starts at a sparse top layer and descends greedily to progressively denser ones — with `M` setting graph degree and memory, `ef_construction` setting build quality, and `ef` traded at query time between recall and latency.
+
+The entire index sits in RAM, which is where its speed and its limit both come from; there is no metadata filtering, no sharding, and no server. Reach for it when you want the best recall-per-millisecond inside your own process and the corpus fits on one machine — a research baseline, an embedded index, a sidecar. Once you need payload filters, multi-tenancy, or durability, that is a vector database's job.
 
 ### Jina Embeddings
 **Short:** Open-weight embedding model family with long context windows and multilingual variants for retrieval.
@@ -321,6 +340,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** search-retrieval/rag-and-document-processing @1, llm-apps/agent-framework @2, llm-apps/prompting-context-and-structured-output @3, search-retrieval/ann-index-library @3
 
+The pipeline is explicit and each stage is replaceable: readers pull documents from a source, node parsers split them into chunks with metadata, an index sits over the nodes, a retriever fetches candidates, and a query engine assembles them into a prompt with a response mode such as compacting everything into one call or summarizing hierarchically when the context will not fit. Its value is that the advanced retrieval patterns arrive as components rather than as papers you have to implement: sentence-window and auto-merging retrieval, recursive retrieval over document hierarchies, hypothetical-document and decomposition query transforms, and rerankers.
+
+Reach for it when the hard part of your application is getting the right chunks in front of the model. When the hard part is agent control flow, tool orchestration and state across steps, an agent framework is the better spine and this becomes the retrieval tool it calls.
+
 ### LlamaIndex HierarchicalNodeParser
 **Short:** LlamaIndex parser producing parent-child chunk hierarchies so retrieval can match small nodes but return larger context.
 **Kind:** api
@@ -375,6 +398,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** search-retrieval/lexical-and-hybrid-search @1, search-retrieval/ann-index-library @3
 
+Lucene is a library, not a server. An analyzer chain turns text into terms, documents are written into immutable segments that background merges consolidate, and queries walk the postings lists scoring with BM25; it also indexes dense vectors with HNSW so lexical and vector search share one index and one query path.
+
+Almost everyone meets it through Elasticsearch, OpenSearch or Solr, which are servers wrapped around it -- so its segment, merge and refresh behaviour is what explains their latency and disk usage. Reach for it directly only when embedding search inside a JVM application with no cluster.
+
 ### Meilisearch
 **Short:** Lightweight search engine focused on instant typo-tolerant full-text results, with optional hybrid vector search.
 **Kind:** tech
@@ -417,6 +444,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** search-retrieval/lexical-and-hybrid-search @1, observability/logging @2, data-stores/vector-store @2
 
+OpenSearch indexes documents into an inverted index and ranks with BM25, sharding both the corpus and the query load across nodes; the same cluster happily stores time-series logs, which is why it so often ends up being both the search engine and the log backend in one deployment. Its k-NN plugin adds vector fields and approximate nearest-neighbour search, so a single query can combine a lexical score with a vector score and filter on structured fields at the same time, instead of joining results from two systems.
+
+Reach for it when you need lexical relevance, filters and aggregations alongside vectors. A dedicated vector database is simpler if lexical search is not part of the requirement.
+
 ### opensearch-haystack
 **Short:** Haystack integration using OpenSearch as the document store, supporting BM25, kNN and hybrid retrieval.
 **Kind:** tech
@@ -440,6 +471,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** search-retrieval/lexical-and-hybrid-search @1, search-retrieval/ann-index-library @2, ml-lifecycle/evaluation-and-benchmarks @3
+
+It wraps Anserini and Lucene for sparse retrieval — BM25, RM3 query expansion, and learned impact indexes such as SPLADE and uniCOIL — and FAISS for dense retrieval, behind one Python searcher API, with hybrid fusion of the two. Prebuilt indexes and the matching topics and qrels for standard collections like MS MARCO, BEIR, and TREC ship with it, so reproducing a published baseline is a few lines instead of a week of indexing.
+
+Reach for it when the question is how good is my retrieval, not how do I serve it: measuring nDCG, MRR, and recall@k against real qrels before you commit to a production stack, or checking whether your embedding model actually beats BM25 on your domain. It is a research and evaluation harness, it needs a JVM for the Lucene half, and it is not built to be a serving system.
 
 ### QuestionAnswerAdvisor
 **Short:** Spring AI advisor that retrieves from a vector store and injects the context into the prompt; naive RAG in one bean.
@@ -471,6 +506,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** search-retrieval/lexical-and-hybrid-search @1
 
+You hand it a list of already-tokenized documents, it computes term-frequency statistics in memory, and `get_scores(query_tokens)` returns a BM25 score per document; that is essentially the whole API, with `BM25Okapi`, `BM25L` and `BM25Plus` as scoring variants. It exists so a hybrid retrieval pipeline can add a lexical signal beside dense embeddings, which is what rescues the exact matches that vectors blur, such as product codes, error strings and rare proper nouns. Scoring is a linear scan over the corpus with no inverted index and no persistence, so it is fine for a few thousand chunks in a notebook or a prototype and the wrong tool beyond that, where Elasticsearch, OpenSearch or a store with native BM25 belongs.
+
 ### RetrievalAugmentationAdvisor
 **Short:** Spring AI advisor that retrieves from a VectorStore and injects the context into the prompt for naive or advanced RAG.
 **Kind:** api
@@ -483,6 +520,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** search-retrieval/ann-index-library @1
 
+ScaNN's distinguishing idea is anisotropic vector quantization: it learns a quantization that penalises error along the direction which actually changes an inner product, rather than minimising plain reconstruction error, which buys higher recall at the same compression than ordinary product quantization. A search runs three tunable phases -- partition to select candidate regions, score them with the quantized approximation, then exactly re-rank a small top set -- so the recall-versus-latency curve is something you dial rather than accept. It is a library you build an index with in-process, aimed at maximum inner-product search over large, mostly static corpora. Reach for it when throughput at very large scale matters more than convenience; if you need metadata filtering, frequent updates, or a service rather than a library, FAISS or a vector database is the practical choice.
+
 ### Self-RAG GitHub
 **Short:** The original Self-RAG paper code and Llama-2 7B/13B fine-tunes that emit retrieve/critique reflection tokens.
 **Kind:** tech
@@ -494,6 +533,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** search-retrieval/ann-index-library @1, applied-ml/nlp-and-text @2, search-retrieval/reranking @3, search-retrieval/rag-and-document-processing @3
+
+A raw transformer gives you per-token vectors; this library wraps encoder, pooling and normalization into one module so `model.encode(texts)` returns comparable fixed-size sentence vectors, batched, sorted by length and moved to GPU for you. That is the practical difference between having an embedding model and having embeddings.
+
+The training half matters as much: contrastive losses such as MultipleNegativesRanking, evaluators for semantic-similarity and retrieval benchmarks, and a trainer - which is how you fine-tune an embedding model on your own query and positive-passage pairs and beat a general-purpose model on domain data. `CrossEncoder` is the complementary piece of a retrieval stack, scoring a query and document jointly for far better accuracy at far worse speed, so it reranks the top-k an ANN index returned rather than searching. Match the model's maximum sequence length to your chunk size: anything past it is truncated silently.
 
 ### sentence-transformers CrossEncoder
 **Short:** sentence-transformers class that scores a query and document jointly for second-stage reranking of retrieved candidates.
@@ -542,6 +585,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** search-retrieval/rag-and-document-processing @1
+
+It routes a file by type, using layout models and OCR for a scanned PDF and native parsers for `.docx`, HTML, email and slides, and returns a list of typed elements such as `Title`, `NarrativeText`, `Table` and `ListItem`, each carrying metadata like page number and source, instead of one undifferentiated blob of text. Those types are what make structure-aware chunking possible, so a section stays with its heading and a table survives as a unit rather than being sliced through the middle, which is one of the most common causes of nonsense context in RAG. Reach for it when the corpus is real-world documents in mixed formats. The high-resolution strategies are slow and model-backed, so partition once into a store rather than on every query.
 
 ### Vector index
 **Short:** Generic term for the structure that makes embedding similarity search fast, from brute-force flat to HNSW or IVF.

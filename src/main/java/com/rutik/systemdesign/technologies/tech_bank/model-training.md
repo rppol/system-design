@@ -15,6 +15,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/distributed-training @1, gpu/multi-gpu-and-collectives @3
 
+You keep your own PyTorch training loop and let `Accelerator()` prepare the model, optimizer, scheduler, and dataloaders; the same script then runs on CPU, a single GPU, multi-GPU DDP, FSDP, DeepSpeed, or TPU depending on an `accelerate config` file and `accelerate launch` flags, with no `if distributed` branches, no manual `.to(device)`, and no hand-written sampler sharding. Mixed precision, gradient accumulation, and gradient clipping are flags on the same object.
+
+It also handles loading a model too large for one GPU by sharding it across devices and CPU or disk offload. Reach for it when you want distributed training without adopting a whole framework or rewriting your loop as a Trainer subclass — it is the layer underneath the `transformers` Trainer and most diffusion training scripts, so understanding it explains their behaviour too.
+
 ### Adan
 **Short:** Adaptive Nesterov momentum optimizer (Xie et al. 2022) reporting faster convergence than Adam on vision and NLP.
 **Kind:** concept
@@ -57,11 +61,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/fine-tuning-and-peft @1, model-training/alignment-and-rl @3
 
+The whole run lives in one YAML file: base model, dataset paths and format, whether this is continued pretraining or SFT, LoRA/QLoRA rank and target modules, sequence length and sample packing, and the DeepSpeed or FSDP config for multi-GPU. It wraps `transformers`, `peft`, and `trl` underneath, so you get their behaviour without writing a training loop, and the config file itself becomes the reproducibility record.
+
+Its practical advantage is dataset flexibility — it understands a range of instruction and chat formats and applies the model's chat template for you, which is where hand-rolled fine-tunes most often go wrong. Reach for it when you want a repeatable fine-tune from a config; drop to `trl` or plain PyTorch when you need a custom loss, a nonstandard data pipeline, or RL-style training it does not express.
+
 ### CatBoost
 **Short:** Gradient-boosted decision trees with ordered boosting and native categorical handling; strong on tabular data.
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/classical-ml-and-boosting @1
+
+Its signature idea is ordered target statistics: to encode a categorical value it uses only the rows preceding that one in a random permutation, so the encoding for a row never sees that row's own target. That is what stops the target leakage plain mean-encoding produces, and it is why you pass raw category columns through `cat_features` with no manual encoding step and no leakage-prone preprocessing to get wrong. Ordered boosting applies the same permutation trick to the gradient estimates.
+
+Its trees are symmetric — every node at a given depth splits on the same feature and threshold — which acts as a regularizer and makes inference very fast, since scoring becomes an index computation rather than a branchy walk; missing values, text and embedding features are handled natively too. Reach for it first on tabular data with high-cardinality categoricals; LightGBM often trains faster on wide numeric data, and comparing the two is cheap enough to be worth doing.
 
 ### CatBoost 1.2+
 **Short:** Gradient-boosted decision trees with ordered boosting, native categorical handling and symmetric (oblivious) trees.
@@ -74,6 +86,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/classical-ml-and-boosting @1, ml-lifecycle/ml-platform-and-pipelines @3
+
+It is a set of scikit-learn transformers for turning high-cardinality categorical columns into numbers without one-hot's width explosion: target, CatBoost, James-Stein and M-estimate encoders replace a category with a smoothed statistic of the target, while binary, base-N and hashing encoders compress the identity into a few columns. All follow the `fit`/`transform` contract and accept DataFrames, so they drop straight into a `Pipeline` and a `ColumnTransformer`. The trap is leakage -- any target-based encoding computed on rows that also train the model lets the label leak into a feature, and this library's `TargetEncoder` smooths with a sigmoid weighted by `min_samples_leaf` and does not cross-fit, so wrap it in a fold-aware wrapper such as `NestedCVWrapper` or fit it separately inside each CV fold. Reach for it when a categorical has thousands of levels and one-hot is impractical; for a handful of levels, plain one-hot is safer and simpler.
 
 ### CleanRL
 **Short:** Single-file, dependency-light reference implementations of RL algorithms, aimed at learning not production.
@@ -98,6 +112,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/distributed-training @1, model-training/deep-learning-framework @3
+
+ZeRO removes the redundancy in data-parallel training by partitioning optimizer state across ranks at stage 1, gradients as well at stage 2, and the parameters themselves at stage 3, gathering each shard only when needed. That trades extra communication for memory, and the offload options push optimizer state or parameters to CPU RAM or NVMe when even the sharded copy will not fit.
+
+Reach for it when the model does not fit the GPUs you have. PyTorch's own FSDP now covers much of the stage-3 ground natively, so the reasons to pick DeepSpeed specifically are the offload tiers, pipeline parallelism and its fused kernels.
 
 ### DeepSpeed ZeRO
 **Short:** DeepSpeed's ZeRO optimizer sharding states, gradients and parameters across ranks to fit larger training jobs.
@@ -146,6 +164,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/distributed-training @1, model-training/deep-learning-framework @3, runtime-systems/memory-processes-and-os @3
+
+Parameters, gradients and optimizer state are sharded across ranks; a unit's full parameters are all-gathered just before its forward and backward and freed immediately after, so peak memory falls roughly with world size in exchange for extra communication. That trade is what makes a model too large for one GPU trainable at all, and it is why the wrapping granularity matters: wrap too coarsely and the peak barely moves, too finely and the collectives dominate the step.
+
+FSDP2 (`fully_shard`) applies bottom-up per transformer block and represents each shard as a DTensor, which lets it compose with tensor or pipeline parallelism, `torch.compile` and per-parameter mixed precision instead of fighting them. In practice it is paired with activation checkpointing and bf16, and the first thing to check when throughput disappoints is whether communication is overlapping with compute.
 
 ### FullyShardedDataParallel
 **Short:** PyTorch wrapper that shards parameters, gradients and optimizer state across ranks, the ZeRO-3 equivalent.
@@ -201,6 +223,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/distributed-training @1, gpu/multi-gpu-and-collectives @2
 
+It was designed so that a single-GPU training script becomes distributed with a handful of lines: initialize, pin the process to a GPU by local rank, shard the dataset, broadcast the initial variables so every worker starts identical, and wrap the optimizer so gradients are averaged before the update. The averaging uses ring all-reduce over NCCL or MPI, where each worker exchanges only with its neighbours, so bandwidth per worker stays constant as the cluster grows instead of converging on one parameter server. Launch is through its own runner or through mpirun.
+
+Reach for it for TensorFlow, or for a shop running more than one framework that wants a single distribution layer. For PyTorch specifically, distributed data parallel is native, uses the same collectives underneath, and is what most current code and documentation assume.
+
 ### Hugging Face PEFT
 **Short:** Hugging Face library for parameter-efficient fine-tuning: LoRA, QLoRA, prefix tuning and adapter merging.
 **Kind:** tech
@@ -231,6 +257,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/fine-tuning-and-peft @1, inference/quantization-and-compression @3
 
+Wrapping a loaded model with `get_peft_model` freezes the base weights and injects small low-rank matrices into the targeted projection modules; only those train, so optimizer state and gradients shrink by orders of magnitude and the artifact you ship is an adapter of a few megabytes rather than a full checkpoint. That is what makes per-tenant or per-task variants practical - adapters can be stored, swapped and even served against one shared base model.
+
+It composes with quantized loading through `prepare_model_for_kbit_training`, which is the QLoRA recipe, and `merge_and_unload()` folds the adapter back into the base weights so inference has no runtime overhead at all. The choices that decide quality are which modules to target and what rank and alpha to use; adapting only the attention projections is cheaper but consistently weaker than including the MLP projections.
+
 ### HuggingFace Trainer
 **Short:** The transformers training loop: model, dataset and TrainingArguments in, steps, eval and checkpoints out.
 **Kind:** api
@@ -249,17 +279,27 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/classical-ml-and-boosting @1, ml-lifecycle/labeling-and-synthetic-data @2
 
+It adds sampler objects following a scikit-learn-style `fit_resample` convention: oversamplers that synthesize minority points by interpolating between neighbours (`SMOTE`, `ADASYN`, and variants for categorical features), undersamplers that drop or clean majority points (`RandomUnderSampler`, `TomekLinks`, `NearMiss`), and ensembles such as `BalancedRandomForestClassifier` that resample inside each bootstrap.
+
+The trap it helps with is also easy to fall into while using it: resampling must happen inside the cross-validation fold and never before the split, or synthetic points derived from validation rows leak and the reported score is fiction — which is exactly why you use `imblearn.pipeline.Pipeline` rather than scikit-learn's when a sampler is one of the steps. Try class weights and a tuned decision threshold first; on many problems they match resampling with far less machinery.
+
 ### Isaac Lab
 **Short:** NVIDIA GPU robot-learning framework on Isaac Sim: thousands of parallel physics environments for RL.
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/alignment-and-rl @1, ml-lifecycle/labeling-and-synthetic-data @2, applied-ml/vision-speech-and-multimodal @3
 
+Everything stays on the GPU - physics stepping, observations, rewards and resets are batched tensors - so thousands of copies of the same robot advance in parallel and a policy collects orders of magnitude more experience per wall-clock second than a CPU simulator allows. Environments, robot assets and task templates ship with it, and it plugs into standard RL libraries rather than replacing them.
+
+The purpose is sim-to-real: train under domain randomization over physics parameters, textures and sensor noise so the policy survives the gap to hardware, and generate synthetic demonstration data where real robot time is the scarce resource. It needs an NVIDIA GPU and the Isaac Sim stack, which is the practical barrier to trying it.
+
 ### JAX
 **Short:** Functional array framework with composable grad/vmap/jit transforms, XLA-compiled to GPU and TPU.
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1, inference/compiler-and-runtime-optimization @2, gpu/kernel-programming @3
+
+It is the NumPy API plus composable function transformations: `grad` differentiates a pure function, `vmap` adds a batch dimension without rewriting the code, `jit` compiles it through XLA, and `pmap` or `shard_map` spread it across devices. The functional constraint is real, since arrays are immutable, state is threaded explicitly and randomness takes an explicit key, and that is both what makes the transformations composable and reproducible and what makes the code feel foreign coming from PyTorch. Reach for it for research where you differentiate or vectorize unusual mathematics, and for TPU work where XLA is the native path. Neural-network layers come from Flax or Equinox, because JAX itself deliberately ships none.
 
 ### JAX/Flax
 **Short:** Google's functional array framework with jit/grad/vmap and XLA compilation, plus Flax layers; TPU-native.
@@ -315,6 +355,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** model-training/classical-ml-and-boosting @1, applied-ml/recommenders-and-graph-ml @2, applied-ml/timeseries-and-anomaly @3
 
+Two design choices explain the speed: continuous features are bucketed into histograms once, so split-finding scans bins rather than sorted values, and trees grow leaf-wise, always splitting the leaf with the largest loss reduction, instead of level by level. Leaf-wise growth reaches a lower loss for the same number of leaves and overfits more readily on small data, which is why `num_leaves` and `min_data_in_leaf` are the parameters that matter most. It handles categorical features natively without one-hot encoding, offers `lambdarank` for learning-to-rank, and takes `scale_pos_weight` or `is_unbalance` for skewed classes. Treat it as the first model to try on tabular and ranking problems and as the baseline any deep-learning proposal has to beat.
+
 ### LightGBM 4.0+
 **Short:** Histogram-based gradient boosting library: leaf-wise growth, native categoricals, and the fastest CPU training.
 **Kind:** tech
@@ -339,12 +381,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/fine-tuning-and-peft @1, model-training/alignment-and-rl @2
 
+It is a configuration layer over the standard stack — `transformers`, `peft`, `trl`, DeepSpeed — rather than a new training engine. You point a YAML file (or the web UI) at a base model and a dataset registered in one of its supported formats, choose the stage (continued pretraining, supervised fine-tuning, reward modelling, DPO or PPO) and the method (full fine-tune, LoRA, QLoRA), and it assembles the trainer, quantization, distributed setup and adapter merging.
+
+Reach for it to get a fine-tune running today, and to compare methods or base models quickly without rewriting a script for each. The moment you need a custom loss, a non-standard data pipeline or a modification inside the training loop, drop down to `trl` and `peft` directly — the abstraction that saved you time becomes the thing you are fighting.
+
 ### llm-foundry
 **Short:** MosaicML/Databricks training stack for pretraining and finetuning LLMs, with WSD schedules and built-in monitoring.
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/distributed-training @1, model-training/fine-tuning-and-peft @2
 
+llm-foundry is the training stack MosaicML built and Databricks now maintains: YAML-configured pretraining and finetuning runs for LLMs, using Composer for the training loop and callbacks, streaming datasets read directly from object storage so nodes do not need the corpus on local disk, FSDP for sharding, and deterministic resumption from checkpoints when a node dies mid-run.
+
+Its warmup-stable-decay learning rate schedule is the part worth knowing: the rate stays flat through the bulk of training and only decays at the end, so a run can be extended or branched from the stable phase without having committed to a total step count in advance. Reach for it when you want a configuration-file path to a real multi-node run rather than assembling the loop yourself; for the largest models, stacks built around tensor and pipeline parallelism go further.
 ### LM-Cocktail
 **Short:** Weight-merging method that blends a domain fine-tune back with the base model to keep general ability.
 **Kind:** tech
@@ -369,6 +418,9 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/distributed-training @1, gpu/multi-gpu-and-collectives @2, model-training/deep-learning-framework @3, model-training/fine-tuning-and-peft @3
 
+Megatron-LM is NVIDIA's reference implementation of the parallelism strategies that make training beyond a single GPU's memory possible. Tensor parallelism splits the weights of each matrix multiply across GPUs inside a node, where the interconnect is fastest. Pipeline parallelism assigns contiguous layer ranges to stages on different nodes and keeps them busy by streaming microbatches through, and sequence or context parallelism splits activation memory along the sequence dimension. Layered with ordinary data parallelism, these form the grid you tune so that memory fits and the interconnect never idles.
+
+Reach for it for pretraining and continued pretraining at the scale where a single node is not an option — the 70B-and-above range this repository keeps pointing at. For a single-node finetune it is far heavier machinery than the job needs, and its parallelism now also ships as a library embedded inside other training frameworks.
 ### mergekit
 **Short:** Toolkit for merging model checkpoints: SLERP, TIES, DARE, linear and passthrough recipes without retraining.
 **Kind:** tech
@@ -405,11 +457,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** cpp, python
 **Roles:** model-training/alignment-and-rl @1, llm-apps/agentic-environments @3, applied-ml/vision-speech-and-multimodal @3
 
+It solves contact dynamics in generalized coordinates with a soft, convex contact model, which stays stable at large timesteps and runs far faster than real time. That speed is what makes reinforcement learning, which needs millions of environment steps, practical at all. Models are declared in MJCF XML, and the Gymnasium locomotion tasks built on it are the standard benchmark for continuous-control algorithms such as SAC, TD3 and PPO. It is equally the workhorse for sim-to-real, where randomizing masses, friction and actuation delay across many parallel simulations is how a policy survives contact with real hardware. It is Apache-2.0 open source and maintained by Google DeepMind, with an MJX variant for batched GPU rollouts.
+
 ### Nanotron
 **Short:** HuggingFace's minimal LLM pre-training framework with clean 3D (data/tensor/pipeline) parallelism.
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/distributed-training @1, model-training/fine-tuning-and-peft @2, model-training/deep-learning-framework @3
+
+Nanotron is a small, readable implementation of 3D parallelism — data, tensor and pipeline — for pre-training language models, written to be read rather than only configured. The parallelism logic, the parameter sharding and the pipeline schedule are visible in the code, which is what makes it a reasonable base for understanding how a large training run is actually split across hundreds of GPUs, or for modifying that behaviour.
+
+Reach for it when the goal is comprehension or a mid-scale pre-training run you want to be able to reason about. For very large production runs, the heavily optimized alternatives carry more accumulated kernel work and more operational scar tissue, which is worth more than readability once a run costs real money per hour.
 
 ### NeMo-RL
 **Short:** NVIDIA's post-training RL library for GRPO/RLVR-style reinforcement learning on large models across many GPUs.
@@ -453,6 +511,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/alignment-and-rl @1, model-training/distributed-training @2
 
+The components of an RLHF loop - actor, critic, reward model, reference model and a vLLM engine doing rollout generation - are placed as separate Ray actors, so each can own its own GPUs and the generation step runs at inference-engine speed instead of inside the training framework. Generation is normally the bottleneck in PPO, so that separation is the reason the design exists rather than an implementation detail.
+
+It implements the surrounding recipe too: supervised fine-tuning, reward modeling, DPO, and the on-policy algorithms PPO, GRPO and REINFORCE++. Reach for it when a run outgrows one machine and a single-process trainer stops fitting; for a small model on one node, TRL is dramatically less to configure and operate.
+
 ### Optax
 **Short:** JAX optimizer library built from composable gradient transformations chained into schedules and clipping.
 **Kind:** tech
@@ -477,6 +539,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/classical-ml-and-boosting @1, applied-ml/timeseries-and-anomaly @3
 
+Models are built compositionally: a distribution is an object, a mixture is a set of distributions with weights, a hidden Markov model is a set of states each holding a distribution, and a Bayesian network is a graph of them, so a mixture of exponential and Poisson components is as easy to express as a Gaussian one. Fitting uses expectation-maximization, and the models tolerate missing data and out-of-core batches. It now sits on PyTorch tensors, which brings GPU execution and autograd along. Reach for it when you want a generative model whose structure and parameters you can read and defend, for anomaly detection or sequence segmentation, rather than the single Gaussian mixture scikit-learn offers.
+
 ### Process Reward Models
 **Short:** Reward models scoring each reasoning step instead of the final answer, a cheap value signal for search and RL.
 **Kind:** concept
@@ -495,11 +559,18 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/classical-ml-and-boosting @1, applied-ml/interpretability-fairness-and-causal @2
 
+In PyMC you write the generative story of your data directly — priors, deterministic transforms, and a likelihood — inside a model context block, and the library compiles that graph, derives gradients, and samples the posterior with NUTS, or approximates it variationally when sampling is too slow. What comes back is a distribution over every parameter rather than a point estimate, so uncertainty, credible intervals and hierarchical partial pooling across groups are first-class rather than bolted on.
+
+Reach for it when data per group is thin and pooling helps, when you need calibrated uncertainty rather than a number, or when domain knowledge deserves to be an explicit prior — small-sample A/B tests, hierarchical forecasting, measurement models. The cost is inference time and the need to check convergence; it does not compete with gradient boosting for raw predictive accuracy on large tabular data.
 ### PyTorch
 **Short:** Tensor and autograd framework with dynamic graphs; the default runtime for training and running deep models on GPU.
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1, model-training/distributed-training @3, inference/compiler-and-runtime-optimization @3, runtime-systems/collections-and-algorithms @3
+
+You write ordinary Python and the framework records a tape of the tensor operations that actually executed, so `loss.backward()` differentiates the graph that ran — there is no separate graph-definition phase, which is why a `print` statement or a breakpoint mid-model just works. Tensors carry a device, so `.to("cuda")` moves the work and every operation dispatches a GPU kernel, usually into cuBLAS or cuDNN; `torch.compile` traces and fuses the graph ahead of time to cut kernel-launch and memory-traffic overhead where eager execution leaves performance on the table.
+
+Around that core sit the layers, losses and optimizers in `torch.nn` and `torch.optim`, `DataLoader` with pinned memory and non-blocking copies for feeding the GPU, and `DistributedDataParallel` and FSDP for multi-GPU and multi-node training. It is also the runtime that inference engines such as vLLM build on, which is why their wheels are pinned to a specific PyTorch version. Reach for it as the default for anything neural; for tabular problems a gradient-boosting library is usually both stronger and much cheaper.
 
 ### PyTorch 2.x
 **Short:** The dominant tensor and autograd framework; 2.x adds torch.compile graph capture, Inductor codegen and FSDP.
@@ -524,6 +595,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1, model-training/distributed-training @2, ml-lifecycle/experiment-tracking-and-tuning @3
+
+You move the model, `training_step`, `validation_step` and optimizer configuration into a LightningModule, and the Trainer owns the loop: device placement, gradient accumulation, mixed precision, checkpointing, early stopping, logging, and the distributed strategy -- DDP, FSDP or DeepSpeed -- selected by a flag rather than by rewriting the script.
+
+Reach for it to stop reimplementing the same loop per project and to go from one GPU to multi-node without touching model code. The cost is indirection: an unusual training scheme -- adversarial, multi-optimizer, custom backward -- fights the hidden loop, and debugging means knowing which hook runs when.
 
 ### PyTorch lr_scheduler
 **Short:** PyTorch learning-rate schedules (CosineAnnealingLR, OneCycleLR, LinearLR, SequentialLR) driven per step or per epoch.
@@ -584,6 +659,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/classical-ml-and-boosting @1, ml-lifecycle/evaluation-and-benchmarks @2, ml-lifecycle/experiment-tracking-and-tuning @3, applied-ml/nlp-and-text @3, applied-ml/timeseries-and-anomaly @3
+
+Everything follows one interface — `fit`, `predict`, `transform` — and that uniformity is what makes `Pipeline` and `ColumnTransformer` the most valuable things in the library rather than a convenience. Putting the scaler, imputer or vectorizer inside a pipeline means cross-validation fits them on training folds only, so leakage stops being something you must remember not to do and becomes structurally impossible.
+
+The breadth covers linear models, trees and forests, SVMs, clustering, decomposition and the surrounding apparatus: `GridSearchCV` and `RandomizedSearchCV`, the splitters that matter for honest evaluation (`GroupKFold`, `TimeSeriesSplit`), probability calibration, and the metric functions that people use to score models trained in entirely different frameworks. Its boundaries are equally clear: single machine, in memory, CPU-first, and no deep learning — so it ends where the data outgrows RAM or the problem needs learned representations rather than engineered features.
 
 ### scikit-learn Pipeline
 **Short:** Chains transformers and an estimator so fitting happens only on training folds, making CV leakage-free.
@@ -777,6 +856,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1, model-training/distributed-training @3, inference/model-server @3, gpu/gpu-math-libraries @3
 
+Keras is the authoring API, tf.function traces Python into a graph that can be optimized and executed without the interpreter in the loop, tf.data builds input pipelines that prefetch and parallelize so the accelerator is not left idle, and SavedModel is the portable artifact everything downstream consumes. That artifact is the reason to choose it: the same export feeds TensorFlow Serving, the mobile and embedded runtime, and the browser, and TPU support is first-class.
+
+Reach for it when you are working in an existing TensorFlow codebase, targeting TPUs, or need that mobile and edge deployment path. For new research and most new model code, PyTorch is where the ecosystem, the papers and the pretrained checkpoints are, so starting here is a deliberate choice rather than the default.
+
 ### TensorFlow MirroredStrategy
 **Short:** TensorFlow's synchronous single-host multi-GPU strategy: mirrors variables and all-reduces gradients each step.
 **Kind:** api
@@ -927,6 +1010,8 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/distributed-training @1, gpu/multi-gpu-and-collectives @2
 
+Given `--nproc_per_node`, torchrun starts one process per GPU and sets the environment the distributed backend expects -- `RANK`, `LOCAL_RANK`, `WORLD_SIZE`, `MASTER_ADDR`, `MASTER_PORT` -- so `init_process_group("nccl")` and `DistributedDataParallel` find each other without you threading ranks through your own code; the conventional first line of the script is setting the current CUDA device from `LOCAL_RANK`. Multi-node runs use a rendezvous backend rather than a hand-picked master, and it supports elastic membership and restarting the whole worker group on failure, which is why it superseded `torch.multiprocessing.spawn` and the older launch module. It is a launcher and nothing more: it starts processes and coordinates rendezvous, and it does nothing about data sharding -- that is `DistributedSampler`'s job, and forgetting it means every rank trains on identical batches. Reach for it for any multi-GPU PyTorch training; under a cluster scheduler, SLURM's `srun` or a Kubernetes job can fill the same role.
+
 ### torchsummary
 **Short:** Small library printing a Keras-style PyTorch model summary: per-layer output shapes and parameter counts.
 **Kind:** tech
@@ -950,6 +1035,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/alignment-and-rl @1, model-training/fine-tuning-and-peft @2
+
+Its trainers subclass the HuggingFace `Trainer`, so datasets, `accelerate`, PEFT adapters and DeepSpeed integration all work unchanged. `SFTTrainer` does supervised fine-tuning; `DPOTrainer` aligns straight from a preference dataset with no reward model at all; `GRPOTrainer` and `RLOOTrainer` do online RL against a reward function; `RewardTrainer` trains the reward model when you do want one.
+
+Reach for it after supervised fine-tuning when you need preference alignment and do not want to implement the objective yourself. Pin the version: the trainers listed above are the stable surface, while PPO and ORPO live in `trl.experimental` and can change in any release.
 
 ### TRL GRPOTrainer
 **Short:** Hugging Face TRL trainer implementing GRPO - group-relative policy optimization - the easiest entry to RL fine-tuning.
@@ -981,6 +1070,10 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** model-training/fine-tuning-and-peft @1, inference/quantization-and-compression @3
 
+It patches the model implementation with hand-written Triton kernels and a manual backward pass for the adapter path, so the arithmetic is unchanged but each step uses far less memory and time; 4-bit QLoRA is supported directly, and it slots under the normal `SFTTrainer` and `DPOTrainer` you would use anyway, exporting merged or GGUF weights at the end.
+
+Reach for it when you are fine-tuning on a single GPU and VRAM is the binding constraint -- that is the case it is built for and where the speedups are real. A large multi-node run belongs on FSDP or DeepSpeed instead, and each supported model family needs its own patch, so a brand-new architecture may not be covered yet.
+
 ### Unsloth GRPO
 **Short:** Unsloth's memory-efficient GRPO trainer, letting a 7B model do QLoRA reinforcement learning on a single 24GB GPU.
 **Kind:** tech
@@ -999,11 +1092,17 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** model-training/classical-ml-and-boosting @1, applied-ml/recommenders-and-graph-ml @2, model-training/alignment-and-rl @3
 
+It learns online, one example at a time, from a sparse text format and the hashing trick, so memory is bounded by the hash table rather than by vocabulary size and a dataset far larger than RAM streams off disk in a single pass. That design makes it the standard tool for production contextual bandits: it implements the exploration policies and the off-policy evaluation you need to score a candidate policy against logged traffic, so a ranker can learn from its own impressions instead of waiting for a nightly retrain. Reach for it for extreme-scale sparse text classification or a bandit-driven ranking loop; for ordinary batch tabular problems a boosted-tree library is more accurate and much easier to operate.
+
 ### XGBoost
 **Short:** Gradient-boosted decision tree library; the default tabular and learning-to-rank baseline, with CPU/GPU hist training.
 **Kind:** tech
 **Lang:** python, java, cpp
 **Roles:** model-training/classical-ml-and-boosting @1, applied-ml/recommenders-and-graph-ml @2, gpu/gpu-math-libraries @3
+
+Trees are grown over histogram-binned features with second-order gradients, missing values are handled by learning a default branch direction at each split rather than requiring imputation, and overfitting is controlled by shrinkage, row and column subsampling and explicit L1/L2 penalties. That combination is why it remains hard to beat on tabular data without heavy tuning, and why it is the baseline any deep-learning approach on tables has to justify itself against.
+
+The modern API is smaller than the folklore suggests: `tree_method="hist"` covers CPU and GPU with `device="cuda"` selecting the accelerator, categorical features are supported natively without one-hot encoding, and `early_stopping_rounds` is a constructor argument rather than a `fit()` keyword. Ranking objectives make it a standard learning-to-rank model too. Tune depth, learning rate and subsampling together with early stopping on a genuine validation split, and remember trees cannot extrapolate outside the range they were trained on.
 
 ### XGBoost 2.0+
 **Short:** Gradient-boosted tree library with GPU hist training, regularized objectives and multi-output support.
