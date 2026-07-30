@@ -317,126 +317,727 @@ const STUDY_ORDER = {
 // form as STUDY_ORDER and MUST stay in sync with that section's README
 // "Learning Paths" list (LLM was the pilot; ML, Java, Spring now live too).
 const STUDY_PATHS = {
+  cs_fundamentals: {
+    senior: [
+      "cs_fundamentals/complexity_analysis_and_big_o",
+      "cs_fundamentals/number_systems_and_bit_manipulation",
+      "cs_fundamentals/recursion_and_problem_solving_patterns",
+      "cs_fundamentals/arrays_strings_and_hashing",
+      "cs_fundamentals/linked_lists_stacks_and_queues",
+      "cs_fundamentals/trees_and_binary_search_trees",
+      "cs_fundamentals/heaps_and_priority_queues",
+      "cs_fundamentals/graphs_tries_and_advanced_structures",
+      "cs_fundamentals/sorting_and_searching",
+      "cs_fundamentals/dynamic_programming",
+      "cs_fundamentals/greedy_and_divide_and_conquer",
+      "cs_fundamentals/graph_and_string_algorithms",
+      "cs_fundamentals/dsa_patterns",
+      "cs_fundamentals/processes_threads_and_context_switching",
+      "cs_fundamentals/cpu_scheduling_algorithms",
+      "cs_fundamentals/memory_management_and_virtual_memory",
+      "cs_fundamentals/deadlocks_and_synchronization",
+    ],
+    principal: [],
+    seniorFiles: {},
+    principalFiles: {},
+    cases: { senior: [], principal: [] },
+  },
   cuda: {
-    interview: [
-      "cuda/gpu_computing_foundations","cuda/gpu_hardware_architecture",
-      "cuda/cuda_programming_model_and_kernels","cuda/warps_and_simt_execution","cuda/cuda_memory_model_and_hierarchy","cuda/memory_management_and_data_transfer",
-      "cuda/memory_coalescing_and_access_patterns","cuda/shared_memory_and_bank_conflicts","cuda/occupancy_and_launch_configuration","cuda/synchronization_and_atomics","cuda/parallel_patterns_reduction_scan_histogram","cuda/warp_level_primitives_and_cooperative_groups",
-      "cuda/streams_events_and_concurrency","cuda/tensor_cores_and_mixed_precision",
-      "cuda/profiling_and_performance_analysis","cuda/debugging_correctness_and_numerics",
+    senior: [
+      "cuda/gpu_computing_foundations",
+      "cuda/gpu_hardware_architecture",
+      "cuda/cuda_programming_model_and_kernels",
+      "cuda/warps_and_simt_execution",
+      "cuda/cuda_memory_model_and_hierarchy",
+      "cuda/memory_management_and_data_transfer",
+      "cuda/memory_coalescing_and_access_patterns",
+      "cuda/shared_memory_and_bank_conflicts",
+      "cuda/occupancy_and_launch_configuration",
+      "cuda/synchronization_and_atomics",
+      "cuda/parallel_patterns_reduction_scan_histogram",
+      "cuda/warp_level_primitives_and_cooperative_groups",
+      "cuda/streams_events_and_concurrency",
+      "cuda/tensor_cores_and_mixed_precision",
+      "cuda/profiling_and_performance_analysis",
+      "cuda/debugging_correctness_and_numerics",
     ],
-  },
-  llm: {
-    interview: [
-      "llm/foundations_and_architecture","llm/tokenization_and_embeddings","llm/embeddings_and_similarity_search","llm/pre_training",
-      "llm/fine_tuning","llm/alignment_and_rlhf",
-      "llm/prompt_engineering","llm/rag_fundamentals","llm/advanced_rag","llm/context_engineering","llm/reasoning_models",
-      "llm/agents_and_tool_use","llm/agentic_workflow_patterns","llm/multi_agent_systems","llm/mcp_model_context_protocol",
-      "llm/inference_and_decoding","llm/context_windows_and_long_context","llm/inference_engines","llm/vllm_deep_dive","llm/optimization_and_quantization",
-      "llm/deployment_and_mlops","llm/llm_caching","llm/token_economics_and_cost_optimization","llm/llm_routing_and_model_selection",
-      "llm/evaluation_and_benchmarks","llm/error_analysis_and_eval_design","llm/llm_testing_strategies","llm/guardrails_and_content_safety",
-      "llm/safety_and_alignment","llm/llm_security","llm/mixture_of_experts",
-    ],
-  },
-  ml: {
-    interview: [
-      "ml/probability_and_statistics","ml/optimization_theory","ml/information_theory",
-      "ml/supervised_learning","ml/ensemble_methods","ml/unsupervised_learning","ml/feature_engineering","ml/model_evaluation_and_selection","ml/imbalanced_data_and_leakage_traps",
-      "ml/neural_network_fundamentals","ml/convolutional_neural_networks","ml/recurrent_neural_networks","ml/training_deep_networks",
-      "ml/natural_language_processing","ml/recommender_systems",
-      "ml/ml_system_design","ml/data_pipelines_and_processing","ml/experiment_tracking_and_versioning","ml/model_serving_and_inference","ml/model_compression_and_efficiency","ml/monitoring_and_drift_detection","ml/mlops_and_ci_cd",
-      "ml/interpretability_and_explainability",
-      "ml/ml_interview_patterns","ml/model_selection_and_algorithm_choice",
-    ],
-  },
-  java: {
-    interview: [
-      "java/core_language","java/strings_and_text","java/generics_and_type_system","java/exceptions_and_io","java/json_processing_jackson",
-      "java/java8_features","java/java_streams","java/java9_to_21_features",
-      "java/jvm_internals","java/concurrency","java/collections_internals","java/design_patterns_in_java","java/java_memory_model",
-      "java/java_interview_patterns","java/testing_junit_mockito",
-      "java/structured_concurrency_and_loom","java/jdbc_and_database",
-    ],
-  },
-  spring: {
-    interview: [
-      "spring/ioc_container","spring/bean_lifecycle","spring/dependency_injection","spring/spring_configuration",
-      "spring/spring_proxies","spring/spring_aop",
-      "spring/spring_boot_autoconfiguration","spring/spring_boot_actuator",
-      "spring/spring_mvc_architecture","spring/request_handling","spring/filters_and_interceptors","spring/spring_webflux","spring/validation_and_error_handling",
-      "spring/spring_data_jpa","spring/spring_transactions","spring/spring_caching",
-      "spring/spring_security_architecture","spring/spring_security_jwt_oauth",
-      "spring/spring_cloud_patterns","spring/spring_messaging",
-      "spring/spring_testing",
-    ],
-  },
-  lld: {
-    interview: [
-      "lld/solid_principles","lld/creational","lld/structural","lld/behavioral","lld/pattern_comparisons","lld/anti_patterns","lld/system_design_problems",
-    ],
-  },
-  hld: {
-    interview: [
-      "hld/scalability","hld/load_balancing","hld/caching","hld/database_design","hld/cap_theorem","hld/api_design","hld/message_queues","hld/rate_limiting",
-      "hld/cdn","hld/consistent_hashing","hld/database_sharding","hld/microservices","hld/distributed_transactions","hld/resilience_patterns",
-    ],
-  },
-  backend: {
-    interview: [
-      "backend/http_protocols","backend/rest_api_design","backend/grpc_and_protobuf",
-      "backend/connection_pooling_deep_dive","backend/caching_strategies_deep_dive","backend/async_and_concurrency_patterns",
-      "backend/database_internals_and_indexing","backend/query_optimization","backend/distributed_transactions_and_consistency",
-      "backend/fault_tolerance_patterns","backend/rate_limiting_in_depth","backend/observability_and_monitoring",
-      "backend/backend_security_owasp","backend/auth_and_authorization_systems",
-      "backend/event_driven_fundamentals","backend/kafka_deep_dive","backend/microservices_fundamentals","backend/api_gateway_patterns",
-    ],
-  },
-  database: {
-    interview: [
-      "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking",
-      "database/postgresql_internals","database/sql_query_optimization","database/schema_design_and_normalization",
-      "database/document_databases","database/key_value_stores","database/vector_databases",
-      "database/replication_and_high_availability","database/sharding_and_partitioning","database/distributed_transactions","database/consistency_models_and_consensus",
-      "database/database_caching_patterns","database/database_selection_framework",
-    ],
-  },
-  python: {
-    interview: [
-      "python/data_model_and_objects","python/core_language_idioms","python/iterators_and_generators","python/decorators_and_closures","python/context_managers_and_exceptions","python/collections_and_data_structures",
-      "python/cpython_memory_model","python/the_gil_and_free_threading","python/the_type_system_and_typing","python/functional_programming",
-      "python/asyncio_and_event_loop","python/async_patterns_and_pitfalls","python/testing_with_pytest",
-    ],
-  },
-  fastapi: {
-    interview: [
-      "fastapi/fastapi_fundamentals_asgi","fastapi/pydantic_v2_deep_dive","fastapi/dependency_injection_in_fastapi","fastapi/async_database_sqlalchemy","fastapi/authentication_and_security","fastapi/error_handling_and_validation",
-      "fastapi/production_deployment_and_scaling","fastapi/observability_and_monitoring","fastapi/caching_and_performance",
-    ],
+    principal: [],
+    seniorFiles: {},
+    principalFiles: {},
+    cases: { senior: [], principal: [] },
   },
   devops: {
-    interview: [
-      "devops/linux_and_os_fundamentals","devops/networking_for_devops",
-      "devops/containers_and_docker","devops/kubernetes_architecture","devops/kubernetes_workloads_and_objects","devops/kubernetes_networking","devops/kubernetes_scheduling_and_autoscaling","devops/kubernetes_security",
-      "devops/ci_cd_fundamentals","devops/ci_cd_platforms","devops/deployment_strategies","devops/gitops_argocd_flux",
-      "devops/infrastructure_as_code_terraform","devops/secrets_management",
-      "devops/cloud_fundamentals_and_aws","devops/serverless_and_faas","devops/cloud_networking_and_cdn",
-      "devops/observability_metrics_prometheus","devops/observability_logging","devops/observability_tracing_and_otel","devops/sre_principles_and_slos","devops/incident_management_and_oncall",
+    senior: [
+      "devops/linux_and_os_fundamentals",
+      "devops/networking_for_devops",
+      "devops/containers_and_docker",
+      "devops/kubernetes_architecture",
+      "devops/kubernetes_workloads_and_objects",
+      "devops/kubernetes_networking",
+      "devops/kubernetes_scheduling_and_autoscaling",
+      "devops/kubernetes_security",
+      "devops/ci_cd_fundamentals",
+      "devops/ci_cd_platforms",
+      "devops/deployment_strategies",
+      "devops/gitops_argocd_flux",
+      "devops/infrastructure_as_code_terraform",
+      "devops/secrets_management",
+      "devops/cloud_fundamentals_and_aws",
+      "devops/serverless_and_faas",
+      "devops/cloud_networking_and_cdn",
+      "devops/observability_metrics_prometheus",
+      "devops/observability_logging",
+      "devops/observability_tracing_and_otel",
+      "devops/sre_principles_and_slos",
+      "devops/incident_management_and_oncall",
     ],
+    principal: [],
+    seniorFiles: {},
+    principalFiles: {},
+    cases: { senior: [], principal: [] },
   },
-  cs_fundamentals: {
-    interview: [
-      "cs_fundamentals/complexity_analysis_and_big_o","cs_fundamentals/number_systems_and_bit_manipulation","cs_fundamentals/recursion_and_problem_solving_patterns",
-      "cs_fundamentals/arrays_strings_and_hashing","cs_fundamentals/linked_lists_stacks_and_queues","cs_fundamentals/trees_and_binary_search_trees","cs_fundamentals/heaps_and_priority_queues","cs_fundamentals/graphs_tries_and_advanced_structures",
-      "cs_fundamentals/sorting_and_searching","cs_fundamentals/dynamic_programming","cs_fundamentals/greedy_and_divide_and_conquer","cs_fundamentals/graph_and_string_algorithms","cs_fundamentals/dsa_patterns",
-      "cs_fundamentals/processes_threads_and_context_switching","cs_fundamentals/cpu_scheduling_algorithms","cs_fundamentals/memory_management_and_virtual_memory","cs_fundamentals/deadlocks_and_synchronization",
+  backend: {
+    senior: [
+      "backend/tcp_ip_deep_dive",
+      "backend/http_protocols",
+      "backend/rest_api_design",
+      "backend/grpc_and_protobuf",
+      "backend/websockets_and_sse",
+      "backend/performance_profiling",
+      "backend/connection_pooling_deep_dive",
+      "backend/caching_strategies_deep_dive",
+      "backend/async_and_concurrency_patterns",
+      "backend/database_internals_and_indexing",
+      "backend/query_optimization",
+      "backend/database_migrations",
+      "backend/distributed_transactions_and_consistency",
+      "backend/fault_tolerance_patterns",
+      "backend/rate_limiting_in_depth",
+      "backend/observability_and_monitoring",
+      "backend/backend_security_owasp",
+      "backend/auth_and_authorization_systems",
+      "backend/load_and_performance_testing",
+      "backend/kafka_deep_dive",
+      "backend/container_and_deployment_patterns",
     ],
+    principal: [
+      "backend/rest_api_design",
+      "backend/caching_strategies_deep_dive",
+      "backend/database_migrations",
+      "backend/distributed_transactions_and_consistency",
+      "backend/database_types_deep_dive",
+      "backend/fault_tolerance_patterns",
+      "backend/observability_and_monitoring",
+      "backend/backend_security_owasp",
+      "backend/auth_and_authorization_systems",
+      "backend/backend_testing_strategies",
+      "backend/chaos_engineering",
+      "backend/event_driven_fundamentals",
+      "backend/event_sourcing_and_cqrs",
+      "backend/messaging_patterns",
+      "backend/microservices_fundamentals",
+      "backend/api_gateway_patterns",
+      "backend/service_mesh_and_service_discovery",
+      "backend/distributed_system_operational_patterns",
+    ],
+    seniorFiles: {},
+    principalFiles: {},
+    cases: { senior: [
+        "backend/case_studies/design_booking_system/README.md",
+        "backend/case_studies/design_feed_service/README.md",
+        "backend/case_studies/design_payment_processor/README.md",
+      ], principal: [
+        "backend/case_studies/design_payment_processor/README.md",
+        "backend/case_studies/design_event_driven_order_system/README.md",
+        "backend/case_studies/design_microservices_migration/README.md",
+      ] },
+  },
+  database: {
+    senior: [
+      "database/database_fundamentals",
+      "database/storage_engines_internals",
+      "database/indexing_deep_dive",
+      "database/concurrency_control_and_locking",
+      "database/postgresql_internals",
+      "database/sql_query_optimization",
+      "database/schema_design_and_normalization",
+      "database/database_migrations_zero_downtime",
+      "database/document_databases",
+      "database/key_value_stores",
+      "database/wide_column_databases",
+      "database/vector_databases",
+      "database/replication_and_high_availability",
+      "database/sharding_and_partitioning",
+      "database/distributed_transactions",
+      "database/consistency_models_and_consensus",
+      "database/connection_pool_management",
+      "database/database_performance_tuning",
+      "database/backup_recovery_and_disaster_recovery",
+    ],
+    principal: [
+      "database/storage_engines_internals",
+      "database/schema_design_and_normalization",
+      "database/database_migrations_zero_downtime",
+      "database/wide_column_databases",
+      "database/newsql_and_distributed_sql",
+      "database/replication_and_high_availability",
+      "database/sharding_and_partitioning",
+      "database/distributed_transactions",
+      "database/consistency_models_and_consensus",
+      "database/backup_recovery_and_disaster_recovery",
+      "database/database_security_and_compliance",
+      "database/database_selection_framework",
+      "database/polyglot_persistence_patterns",
+    ],
+    seniorFiles: {
+      "database/schema_design_and_normalization": ["README.md", "surrogate_vs_natural_keys.md"],
+    },
+    principalFiles: {
+      "database/schema_design_and_normalization": ["README.md", "surrogate_vs_natural_keys.md"],
+    },
+    cases: { senior: [
+        "database/case_studies/design_banking_ledger/README.md",
+        "database/case_studies/design_ecommerce_catalog/README.md",
+        "database/case_studies/design_social_media_feed_storage/README.md",
+      ], principal: [
+        "database/case_studies/design_realtime_analytics_platform/README.md",
+        "database/case_studies/design_multitenant_saas_database/README.md",
+        "database/case_studies/design_monolith_to_polyglot_migration/README.md",
+      ] },
+  },
+  hld: {
+    senior: [
+      "hld/scalability",
+      "hld/load_balancing",
+      "hld/caching",
+      "hld/database_design",
+      "hld/cap_theorem",
+      "hld/api_design",
+      "hld/message_queues",
+      "hld/rate_limiting",
+      "hld/cdn",
+      "hld/consistent_hashing",
+      "hld/database_sharding",
+      "hld/microservices",
+      "hld/distributed_transactions",
+      "hld/resilience_patterns",
+    ],
+    principal: [
+      "hld/scalability",
+      "hld/cap_theorem",
+      "hld/api_design",
+      "hld/database_sharding",
+      "hld/microservices",
+      "hld/distributed_transactions",
+      "hld/observability",
+      "hld/security_and_auth",
+      "hld/resilience_patterns",
+      "hld/consensus_algorithms",
+      "hld/event_sourcing_cqrs",
+    ],
+    seniorFiles: {},
+    principalFiles: {},
+    cases: { senior: [
+        "hld/case_studies/design_url_shortener.md",
+        "hld/case_studies/design_twitter.md",
+        "hld/case_studies/design_whatsapp.md",
+        "hld/case_studies/design_notification_system.md",
+        "hld/case_studies/design_uber.md",
+        "hld/case_studies/design_search_autocomplete.md",
+        "hld/case_studies/design_leaderboard.md",
+        "hld/case_studies/design_google_docs.md",
+        "hld/case_studies/design_google_drive.md",
+        "hld/case_studies/design_web_crawler.md",
+        "hld/case_studies/design_key_value_store.md",
+        "hld/case_studies/design_distributed_unique_id.md",
+        "hld/case_studies/design_distributed_message_queue.md",
+        "hld/case_studies/design_hotel_reservation.md",
+      ], principal: [
+        "hld/case_studies/design_netflix.md",
+        "hld/case_studies/design_google_maps.md",
+        "hld/case_studies/design_payment_system.md",
+        "hld/case_studies/design_stock_exchange.md",
+        "hld/case_studies/design_object_storage_s3.md",
+        "hld/case_studies/design_ad_click_aggregation.md",
+        "hld/case_studies/design_metrics_monitoring.md",
+      ] },
+  },
+  java: {
+    senior: [
+      "java/core_language",
+      "java/strings_and_text",
+      "java/generics_and_type_system",
+      "java/exceptions_and_io",
+      "java/json_processing_jackson",
+      "java/java8_features",
+      "java/java_streams",
+      "java/java9_to_21_features",
+      "java/jvm_internals",
+      "java/reference_types_and_cleaners",
+      "java/concurrency",
+      "java/collections_internals",
+      "java/design_patterns_in_java",
+      "java/performance_and_tuning",
+      "java/java_memory_model",
+      "java/java_interview_patterns",
+      "java/testing_junit_mockito",
+      "java/structured_concurrency_and_loom",
+      "java/jdbc_and_database",
+    ],
+    principal: [
+      "java/java9_to_21_features",
+      "java/java_platform_module_system",
+      "java/jvm_internals",
+      "java/graalvm_native_image",
+      "java/design_patterns_in_java",
+      "java/performance_and_tuning",
+      "java/testing_junit_mockito",
+      "java/logging",
+      "java/annotation_processing",
+      "java/build_tools_maven_gradle",
+      "java/structured_concurrency_and_loom",
+      "java/reactive_programming",
+      "java/security_and_cryptography",
+      "java/grpc_protobuf",
+      "java/microservices_patterns",
+    ],
+    seniorFiles: {
+      "java/strings_and_text": ["README.md", "regex_engine_and_redos.md"],
+      "java/generics_and_type_system": ["README.md", "type_inference_and_bounds.md"],
+      "java/performance_and_tuning": ["README.md", "jmx_and_management.md"],
+    },
+    principalFiles: {
+      "java/performance_and_tuning": ["README.md"],
+    },
+    cases: { senior: [
+        "java/case_studies/design_connection_pool.md",
+        "java/case_studies/design_thread_pool_java.md",
+        "java/case_studies/design_rate_limiter_java.md",
+        "java/case_studies/design_snowflake_id_generator_java.md",
+        "java/case_studies/design_lru_cache_java.md",
+      ], principal: [
+        "java/case_studies/design_di_container_java.md",
+        "java/case_studies/design_event_bus.md",
+        "java/case_studies/design_circuit_breaker_java.md",
+      ] },
+  },
+  lld: {
+    senior: [
+      "lld/solid_principles",
+      "lld/creational",
+      "lld/structural",
+      "lld/behavioral",
+      "lld/pattern_comparisons",
+      "lld/anti_patterns",
+      "lld/concurrency_patterns",
+      "lld/system_design_problems",
+    ],
+    principal: [
+      "lld/design_principles",
+      "lld/solid_principles",
+      "lld/creational",
+      "lld/structural",
+      "lld/behavioral",
+      "lld/pattern_comparisons",
+      "lld/anti_patterns",
+      "lld/system_design_problems",
+    ],
+    seniorFiles: {
+      "lld/solid_principles": ["README.md", "SingleResponsibility.md", "OpenClosed.md", "LiskovSubstitution.md", "InterfaceSegregation.md", "DependencyInversion.md"],
+      "lld/creational": ["README.md", "singleton/README.md", "factory_method/README.md", "abstract_factory/README.md", "builder/README.md"],
+      "lld/structural": ["README.md", "adapter/README.md", "decorator/README.md", "proxy/README.md", "facade/README.md", "composite/README.md"],
+      "lld/behavioral": ["README.md", "strategy/README.md", "observer/README.md", "state/README.md", "command/README.md", "template_method/README.md", "chain_of_responsibility/README.md", "iterator/README.md"],
+      "lld/pattern_comparisons": ["README.md", "Strategy_vs_State.md", "Decorator_vs_Proxy.md", "Factory_vs_AbstractFactory_vs_Builder.md", "Observer_vs_Mediator.md", "Adapter_vs_Bridge_vs_Facade.md", "DecisionFlowchart.md", "InterviewQuestions.md"],
+      "lld/anti_patterns": ["README.md", "GodObject.md", "Singleton_Abuse.md"],
+      "lld/concurrency_patterns": ["README.md", "ThreadSafeSingleton_README.md", "ProducerConsumer_README.md", "ReadWriteLock_README.md", "ThreadPool_README.md"],
+      "lld/system_design_problems": ["README.md", "ParkingLot_README.md", "ElevatorSystem_README.md", "VendingMachine_README.md", "LRUCache_README.md", "RateLimiter_README.md", "OnlineBookingSystem_README.md"],
+    },
+    principalFiles: {
+      "lld/design_principles": ["README.md", "DRY.md", "KISS.md", "YAGNI.md", "Composition_over_Inheritance.md", "ProgramToInterface.md", "LawOfDemeter.md"],
+      "lld/solid_principles": ["README.md", "OpenClosed.md", "LiskovSubstitution.md", "DependencyInversion.md"],
+      "lld/creational": ["README.md"],
+      "lld/structural": ["README.md", "bridge/README.md"],
+      "lld/behavioral": ["README.md", "observer/README.md"],
+      "lld/pattern_comparisons": ["README.md", "Strategy_vs_State.md", "Observer_vs_Mediator.md", "Adapter_vs_Bridge_vs_Facade.md", "Template_vs_Strategy.md", "DecisionFlowchart.md", "PatternCombinations.md", "InterviewQuestions.md"],
+      "lld/anti_patterns": ["README.md", "Golden_Hammer.md", "Premature_Optimization.md", "ServiceLocator.md", "Anemic_Domain_Model.md", "Circular_Dependencies.md", "Lava_Flow.md"],
+      "lld/system_design_problems": ["README.md"],
+    },
+    cases: { senior: [], principal: [] },
+  },
+  llm: {
+    senior: [
+      "llm/foundations_and_architecture",
+      "llm/tokenization_and_embeddings",
+      "llm/embeddings_and_similarity_search",
+      "llm/pre_training",
+      "llm/fine_tuning",
+      "llm/alignment_and_rlhf",
+      "llm/prompt_engineering",
+      "llm/rag_fundamentals",
+      "llm/advanced_rag",
+      "llm/context_engineering",
+      "llm/reasoning_models",
+      "llm/agents_and_tool_use",
+      "llm/agentic_workflow_patterns",
+      "llm/multi_agent_systems",
+      "llm/mcp_model_context_protocol",
+      "llm/inference_and_decoding",
+      "llm/context_windows_and_long_context",
+      "llm/inference_engines",
+      "llm/vllm_deep_dive",
+      "llm/optimization_and_quantization",
+      "llm/deployment_and_mlops",
+      "llm/llm_caching",
+      "llm/llm_observability_and_monitoring",
+      "llm/token_economics_and_cost_optimization",
+      "llm/evaluation_and_benchmarks",
+      "llm/error_analysis_and_eval_design",
+      "llm/llm_testing_strategies",
+      "llm/guardrails_and_content_safety",
+      "llm/safety_and_alignment",
+      "llm/llm_security",
+      "llm/mixture_of_experts",
+    ],
+    principal: [
+      "llm/foundations_and_architecture",
+      "llm/fine_tuning",
+      "llm/alignment_and_rlhf",
+      "llm/rag_fundamentals",
+      "llm/advanced_rag",
+      "llm/context_engineering",
+      "llm/reasoning_models",
+      "llm/agents_and_tool_use",
+      "llm/agentic_workflow_patterns",
+      "llm/agentic_frameworks",
+      "llm/multi_agent_systems",
+      "llm/mcp_model_context_protocol",
+      "llm/inference_and_decoding",
+      "llm/inference_engines",
+      "llm/optimization_and_quantization",
+      "llm/knowledge_distillation_and_model_merging",
+      "llm/deployment_and_mlops",
+      "llm/llm_caching",
+      "llm/llm_observability_and_monitoring",
+      "llm/token_economics_and_cost_optimization",
+      "llm/llm_routing_and_model_selection",
+      "llm/prompt_management_and_promptops",
+      "llm/evaluation_and_benchmarks",
+      "llm/error_analysis_and_eval_design",
+      "llm/guardrails_and_content_safety",
+      "llm/safety_and_alignment",
+      "llm/llm_security",
+      "llm/ai_regulations_and_compliance",
+      "llm/llm_ecosystem_and_landscape",
+      "llm/data_flywheels_and_continuous_learning",
+    ],
+    seniorFiles: {
+      "llm/foundations_and_architecture": ["README.md", "attention_mechanisms.md", "positional_encoding.md", "state_space_models_and_linear_attention.md"],
+      "llm/tokenization_and_embeddings": ["README.md"],
+      "llm/fine_tuning": ["README.md", "lora.md", "qlora.md", "peft_methods.md", "instruction_tuning.md"],
+      "llm/alignment_and_rlhf": ["README.md", "grpo_and_rlvr.md"],
+      "llm/rag_fundamentals": ["README.md", "chunking_strategies.md", "embedding_models.md", "retrieval_methods.md", "reranking.md"],
+      "llm/advanced_rag": ["README.md", "agentic_rag.md", "graph_rag.md", "multimodal_rag.md", "query_transformation.md"],
+      "llm/agents_and_tool_use": ["README.md", "function_calling_and_tool_design.md", "react_and_reasoning_patterns.md", "plan_and_execute.md", "agent_memory.md", "agent_reliability.md", "agent_evaluation_and_benchmarking.md", "tool_selection_at_scale.md", "sandboxed_code_execution.md", "subagents_and_delegation.md", "durable_long_running_agents.md"],
+      "llm/multi_agent_systems": ["README.md", "orchestrator_worker_pattern.md", "multi_agent_security.md"],
+      "llm/mcp_model_context_protocol": ["README.md", "mcp_server_building.md", "mcp_transports_and_jsonrpc.md", "mcp_security.md"],
+      "llm/inference_and_decoding": ["README.md", "kv_cache_optimization.md", "speculative_decoding.md", "sampling_and_decoding_strategies.md", "constrained_decoding_and_structured_outputs.md"],
+      "llm/optimization_and_quantization": ["README.md", "gpu_architecture_and_roofline.md"],
+      "llm/guardrails_and_content_safety": ["README.md", "guardrail_evaluation_and_operations.md"],
+      "llm/safety_and_alignment": ["README.md"],
+      "llm/llm_security": ["README.md", "privacy_and_data_governance.md"],
+    },
+    principalFiles: {
+      "llm/foundations_and_architecture": ["README.md"],
+      "llm/fine_tuning": ["README.md", "lora.md", "domain_adaptation.md"],
+      "llm/alignment_and_rlhf": ["README.md"],
+      "llm/rag_fundamentals": ["README.md", "embedding_models.md", "retrieval_methods.md", "reranking.md"],
+      "llm/advanced_rag": ["README.md", "agentic_rag.md", "graph_rag.md"],
+      "llm/agents_and_tool_use": ["README.md", "agent_evaluation_and_benchmarking.md", "tool_selection_at_scale.md", "sandboxed_code_execution.md", "subagents_and_delegation.md", "agent_cost_and_token_budget.md", "durable_long_running_agents.md"],
+      "llm/agentic_frameworks": ["README.md"],
+      "llm/multi_agent_systems": ["README.md", "orchestrator_worker_pattern.md", "agent_to_agent_protocols.md", "multi_agent_security.md"],
+      "llm/mcp_model_context_protocol": ["README.md", "mcp_security.md", "mcp_registries_and_ecosystem.md"],
+      "llm/inference_and_decoding": ["README.md", "kv_cache_optimization.md"],
+      "llm/optimization_and_quantization": ["README.md", "gpu_architecture_and_roofline.md"],
+      "llm/guardrails_and_content_safety": ["README.md", "guardrail_evaluation_and_operations.md"],
+      "llm/safety_and_alignment": ["README.md"],
+      "llm/llm_security": ["README.md", "privacy_and_data_governance.md"],
+    },
+    cases: { senior: [
+        "llm/case_studies/design_chatgpt.md",
+        "llm/case_studies/design_rag_pipeline.md",
+        "llm/case_studies/design_copilot.md",
+        "llm/case_studies/design_ai_search_engine.md",
+        "llm/case_studies/design_notion_ai.md",
+        "llm/case_studies/design_customer_support_bot.md",
+        "llm/case_studies/design_real_time_translation.md",
+        "llm/case_studies/design_ai_content_moderation.md",
+        "llm/case_studies/design_ai_code_review.md",
+        "llm/case_studies/design_ai_coding_assistant.md",
+        "llm/case_studies/design_ai_data_analyst.md",
+        "llm/case_studies/design_autonomous_swe_agent.md",
+        "llm/case_studies/design_browser_research_agent.md",
+        "llm/case_studies/design_sales_ai_agent.md",
+        "llm/case_studies/design_ai_meeting_assistant.md",
+      ], principal: [
+        "llm/case_studies/design_llm_gateway.md",
+        "llm/case_studies/design_ai_content_moderation.md",
+        "llm/case_studies/design_autonomous_swe_agent.md",
+        "llm/case_studies/design_gpu_inference_platform.md",
+        "llm/case_studies/design_llm_fine_tuning_platform.md",
+        "llm/case_studies/design_llm_eval_platform.md",
+        "llm/case_studies/design_synthetic_data_platform.md",
+        "llm/case_studies/design_legal_ai_platform.md",
+        "llm/case_studies/design_medical_ai_scribe.md",
+        "llm/case_studies/design_financial_research_agent.md",
+        "llm/case_studies/design_ai_companion_platform.md",
+      ] },
+  },
+  ml: {
+    senior: [
+      "ml/probability_and_statistics",
+      "ml/optimization_theory",
+      "ml/information_theory",
+      "ml/supervised_learning",
+      "ml/ensemble_methods",
+      "ml/unsupervised_learning",
+      "ml/feature_engineering",
+      "ml/model_evaluation_and_selection",
+      "ml/imbalanced_data_and_leakage_traps",
+      "ml/neural_network_fundamentals",
+      "ml/convolutional_neural_networks",
+      "ml/training_deep_networks",
+      "ml/natural_language_processing",
+      "ml/recommender_systems",
+      "ml/information_retrieval_and_search",
+      "ml/ml_system_design",
+      "ml/data_pipelines_and_processing",
+      "ml/distributed_training",
+      "ml/experiment_tracking_and_versioning",
+      "ml/model_serving_and_inference",
+      "ml/model_compression_and_efficiency",
+      "ml/monitoring_and_drift_detection",
+      "ml/mlops_and_ci_cd",
+      "ml/interpretability_and_explainability",
+      "ml/ml_interview_patterns",
+    ],
+    principal: [
+      "ml/imbalanced_data_and_leakage_traps",
+      "ml/recommender_systems",
+      "ml/multi_task_and_multi_objective_learning",
+      "ml/ml_system_design",
+      "ml/active_learning_and_weak_supervision",
+      "ml/monitoring_and_drift_detection",
+      "ml/mlops_and_ci_cd",
+      "ml/causal_inference_and_ml",
+      "ml/adversarial_ml_and_robustness",
+      "ml/privacy_preserving_ml",
+      "ml/interpretability_and_explainability",
+      "ml/fairness_and_responsible_ai",
+      "ml/uncertainty_quantification_and_conformal_prediction",
+      "ml/ml_interview_patterns",
+      "ml/model_selection_and_algorithm_choice",
+    ],
+    seniorFiles: {
+      "ml/supervised_learning": ["README.md", "linear_models.md", "decision_trees.md"],
+      "ml/ensemble_methods": ["README.md", "random_forests.md", "gradient_boosting.md", "xgboost_lightgbm.md"],
+      "ml/unsupervised_learning": ["README.md"],
+      "ml/model_evaluation_and_selection": ["README.md"],
+      "ml/natural_language_processing": ["README.md", "text_classification.md", "bert_and_pretrained_models.md"],
+      "ml/recommender_systems": ["README.md", "collaborative_filtering.md", "retrieval_and_ranking.md", "deep_learning_recommenders.md"],
+      "ml/ml_system_design": ["README.md", "design_framework.md", "feature_store_design.md", "training_pipeline_design.md", "ab_testing_for_ml.md", "latency_and_throughput_optimization.md"],
+    },
+    principalFiles: {
+      "ml/recommender_systems": ["README.md", "retrieval_and_ranking.md", "online_learning_and_bandits.md"],
+      "ml/ml_system_design": ["README.md", "design_framework.md", "feature_store_design.md", "ab_testing_for_ml.md", "classical_ml_vs_llm.md"],
+      "ml/active_learning_and_weak_supervision": ["README.md"],
+    },
+    cases: { senior: [
+        "ml/case_studies/design_churn_prediction.md",
+        "ml/case_studies/design_image_classification_pipeline.md",
+        "ml/case_studies/design_search_ranking.md",
+        "ml/case_studies/design_recommendation_engine.md",
+        "ml/case_studies/design_real_time_personalization.md",
+        "ml/case_studies/design_ads_click_prediction.md",
+        "ml/case_studies/design_eta_prediction.md",
+        "ml/case_studies/design_demand_forecasting.md",
+        "ml/case_studies/design_fraud_detection.md",
+        "ml/case_studies/design_nlp_classification_pipeline.md",
+        "ml/case_studies/design_semantic_search_engine.md",
+        "ml/case_studies/design_ml_platform.md",
+      ], principal: [
+        "ml/case_studies/design_credit_risk_scoring.md",
+        "ml/case_studies/design_customer_ltv_prediction.md",
+        "ml/case_studies/design_content_feed_ranking.md",
+        "ml/case_studies/design_video_recommendation.md",
+        "ml/case_studies/design_marketplace_matching.md",
+        "ml/case_studies/design_harmful_content_detection.md",
+        "ml/case_studies/design_autonomous_driving_perception.md",
+        "ml/case_studies/design_multi_touch_attribution.md",
+        "ml/case_studies/design_dynamic_pricing.md",
+        "ml/case_studies/design_ml_platform.md",
+      ] },
+  },
+  python: {
+    senior: [
+      "python/data_model_and_objects",
+      "python/core_language_idioms",
+      "python/iterators_and_generators",
+      "python/decorators_and_closures",
+      "python/context_managers_and_exceptions",
+      "python/collections_and_data_structures",
+      "python/strings_bytes_encoding_and_regex",
+      "python/cpython_memory_model",
+      "python/the_gil_and_free_threading",
+      "python/metaclasses_and_metaprogramming",
+      "python/the_type_system_and_typing",
+      "python/performance_and_profiling",
+      "python/threading_and_multiprocessing",
+      "python/asyncio_and_event_loop",
+      "python/async_patterns_and_pitfalls",
+      "python/testing_with_pytest",
+    ],
+    principal: [
+      "python/the_gil_and_free_threading",
+      "python/the_type_system_and_typing",
+      "python/performance_and_profiling",
+      "python/async_patterns_and_pitfalls",
+      "python/design_patterns_in_python",
+      "python/testing_with_pytest",
+      "python/packaging_and_project_tooling",
+    ],
+    seniorFiles: {
+      "python/asyncio_and_event_loop": ["README.md", "event_loop_internals.md", "structured_concurrency.md"],
+      "python/the_type_system_and_typing": ["README.md", "protocols_and_structural_typing.md"],
+    },
+    principalFiles: {
+      "python/the_type_system_and_typing": ["README.md"],
+    },
+    cases: { senior: [], principal: [] },
+  },
+  fastapi: {
+    senior: [
+      "fastapi/fastapi_fundamentals_asgi",
+      "fastapi/pydantic_v2_deep_dive",
+      "fastapi/dependency_injection_in_fastapi",
+      "fastapi/middleware_and_lifecycle",
+      "fastapi/async_database_sqlalchemy",
+      "fastapi/authentication_and_security",
+      "fastapi/error_handling_and_validation",
+      "fastapi/background_jobs_and_task_queues",
+      "fastapi/testing_fastapi",
+      "fastapi/http_clients_and_external_apis",
+      "fastapi/production_deployment_and_scaling",
+      "fastapi/observability_and_monitoring",
+      "fastapi/caching_and_performance",
+    ],
+    principal: [
+      "fastapi/async_database_sqlalchemy",
+      "fastapi/authentication_and_security",
+      "fastapi/error_handling_and_validation",
+      "fastapi/background_jobs_and_task_queues",
+      "fastapi/production_deployment_and_scaling",
+      "fastapi/observability_and_monitoring",
+      "fastapi/api_design_and_versioning",
+      "fastapi/security_hardening_and_owasp",
+    ],
+    seniorFiles: {
+      "fastapi/pydantic_v2_deep_dive": ["README.md", "pydantic_core_and_performance.md"],
+      "fastapi/dependency_injection_in_fastapi": ["README.md", "yield_dependencies_and_scopes.md"],
+    },
+    principalFiles: {},
+    cases: { senior: [
+        "fastapi/case_studies/design_rate_limited_api_fastapi.md",
+        "fastapi/case_studies/design_realtime_chat_fastapi.md",
+        "fastapi/case_studies/design_async_task_queue.md",
+        "fastapi/case_studies/design_async_web_scraper.md",
+        "fastapi/case_studies/design_ml_inference_api_fastapi.md",
+      ], principal: [
+        "fastapi/case_studies/design_multi_tenant_saas_api.md",
+        "fastapi/case_studies/design_async_task_queue.md",
+      ] },
+  },
+  spring: {
+    senior: [
+      "spring/ioc_container",
+      "spring/bean_lifecycle",
+      "spring/dependency_injection",
+      "spring/spring_configuration",
+      "spring/spring_proxies",
+      "spring/spring_aop",
+      "spring/spring_boot_autoconfiguration",
+      "spring/spring_boot_configuration",
+      "spring/spring_boot_actuator",
+      "spring/spring_mvc_architecture",
+      "spring/request_handling",
+      "spring/filters_and_interceptors",
+      "spring/spring_webflux",
+      "spring/spring_http_clients",
+      "spring/validation_and_error_handling",
+      "spring/spring_data_jpa",
+      "spring/spring_transactions",
+      "spring/spring_caching",
+      "spring/spring_security_architecture",
+      "spring/spring_security_jwt_oauth",
+      "spring/spring_cloud_patterns",
+      "spring/spring_messaging",
+      "spring/spring_events_and_scheduling",
+      "spring/spring_testing",
+      "spring/spring_performance",
+    ],
+    principal: [
+      "spring/spring_boot_autoconfiguration",
+      "spring/spring_boot_configuration",
+      "spring/spring_boot_actuator",
+      "spring/spring_modulith",
+      "spring/spring_hateoas_rest_maturity",
+      "spring/spring_http_clients",
+      "spring/database_migrations",
+      "spring/spring_transactions",
+      "spring/spring_security_architecture",
+      "spring/spring_security_jwt_oauth",
+      "spring/spring_session",
+      "spring/spring_cloud_config",
+      "spring/spring_cloud_patterns",
+      "spring/spring_messaging",
+      "spring/spring_testing",
+      "spring/spring_performance",
+      "spring/observability_and_tracing",
+      "spring/spring_native_graalvm",
+    ],
+    seniorFiles: {
+      "spring/spring_aop": ["README.md", "pointcut_designators.md"],
+      "spring/request_handling": ["README.md"],
+      "spring/spring_webflux": ["README.md"],
+      "spring/spring_cloud_patterns": ["README.md", "gateway_server_webmvc.md"],
+    },
+    principalFiles: {
+      "spring/spring_cloud_patterns": ["README.md", "gateway_server_webmvc.md"],
+    },
+    cases: { senior: [
+        "spring/case_studies/design_api_gateway.md",
+        "spring/case_studies/design_distributed_caching.md",
+        "spring/case_studies/design_distributed_rate_limiter_spring.md",
+        "spring/case_studies/design_batch_pipeline.md",
+        "spring/case_studies/design_realtime_notification_service.md",
+      ], principal: [
+        "spring/case_studies/design_multitenant_api.md",
+        "spring/case_studies/design_oauth2_authorization_server.md",
+        "spring/case_studies/design_event_driven_microservice.md",
+        "spring/case_studies/design_idempotent_payment_api.md",
+      ] },
   },
 };
 
 // Which path the learner picked for a section, persisted as a JSON map keyed by
 // section: { llm: "interview" } etc. Defaults to "full" (backward-compatible).
+// Stored tier per section. "interview" was renamed to "senior" when the Principal tier
+// landed; map the legacy value on READ so nobody's saved preference breaks, and setStudyPath
+// re-normalises it on the next write.
 function getStudyPath(section) {
-  try { return (JSON.parse(localStorage.getItem("sd_study_path") || "{}")[section]) || "full"; }
+  try {
+    const v = JSON.parse(localStorage.getItem("sd_study_path") || "{}")[section] || "full";
+    return v === "interview" ? "senior" : v;
+  }
   catch { return "full"; }
 }
 function setStudyPath(section, path) {
@@ -4133,9 +4734,14 @@ async function openStudySection(sectionPath) {
   // the bank. Guard a stale stored "cases" value on a section with <2 case studies.
   const casesList = caseStudiesFromIndex(section);
   const hasCases = casesList.length >= 2;
-  const interviewPath = STUDY_PATHS[section] && STUDY_PATHS[section].interview;
-  let studyPath = getStudyPath(section);                // "full" | "interview" | "cases"
+  // [TIERS] Curated paths are per level: senior (the craft) and principal (the judgment).
+  // They are DIFFERENT cuts, not nested depths, so a module can be in one, both or neither.
+  const _sp = STUDY_PATHS[section] || {};
+  const tierPath = { senior: _sp.senior, principal: _sp.principal };
+  let studyPath = getStudyPath(section);       // "full" | "senior" | "principal" | "cases"
   if (studyPath === "cases" && !hasCases) studyPath = "full";
+  if ((studyPath === "senior" || studyPath === "principal") && !tierPath[studyPath]) studyPath = "full";
+  const activeTier = (studyPath === "senior" || studyPath === "principal") ? studyPath : null;
   const casesMode = studyPath === "cases" && hasCases;
 
   let mods;
@@ -4159,13 +4765,18 @@ async function openStudySection(sectionPath) {
       mods = mods.filter((m) => bookOf(m.module) === bookScope);
       if (!mods.length) { go("#/study/book"); return; }   // unknown/renamed book slug
     }
-    // Interview-Specific path: restrict the skill tree to the curated subset (mods is
-    // already in STUDY_ORDER == interview-list order, so a filter preserves order).
-    if (studyPath === "interview" && interviewPath) {
-      const keep = new Set(interviewPath);
+    // [TIERS] Restrict the skill tree to the active tier's curated subset (mods is already
+    // in STUDY_ORDER == tier-list order, so a filter preserves order).
+    if (activeTier && tierPath[activeTier]) {
+      const keep = new Set(tierPath[activeTier]);
       mods = mods.filter((m) => keep.has(m.module));
     }
   }
+  // [TIERS] Sub-file allowlist. A module in a tier used to drag in EVERY deep-dive under it
+  // -- lld shipped 62 sub-files behind 7 modules, 90% of the section, in a path advertised
+  // as a cut. `<tier>Files` names the sourceFiles that tier actually wants; a module with no
+  // entry keeps all of them. Consumed by studyFilesFor() below.
+  const tierFiles = activeTier ? ((STUDY_PATHS[section] || {})[activeTier + "Files"] || {}) : {};
   // v2: weighted prerequisite edges from graph/<section>.json (real repo
   // cross-links + lexical Q&A overlap). Pairs are undirected; orient each one
   // forward along the path order. Missing/failed file -> plain v1 path.
@@ -4211,7 +4822,13 @@ async function openStudySection(sectionPath) {
 
   const leafLabel = (fn) => (fn === "README.md" ? "Readme" : titleize(fn.replace(/\.md$/i, "")));
   const steps = mods.map((m, i) => {
-    const mFiles = files[m.module] || ["README.md"];
+    // [TIERS] In a curated tier, show only that tier's allowlisted sourceFiles. A module
+    // with no `<tier>Files` entry keeps all of them. The excluded ones stay reachable on
+    // the Full path -- this narrows the reading list, it does not hide content.
+    const allFiles = files[m.module] || ["README.md"];
+    const allow = tierFiles[m.module];
+    const mFiles = allow ? allFiles.filter((fn) => allow.includes(fn)) : allFiles;
+    const hiddenCount = allFiles.length - mFiles.length;
     const multi = mFiles.length > 1;
     const isHere = m.module === hereMod;
     const isOpen = openFans.has(m.module);
@@ -4241,18 +4858,19 @@ async function openStudySection(sectionPath) {
           </span>
           ${done ? `<span class="pn-check" title="${casesMode ? "Read" : "Practiced"}">✓</span>` : ""}
         </button>
-        ${multi ? `<button class="pn-fan" aria-expanded="${isOpen}" aria-controls="fan-${i}" aria-label="${mFiles.length} files in ${esc(m.name)}"><span class="pn-arrow">&#9656;</span>&nbsp;${mFiles.length} files</button>` : ""}
+        ${multi ? `<button class="pn-fan" aria-expanded="${isOpen}" aria-controls="fan-${i}" aria-label="${mFiles.length} files in ${esc(m.name)}${hiddenCount ? `, ${hiddenCount} more on the Full path` : ""}"><span class="pn-arrow">&#9656;</span>&nbsp;${mFiles.length} files${hiddenCount ? ` <span class="pn-fan-more">+${hiddenCount}</span>` : ""}</button>` : ""}
       </div>
       ${multi ? `<div class="leaf-fan" id="fan-${i}"${isOpen ? "" : " hidden"}>${leaves}</div>` : ""}
     </div>`;
   }).join("");
 
-  const onInterview = studyPath === "interview" && interviewPath;
-  // [CS] Path toggle: Full always; Interview iff a curated subset exists; Case
-  // Studies iff the section has >=2. Rendered only when >=2 options exist.
+  const onInterview = !!activeTier;
+  // [TIERS] Path toggle: Full always; Senior and Principal each iff that tier has a
+  // curated subset; Case Studies iff the section has >=2. Rendered only when >=2 exist.
   const pathOpts = [
     { v: "full", label: "Full" },
-    interviewPath ? { v: "interview", label: "Interview" } : null,
+    tierPath.senior ? { v: "senior", label: "Senior" } : null,
+    tierPath.principal && tierPath.principal.length ? { v: "principal", label: "Principal" } : null,
     hasCases ? { v: "cases", label: "Case Studies" } : null,
   ].filter(Boolean);
   const pathSwitchHtml = pathOpts.length >= 2 ? `

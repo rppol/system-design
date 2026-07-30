@@ -346,9 +346,16 @@ STUDY_PATHS_RE = re.compile(r"const STUDY_PATHS = \{(.*?)\n\};", re.S)
 SLUG_RE = re.compile(r'"([a-z0-9_]+(?:/[a-z0-9_]+)+)"')
 
 
-def _section_arrays(body):
+def _section_arrays(body, inner=None):
     """{'cuda': [slug, ...]} from a STUDY_ORDER/STUDY_PATHS object body.
-    Section keys sit at 2-space indent ('  cuda: [' / '  cuda: {')."""
+    Section keys sit at 2-space indent ('  cuda: [' / '  cuda: {').
+
+    With `inner` set, return only that named array inside each section object -- e.g.
+    _section_arrays(body, "senior") reads `senior: [...]` and IGNORES `principal: [...]`
+    and the `*Files`/`cases` objects. Without it the whole section blob is scanned, which
+    is right for STUDY_ORDER (a bare array) but would union every tier in STUDY_PATHS --
+    precisely the false-fail the NOTE above STUDY_ORDER in app.js warns about.
+    """
     out = {}
     for m in re.finditer(r"\n  ([a-z_]+): ([\[{])", body):
         open_ch, close_ch = m.group(2), ("]" if m.group(2) == "[" else "}")
@@ -357,7 +364,18 @@ def _section_arrays(body):
             if body[i] == open_ch: depth += 1
             elif body[i] == close_ch: depth -= 1
             i += 1
-        out[m.group(1)] = SLUG_RE.findall(body[m.end():i])
+        blob = body[m.end():i]
+        if inner is not None:
+            im = re.search(r"\b" + inner + r":\s*\[", blob)
+            if not im:
+                continue
+            d, k = 1, im.end()
+            while d and k < len(blob):
+                if blob[k] == "[": d += 1
+                elif blob[k] == "]": d -= 1
+                k += 1
+            blob = blob[im.end():k]
+        out[m.group(1)] = SLUG_RE.findall(blob)
     return out
 
 
@@ -366,24 +384,32 @@ def _section_arrays(body):
 # "### Interview-Specific Path (N modules)" table (what a human reads). Nothing used to
 # reconcile them, so either could drift silently -- a module added to one and forgotten in
 # the other shows up in the game but not the docs, or vice versa, with a green build.
-README_PATH_RE = re.compile(r"^###\s+Interview-Specific Path\s*\((\d+)\s+modules?\)\s*$", re.M)
+# TIERS: the curated paths are now per level. `senior` is what `interview` used to be;
+# `principal` is a DIFFERENT cut, not senior-plus-extras. The legacy heading is still
+# accepted so a section can migrate its README independently of the app.js data.
+TIERS = ("senior", "principal")
+README_TIER_RE = {
+    "senior": re.compile(r"^###\s+(?:Senior|Interview-Specific)\s+Path\s*\((\d+)\s+modules?\)\s*$", re.M | re.I),
+    "principal": re.compile(r"^###\s+Principal(?:/Staff)?\s+Path\s*\((\d+)\s+modules?\)\s*$", re.M | re.I),
+}
+README_LEGACY_RE = re.compile(r"^###\s+Interview-Specific Path\s*\((\d+)\s+modules?\)\s*$", re.M)
 README_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)#]+)\)")
 
 
-def _readme_interview_path(section):
-    """(declared_count, [slug, ...]) from a section README's Interview-Specific Path
-    TABLE, or None when the section has no such heading.
+def _readme_tier_path(section, tier):
+    """(declared_count, [slug, ...]) from a section README's `### <Tier> Path (N modules)`
+    TABLE, or None when that heading is absent.
 
     Only the table's Modules column is read. The prose that follows the table links
     modules too -- and in hld those are the modules DELIBERATELY EXCLUDED from the
-    interview path -- so a section-wide link scan would invert the check's meaning.
+    path -- so a section-wide link scan would invert the check's meaning.
     """
     path = os.path.join(BASE_DIR, section, "README.md")
     try:
         text = open(path, encoding="utf-8").read()
     except OSError:
         return None
-    m = README_PATH_RE.search(text)
+    m = README_TIER_RE[tier].search(text)
     if not m:
         return None
     body = text[m.end():]
@@ -407,10 +433,58 @@ def _readme_interview_path(section):
     return int(m.group(1)), slugs
 
 
+def _module_sourcefiles(module):
+    """Every sourceFile under a module, in the form extract.py emits (incl. nested
+    `<pattern>/README.md`). None when the directory does not exist."""
+    root = os.path.join(BASE_DIR, module)
+    if not os.path.isdir(root):
+        return None
+    out = []
+    for dp, dn, fs in os.walk(root):
+        dn[:] = [d for d in dn if d not in SKIP_PATH_PARTS]
+        out += [os.path.relpath(os.path.join(dp, f), root) for f in fs if f.endswith(".md")]
+    return set(out)
+
+
+def _tier_objects(body, key):
+    """{section: {module: [sourceFile, ...]}} for a `<tier>Files` map, or {section: [paths]}
+    for `cases`. These are OBJECTS, not arrays -- the ordered-subset logic must never see
+    them, which is why they are parsed separately rather than by _section_arrays()."""
+    out = {}
+    for m in re.finditer(r"\n  ([a-z_]+):\s*\{", body):
+        sec, i, depth = m.group(1), m.end() - 1, 0
+        for j in range(i, len(body)):
+            if body[j] == "{": depth += 1
+            elif body[j] == "}":
+                depth -= 1
+                if depth == 0: break
+        blob = body[i:j + 1]
+        km = re.search(r"\b" + key + r":\s*\{", blob)
+        if not km:
+            continue
+        k, d = km.end() - 1, 0
+        for j2 in range(k, len(blob)):
+            if blob[j2] == "{": d += 1
+            elif blob[j2] == "}":
+                d -= 1
+                if d == 0: break
+        inner, sub = blob[k:j2 + 1], {}
+        for em in re.finditer(r'"([^"]+)":\s*\[(.*?)\]', inner, re.S):
+            sub[em.group(1)] = re.findall(r'"([^"]+)"', em.group(2))
+        out[sec] = sub
+    return out
+
+
 def check_wiring(questions, strict):
-    """Fail (under --strict) if a bank module is missing from STUDY_ORDER, if a
-    STUDY_PATHS array stops being an ordered subset of its section's STUDY_ORDER, or if
-    a section README's Interview-Specific Path table disagrees with STUDY_PATHS.
+    """Fail (under --strict) if a bank module is missing from STUDY_ORDER, if a curated
+    tier array stops being an ordered subset of its section's STUDY_ORDER, if a
+    `<tier>Files` sub-file allowlist names something that does not exist, or if a section
+    README's tier table disagrees with app.js.
+
+    `senior` and `principal` are validated INDEPENDENTLY. The old guard unioned every slug
+    array it found in a section, which is exactly what would false-fail once a second array
+    exists (see the NOTE above STUDY_ORDER in app.js).
+
     Warn-only without --strict. Reads app.js as text (stdlib only)."""
     app = open(os.path.join(GAME_DIR, "app.js"), encoding="utf-8").read()
     errors, warns = [], []
@@ -431,48 +505,105 @@ def check_wiring(questions, strict):
                 warns.append(f"STUDY_ORDER dead entry: {slug} extracted 0 questions (Q&A format broken?)")
         mp = STUDY_PATHS_RE.search(app)
         if mp:
-            path_secs = _section_arrays(mp.group(1))
-            for sec, arr in path_secs.items():
-                o = order.get(sec, [])
-                idxs = [o.index(x) if x in o else -1 for x in arr]
-                missing = [x for x, i in zip(arr, idxs) if i < 0]
-                if missing:
-                    errors.append(f"STUDY_PATHS.{sec} not a subset of STUDY_ORDER: {missing}")
-                elif idxs != sorted(idxs):
-                    errors.append(f"STUDY_PATHS.{sec} order deviates from STUDY_ORDER")
+            body = mp.group(1)
+            tier_arrays = {t: _section_arrays(body, t) for t in TIERS}
+            tier_files = {t: _tier_objects(body, t + "Files") for t in TIERS}
+            cases_map = _tier_objects(body, "cases")
+            path_secs = sorted({s for t in TIERS for s in tier_arrays[t]})
 
-                # dual-source reconciliation: app.js vs the section README's table
-                doc = _readme_interview_path(sec)
-                if doc is None:
-                    errors.append(
-                        f"STUDY_PATHS.{sec} exists but {sec}/README.md has no "
-                        f"'### Interview-Specific Path (N modules)' heading -- the game offers an "
-                        f"Interview toggle the docs never describe")
-                    continue
-                declared, doc_slugs = doc
-                only_doc = [x for x in doc_slugs if x not in arr]
-                only_app = [x for x in arr if x not in doc_slugs]
-                if only_doc or only_app:
-                    errors.append(
-                        f"Interview path drift in {sec}: README table and STUDY_PATHS.{sec} "
-                        f"disagree -- only in README: {only_doc or 'none'}; "
-                        f"only in app.js: {only_app or 'none'}")
-                elif declared != len(doc_slugs):
-                    errors.append(
-                        f"Interview path count wrong in {sec}/README.md: heading says "
-                        f"({declared} modules) but the table lists {len(doc_slugs)}")
-                elif doc_slugs != arr:
-                    # same members, different sequence -- the README claims the learning
-                    # order, so this misleads a reader without breaking the game
-                    warns.append(
-                        f"Interview path order differs in {sec}: README table sequences "
-                        f"{[x.split('/')[-1] for x in doc_slugs]} but STUDY_PATHS.{sec} (which "
-                        f"follows STUDY_ORDER) sequences {[x.split('/')[-1] for x in arr]}")
+            for sec in path_secs:
+                o = order.get(sec, [])
+                for tier in TIERS:
+                    arr = tier_arrays[tier].get(sec)
+                    if arr is None:
+                        continue
+                    # (1) each tier is an ordered subset of STUDY_ORDER, independently
+                    bad = [x for x in arr if len(x.split("/")) != 2]
+                    if bad:
+                        errors.append(f"STUDY_PATHS.{sec}.{tier}: module id must be 2 segments: {bad}")
+                    idxs = [o.index(x) if x in o else -1 for x in arr]
+                    missing = [x for x, i in zip(arr, idxs) if i < 0]
+                    if missing:
+                        errors.append(f"STUDY_PATHS.{sec}.{tier} not a subset of STUDY_ORDER: {missing}")
+                    elif idxs != sorted(idxs):
+                        errors.append(f"STUDY_PATHS.{sec}.{tier} order deviates from STUDY_ORDER")
+
+                    # (2-4) sub-file allowlist: keys in-tier, files real, README.md present
+                    fmap = tier_files[tier].get(sec, {})
+                    for mod, lst in fmap.items():
+                        if mod not in arr:
+                            errors.append(f"STUDY_PATHS.{sec}.{tier}Files: '{mod}' is not in {tier}")
+                        real = _module_sourcefiles(mod)
+                        if real is None:
+                            errors.append(f"STUDY_PATHS.{sec}.{tier}Files: no such module dir '{mod}'")
+                            continue
+                        for fn in lst:
+                            if fn not in real:
+                                errors.append(f"STUDY_PATHS.{sec}.{tier}Files['{mod}']: '{fn}' not on disk")
+                        if "README.md" not in lst:
+                            errors.append(f"STUDY_PATHS.{sec}.{tier}Files['{mod}']: missing README.md -- the module page is never optional")
+                    # (5) a tiered module with sub-files and no allowlist silently
+                    #     re-inflates the path the next time a deep-dive is added
+                    for mod in arr:
+                        real = _module_sourcefiles(mod) or set()
+                        if len(real) > 1 and mod not in fmap:
+                            warns.append(f"STUDY_PATHS.{sec}.{tier}: '{mod}' has {len(real)-1} sub-file(s) but no {tier}Files entry -- all of them are in the path")
+
+                    # dual-source reconciliation against the README's tier table.
+                    #
+                    # MIGRATION GRACE: a section still carrying the legacy
+                    # "### Interview-Specific Path" heading is mid-migration -- its table
+                    # holds hand-written per-group rationale prose that must be rewritten by
+                    # hand, not regenerated. While that heading is present, every
+                    # reconciliation finding for that section is a WARNING. It becomes fatal
+                    # the moment the section adopts "### Senior Path" / "### Principal Path",
+                    # so a migrated section can never silently drift.
+                    rp = os.path.join(BASE_DIR, sec, "README.md")
+                    legacy = bool(README_LEGACY_RE.search(open(rp, encoding="utf-8").read())) \
+                        if os.path.exists(rp) else False
+                    sink = warns if legacy else errors
+
+                    doc = _readme_tier_path(sec, tier)
+                    if doc is None:
+                        sink.append(
+                            f"{sec}/README.md has no '### {tier.title()} Path (N modules)' heading"
+                            + (" (still on the legacy Interview-Specific Path heading)" if legacy
+                               else f" but STUDY_PATHS.{sec}.{tier} exists"))
+                        continue
+                    declared, doc_slugs = doc
+                    only_doc = [x for x in doc_slugs if x not in arr]
+                    only_app = [x for x in arr if x not in doc_slugs]
+                    if only_doc or only_app:
+                        sink.append(
+                            f"{tier} path drift in {sec}: README table and STUDY_PATHS.{sec}.{tier} "
+                            f"disagree -- only in README: {only_doc or 'none'}; only in app.js: {only_app or 'none'}")
+                    elif declared != len(doc_slugs):
+                        sink.append(
+                            f"{tier} path count wrong in {sec}/README.md: heading says "
+                            f"({declared} modules) but the table lists {len(doc_slugs)}")
+                    elif doc_slugs != arr:
+                        warns.append(
+                            f"{tier} path order differs in {sec}: README sequences "
+                            f"{[x.split('/')[-1] for x in doc_slugs]} but STUDY_PATHS.{sec}.{tier} "
+                            f"(which follows STUDY_ORDER) sequences {[x.split('/')[-1] for x in arr]}")
+
+                # case-study tiering: paths must resolve, and cross_cutting/ is excluded
+                # from index.caseStudies so it can never be addressed here
+                for tier, lst in (cases_map.get(sec) or {}).items():
+                    for c in lst:
+                        if any(p in CS_EXCLUDE_DIRS for p in c.split("/")):
+                            errors.append(f"STUDY_PATHS.{sec}.cases.{tier}: '{c}' is under an excluded dir -- it never enters index.caseStudies")
+                        elif not os.path.exists(os.path.join(BASE_DIR, c)):
+                            errors.append(f"STUDY_PATHS.{sec}.cases.{tier}: no such file '{c}'")
+
             for sec in sorted(order):
-                if sec not in path_secs and _readme_interview_path(sec) is not None:
-                    errors.append(
-                        f"{sec}/README.md documents an Interview-Specific Path but there is no "
-                        f"STUDY_PATHS.{sec} -- the game's Interview toggle will not offer it")
+                if sec in path_secs:
+                    continue
+                for tier in TIERS:
+                    if _readme_tier_path(sec, tier) is not None:
+                        errors.append(
+                            f"{sec}/README.md documents a {tier.title()} Path but there is no "
+                            f"STUDY_PATHS.{sec}.{tier} -- the game will not offer that tab")
     for w in warns:  print(f"WIRING WARNING: {w}", file=sys.stderr)
     for e in errors: print(f"WIRING ERROR: {e}", file=sys.stderr)
     if errors and strict: sys.exit(1)
