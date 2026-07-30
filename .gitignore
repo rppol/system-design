@@ -53,3 +53,7 @@ src/main/java/com/rutik/systemdesign/game/vendor/icons-*.json
 
 # CI build tooling (Puppeteer for diagram pre-rendering) — never committed
 node_modules/
+
+# Python bytecode from the build scripts (extract.py imports)
+__pycache__/
+*.pyc
