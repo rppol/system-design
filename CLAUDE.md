@@ -62,6 +62,7 @@ anywhere below a section root.
 | `<section>/case_studies/case_studies.md` | one per section with case studies | The case-study INDEX (5-section learning path + tier markers). |
 | `<section>/case_studies/<name>/<name>.md` | directory-shaped case study | Flat case studies stay `<name>.md`. |
 | `book/<book>/<NN_chapter>/<NN_chapter>.md` | book chapter | Same rule; the per-book index is `book/<book>/<book>.md` and only `book/README.md` is a README. |
+| `technologies/tech_bank/*.md` | one taxonomy + 18 tier shards | The technology KNOWLEDGE BANK — authored **data**, not a module. Source of the generated `game/tech_index.json`. Excluded from both `extract.py` walks by exact path; carries records, never the 14-section template. See `technologies/CLAUDE.md`. |
 
 So: **one `README.md` per section (the index), one `CLAUDE.md` per section (agent rules),
 and every content page named for its folder.** `extract.py` resolves a module page with
@@ -518,6 +519,16 @@ silently dropped from the game or renders wrong. These rules are derived from
   `CLAUDE.md` files. Case studies are still **reachable in the reader** via
   relative `.md` links (the `/content/` route serves any file) — so linking to a
   case study from a module is fine; its Q&As just never enter the quiz bank.
+- **`technologies/tech_bank/` is excluded from BOTH walks by exact path** — the Q&A/file-
+  tree walk in `main()` and the §11/§8 walk in `build_tech_index()` (`TECH_BANK_DIR` /
+  `in_tech_bank()` in `extract.py`). It is authored DATA, the source of
+  `game/tech_index.json`, not study content: no `STUDY_ORDER` entry, no
+  `<!-- study-paths -->` block, no questions, not in the reader's module tree. The
+  exclusion is load-bearing and silent — as a plain module dir it becomes a phantom
+  module that `--strict` waves through, and one `## 11. Technologies & Tools` table
+  inside it makes the index index the bank into itself (3809/613 → 3810/614, no error).
+  So `build_tech_bank()` fails the build on any `## NN.` template heading found there.
+  Full authoring contract: `technologies/CLAUDE.md`.
 - The bank (`game/questions/*.json`) and the module-relatedness graphs
   (`game/graph/*.json`) are **generated, not committed** — they are
   gitignored; the Pages CI regenerates them fresh on every push (see

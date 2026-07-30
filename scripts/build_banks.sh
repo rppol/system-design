@@ -105,6 +105,42 @@ except FileNotFoundError:
 except json.JSONDecodeError as e:
     fail.append(f"unparseable questions/tech.json: {e}")
 
+# tech_index.json — the technology KNOWLEDGE BANK (what each tool IS), generated from
+# technologies/tech_bank/*.md. It lives at the GAME ROOT, not in questions/, so the
+# stale-artifact guard below cannot see it and neither can the APK smoke test's
+# `BANKS == SEC + 3` count (which stays correct precisely because this file is not in
+# questions/ — do not touch it). Broken, the Technologies screen silently degrades to a
+# flat provenance list with no summaries, chips, tiers or kinds: exactly the quiet
+# failure the tech.json check above exists to prevent.
+try:
+    with open("tech_index.json") as f:
+        bank = json.load(f)
+except FileNotFoundError:
+    fail.append("missing tech_index.json — the Technologies screen would lose every "
+                "summary, role chip and facet")
+except json.JSONDecodeError as e:
+    fail.append(f"unparseable tech_index.json: {e}")
+else:
+    tools = bank.get("tools") or {}
+    if not tools:
+        fail.append("tech_index.json has no tools — the technology bank is empty")
+    if len(bank.get("tiers") or []) < 18:
+        fail.append(f"tech_index.json has {len(bank.get('tiers') or [])} tiers, expected >= 18 "
+                    "— the tier shelf and every facet chip come from this list")
+    if not (bank.get("kinds") and bank.get("langs")):
+        fail.append("tech_index.json is missing its kinds/langs vocabulary")
+    # The permanent regression test for the markdown migration: every field that existed
+    # before the source moved into technologies/tech_bank/ must still parse out. `d` (the
+    # authored description) is the one key that is new and per-record optional, so it is
+    # excluded — the other four must never drift, whatever a description wave touches.
+    bad = [n for n, v in tools.items()
+           if not (isinstance(v.get("s"), str) and 15 <= len(v["s"]) <= 220)
+           or not v.get("r") or not v.get("l") or not v.get("k")
+           or set(v) - {"k", "r", "l", "s", "d"}]
+    if bad:
+        fail.append(f"{len(bad)} tech_index.json record(s) lost a migrated field "
+                    f"(k/r/l/s) or grew an unknown key, e.g. {bad[:3]}")
+
 # Stale files from a removed/renamed section would rsync into the APK payload
 # and confuse the loaders, so demand an exact match both ways.
 # index.json, paths.json and tech.json are the section-INDEPENDENT artifacts

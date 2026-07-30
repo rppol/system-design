@@ -49,6 +49,26 @@ SKIP_SECTIONS = {"game"}
 # Path components that exclude a page from the bank (e.g. case studies).
 SKIP_PATH_PARTS = {"case_studies"}
 
+# The technology KNOWLEDGE BANK: authored DATA, not study content. It lives inside a real
+# bank section (technologies/ has STUDY_ORDER entries), so it must be excluded by EXACT
+# relative path from BOTH walks -- main()'s Q&A/file-tree walk and build_tech_index()'s
+# §11/§8 walk. Three hazards, all measured, all silent:
+#   * as a plain module dir it passes --strict yet lands in index.files with
+#     moduleCounts 0 -> a PHANTOM module in the reader tree, prev/next chain, command
+#     palette and Study skill tree;
+#   * a `## 11. Technologies & Tools` table inside it makes build_tech_index() index the
+#     bank INTO ITSELF (3809/613 -> 3810/614, no error);
+#   * at the section ROOT instead, one stray `## 12. Interview Questions` heading collapses
+#     `module` to the 1-segment "technologies" and check_wiring() kills the deploy.
+# An exact path, NOT a name in SKIP_PATH_PARTS: a name rule would silently swallow a
+# directory called tech_bank in any of the 16 sections.
+TECH_BANK_DIR = os.path.join("technologies", "tech_bank")
+
+
+def in_tech_bank(rel):
+    """True for the tech_bank directory itself and anything nested under it."""
+    return rel == TECH_BANK_DIR or rel.startswith(TECH_BANK_DIR + os.sep)
+
 # The case-studies learning-path INDEX inside <section>/case_studies/. Named for its
 # folder like every other page since 2026-07-30 (it was case_studies/README.md). It
 # carries the tier markers AND the curated order, and it is not itself a case study.
@@ -882,6 +902,239 @@ def collect_case_studies(section, base_dir):
     return [{"file": universe[s], "name": names[s]} for s in ordered]
 
 
+# ---- technology KNOWLEDGE BANK (tech_index.json) ---------------------------
+#
+# What each tool IS and what problems it solves, independent of which module happens to
+# teach it. The SOURCE is markdown -- technologies/tech_bank/*.md -- and tech_index.json
+# is generated from it, gitignored, and rebuilt by CI exactly like the question banks,
+# paths.json and the pre-rendered Mermaid assets. It used to be a committed blob because
+# deriving a tool's roles needs a judgement pass; that judgement now lives in the markdown,
+# so the blob is an artifact again.
+#
+# The record contract deliberately mirrors the Q&A `**Short:**` contract, bound included:
+# the short line is the always-visible row text (so it must stand alone at 15-220 chars),
+# and the prose beneath it is the reveal. Both are per-record opt-in, so the description
+# pass can run shard by shard for as long as it takes without any intermediate state
+# being broken.
+TB_H2 = re.compile(r"^##\s+(.+?)\s*$")
+TB_REC = re.compile(r"^###\s+(.+?)\s*$")
+TB_SUB = re.compile(r"^####\s+(.+?)\s*$")
+TB_FLD = re.compile(r"^\*\*([A-Za-z]+):\*\*\s*(.*?)\s*$")
+TB_ROLE = re.compile(r"^(\S+/\S+)\s*@([123])$")
+# A `## NN.` section-template heading is the signature of someone mistaking this data
+# directory for study content. The exclusion from both walks is silent by design, which
+# is exactly what makes it a trap -- so say so loudly instead.
+TB_TEMPLATE_HDR = re.compile(r"^##\s+\d+[.)]\s")
+# Descriptions are ESCAPED and rendered as <p>, with one backtick->code pass. Anything
+# else would leak as literal characters, so reject it at build time rather than ship it.
+TB_BAD_DESC = re.compile(r"(?:```|~~~)|^\s*(?:[-*+]|\d+[.)])\s|^\s*\||\]\(")
+
+
+def _tb_paragraphs(lines):
+    """Hard-wrapped markdown prose -> the paragraph list app.js splits on "\\n\\n".
+    Wrapped lines inside one paragraph are joined with a space; a blank line starts a
+    new paragraph. Without the join the literal newlines survive into the escaped HTML
+    and into the search haystack."""
+    paras, cur = [], []
+    for line in list(lines) + [""]:
+        if line.strip():
+            cur.append(line.strip())
+        elif cur:
+            paras.append(" ".join(cur))
+            cur = []
+    return paras
+
+
+def _tb_taxonomy(path, errs):
+    """tech_bank.md -> (langs, tiers, kinds). Order is file order, so the tier shelf and
+    the kind/language selects render in the sequence the taxonomy was authored in."""
+    kinds, langs, tiers = [], [], []
+    sec, cur, role = None, None, None
+    for n, line in enumerate(open(path, encoding="utf-8").read().split("\n"), 1):
+        if TB_TEMPLATE_HDR.match(line):
+            errs.append(f"tech_bank.md:{n} `## NN.` section-template heading -- "
+                        f"tech_bank/ is DATA, not a study module")
+        m = TB_SUB.match(line)
+        if m:                                   # a role, under the open tier
+            if sec == "Tiers" and cur is not None:
+                role = {"id": m.group(1), "label": "", "def": "", "seeds": []}
+                cur["roles"].append(role)
+            continue
+        m = TB_REC.match(line)
+        if m:
+            role = None
+            if sec == "Kinds":
+                cur = {"id": m.group(1), "label": "", "def": "", "default": False, "examples": []}
+                kinds.append(cur)
+            elif sec == "Languages":
+                cur = {"id": m.group(1), "label": ""}
+                langs.append(cur)
+            elif sec == "Tiers":
+                cur = {"id": m.group(1), "label": "", "blurb": "", "roles": []}
+                tiers.append(cur)
+            else:
+                cur = None
+            continue
+        m = TB_H2.match(line)
+        if m:
+            sec, cur, role = m.group(1).strip(), None, None
+            continue
+        m = TB_FLD.match(line)
+        if not m or cur is None:
+            continue
+        key, val = m.group(1).lower(), m.group(2)
+        tgt = role if role is not None else cur
+        if key == "label":
+            tgt["label"] = val
+        elif key == "blurb" and "blurb" in tgt:
+            tgt["blurb"] = val
+        elif key == "def" and "def" in tgt:
+            tgt["def"] = val
+        elif key == "default":
+            tgt["default"] = val.strip().lower() in ("yes", "true")
+        elif key == "examples" and "examples" in tgt:
+            tgt["examples"] = [x.strip() for x in val.split(",") if x.strip()]
+        elif key == "seeds" and role is not None:
+            role["seeds"] = [x.strip() for x in val.split(",") if x.strip()]
+        elif key in ("merged", "note") and role is not None:
+            role[key] = val
+    for t in tiers:
+        if not t["roles"]:
+            errs.append(f"tech_bank.md: tier '{t['id']}' declares no roles")
+    if not kinds or not tiers or not langs:
+        errs.append("tech_bank.md: taxonomy is missing a Kinds, Languages or Tiers section")
+    return langs, tiers, kinds
+
+
+def build_tech_bank():
+    """technologies/tech_bank/*.md -> the tech_index.json payload, plus the validation
+    errors that --strict turns into a failed build and the never-fatal warnings.
+    Returns (bank, errors, warnings); (None, [...], []) when the directory is absent."""
+    root = os.path.join(BASE_DIR, TECH_BANK_DIR)
+    errs, warns = [], []
+    if not os.path.isdir(root):
+        return None, [f"missing {TECH_BANK_DIR}/ -- the technology bank has no source"], []
+    tax = os.path.join(root, "tech_bank.md")
+    if not os.path.isfile(tax):
+        return None, [f"missing {TECH_BANK_DIR}/tech_bank.md -- no taxonomy"], []
+    langs, tiers, kinds = _tb_taxonomy(tax, errs)
+    role_ids = {f"{t['id']}/{r['id']}" for t in tiers for r in t["roles"]}
+    kind_ids = {k["id"] for k in kinds}
+    lang_ids = {L["id"] for L in langs}
+
+    # RECURSIVE, so a shard someone files under a sub-directory is parsed and validated
+    # rather than silently ignored. Both extract.py walks already treat everything under
+    # tech_bank/ as inert; this pass is the only thing that reads it, so it has to be the
+    # thing that notices.
+    shard_files = []
+    for r, dn, files in os.walk(root):
+        dn.sort()
+        for fn in sorted(files):
+            if not fn.endswith(".md") or fn == "CLAUDE.md":
+                continue
+            rel = os.path.relpath(os.path.join(r, fn), root)
+            if rel != "tech_bank.md":
+                shard_files.append(rel)
+
+    tools, where = {}, {}
+    for fn in shard_files:
+        shard_tier = os.path.basename(fn)[:-3]
+        lines = open(os.path.join(root, fn), encoding="utf-8").read().split("\n")
+        i, cur, cur_line = 0, None, 0
+
+        def close(cur, cur_line, desc):
+            if cur is None:
+                return
+            name = cur["n"]
+            paras = _tb_paragraphs(desc)
+            if "s" not in cur:
+                # The short line IS the row. A description with nothing above it renders
+                # as a bare name, so this is fatal whether or not prose follows.
+                errs.append(f"{fn}:{cur_line} '{name}' has no **Short:** line")
+            elif not (SHORT_MIN <= len(cur["s"]) <= SHORT_MAX):
+                errs.append(f"{fn}:{cur_line} '{name}' short line {len(cur['s'])} chars "
+                            f"({SHORT_MIN}-{SHORT_MAX})")
+            if cur.get("k") not in kind_ids:
+                errs.append(f"{fn}:{cur_line} '{name}' unknown **Kind:** {cur.get('k')!r}")
+            for tok in cur.get("l") or []:
+                if tok not in lang_ids:
+                    errs.append(f"{fn}:{cur_line} '{name}' unknown language token {tok!r}")
+            if not cur.get("l"):
+                errs.append(f"{fn}:{cur_line} '{name}' has no **Lang:** token")
+            if not cur.get("r"):
+                # facetWeight() returns null with no roles -> invisible under every facet.
+                errs.append(f"{fn}:{cur_line} '{name}' has no roles")
+            for rid, _w in cur.get("r") or []:
+                if rid not in role_ids:
+                    errs.append(f"{fn}:{cur_line} '{name}' unknown role {rid!r}")
+            if name in where:
+                errs.append(f"{fn}:{cur_line} duplicate record '{name}' "
+                            f"(already in {where[name]}) -- last write would win silently")
+            where[name] = fn
+            if cur.get("r") and cur["r"][0][0].split("/")[0] != shard_tier:
+                warns.append(f"{fn}: '{name}' primary role is "
+                             f"{cur['r'][0][0].split('/')[0]}, not this shard's {shard_tier}")
+            for ln in desc:
+                if TB_BAD_DESC.search(ln):
+                    errs.append(f"{fn}:{cur_line} '{name}' description carries a fence, "
+                                f"list, table or link -- it is escaped, not rendered")
+                    break
+            out = {"k": cur.get("k", ""), "r": cur.get("r", []),
+                   "l": cur.get("l", []), "s": cur.get("s", "")}
+            if paras:
+                out["d"] = "\n\n".join(paras)
+            tools[name] = out
+
+        desc = []
+        while i < len(lines):
+            line = lines[i]
+            if TB_TEMPLATE_HDR.match(line):
+                errs.append(f"{fn}:{i + 1} `## NN.` section-template heading -- "
+                            f"tech_bank/ is DATA, not a study module")
+            m = TB_REC.match(line)
+            if not m:
+                if cur is not None:
+                    desc.append(line)
+                i += 1
+                continue
+            close(cur, cur_line, desc)
+            cur, cur_line, desc = {"n": m.group(1)}, i + 1, []
+            i += 1
+            # The field block is CONTIGUOUS and starts on the very next line, so a bolded
+            # sentence inside a description can never be mistaken for a field.
+            while i < len(lines):
+                f = TB_FLD.match(lines[i])
+                if not f:
+                    break
+                key, val = f.group(1).lower(), f.group(2)
+                if key == "short":
+                    cur["s"] = val
+                elif key == "kind":
+                    cur["k"] = val
+                elif key == "lang":
+                    cur["l"] = [x.strip() for x in val.split(",") if x.strip()]
+                elif key == "roles":
+                    rs = []
+                    for part in val.split(","):
+                        rm = TB_ROLE.match(part.strip())
+                        if not rm:
+                            errs.append(f"{fn}:{i + 1} '{cur['n']}' bad role "
+                                        f"{part.strip()!r} (want 'tier/role @1|2|3')")
+                            continue
+                        rs.append([rm.group(1), int(rm.group(2))])
+                    cur["r"] = rs
+                else:
+                    errs.append(f"{fn}:{i + 1} '{cur['n']}' unknown field **{f.group(1)}:**")
+                i += 1
+        close(cur, cur_line, desc)
+
+    if not tools:
+        errs.append(f"{TECH_BANK_DIR}/ parsed zero tools")
+    bank = {"generatedAt": datetime.now(timezone.utc).isoformat(),
+            "langs": langs, "tiers": tiers, "kinds": kinds, "tools": tools}
+    return bank, errs, warns
+
+
 # ---- technologies index (questions/tech.json) ------------------------------
 #
 # Two sections of the 14-section module template are pure REFERENCE material that
@@ -1116,8 +1369,23 @@ def tech_from_bullets(body):
     return out
 
 
-def build_tech_index():
-    """{anchors, modules, tech, trade} -- the whole-repo technology + tradeoff index."""
+def _study_order():
+    """{section: [module slug, ...]} read out of app.js's STUDY_ORDER literal, in file
+    order -- so a Python dict's insertion order matches JS `Object.keys(STUDY_ORDER)`.
+    Returns {} if app.js cannot be read; callers must degrade, never crash."""
+    try:
+        app_src = open(os.path.join(GAME_DIR, "app.js"), encoding="utf-8").read()
+        return _section_arrays(STUDY_ORDER_RE.search(app_src).group(1))
+    except Exception:
+        return {}
+
+
+def build_tech_index(bank=None):
+    """{anchors, modules, tech, trade, secs, deep} -- the whole-repo technology +
+    tradeoff index, with everything the Technologies screen used to recompute on EVERY
+    render precomputed here instead (see the `h`/`s`/`secs`/`deep` notes at the bottom).
+    `bank` is the parsed tech_bank, folded into the search haystack so the authored
+    summary and description are searchable without the browser touching them."""
     anchors, anchor_ids = [], {}
     modules, module_ids = [], {}
     tech = {}            # key -> {"forms": Counter-ish dict, "uses": [(modIdx, blurb)]}
@@ -1144,7 +1412,7 @@ def build_tech_index():
             continue
         parts = rel.split(os.sep)
         section = parts[0]
-        if section in SKIP_SECTIONS or SKIP_PATH_PARTS.intersection(parts):
+        if section in SKIP_SECTIONS or SKIP_PATH_PARTS.intersection(parts) or in_tech_bank(rel):
             continue
         # Same module-id rule as the bank: 2 segments, 3 for book. A file deeper than
         # that folds into its parent module and carries the rest in source_file.
@@ -1223,6 +1491,24 @@ def build_tech_index():
                     if digest:
                         trade.append({"i": mi, "h": head, "r": digest})
 
+    # ---- everything below here is PRECOMPUTE, not indexing ----------------------
+    # The Technologies screen used to rebuild all of this inside renderTech(), on every
+    # render, from data that never depends on user state: a 574,532-character lowercase
+    # haystack across 3,809 rows, a Set of sections per row, a whole-index pass to count
+    # the tools in each hand-written deep dive, and a 607-row map+sort for the tradeoff
+    # tab. None of it can change between renders, so none of it belongs in the browser --
+    # the same reason scripts/build_diagrams.mjs pre-renders Mermaid to static SVG.
+    order = _study_order()
+    sec_pos = {s: i for i, s in enumerate(order)}
+    def sec_rank(s):
+        return sec_pos.get(s, 998) + 1
+
+    # techName(m) in app.js = m.t || fileLabel(m.f) || prettyMod(m.m). All 613 modules
+    # carry a title today; the fallback exists so a future untitled page still gets a
+    # searchable string rather than "None".
+    def mod_title(m):
+        return m["t"] or os.path.basename(m["f"])[:-3].replace("_", " ") or m["m"]
+
     # Display name = the most common surface form (shortest wins a tie), so a tool
     # written five ways in five sections still reads as one entry.
     tech_out = []
@@ -1238,9 +1524,67 @@ def build_tech_index():
         tech_out.append({"n": name, "u": uses})
     # Broadest coverage first: the tools worth learning are the ones many modules reach for.
     tech_out.sort(key=lambda t: (-len(t["u"]), t["n"].lower()))
-    trade.sort(key=lambda t: (modules[t["i"]]["m"], modules[t["i"]]["f"]))
+
+    # `h` -- the SEARCH HAYSTACK, lowercased and pre-joined. It carries the tool name,
+    # every citing module's title and that module's own blurb for it, PLUS the bank's
+    # authored short line and description. The short line was never searchable before
+    # (renderTech built the haystack from name + provenance only), so 404,755 characters
+    # of the best text in the index were displayed and invisible to the search box.
+    # Folding the description in here is also what makes a description-only artifact
+    # split pointless: a copy of the prose has to live in the haystack either way.
+    # `s` -- the row's sections, in first-appearance order, for the section filter.
+    btools = (bank or {}).get("tools") or {}
+    for t in tech_out:
+        secs, seen_s = [], set()
+        for u in t["u"]:
+            s = modules[u[0]]["m"].split("/")[0]
+            if s not in seen_s:
+                seen_s.add(s)
+                secs.append(s)
+        b = btools.get(t["n"]) or {}
+        parts = [t["n"]]
+        for u in t["u"]:
+            parts.append(mod_title(modules[u[0]]))
+            parts.append(u[1] if len(u) > 1 else "")
+        parts.append(b.get("s", ""))
+        parts.append(b.get("d", ""))
+        t["s"] = secs
+        t["h"] = " ".join(p for p in parts if p).lower()
+
+    # Tradeoff cards come out in the order you LEARN the material: section order first,
+    # then the module's STUDY_ORDER position. app.js applied the same comparator on every
+    # render; emitting the array already sorted makes that sort a no-op (Array.sort is
+    # stable), so it stays correct whether or not the runtime keeps sorting.
+    def so_index(mod_id):
+        sec = mod_id.split("/")[0]
+        for i, slug in enumerate(order.get(sec, [])):
+            if mod_id == slug or mod_id.startswith(slug + "/"):
+                return i
+        return 9999
+    # NOT precomputed, deliberately: the tradeoff tab's own search haystack. It was
+    # measured at +53,531 bytes GZIP -- gzip cannot dedupe it against the cells it copies
+    # because the copy is lowercased -- to save one pass over 607 rows / ~220 K chars,
+    # about 1.7 ms per render of a tab that is not even the default. The per-tool haystack
+    # is 3,809 rows and carries text that exists nowhere else in the file; this one is
+    # neither. Leaving it at runtime is the cheaper side of the trade.
+    trade.sort(key=lambda t: (sec_rank(modules[t["i"]]["m"].split("/")[0]),
+                              so_index(modules[t["i"]]["m"]),
+                              modules[t["i"]]["m"], modules[t["i"]]["f"]))
+
+    # Sections present in the index, already in the app's canonical order.
+    secs_present = sorted({m["m"].split("/")[0] for m in modules}, key=sec_rank)
+    # The hand-written technologies/ deep dives, pinned above the derived index, each with
+    # the number of indexed tools in its stack. That count used to cost a full pass over
+    # every tool's every use (~5,800 pairs) to label three cards.
+    tools_in = {}
+    for t in tech_out:
+        for u in t["u"]:
+            tools_in[u[0]] = tools_in.get(u[0], 0) + 1
+    deep = [[i, tools_in.get(i, 0)] for i, m in enumerate(modules)
+            if m["m"].startswith("technologies/")]
     return {"generatedAt": datetime.now(timezone.utc).isoformat(),
-            "anchors": anchors, "modules": modules, "tech": tech_out, "trade": trade}
+            "anchors": anchors, "modules": modules, "tech": tech_out, "trade": trade,
+            "secs": secs_present, "deep": deep}
 
 
 def build_questions(raw, rng):
@@ -1398,6 +1742,8 @@ def main():
             continue
         if SKIP_PATH_PARTS.intersection(parts):
             continue  # exclude case studies etc.
+        if in_tech_bank(rel):
+            continue  # the technology knowledge bank is DATA, never a study module
         # A module key is ALWAYS "<section>/<module>" -- exactly two segments. A file living
         # deeper (lld/creational/prototype/prototype.md) folds into its parent module the same
         # way a deep-dive sub-file does, carrying the extra path inside source_file. `book`
@@ -1514,25 +1860,63 @@ def main():
     except Exception as exc:                                   # never block the bank build
         print(f"WARNING: could not derive tier paths: {exc}", file=sys.stderr)
 
+    strict = "--strict" in sys.argv[1:]
+
+    # The technology KNOWLEDGE BANK, parsed from technologies/tech_bank/*.md into
+    # game/tech_index.json. Built BEFORE the derived index so the authored short line and
+    # description can be folded into that index's precomputed search haystack.
+    bank, bank_errs, bank_warns = build_tech_bank()
+    if bank:
+        with open(os.path.join(GAME_DIR, "tech_index.json"), "w", encoding="utf-8") as fh:
+            json.dump(bank, fh, ensure_ascii=False, separators=(",", ":"))
+        n_desc = sum(1 for v in bank["tools"].values() if v.get("d"))
+        print(f"Wrote technology bank -> {GAME_DIR}/tech_index.json  "
+              f"({len(bank['tools'])} tools, {len(bank['tiers'])} tiers, "
+              f"{sum(len(t['roles']) for t in bank['tiers'])} roles, "
+              f"{len(bank['kinds'])} kinds)")
+        print(f"authored descriptions: {n_desc} of {len(bank['tools'])} bank records")
+    for w in bank_warns[:20]:
+        print(f"  tech-bank WARNING: {w}", file=sys.stderr)
+
     # Whole-repo technology + tradeoff index (the Technologies screen). Generated and
     # gitignored like the banks. Never blocks the bank build: the screen degrades to an
     # empty state, but a broken quiz would be a broken app.
     try:
-        tech_index = build_tech_index()
+        tech_index = build_tech_index(bank)
         with open(os.path.join(OUT_DIR, "tech.json"), "w", encoding="utf-8") as fh:
             json.dump(tech_index, fh, ensure_ascii=False, separators=(",", ":"))
         print(f"Wrote technologies index -> {OUT_DIR}/tech.json  "
               f"({len(tech_index['tech'])} technologies, "
               f"{len(tech_index['modules'])} module files, "
               f"{len(tech_index['trade'])} tradeoff tables)")
+        # Coverage, both directions. Neither is fatal: an orphan record simply never
+        # renders (renderTech iterates the DERIVED index and looks the bank up by name),
+        # and an uncovered tool is the designed degradation to a plain one-line row.
+        if bank:
+            derived = {t["n"] for t in tech_index["tech"]}
+            orphans = sorted(set(bank["tools"]) - derived)
+            uncovered = sorted(derived - set(bank["tools"]))
+            print(f"bank coverage: {len(derived) - len(uncovered)} of {len(derived)} indexed "
+                  f"tools have a record; {len(orphans)} bank records no module teaches")
+            for n in orphans[:10]:
+                print(f"  tech-bank WARNING: orphan record '{n}' -- no module teaches it",
+                      file=sys.stderr)
     except Exception as exc:
         print(f"WARNING: could not build the technologies index: {exc}", file=sys.stderr)
+
+    if bank_errs:
+        # Same rule as an out-of-bounds authored **Short:**: a bad value ships to the
+        # user either way, so fail the build rather than the screen.
+        print(f"ERROR: {len(bank_errs)} technology-bank validation error(s)", file=sys.stderr)
+        for e in bank_errs[:25]:
+            print(f"  {e}", file=sys.stderr)
+        if strict:
+            sys.exit(1)
 
     print(f"Wrote {len(questions)} questions -> {OUT_DIR}/<section>.json")
     print("Per-section counts:")
     for sec, cnt in index["sections"].items():
         print(f"  {sec:16s} {cnt}")
-    strict = "--strict" in sys.argv[1:]
     # Migration progress. Counted from the parsed Q&As, not the emitted bank, since
     # the flag is a build-time signal and does not need to ship in questions/*.json.
     n_short = sum(1 for q in raw if q.get("shortAuthored"))
