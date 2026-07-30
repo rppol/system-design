@@ -4345,9 +4345,17 @@ async function renderTech() {
     const roles = F.t.length
       ? TIERS.filter((t) => F.t.includes(t.id)).flatMap((t) => t.roles.map((r) => ({ t, r, id: `${t.id}/${r.id}` })))
       : [];
-    const roleChips = roles.map(({ r, id }) => {
+    // With several tiers active this row is dozens of chips from different tiers with
+    // nothing saying which belongs to which -- on a phone it read as one wall of text.
+    // Caption each tier's run, but only when there IS more than one, so the common
+    // single-tier case stays clean.
+    const multiTier = F.t.length > 1;
+    let lastTier = null;
+    const roleChips = roles.map(({ t, r, id }) => {
       const n = rc.get(id) || 0, on = F.r.includes(id);
-      return `<button class="tx-chip tx-rolechip${on ? " on" : ""}" data-role="${esc(id)}"${n || on ? "" : " disabled"}
+      let cap = "";
+      if (multiTier && t.id !== lastTier) { lastTier = t.id; cap = `<span class="tx-rolecap">${esc(t.label)}</span>`; }
+      return cap + `<button class="tx-chip tx-rolechip${on ? " on" : ""}" data-role="${esc(id)}"${n || on ? "" : " disabled"}
         aria-pressed="${on}">${esc(r.label)} <span class="tx-chipn">${n}</span></button>`;
     }).join("");
     const langs = LANGS;

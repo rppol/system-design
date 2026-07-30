@@ -3052,17 +3052,28 @@ body.interview-mode #app::before {
 .tx-facets { display: flex; flex-direction: column; gap: 8px; margin: 10px 0 4px; }
 .tx-chiprow { display: flex; flex-wrap: wrap; gap: 6px; }
 .tx-chip {
-  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border: 1px solid var(--glass-brd); background: var(--glass); color: var(--text);
   border-radius: 999px; padding: 5px 11px; font-size: var(--fs-xs); cursor: pointer;
   display: inline-flex; align-items: baseline; gap: 6px; transition: background .12s, border-color .12s;
 }
 .tx-chip:hover:not(:disabled) { border-color: var(--accent); }
-.tx-chip.on { background: color-mix(in srgb, var(--accent) 22%, var(--card)); border-color: var(--accent); }
+.tx-chip.on {
+  background: color-mix(in srgb, var(--accent) 30%, var(--glass-2));
+  border-color: var(--accent); color: var(--text); font-weight: 600;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+}
 /* .32 made the label and its 0 unreadable (2.0:1 on the light surface). A disabled
    chip still has to be identifiable -- knowing WHICH area is empty is the information. */
 .tx-chip:disabled { opacity: .58; cursor: default; }
 .tx-chipn { font-family: var(--mono); font-size: .85em; color: var(--muted); font-variant-numeric: tabular-nums; }
-.tx-rolerow { padding-left: 10px; border-left: 2px solid var(--line); }
+/* the role row is a SECOND level, so it gets its own inset surface -- run flush against
+   the tier row it reads as one undifferentiated wall of text, which is exactly what it
+   looked like on a phone. */
+.tx-rolerow {
+  padding: 8px 10px; margin-left: 2px;
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--glass); border-radius: 0 var(--radius) var(--radius) 0;
+}
 .tx-facetfoot { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 
 /* landing shelf: one card per tier, roles as mini-chips */
@@ -3076,7 +3087,7 @@ body.interview-mode #app::before {
 .tx-tiername:hover:not(:disabled) { color: var(--accent); }
 .tx-tierroles { display: flex; flex-wrap: wrap; gap: 4px; }
 .tx-minirole {
-  background: none; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--glass); border: 1px solid var(--glass-brd); border-radius: 999px;
   color: var(--muted); font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
 .tx-minirole:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
@@ -3090,7 +3101,7 @@ body.interview-mode #app::before {
 .tx-sum { color: var(--muted); font-size: var(--fs-xs); line-height: 1.45; }
 .tx-roles { display: flex; flex-wrap: wrap; gap: 4px; }
 .tx-role {
-  background: none; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--glass); border: 1px solid var(--glass-brd); border-radius: 999px;
   color: var(--muted); font-size: 10.5px; padding: 1px 7px; cursor: pointer;
 }
 .tx-role.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -3128,7 +3139,35 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
 .tx-langband:first-child { margin-top: 2px; }
 /* [BANK] the full description, revealed only on expand -- the short line is what you scan,
    this is what you read once you have decided to care (same split as **Short:** / answer). */
-.tx-desc { margin: 2px 0 10px; padding-left: 6px; border-left: 2px solid var(--line); }
+.tx-desc { margin: 2px 0 10px; padding-left: 8px; border-left: 2px solid var(--glass-brd); }
 .tx-desc p { margin: 0 0 7px; color: var(--text); font-size: var(--fs-xs); line-height: 1.6; }
 .tx-desc p:last-child { margin-bottom: 0; }
 .tx-desc code { font-family: var(--mono); font-size: .92em; color: var(--accent-text); }
+
+/* [BANK] separation, after the live phone screenshot showed the screen as one flat
+   translucent purple with no boundaries anywhere. */
+
+/* which tier a run of role chips belongs to -- forces a line break so each tier's roles
+   read as a group instead of a continuous wall */
+.tx-rolecap {
+  flex-basis: 100%; margin: 6px 0 1px; font-size: 10.5px; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase; color: var(--accent-text);
+}
+.tx-rolecap:first-child { margin-top: 0; }
+
+/* the tier row gets a surface too, so the two levels are visibly different objects */
+.tx-chiprow:not(.tx-rolerow) { padding: 2px 0; }
+
+/* rows: a real divider and a hover surface. Hairlines alone vanished on the phone. */
+.tx-item { border-bottom: 1px solid var(--glass-brd); }
+.tx-item > summary { padding: 9px 8px; border-radius: var(--radius); }
+.tx-item > summary:hover { background: var(--glass); }
+.tx-item[open] { background: var(--glass); border-radius: var(--radius); margin: 4px 0; }
+.tx-item[open] > summary { border-bottom: 1px solid var(--glass-brd); border-radius: var(--radius) var(--radius) 0 0; }
+
+/* band captions were the only structure on screen and were barely visible */
+.tx-band {
+  border-top: 1px solid var(--glass-brd); padding-top: 10px;
+  margin: 18px 0 2px; color: var(--muted);
+}
+.tx-band:first-child { border-top: 0; padding-top: 0; }
