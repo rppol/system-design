@@ -947,6 +947,9 @@ button:active { transform: scale(0.98); }
   min-width: 2.2em; text-align: right; flex-shrink: 0;
   color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums;
 }
+/* the repo-wide total beside the section-scoped count ("5/29"), dimmer so the
+   scoped number stays the one you read */
+.tx-count-all { opacity: .5; }
 .tx-uses { list-style: none; margin: 0 0 8px; padding: 0 0 0 6px; display: flex; flex-direction: column; gap: 2px; }
 .tx-go {
   width: 100%; display: flex; align-items: baseline; gap: 9px; text-align: left;
@@ -1661,9 +1664,18 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
    chain up to the reader body. */
 .md-tablewrap { overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; margin: 12px 0; }
 .md-body table { border-collapse: collapse; margin: 0; font-size: 13px; display: table; }
-/* overflow-wrap:anywhere lets long unbreakable tokens (URLs, code, snake_case)
-   break so a cell wraps instead of forcing the table wider than the column. */
-.md-body th, .md-body td { border: 1px solid var(--od-line); padding: 6px 10px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+/* Long unbreakable tokens (URLs, code, snake_case) must still break so a cell wraps
+   instead of forcing the table wider than its column — but `anywhere` is NOT a
+   cosmetic variant of `break-word`. Per CSS Text 3, `anywhere` feeds intrinsic
+   min-content sizing while `break-word` does not: with `anywhere` every column's
+   min-content width collapses to ONE CHARACTER, the table never exceeds its
+   container, and `.md-tablewrap`'s overflow-x can therefore never fire. In the
+   reader's ~350px main column (both sidebars open) that rendered a 4-column §11
+   table as "To ol | Ca te go ry | Purp ose". `min-width: 8ch` gives each column a
+   floor so a genuinely wide table overflows into the scroller as intended.
+   Control case: .tr-table on the Technologies tab uses the same wrapper WITHOUT
+   `anywhere` and has never shown the bug. */
+.md-body th, .md-body td { border: 1px solid var(--od-line); padding: 6px 10px; text-align: left; vertical-align: top; overflow-wrap: break-word; min-width: 8ch; }
 .md-body th { background: var(--od-bg2); color: var(--od-text); }
 
 /* copy button on code fences (injected by the reader) */

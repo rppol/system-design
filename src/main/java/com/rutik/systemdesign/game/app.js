@@ -122,6 +122,14 @@ function titleize(s) {
   }).replace(/\bTCP IP\b/g, "TCP/IP").replace(/\bCI CD\b/g, "CI/CD");
 }
 
+// [SD] A module's own content page, derived from its id. Since 2026-07-30 every module
+// page is named for the folder that holds it (llm/advanced_rag/advanced_rag.md); the
+// only README.md files left are the 16 SECTION landing pages, which are never module
+// pages. Module ids did not change in that rename, so the page name is always
+// derivable — nothing here needs the bank. Book ids are three segments and the last
+// one is still the folder, so this holds for them too.
+const modulePage = (mod) => String(mod).replace(/\/+$/, "").split("/").pop() + ".md";
+
 // Phase-order for the Study browser. Derived from each section's README learning path.
 // Modules not listed here sort to the end (alphabetically by JS Map insertion order).
 // extract.py --strict parses this literal (and STUDY_PATHS) — keep the "const STUDY_ORDER = {" ... "};" shape.
@@ -1197,6 +1205,49 @@ function isModuleRead(path) {
   return !!(state.progress && state.progress.readModules && state.progress.readModules[path]);
 }
 
+// [SD] One-time key migration for the 2026-07-30 module-page rename. `readModules` is
+// keyed by reader PATH, so every page read before the rename is filed under
+// "<module>/README.md" and stops matching the moment the file becomes
+// "<module>/<module>.md" — the reader's read ticks, the Study path's "already read"
+// state, the Codex and "Continue your path" would all silently reset to zero on a
+// rename that changed no content. Strictly ADDITIVE: the new key is written BESIDE the
+// old one, never instead of it, so an old export still imports and a re-run is a no-op.
+// A key is only migrated when the renamed path actually exists in the index, which also
+// leaves the 16 surviving section landing pages alone.
+function migrateReadModulesForRename() {
+  const p = state.progress;
+  if (!p || !p.readModules || !state.index) return;
+  const files = state.index.files || {};
+  const caseFiles = new Set();
+  for (const list of Object.values(state.index.caseStudies || {}))
+    for (const c of list) caseFiles.add(c.file);
+  const exists = (path) => {
+    if (caseFiles.has(path)) return true;
+    const loc = splitModulePath(path);
+    return !!(loc && (files[loc.mod] || []).includes(loc.file));
+  };
+  const renamed = (path) => {
+    if (!/\/README\.md$/i.test(path)) return null;
+    const dir = path.slice(0, -"/README.md".length);
+    if (!dir.includes("/")) return null;             // "<section>/README.md" still exists
+    const next = `${dir}/${modulePage(dir)}`;
+    return exists(next) ? next : null;
+  };
+  let added = 0;
+  for (const [path, when] of Object.entries(p.readModules)) {
+    const next = renamed(path);
+    if (next && !p.readModules[next]) { p.readModules[next] = when; added++; }
+  }
+  if (added) safeSet("sd_progress", JSON.stringify(p));
+  // Study's "Continue reading" card points at one path; a stale one opens the reader's
+  // 404 panel. This is a UI pointer, not progress, so it is rewritten in place.
+  try {
+    const last = JSON.parse(localStorage.getItem("sd_last_read"));
+    const next = last && last.path && renamed(last.path);
+    if (next) safeSet("sd_last_read", JSON.stringify({ ...last, path: next }));
+  } catch { }
+}
+
 // SM-2-lite spaced-repetition scheduler. `ms` (time-to-answer, optional) is
 // tracked as an EMA so future difficulty tuning has a per-question latency signal.
 function scheduleReview(rv, status, today, ms, conf) {
@@ -1765,8 +1816,8 @@ function modulesFromIndex(section) {
     });
 }
 
-// [CS] Ordered case studies for a section from index.caseStudies (extract.py,
-// README-curated). Each entry is { file: reader path, name: display title }.
+// [CS] Ordered case studies for a section from index.caseStudies (extract.py, curated
+// by <section>/case_studies/case_studies.md). Each entry is { file: reader path, name: display title }.
 // Powers the read-only "Case Studies" study track (third path beside Full/Interview).
 function caseStudiesFromIndex(section) {
   return ((state.index && state.index.caseStudies) || {})[section] || [];
@@ -1782,15 +1833,15 @@ async function openTopics(section) {
   const mods = modulesOf(bank);
   // [SF] Per-module sub-file breakdown, derived straight from the bank: a module
   // qualifies for a sub-file selector only when its questions come from more than
-  // one file (README + deep-dives). No extract.py change — sourceFile and the counts
+  // one file (module page + deep-dives). No extract.py change — sourceFile and the counts
   // already live in the bank and module ids are never re-keyed, so spaced-repetition
   // state is untouched. Serves BOTH quiz and flashcard mode (one shared picker).
   const subLabel = (f) => fileLabel(f);
-  const subMap = new Map();                          // module -> [{ file, name, count }] (README first)
+  const subMap = new Map();                          // module -> [{ file, name, count }] (module page first)
   {
     const per = new Map();                            // module -> Map<file, count>
     for (const q of bank) {
-      const f = q.sourceFile || "README.md";
+      const f = q.sourceFile || modulePage(q.module);
       let mm = per.get(q.module); if (!mm) { mm = new Map(); per.set(q.module, mm); }
       mm.set(f, (mm.get(f) || 0) + 1);
     }
@@ -1798,7 +1849,7 @@ async function openTopics(section) {
     for (const [mod, mm] of per) {
       if (mm.size <= 1) continue;                     // only one file -> no selector needed
       // Order sub-files by the curated learning sequence (file-tree order from the
-      // parent README's links), not alphabetically — matches the reader/Study order.
+      // module page's links), not alphabetically — matches the reader/Study order.
       const order = fileTree[mod] || [];
       const rank = (f) => { const i = order.indexOf(f); return i === -1 ? 9999 : i; };
       subMap.set(mod, [...mm.entries()].map(([file, count]) => ({ file, count, name: subLabel(file) }))
@@ -2043,7 +2094,7 @@ async function startBlitz(section, modules, sourceFiles = null, limit = null) {
   if (sourceFiles && sourceFiles.length) {
     const sf = new Set(sourceFiles);
     const constrained = new Set(sourceFiles.map((k) => k.slice(0, k.lastIndexOf("|"))));
-    bank = bank.filter((q) => !constrained.has(q.module) || sf.has(q.module + "|" + (q.sourceFile || "README.md")));
+    bank = bank.filter((q) => !constrained.has(q.module) || sf.has(q.module + "|" + (q.sourceFile || modulePage(q.module))));
   }
   state.section = section;
   state.modules = modules && modules.length ? modules : null;
@@ -2869,7 +2920,7 @@ function buildReveal(item, pickIdx, right, ctx) {
   if (!right && !item.flip) {
     const src = distractorSource(q, opts[pickIdx]);
     if (src) prov = `<div class="prov">You picked the answer to: <span class="prov-q">${qInline(src.questionMd || src.question)}</span> &mdash; from ${esc(src.moduleName)}.
-      <button class="deeper prov-read" data-mod="${esc(src.module)}" data-src="${esc(src.sourceFile || "README.md")}" data-name="${esc(src.moduleName)}">Read that instead &rarr;</button></div>`;
+      <button class="deeper prov-read" data-mod="${esc(src.module)}" data-src="${esc(src.sourceFile || modulePage(src.module))}" data-name="${esc(src.moduleName)}">Read that instead &rarr;</button></div>`;
   }
   rev.className = "reveal show" + (hyper ? " hyper" : "");
   // [B] comeback + double-down outcome chips, above the usual reveal content.
@@ -2887,7 +2938,7 @@ function buildReveal(item, pickIdx, right, ctx) {
     rev.insertAdjacentHTML("beforeend", explainBackHTML(item));
     wireExplainBack(rev, item);
   }
-  el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
+  el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || modulePage(q.module)}`, q.moduleName));
   const pr = rev.querySelector(".prov-read");
   if (pr) pr.addEventListener("click", () => openReaderPath(`${pr.dataset.mod}/${pr.dataset.src}`, pr.dataset.name));
   /* [C] deep_habit: dive-deeper opens from a MISS reveal bump the persisted counter */
@@ -2966,7 +3017,7 @@ function revealCard() {
   rev.classList.add("show");
   if (!REDUCED()) rev.classList.add("card-flip");  // [B] 3D flip; instant swap when reduced-motion
   announce(`Answer: ${q.answerFull}`);
-  el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName));
+  el("#deeperBtn").addEventListener("click", () => openReaderPath(`${q.module}/${q.sourceFile || modulePage(q.module)}`, q.moduleName));
   // A4: three-way self-grade folds into the confidence signal — Hard/Easy both
   // count correct, but record how sure the recall felt.
   el("#cardActions").innerHTML = `
@@ -3115,7 +3166,7 @@ async function finish(opts = {}) {
     return `<details class="miss-item ${m.status}${m.redeemed ? " redeemed" : ""}">
         <summary class="miss-q">${qInline(m.q.correctMd || m.q.correct)}</summary>
         <div class="miss-a">${body}</div>
-        <button class="deeper miss-deeper" data-mod="${esc(m.q.module)}" data-src="${esc(m.q.sourceFile || "README.md")}" data-name="${esc(m.q.moduleName)}">Dive deeper into ${esc(m.q.moduleName)} &rarr;</button>
+        <button class="deeper miss-deeper" data-mod="${esc(m.q.module)}" data-src="${esc(m.q.sourceFile || modulePage(m.q.module))}" data-name="${esc(m.q.moduleName)}">Dive deeper into ${esc(m.q.moduleName)} &rarr;</button>
       </details>`;
   };
   const group = (title, cls, arr) => arr.length ? `<h3 class="miss-group ${cls}">${title}</h3>${arr.map(missItem).join("")}` : "";
@@ -3638,7 +3689,7 @@ async function fillLeeches() {
   const rows = ids.map((id) => {
     const rv = state.progress.reviews[id] || {}, q = byId.get(id);
     if (!q) return "";
-    return `<button class="leech-row" data-path="${esc(q.module + "/" + (q.sourceFile || "README.md"))}" data-name="${esc(q.moduleName)}">
+    return `<button class="leech-row" data-path="${esc(q.module + "/" + (q.sourceFile || modulePage(q.module)))}" data-name="${esc(q.moduleName)}">
         <span class="leech-q">${qInline(q.questionMd || q.question)}</span>
         <span class="leech-meta">${rv.lapses}&times; missed &middot; ${esc(q.moduleName)}</span></button>`;
   }).join("");
@@ -3769,7 +3820,7 @@ function palStaticCommands() {
     out.push({ label: `Start ${label(s)} blitz`, hint: "blitz", run: () => startBlitz(s) });
   for (const [mod, list] of Object.entries(state.index.files || {})) {
     const name = titleize(mod.split("/").pop()), sec = mod.split("/")[0];
-    const file = (list && list[0]) || "README.md";
+    const file = (list && list[0]) || modulePage(mod);
     out.push({ label: `Read ${name}`, hint: label(sec), run: () => { reader.back = []; openReaderPath(`${mod}/${file}`, name); } });
     out.push({ label: `Quiz ${name}`, hint: label(sec), run: () => startBlitz(sec, [mod]) });
   }
@@ -3841,7 +3892,7 @@ function openPalette() {
     const bank = bankCache[search.section] || [];
     const toks = query.toLowerCase().split(/\s+/).filter(Boolean);
     const hits = bank.filter((q) => { const t = (q.question || "").toLowerCase(); return toks.every((tk) => t.includes(tk)); }).slice(0, 8);
-    return hits.map((q) => ({ label: q.question, hint: q.moduleName, run: () => openReaderPath(`${q.module}/${q.sourceFile || "README.md"}`, q.moduleName) }));
+    return hits.map((q) => ({ label: q.question, hint: q.moduleName, run: () => openReaderPath(`${q.module}/${q.sourceFile || modulePage(q.module)}`, q.moduleName) }));
   }
   function enterSearch(section, query) {
     search = { section };
@@ -3974,7 +4025,7 @@ function renderStudy() {
 }
 
 /* ---------- [TECH] technologies index (a top-level screen) ---------- */
-// Every module README carries "## 11. Technologies & Tools" and "## 8. Tradeoffs".
+// Every module page carries "## 11. Technologies & Tools" and "## 8. Tradeoffs".
 // Inside one page they are reference material; INVERTED across the repo they answer
 // a question no other screen can: "where is Kafka actually taught, and what does
 // each of those pages make me weigh?"
@@ -4093,28 +4144,59 @@ async function renderTech() {
       </button></li>`;
   };
 
+  // How well a tool's own NAME matches the query, lower = better. The search haystack
+  // deliberately includes module titles and every usage blurb so the 2,987 single-module
+  // tools stay reachable — but that also means typing "redis" scores a module merely
+  // MENTIONING Redis the same as Redis itself. Rank 4 keeps the tail findable while
+  // stopping blurb noise from outranking an exact name.
+  function matchRank(name, q) {
+    const n = name.toLowerCase();
+    if (n === q) return 0;
+    if (n.startsWith(q)) return 1;
+    if (new RegExp("(^|[\\s\\-_./])" + q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).test(n)) return 2;
+    if (n.includes(q)) return 3;
+    return 4;                       // matched only via r.hay (a module title or a blurb)
+  }
+
   function paint() {
     const q = findEl.value.trim().toLowerCase();
     if (tab === "tech") {
       let rows = techRows;
       if (secPick !== "all") rows = rows.filter((r) => r.secs.includes(secPick));
       if (q) rows = rows.filter((r) => r.hay.includes(q));
-      const slice = rows.slice(0, shown.tech);
-      countEl.textContent = rows.length
-        ? `${slice.length} of ${rows.length} tool${rows.length === 1 ? "" : "s"}`
+      // Scope each row's uses to the active section ONCE, before slicing, because the
+      // order has to be computed from the same number the row prints. Filtering without
+      // re-sorting kept techRows' global count-desc order while showing the scoped count,
+      // so under Section=LLM the list read 5, 4, 3, 20, 3, 2 ... with LangSmith (20 in
+      // llm) fourth and vLLM (15) tenth, below Grafana (3).
+      let scoped = rows.map((r) => ({
+        r,
+        uses: secPick === "all" ? r.u : r.u.filter((u) => secOf(u[0]) === secPick),
+      }));
+      // techRows already arrives global-count desc and Array.sort is STABLE, so a single
+      // scoped-count key behaves as (scoped count, then repo-wide prominence). No
+      // comparator chain needed, and the unfiltered/unsearched case needs no sort at all.
+      if (q) scoped.sort((a, b) => matchRank(a.r.n, q) - matchRank(b.r.n, q) || b.uses.length - a.uses.length);
+      else if (secPick !== "all") scoped.sort((a, b) => b.uses.length - a.uses.length);
+      const slice = scoped.slice(0, shown.tech);
+      countEl.textContent = scoped.length
+        ? (q ? `${scoped.length} match${scoped.length === 1 ? "" : "es"}`
+             : `${slice.length} of ${scoped.length} tool${scoped.length === 1 ? "" : "s"}`)
         : "no matches";
-      listEl.innerHTML = rows.length ? slice.map((r) => {
-        const uses = secPick === "all" ? r.u : r.u.filter((u) => secOf(u[0]) === secPick);
+      listEl.innerHTML = scoped.length ? slice.map(({ r, uses }) => {
+        // "Redis 5/29" vs "LangSmith 20/20" is the whole story the section filter can
+        // tell: one is a general tool that turns up in LLM work, the other is an LLM tool.
+        const all = uses.length < r.u.length ? `<span class="tx-count-all">/${r.u.length}</span>` : "";
         return `<details class="tx-item">
           <summary>
             <span class="tx-name">${esc(r.n)}</span>
             <span class="tx-dots">${[...new Set(uses.map((u) => secOf(u[0])))].map(secChip).join("")}</span>
-            <span class="tx-count">${uses.length}</span>
+            <span class="tx-count">${uses.length}${all}</span>
           </summary>
           <ul class="tx-uses">${uses.map(useRow).join("")}</ul>
         </details>`;
-      }).join("") + (rows.length > slice.length
-        ? `<button class="ghost tx-more" data-more="tech">Show ${Math.min(TECH_PAGE, rows.length - slice.length)} more</button>` : "")
+      }).join("") + (scoped.length > slice.length
+        ? `<button class="ghost tx-more" data-more="tech">Show ${Math.min(TECH_PAGE, scoped.length - slice.length)} more</button>` : "")
         : `<p class="tx-empty">No tool matches &ldquo;${esc(findEl.value.trim())}&rdquo;. Try a shorter name &mdash; the index stores each tool exactly as its module writes it.</p>`;
     } else {
       let rows = tradeRows;
@@ -4260,7 +4342,7 @@ async function openStudySection(sectionPath) {
   // stall on mobile. The bank now loads only when a quiz starts; we warm it in the
   // background so the first node-tap stays instant.
   // [CS] Case Studies track (a third path beside Full/Interview): nodes come from
-  // index.caseStudies (README-curated), open the reader read-only, and are NOT in
+  // index.caseStudies (curated by case_studies.md), open the reader read-only, and are NOT in
   // the bank. Guard a stale stored "cases" value on a section with <2 case studies.
   const allCases = caseStudiesFromIndex(section);
   const hasCases = allCases.length >= 2;
@@ -4338,7 +4420,7 @@ async function openStudySection(sectionPath) {
   });
   const list = casesMode
     ? mods.map((m) => ({ path: m.module, title: m.name }))            // [CS] module IS the reader path
-    : mods.map((m) => ({ path: `${m.module}/README.md`, title: m.name }));
+    : mods.map((m) => ({ path: `${m.module}/${modulePage(m.module)}`, title: m.name }));
   const files = (state.index && state.index.files) || {};
   // Practiced = any spaced-repetition entry from this module (real history only).
   const practiced = new Set(Object.values(state.progress.reviews || {}).map((r) => r.module).filter(Boolean));
@@ -4354,17 +4436,22 @@ async function openStudySection(sectionPath) {
   const hereMod = herePath
     ? (casesMode
         ? (mods.find((m) => herePath === m.module) || {}).module
-        : (mods.find((m) => herePath === `${m.module}/README.md` || herePath.startsWith(m.module + "/")) || {}).module) || null
+        : (mods.find((m) => herePath === `${m.module}/${modulePage(m.module)}` || herePath.startsWith(m.module + "/")) || {}).module) || null
     : null;
   const openFans = new Set();
-  if (herePath && hereMod && !/\/README\.md$/i.test(herePath)) openFans.add(hereMod);  // reveal the "here" leaf
+  // Fan open only when "here" is a SUB-file. Testing for README.md here would be true
+  // for every page after the 2026-07-30 rename, fanning open every module.
+  if (herePath && hereMod && herePath !== `${hereMod}/${modulePage(hereMod)}`) openFans.add(hereMod);
 
-  const leafLabel = (fn) => (fn === "README.md" ? "Readme" : titleize(fn.replace(/\.md$/i, "")));
+  // The module page leaf is labelled "Overview": since the rename it is named for its
+  // own folder, so titleizing it would just repeat the node header above it. fileLabel
+  // handles the nested case (prototype/prototype.md -> "Prototype").
+  const leafLabel = (fn, mod) => (fn === modulePage(mod) ? "Overview" : fileLabel(fn));
   const steps = mods.map((m, i) => {
     // [TIERS] In a curated tier, show only that tier's allowlisted sourceFiles. A module
     // with no `<tier>Files` entry keeps all of them. The excluded ones stay reachable on
     // the Full path -- this narrows the reading list, it does not hide content.
-    const allFiles = files[m.module] || ["README.md"];
+    const allFiles = files[m.module] || [modulePage(m.module)];
     const allow = tierFiles[m.module];
     const mFiles = allow ? allFiles.filter((fn) => allow.includes(fn)) : allFiles;
     const hiddenCount = allFiles.length - mFiles.length;
@@ -4385,7 +4472,7 @@ async function openStudySection(sectionPath) {
     const ariaCount = casesMode ? "case study" : `${m.count} questions`;
     const leaves = multi ? mFiles.map((fn, k) => {
       const p = `${m.module}/${fn}`;
-      return `<button class="pathleaf${p === herePath ? " here" : ""}" data-idx="${i}" data-path="${esc(p)}" style="animation-delay:${k * 30}ms">${esc(leafLabel(fn))}</button>`;
+      return `<button class="pathleaf${p === herePath ? " here" : ""}" data-idx="${i}" data-path="${esc(p)}" style="animation-delay:${k * 30}ms">${esc(leafLabel(fn, m.module))}</button>`;
     }).join("") : "";
     return `<div class="pathstep${isOpen ? " open" : ""}">
       <div class="pathnode${done ? " practiced" : ""}${isHere ? " here" : ""}${mmCls}" title="${esc(retTxt)}">
@@ -6348,8 +6435,10 @@ function resolvePath(baseFile, rel) {
   return stack.join("/");
 }
 
-// Human title from a content path: ".../module/README.md" -> "Module";
-// ".../module/sub_file.md" -> "Sub File".
+// Human title from a content path: ".../module/module.md" -> "Module";
+// ".../module/sub_file.md" -> "Sub File". Since the 2026-07-30 rename a module page is
+// named for its folder, so the plain basename already yields the right title; the
+// readme branch survives only for the 16 SECTION landing pages, still README.md.
 function titleFromPath(path) {
   const parts = path.split("/");
   let name = parts.pop();
@@ -6727,8 +6816,8 @@ function closeReaderFind() {
 // [SD] Resolve a reader path to its owning module + module-relative file name.
 // Module ids are always "<section>/<module>" (book adds a third segment), but a
 // module may hold files one level deeper — the lld pattern folders, e.g.
-// "lld/creational/prototype/README.md" belongs to module "lld/creational" with
-// sourceFile "prototype/README.md", which is exactly what extract.py emits.
+// "lld/creational/prototype/prototype.md" belongs to module "lld/creational" with
+// sourceFile "prototype/prototype.md", which is exactly what extract.py emits.
 // Longest-prefix match against the real module list; null for non-module pages.
 function splitModulePath(path) {
   const files = (state.index && state.index.files) || {};
@@ -6742,8 +6831,9 @@ function splitModulePath(path) {
 }
 
 // Display name for a module-relative file. "instruction_tuning.md" -> "Instruction
-// Tuning"; a nested "prototype/README.md" is named for its folder -> "Prototype",
-// since every one of those is named README.md and the folder carries the meaning.
+// Tuning"; a nested "prototype/prototype.md" -> "Prototype". Since the rename the
+// basename alone is enough for both, so the readme branch below is a legacy fallback
+// (a section landing page opened directly), not the normal path.
 function fileLabel(f) {
   const parts = f.split("/");
   const base = parts.pop();
@@ -6757,18 +6847,23 @@ function fileLabel(f) {
 function buildModuleNav(modEl, navCtx, currentPath) {
   if (!navCtx || !navCtx.list.length) { modEl.innerHTML = ""; return; }
   const files = (state.index && state.index.files) || {};
+  // A nav entry's path is "<module>/<module page>", so the module key is the path
+  // minus its last segment. Stripping the literal "/README.md" was a no-op after the
+  // 2026-07-30 rename, which left mKey holding the filename: files[mKey] came back
+  // undefined and the whole tree collapsed to flat single-file rows.
+  const modKeyOf = (p) => p.replace(/\/[^/]+$/, "");
 
   // Auto-expand any folder that contains the current path.
   navCtx.list.forEach((m) => {
-    const mKey = m.path.replace("/README.md", "");
+    const mKey = modKeyOf(m.path);
     const mFiles = files[mKey] || [];
     if (mFiles.length > 1 && mFiles.some((fn) => `${mKey}/${fn}` === currentPath))
       readerExpanded.add(mKey);
   });
 
   const itemHtml = navCtx.list.map((m, i) => {
-    const mKey = m.path.replace("/README.md", "");
-    const mFiles = files[mKey] || ["README.md"];
+    const mKey = modKeyOf(m.path);
+    const mFiles = files[mKey] || [modulePage(mKey)];
 
     if (mFiles.length <= 1) {
       const isActive = m.path === currentPath;
@@ -6835,7 +6930,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
   modEl.querySelectorAll(".mod-folder").forEach((folder) => {
     folder.addEventListener("click", () => {
       const li = folder.closest(".mod-group");
-      const mKey = navCtx.list[+folder.dataset.midx].path.replace("/README.md", "");
+      const mKey = modKeyOf(navCtx.list[+folder.dataset.midx].path);
       const willOpen = !li.classList.contains("open");
       li.classList.toggle("open", willOpen);
       folder.setAttribute("aria-expanded", String(willOpen));
@@ -6847,7 +6942,7 @@ function buildModuleNav(modEl, navCtx, currentPath) {
     e.preventDefault();
     // Match by module-prefix against the real list — book modules are three
     // segments deep, so a fixed two-segment key would never find them.
-    const midx = navCtx.list.findIndex((m) => a.dataset.path.startsWith(m.path.replace("/README.md", "") + "/"));
+    const midx = navCtx.list.findIndex((m) => a.dataset.path.startsWith(modKeyOf(m.path) + "/"));
     openReaderPath(a.dataset.path, null, midx >= 0 ? { list: navCtx.list, idx: midx } : reader.nav);
   }));
 
@@ -7013,7 +7108,7 @@ function applyShortPref() {
 function appendEvalBlock(main, path) {
   if (state.inQuiz) return;
   // [SD] A module id is always 2 segments, so resolve by prefix — a page can live
-  // one level deeper than its module (lld/creational/prototype/README.md) and its
+  // one level deeper than its module (lld/creational/prototype/prototype.md) and its
   // module-relative name IS the sourceFile the bank carries.
   const loc = splitModulePath(path);
   const dir = loc ? loc.mod : path.replace(/\/[^/]+$/, "");
@@ -7025,16 +7120,19 @@ function appendEvalBlock(main, path) {
   const section = dir.split("/")[0];
   const loadPool = isCase ? loadCaseBank : loadBank;
   // [SF] On a deep-dive sub-file, scope the quiz to THAT file only (its own
-  // sourceFile); on the module README, keep the whole-module quiz. Every question
+  // sourceFile); on the module page, keep the whole-module quiz. Every question
   // carries sourceFile, so this is a pure filter — module ids/SR state untouched.
-  const isReadme = /^readme\.md$/i.test(base);
+  // "Is this the module page?" — /readme\.md/ would be false on every page after the
+  // 2026-07-30 rename, silently narrowing the module page's quiz to its own file and
+  // mislabelling the button "Quiz this sub-topic".
+  const isReadme = base === modulePage(dir);
   const csName = isCase ? (caseStudiesFromIndex(section).find((c) => c.file === path) || {}).name : null;
   const name = csName || (isReadme ? titleize(dir.split("/").pop()) : fileLabel(base));
   const inScope = isReadme
     ? (q) => q.module === dir
-    : (q) => q.module === dir && (q.sourceFile || "README.md") === base;
+    : (q) => q.module === dir && (q.sourceFile || modulePage(q.module)) === base;
   // [SF] "quick" = a random subset capped at the user's deckLen() pref; "all" runs
-  // every question in scope (limit = pool size). README stays whole-module + deckLen.
+  // every question in scope (limit = pool size). The module page stays whole-module + deckLen.
   const launch = isReadme
     ? () => startBlitz(section, [dir])
     : (limit) => startBlitz(section, [dir], [dir + "|" + base], limit);
@@ -7110,10 +7208,11 @@ async function appendWhatNext(main, path) {
     const rel = g.pairs.filter((pr) => pr.a === dir || pr.b === dir)
       .sort((x, y) => (y.w || 0) - (x.w || 0))
       .map((pr) => (pr.a === dir ? pr.b : pr.a));
-    const unread = rel.filter((m) => !isModuleRead(m + "/README.md"));
-    for (const m of unread.concat(rel.filter((m) => isModuleRead(m + "/README.md")))) {
+    const relPage = (m) => m + "/" + modulePage(m);
+    const unread = rel.filter((m) => !isModuleRead(relPage(m)));
+    for (const m of unread.concat(rel.filter((m) => isModuleRead(relPage(m))))) {
       if (cards.length >= 2) break;                  // related takes at most 2; leave room for resume
-      push(m + "/README.md", "Related");
+      push(relPage(m), "Related");
     }
   }
   if (last && last.path && last.path !== path) push(last.path, "Resume", last.title);
@@ -7201,9 +7300,9 @@ function navFromIndex(path) {
     const ai = order.indexOf(a), bi = order.indexOf(b);
     return (ai === -1 ? 9999 : ai) - (bi === -1 ? 9999 : bi);
   });
-  const list = mods.map((m) => ({ path: `${m}/README.md`, title: titleize(m.split("/").pop()) }));
+  const list = mods.map((m) => ({ path: `${m}/${modulePage(m)}`, title: titleize(m.split("/").pop()) }));
   const dir = (splitModulePath(path) || {}).mod || path.replace(/\/[^/]+$/, "");
-  const idx = list.findIndex((m) => m.path.replace("/README.md", "") === dir || m.path === path);
+  const idx = list.findIndex((m) => m.path.replace(/\/[^/]+$/, "") === dir || m.path === path);
   return { list, idx: idx === -1 ? 0 : idx };
 }
 
@@ -7410,8 +7509,12 @@ async function openReaderPath(path, title, navCtx, frag) {
     // offline/transport failure and keeps the retry.
     const b = el("#readerBody");
     if (b && e && e.missing) {
-      const home = path.replace(/\/[^/]+$/, "") + "/README.md";
-      const isReadme = /README\.md$/i.test(path);
+      // The module home is the page named for its folder; offering "/README.md" here
+      // would 404 a second time, and testing for it would offer the button even when
+      // the missing page IS the module home.
+      const homeDir = path.replace(/\/[^/]+$/, "");
+      const home = homeDir + "/" + modulePage(homeDir);
+      const isReadme = path === home;
       b.innerHTML = `<div class="error">This page isn't in the repo — it may have moved.
           <div class="row" style="margin-top:10px">
             ${isReadme ? "" : `<button class="ghost" id="readerHome">Open module home</button>`}
@@ -7430,10 +7533,10 @@ async function openReaderPath(path, title, navCtx, frag) {
   }
 }
 
-// Entry point from a quiz/flashcard reveal: a module README, fresh history, no prev/next.
+// Entry point from a quiz/flashcard reveal: a module page, fresh history, no prev/next.
 function openReader(module, moduleName) {
   reader.back = [];
-  return openReaderPath(`${module}/README.md`, moduleName, null);
+  return openReaderPath(`${module}/${modulePage(module)}`, moduleName, null);
 }
 
 // Remove the reader overlay only; the underlying screen DOM is untouched.
@@ -8443,7 +8546,7 @@ function renderCodex() {
     <div class="row" style="margin-top:18px"><button class="ghost" id="cxHome">&larr; Home</button></div>`;
   el("#cxHome").addEventListener("click", () => go("#/home"));
   document.querySelectorAll(".cx-card").forEach((b) =>
-    b.addEventListener("click", () => { reader.back = []; openReaderPath(b.dataset.mod + "/README.md", prettyMod(b.dataset.mod)); }));
+    b.addEventListener("click", () => { reader.back = []; openReaderPath(b.dataset.mod + "/" + modulePage(b.dataset.mod), prettyMod(b.dataset.mod)); }));
   wireReveals();
 }
 
@@ -8842,7 +8945,7 @@ async function boot() {
   if (navigator.connection && navigator.connection.saveData) document.documentElement.classList.add("low-power");
   state.index = await fetchJSON("questions/index.json", null);
   // [TIERS] Curated Senior/Principal membership, DERIVED by extract.py from each file's
-  // `<!-- tiers: ... -->` marker. Generated like the banks, so the module README is the
+  // `<!-- tiers: ... -->` marker. Generated like the banks, so the module page is the
   // single source of truth and there is no hand-maintained copy here to drift from.
   // Absent (offline, or a bank that predates it) -> the tier tabs simply do not render.
   STUDY_PATHS = await fetchJSON("questions/paths.json", {}) || {};
@@ -8856,7 +8959,8 @@ async function boot() {
   }
   el("#bankInfo").textContent = `${state.index.total} questions across ${Object.keys(state.index.sections).length} sections`;
   state.progress = loadProgress();
-  seedCoachMarksIfVeteran();                       // [E1] a non-empty history means every coach mark is pre-seen
+  migrateReadModulesForRename();                   // [SD] pre-rename "<mod>/README.md" read keys
+  seedCoachMarksIfVeteran();                     // [E1] a non-empty history means every coach mark is pre-seen
   /* [D] coach: daily pick + message, computed once per boot */
   const todayPick = coachPick();
   const todayMsg = coachMessage(todayPick);
