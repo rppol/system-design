@@ -199,7 +199,7 @@ sequenceDiagram
         Client->>Server: message
         Server-->>Client: message
     end
-    Note over Client,Server: no head-of-line blocking between streams; each has its own flow-control window
+    Note over Client,Server: no head-of-line blocking between streams, each has its own flow-control window
 ```
 Three independent gRPC calls — unary, server-streaming, bidirectional — multiplex
 over one HTTP/2 connection as separate streams with independent flow control.
@@ -221,7 +221,7 @@ sequenceDiagram
     B->>B: spends 250ms - deadline hit
     B-->>A: DEADLINE_EXCEEDED
     A-->>Client: DEADLINE_EXCEEDED
-    Note over A,B: cancellation propagates back up automatically; B stops work, A stops waiting
+    Note over A,B: cancellation propagates back up automatically, B stops work and A stops waiting
 ```
 A single absolute deadline set by the client travels downstream and shrinks at each
 hop; once it is exceeded, cancellation propagates back up the call tree so no

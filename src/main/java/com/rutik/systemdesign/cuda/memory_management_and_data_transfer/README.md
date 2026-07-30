@@ -680,9 +680,9 @@ quadrantChart
     title Achieved bandwidth vs. setup cost
     x-axis Low setup cost --> High setup cost
     y-axis Low achieved bandwidth --> High achieved bandwidth
-    quadrant-1 Ideal: fast and cheap
+    quadrant-1 "Ideal: fast and cheap"
     quadrant-2 Costly but fast
-    quadrant-3 Avoid: slow and cheap
+    quadrant-3 "Avoid: slow and cheap"
     quadrant-4 Costly and slow
     Pageable cudaMemcpy: [0.10, 0.30]
     Pinned + async: [0.55, 0.90]

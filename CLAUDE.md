@@ -406,6 +406,39 @@ transparent, and add a fit-to-width button on any diagram that overflows its
 column (auto re-fits when sidebars collapse/expand). Do not add per-diagram
 workarounds; these are handled globally.
 
+### A fence that does not parse FAILS THE BUILD (owner-set 2026-07-30)
+
+`scripts/build_diagrams.mjs` pre-renders every fence to `game/diagrams/<hash>.mmz`
+and now **exits 1 on any parse failure**, taking both Pages and the APK red. It used
+to exit 0 on the theory that the reader live-renders a failed fence anyway — which
+hid **20 broken diagrams across 8 sections**, each shipping as a raw-source blob to
+anyone offline or on the APK. Do not restore the non-blocking behaviour.
+
+**Validate before committing** — render the fences you touched rather than eyeballing
+them. GitHub silently shows a broken fence as an error box, so "it looked fine in the
+diff" proves nothing:
+
+```bash
+node scripts/_check_render.mjs <absolute-file.md>   # untracked dev tool; needs npm ci
+```
+
+**The traps that caused all 20.** Every one of these is a *silent* parse failure — the
+diagram reads perfectly as source:
+
+| Trap | Breaks | Fix |
+|------|--------|-----|
+| `;` anywhere in a `Note`/message body | sequenceDiagram — `;` is a statement separator, so the text is cut and the remainder parses as a new statement | use `,` or `.` |
+| Bare `call` as a node id | flowchart — `call` is reserved (`click X call fn()`). Legal in `call([...])`, explodes at statement start (`call --> b`) or in a `class` list | rename (`doCall`, `entry`) |
+| Extra spaces AFTER an edge label's closing `\|` | flowchart — `a -->\|"x"\|   b` fails; spaces *before* the arrow are fine | single space after `\|` |
+| `\"` inside a node label | flowchart — Mermaid has no backslash escape | `#quot;` |
+| `:` or `()` in a `quadrant-N` label | quadrantChart — `:` is the data-point separator | quote it: `quadrant-1 "Ideal: fast"` |
+| A quadrant point without brackets | quadrantChart — `"P": 0.2, 0.8` | `"P": [0.2, 0.8]` |
+| A quadrant coordinate of exactly `1.0` | quadrantChart — must be `< 1.0` | use `0.98` |
+
+The alignment trap deserves naming: padding spaces to line up a column of edges is
+exactly the habit that makes ASCII diagrams readable, and it is the one that broke
+the RSocket diagram. Mermaid is not ASCII art — do not pad.
+
 ---
 
 ## Game / Reader / Q&A Compatibility (authoring contract — all files MUST comply)

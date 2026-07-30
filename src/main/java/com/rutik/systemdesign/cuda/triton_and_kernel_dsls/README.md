@@ -830,7 +830,7 @@ quadrantChart
     "Triton": [0.35, 0.85]
     "CUTLASS": [0.7, 0.5]
     "CUDA C++": [0.9, 0.3]
-    "Raw PTX / SASS": [1.0, 0.05]
+    "Raw PTX / SASS": [0.98, 0.05]
 ```
 
 Triton lands in quadrant-2 (low control, high productivity) alongside vendor

@@ -514,9 +514,9 @@ quadrantChart
     title Abstraction vs control across the four forms
     x-axis Low abstraction --> High abstraction
     y-axis Low control --> High control
-    quadrant-1 Rare: both at once
+    quadrant-1 "Rare: both at once"
     quadrant-2 Full manual control
-    quadrant-3 Avoid: neither
+    quadrant-3 "Avoid: neither"
     quadrant-4 Convenience first
     CUDA C++: [0.10, 0.95]
     CuPy RawKernel: [0.30, 0.90]

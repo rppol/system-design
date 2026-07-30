@@ -263,7 +263,7 @@ sequenceDiagram
     Agent->>Inst: retransformClasses(Service.class)
     Inst->>TR: transform(...) again with current bytes
     TR-->>Inst: re-instrumented byte array
-    Note over JVM: verifier re-runs; schema (fields/methods) must not change
+    Note over JVM: verifier re-runs, schema (fields/methods) must not change
 ```
 
 The transformer sees every class's raw bytes at load and can return rewritten bytes; `retransformClasses` re-runs the transformer on already-loaded classes — the mechanism APM agents use to hot-patch instrumentation, subject to the no-schema-change rule.

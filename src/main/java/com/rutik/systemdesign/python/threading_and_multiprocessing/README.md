@@ -100,7 +100,7 @@ sequenceDiagram
     Note over W2: own GIL<br/>execute(args)
     W1-->>M: pickle(result)
     W2-->>M: pickle(result)
-    Note over M,W2: Separate heaps - no sharing; each process runs a full Python interpreter
+    Note over M,W2: Separate heaps - no sharing, each process runs a full Python interpreter
 ```
 
 **`concurrent.futures` state machine**:

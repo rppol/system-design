@@ -116,13 +116,13 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    LIT(["\"hello\" literal"]) --> LDC["LDC #2\nload constant"]
+    LIT(["#quot;hello#quot; literal"]) --> LDC["LDC #2\nload constant"]
     LDC --> LOOKUP{"string table\nlookup"}
     LOOKUP -->|found| RET(["return existing ref"])
     LOOKUP -->|missing| ALLOC["allocate on heap,\nadd to table"]
     ALLOC --> RET2(["return ref"])
 
-    NEWSTR(["new String(\"hello\")"]) --> HEAP["new heap allocation\nalways a separate object"]
+    NEWSTR(["new String(#quot;hello#quot;)"]) --> HEAP["new heap allocation\nalways a separate object"]
 
     class LIT,RET,RET2,NEWSTR io
     class LDC,ALLOC mathOp
@@ -143,12 +143,12 @@ flowchart TD
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    SRC(["String result = a + \" \" + b;"])
+    SRC(["String result = a + #quot; #quot; + b;"])
 
     subgraph J8["Java 8 bytecode"]
         NSB["new StringBuilder"] --> INIT["invokespecial StringBuilder.&lt;init&gt;"]
         INIT --> AP1["aload a → invokevirtual append"]
-        AP1 --> AP2["ldc \" \" → invokevirtual append"]
+        AP1 --> AP2["ldc #quot; #quot; → invokevirtual append"]
         AP2 --> AP3["aload b → invokevirtual append"]
         AP3 --> TOS["invokevirtual toString"]
     end

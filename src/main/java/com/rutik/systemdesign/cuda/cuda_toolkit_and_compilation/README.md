@@ -48,9 +48,9 @@ quadrantChart
     title Arch-locked speed vs forward portability
     x-axis Arch-locked --> Forward-portable
     y-axis Slow first launch --> Fast first launch
-    quadrant-1 Ideal: fast and portable
+    quadrant-1 "Ideal: fast and portable"
     quadrant-2 Portable, pays JIT once
-    quadrant-3 Rare: fragile and slow
+    quadrant-3 "Rare: fragile and slow"
     quadrant-4 Fast, frozen to one GPU
     Single sm_XX, no PTX: [0.08, 0.95]
     Multiple sm_XX, no PTX: [0.30, 0.93]

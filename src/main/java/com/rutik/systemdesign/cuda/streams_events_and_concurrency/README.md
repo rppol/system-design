@@ -724,7 +724,7 @@ quadrantChart
     x-axis Low complexity --> High complexity
     y-axis Low concurrency --> High concurrency
     quadrant-1 Worth the effort
-    quadrant-2 Best ROI (rare)
+    quadrant-2 "Best ROI (rare)"
     quadrant-3 Prototyping only
     quadrant-4 Avoid
     Legacy default: [0.08, 0.05]

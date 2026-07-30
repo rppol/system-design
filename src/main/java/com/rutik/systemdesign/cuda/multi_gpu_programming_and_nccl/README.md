@@ -373,14 +373,14 @@ sequenceDiagram
     participant G2 as GPU2
     participant G3 as GPU3
 
-    Note over G0,G3: Phase 1 - Reduce-Scatter (one ring round shown; repeats N-1=3x)
+    Note over G0,G3: Phase 1 - Reduce-Scatter (one ring round shown, repeats N-1=3x)
     G0->>G1: chunk, accumulate (+=)
     G1->>G2: chunk, accumulate (+=)
     G2->>G3: chunk, accumulate (+=)
     G3->>G0: chunk, accumulate (+=)
     Note over G0,G3: after 3 rounds, each GPU owns one FULL SUM chunk
 
-    Note over G0,G3: Phase 2 - All-Gather (one ring round shown; repeats N-1=3x)
+    Note over G0,G3: Phase 2 - All-Gather (one ring round shown, repeats N-1=3x)
     G0->>G1: forward FULL SUM chunk
     G1->>G2: forward FULL SUM chunk
     G2->>G3: forward FULL SUM chunk

@@ -128,7 +128,13 @@ async function main() {
 
   await browser.close();
   console.log(`[diagrams] done: ${rendered} rendered, ${cached} cached, ${pruned} pruned, ${failed} failed; ${liveKeys.size} live assets`);
-  if (failed) process.exitCode = 0;   // a failed fence falls back to live render at runtime; don't fail the build
+  // BLOCKING (owner-set 2026-07-30). This used to exit 0 on the theory that a
+  // failed fence just falls back to live rendering, so the deploy could proceed.
+  // In practice that made every broken diagram invisible: 20 of them accumulated
+  // across 8 sections, each shipping as a raw-source blob to any reader offline
+  // or on the APK, and nothing ever went red. A diagram that does not parse is a
+  // content defect, so it fails the build now.
+  if (failed) process.exitCode = 1;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

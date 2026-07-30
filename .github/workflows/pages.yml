@@ -42,9 +42,10 @@ jobs:
         # Drives the app in headless Chromium (Puppeteer) and renders every fence
         # to game/diagrams/<hash>.mmz (gitignored, regenerated here). The runtime
         # reads these instead of loading the mermaid engine, so diagrams draw with
-        # no CDN and no per-diagram render cost. A diagram failure never blocks the
-        # deploy — the reader live-renders that fence. node_modules is removed after
-        # so it never lands in the Pages artifact (path: . uploads the whole tree).
+        # no CDN and no per-diagram render cost. A diagram that fails to parse FAILS
+        # THE BUILD (owner-set 2026-07-30) — it was non-blocking, which let 20 broken
+        # fences accumulate unseen. node_modules is removed after so it never lands
+        # in the Pages artifact (path: . uploads the whole tree).
         run: |
           npm ci --no-audit --no-fund
           node scripts/build_icons.mjs

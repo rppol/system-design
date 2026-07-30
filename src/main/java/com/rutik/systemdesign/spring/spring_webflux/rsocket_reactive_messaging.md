@@ -129,10 +129,10 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     RRin(["send Mono"])  -->|"REQUEST_RESPONSE"| RRout(["receive Mono"])
-    RSin(["send Mono"])  -->|"REQUEST_STREAM"|   RSout(["receive Flux"])
-    FFin(["send Mono"])  -->|"REQUEST_FNF"|      FFout(["no reply"])
-    CHin(["send Flux"])  -->|"REQUEST_CHANNEL"|  CHout(["receive Flux"])
-    MPin(["metadata"])   -->|"METADATA_PUSH"|    MPout(["no reply"])
+    RSin(["send Mono"])  -->|"REQUEST_STREAM"| RSout(["receive Flux"])
+    FFin(["send Mono"])  -->|"REQUEST_FNF"| FFout(["no reply"])
+    CHin(["send Flux"])  -->|"REQUEST_CHANNEL"| CHout(["receive Flux"])
+    MPin(["metadata"])   -->|"METADATA_PUSH"| MPout(["no reply"])
 
     class RRin,RSin,FFin,CHin,MPin req
     class RRout,RSout,CHout base

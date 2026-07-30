@@ -143,14 +143,14 @@ flowchart LR
     classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
-    call(["serialize(obj)"]) --> router{"type(obj)<br/>dict lookup"}
+    entry(["serialize(obj)"]) --> router{"type(obj)<br/>dict lookup"}
     router -->|"int"| intImpl("serialize_int(obj)")
     router -->|"str"| strImpl("serialize_str(obj)")
     router -->|"list"| listImpl("serialize_list(obj)")
     router -->|"datetime"| dtImpl("serialize_datetime(obj)")
     router -->|"no match"| fallback(["raise TypeError"])
 
-    class call req
+    class entry req
     class router mathOp
     class intImpl,strImpl,listImpl,dtImpl train
     class fallback lossN

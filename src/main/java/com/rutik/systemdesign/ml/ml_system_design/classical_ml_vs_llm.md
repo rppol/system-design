@@ -54,12 +54,12 @@ quadrantChart
     quadrant-2 "Prompt or fine-tune LLM"
     quadrant-3 "Fine-tune small encoder"
     quadrant-4 "GBDT or logistic or two-tower"
-    "Chatbot / assistant": 0.20, 0.80
-    "Doc extraction (long tail)": 0.30, 0.72
-    "High-volume text moderation": 0.78, 0.68
-    "Ad CTR ranking": 0.88, 0.18
-    "Fraud detection": 0.80, 0.25
-    "Semantic search": 0.55, 0.55
+    "Chatbot / assistant": [0.20, 0.80]
+    "Doc extraction (long tail)": [0.30, 0.72]
+    "High-volume text moderation": [0.78, 0.68]
+    "Ad CTR ranking": [0.88, 0.18]
+    "Fraud detection": [0.80, 0.25]
+    "Semantic search": [0.55, 0.55]
 ```
 
 Two axes decide the quadrant: how structured the input is (vertical) and how high-volume/narrow the task is (horizontal). Unstructured + low-volume → prompt an LLM; structured + high-volume → classical ML; high-volume + unstructured → distill the LLM into a small model to get LLM quality at classical economics.

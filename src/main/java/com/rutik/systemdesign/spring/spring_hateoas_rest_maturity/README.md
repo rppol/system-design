@@ -126,7 +126,7 @@ sequenceDiagram
     API-->>C: 200 OK\npayment resource, _links: self, confirm
     C->>API: follow _links.confirm.href  (PUT)
     API-->>C: 200 OK\norder state PAID, _links: self, ship
-    Note over C,API: Client hardcodes only the root URL; every next action is read off _links
+    Note over C,API: Client hardcodes only the root URL, every next action is read off _links
 ```
 
 The client never templates a URL. Which links appear depends on the order's current state — an already-paid order simply stops offering a `pay` link, so the state machine lives on the server.

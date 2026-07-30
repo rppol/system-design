@@ -502,8 +502,8 @@ quadrantChart
     y-axis Poor lossy-link robustness --> Good lossy-link robustness
     quadrant-1 Satellite / long-haul links
     quadrant-2 Bandwidth-limited niches
-    quadrant-3 Reno: legacy / simple nets
-    quadrant-4 CUBIC: datacenter / low-loss
+    quadrant-3 "Reno: legacy / simple nets"
+    quadrant-4 "CUBIC: datacenter / low-loss"
     CUBIC: [0.55, 0.25]
     BBR: [0.85, 0.7]
     Reno: [0.2, 0.2]

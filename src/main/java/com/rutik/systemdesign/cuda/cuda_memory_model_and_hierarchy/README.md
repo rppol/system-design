@@ -705,7 +705,7 @@ quadrantChart
     title Capacity vs speed across the six memory spaces
     x-axis Small capacity --> Large capacity
     y-axis Slow --> Fast
-    quadrant-1 Ideal (none reach here)
+    quadrant-1 "Ideal (none reach here)"
     quadrant-2 Fast but tiny
     quadrant-3 Slow and tiny
     quadrant-4 Large but slow

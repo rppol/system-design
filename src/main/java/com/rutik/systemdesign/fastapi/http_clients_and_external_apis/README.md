@@ -285,9 +285,9 @@ flowchart LR
 
     request(["Incoming<br/>request"]) --> cb{"circuit<br/>open?"}
     cb -->|"yes"| reject(["reject 503<br/>immediately"])
-    cb -->|"closed /<br/>half-open"| call["httpx.AsyncClient<br/>.get(url, timeout)"]
+    cb -->|"closed /<br/>half-open"| doCall["httpx.AsyncClient<br/>.get(url, timeout)"]
 
-    call --> status{"response<br/>status?"}
+    doCall --> status{"response<br/>status?"}
     status -->|"200-299"| success(["return<br/>response"])
     status -->|"5xx / ConnectError"| retryCheck{"attempt<br/>less than max?"}
     status -->|"4xx not 429"| clientErr(["raise<br/>immediately"])
@@ -296,11 +296,11 @@ flowchart LR
     retryCheck -->|"yes"| backoff["sleep(backoff<br/>+ jitter)"]
     retryCheck -->|"no"| exhausted(["record failure,<br/>raise"])
 
-    backoff -.->|"retry"| call
-    rateLimited -.->|"retry"| call
+    backoff -.->|"retry"| doCall
+    rateLimited -.->|"retry"| doCall
 
     class request io
-    class cb,status,retryCheck,call,backoff,rateLimited mathOp
+    class cb,status,retryCheck,doCall,backoff,rateLimited mathOp
     class reject,clientErr,exhausted lossN
     class success train
 ```

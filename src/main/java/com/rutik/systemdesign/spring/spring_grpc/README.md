@@ -105,7 +105,7 @@ sequenceDiagram
     Net->>SI: start(call, metadata)
     Note over SI: read traceparent → start span<br/>read Authorization → build Authentication<br/>check Context deadline not already expired
     SI->>Svc: getUser(req, responseObserver)
-    Svc-->>SI: onNext(resp); onCompleted()
+    Svc-->>SI: onNext(resp), then onCompleted()
     SI-->>Net: HEADERS(status=OK) + DATA + trailers
     Net-->>CI: response frames
     CI-->>App: UserResponse (or StatusRuntimeException)
