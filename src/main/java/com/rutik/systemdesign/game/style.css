@@ -997,6 +997,11 @@ button:active { transform: scale(0.98); }
   .tx-seclabel { flex: 1 1 130px; }
   .tx-secsel { flex: 1; }
   .tx-go { flex-wrap: wrap; row-gap: 2px; }
+  /* flex-shrink:0 is right on a wide row and wrong at 390px: a long module title
+     ("Spring Cloud Patterns — Gateway, Resilience, Service Discovery, Observability")
+     ran 171px past the row and was silently clipped by the page's overflow-x, taking
+     the section label with it. Let it wrap instead. */
+  .tx-gomod { flex-shrink: 1; min-width: 0; overflow-wrap: anywhere; }
   .tx-gosec { margin-left: 0; padding-left: 16px; }
   .tx-item > summary { padding: 11px 6px; }
   /* On a phone the hero + three deep-dive cards cost a whole screen before the
@@ -3053,7 +3058,9 @@ body.interview-mode #app::before {
 }
 .tx-chip:hover:not(:disabled) { border-color: var(--accent); }
 .tx-chip.on { background: color-mix(in srgb, var(--accent) 22%, var(--card)); border-color: var(--accent); }
-.tx-chip:disabled { opacity: .32; cursor: default; }
+/* .32 made the label and its 0 unreadable (2.0:1 on the light surface). A disabled
+   chip still has to be identifiable -- knowing WHICH area is empty is the information. */
+.tx-chip:disabled { opacity: .58; cursor: default; }
 .tx-chipn { font-family: var(--mono); font-size: .85em; color: var(--muted); font-variant-numeric: tabular-nums; }
 .tx-rolerow { padding-left: 10px; border-left: 2px solid var(--line); }
 .tx-facetfoot { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
@@ -3066,13 +3073,15 @@ body.interview-mode #app::before {
   color: var(--text); font-weight: 600; font-size: var(--fs-sm);
   display: flex; justify-content: space-between; gap: 8px;
 }
-.tx-tiername:hover { color: var(--accent); }
+.tx-tiername:hover:not(:disabled) { color: var(--accent); }
 .tx-tierroles { display: flex; flex-wrap: wrap; gap: 4px; }
 .tx-minirole {
   background: none; border: 1px solid var(--line); border-radius: 999px;
   color: var(--muted); font-size: 11px; padding: 2px 8px; cursor: pointer;
 }
-.tx-minirole:hover { color: var(--text); border-color: var(--accent); }
+.tx-minirole:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+/* a shelf entry with nothing behind it is disabled, exactly like a zero-count chip */
+.tx-tiername:disabled, .tx-minirole:disabled { opacity: .58; cursor: default; }
 .tx-morerole { color: var(--muted); font-size: 11px; align-self: center; }
 
 /* two-line row: the summary is what makes this a knowledge bank and not a list */
@@ -3085,8 +3094,12 @@ body.interview-mode #app::before {
   color: var(--muted); font-size: 10.5px; padding: 1px 7px; cursor: pointer;
 }
 .tx-role.on { color: var(--text); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
-.tx-role-weak { opacity: .55; }
-.tx-lang { font-family: var(--mono); font-size: 10.5px; color: var(--accent); }
+/* .55 put the label of a live control at 3.86:1 in light mode; it still reads as the
+   quieter of the two badge weights without dropping below AA. */
+.tx-role-weak { opacity: .72; }
+/* --accent-text, not --accent: the raw accent is tuned for a dark surface and lands at
+   1.94:1 as small text on the light one. */
+.tx-lang { font-family: var(--mono); font-size: 10.5px; color: var(--accent-text); }
 .tx-band {
   font-size: var(--fs-xs); color: var(--muted); text-transform: uppercase;
   letter-spacing: .06em; margin: 14px 0 4px; font-weight: 600;
@@ -3111,5 +3124,5 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
 .tx-tailchip { font-size: 11px; padding: 3px 9px; }
 .tx-widen { margin-left: 8px; }
 /* the language split reads as a stronger boundary than the weight bands nested inside it */
-.tx-langband { color: var(--accent); margin-top: 18px; letter-spacing: .04em; }
+.tx-langband { color: var(--accent-text); margin-top: 18px; letter-spacing: .04em; }
 .tx-langband:first-child { margin-top: 2px; }

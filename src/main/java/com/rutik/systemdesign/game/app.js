@@ -4094,9 +4094,17 @@ async function renderTech() {
 
   // Precomputed once per render: a lowercase haystack per row so keystroke filtering
   // is a substring scan over ~4,200 short strings rather than a re-walk of the index.
+  // The bank's own summary joins the haystack: it is the best text in the index --
+  // it says what the thing IS and what it is FOR, where a module blurb says only what
+  // one chapter happened to use it for. 404 KB of authored text that used to be
+  // display-only (searching "anti-entropy" found nothing though Reaper's summary says
+  // it). Guarded on the bank, so the degraded provenance-only mode still filters.
+  const bankTools = (bank && bank.tools) || null;
   const techRows = idx.tech.map((t) => {
     const secs = [...new Set(t.u.map((u) => secOf(u[0])))];
-    return { n: t.n, u: t.u, secs, hay: (t.n + " " + t.u.map((u) => techName(mods[u[0]]) + " " + (u[1] || "")).join(" ")).toLowerCase() };
+    const sum = (bankTools && bankTools[t.n] && bankTools[t.n].s) || "";
+    return { n: t.n, u: t.u, secs,
+      hay: (t.n + " " + sum + " " + t.u.map((u) => techName(mods[u[0]]) + " " + (u[1] || "")).join(" ")).toLowerCase() };
   });
   const _secOrder = Object.keys(STUDY_ORDER);
   const secOrderIdx = (sec) => (_secOrder.indexOf(sec) + 1 || 999);
@@ -4149,14 +4157,30 @@ async function renderTech() {
   const defaultKind = (KINDS.find((k) => k.default) || KINDS[0] || {}).id || "tech";
   const roleTier = new Map();            // "tier/role" -> {tier, role}
   TIERS.forEach((t) => t.roles.forEach((r) => roleTier.set(`${t.id}/${r.id}`, { t, r })));
+  const LANGS = ["", "python", "java", "js", "go", "cpp", "csharp", "rust"];
 
   function readFacets() {
-    const qs = new URLSearchParams((location.hash.split("?")[1] || ""));
-    const stored = (() => { try { return JSON.parse(localStorage.getItem("sd_tech_facets")) || {}; } catch { return {}; } })();
+    const qsRaw = location.hash.split("?")[1] || "";
+    const qs = new URLSearchParams(qsRaw);
+    // A URL that carries facets is a COMPLETE snapshot, so localStorage is consulted
+    // only for a bare "#/tech". Merging the two meant a pasted "?t=gpu" link rendered
+    // the recipient's stored language AND a stale role from a tier that link never
+    // named -- i.e. GPU selected, caching results on screen.
+    const stored = qsRaw
+      ? {}
+      : (() => { try { return JSON.parse(localStorage.getItem("sd_tech_facets")) || {}; } catch { return {}; } })();
     const pick = (k, d) => (qs.has(k) ? qs.get(k) : (stored[k] !== undefined ? stored[k] : d));
-    const csv = (v) => String(v || "").split(",").filter(Boolean);
-    return { t: csv(pick("t", "")), r: csv(pick("r", "")),
-             l: pick("l", "") || "", k: pick("k", defaultKind) || defaultKind };
+    const csv = (v) => (Array.isArray(v) ? v : String(v || "").split(",")).filter(Boolean);
+    // Ids drift -- a tier renamed in tech_index.json orphans every old link. Drop what
+    // no longer exists instead of filtering to an empty screen whose own explanation
+    // ("2,254 hidden by the problem area") names an area that is gone.
+    const t = csv(pick("t", "")).filter((id) => TIERS.some((x) => x.id === id));
+    const r = csv(pick("r", "")).filter((id) => roleTier.has(id));
+    // A role implies its tier, exactly as clicking a role chip does.
+    for (const rid of r) { const tid = rid.split("/")[0]; if (!t.includes(tid)) t.push(tid); }
+    const l = pick("l", "") || "", k = pick("k", defaultKind) || defaultKind;
+    return { t, r, l: LANGS.includes(l) ? l : "",
+             k: KINDS.some((x) => x.id === k) ? k : defaultKind };
   }
   let F = readFacets();
   function writeFacets(replace) {
@@ -4194,6 +4218,11 @@ async function renderTech() {
   let secPick = techSecFilter();
   if (secPick !== "all" && !secsPresent.includes(secPick)) secPick = "all";
   let shown = { tech: TECH_PAGE, trade: TRADE_PAGE };
+  // <details> state lives in the DOM and every repaint rebuilds the list, so an expanded
+  // row collapsed the instant you pressed "Show more" or touched a facet. Remember it by
+  // tool name (stable across every sort order) and re-apply it on render.
+  const openRows = new Set();
+  let tailOpen = false;
 
   app.innerHTML = `
     <div class="hero">
@@ -4257,11 +4286,16 @@ async function renderTech() {
   // Live counts against the OTHER active facets, so a chip showing 0 is genuinely
   // empty rather than merely unselected -- zero-count chips are disabled, which is
   // what makes it impossible to click your way into an empty screen.
+  // The section picker is one of the OTHER active facets, so it has to scope these too.
+  // Without it, Section=CUDA still advertised "Databases 211" as an enabled chip that
+  // landed you on an empty screen -- the exact click-into-nothing the zero-count
+  // disabling exists to prevent -- and blamed the problem area for the section's doing.
+  const secOK = (row) => secPick === "all" || row.secs.includes(secPick);
   function tierCounts(q) {
     const c = new Map();
     for (const row of techRows) {
       const b = bankOf(row.n);
-      if (!b || !kindOK(b) || !langOK(b)) continue;
+      if (!b || !kindOK(b) || !langOK(b) || !secOK(row)) continue;
       if (q && !row.hay.includes(q)) continue;
       for (const t of new Set(b.r.map(([rid]) => rid.split("/")[0]))) c.set(t, (c.get(t) || 0) + 1);
     }
@@ -4271,7 +4305,7 @@ async function renderTech() {
     const c = new Map();
     for (const row of techRows) {
       const b = bankOf(row.n);
-      if (!b || !kindOK(b) || !langOK(b)) continue;
+      if (!b || !kindOK(b) || !langOK(b) || !secOK(row)) continue;
       if (q && !row.hay.includes(q)) continue;
       for (const [rid] of b.r) if (!F.t.length || F.t.includes(rid.split("/")[0])) c.set(rid, (c.get(rid) || 0) + 1);
     }
@@ -4280,6 +4314,10 @@ async function renderTech() {
 
   function renderFacets(q) {
     if (!bankOn) return;
+    // These facets narrow TOOLS; on the Tradeoffs tab they narrow nothing. Leaving them
+    // up made a live-looking control dead -- picking a tier moved the chip state and the
+    // URL while the card list underneath never changed by a single row.
+    if (tab !== "tech") { facetEl().innerHTML = ""; return; }
     const tc = tierCounts(q), rc = roleCounts(q);
     const tierChips = TIERS.map((t) => {
       const n = tc.get(t.id) || 0, on = F.t.includes(t.id);
@@ -4296,7 +4334,7 @@ async function renderTech() {
       return `<button class="tx-chip tx-rolechip${on ? " on" : ""}" data-role="${esc(id)}"${n || on ? "" : " disabled"}
         aria-pressed="${on}">${esc(r.label)} <span class="tx-chipn">${n}</span></button>`;
     }).join("");
-    const langs = ["", "python", "java", "js", "go", "cpp", "csharp", "rust"];
+    const langs = LANGS;
     const langSel = `<label class="tx-seclabel">Language
       <select class="filter tx-secsel" id="techLang" aria-label="Filter by language">
         ${langs.map((L) => `<option value="${L}"${L === F.l ? " selected" : ""}>${L ? esc(L) : "Any language"}</option>`).join("")}
@@ -4319,15 +4357,23 @@ async function renderTech() {
     const showShelf = bankOn && tab === "tech" && !q && !F.t.length && !F.r.length;
     const host = shelfEl();
     if (!showShelf) { host.innerHTML = ""; return; }
-    const tc = tierCounts("");
-    host.innerHTML = `<div class="grid tx-tiergrid">${TIERS.map((t) => `
+    const tc = tierCounts(""), rc = roleCounts("");
+    // Same contract as the chip row: a zero-count entry is disabled, so no click on
+    // this screen can land on an empty one. It matters most under a section filter --
+    // Section=CUDA leaves "Databases 0" with nine live role buttons beneath it.
+    host.innerHTML = `<div class="grid tx-tiergrid">${TIERS.map((t) => {
+      const n = tc.get(t.id) || 0;
+      return `
       <div class="tile tx-tiercard">
-        <button class="tx-tiername" data-tier="${esc(t.id)}">${esc(t.label)}
-          <span class="tx-chipn">${tc.get(t.id) || 0}</span></button>
-        <div class="tx-tierroles">${t.roles.slice(0, 6).map((r) => `
-          <button class="tx-minirole" data-role="${esc(t.id)}/${esc(r.id)}">${esc(r.label)}</button>`).join("")}
+        <button class="tx-tiername" data-tier="${esc(t.id)}"${n ? "" : " disabled"}>${esc(t.label)}
+          <span class="tx-chipn">${n}</span></button>
+        <div class="tx-tierroles">${t.roles.slice(0, 6).map((r) => {
+          const rid = `${t.id}/${r.id}`;
+          return `<button class="tx-minirole" data-role="${esc(rid)}"${rc.get(rid) ? "" : " disabled"}
+            title="${esc(r.label)} &mdash; ${rc.get(rid) || 0}">${esc(r.label)}</button>`;
+        }).join("")}
           ${t.roles.length > 6 ? `<span class="tx-morerole">+${t.roles.length - 6}</span>` : ""}</div>
-      </div>`).join("")}</div>`;
+      </div>`; }).join("")}</div>`;
   }
 
   // Telling "nothing exists" apart from "you over-filtered" is the whole job of an empty
@@ -4335,11 +4381,13 @@ async function renderTech() {
   // one did it. So count the drop per facet and name the culprit.
   function emptyHTML(q) {
     if (!bankOn) return `<p class="tx-empty">No tool matches &ldquo;${esc(findEl.value.trim())}&rdquo;.</p>`;
-    let byLang = 0, byKind = 0, byFacet = 0, base = 0;
+    let bySec = 0, byLang = 0, byKind = 0, byFacet = 0, base = 0;
     for (const row of techRows) {
       if (q && !row.hay.includes(q)) continue;
       const b = bankOf(row.n); if (!b) continue;
       base++;
+      // Same order paint() applies them in, so the counts add up to what is on screen.
+      if (!secOK(row)) { bySec++; continue; }
       if (!langOK(b)) { byLang++; continue; }
       if (!q && !kindOK(b)) { byKind++; continue; }
       if (facetWeight(b) === null) byFacet++;
@@ -4349,6 +4397,7 @@ async function renderTech() {
         Tools are stored exactly as their module writes them, so try a shorter fragment.</p>`;
     }
     const bits = [];
+    if (bySec) bits.push(`${bySec} by section`);
     if (byFacet) bits.push(`${byFacet} by the problem area`);
     if (byLang) bits.push(`${byLang} by language`);
     if (byKind) bits.push(`${byKind} by kind`);
@@ -4361,7 +4410,7 @@ async function renderTech() {
   // singleton's expansion would hold exactly one entry, so the disclosure is pure overhead.
   function tailHTML(tail) {
     if (!tail.length) return "";
-    return `<details class="tx-tail"><summary>+ ${tail.length} mentioned once</summary>
+    return `<details class="tx-tail"${tailOpen ? " open" : ""}><summary>+ ${tail.length} mentioned once</summary>
       <div class="tx-chipcloud">${tail.map(({ r, b, uses }) => {
         const m = mods[uses[0][0]];
         return `<button class="tx-chip tx-tailchip" data-p="${esc(techPath(m))}"
@@ -4401,7 +4450,13 @@ async function renderTech() {
       // techRows already arrives global-count desc and Array.sort is STABLE, so a single
       // scoped-count key behaves as (scoped count, then repo-wide prominence). No
       // comparator chain needed, and the unfiltered/unsearched case needs no sort at all.
-      if (q) scoped.sort((a, b) => matchRank(a.r.n, q) - matchRank(b.r.n, q) || b.uses.length - a.uses.length);
+      // With a facet active the list is weight-MAJOR, because the band caption above each
+      // group claims it is. Ranking the whole list by name match instead re-emitted
+      // "Built for this / Also does this / Built for this ..." nine times across 26 rows,
+      // so the captions read as noise rather than as groups. Match rank stays, one key
+      // down -- which is where it belongs once you have said which area you are in.
+      if (q) scoped.sort((a, b) => ((a.w || 0) - (b.w || 0))
+        || matchRank(a.r.n, q) - matchRank(b.r.n, q) || b.uses.length - a.uses.length);
       else if (secPick !== "all") scoped.sort((a, b) => b.uses.length - a.uses.length);
       // With a language picked, 67% of the index is polyglot and matches it too, so the
       // filter LOOKS like it did nothing. Sorting language-specific first makes the answer
@@ -4409,7 +4464,9 @@ async function renderTech() {
       // can call -- with the weight bands nesting inside. MUST run before the slice.
       if (bankOn && F.l) {
         scoped.sort((a, z) => (a.b.l.includes(F.l) ? 0 : 1) - (z.b.l.includes(F.l) ? 0 : 1)
-                           || ((a.w || 1) - (z.w || 1)) || z.uses.length - a.uses.length);
+                           || ((a.w || 1) - (z.w || 1))
+                           || (q ? matchRank(a.r.n, q) - matchRank(z.r.n, q) : 0)
+                           || z.uses.length - a.uses.length);
       }
       // Split the single-module tail out of the main list. Only when a facet is active:
       // on the unfiltered landing there is no "main list" for it to be crowding out.
@@ -4448,12 +4505,15 @@ async function renderTech() {
         const badges = b ? b.r.map(([rid, rw]) => {
           const rt = roleTier.get(rid); if (!rt) return "";
           const hit = F.r.includes(rid) || F.t.includes(rid.split("/")[0]);
+          // aria-pressed, because the badge IS the filter control -- the .on class alone
+          // announced nothing, so a screen reader read a plain button that did not say
+          // it was a toggle or which way it was set.
           return `<button class="tx-role${hit ? " on" : ""}${rw === 3 ? " tx-role-weak" : ""}"
-            data-role="${esc(rid)}" title="${esc(rt.t.label)}">${esc(rt.r.label)}</button>`;
+            data-role="${esc(rid)}" aria-pressed="${hit}" title="${esc(rt.t.label)}">${esc(rt.r.label)}</button>`;
         }).join("") : "";
         const langTag = b && !b.l.includes("*")
           ? `<span class="tx-lang">${b.l.map(esc).join(" / ")}</span>` : "";
-        return `${head}<details class="tx-item${b ? " tx-item2" : ""}">
+        return `${head}<details class="tx-item${b ? " tx-item2" : ""}" data-n="${esc(r.n)}"${openRows.has(r.n) ? " open" : ""}>
           <summary>
             <span class="tx-line1">
               <span class="tx-name">${esc(r.n)}</span>${langTag}
@@ -4495,11 +4555,35 @@ async function renderTech() {
         : `<p class="tx-empty">No tradeoff table matches &ldquo;${esc(findEl.value.trim())}&rdquo;.</p>`;
     }
   }
+  // Re-rendering replaces the very node you just activated, so focus fell to <body>:
+  // a keyboard user lost their place on every chip press, every select, and every
+  // "Show more" -- and that button takes 37 presses to reach the end of the index.
+  // Re-point focus at the replacement, matched by the same data attribute or id.
+  function focusKey() {
+    const e = document.activeElement;
+    if (!e || e === document.body || !e.closest) return null;
+    const host = e.closest("#techFacets, #techShelf, #techList");
+    if (!host) return null;                        // the search box is never re-rendered
+    const d = e.dataset || {};
+    const sel = d.tier ? `[data-tier="${d.tier}"]`
+      : d.role ? `[data-role="${d.role}"]`
+      : e.id ? `#${e.id}`
+      : e.classList.contains("tx-more") ? ".tx-more" : null;
+    return sel ? { host: "#" + host.id, sel } : null;
+  }
+  function refocus(k) {
+    // Only when the re-render is what dropped focus -- never steal it from elsewhere.
+    if (!k || document.activeElement !== document.body) return;
+    const n = (el(k.host) || app).querySelector(k.sel) || app.querySelector(k.sel);
+    if (n && !n.disabled) n.focus({ preventScroll: true });
+  }
   // paint() renders the results; the facet chips and the tier shelf are their own
   // surfaces because their counts depend on the OTHER facets, not on the result slice.
   function repaint() {
+    const k = focusKey();
     const q = findEl.value.trim().toLowerCase();
     renderFacets(q); renderShelf(q); paint();
+    refocus(k);
   }
   function toggle(list, v) {
     const i = list.indexOf(v);
@@ -4547,9 +4631,18 @@ async function renderTech() {
   // across paging, and binding each one would cost more than the render.
   listEl.addEventListener("click", (e) => {
     const more = e.target.closest(".tx-more");
-    if (more) { shown[more.dataset.more] += more.dataset.more === "tech" ? TECH_PAGE : TRADE_PAGE; paint(); return; }
+    if (more) {
+      const k = focusKey();
+      shown[more.dataset.more] += more.dataset.more === "tech" ? TECH_PAGE : TRADE_PAGE;
+      paint(); refocus(k); return;
+    }
     if (e.target.closest("#techWiden")) {
+      // The escape hatch clears everything the message just blamed -- including the
+      // section, which lives in the top bar and is otherwise the one culprit this
+      // button named and then left switched on.
       F = { t: [], r: [], l: "", k: defaultKind }; findEl.value = "";
+      secPick = "all"; safeSet("sd_tech_sec", secPick);
+      const sel = el("#techSec"); if (sel) sel.value = "all";
       writeFacets(); repaint(); return;
     }
     const roleBadge = e.target.closest(".tx-role");
@@ -4559,6 +4652,15 @@ async function renderTech() {
     reader.back = [];
     openReaderPath(go.dataset.p, null, null, go.dataset.a || null);
   });
+  // `toggle` does not bubble, so this listens in the capture phase. It is the only
+  // record of which rows are expanded, since every repaint rebuilds the markup.
+  listEl.addEventListener("toggle", (e) => {
+    const d = e.target;
+    if (!d.classList) return;
+    if (d.classList.contains("tx-item") && d.dataset.n) {
+      if (d.open) openRows.add(d.dataset.n); else openRows.delete(d.dataset.n);
+    } else if (d.classList.contains("tx-tail")) tailOpen = d.open;
+  }, true);
   document.querySelectorAll(".tx-deepcard").forEach((b) => b.addEventListener("click", () => {
     reader.back = [];
     openReaderPath(b.dataset.p, null, null);
@@ -4571,10 +4673,15 @@ async function renderTech() {
       o.classList.toggle("on", on);
       o.setAttribute("aria-checked", String(on));
     });
-    paint();
+    // repaint, not paint: the facet row and the tier shelf belong to the technology
+    // tab only, and paint() alone left both standing over the tradeoff cards.
+    repaint();
   }));
-  el("#techSec").addEventListener("change", (e) => { secPick = e.target.value; safeSet("sd_tech_sec", secPick); paint(); });
-  findEl.addEventListener("input", () => { shown = { tech: TECH_PAGE, trade: TRADE_PAGE }; paint(); });
+  // Both of these change what the chip counts mean, so both go through repaint():
+  // paint() alone left the shelf sitting above the search results with repo-wide
+  // counts, and left "Databases 211" on screen while 7 tools matched the query.
+  el("#techSec").addEventListener("change", (e) => { secPick = e.target.value; safeSet("sd_tech_sec", secPick); repaint(); });
+  findEl.addEventListener("input", () => { shown = { tech: TECH_PAGE, trade: TRADE_PAGE }; repaint(); });
   el("#techHome").addEventListener("click", () => go("#/home"));
   wireReveals();
 }
