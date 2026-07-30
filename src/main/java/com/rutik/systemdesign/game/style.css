@@ -3126,3 +3126,9 @@ html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-heigh
 /* the language split reads as a stronger boundary than the weight bands nested inside it */
 .tx-langband { color: var(--accent-text); margin-top: 18px; letter-spacing: .04em; }
 .tx-langband:first-child { margin-top: 2px; }
+/* [BANK] the full description, revealed only on expand -- the short line is what you scan,
+   this is what you read once you have decided to care (same split as **Short:** / answer). */
+.tx-desc { margin: 2px 0 10px; padding-left: 6px; border-left: 2px solid var(--line); }
+.tx-desc p { margin: 0 0 7px; color: var(--text); font-size: var(--fs-xs); line-height: 1.6; }
+.tx-desc p:last-child { margin-bottom: 0; }
+.tx-desc code { font-family: var(--mono); font-size: .92em; color: var(--accent-text); }
