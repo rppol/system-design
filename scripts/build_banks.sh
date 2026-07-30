@@ -92,12 +92,27 @@ except FileNotFoundError:
 except json.JSONDecodeError as e:
     fail.append(f"unparseable questions/paths.json: {e}")
 
+# tech.json drives the Technologies screen (app.js fetches it at boot into
+# TECH_INDEX). Missing, the screen shows its empty state instead of the repo-wide
+# technology index — quiet enough to ship unnoticed, so check it here.
+try:
+    with open("questions/tech.json") as f:
+        techidx = json.load(f)
+    if not (techidx.get("tech") and techidx.get("modules")):
+        fail.append("questions/tech.json has no technologies — the Technologies screen would be empty")
+except FileNotFoundError:
+    fail.append("missing questions/tech.json — the Technologies screen would be empty")
+except json.JSONDecodeError as e:
+    fail.append(f"unparseable questions/tech.json: {e}")
+
 # Stale files from a removed/renamed section would rsync into the APK payload
 # and confuse the loaders, so demand an exact match both ways.
-# index.json and paths.json are the two section-INDEPENDENT artifacts extract.py
-# emits into questions/. Everything else in there must name a real section, so a
-# new non-section artifact has to be declared here or it reads as stale junk.
-want_banks = {f"{s}.json" for s in sections} | {"index.json", "paths.json"}
+# index.json, paths.json and tech.json are the section-INDEPENDENT artifacts
+# extract.py emits into questions/. Everything else in there must name a real
+# section, so a new non-section artifact has to be declared here or it reads as
+# stale junk. Adding one here means bumping the APK smoke test's BANKS count too
+# (.github/workflows/android-apk.yml) — they are two halves of the same guard.
+want_banks = {f"{s}.json" for s in sections} | {"index.json", "paths.json", "tech.json"}
 have_banks = {f for f in os.listdir("questions") if f.endswith(".json")}
 for extra in sorted(have_banks - want_banks):
     fail.append(f"stale bank questions/{extra} (no such section) — delete it: rm questions/{extra}")

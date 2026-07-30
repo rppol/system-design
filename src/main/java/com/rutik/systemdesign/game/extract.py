@@ -844,6 +844,328 @@ def collect_case_studies(section, base_dir):
     return [{"file": universe[s], "name": names[s]} for s in ordered]
 
 
+# ---- technologies index (questions/tech.json) ------------------------------
+#
+# Two sections of the 14-section module template are pure REFERENCE material that
+# the Q&A bank throws away: "## 11. Technologies & Tools" (a table of the tools a
+# module teaches) and "## 8. Tradeoffs" (comparison tables). Read inside a single
+# module they answer "what does this page use"; read across the whole repo they
+# answer a question no screen could previously ask -- "where is Kafka taught, and
+# what is the decision each of those pages makes me weigh".
+#
+# So this pass inverts them: an index BY TECHNOLOGY (name -> every module that
+# covers it, with that module's one-line purpose for it) plus a per-module
+# tradeoff digest. Both deep-link into the reader at the exact heading, using the
+# same slug() the reader's mdRender computes for heading ids.
+#
+# Emitted as questions/tech.json -- a section-INDEPENDENT artifact like index.json
+# and paths.json, so it must also be declared in scripts/build_banks.sh's
+# `want_banks` and counted in the APK smoke test, or both deploys go red.
+TECH_HDR = re.compile(r"^##\s+(?:\d+[.)]\s*)?.*\btechnolog\w*\b.*\btools?\b.*$", re.I)
+TRADE_HDR = re.compile(r"^##\s+(?:\d+[.)]\s*)?trade[\s-]?offs?\b.*$", re.I)
+
+# A §11 table whose FIRST column is a grouping label, not a product: the tools then
+# live in the second column as a comma-separated list ("| Async messaging | Kafka,
+# RabbitMQ, SQS |"). Taking column 0 there would index "Async messaging" as a
+# technology and lose all three real ones.
+CATEGORY_HEADS = {"category", "concern", "dimension", "capability", "layer", "area",
+                  "aspect", "phase", "stage", "use case", "need", "task", "problem",
+                  "requirement", "when", "scenario", "goal", "purpose", "job", "role"}
+TOOLLIST_HEADS = {"tools", "tool", "options", "option", "technologies", "technology",
+                  "examples", "example", "libraries", "library", "choices", "products",
+                  "stack", "tooling", "tool / library"}
+
+# Row labels that are table furniture, not products.
+TECH_NOISE = re.compile(
+    r"^(n/?a|none|-+|—|–|\.{2,}|tbd|various|others?|etc\.?|notes?|purpose|example|"
+    r"typical use case|use case|when to use|best for|pros|cons|summary|total|"
+    r"description|comments?)$", re.I)
+
+# Split a name cell into the products it actually names. Spaced " / " and " + "
+# are compounds ("htop / top", "Micrometer + Actuator"); an unspaced slash is part
+# of the name and must survive ("TCP/IP", "AWS SQS/SNS", "HTTP/2").
+NAME_SPLIT_RE = re.compile(r"\s+(?:/|\+|&amp;)\s+")
+LIST_SPLIT_RE = re.compile(r"\s*(?:,|;)\s+")
+MD_TABLE_SEP = re.compile(r"^\|[\s:|-]+\|?\s*$")
+
+
+# Only REAL html tags may be stripped. A blanket <[^>]+> also ate placeholders that
+# are part of the content -- "/proc/<pid>/sched" came out as "/proc//sched".
+HTML_TAG_RE = re.compile(
+    r"</?(?:br|b|i|u|em|strong|sub|sup|code|kbd|samp|var|span|div|p|a|img|small|"
+    r"ul|ol|li|table|thead|tbody|tr|td|th|details|summary|hr|pre|blockquote)\b[^>]*/?>",
+    re.I)
+
+
+def tech_strip_md(text):
+    """Table cells hold links, code spans, bold and <br> -- reduce to plain text."""
+    text = re.sub(r"<br\s*/?>", " ", text, flags=re.I)
+    text = HTML_TAG_RE.sub("", text)
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = text.replace("`", "").replace("**", "").replace("__", "")
+    text = text.replace("&amp;", "&").replace("\\|", "|")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def reader_slug(text):
+    """Port of the reader's `slug()`/`stripMd()` pair in app.js, so the anchor we emit
+    is the id mdRender() will actually put on that heading. Diverge and every deep
+    link lands at the top of the page instead of the section, silently. Kept
+    character-for-character equivalent -- note it strips ` * _ like the JS does,
+    which `tech_strip_md` deliberately does not.
+
+    Not modelled: mdRender's `-2` suffix for a second heading that slugs the same
+    within one file. No module has two §11/§8 headings, and if one ever does the
+    link still lands on the first of the pair."""
+    base = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    base = re.sub(r"[`*_]", "", base).lower()
+    base = re.sub(r"[^\w\s-]", "", base).strip()
+    return re.sub(r"\s+", "-", base)[:80] or "section"
+
+
+def md_tables(body_lines):
+    """[(header_cells, [row_cells, ...]), ...] for every pipe table in a block."""
+    out, cur = [], []
+    for line in list(body_lines) + [""]:
+        s = line.strip()
+        if s.startswith("|"):
+            cur.append(s)
+            continue
+        if cur:
+            if len(cur) >= 3 and MD_TABLE_SEP.match(cur[1]):
+                cells = lambda r: [c.strip() for c in r.strip().strip("|").split("|")]
+                out.append((cells(cur[0]), [cells(r) for r in cur[2:]]))
+            cur = []
+    return out
+
+
+# A bare version or model-size token ("3.5", "3.6)", "3B", "9B", "1.x", "v2"). These
+# fall out of a split inside a cell and are never a product on their own.
+VERSION_TOKEN_RE = re.compile(r"^v?\d+(?:\.\d+)*(?:\.x)?\s*[BbMmKk]?[)\].,;:]?$")
+# A name may start with any Unicode letter or digit -- "2captcha" and the Greek-lead
+# "τ²-bench" are both real -- or with @ / . _ when a letter follows: "@Bean",
+# "@modelcontextprotocol/sdk", "/actuator/beans", ".NET" and Elasticsearch's
+# "_cat/indices" are all real API names in this repo. A blanket ban on a leading @ or
+# / would delete ~95 genuine Spring annotations and scoped npm packages to remove
+# three fragments. Anything else leading IS a fragment ("$ tracking)", "(m - 1) * T").
+NAME_START_RE = re.compile(r"^(?:[^\W_]|[@/._][^\W_])")
+
+
+def clean_tech_name(raw):
+    """A product name, or None when the cell is prose/furniture rather than a tool."""
+    name = tech_strip_md(raw)
+    name = re.sub(r"\s*\([^()]*\)\s*$", "", name).strip()   # drop a trailing parenthetical
+    name = re.sub(r"[\s,]+etc\.?$", "", name, flags=re.I)   # "@ai-sdk/anthropic etc"
+    name = name.strip(" .,:;*\"'")
+    # No ASCII LETTER at all -> a number, a percentage or an expression ("<1%", "3.5",
+    # "(m - 1) * T"), never a product.
+    if not name or TECH_NOISE.match(name) or not re.search(r"[A-Za-z]", name):
+        return None
+    # Deliberately NOT a 3-character minimum: the two-character names in this repo are
+    # overwhelmingly real (k6, jq, yq, ss, nc, nm, uv, Nx, Z3, H2, S3, TF, RQ, E5, re,
+    # ip) and only "3B"/"9B" were junk -- VERSION_TOKEN_RE removes those precisely,
+    # without costing 16 genuine tools.
+    if not (2 <= len(name) <= 42) or name.count(" ") > 5:
+        return None
+    if VERSION_TOKEN_RE.match(name):        # bare "3.5" / "3B" / "1.x" / "Boot 3)"-style tail
+        return None
+    if re.search(r"\.\s+[A-Z]", name):                      # a sentence, not a name
+        return None
+    # An unmatched closing bracket means a split landed mid-parenthetical, so this is
+    # the tail of a cell rather than a name ("Boot 3)", "reactive streams)", "ICU4J)").
+    if (name.endswith(")") and "(" not in name) or (name.endswith("]") and "[" not in name):
+        return None
+    # A CLI flag is documentation of a tool, not a tool. Triton's §11 has a whole
+    # flags-reference table; indexing "--model-repository" as a technology buries the
+    # products the same section actually names.
+    if name.startswith("-") or not NAME_START_RE.match(name):
+        return None
+    return name
+
+
+def tech_key(name):
+    """Merge key. "Apache Kafka"/"Kafka" and "Pydantic v2"/"Pydantic" are one tool;
+    "Redis"/"Redis Cluster" are deliberately not."""
+    key = re.sub(r"^apache\s+", "", name.lower())
+    key = re.sub(r"\s+v\d[\d.]*$", "", key)
+    return re.sub(r"\s+", " ", key).strip(" .")
+
+
+def _tech_names(cell):
+    for part in NAME_SPLIT_RE.split(cell):
+        got = clean_tech_name(part)
+        if got:
+            yield got
+
+
+# Not every §11 is a table. Two bold-lead bullet shapes carry real products, and the
+# three hand-written technologies/ deep dives use them almost exclusively -- the
+# Airflow card read "0 tools" until this pass existed.
+#
+#   labelled:  - **Metadata DB:** **PostgreSQL** (recommended for HA) or **MySQL 8+**
+#              -> the first bold is the LABEL (it ends in a colon); the tools follow
+#   dashed:    - **perf_analyzer** — sweeps concurrency, reporting **throughput** ...
+#              -> the first bold IS the tool; later bolds are prose emphasis, not tools
+#
+# A bullet matching NEITHER shape is prose that happens to contain bold, and is
+# skipped: taking its bold spans indexes sentence fragments ("Always front Triton
+# with a gateway") as if they were products.
+BULLET_RE = re.compile(r"^\s*[-*+]\s+(.*)$")
+BOLD_SPAN_RE = re.compile(r"\*\*([^*]+)\*\*")
+DASH_LEAD_RE = re.compile(r"^\s*[—–-]\s")
+
+
+def tech_from_bullets(body):
+    out = []
+    for line in body:
+        m = BULLET_RE.match(line)
+        if not m:
+            continue
+        text = m.group(1)
+        spans = BOLD_SPAN_RE.findall(text)
+        if not spans:
+            continue
+        first = spans[0].rstrip()
+        if first.endswith(":"):
+            names, blurb = spans[1:], first.rstrip(":").strip()
+        elif DASH_LEAD_RE.match(text[text.index("**" + spans[0] + "**") + len(spans[0]) + 4:]):
+            names, blurb = spans[:1], tech_strip_md(re.sub(r"^\s*[—–-]\s*", "", text.split("**", 2)[-1]))
+        else:
+            continue
+        for span in names:
+            for name in _tech_names(span):
+                out.append((name, blurb[:90]))
+    return out
+
+
+def build_tech_index():
+    """{anchors, modules, tech, trade} -- the whole-repo technology + tradeoff index."""
+    anchors, anchor_ids = [], {}
+    modules, module_ids = [], {}
+    tech = {}            # key -> {"forms": Counter-ish dict, "uses": [(modIdx, blurb)]}
+    trade = []
+
+    def anchor_idx(heading):
+        a = reader_slug(heading)
+        if a not in anchor_ids:
+            anchor_ids[a] = len(anchors)
+            anchors.append(a)
+        return anchor_ids[a]
+
+    def module_idx(module, source_file, title):
+        key = (module, source_file)
+        if key not in module_ids:
+            module_ids[key] = len(modules)
+            modules.append({"m": module, "f": source_file, "t": title, "a": [-1, -1]})
+        return module_ids[key]
+
+    for root, dirs, files in os.walk(BASE_DIR):
+        dirs.sort()
+        rel = os.path.relpath(root, BASE_DIR)
+        if rel == ".":
+            continue
+        parts = rel.split(os.sep)
+        section = parts[0]
+        if section in SKIP_SECTIONS or SKIP_PATH_PARTS.intersection(parts):
+            continue
+        # Same module-id rule as the bank: 2 segments, 3 for book. A file deeper than
+        # that folds into its parent module and carries the rest in source_file.
+        depth = 3 if section == "book" else 2
+        if len(parts) < depth:
+            continue
+        module = "/".join(parts[:depth])
+        sub = "/".join(parts[depth:])
+        for fn in sorted(files):
+            if not fn.endswith(".md") or fn == "CLAUDE.md":
+                continue
+            source_file = f"{sub}/{fn}" if sub else fn
+            try:
+                lines = open(os.path.join(root, fn), encoding="utf-8").read().split("\n")
+            except OSError:
+                continue
+            i11 = next((i for i, l in enumerate(lines) if TECH_HDR.match(l)), None)
+            i8 = next((i for i, l in enumerate(lines) if TRADE_HDR.match(l)), None)
+            if i11 is None and i8 is None:
+                continue
+            title = next((tech_strip_md(l[2:]) for l in lines[:40] if l.startswith("# ")), None)
+            mi = module_idx(module, source_file, title)
+
+            if i11 is not None:
+                modules[mi]["a"][0] = anchor_idx(lines[i11][3:])
+                body = []
+                for l in lines[i11 + 1:]:
+                    if l.startswith("## "):
+                        break
+                    body.append(l)
+                found = []
+                for hdr, rows in md_tables(body):
+                    h0 = tech_strip_md(hdr[0]).lower() if hdr else ""
+                    h1 = tech_strip_md(hdr[1]).lower() if len(hdr) > 1 else ""
+                    grouped = h0 in CATEGORY_HEADS and h1 in TOOLLIST_HEADS
+                    for row in rows:
+                        if not row or not row[0].strip():
+                            continue
+                        if grouped:
+                            listing = re.sub(r"\([^)]*\)", "", tech_strip_md(row[1] if len(row) > 1 else ""))
+                            names = [n for part in LIST_SPLIT_RE.split(listing) for n in _tech_names(part)]
+                            blurb = tech_strip_md(row[0])
+                        else:
+                            names = list(_tech_names(row[0]))
+                            blurb = " — ".join(tech_strip_md(c) for c in row[1:3] if c.strip())
+                        found += [(name, blurb[:90]) for name in names]
+                # Merged, not fallback: the technologies/ deep dives carry BOTH a flags
+                # table and the bullet prose that names the actual products, so a
+                # table-first-wins rule indexed Triton as 19 CLI flags and no tools.
+                found += tech_from_bullets(body)
+                for name, blurb in found:
+                    entry = tech.setdefault(tech_key(name), {"forms": {}, "uses": []})
+                    entry["forms"][name] = entry["forms"].get(name, 0) + 1
+                    entry["uses"].append([mi, blurb])
+
+            if i8 is not None:
+                modules[mi]["a"][1] = anchor_idx(lines[i8][3:])
+                body = []
+                for l in lines[i8 + 1:]:
+                    if l.startswith("## "):
+                        break
+                    body.append(l)
+                tabs = md_tables(body)
+                if tabs:
+                    # The FIRST table is the module's headline decision table; the rest
+                    # are drill-downs the reader already renders. Digest, don't mirror.
+                    hdr, rows = tabs[0]
+                    head = [tech_strip_md(c)[:36] for c in hdr][:3]
+                    digest = []
+                    for row in rows[:5]:
+                        cells = [tech_strip_md(c)[:72] for c in row][:3]
+                        while cells and not cells[-1]:
+                            cells.pop()
+                        if cells and cells[0]:
+                            digest.append(cells)
+                    if digest:
+                        trade.append({"i": mi, "h": head, "r": digest})
+
+    # Display name = the most common surface form (shortest wins a tie), so a tool
+    # written five ways in five sections still reads as one entry.
+    tech_out = []
+    for key, entry in tech.items():
+        name = max(entry["forms"].items(), key=lambda kv: (kv[1], -len(kv[0]), kv[0]))[0]
+        # One module may list the same tool in two tables — keep the first blurb only.
+        seen, uses = set(), []
+        for mi, blurb in entry["uses"]:
+            if mi in seen:
+                continue
+            seen.add(mi)
+            uses.append([mi, blurb] if blurb else [mi])
+        tech_out.append({"n": name, "u": uses})
+    # Broadest coverage first: the tools worth learning are the ones many modules reach for.
+    tech_out.sort(key=lambda t: (-len(t["u"]), t["n"].lower()))
+    trade.sort(key=lambda t: (modules[t["i"]]["m"], modules[t["i"]]["f"]))
+    return {"generatedAt": datetime.now(timezone.utc).isoformat(),
+            "anchors": anchors, "modules": modules, "tech": tech_out, "trade": trade}
+
+
 def build_questions(raw, rng):
     """raw parsed Q&As -> MCQ entries (dedup + IDF-related distractors). Called
     for BOTH the main bank and the separate case-study reader-quiz pool; each pool
@@ -1114,6 +1436,20 @@ def main():
             print(f"--write-paths: {len(_changed)} README(s) updated, {len(_probs)} unplaced block(s)")
     except Exception as exc:                                   # never block the bank build
         print(f"WARNING: could not derive tier paths: {exc}", file=sys.stderr)
+
+    # Whole-repo technology + tradeoff index (the Technologies screen). Generated and
+    # gitignored like the banks. Never blocks the bank build: the screen degrades to an
+    # empty state, but a broken quiz would be a broken app.
+    try:
+        tech_index = build_tech_index()
+        with open(os.path.join(OUT_DIR, "tech.json"), "w", encoding="utf-8") as fh:
+            json.dump(tech_index, fh, ensure_ascii=False, separators=(",", ":"))
+        print(f"Wrote technologies index -> {OUT_DIR}/tech.json  "
+              f"({len(tech_index['tech'])} technologies, "
+              f"{len(tech_index['modules'])} module files, "
+              f"{len(tech_index['trade'])} tradeoff tables)")
+    except Exception as exc:
+        print(f"WARNING: could not build the technologies index: {exc}", file=sys.stderr)
 
     print(f"Wrote {len(questions)} questions -> {OUT_DIR}/<section>.json")
     print("Per-section counts:")

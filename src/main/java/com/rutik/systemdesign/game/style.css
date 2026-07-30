@@ -904,6 +904,117 @@ button:active { transform: scale(0.98); }
 .pathopt:hover { color: var(--text); border-color: var(--glass-brd-hi); }
 .pathopt.on { color: var(--accent-ink); background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; }
 
+/* ---------- [TECH] technologies index (#/tech) ---------------------------- */
+/* A dense reference screen, so it deliberately reads quieter than the play
+   surfaces: hairline rows instead of glass cards, mono for anything countable,
+   and the section hue carried ONLY by a 7px dot so 3,600 rows never turn into a
+   colour riot. Every colour is a token or the section's own --tile-accent. */
+
+.tx-cite { font-family: var(--mono); font-size: 0.88em; color: var(--muted); white-space: nowrap; }
+.tx-deep { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+.tx-deepcard { cursor: pointer; border-color: color-mix(in srgb, var(--tile-accent) 34%, var(--glass-brd)); }
+.tx-deepcard:hover { border-color: color-mix(in srgb, var(--tile-accent) 70%, transparent); background: var(--glass-2); }
+.tx-deepcard .tmeta { color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); }
+
+.tx-bar { flex-wrap: wrap; margin-top: 18px; }
+.tx-bar .filter { flex: 1 1 220px; }
+.tx-seclabel { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+.tx-secsel { min-width: 0; padding-right: 8px; cursor: pointer; }
+/* A native <select> inherits the OS popup, which is the right call on a phone —
+   only the closed control is themed, and color-scheme keeps the popup readable. */
+.tx-secsel option { background: var(--bg-2); color: var(--text); }
+
+.tx-list { display: flex; flex-direction: column; gap: 2px; }
+.tx-empty { color: var(--muted); padding: 28px 4px; max-width: 52ch; }
+.tx-more { margin: 14px auto 0; display: block; }
+
+.tx-item { border-bottom: 1px solid var(--glass-brd); }
+.tx-item > summary {
+  display: flex; align-items: center; gap: 10px; cursor: pointer;
+  padding: 9px 6px; list-style: none; border-radius: var(--radius-sm);
+}
+.tx-item > summary::-webkit-details-marker { display: none; }
+.tx-item > summary:hover { background: var(--glass); }
+.tx-item[open] > summary { background: var(--glass); }
+.tx-item[open] > summary .tx-name { color: var(--accent-text); }
+.tx-name { font-weight: 650; font-size: 14px; overflow-wrap: anywhere; }
+.tx-dots { display: inline-flex; gap: 3px; margin-left: auto; flex-shrink: 0; }
+.tx-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+  background: var(--tile-accent, var(--accent));
+}
+.tx-count {
+  min-width: 2.2em; text-align: right; flex-shrink: 0;
+  color: var(--muted); font-family: var(--mono); font-size: var(--fs-xs); font-variant-numeric: tabular-nums;
+}
+.tx-uses { list-style: none; margin: 0 0 8px; padding: 0 0 0 6px; display: flex; flex-direction: column; gap: 2px; }
+.tx-go {
+  width: 100%; display: flex; align-items: baseline; gap: 9px; text-align: left;
+  padding: 7px 10px; border-radius: var(--radius-sm);
+  background: none; border: 1px solid transparent; color: var(--text); cursor: pointer;
+  font: inherit; font-size: var(--fs-md);
+}
+.tx-go:hover, .tx-go:focus-visible { background: var(--glass); border-color: var(--glass-brd); }
+.tx-go .tx-dot { align-self: center; }
+.tx-gomod { font-weight: 600; flex-shrink: 0; }
+.tx-why { color: var(--muted); font-size: var(--fs-sm); min-width: 0; overflow-wrap: anywhere; }
+.tx-gosec { margin-left: auto; padding-left: 10px; flex-shrink: 0; color: var(--faint); font-family: var(--mono); font-size: var(--fs-2xs); }
+
+.tr-card {
+  border: 1px solid var(--glass-brd); border-radius: var(--radius); overflow: hidden;
+  background: var(--glass); margin-bottom: 10px;
+}
+.tr-card:hover { border-color: color-mix(in srgb, var(--tile-accent) 45%, var(--glass-brd)); }
+.tr-head {
+  width: 100%; display: flex; align-items: center; gap: 10px; text-align: left;
+  padding: 11px 14px; background: none; border: 0; border-bottom: 1px solid var(--glass-brd);
+  color: var(--text); cursor: pointer; font: inherit;
+}
+.tr-head:hover { background: var(--glass-2); }
+.tr-mod { font-weight: 650; font-size: 14px; }
+.tr-sec { color: var(--faint); font-family: var(--mono); font-size: var(--fs-2xs); }
+.tr-go { margin-left: auto; padding-left: 10px; color: var(--accent-text); font-family: var(--mono); font-size: var(--fs-xs); white-space: nowrap; }
+/* Comparison tables are wide by nature — scroll the table, never the page. */
+.tr-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+.tr-table { border-collapse: collapse; width: 100%; font-size: var(--fs-md); }
+.tr-table th, .tr-table td { padding: 7px 14px; text-align: left; vertical-align: top; border-top: 1px solid var(--glass-brd); }
+.tr-table thead th {
+  border-top: 0; color: var(--muted); font-family: var(--mono);
+  font-size: var(--fs-2xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.tr-table tbody th { font-weight: 650; white-space: nowrap; }
+.tr-table tbody td { color: var(--muted); }
+
+@media (max-width: 640px) {
+  /* Below the topbar breakpoint the bar stacks: the segmented control keeps a full
+     row, search + section share the next one. */
+  .tx-bar .pathswitch { width: 100%; }
+  .tx-bar .pathswitch .pathopt { flex: 1; }
+  .tx-seclabel { flex: 1 1 130px; }
+  .tx-secsel { flex: 1; }
+  .tx-go { flex-wrap: wrap; row-gap: 2px; }
+  .tx-gosec { margin-left: 0; padding-left: 16px; }
+  .tx-item > summary { padding: 11px 6px; }
+  /* On a phone the hero + three deep-dive cards cost a whole screen before the
+     index appears. Drop the provenance sentence (the §-citations are desktop
+     context, not instructions) and let the cards ride a single swipeable row. */
+  .tx-provenance { display: none; }
+  .tx-deep {
+    display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
+    margin: 0 -16px; padding: 2px 16px 8px; overscroll-behavior-x: contain;
+  }
+  .tx-deepcard { flex: 0 0 62%; scroll-snap-align: start; }
+}
+/* Phone WebView: the sanctioned APK hook is presentation-only CSS (html.is-apk is
+   wrapper-stamped, never a JS branch). Rows get thumb-sized hit targets and the
+   list clears the bottom tab bar + gesture inset. */
+html.is-apk .tx-item > summary,
+html.is-apk .tx-go { min-height: 44px; }
+html.is-apk .tx-go { align-items: center; }
+html.is-apk .tr-head { min-height: 48px; }
+html.is-apk .tx-list { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); }
+
 /* ---------- 10. Footer & states ------------------------------------------- */
 
 .foot { text-align: center; color: var(--faint); font-family: var(--mono); font-size: var(--fs-xs); padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); border-top: 1px solid var(--glass-brd); }
@@ -1794,7 +1905,7 @@ body.reader-resizing .modules-grip::after, body.reader-resizing .toc-grip::after
   .badges { gap: 8px; }
   .badge { min-width: 84px; padding: 10px 14px; }
   /* [E2] the topbar keeps brand + stats; text nav lives in the bottom tab bar. */
-  #navStudy, #navProgress { display: none; }
+  #navStudy, #navTech, #navProgress { display: none; }
   #tabbar { display: flex; }
   /* [E2] sticky quiz actions: the answer/next controls ride just above the tab bar. */
   .qactions {

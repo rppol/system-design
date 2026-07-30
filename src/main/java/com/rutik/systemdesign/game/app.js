@@ -324,6 +324,24 @@ const STUDY_ORDER = {
 //                       cases:{senior:[],principal:[]} } }
 let STUDY_PATHS = {};
 
+// [TECH] The whole-repo technology + tradeoff index (questions/tech.json), built by
+// extract.py from every module's "## 11. Technologies & Tools" and "## 8. Tradeoffs"
+// sections. Fetched RELATIVELY like paths.json and diagrams/<key>.mmz, so the same
+// line resolves on Pages and on the APK's asset host -- adding no new APK seam
+// (the grep-counted token stays at exactly 4; see game/CLAUDE.md).
+//
+// It is an order of magnitude larger than paths.json (~740 KB, ~250 KB gzipped), so
+// boot() STARTS the fetch without awaiting it and renderTech() awaits the same
+// promise. Boot latency is untouched; by the time anyone reaches the screen it is
+// warm. Absent (offline before the first fetch) -> the screen shows an empty state.
+let TECH_INDEX = null;
+let _techPromise = null;
+function loadTechIndex() {
+  if (!_techPromise) _techPromise = fetchJSON("questions/tech.json", null, "default")
+    .then((d) => (TECH_INDEX = d));
+  return _techPromise;
+}
+
 // Which path the learner picked for a section, persisted as a JSON map keyed by
 // section: { llm: "interview" } etc. Defaults to "full" (backward-compatible).
 // Stored tier per section. "interview" was renamed to "senior" when the Principal tier
@@ -3942,7 +3960,7 @@ function renderStudy() {
   }).join("");
   app.innerHTML = `
     <div class="hero"><h1>Study</h1><p>Read your notes in a focused reader &mdash; no quiz, no clock.</p></div>
-    <div class="study-head"><button class="ghost" id="studySearch" aria-label="Search or jump to a topic" title="Search (press /)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Search</span></button></div>
+    <div class="study-head"><button class="ghost" id="studyTech" title="Every tool this repo teaches, and where"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2z"/></svg><span>Technologies</span></button><button class="ghost" id="studySearch" aria-label="Search or jump to a topic" title="Search (press /)"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>Search</span></button></div>
     ${contCard}
     <h2 class="section-h">Pick a section to browse its topics</h2>
     <div class="grid">${tiles}</div>
@@ -3950,7 +3968,211 @@ function renderStudy() {
   document.querySelectorAll(".tile").forEach((b) => b.addEventListener("click", () => go("#/study/" + b.dataset.section)));
   if (contCard) el("#contBtn").addEventListener("click", () => { reader.back = []; openReaderPath(lastRead.path, lastRead.title, null); });
   el("#studySearch").addEventListener("click", () => openPalette());
+  el("#studyTech").addEventListener("click", () => go("#/tech"));
   el("#studyHome").addEventListener("click", () => go("#/home"));
+  wireReveals();
+}
+
+/* ---------- [TECH] technologies index (a top-level screen) ---------- */
+// Every module README carries "## 11. Technologies & Tools" and "## 8. Tradeoffs".
+// Inside one page they are reference material; INVERTED across the repo they answer
+// a question no other screen can: "where is Kafka actually taught, and what does
+// each of those pages make me weigh?"
+//
+// Deliberately NOT a dump of 600 raw markdown sections -- that is the reader's job
+// and it already does it well. This is an INDEX:
+//   * Deep dives   -- the hand-written technologies/ section, pinned at the top so
+//                     the three real deep-dive modules are never buried under 3,600
+//                     derived one-liners.
+//   * Technologies -- name -> every module that teaches it + that module's own
+//                     one-line purpose for it, deep-linked to the exact §11 heading.
+//   * Tradeoffs    -- per module, the headline decision table digested to its first
+//                     few rows, deep-linked to §8. A digest, not a mirror.
+// Both lists share one search box and one section filter.
+const TECH_PAGE = 120;    // technology rows painted per page ("Show more" adds another)
+const TRADE_PAGE = 40;    // tradeoff cards painted per page
+
+const techTab = () => (localStorage.getItem("sd_tech_tab") === "trade" ? "trade" : "tech");
+const techSecFilter = () => localStorage.getItem("sd_tech_sec") || "all";
+// A module file's reader path and display name, from the compact index rows.
+const techPath = (m) => `${m.m}/${m.f}`;
+const techName = (m) => m.t || fileLabel(m.f) || prettyMod(m.m);
+// A deep dive's H1 is a full descriptive title ("Intel OpenVINO — CPU/Edge Inference
+// & Model Optimization"). The card wants the product; the subtitle after the dash is
+// on the page itself and lands in the card's title attribute.
+const deepTitle = (m) => techName(m).split(/\s+[—–]\s+/)[0];
+
+async function renderTech() {
+  state.inQuiz = false;
+  refreshStats();
+  app.innerHTML = skeletonHTML("topics");
+  const idx = TECH_INDEX || await loadTechIndex();
+  if (location.hash !== "#/tech") return;              // navigated away during the fetch
+  if (!idx || !idx.tech || !idx.modules) {
+    errorScreen("Technologies index unavailable",
+      `It's generated with the question bank, so an offline first visit won't have it yet.${devDetail(`Run <code>python3 extract.py</code> then reload.`)}`,
+      () => { _techPromise = null; renderTech(); });
+    return;
+  }
+  const mods = idx.modules;
+  const secOf = (mi) => mods[mi].m.split("/")[0];
+  const accentOf = (sec) => (SECTION_IDENTITY[sec] || {}).accent || "var(--accent)";
+
+  // Precomputed once per render: a lowercase haystack per row so keystroke filtering
+  // is a substring scan over ~4,200 short strings rather than a re-walk of the index.
+  const techRows = idx.tech.map((t) => {
+    const secs = [...new Set(t.u.map((u) => secOf(u[0])))];
+    return { n: t.n, u: t.u, secs, hay: (t.n + " " + t.u.map((u) => techName(mods[u[0]]) + " " + (u[1] || "")).join(" ")).toLowerCase() };
+  });
+  const tradeRows = idx.trade.map((t) => {
+    const m = mods[t.i];
+    return { t, m, sec: m.m.split("/")[0],
+      hay: (techName(m) + " " + t.h.join(" ") + " " + t.r.map((r) => r.join(" ")).join(" ")).toLowerCase() };
+  });
+  // Sections present in the index, in the app's canonical section order.
+  const secOrder = Object.keys(STUDY_ORDER);
+  const secsPresent = [...new Set(mods.map((m) => m.m.split("/")[0]))]
+    .sort((a, b) => (secOrder.indexOf(a) + 1 || 99) - (secOrder.indexOf(b) + 1 || 99));
+
+  // The hand-written technologies/ deep dives, pinned above the derived index.
+  const deep = mods.map((m, i) => ({ m, i })).filter((x) => x.m.m.startsWith("technologies/"));
+  const toolsIn = new Map();
+  techRows.forEach((t) => t.u.forEach((u) => toolsIn.set(u[0], (toolsIn.get(u[0]) || 0) + 1)));
+  const deepHTML = deep.length ? `
+    <h2 class="section-h">Hand-written deep dives</h2>
+    <div class="grid tx-deep">${deep.map(({ m, i }) => `
+      <button class="tile tx-deepcard" data-p="${esc(techPath(m))}" data-a="" title="${esc(techName(m))}" style="--tile-accent:${accentOf("technologies")}">
+        <span class="tname">${esc(deepTitle(m))}</span>
+        <span class="tmeta">${toolsIn.get(i)
+          ? `${toolsIn.get(i)} tools in its stack &middot; full module`
+          : "full module &middot; 14 sections"}</span>
+      </button>`).join("")}</div>` : "";
+
+  let tab = techTab();
+  let secPick = techSecFilter();
+  if (secPick !== "all" && !secsPresent.includes(secPick)) secPick = "all";
+  let shown = { tech: TECH_PAGE, trade: TRADE_PAGE };
+
+  app.innerHTML = `
+    <div class="hero">
+      <h1>Technologies</h1>
+      <p><b>${idx.tech.length.toLocaleString()}</b> tools indexed from <b>${mods.length}</b> module pages.
+      Search one to find every page that teaches it.<span class="tx-provenance"> Built from every
+      <span class="tx-cite">&sect;11 Technologies &amp; Tools</span> and
+      <span class="tx-cite">&sect;8 Tradeoffs</span> table in the repo.</span></p>
+    </div>
+    ${deepHTML}
+    <div class="topicbar tx-bar">
+      <div class="pathswitch" role="radiogroup" aria-label="Index">
+        <button class="pathopt${tab === "tech" ? " on" : ""}" role="radio" aria-checked="${tab === "tech"}" data-txtab="tech">By technology</button>
+        <button class="pathopt${tab === "trade" ? " on" : ""}" role="radio" aria-checked="${tab === "trade"}" data-txtab="trade">Tradeoffs</button>
+      </div>
+      <input type="search" class="filter" id="techFilter" placeholder="Search tools, modules, decisions" aria-label="Search the technologies index" />
+      <label class="tx-seclabel">Section
+        <select class="filter tx-secsel" id="techSec" aria-label="Filter by section">
+          <option value="all">All sections</option>
+          ${secsPresent.map((s) => `<option value="${esc(s)}"${s === secPick ? " selected" : ""}>${esc(label(s))}</option>`).join("")}
+        </select>
+      </label>
+      <span class="selcount" id="techCount" role="status"></span>
+    </div>
+    <div id="techList" class="tx-list"></div>
+    <div class="row" style="margin-top:18px"><button class="ghost" id="techHome">&larr; Home</button></div>`;
+
+  const listEl = el("#techList"), countEl = el("#techCount"), findEl = el("#techFilter");
+
+  const secChip = (s) => `<span class="tx-dot" title="${esc(label(s))}" style="--tile-accent:${accentOf(s)}"></span>`;
+  const useRow = (u) => {
+    const m = mods[u[0]];
+    const anchor = m.a[0] >= 0 ? idx.anchors[m.a[0]] : "";
+    return `<li><button class="tx-go" data-p="${esc(techPath(m))}" data-a="${esc(anchor)}">
+        <span class="tx-dot" style="--tile-accent:${accentOf(m.m.split("/")[0])}"></span>
+        <span class="tx-gomod">${esc(techName(m))}</span>
+        ${u[1] ? `<span class="tx-why">${esc(u[1])}</span>` : ""}
+        <span class="tx-gosec">${esc(label(m.m.split("/")[0]))}</span>
+      </button></li>`;
+  };
+
+  function paint() {
+    const q = findEl.value.trim().toLowerCase();
+    if (tab === "tech") {
+      let rows = techRows;
+      if (secPick !== "all") rows = rows.filter((r) => r.secs.includes(secPick));
+      if (q) rows = rows.filter((r) => r.hay.includes(q));
+      const slice = rows.slice(0, shown.tech);
+      countEl.textContent = rows.length
+        ? `${slice.length} of ${rows.length} tool${rows.length === 1 ? "" : "s"}`
+        : "no matches";
+      listEl.innerHTML = rows.length ? slice.map((r) => {
+        const uses = secPick === "all" ? r.u : r.u.filter((u) => secOf(u[0]) === secPick);
+        return `<details class="tx-item">
+          <summary>
+            <span class="tx-name">${esc(r.n)}</span>
+            <span class="tx-dots">${[...new Set(uses.map((u) => secOf(u[0])))].map(secChip).join("")}</span>
+            <span class="tx-count">${uses.length}</span>
+          </summary>
+          <ul class="tx-uses">${uses.map(useRow).join("")}</ul>
+        </details>`;
+      }).join("") + (rows.length > slice.length
+        ? `<button class="ghost tx-more" data-more="tech">Show ${Math.min(TECH_PAGE, rows.length - slice.length)} more</button>` : "")
+        : `<p class="tx-empty">No tool matches &ldquo;${esc(findEl.value.trim())}&rdquo;. Try a shorter name &mdash; the index stores each tool exactly as its module writes it.</p>`;
+    } else {
+      let rows = tradeRows;
+      if (secPick !== "all") rows = rows.filter((r) => r.sec === secPick);
+      if (q) rows = rows.filter((r) => r.hay.includes(q));
+      const slice = rows.slice(0, shown.trade);
+      countEl.textContent = rows.length
+        ? `${slice.length} of ${rows.length} table${rows.length === 1 ? "" : "s"}`
+        : "no matches";
+      listEl.innerHTML = rows.length ? slice.map(({ t, m, sec }) => {
+        const anchor = m.a[1] >= 0 ? idx.anchors[m.a[1]] : "";
+        const cols = Math.max(t.h.length, ...t.r.map((r) => r.length));
+        const head = Array.from({ length: cols }, (_, c) => `<th>${esc(t.h[c] || "")}</th>`).join("");
+        const body = t.r.map((r) => `<tr>${Array.from({ length: cols }, (_, c) =>
+          c === 0 ? `<th scope="row">${esc(r[0] || "")}</th>` : `<td>${esc(r[c] || "&mdash;")}</td>`).join("")}</tr>`).join("");
+        return `<div class="tr-card" style="--tile-accent:${accentOf(sec)}">
+          <button class="tr-head" data-p="${esc(techPath(m))}" data-a="${esc(anchor)}">
+            <span class="tx-dot"></span>
+            <span class="tr-mod">${esc(techName(m))}</span>
+            <span class="tr-sec">${esc(label(sec))}</span>
+            <span class="tr-go">Open &sect;Tradeoffs &rarr;</span>
+          </button>
+          <div class="tr-scroll"><table class="tr-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+        </div>`;
+      }).join("") + (rows.length > slice.length
+        ? `<button class="ghost tx-more" data-more="trade">Show ${Math.min(TRADE_PAGE, rows.length - slice.length)} more</button>` : "")
+        : `<p class="tx-empty">No tradeoff table matches &ldquo;${esc(findEl.value.trim())}&rdquo;.</p>`;
+    }
+  }
+  paint();
+
+  // One delegated listener for the whole list: a tech row fans out to ~4,000 buttons
+  // across paging, and binding each one would cost more than the render.
+  listEl.addEventListener("click", (e) => {
+    const more = e.target.closest(".tx-more");
+    if (more) { shown[more.dataset.more] += more.dataset.more === "tech" ? TECH_PAGE : TRADE_PAGE; paint(); return; }
+    const go = e.target.closest("[data-p]");
+    if (!go) return;
+    reader.back = [];
+    openReaderPath(go.dataset.p, null, null, go.dataset.a || null);
+  });
+  document.querySelectorAll(".tx-deepcard").forEach((b) => b.addEventListener("click", () => {
+    reader.back = [];
+    openReaderPath(b.dataset.p, null, null);
+  }));
+  document.querySelectorAll("[data-txtab]").forEach((b) => b.addEventListener("click", () => {
+    tab = b.dataset.txtab;
+    safeSet("sd_tech_tab", tab);
+    document.querySelectorAll("[data-txtab]").forEach((o) => {
+      const on = o.dataset.txtab === tab;
+      o.classList.toggle("on", on);
+      o.setAttribute("aria-checked", String(on));
+    });
+    paint();
+  }));
+  el("#techSec").addEventListener("change", (e) => { secPick = e.target.value; safeSet("sd_tech_sec", secPick); paint(); });
+  findEl.addEventListener("input", () => { shown = { tech: TECH_PAGE, trade: TRADE_PAGE }; paint(); });
+  el("#techHome").addEventListener("click", () => go("#/home"));
   wireReveals();
 }
 
@@ -7810,7 +8032,7 @@ function updateTabbar() {
   const bar = el("#tabbar");
   if (!bar) return;
   const h = location.hash || "#/home";
-  const active = h.startsWith("#/study") ? "study" : h === "#/progress" ? "progress" : h.startsWith("#/quiz") || h.startsWith("#/reader") ? null : "home";
+  const active = h.startsWith("#/study") ? "study" : h === "#/tech" ? "tech" : h === "#/progress" ? "progress" : h.startsWith("#/quiz") || h.startsWith("#/reader") ? null : "home";
   bar.querySelectorAll(".tab").forEach((t) => {
     const on = t.dataset.tab === active;
     t.classList.toggle("active", on);
@@ -7874,6 +8096,7 @@ function dispatch(route) {
   if (route.startsWith("#/topics/")) { openTopics(route.slice("#/topics/".length)); return; }
   if (route.startsWith("#/study/")) { openStudySection(route.slice("#/study/".length)); return; }
   if (route === "#/study") { renderStudy(); return; }
+  if (route === "#/tech") { renderTech(); return; }   /* [TECH] repo-wide technology index */
   if (route === "#/progress") { renderProgress(); return; }
   if (route === "#/debrief") { renderDebrief(); return; }   /* [D] Friday Debrief */
   renderHome();                                     // #/home and any unknown route
@@ -8623,6 +8846,10 @@ async function boot() {
   // single source of truth and there is no hand-maintained copy here to drift from.
   // Absent (offline, or a bank that predates it) -> the tier tabs simply do not render.
   STUDY_PATHS = await fetchJSON("questions/paths.json", {}) || {};
+  // [TECH] Same relative-path fetch, deliberately NOT awaited: tech.json is ~250 KB
+  // gzipped and nothing on the first screen needs it. renderTech() awaits this exact
+  // promise, so the screen is warm on arrival and boot never waits for it.
+  loadTechIndex();
   if (!state.index) {
     errorScreen("No question bank found", `Check your connection, or the question bank hasn't been built yet.${devDetail(`Run <code>python3 extract.py</code> then reload.`)}`, () => location.reload());
     return;
@@ -8643,10 +8870,14 @@ async function boot() {
   el("#navProgress").addEventListener("click", () => guardedNav(() => go("#/progress")));
   const studyB = el("#navStudy");
   if (studyB) studyB.addEventListener("click", () => guardedNav(() => go("#/study")));
+  const techB = el("#navTech");                     // [TECH] repo-wide technology index
+  if (techB) techB.addEventListener("click", () => guardedNav(() => go("#/tech")));
   // [E2] mobile bottom tab bar (shown only < 640px). Routes through guardedNav so
   // leaving a live blitz raises the pause sheet, same as the topbar nav.
   document.querySelectorAll("#tabbar .tab").forEach((t) => t.addEventListener("click", () => {
-    const dest = t.dataset.tab === "study" ? "#/study" : t.dataset.tab === "progress" ? "#/progress" : "#/home";
+    const dest = t.dataset.tab === "study" ? "#/study"
+      : t.dataset.tab === "tech" ? "#/tech"
+        : t.dataset.tab === "progress" ? "#/progress" : "#/home";
     guardedNav(() => go(dest));
   }));
   const helpB = el("#helpBtn");
