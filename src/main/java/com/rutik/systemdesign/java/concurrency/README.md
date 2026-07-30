@@ -29,6 +29,15 @@ This module is the most critical for senior Java interviews. Expect questions on
 - **CAS (Compare-And-Swap)**: Hardware instruction; atomically: if value == expected, set to new; return success/failure. Foundation of all lock-free algorithms.
 - **Amdahl's Law**: Maximum speedup from parallelism = 1 / (S + (1-S)/N) where S = serial fraction. Even 10% serial code limits speedup to 10× regardless of cores.
 
+```
+speedup = 1 / (S + (1 - S)/N)
+
+  S             <- serial fraction: the share that cannot be parallelised at all
+  1 - S         <- the parallelisable share
+  (1 - S) / N   <- what the parallel share costs once spread over N cores
+  S + (1 - S)/N <- total time as a fraction of single-threaded time
+```
+
 **What this actually says.** "The part of your program that cannot run in parallel sets a hard ceiling on speedup, and you hit most of that ceiling with surprisingly few cores — so the serial fraction, not the core count, is the thing worth attacking."
 
 The framing matters because it inverts the instinct. Adding cores has sharply diminishing returns, while shaving the serial fraction raises the ceiling itself. A lock held across a critical section *is* your serial fraction.

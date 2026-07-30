@@ -193,15 +193,41 @@ ALTER TABLE users ADD COLUMN email_verified BOOLEAN;  -- nullable, old code igno
 -- ALTER TABLE users ALTER COLUMN email_verified SET NOT NULL;
 
 -- V3__index_email_verified.sql   <- a SEPARATE migration, and a non-transactional one
--- flyway:executeInTransaction=false
 CREATE INDEX CONCURRENTLY idx_users_email_verified ON users(email_verified);
 ```
 
-`CREATE INDEX CONCURRENTLY` is the reason V3 is split out and carries that directive:
-PostgreSQL refuses to run it inside a transaction block, and Flyway wraps every migration in one
-by default — so leaving it in V2 fails with `CREATE INDEX CONCURRENTLY cannot run inside a
-transaction block`. The consequence of running non-transactionally is that a failure leaves an
-INVALID index behind: check `pg_index.indisvalid`, `DROP INDEX` the invalid one, and re-run.
+```properties
+# V3__index_email_verified.sql.conf  <- sidecar script config: same folder, migration
+#                                       filename + ".conf". This is the ONLY per-migration
+#                                       mechanism -- there is no "-- flyway:" comment syntax
+#                                       inside the SQL, however often it is written that way.
+executeInTransaction=false
+```
+
+`CREATE INDEX CONCURRENTLY` is the reason V3 is split out and carries that sidecar: PostgreSQL
+refuses to run it inside a transaction block, and Flyway wraps every migration in one by default
+(`executeInTransaction` defaults to `true`) — so leaving it in V2 fails with `CREATE INDEX
+CONCURRENTLY cannot run inside a transaction block`.
+
+On PostgreSQL that is only half the fix, and the missing half hangs rather than fails. Since
+Flyway 9.1.2 the schema-history lock is a **transactional** advisory lock taken on a separate
+connection, so a migration excused from its own transaction still blocks behind that one
+indefinitely — a Spring Boot app that never finishes starting, with no error to read. Add
+`spring.flyway.postgresql.transactional-lock=false` (Flyway's own
+`flyway.postgresql.transactional.lock=false`) to switch to a session-level lock.
+
+Recovery is the part that gets skipped. A failed `CREATE INDEX CONCURRENTLY` leaves an **invalid**
+index behind — the worst of both states, since PostgreSQL ignores it for reads (it may be
+incomplete) while every INSERT, UPDATE and DELETE still pays to maintain it. Find it, drop it
+concurrently, and re-run the migration:
+
+```sql
+SELECT c.relname
+  FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+ WHERE i.indisvalid = false;
+
+DROP INDEX CONCURRENTLY idx_users_email_verified;   -- also cannot run in a transaction block
+```
 
 ```sql
 -- V4__rename_status_column.sql

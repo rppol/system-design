@@ -341,9 +341,13 @@ ANSI ones, arriving from a direction SQL isolation levels cannot defend against:
 The dirty read is the expensive one, because it can escape the system: a customer is
 emailed "order confirmed" off a state that is compensated thirty seconds later.
 
-Because no database can help here, the fixes are application-level **countermeasures**
-(Garcia-Molina and Salem's 1987 saga paper; catalogued in Richardson's
-*Microservices Patterns*, §4.3):
+Because no database can help here, the fixes are application-level **countermeasures**.
+Get the lineage right, because it is a common interview mis-citation: the saga itself is
+Hector Garcia-Molina and Kenneth Salem, "Sagas", SIGMOD 1987, and that paper does *not*
+name these four. The countermeasures come from Lars Frank and Torben U. Zahle, "Semantic
+ACID properties in multidatabases using remote procedure calls and update propagations"
+(*Software: Practice and Experience* 28(1), 1998), and are catalogued under these names in
+Chris Richardson's *Microservices Patterns*, §4.3:
 
 - **Semantic lock** — the saga sets an in-band flag (`order.status = PENDING`,
   `payment.state = AUTHORIZED`) that tells every other reader "this row is mid-saga."

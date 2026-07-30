@@ -479,6 +479,52 @@ sequentially-consistent store would force a StoreLoad fence that this unlock doe
 
 ---
 
+### Dekker's idiom — the one place the access modes become observable
+
+Section 4.5 ranks the four modes by cost, but every example above is correct in all of them.
+Dekker's idiom is the shape that separates them: each thread **stores its own flag, then
+loads the other's**. Forbidding "both read `false`" means ordering a store ahead of a later
+load of a *different* variable — a **StoreLoad** barrier, which only sequential consistency gives you.
+
+```java
+class Dekker {
+    static boolean flag1, flag2;      // plain fields -- the MODE at the call site decides
+    private static final VarHandle F1, F2;
+    static {
+        try {
+            MethodHandles.Lookup l = MethodHandles.lookup();
+            F1 = l.findStaticVarHandle(Dekker.class, "flag1", boolean.class);
+            F2 = l.findStaticVarHandle(Dekker.class, "flag2", boolean.class);
+        } catch (ReflectiveOperationException e) { throw new ExceptionInInitializerError(e); }
+    }
+
+    // BROKEN -- release/acquire. Both threads can read false and both proceed.
+    static boolean t1Broken() { F1.setRelease(true);  return (boolean) F2.getAcquire(); }
+    static boolean t2Broken() { F2.setRelease(true);  return (boolean) F1.getAcquire(); }
+
+    // FIXED -- sequential consistency. "Both read false" is not a legal execution.
+    static boolean t1Fixed()  { F1.setVolatile(true); return (boolean) F2.getVolatile(); }
+    static boolean t2Fixed()  { F2.setVolatile(true); return (boolean) F1.getVolatile(); }
+
+    // ALSO FIXED -- keep the cheap modes, buy the barrier explicitly.
+    static boolean t1Fenced() { F1.setRelease(true); VarHandle.fullFence();
+                                return (boolean) F2.getAcquire(); }
+}
+```
+
+Doug Lea's JMM9 cookbook states the outcome for this exact program: under Volatile mode at
+least one of the two reads must be true, but "under some of the executions allowed in RA mode,
+both may be 0" — and it prescribes the third variant, "a Release mode write, followed by an
+explicit `fullFence`, followed by an Acquire mode read".
+
+**Do not expect to reproduce the failure in a hand-written loop.** StoreLoad is precisely the
+reordering x86's TSO still permits, so the broken pair really can fail on x86 — the release
+store sits in the store buffer while the acquire load completes — but the window is narrow,
+the JIT is the other reorderer, and a naive harness usually runs for hours and prints nothing.
+OpenJDK `jcstress` (see Q11) is the only tool that classifies these outcomes reliably.
+
+---
+
 ## 7. Real-World Examples
 
 ### OpenJDK ConcurrentHashMap — table head CAS
@@ -897,6 +943,26 @@ both threads *can* read `false`, because acquire/release orders each thread's ow
 but imposes no global order across the two independent variables. Same for plain fields.
 The lesson is not "two volatiles are not enough" — they are — but "acquire/release is not
 volatile", and reaching for the cheaper mode silently deletes the property Dekker depends on.
+
+**Q16. Which `VarHandle` access mode is the weakest one that still makes Dekker's idiom correct, and why is acquire/release not enough?**
+`getVolatile`/`setVolatile` — sequential consistency — is the weakest mode that works, and the
+plain `volatile` keyword buys you the same thing. Dekker's idiom has each thread store its own
+flag and then load the other thread's, so making "both read false" illegal requires ordering a
+store ahead of a *later load of a different variable*: a StoreLoad barrier. Release/acquire
+deliberately does not provide one — a release write only orders the accesses that precede it,
+and an acquire read only orders the accesses that follow it, so nothing forbids each thread's
+store from sliding past its own load. Doug Lea's JMM9 cookbook states the outcome for exactly
+this program: under Volatile mode at least one read must be true, while "under some of the
+executions allowed in RA mode, both may be 0". Two practical consequences follow. First, this
+is not a compiler-only artefact — StoreLoad is precisely the reordering x86's TSO still
+permits, so the release store can sit in the store buffer while the acquire load completes and
+the failure is reachable on real hardware; it is simply rare enough that a hand-written loop
+will not find it and `jcstress` will. Second, if you want to keep the cheaper modes the fix is
+explicit rather than implicit: a release write, `VarHandle.fullFence()`, then an acquire read,
+which is what the cookbook prescribes. The general rule is that acquire/release is the right
+default for producer-consumer publication — one thread writes a variable, another reads that
+same variable — and the wrong default for mutual exclusion, where two threads race on two
+different variables.
 
 ---
 

@@ -94,6 +94,18 @@ The pool size, not the thread count, is the knob. Forking 500 virtual threads ag
 10-connection pool gives 10 s; against 40 it gives 2.5 s at the cost of 40 concurrent DDL
 sessions on the database.
 
+Two things follow, and both are easy to get wrong. First, the excess tasks do not wait
+indefinitely — they park in `getConnection()` and, after HikariCP's default `connectionTimeout`
+of 30000 ms, fail with `SQLTransientConnectionException`. Against HikariCP's default
+`maximumPoolSize` of 10, a 32-way fork runs 10 migrations and puts 22 tasks on a 30-second fuse,
+so the run aborts at 30 s rather than completing slowly. Second — the one that causes an
+incident — if the migration borrows the pool the application serves traffic from, every live
+request queues behind the DDL and inherits the same 30-second timeout. Broken:
+`Flyway.configure().dataSource(dataSource)` against the shared application pool (§4.6). Fixed:
+build a separate, explicitly-sized `HikariDataSource` for migration only and `close()` it when
+the `ApplicationRunner` returns, so the sizing decision above is made once, in isolation, and
+cannot starve request threads.
+
 ---
 
 ## 3. High-Level Architecture
@@ -740,6 +752,15 @@ per database, but DDL operations (CREATE TABLE, VACUUM) become slower at very hi
 counts. Above ~5,000 schemas per database, consider horizontal database sharding by tenant
 range or consistent-hash assignment.
 ```
+
+Two app instances starting at once do not corrupt anything. Flyway guards each migration run with
+a PostgreSQL advisory lock keyed on the schema-qualified history table, so with
+`.schemas(schemaName)` per tenant the key differs per tenant: different tenants still migrate in
+parallel, while two instances aimed at the *same* schema serialise — the second blocks until the
+first releases, then finds every version already applied. Safe, but not free at rolling-deploy
+time: the second pod's startup now contains the first pod's entire migration window, which is
+what pushes a `maxSurge` deploy past the readiness `initialDelaySeconds`. Stagger replica
+startup, or move provisioning out of startup and into the tenant-creation job.
 
 ---
 

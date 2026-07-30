@@ -293,6 +293,48 @@ stored `null` values turns a silent lookup into an `NullPointerException` at the
 site — often far from the code that assumed the mapping existed. Use a sentinel object or
 `Optional`-shaped values instead of `null`.
 
+### Null-Hostile Idioms — `Collectors.toMap`, `merge`, `getOrDefault`
+
+`LinkedHashMap` follows `HashMap` exactly (one null key, any number of null values, in both
+insertion- and access-order mode); `ConcurrentSkipListMap` follows `ConcurrentHashMap` and
+rejects both regardless of its `Comparator`. But the map is only half the story — several
+everyday *idioms* are null-hostile independently of the map they build, and `Collectors.toMap`
+is the sharpest because its javadoc never says so (only `toUnmodifiableMap` documents it).
+
+```java
+record Person(String dept, String manager) { }      // manager is legitimately null at the top
+
+// BROKEN: NullPointerException on the first null manager -- in EVERY toMap overload.
+// The two-arg form does Objects.requireNonNull(valueMapper.apply(e)) before putIfAbsent;
+// the merge-function overloads accumulate with map.merge(k, v, f), and Map.merge requires a
+// non-null value because it reserves null (from the remapping function) to mean "remove".
+Map<String, String> byDept = people.stream()
+        .collect(Collectors.toMap(Person::dept, Person::manager));
+
+// FIX: three-argument collect() puts straight into the map, so null values survive.
+Map<String, String> byDept = people.stream().collect(
+        HashMap::new, (m, p) -> m.put(p.dept(), p.manager()), HashMap::putAll);
+```
+
+That disqualifies `merge` as the workaround too, not just as the cause: `map.merge(k, null, f)`
+throws for the same reason. The lookup side has the matching trap — a key that is *present but
+mapped to null* is not an absent key, and the accessors disagree about which is which:
+
+```java
+Map<String, String> m = new HashMap<>();
+m.put("k", null);
+m.get("k");                       // null
+m.getOrDefault("k", "DEFAULT");   // null  -- NOT "DEFAULT": the mapping exists, so no default
+m.containsKey("k");               // true  -- the only accessor that separates the two cases
+m.putIfAbsent("k", "x");          // returns null and STORES "x" -- null counts as absent
+m.computeIfAbsent("k", x -> "v"); // "v"   -- null counts as absent here as well
+```
+
+`getOrDefault` says "present" while `putIfAbsent` and `computeIfAbsent` say "absent", for the
+same entry. The cheap way out is to not store null at all: a sentinel or an empty collection
+keeps a `null` return meaning exactly one thing, and keeps the code portable to
+`ConcurrentHashMap`.
+
 ### PriorityQueue — Binary Min-Heap
 
 ```java
@@ -699,6 +741,11 @@ A fail-fast iterator throws `ConcurrentModificationException` as soon as it noti
 **Short:** Java 21's SequencedCollection adds uniform first/last/reversed methods, and reversed() returns a live view, not a copy.
 
 Java 21 added `SequencedCollection`, `SequencedSet` and `SequencedMap`, giving every ordered collection one uniform first/last/reversed API. `SequencedCollection` declares `addFirst`/`addLast`, `getFirst`/`getLast`, `removeFirst`/`removeLast` and `reversed()`; `SequencedMap` adds `putFirst`/`putLast`, `firstEntry`/`lastEntry` and `pollFirstEntry`/`pollLastEntry`. `List` and `Deque` were retrofitted onto `SequencedCollection`, `LinkedHashSet` and `SortedSet` onto `SequencedSet`, `LinkedHashMap` and `SortedMap` onto `SequencedMap`; `HashMap`/`HashSet` are excluded because they have no encounter order. `reversed()` returns a live **view**, not a copy — mutating the source is visible through it and writes through it reach the source, so take `List.copyOf(list.reversed())` when you need a snapshot. The mutators are `default` methods that throw `UnsupportedOperationException` where they make no sense: on an immutable `List.of(...)` and on a `SortedSet`, whose position is dictated by the comparator.
+
+**Q21: Why does `Collectors.toMap` throw a `NullPointerException` on a null value, and what do you use instead?**
+**Short:** Every toMap overload rejects null values, so use the three-argument collect with HashMap::new when a mapped value can legitimately be null.
+
+All four `toMap` overloads reject a null value even though the `HashMap` they build would accept it. The two-argument form calls `Objects.requireNonNull` on the mapped value before `putIfAbsent`; the overloads that take a merge function accumulate with `map.merge(k, v, f)`, and `Map.merge` requires a non-null value because it reserves `null` — returned from the remapping function — to mean "remove the mapping". Only `toUnmodifiableMap` documents the rejection, so the other forms fail at runtime with an NPE whose stack trace points inside `Collectors` rather than at your lambda. That also disqualifies `merge` as the workaround. The fix is the three-argument `collect`, which puts directly into a supplied map: `people.stream().collect(HashMap::new, (m, p) -> m.put(p.dept(), p.manager()), HashMap::putAll)`. Better still, do not store null values at all — a sentinel or an empty collection keeps a `null` return unambiguous and keeps the code portable to `ConcurrentHashMap`, which bans null outright.
 
 ---
 

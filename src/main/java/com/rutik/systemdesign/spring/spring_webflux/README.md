@@ -616,6 +616,51 @@ public Flux<Product> streamAllProducts(int batchSize) {
 - The application handles a low volume of requests — below 1,000 concurrent connections, Spring MVC and WebFlux perform equivalently
 - Thorough debugging and straightforward stack traces are a priority for operational teams
 
+### Virtual threads changed what "blocking data layer" costs [Boot 3.2+, Java 21+]
+
+The JDBC/JPA bullet above used to mean "accept the 200-thread ceiling or rewrite on R2DBC".
+It no longer does. `spring.threads.virtual.enabled=true` swaps the embedded container's
+request executor for a virtual-thread-per-request executor, so a blocking `jdbcTemplate`
+call parks a virtual thread (~few KB) instead of occupying a platform thread (~1MB), and
+`server.tomcat.threads.max` (default 200) stops being the concurrency ceiling. JEP 491
+(Java 24) removed the last common degradation: blocking inside a `synchronized` block no
+longer pins its carrier. Only a `native` method or a Foreign Function & Memory downcall
+still pins — diagnose it with the `jdk.VirtualThreadPinned` JFR event, enabled by default
+at a 20 ms threshold.
+
+What that does **not** buy you is the rest of what WebFlux is for:
+
+| Capability | Virtual threads on MVC | WebFlux |
+|-----------|------------------------|---------|
+| Thread-count ceiling for blocking I/O | Gone — millions of virtual threads | Gone — event loop never blocks |
+| Backpressure | ✗ none — no `request(n)`, no `limitRate`, no overflow strategy | ✓ Reactive Streams, end to end |
+| Streaming / SSE composition | ✗ write to the response yourself | ✓ return a `Flux`, operators compose |
+| Bound on the downstream resource | ✗ you must add one | ✓ implicit in demand signalling |
+
+That last row is the trap. Virtual threads are unlimited; the connection pool is not, and
+it becomes the real concurrency limit the moment you enable them.
+
+```java
+// BROKEN: 5,000 concurrent requests -> 5,000 virtual threads -> 4,990 of them parked in
+// HikariPool.getConnection() until connectionTimeout (30s default) fires as a 500.
+@GetMapping("/report")
+public Report report() {
+    return jdbcRepo.expensiveQuery();   // Hikari maximumPoolSize default: 10
+}
+
+// FIXED: bound the fan-out yourself. Do NOT pool virtual threads — use a Semaphore,
+// sized against the pool, and fail fast instead of queueing 30 seconds of latency.
+private final Semaphore dbPermits = new Semaphore(20);
+
+@GetMapping("/report")
+public Report report() throws InterruptedException {
+    if (!dbPermits.tryAcquire(200, TimeUnit.MILLISECONDS)) {
+        throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE);
+    }
+    try { return jdbcRepo.expensiveQuery(); } finally { dbPermits.release(); }
+}
+```
+
 ---
 
 ## 10. Common Pitfalls
@@ -926,6 +971,11 @@ Symptoms include p99 latency spikes to 10-100x baseline and CPU usage dropping t
 **Short:** Chain `.timeout(Duration)` with `.retryWhen(Retry.backoff(...))` to fail slow calls and retry transient errors with backoff and jitter.
 
 Use `.timeout(Duration)` to emit a `TimeoutException` if the publisher does not complete within the duration, and `.retryWhen(Retry.backoff(maxAttempts, minBackoff))` for exponential backoff retries. The `Retry.backoff` variant supports `jitter()` to spread retry timing, `.filter(e -> e instanceof NetworkException)` to retry only on specific errors, and `.maxBackoff(maxDuration)` to cap the backoff delay. Example: `retryWhen(Retry.backoff(3, Duration.ofMillis(100)).maxBackoff(Duration.ofSeconds(2)).jitter(0.5))` retries up to 3 times with 100ms base delay, up to 2 seconds max, with 50% jitter. Place `.timeout()` before `.retryWhen()` if you want each attempt to have its own timeout.
+
+**Q: Now that virtual threads exist, is there any reason left to choose WebFlux over Spring MVC?**
+**Short:** Yes — backpressure and streaming composition, which virtual threads do not provide at all.
+
+Virtual threads dissolved the *thread-count* argument for WebFlux but none of the others. Setting `spring.threads.virtual.enabled=true` (Spring Boot 3.2+, Java 21+) puts the servlet container's request handling on a virtual-thread-per-request executor, so a blocking JDBC call parks a few-KB virtual thread instead of holding a ~1MB platform thread, and JEP 491 in Java 24 stopped `synchronized` blocks from pinning the carrier — only a `native` method or a Foreign Function & Memory downcall still pins, observable through the `jdk.VirtualThreadPinned` JFR event that is enabled by default at a 20 ms threshold. What remains WebFlux-only is Reactive Streams backpressure (`request(n)`, `limitRate`, `onBackpressureDrop`) and the operator vocabulary for composing a streaming response such as SSE. The corollary is the mistake teams make on day one of a virtual-thread migration: virtual threads are unbounded but the connection pool is not, so with HikariCP's default `maximumPoolSize` of 10 a 5,000-request burst simply relocates the queue into `getConnection()` and times out there. Practical guidance: keep WebFlux for streaming and backpressured pipelines, move blocking-JDBC services to MVC on virtual threads, and bound the fan-out with a `Semaphore` sized against the pool rather than by pooling the virtual threads.
 
 ---
 

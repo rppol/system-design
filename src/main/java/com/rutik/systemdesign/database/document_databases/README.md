@@ -415,7 +415,7 @@ failover could still roll back.
 | `local` | Whatever this node has. Default. May be rolled back on failover | Cheapest |
 | `available` | Same, and on a sharded cluster skips the orphan-document filter | Fastest sharded read; not usable in transactions or causal sessions |
 | `majority` | Only data acknowledged by a majority — durable, never rolled back | Waits for the majority commit point |
-| `linearizable` | Reflects every majority-acknowledged write that finished before the read began | Primary only; always pair with `maxTimeMS` |
+| `linearizable` | Reflects every majority-acknowledged write that finished before the read began | Primary only; barred from transactions and causal sessions; always pair with `maxTimeMS` |
 | `snapshot` | Majority-committed data as of one consistent point in time, across shards | Transactions and causally consistent sessions |
 
 The pairing that matters in an interview: **`w: "majority"` plus `readConcern: "local"` is

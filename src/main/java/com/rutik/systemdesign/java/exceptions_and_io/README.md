@@ -286,6 +286,8 @@ System.getProperty("stdout.encoding")        // US-ASCII -- the CONSOLE charset,
 
 // -Dfile.encoding=COMPAT restores the pre-18 locale-derived behaviour, for one bad
 // migration only. It is an escape hatch, not a configuration option to leave in place.
+// JEP 400 specifies exactly two values, UTF-8 and COMPAT; -Dfile.encoding=ISO-8859-1
+// or any other charset name is UNSPECIFIED behaviour, not a supported third option.
 ```
 
 Three consequences worth carrying into a code review:

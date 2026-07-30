@@ -309,17 +309,27 @@ a TTL is not freed the moment the TTL passes. Redis removes it in two ways:
 
 - **Passive (lazy)**: a client touches the key, Redis notices it is past its deadline,
   deletes it, and answers as if it were absent. Costs nothing until someone asks.
-- **Active**: an expire cycle runs 10 times a second. Each pass samples 20 keys at random
-  from the volatile set and deletes the expired ones; **if more than 25% of that sample
-  was expired, it immediately repeats**. At the steady state that is only about 200 keys
-  per second actively reclaimed — the lazy path is expected to do most of the work.
+- **Active**: the slow expire cycle runs `hz` times a second (default `hz 10`). Each pass
+  samples 20 keys at random from one database's volatile set and deletes the expired ones;
+  **if more than 10% of that sample was expired, it immediately repeats on the same
+  database**. At the steady state that is only about 200 keys per second actively
+  reclaimed — the lazy path is expected to do most of the work.
 
-That 25% loop is the operational trap. It is adaptive by design, so a keyspace where a
+Do not confuse the two percentages in that algorithm — they are different constants doing
+different jobs. `ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE` (10) is the *repeat* threshold; the
+familiar 25 is `ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC`, a cap on how much of the `hz` period
+one cycle may consume. Both scale with `active-expire-effort` (default `1`, range 1–10);
+raising it samples more keys per loop and lowers the repeat threshold further.
+
+That 10% loop is the operational trap. It is adaptive by design, so a keyspace where a
 large share of the volatile keys come due in the *same second* — the classic result of
 writing a million keys with an identical TTL in a bulk load — makes the cycle iterate
-repeatedly on the single command thread until the expired fraction drops back under 25%.
-This is the same argument for TTL jitter that stampede prevention makes, arriving from
-the memory-reclamation side rather than the cache-miss side.
+repeatedly on the single command thread until the expired fraction drops back under 10%.
+The only thing bounding the burst is that time cap: 25% of the `hz` period, or 25 ms out
+of every 100 ms at `hz 10` — a quarter of the command thread surrendered to reclamation
+for as long as the backlog lasts. This is the same argument for TTL jitter that stampede
+prevention makes, arriving from the memory-reclamation side rather than the cache-miss
+side.
 
 Two consequences worth knowing before an incident:
 
@@ -712,7 +722,7 @@ In Redis Cluster, each slot is owned by one primary shard. A "hot key" — a key
 **Q: How does Redis actually expire keys, and why do replicas not do it themselves?**
 **Short:** Redis expires keys both lazily on access and via an active sampling cycle, and only the primary issues the DEL that replicas apply.
 
-Redis expires keys two ways: passively, when a client touches a key that is past its deadline, and actively, via a cycle that runs 10 times a second and samples 20 volatile keys per pass. The active cycle is adaptive — if more than 25% of the sampled keys were already expired it repeats immediately — so in the steady state it reclaims only around 200 keys per second and the lazy path does most of the work. That adaptivity is also the trap: a bulk load that gives a million keys the same TTL makes them all come due in the same second, the sample stays above 25%, and the cycle loops on the single command thread, which is the memory-side argument for TTL jitter. Two consequences follow. Memory is not released at the deadline, so `used_memory` can exceed what the TTLs imply and eviction can start on keys that are logically already dead. And TTLs are absolute Unix timestamps whose clock keeps running while Redis is down, so restoring an RDB onto a host with a skewed clock can expire the entire dataset on load. Replicas never expire keys on their own: the primary synthesizes an explicit `DEL` into the replication stream and the AOF, centralizing expiry so nodes cannot diverge — a replica keeps the dead key, and its memory, until that `DEL` arrives, and only begins expiring independently once promoted.
+Redis expires keys two ways: passively, when a client touches a key that is past its deadline, and actively, via a slow cycle that runs `hz` times a second (default `hz 10`) and samples 20 volatile keys per pass. The active cycle is adaptive — if more than 10% of the sampled keys were already expired it repeats immediately on the same database — so in the steady state it reclaims only around 200 keys per second and the lazy path does most of the work. Two percentages get conflated here and an interviewer may probe it: 10% is the repeat threshold (`ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE`), while the familiar 25% is `ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC`, the cap on how much of the `hz` period one cycle may consume. That adaptivity is also the trap: a bulk load that gives a million keys the same TTL makes them all come due in the same second, the sample stays above 10%, and the cycle loops on the single command thread up to that 25% cap — 25 ms out of every 100 ms at `hz 10` — which is the memory-side argument for TTL jitter. Two consequences follow. Memory is not released at the deadline, so `used_memory` can exceed what the TTLs imply and eviction can start on keys that are logically already dead. And TTLs are absolute Unix timestamps whose clock keeps running while Redis is down, so restoring an RDB onto a host with a skewed clock can expire the entire dataset on load. Replicas never expire keys on their own: the primary synthesizes an explicit `DEL` into the replication stream and the AOF, centralizing expiry so nodes cannot diverge — a replica keeps the dead key, and its memory, until that `DEL` arrives, and only begins expiring independently once promoted.
 
 **Q: What happens when Redis memory reaches maxmemory and eviction policy is allkeys-lru?**
 **Short:** When maxmemory is hit under allkeys-lru, Redis samples a small pool of keys and evicts the approximate least-recently-used one before each write.

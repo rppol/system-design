@@ -567,13 +567,19 @@ loss of the zero-index-write path. Two levers:
 - **Do not index columns you update constantly** (`last_seen_at`, `view_count`,
   `progress`). If you must query on one, ask whether a partial or expression index on a
   stable column can serve the query instead.
-- **Lower `fillfactor`** (70–90) on update-heavy tables so condition 2 keeps holding.
-  Without free space on the page, the new version migrates to another page and HOT is
+- **Lower `fillfactor`** (70–90) on update-heavy tables so condition 2 keeps holding. The
+  heap default is **100 — complete packing**, which leaves no room for a same-page new
+  version. Without that free space the new version migrates to another page and HOT is
   unavailable regardless of which columns changed.
 
 Measure it, do not assume it: `n_tup_upd` versus `n_tup_hot_upd` in
 `pg_stat_user_tables` is the HOT ratio for a table, and a ratio near zero on a
 write-heavy table is a strong signal that an index is sitting on a churning column.
+`n_tup_newpage_upd` tells you *which* of the two conditions you are failing — it counts
+non-HOT updates whose successor version landed on a **different heap page**, so a large
+`n_tup_newpage_upd` points at page space (raise headroom via `fillfactor`), while a large
+non-HOT remainder with a small `n_tup_newpage_upd` points at an indexed column being
+updated. `n_tup_upd` is the total and includes both.
 
 ---
 
