@@ -889,7 +889,7 @@ A diffusion model U-Net was implemented but the timestep t embedding was silentl
 | `accelerate` (HuggingFace) | Multi-GPU/TPU training for diffusion models |
 | CLIP (`openai/clip`) | Text encoder for conditional generation |
 | `einops` | Tensor reshaping for attention in U-Net |
-| `xformers` | Memory-efficient attention for diffusion U-Net (reduces VRAM 40-60%); largely superseded by PyTorch 2.x built-in `scaled_dot_product_attention` |
+| `torch.nn.functional.scaled_dot_product_attention` | Built-in memory-efficient / flash attention for the diffusion backbone; what `diffusers` dispatches to by default, cutting attention VRAM substantially versus a materialized attention matrix |
 
 Key `diffusers` APIs:
 ```python

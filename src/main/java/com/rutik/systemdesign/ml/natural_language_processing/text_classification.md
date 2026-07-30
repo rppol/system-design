@@ -811,7 +811,7 @@ SMOTE creates synthetic minority points by interpolating between neighbors, but 
 | Tool | Purpose | Notes |
 |------|---------|-------|
 | `scikit-learn` | TF-IDF, MultinomialNB, LogisticRegression, LinearSVC, Pipeline, metrics | The linear-baseline workhorse; keep the vectorizer in a Pipeline |
-| `fasttext` (Meta) | Ultra-fast n-gram linear classifier with hierarchical softmax | CPU training in seconds on millions of docs |
+| `fasttext` (Meta) | Ultra-fast n-gram linear classifier with hierarchical softmax | CPU training in seconds on millions of docs; upstream repo is archived, so pin the version or reproduce the recipe with a scikit-learn char-n-gram + `SGDClassifier` pipeline |
 | `torch` / `torchtext` | TextCNN, RNN, custom neural classifiers | `nn.Conv1d` for TextCNN; pad and pack sequences |
 | `transformers` (HuggingFace) | Fine-tuned encoder classifiers | See [bert_and_pretrained_models.md](bert_and_pretrained_models.md) |
 | `imbalanced-learn` | Resampling (SMOTE, RandomOverSampler), pipeline integration | Prefer class weights first on sparse text |

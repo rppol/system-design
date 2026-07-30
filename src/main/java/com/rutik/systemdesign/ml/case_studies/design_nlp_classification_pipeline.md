@@ -154,9 +154,9 @@ def build_tfidf_lr_pipeline(
         solver="saga",              # fast for large sparse matrices
         n_jobs=-1,
     )
-    # Note: the `multi_class` parameter was deprecated in scikit-learn 1.5 and
-    # REMOVED in 1.7 — passing it now raises TypeError. Multinomial (softmax) is
-    # the behaviour for all solvers except liblinear, so nothing needs to be set.
+    # Every solver except liblinear optimises the full multinomial (softmax)
+    # loss whenever n_classes >= 3, so there is nothing to configure for
+    # multiclass here — saga just has to converge.
     # Calibration: isotonic regression via 5-fold CV produces well-calibrated probabilities
     calibrated_clf = CalibratedClassifierCV(base_clf, cv=5, method="isotonic")
     return Pipeline([("tfidf", vectorizer), ("clf", calibrated_clf)])

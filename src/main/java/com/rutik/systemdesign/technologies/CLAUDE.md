@@ -37,9 +37,9 @@ say so on first mention.
 
 | Dir | Category | Key Concepts | Version Studied |
 |-----|----------|-------------|-----------------|
-| [`apache_airflow/`](apache_airflow/README.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.0.x |
+| [`apache_airflow/`](apache_airflow/README.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.3.0 |
 | [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/README.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
-| [`intel_openvino/`](intel_openvino/README.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2025.2 |
+| [`intel_openvino/`](intel_openvino/README.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.2 |
 
 ---
 

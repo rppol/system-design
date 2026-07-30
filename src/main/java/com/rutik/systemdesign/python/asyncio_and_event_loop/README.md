@@ -959,6 +959,39 @@ async def fixed_dynamic(urls: list[str]) -> list[str]:
 - `PYTHONASYNCIODEBUG=1` environment variable — enables debug mode globally
 - `aiodebug` / custom slow-callback detection via `loop.slow_callback_duration = 0.05`
 
+### Inspecting a Live Process — `python -m asyncio ps` / `pstree`
+
+Every tool above needs to be armed *before* the problem happens. The one that does not is
+the stdlib introspection CLI, which attaches to an **already-running** process by PID and
+reports what its event loop is actually doing right now — no instrumentation, no debug
+flag, no restart:
+
+```bash
+python -m asyncio ps 1935500       # flat task table
+python -m asyncio pstree 1935500   # the same data as an async call tree
+```
+
+`ps` prints one row per live Task — task id, task name, its coroutine stack, and the
+**awaiter chain**: which task is waiting on it. `pstree` renders that awaiter graph as a
+tree with file and line numbers:
+
+```
+└── (T) Task-1
+    └──  main example.py:13
+        └──  TaskGroup.__aexit__ Lib/asyncio/taskgroups.py:72
+```
+
+This is the direct answer to the hardest question in production async: *a request has been
+open for four minutes — what is it blocked on?* A stack trace of the main thread shows only
+`loop.run_forever()`; the awaiter chain shows the actual coroutine and the line it is parked
+on. It also detects a deadlocked await graph outright, printing
+`ERROR: await-graph contains cycles - cannot print a tree!` rather than a misleading tree.
+
+It works by injecting a read into the target process via `sys.remote_exec()` (PEP 768), so
+the target does not have to cooperate — but that same mechanism can be disabled at build
+time or by environment/CLI flags, so confirm it is available in your production image
+before relying on it during an incident.
+
 ---
 
 ## 12. Interview Questions with Answers
@@ -1086,7 +1119,7 @@ The practical guidance: always run with debug mode on in development; in product
 **Short:** asyncio bridges to threads via to_thread, run_in_executor, and run_coroutine_threadsafe.
 
 asyncio and threads coexist through three bridges, one per direction and one for custom pools.
-In detail: (1) `asyncio.to_thread(fn, *args)` (3.9+)
+In detail: (1) `asyncio.to_thread(fn, *args)`
 runs a synchronous function in the default `ThreadPoolExecutor` and returns a coroutine that
 resolves when the thread finishes — this is the canonical way to call blocking code from async.
 (2) `loop.run_in_executor(executor, fn, *args)` is the lower-level equivalent with a custom
@@ -1205,6 +1238,11 @@ carrying only `except*` clauses around the `TaskGroup`, and an outer `try` carry
 `return` are a `SyntaxError` inside an `except*` block, and `except* ExceptionGroup` compiles but
 raises `TypeError` at runtime ("catching ExceptionGroup with except* is not allowed") — to catch
 the group as a whole you must use a plain `except ExceptionGroup`.
+
+**Q: A production async service has requests hanging with no logs — how do you find what they are blocked on?**
+**Short:** Attach to the live process with `python -m asyncio pstree PID` and read the awaiter chain to see the exact coroutine each task is parked on.
+
+Attach to the running process by PID with the stdlib introspection CLI — `python -m asyncio ps <pid>` for a flat task table, `python -m asyncio pstree <pid>` for the async call tree. Neither needs the process to have been started in debug mode, instrumented, or restarted, which is what makes it usable during an incident rather than after one. The value is the **awaiter chain**: a normal thread dump of an async service is useless because every thread shows `loop.run_forever()`, whereas `pstree` shows each Task, the coroutine stack inside it, and which task is awaiting it, with file and line numbers. If the await graph is genuinely deadlocked the tool says so — `ERROR: await-graph contains cycles - cannot print a tree!` — instead of drawing a misleading tree. The mechanism is `sys.remote_exec()` (PEP 768), so verify it is not disabled in your production build before you need it; `asyncio.run(main(), debug=True)` and `loop.slow_callback_duration` remain the complementary always-on signals for the different failure of a coroutine that blocks the loop rather than waiting on it.
 
 ---
 

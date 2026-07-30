@@ -2,7 +2,7 @@
 
 ## 1. Concept Overview
 
-InnoDB is MySQL's default storage engine since MySQL 5.5. It provides full ACID compliance, MVCC, row-level locking, foreign key enforcement, and crash recovery. Understanding InnoDB's internal architecture — especially its dual-log design, clustered index structure, and buffer pool mechanics — is essential for optimizing MySQL performance and diagnosing production issues.
+InnoDB is MySQL's default storage engine. It provides full ACID compliance, MVCC, row-level locking, foreign key enforcement, and crash recovery. Understanding InnoDB's internal architecture — especially its dual-log design, clustered index structure, and buffer pool mechanics — is essential for optimizing MySQL performance and diagnosing production issues.
 
 ---
 
@@ -82,7 +82,7 @@ Implications:
 
 ### Redo Log vs Undo Log
 
-**Redo Log** (iblogfile0, iblogfile1 in MySQL 5.7; auto-managed in MySQL 8):
+**Redo Log** (32 files named `#ib_redo<N>` in the `#innodb_redo` directory, sized in total by `innodb_redo_log_capacity`):
 - Circular buffer on disk
 - Stores physical changes: "page N, offset O: change bytes X to Y"
 - Purpose: crash recovery — replay redo log to restore committed changes
@@ -91,7 +91,7 @@ Implications:
 **Undo Log**:
 - Stores logical inverse operations: "row was: (id=1, balance=500)"
 - Purpose: (1) ROLLBACK — apply undo records to revert changes. (2) MVCC — provide old row versions to readers
-- Stored in the system tablespace or separate undo tablespaces (MySQL 8)
+- Stored in two default undo tablespaces (`innodb_undo_001`, `innodb_undo_002`), truncated in the background by the purge threads
 
 ```
 UPDATE accounts SET balance = 600 WHERE id = 1;
@@ -271,10 +271,10 @@ For replicated setups with sync binlog: use `=2` on replicas (binlog is authorit
 ### InnoDB Row Formats
 
 Four row formats:
-- `REDUNDANT`: Legacy, stores column lengths twice. Largest row size.
-- `COMPACT`: Default before MySQL 5.7. 20% less space than REDUNDANT.
-- `DYNAMIC` (MySQL 5.7+ default): Large BLOB/TEXT stored fully off-page. Better for long columns.
-- `COMPRESSED`: Like DYNAMIC but page-level compression (KEY_BLOCK_SIZE). CPU cost.
+- `DYNAMIC` (the default, `innodb_default_row_format=dynamic`): large BLOB/TEXT stored fully off-page with only a 20-byte pointer in the row. Best for long columns.
+- `COMPACT`: same header as DYNAMIC but stores a 768-byte prefix of an off-page column inline, wasting page space on wide rows.
+- `COMPRESSED`: like DYNAMIC plus page-level compression (`KEY_BLOCK_SIZE`). CPU cost, and it cannot use the modern 32KB/64KB page sizes.
+- `REDUNDANT`: stores column lengths twice. Largest row size; exists only for tables carried forward from very old schemas.
 
 ```sql
 CREATE TABLE t (id INT, data TEXT)
@@ -358,7 +358,7 @@ SHOW REPLICA STATUS\G
 ## 7. Real-World Examples
 
 - **UUID PK performance**: A startup switched from INT AUTO_INCREMENT to UUID v4 as primary key (for distributed ID generation). Write throughput dropped 60%, buffer pool hit rate dropped from 99% to 75%. Root cause: random UUID inserts scattered across the entire clustered index. Fix: switched to ULIDv2 (time-ordered UUID) — first 48 bits are timestamp, so inserts are sequential. Performance recovered.
-- **redo log too small**: MySQL 5.7 default redo log = 48MB. A transaction writing a 60MB BLOB to a single row exceeded the redo log size limit. MySQL crashed with "InnoDB: mtr_commit(): Log buffer size too small". Fix: increase `innodb_log_file_size = 1GB` (or use MySQL 8's auto-sizing).
+- **redo log too small**: a server left at the engine default `innodb_redo_log_capacity = 100MB` under a 40MB/s write rate wrapped its redo log every 2.5 seconds, firing sharp checkpoints continuously. Fix: `SET GLOBAL innodb_redo_log_capacity = 4294967296;` (4GB), which takes effect online with no restart, or start with `--innodb-dedicated-server` so capacity is sized automatically at `(logical processors / 2) GB` up to 16GB. Note the neighbouring knob that catches people out: a single mini-transaction larger than `innodb_log_buffer_size` (64MB by default) fails with "InnoDB: mtr_commit(): Log buffer size too small" — that is the *buffer*, not the capacity, and raising capacity will not fix it.
 - **Change buffer causing slow startup**: After a power failure, a server had 8GB of pending change buffer entries. MySQL startup took 45 minutes as it merged the change buffer before accepting connections. Fix: `innodb_change_buffer_max_size = 10` (10% of buffer pool, down from 25%) to limit change buffer growth.
 
 ---
@@ -377,7 +377,7 @@ SHOW REPLICA STATUS\G
 
 **Use InnoDB when**: ACID compliance required, foreign keys, row-level locking, MVCC reads, mixed read/write workloads — this should be the default for all production MySQL tables.
 
-**Use MyISAM when**: read-only tables where no crash recovery is needed, full-text search (MySQL 5.6 and below). In MySQL 8, MyISAM is deprecated for most use cases. InnoDB has full-text search support since MySQL 5.6.
+**Do not use MyISAM**: it has no transactions, no crash recovery, no foreign keys, no partitioning, and only table-level locking — a single write blocks every reader. Every reason teams historically reached for it is now covered by InnoDB: `FULLTEXT` indexes, `SPATIAL`/R-tree indexes, and counting via a maintained summary table. A transaction that updates both an InnoDB and a MyISAM table now raises a server warning that combining the two engines is deprecated, so migrate stragglers with `ALTER TABLE t ENGINE=InnoDB`.
 
 **Consider alternatives when**: write throughput > 200K/s sustained (consider Cassandra), complex joins across many tables on petabyte scale (consider ClickHouse for analytics).
 
@@ -386,7 +386,7 @@ SHOW REPLICA STATUS\G
 ## 10. Common Pitfalls
 
 **Pitfall 1: Redo log too small causes I/O spikes**
-When `innodb_log_file_size=48MB` (MySQL 5.7 default) and write rate is 30MB/s, the redo log fills every 1.6 seconds, triggering an emergency checkpoint (flush all dirty pages). This creates I/O spikes every 1-2 seconds. Fix: `innodb_log_file_size=1GB`. Requires MySQL restart. MySQL 8 automatically sizes the redo log.
+At the engine default `innodb_redo_log_capacity=100MB` and a write rate of 30MB/s, the redo log fills every 3.3 seconds, triggering an emergency checkpoint (flush all dirty pages). This creates I/O spikes every few seconds. Fix: `SET GLOBAL innodb_redo_log_capacity = 4294967296;` — the resize happens online, no restart. Better still, start with `--innodb-dedicated-server`, which sizes capacity at `(logical processors / 2) GB` up to a 16GB ceiling.
 
 **What this actually says.** "The redo log is a fixed-size tape running in a circle, and
 `log size / write rate` is how many seconds you have before the write head laps the
@@ -396,7 +396,7 @@ InnoDB is forced to stop the world and flush them all at once.
 
 | Symbol | What it is |
 |--------|------------|
-| `innodb_log_file_size` | Bytes per redo log file — the circumference of the tape |
+| `innodb_redo_log_capacity` | Total redo bytes across all 32 files — the circumference of the tape |
 | Write rate | Redo bytes generated per second by the workload, not row bytes |
 | Wrap time | `log size / write rate`. Seconds of runway before the head laps the checkpoint |
 | Checkpoint age | Redo bytes written but whose dirty pages are still unflushed |
@@ -448,7 +448,7 @@ A batch job ran a single transaction deleting 50M rows. The undo log grew to 120
 | `SHOW ENGINE INNODB STATUS` | Buffer pool hit rate, redo log utilization, lock waits, deadlock history |
 | `performance_schema.data_locks` | Current row locks (MySQL 8) |
 | `information_schema.INNODB_TRX` | Active transactions, lock waiting |
-| `pt-online-schema-change` | Online table rebuilds for MySQL 5.x |
+| `pt-online-schema-change` | Trigger-based online table rebuilds; works where gh-ost's binlog approach cannot (multi-source, no binlog access) |
 | `gh-ost` | GitHub's online schema change tool — no triggers, safer than pt-osc |
 | `mysqlcheck` | Table analysis and repair |
 | `Percona XtraBackup` | Hot backup (no table locks) for InnoDB |
@@ -513,12 +513,12 @@ A direct `ALTER TABLE t MODIFY COLUMN name VARCHAR(200)` (expanding size) may be
 **Q: What happens when the InnoDB redo log runs out of space?**
 **Short:** When the redo log wraps before dirty pages flush, InnoDB triggers a sharp checkpoint that flushes everything immediately and stalls writes.
 
-The redo log is a fixed-size circular buffer. If dirty pages are not flushed fast enough, the write position circles around to the checkpoint position — the oldest committed changes are still in the redo log because their pages haven't been flushed to disk yet. InnoDB must trigger a "sharp checkpoint": flush all dirty pages immediately before the redo log position wraps. This causes a massive I/O spike and can stall all writes for seconds. Prevention: set redo log large enough (`innodb_log_file_size = 1-4GB` in MySQL 5.7) to give the background flusher time to flush dirty pages before the log wraps. MySQL 8 automatically sizes the redo log based on write throughput.
+The redo log is a fixed-size circular buffer. If dirty pages are not flushed fast enough, the write position circles around to the checkpoint position — the oldest committed changes are still in the redo log because their pages haven't been flushed to disk yet. InnoDB must trigger a "sharp checkpoint": flush all dirty pages immediately before the redo log position wraps. This causes a massive I/O spike and can stall all writes for seconds. Prevention: set `innodb_redo_log_capacity` large enough (1-8GB is typical) to give the background flusher time to flush dirty pages before the log wraps; the variable is dynamic, so `SET GLOBAL` resizes it without a restart. Starting the server with `--innodb-dedicated-server` picks the capacity for you at `(logical processors / 2) GB`, capped at 16GB.
 
 **Q: How does InnoDB handle concurrent INSERTs and what is the auto-increment lock?**
 **Short:** InnoDB's interleaved auto-increment mode allocates IDs with a lightweight mutex instead of a table lock, letting concurrent inserts proceed with only occasional ID gaps.
 
-MySQL 8 default `innodb_autoinc_lock_mode=2` (interleaved): AUTO_INCREMENT values are allocated without table-level locks using a lightweight mutex. Concurrent INSERT statements get non-overlapping ranges of auto-increment values instantly. Gaps in auto-increment values can occur (e.g., a batch INSERT gets IDs 100-200, another gets 201-300, but the first rollsback — gap at 100-200). For statement-based replication, mode=2 requires row-based binlog (not statement-based), otherwise non-deterministic. MySQL 5.7 default was mode=1 (sequential for single-row inserts, table lock for bulk inserts). Always use mode=2 with row-based replication for best performance.
+The default `innodb_autoinc_lock_mode=2` (interleaved): AUTO_INCREMENT values are allocated without table-level locks using a lightweight mutex. Concurrent INSERT statements get non-overlapping ranges of auto-increment values instantly. Gaps in auto-increment values can occur (e.g., a batch INSERT gets IDs 100-200, another gets 201-300, but the first rollsback — gap at 100-200). Mode 2 requires row-based binlog, because the interleaved IDs are non-deterministic under statement-based replication — which is also why `binlog_format=ROW` is the default. Mode 1 is the fallback if you are stuck with statement-based replication: sequential IDs for single-row inserts, table lock for bulk inserts.
 
 **Q: What is the InnoDB buffer pool instance and why use multiple instances?**
 **Short:** Splitting the buffer pool into multiple instances gives each its own mutex, reducing lock contention on the global buffer pool at high concurrency.
@@ -541,7 +541,7 @@ REPEATABLE READ (default): uses record locks + gap locks + next-key locks. Gap l
 
 1. Set `innodb_buffer_pool_size = 70-80% of available RAM`. This is the single most impactful setting.
 2. Set `innodb_flush_log_at_trx_commit = 1` and `sync_binlog = 1` for full ACID on primary.
-3. In MySQL 8, rely on automatic redo log sizing; in MySQL 5.7 set `innodb_log_file_size = 1GB+`.
+3. Size the redo log with `innodb_redo_log_capacity` (1GB+), or start with `--innodb-dedicated-server` and let it scale with CPU count.
 4. Use `BIGINT AUTO_INCREMENT` primary keys for InnoDB tables, not UUID v4.
 5. Index all foreign key columns to avoid lock escalation on parent DELETE.
 6. Use gh-ost for online schema changes on tables > 10GB.
@@ -554,7 +554,7 @@ REPEATABLE READ (default): uses record locks + gap locks + next-key locks. Gap l
 
 ## 14. Case Study
 
-**Scenario**: A MySQL 5.7 production database (32GB RAM, `innodb_buffer_pool_size=24GB`) serving a marketplace application receives reports of 500ms+ query latency during peak hours (3-5 PM daily). Off-peak latency is 5ms.
+**Scenario**: A MySQL 8.4 LTS production database (32GB RAM, `innodb_buffer_pool_size=24GB`) serving a marketplace application receives reports of 500ms+ query latency during peak hours (3-5 PM daily). Off-peak latency is 5ms.
 
 **Diagnosis**:
 ```sql
@@ -570,8 +570,9 @@ SHOW ENGINE INNODB STATUS\G
 -- Log flushed up to: 82540000000
 -- Pages flushed up to: 81290000000  ← 1.25GB of dirty data
 -- Last checkpoint at: 80540000000   ← redo log contains 2GB of unflushed changes
--- innodb_log_file_size: 100MB (WAY too small!)
--- Checkpoint age: 2GB >> redo log size (200MB) → emergency checkpoints firing constantly
+
+SELECT @@innodb_redo_log_capacity;   -- 209715200 (200MB — WAY too small!)
+-- Checkpoint age: 2GB >> redo capacity (200MB) → emergency checkpoints firing constantly
 
 -- Checkpoint events:
 SHOW GLOBAL STATUS LIKE 'Innodb_checkpoint%';
@@ -607,47 +608,49 @@ writer run". The first comes back healthy, which is what makes the second the an
 
     dirty but unflushed  = 82,540,000,000 - 81,290,000,000 = 1.25 GB
     checkpoint age       = 82,540,000,000 - 80,540,000,000 = 2.00 GB
-    redo capacity        = 2 files x 100 MB                = 0.20 GB
+    redo capacity        = innodb_redo_log_capacity        = 0.20 GB
 
     ratio = 2.00 GB / 0.20 GB = 10x over capacity          the actual bug
 ```
 
 A checkpoint age 10x larger than the entire redo log means InnoDB is firing a sharp
 checkpoint continuously — it can never let the write head advance. That is why raising
-`innodb_log_file_size` to 2G fixed a latency problem that a 91.4% hit rate said was not
-a memory problem.
+`innodb_redo_log_capacity` to 2G fixed a latency problem that a 91.4% hit rate said was
+not a memory problem.
 
-**Root cause**: `innodb_log_file_size=100MB` (non-default, manually set poorly). At peak write rate of 50MB/s, the redo log filled every 2 seconds, triggering emergency checkpoints — I/O spikes stalling all writes.
+**Root cause**: `innodb_redo_log_capacity=200MB` (manually set poorly, and only 2x the engine default). At peak write rate of 50MB/s, the redo log filled every 4 seconds, triggering emergency checkpoints — I/O spikes stalling all writes.
 
 **Put simply.** The fix moves the wrap time from "shorter than a page flush" to "longer
 than a peak-hour burst":
 
 ```
-                      redo per file   peak write rate   wrap time = size / rate
-  before                    100 MB         50 MB/s            2.0 s
-  after  (innodb_log_file_size = 2G)      2048 MB   50 MB/s   41.0 s
+                   redo capacity   peak write rate   wrap time = capacity / rate
+  before                  200 MB          50 MB/s            4.0 s
+  after (2G capacity)    2048 MB          50 MB/s           41.0 s
 ```
 
-A 20x larger log buys a 20x longer runway at the same 50MB/s. The background flusher
-was already capable of clearing 1.25GB of dirty pages — it simply needed more than two
-seconds in which to do it, which is why the maintenance window was 5 minutes and the
+A 10x larger log buys a 10x longer runway at the same 50MB/s. The background flusher
+was already capable of clearing 1.25GB of dirty pages — it simply needed more than four
+seconds in which to do it, which is why no maintenance window was needed at all and the
 disks were never touched.
 
 **Fix**:
 ```
-# my.cnf changes:
-innodb_log_file_size = 2G     # MySQL 5.7: requires restart + rename old iblogfiles
-innodb_log_buffer_size = 64M  # More buffer for high-concurrency transactions
-innodb_flush_method = O_DIRECT # Bypass OS page cache for buffer pool I/O (on Linux)
+# Applied online — innodb_redo_log_capacity is dynamic, no restart:
+SET GLOBAL innodb_redo_log_capacity = 2147483648;   -- 2 GiB
 
-# Procedure:
-1. SET GLOBAL innodb_fast_shutdown=0; (clean shutdown flushes dirty pages)
-2. systemctl stop mysql
-3. mv /var/lib/mysql/ib_logfile0 /tmp/
-4. mv /var/lib/mysql/ib_logfile1 /tmp/
-5. Edit my.cnf: innodb_log_file_size=2G
-6. systemctl start mysql (creates new ib_logfile0/1 at 2GB)
-7. Verify: SHOW ENGINE INNODB STATUS — checkpoint age should stay << log size
+# Persist it so a restart keeps the value (MySQL 8.0+ SET PERSIST writes
+# mysqld-auto.cnf; equivalently put the line in my.cnf):
+SET PERSIST innodb_redo_log_capacity = 2147483648;
+
+# Verify the resize completed — InnoDB reshapes the 32 files in #innodb_redo
+# in the background, so the variable can report the new value before the files
+# are done:
+SHOW STATUS LIKE 'Innodb_redo_log_resize_status';   -- expect OK
+SHOW ENGINE INNODB STATUS\G                         -- checkpoint age << capacity
 ```
 
-**Result**: Peak hour latency dropped from 500ms+ to 8ms. Emergency checkpoint I/O spikes: eliminated. Buffer pool hit rate: unchanged at 91% (not the bottleneck). The fix was a 5-minute maintenance window to resize the redo log.
+The two settings that used to accompany this change are now the defaults and needed no
+edit: `innodb_log_buffer_size` is 64MB and `innodb_flush_method` is `O_DIRECT` on Linux.
+
+**Result**: Peak hour latency dropped from 500ms+ to 8ms. Emergency checkpoint I/O spikes: eliminated. Buffer pool hit rate: unchanged at 91% (not the bottleneck). The fix took effect with a single dynamic `SET GLOBAL` and zero downtime.

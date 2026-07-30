@@ -11,8 +11,8 @@ A software pipeline produces a binary artifact that either works or fails. An ML
 Key components:
 - **Data versioning** — DVC, git-lfs; track which data snapshot produced which model
 - **Experiment tracking** — MLflow Tracking, Weights & Biases; log hyperparameters, metrics, artifacts per run
-- **Model registry** — MLflow Model Registry, Agent Platform Model Registry (Google renamed Vertex AI to Agent Platform in May 2026); manage the model lifecycle
-- **Pipeline orchestration** — Kubeflow Pipelines, Agent Platform Pipelines (formerly Vertex AI Pipelines), Airflow; reproducible, containerized ML workflows
+- **Model registry** — MLflow Model Registry, Model Registry on Google's Gemini Enterprise Agent Platform (formerly Vertex AI); manage the model lifecycle
+- **Pipeline orchestration** — Kubeflow Pipelines, Agent Platform Pipelines, Apache Airflow; reproducible, containerized ML workflows
 - **CI/CD for ML** — automated code, data, and model quality gates before any model reaches production
 - **Monitoring and feedback** — drift detection, performance degradation alerts, retraining triggers
 
@@ -246,7 +246,6 @@ def log_model(
         )
 
         # Log model artifact with signature and sample input for validation.
-        # `name=` replaced the deprecated `artifact_path=` in MLflow 3.
         mlflow.sklearn.log_model(
             sk_model=model,
             name="model",
@@ -304,9 +303,9 @@ def promote_to_challenger(
     Register a model version and tag it with the `@challenger` alias in the
     MLflow Model Registry only if all validation gates pass.
 
-    Aliases replace the old None/Staging/Production/Archived stages, which
-    MLflow deprecated in 2.9.0; `transition_model_version_stage` still runs
-    but emits a deprecation warning and is slated for removal.
+    Aliases are mutable named pointers to a version, so one model can carry
+    several at once (per-region champions, a shadow candidate) and promotion
+    or rollback is a single atomic alias move.
 
     Returns True if promoted, False if rejected.
     """
@@ -379,7 +378,7 @@ from kfp import dsl
 from kfp.dsl import Input, Output, Dataset, Model, Metrics
 
 
-@dsl.component(base_image="python:3.10", packages_to_install=["scikit-learn", "pandas", "mlflow"])
+@dsl.component(base_image="python:3.12", packages_to_install=["scikit-learn", "pandas", "mlflow"])
 def preprocess_data(
     raw_data_uri: str,
     processed_dataset: Output[Dataset],
@@ -391,7 +390,7 @@ def preprocess_data(
     df.to_parquet(processed_dataset.path, index=False)
 
 
-@dsl.component(base_image="python:3.10", packages_to_install=["scikit-learn", "pandas", "mlflow"])
+@dsl.component(base_image="python:3.12", packages_to_install=["scikit-learn", "pandas", "mlflow"])
 def train_model(
     dataset: Input[Dataset],
     model_output: Output[Model],
@@ -422,7 +421,7 @@ def train_model(
         pickle.dump(clf, f)
 
 
-@dsl.component(base_image="python:3.10", packages_to_install=["scikit-learn", "mlflow"])
+@dsl.component(base_image="python:3.12", packages_to_install=["scikit-learn", "mlflow"])
 def validate_and_register(
     model: Input[Model],
     metrics: Input[Metrics],
@@ -650,7 +649,7 @@ Three checks fire before any user population is fully committed, and the first o
 
 **Airbnb** does not use Great Expectations; it built its own data quality stack. The Midas certification process requires that a Data Engineer build automated checks — basic sanity checks, definitional testing, and anomaly detection on new data — into the pipeline itself before data can be certified, and Airbnb's Wall framework expresses those checks as YAML configs run by an Airflow helper, with blocking and non-blocking modes so a minor violation warns while a critical one halts the pipeline. The transferable lesson is the same: schema and distribution checks must gate the pipeline, not just annotate it.
 
-**Google Cloud Agent Platform Pipelines** (renamed from Vertex AI Pipelines when Google folded Vertex AI into the Gemini Enterprise Agent Platform in May 2026 — the rename is a product/branding change, so existing pipeline definitions are unaffected) runs KFP-authored pipelines as a managed service and integrates with Cloud Build for CI. Teams define pipelines as Python DAGs, store the compiled templates in Artifact Registry, and trigger them from Cloud Build.
+**Google Cloud Agent Platform Pipelines** (formerly Vertex AI Pipelines) runs KFP-authored pipelines as a managed service and integrates with Cloud Build for CI. Teams define pipelines as Python DAGs, store the compiled templates in Artifact Registry, and trigger them from Cloud Build.
 
 ---
 
@@ -659,7 +658,7 @@ Three checks fire before any user population is fully committed, and the first o
 | Approach | Benefit | Cost |
 |---|---|---|
 | Kubeflow Pipelines (self-managed) | Full control, portable across clouds | High setup and ops overhead; requires Kubernetes expertise |
-| Agent Platform Pipelines (managed, ex-Vertex AI) | Zero infrastructure management, GCP-native | Vendor lock-in; cost increases at scale |
+| Agent Platform Pipelines (managed) | Zero infrastructure management, GCP-native | Vendor lock-in; cost increases at scale |
 | MLflow Model Registry | Open source, integrates with any cloud | No built-in canary orchestration; manual promotion workflow |
 | Canary deployment | Gradual risk; automatic rollback | Requires traffic routing infra (Istio, Nginx); doubles serving cost during split |
 | Blue/green deployment | Instant rollback; zero downtime | Doubles infra cost continuously; expensive for GPU serving |
@@ -726,13 +725,13 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 - Neptune.ai — SaaS alternative; strong metadata management
 
 **Model Registry:**
-- MLflow Model Registry — open source; **aliases** (`@champion`, `@challenger`) plus tags are the current lifecycle mechanism. The old None/Staging/Production/Archived *stages* were deprecated in MLflow 2.9.0 and are slated for removal; `transition_model_version_stage` and `get_latest_versions(stages=...)` still work in 3.x but emit deprecation warnings. Also provides model signatures and a REST API
-- Agent Platform Model Registry (renamed from Vertex AI Model Registry, May 2026) — GCP-managed; integrates with Agent Platform Endpoints
+- MLflow Model Registry — open source; the lifecycle mechanism is mutable **aliases** (`@champion`, `@challenger`) plus key-value tags, so one model version can carry several labels at once and promotion is an atomic alias move. Also provides model signatures and a REST API
+- Agent Platform Model Registry (formerly Vertex AI Model Registry) — GCP-managed; integrates with Agent Platform Endpoints
 - Amazon SageMaker Model Registry — AWS-managed; Model Groups + Model Package versions with an approval status; integrates with SageMaker Endpoints
 
 **Pipeline Orchestration:**
 - Kubeflow Pipelines (KFP v2, SDK 2.x) — Kubernetes-native; KFP SDK for Python DAG definition; portable
-- Agent Platform Pipelines (ex-Vertex AI Pipelines) — managed KFP on GCP; Cloud Build integration; no infra management
+- Agent Platform Pipelines — managed KFP on GCP; Cloud Build integration; no infra management
 - Apache Airflow — general-purpose; widely used; less ML-native than KFP
 - Prefect / Dagster — modern workflow orchestrators; good Python-native experience
 
@@ -741,20 +740,20 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 - Delta Lake / Iceberg — ACID-compliant table formats; time-travel queries for dataset versioning
 
 **Data Quality:**
-- Great Expectations (GX Core 1.x) — schema + distribution expectations; Python API only, since GX 1.0 dropped the `great_expectations` CLI entirely; integrates into Airflow and CI
+- Great Expectations (GX Core 1.x) — schema + distribution expectations; Python-API only (no CLI); integrates into Airflow and CI
 - Deepchecks — ML-specific checks including train-test drift, model performance degradation
 - Evidently AI — drift reports, data quality reports; integrates with MLflow
 
 **CI/CD:**
 - GitHub Actions — YAML-based workflows; free tier for public repos; GitHub-native
 - GitLab CI/CD — strong for self-hosted enterprise deployments
-- Jenkins — legacy; widely deployed; high flexibility, high maintenance overhead
+- Jenkins — widely deployed in existing enterprise estates; high flexibility, high maintenance overhead
 
 **Serving and Traffic Management:**
 - Istio / Envoy — service mesh; fine-grained traffic splitting for canary deployments
 - Seldon Core — Kubernetes-native model serving with canary and shadow mode built in
 - BentoML — model packaging and serving; cloud-agnostic
-- Triton Inference Server (NVIDIA) — high-performance GPU serving; supports TensorRT, ONNX, PyTorch
+- Dynamo Triton (NVIDIA) — high-performance GPU serving; supports TensorRT, ONNX, PyTorch, Python backends
 
 **Monitoring:**
 - Prometheus + Grafana — metrics collection and dashboards; pull-based
@@ -765,7 +764,7 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 **Feature Stores:**
 - Feast — open source; offline (Parquet/BigQuery) + online (Redis/DynamoDB) stores
 - Tecton — SaaS feature platform; strong consistency guarantees
-- Agent Platform Feature Store (ex-Vertex AI Feature Store) — GCP-managed; feature data is registered from a BigQuery source and exposed through online store / feature view instances
+- Agent Platform Feature Store (formerly Vertex AI Feature Store) — GCP-managed; feature data is registered from a BigQuery source and exposed through Bigtable online serving via feature view instances
 
 ---
 
@@ -781,7 +780,7 @@ Training-serving skew occurs when features presented to the model at serving tim
 
 **Q: Explain how MLflow Model Registry tracks a model's lifecycle and how you automate promotion.**
 **Short:** MLflow tracks lifecycle with mutable aliases like champion and challenger, and CI automates promotion by moving the alias after gates pass.
-Current MLflow uses mutable **aliases** such as `@champion` and `@challenger` plus key-value tags, not the old four stages. The None/Staging/Production/Archived stages were deprecated in MLflow 2.9.0; `transition_model_version_stage` and `get_latest_versions(stages=...)` still function in 3.x but emit deprecation warnings and are slated for removal, so new pipelines should not build on them. Automation: CI trains a model, logs it, calls `create_model_version()`, then runs validation gates (AUC >= baseline, latency SLA, fairness checks); if all pass it calls `set_registered_model_alias(name, "challenger", version)`. A separate deployment job, triggered by a merge to main or manual approval, repoints `@champion` to that version — a single atomic alias move, which is also what makes rollback one API call back to the prior version.
+MLflow tracks lifecycle with mutable **aliases** such as `@champion` and `@challenger` plus key-value tags. An alias is a named pointer to one version, so a single model can carry several at once — per-region champions, a shadow candidate — which a fixed promotion ladder cannot express. Automation: CI trains a model, logs it, calls `create_model_version()`, then runs validation gates (AUC >= baseline, latency SLA, fairness checks); if all pass it calls `set_registered_model_alias(name, "challenger", version)`. A separate deployment job, triggered by a merge to main or manual approval, repoints `@champion` to that version — a single atomic alias move, which is also what makes rollback one API call back to the prior version.
 
 **Q: How do you implement automatic rollback in a canary deployment for an ML model?**
 **Short:** A canary controller polls a live metric and atomically shifts all traffic weight back to the production model on regression.
@@ -958,10 +957,10 @@ def train_and_log_model(
 
         mlflow.log_metric("val_auc_roc", auc_roc)
         mlflow.log_metric("val_mape", mape)
-        mlflow.lightgbm.log_model(model, name="model")   # `artifact_path` is deprecated
+        mlflow.lightgbm.log_model(model, name="model")
 
-        # Register the version and label it @challenger (aliases replaced the
-        # deprecated None/Staging/Production/Archived stages in MLflow 2.9.0)
+        # Register the version and label it @challenger; the deploy job later
+        # moves @champion onto the same version if the canary stays clean.
         model_uri = f"runs:/{run.info.run_id}/model"
         mv = mlflow.register_model(model_uri, MODEL_NAME)
         MlflowClient().set_registered_model_alias(MODEL_NAME, "challenger", mv.version)
@@ -1279,7 +1278,7 @@ That 6 days versus 72 minutes is the actual explanation for `4-6 stale model inc
 
 **Interview discussion points:**
 
-**What is the difference between the `@challenger` and `@champion` aliases in MLflow Model Registry?** Both are mutable named pointers to a model version — metadata labels, not deployment states. `@challenger` means "passed offline eval, candidate for deployment"; `@champion` means "the version serving live traffic." The CI pipeline enforces that only models passing the validation gate (AUC-ROC, MAPE, PSI, schema checks) get `@challenger`, and only a clean canary window moves `@champion`. Aliases replaced the old None/Staging/Production/Archived stages, which MLflow deprecated in 2.9.0 precisely because a fixed four-stage ladder could not express workflows like champion/challenger or per-region champions. The registry remains a single source of truth for which version should be served, decoupling the promotion decision from the mechanics of deployment.
+**What is the difference between the `@challenger` and `@champion` aliases in MLflow Model Registry?** Both are mutable named pointers to a model version — metadata labels, not deployment states. `@challenger` means "passed offline eval, candidate for deployment"; `@champion` means "the version serving live traffic." The CI pipeline enforces that only models passing the validation gate (AUC-ROC, MAPE, PSI, schema checks) get `@challenger`, and only a clean canary window moves `@champion`. Aliases exist precisely because a fixed promotion ladder cannot express workflows like champion/challenger or per-region champions — a version can hold any number of aliases at once, and moving one is atomic. The registry remains a single source of truth for which version should be served, decoupling the promotion decision from the mechanics of deployment.
 
 **Why is PSI used as a promotion gate criterion alongside AUC-ROC?** PSI measures how much the new model's score distribution differs from the production model's score distribution. A new model can achieve high AUC-ROC on the validation holdout while generating completely different score distributions in production, causing downstream systems (fraud score thresholds, pricing bands) calibrated to the old distribution to behave incorrectly. This pipeline's PSI > 0.15 score-distribution gate (deliberately stricter than the 0.2 threshold conventionally used to trigger *retraining*) flags that structural mismatch before deployment, preventing silent system breakage that AUC-ROC alone would not detect.
 

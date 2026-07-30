@@ -1,6 +1,6 @@
 # NVIDIA Triton Inference Server
 
-> Version anchor: this module tracks Triton by **NGC container release** (e.g. `nvcr.io/nvidia/tritonserver:25.06-py3`). Each monthly NGC tag pins a specific CUDA, TensorRT, and backend matrix — always design against a tag, never "latest". Default ports: **8000 HTTP/REST**, **8001 gRPC**, **8002 Prometheus metrics**.
+> Version anchor: this module tracks Triton by **NGC container release** (e.g. `nvcr.io/nvidia/tritonserver:26.06-py3`). Each monthly NGC tag pins a specific CUDA, TensorRT, and backend matrix — always design against a tag, never "latest". Default ports: **8000 HTTP/REST**, **8001 gRPC**, **8002 Prometheus metrics**.
 
 ---
 
@@ -58,7 +58,7 @@ Triton's power is the breadth of backends behind one API:
 |---------|----------|-------------|
 | **TensorRT** | Compiled `.plan` engines | Lowest latency on NVIDIA GPUs; engine is arch-specific |
 | **ONNX Runtime** | `.onnx` graphs | Portable; runs the same model on many GPU/CPU targets |
-| **PyTorch (LibTorch)** | TorchScript / `.pt` | Ship a PyTorch model with no rewrite |
+| **PyTorch** | `.pt2` AOTInductor archives (`platform: "torch_aoti"`), plus TorchScript / `torch.save` `.pt` | Ship a PyTorch model with no rewrite; `.pt2` is the current export path |
 | **TensorFlow** | SavedModel / GraphDef | Legacy TF estates |
 | **Python** | Arbitrary `model.py` | Pre/post-processing, glue, custom logic, BLS |
 | **vLLM** | HF LLMs via vLLM engine | LLM serving with PagedAttention inside Triton |
@@ -573,19 +573,19 @@ Write a C++ backend over the Python backend when: you need every microsecond (no
 
 ### 6.21 Building Minimal Images with compose.py
 
-The stock NGC image (`tritonserver:25.06-py3`) carries every backend and is ~10-15 GB. For production you usually want only one or two backends. `compose.py` assembles a slim image from the per-backend layers:
+The stock NGC image (`tritonserver:26.06-py3`) carries every backend and is ~10-15 GB. For production you usually want only one or two backends. `compose.py` assembles a slim image from the per-backend layers:
 
 ```bash
 python3 compose.py --backend tensorrt --backend python \
-  --repoagent checksum --container-version 25.06 \
-  --output-name triton-slim:25.06
+  --repoagent checksum --container-version 26.06 \
+  --output-name triton-slim:26.06
 ```
 
 This drops the image to a few GB, shrinks the attack surface, and speeds pulls in autoscaling. Backend selection happens at **build** time (which `.so` backends are baked in), independent of which models the repository actually loads at **run** time — a model referencing a backend not in the image simply fails to load.
 
 ### 6.22 Model Configuration Auto-Generation and the Optimization Block
 
-You do not always have to write `config.pbtxt` by hand. Auto-completion is **on by default**; the current flag to turn it off is `--disable-auto-complete-config`. The older `--strict-model-config=true/false` flag controlled the same behavior with inverted polarity and is now a **deprecated alias** in Triton's own `--help` text — reason and document in terms of `--disable-auto-complete-config`, not the legacy flag. With auto-completion enabled, Triton **auto-completes** the config for backends that expose their own IO metadata — TensorRT, ONNX Runtime, and TensorFlow SavedModel carry input/output names, dtypes, and shapes in the model file, so Triton fills them in and even enables dynamic batching with a default `max_batch_size`. You still write config explicitly when you need to pin batching policy, instance groups, or version policy, because auto-config gives you a conservative default, not a tuned one. The `platform`/`backend` field, `max_batch_size`, and any scheduler block are the parts worth writing by hand.
+You do not always have to write `config.pbtxt` by hand. Auto-completion is **on by default**; the flag that turns it off is `--disable-auto-complete-config`. With auto-completion enabled, Triton **auto-completes** the config for backends that expose their own IO metadata — TensorRT, ONNX Runtime, and TensorFlow SavedModel carry input/output names, dtypes, and shapes in the model file, so Triton fills them in and even enables dynamic batching with a default `max_batch_size`. You still write config explicitly when you need to pin batching policy, instance groups, or version policy, because auto-config gives you a conservative default, not a tuned one. The `platform`/`backend` field, `max_batch_size`, and any scheduler block are the parts worth writing by hand.
 
 The **`optimization`** block turns on backend-specific accelerators without changing the model:
 
@@ -710,7 +710,7 @@ Each backend exposes its own knobs; the ones that matter in production:
 
 - **TensorRT** — the engine is built with **optimization profiles** that fix the *range* of dynamic dimensions (min/opt/max batch and shape). A request outside the profile range fails. The `opt` shape is the size TensorRT tunes for, so set it to your common batch (e.g. min 1 / opt 8 / max 32). Precision (FP16/INT8/FP8) is baked into the engine at build time, not toggled in `config.pbtxt`. Multiple profiles let one engine serve several shape regimes at the cost of more VRAM.
 - **ONNX Runtime** — select **execution providers** in priority order (`tensorrt`, `cuda`, then `cpu` fallback) and set `graph_optimization_level` (`ORT_ENABLE_ALL` fuses ops). The TensorRT EP converts subgraphs at load time — fast at run time, slow to load. Thread pools (`intra_op`/`inter_op`) matter on the CPU EP.
-- **PyTorch (LibTorch)** — ship a **TorchScript** (`torch.jit.trace`/`script`) module; eager `.pt` files are not directly servable. `DISABLE_OPTIMIZED_EXECUTION` and `INFERENCE_MODE` parameters control JIT fusion. Watch that traced models bake in the trace-time batch shape unless you trace with dynamic axes.
+- **PyTorch** — the current export path is a **PT2 archive**: `ep = torch.export.export(model, sample_inputs)` then `torch._inductor.compile_and_package(ep, "model.pt2")`, served with `platform: "torch_aoti"` (Triton `[26.03+]`). AOT compilation moves the kernel-fusion cost to build time, so there is no warm-up cliff on the first request. **TorchScript** (`torch.jit.trace`/`script`) modules still load, with `DISABLE_OPTIMIZED_EXECUTION` and `INFERENCE_MODE` controlling JIT fusion — watch that traced models bake in the trace-time batch shape unless you trace with dynamic axes, which is precisely the class of surprise `torch.export` was designed to remove.
 - **TensorFlow** — SavedModel is preferred over frozen GraphDef; the backend can apply TF-TRT conversion via the `optimization` block. Signature-def names become the IO tensor names.
 
 The recurring gotcha across all four is **shape/precision mismatch between build and serve** — an engine or traced module built for one shape/precision regime silently fails or falls back when production sends something outside it. Always build for the production shape distribution.
@@ -852,7 +852,7 @@ Returning `None` (not a response list) is the decoupled contract — the respons
 
 - You are a **pure-LLM shop** serving a handful of large models — run **vLLM or SGLang directly** for a simpler stack ([../../llm/inference_engines/README.md](../../llm/inference_engines/README.md); deep dive [../../llm/vllm_deep_dive/README.md](../../llm/vllm_deep_dive/README.md)). Triton adds value once you also have non-LLM models to consolidate.
 - You serve **small CPU-only models** — a **FastAPI + ONNX Runtime** service is lighter and cheaper; see the reader-linked case study [../../fastapi/case_studies/design_ml_inference_api_fastapi.md](../../fastapi/case_studies/design_ml_inference_api_fastapi.md).
-- You are choosing **TorchServe** — it has been in **maintenance mode since 2024**; do not build new systems on it.
+- You are choosing **TorchServe** — its repository was **archived on 7 August 2025** and is read-only, with no further bug fixes or security patches; Triton's PyTorch backend or Ray Serve is where PyTorch serving lives now.
 - Your workload is a **Python-heavy multi-step pipeline** where the model is a small part — **Ray Serve** composes Python business logic more naturally than Triton's ensemble/BLS.
 
 ---
@@ -923,8 +923,6 @@ The flags that actually change between a laptop smoke test and a production laun
 | `--cache-config` | *(none — disabled)* | Enable `local,size=<bytes>` or `redis,host=...,port=...` for deterministic models (§6.16) |
 | `--trace-config` | *(none — disabled)* | Enable `mode=opentelemetry` with a low `rate` for sampled distributed tracing (§6.17) |
 | `--log-verbose` | `0` | Raise temporarily (`1`+) to debug; never leave above `0` in steady-state production |
-
-`--strict-model-config` still appears in `--help` output but is a **deprecated alias** for `--disable-auto-complete-config` (§6.22) — new launch commands should use the current flag name.
 
 ### 11.5 MIG vs MPS — Partitioning Mechanics
 

@@ -54,7 +54,7 @@ Stub and Mock both script canned behavior and look alike until the vertical axis
 - `@WebMvcTest`: only Spring MVC layer (controllers, filters, security); no service/repo beans
 - `@DataJpaTest`: only JPA layer (entities, repositories, embedded H2); no web layer
 - `@DataRedisTest`: only Redis auto-configuration
-- `@MockBean`: replaces a bean in Spring context with a Mockito mock
+- `@MockitoBean`: replaces a bean in Spring context with a Mockito mock
 
 ---
 
@@ -259,7 +259,7 @@ class OrderControllerTest {
     @Autowired
     private MockMvc mockMvc;
 
-    @MockBean
+    @MockitoBean
     private OrderService orderService;
 
     @Autowired
@@ -454,7 +454,7 @@ Mutation testing automatically introduces bugs (mutations) into the source code 
 **Q: When should you use @SpringBootTest vs @WebMvcTest vs @DataJpaTest?**
 **Short:** SpringBootTest loads the full context, WebMvcTest loads only MVC components, and DataJpaTest loads only JPA and the database.
 
-`@SpringBootTest` loads the entire application context including all beans, auto-configurations, and database connections. Use it for full integration tests and E2E tests but expect 10-30 second startup. `@WebMvcTest` loads only Spring MVC components: controllers, `@ControllerAdvice`, filters, security configuration, and `WebMvcConfigurer`. Service and repository beans are not created — you must `@MockBean` them. Use for testing HTTP request handling, validation, and JSON serialization. `@DataJpaTest` loads only JPA-related beans: entity manager, repositories, and an embedded or Testcontainers DB. Use for testing repository queries, entity lifecycle, and database constraints without web overhead.
+`@SpringBootTest` loads the entire application context including all beans, auto-configurations, and database connections. Use it for full integration tests and E2E tests but expect 10-30 second startup. `@WebMvcTest` loads only Spring MVC components: controllers, `@ControllerAdvice`, filters, security configuration, and `WebMvcConfigurer`. Service and repository beans are not created — you must `@MockitoBean` them. Use for testing HTTP request handling, validation, and JSON serialization. `@DataJpaTest` loads only JPA-related beans: entity manager, repositories, and an embedded or Testcontainers DB. Use for testing repository queries, entity lifecycle, and database constraints without web overhead.
 
 **Q: What is the coordinated omission problem in performance testing?**
 **Short:** Coordinated omission hides true latency because a load tool waiting for each response naturally throttles its own request rate.
@@ -486,10 +486,10 @@ Property-based testing generates hundreds of random inputs satisfying defined co
 
 Use `@WebMvcTest` with `@WithMockUser(roles = "ADMIN")` or `@WithMockUser(username = "user1")` annotations to simulate authenticated users. For JWT-based auth, create a `SecurityMockMvcRequestPostProcessors.jwt()` post-processor: `mockMvc.perform(get("/api/admin").with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))`. Test: authenticated requests to protected endpoints return 200, unauthenticated requests return 401, correctly authenticated but unauthorized requests return 403. Also test CSRF token handling for POST endpoints.
 
-**Q: What is the difference between @Mock and @MockBean?**
-**Short:** @Mock creates a plain Mockito mock outside Spring, while @MockBean registers that mock into the Spring application context.
+**Q: What is the difference between @Mock and @MockitoBean?**
+**Short:** @Mock creates a plain Mockito mock outside Spring, while @MockitoBean registers that mock into the Spring application context.
 
-`@Mock` (Mockito) creates a mock object outside the Spring context. It works in unit tests with `@ExtendWith(MockitoExtension.class)`. The mock is injected into the class under test via `@InjectMocks`. `@MockBean` (Spring Boot Test) creates a Mockito mock and registers it as a Spring bean in the application context, replacing any existing bean of that type. Use `@MockBean` in `@WebMvcTest` and `@SpringBootTest` to replace real beans (service, repository) with mocks without loading the entire application graph. `@MockBean` causes Spring to restart its context (unless the same mock configuration is cached), so use it sparingly.
+`@Mock` (Mockito) creates a mock object outside the Spring context. It works in unit tests with `@ExtendWith(MockitoExtension.class)`. The mock is injected into the class under test via `@InjectMocks`. `@MockitoBean` (`org.springframework.test.context.bean.override.mockito`, part of Spring Framework's Bean Override support rather than Boot) creates a Mockito mock and registers it as a Spring bean in the application context, replacing any existing bean of that type. Use `@MockitoBean` in `@WebMvcTest` and `@SpringBootTest` to replace real beans (service, repository) with mocks without loading the entire application graph; `@MockitoSpyBean` is the partial-mock counterpart that wraps the real bean. Each distinct mock configuration produces a different context cache key, so a test class carrying `@MockitoBean` builds its own context — use it sparingly or the suite pays a fresh startup per variation. `@MockitoBean` is a field-level annotation on the test class; it is not permitted on `@Configuration` class fields.
 
 **Q: What is the difference between a Fake and a Stub in the test doubles taxonomy?**
 **Short:** A Fake is a working lightweight implementation with real logic, while a Stub only returns one pre-programmed answer.

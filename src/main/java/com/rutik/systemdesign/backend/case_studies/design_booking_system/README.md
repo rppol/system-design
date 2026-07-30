@@ -772,7 +772,7 @@ CREATE INDEX ix_bookings_expiry ON bookings(expires_at) WHERE status = 'PENDING'
 
 | Technology | Role |
 |---|---|
-| Spring Boot 3.2 | Application framework |
+| Spring Boot 4.1 | Application framework |
 | Spring Data JPA | ORM with optimistic/pessimistic locking annotations |
 | PostgreSQL 15 | Primary data store; row-level locking, CHECK constraints |
 | Redis 7 | Distributed lock (SET NX EX), seat hold TTL tracking |

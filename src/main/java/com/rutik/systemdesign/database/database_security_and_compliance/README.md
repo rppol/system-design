@@ -143,7 +143,7 @@ host    all      all        0.0.0.0/0     reject
 # Authentication methods (in order of security):
 #   trust       — No password (NEVER use in production)
 #   md5         — MD5 hash (weak, susceptible to rainbow tables; avoid)
-#   scram-sha-256 — Strong (PostgreSQL 10+; default in PG 14+)
+#   scram-sha-256 — Strong, salted challenge-response; the default password method
 #   cert        — Client certificate authentication (strongest)
 #   ident/peer  — OS user mapping (local connections only)
 ```
@@ -625,7 +625,7 @@ A DSAR requires an organization to provide a data subject with a copy of all per
 ## 13. Best Practices
 
 - **Enable TLS with `sslmode=verify-full`** — accept no connections without certificate validation.
-- **Use scram-sha-256** — never md5 (deprecated), never trust (except for local Unix socket admin).
+- **Use scram-sha-256** — never md5, whose unsalted-by-username hash falls to offline cracking, and never trust (except for local Unix socket admin).
 - **Create a dedicated migration role** with DDL privileges for schema changes; the application role has only DML.
 - **Enable RLS for all multi-tenant tables** — database-enforced isolation is defense against application bugs.
 - **Store credentials in Vault or Secrets Manager** — rotate automatically; never in environment variables committed to repos.

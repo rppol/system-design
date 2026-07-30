@@ -371,7 +371,7 @@ ServerSocket serverSocket = new ServerSocket(8080);
 Socket socket = serverSocket.accept();
 socket.setTcpNoDelay(true);  // TCP_NODELAY
 
-// For java.net.http.HttpClient (Java 11+): there is no socket-option API on
+// For java.net.http.HttpClient: there is no socket-option API on
 // the builder, but you do not need one — the JDK sets TCP_NODELAY itself on
 // every connection it opens (jdk.internal.net.http.PlainHttpConnection calls
 // chan.setOption(StandardSocketOptions.TCP_NODELAY, true)).

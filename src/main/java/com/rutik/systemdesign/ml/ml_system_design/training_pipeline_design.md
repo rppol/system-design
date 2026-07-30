@@ -477,7 +477,6 @@ def train_with_hpo(
         mlflow.log_params(best_params)
         mlflow.log_metric("best_val_auc", best_val_auc)
         mlflow.log_metric("n_trials", len(study.trials))
-        # MLflow 3.x: `artifact_path` is deprecated in favour of `name`.
         mlflow.lightgbm.log_model(final_model, name="model")
 
         return final_model.booster_, best_params, best_val_auc
@@ -671,9 +670,8 @@ def evaluate_retraining_triggers(
     `last_training_date` must be timezone-aware (UTC) — subtracting a naive from
     an aware datetime raises TypeError.
     """
-    # datetime.utcnow() is deprecated since Python 3.12: it returns a NAIVE
-    # datetime that only looks like UTC, which is exactly how pipelines end up
-    # comparing a naive timestamp to an aware one.
+    # Always build an AWARE UTC timestamp. A naive datetime that merely looks
+    # like UTC is how pipelines end up comparing naive to aware and raising.
     now = datetime.now(timezone.utc)
     triggers: list[RetrainingTrigger] = []
 

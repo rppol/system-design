@@ -48,18 +48,16 @@ Key insight: the goal is not to log more data — it is to log the right data so
 ## 4. Types / Architectures / Strategies
 
 **MLflow Tracking**
-Open-source, self-hosted or Databricks-managed. Runs are grouped under Experiments. Logs: params (str key, str value), metrics (float, with step), artifacts (any file). Auto-logging captures common framework calls automatically — `mlflow.sklearn.autolog()` patches `fit()`, while `mlflow.pytorch.autolog()` hooks **PyTorch Lightning's `Trainer.fit()` only** and is a no-op for a hand-written PyTorch loop. MLflow Model Registry adds model lifecycle management; its `None → Staging → Production → Archived` **stages have been deprecated since MLflow 2.9** in favour of model version **aliases** (`@champion`, `@challenger`) plus version **tags**, and MLflow states stages will be removed in a future major release.
+Open-source, self-hosted or Databricks-managed. Runs are grouped under Experiments. Logs: params (str key, str value), metrics (float, with step), artifacts (any file). Auto-logging captures common framework calls automatically — `mlflow.sklearn.autolog()` patches `fit()`, while `mlflow.pytorch.autolog()` hooks **PyTorch Lightning's `Trainer.fit()` only** and is a no-op for a hand-written PyTorch loop. MLflow Model Registry adds model lifecycle management: numbered model versions carry mutable **aliases** (`@champion`, `@challenger`) plus version **tags** (`validation_status: passed`), and serving resolves a model by alias URI — `models:/fraud-model@champion`.
 
 **Weights & Biases (W&B)**
 SaaS (with self-hosted option). Richer visualizations than MLflow (interactive charts, side-by-side run comparison, media logging — images, audio, video). W&B Sweeps: define a hyperparameter search space, launch agents that query W&B's Bayesian optimizer for the next configuration. W&B Artifacts: versioned datasets, models, and evaluation results with lineage graph between them.
-
-**Neptune** — *no longer available; kept here for historical context.* Neptune was a SaaS tracker with a strong Python SDK (nested dicts, custom objects). OpenAI announced its acquisition of Neptune on 2025-12-04; Neptune stopped taking new customers and turned off the hosted app and API on 2026-03-04. Do not select it for new work.
 
 **Comet ML**
 SaaS, automatic code capturing, diff logging. Strong in NLP research community.
 
 **DVC (Data Version Control)**
-Open-source, git-native. Tracks data files and pipeline stages (not experiments directly). `dvc stage add` defines a stage in dvc.yaml and `dvc repro` executes the pipeline DAG, caching intermediate outputs by content hash (the old `dvc run` command was deprecated and no longer exists in DVC 3.x). `dvc exp run` for experiment tracking — lightweight, storing each experiment under hidden custom git refs (`refs/exps/...`) rather than as a real branch. Pairs with MLflow/W&B for full solution.
+Open-source, git-native. Tracks data files and pipeline stages (not experiments directly). `dvc stage add` defines a stage in dvc.yaml and `dvc repro` executes the pipeline DAG, caching intermediate outputs by content hash. `dvc exp run` for experiment tracking — lightweight, storing each experiment under hidden custom git refs (`refs/exps/...`) rather than as a real branch. Pairs with MLflow/W&B for full solution.
 
 **Hyperparameter Optimization Strategies**:
 - Grid search: all combinations — O(N^k) for N values per k hyperparameters; feasible only for 1-2 hyperparameters
@@ -212,22 +210,22 @@ flowchart LR
 
 ```mermaid
 stateDiagram-v2
-    [*] --> None: register model version
-    None --> Staging: offline metric gate passes
-    Staging --> Production: human approval + shadow eval
-    Staging --> Archived: rejected
-    Production --> Archived: superseded by new version
-    Production --> Staging: demote for retest
-    Archived --> [*]
+    [*] --> Registered: register model version
+    Registered --> Challenger: offline metric gate passes
+    Challenger --> Champion: human approval + shadow eval
+    Challenger --> Unaliased: rejected
+    Champion --> Unaliased: newer version takes @champion
+    Champion --> Challenger: demote for retest
+    Unaliased --> [*]
 ```
 
-A model enters the registry linked to one run, then transitions through gated
-stages. Promotion to Production is a metadata change, so rollback is instant: the
-previous version stays Archived and can be re-promoted without a redeploy.
-The **lifecycle above is the concept; MLflow's literal stage names are deprecated**
-(since 2.9) — implement the same gates today with aliases (`@champion`,
-`@challenger`) and version tags (`validation_status: passed`), which additionally
-let one version carry several labels at once.
+A model enters the registry linked to one run, then earns aliases through gated
+steps. Promotion is an alias move — pure metadata — so rollback is instant: the
+older version is untouched on disk and `@champion` is simply pointed back at it,
+with no redeploy. Aliases plus version tags beat a single status field because one
+version can carry several labels at once (`@champion` for one deployment,
+`@challenger` for another) while `validation_status: passed` records *why* it was
+eligible.
 
 **Reproducibility chain — the four axes that must all be pinned**
 
@@ -565,7 +563,6 @@ def launch_wandb_sweep() -> None:
 | W&B | SaaS / self-hosted | Free tier (5 GB/mo storage), then paid | Excellent | Built-in Sweeps | W&B Artifacts |
 | Comet ML | SaaS | Free tier, then paid | Good | No built-in | No |
 | DVC | Self-hosted (git + remote) | Free | Via DVCLive | Via DVC Experiments | Yes (core feature) |
-| ~~Neptune~~ | — | **Discontinued** — acquired by OpenAI (announced 2025-12-04), hosted app and API shut off 2026-03-04 | — | — | — |
 
 | HPO Strategy | Sample Efficiency | Parallelism | Implementation Complexity |
 |---|---|---|---|
@@ -648,7 +645,7 @@ A team saved all model checkpoints to `s3://bucket/models/best_model.pt` — ove
 | Tool | Category | Key Feature |
 |---|---|---|
 | MLflow Tracking | Experiment tracking | Open-source, SQL backend, model registry |
-| MLflow Model Registry | Model lifecycle | Version aliases (`@champion`) + tags; the old stage names are deprecated |
+| MLflow Model Registry | Model lifecycle | Version aliases (`@champion`, `@challenger`) + version tags |
 | Weights & Biases | Experiment tracking | Rich visualization, Sweeps, Artifacts |
 | Comet ML | Experiment tracking | Auto code capture, diff logging |
 | Optuna | HPO | TPE sampler, Hyperband pruner, distributed |
@@ -687,8 +684,8 @@ Four commands: `dvc add data/train.csv` creates a small YAML `data/train.csv.dvc
 Pick W&B Sweeps if you already live in W&B and want managed distributed agents; pick Optuna if you want sampler and pruner control independent of any tracker. Use W&B Sweeps when: the team already uses W&B for experiment tracking (runs appear in the same project dashboard), you need distributed agents across multiple machines without managing a database, or you want the sweep results visualized in W&B's parallel coordinates plot. Use Optuna when: you need more control over the sampler (custom TPE, CMA-ES, grid), you use a different tracking backend (MLflow, no tracker), you want advanced pruning (MedianPruner, Hyperband, SuccessiveHalving), or you are running HPO programmatically in a Python script without a SaaS dependency. Both support Bayesian optimization; Optuna has richer built-in pruning support.
 
 **Q: What is MLflow Model Registry and how does it relate to experiment tracking?**
-**Short:** MLflow Model Registry manages model versions and promotion via aliases like champion and challenger, replacing the deprecated Staging/Production stage labels.
-MLflow Model Registry is a model lifecycle management system separate from (but linked to) the tracking server. A model is registered by linking an artifact from a completed run: `mlflow.register_model(f"runs:/{run_id}/model", "MyModel")`. The registry manages version numbers plus the labels that say which version is live. Note the API shift: the four stages (None → Staging → Production → Archived) have been deprecated since MLflow 2.9 and MLflow says they will be removed in a future major release — `client.transition_model_version_stage()` still runs but emits a deprecation warning. The replacement is `client.set_registered_model_alias(name, "champion", version)` plus version tags such as `validation_status: passed`, which lets one version hold several labels and lets you split environments into separate registered models. Teams gate production deployment on that label: CI/CD checks that the alias was moved only after human approval and validation tests passing. This creates an audit trail: every production model links back to the exact training run (and thus the exact hyperparameters, dataset version, and git SHA) that produced it.
+**Short:** MLflow Model Registry is the deployment-side counterpart to tracking: it holds numbered model versions and labels the live one with mutable aliases such as @champion plus version tags.
+MLflow Model Registry is a model lifecycle management system separate from (but linked to) the tracking server. A model is registered by linking an artifact from a completed run: `mlflow.register_model(f"runs:/{run_id}/model", "MyModel")`. The registry manages version numbers plus the labels that say which version is live. Those labels are `client.set_registered_model_alias(name, "champion", version)` plus version tags such as `validation_status: passed`, which lets one version hold several labels at once and lets you split environments into separate registered models. Teams gate production deployment on that label: CI/CD checks that the alias was moved only after human approval and validation tests passing. This creates an audit trail: every production model links back to the exact training run (and thus the exact hyperparameters, dataset version, and git SHA) that produced it.
 
 **Q: How do you handle random seeds for reproducibility in PyTorch?**
 **Short:** Full PyTorch determinism requires seeding Python, NumPy, and all CUDA devices, then disabling cuDNN's auto-tuning benchmark mode.
@@ -760,7 +757,7 @@ A parent run represents the whole sweep and each trial is a nested child run, so
 
 ## 14. Case Study
 
-**Scenario: Experiment tracking for a 12-person ML team running 500 experiments/week.** Without discipline, results are irreproducible and the team re-runs the same failed configs. MLflow centralizes params, metrics, and artifacts; DVC versions large datasets; the Model Registry gates Staging -> Production promotion. Every run is pinned to a git commit SHA and a DVC data hash, so any model can be reproduced exactly.
+**Scenario: Experiment tracking for a 12-person ML team running 500 experiments/week.** Without discipline, results are irreproducible and the team re-runs the same failed configs. MLflow centralizes params, metrics, and artifacts; DVC versions large datasets; the Model Registry gates the `@challenger` -> `@champion` promotion. Every run is pinned to a git commit SHA and a DVC data hash, so any model can be reproduced exactly.
 
 ```
 experiment run
@@ -777,7 +774,7 @@ experiment run
    reproduce = checkout(git_sha) + dvc pull(data_hash) + load run params
 ```
 
-500 experiments/week become searchable and comparable; promotion to Production requires passing the Staging gate (offline metric threshold + shadow eval). Reproducibility holds because both code (SHA) and data (DVC hash) are pinned per run.
+500 experiments/week become searchable and comparable; taking `@champion` requires passing the challenger gate (offline metric threshold + shadow eval). Reproducibility holds because both code (SHA) and data (DVC hash) are pinned per run.
 
 **Logging an experiment correctly (throttled metrics, full artifacts):**
 
@@ -795,9 +792,7 @@ def run_experiment(model, train_fn, params: dict, data_hash: str) -> str:
                 mlflow.log_metric("loss", loss, step=step)
                 mlflow.log_metric("auc", auc, step=step)
         mlflow.log_artifact("preprocessing.py")        # reproducibility
-        # `name=` is the current parameter; the old positional `artifact_path`
-        # still works but logs a deprecation warning in MLflow 3.x
-        mlflow.sklearn.log_model(model, name="model")
+        mlflow.sklearn.log_model(model, name="model")  # `name=` names the artifact
         return run.info.run_id
 ```
 
@@ -827,14 +822,13 @@ def promote(run_id: str, name: str, min_auc: float) -> str:
     if auc < min_auc:
         return "rejected"
     mv = client.create_model_version(name, f"runs:/{run_id}/model", run_id)
-    # Aliases + tags, NOT transition_model_version_stage(): registry stages are
-    # deprecated since MLflow 2.9 and slated for removal in a future major release.
+    # A tag records WHY the version is eligible; an alias records WHERE it is live.
     client.set_model_version_tag(name, mv.version, "validation_status", "passed")
     client.set_registered_model_alias(name, "challenger", mv.version)
     return f"{name} v{mv.version} -> @challenger"
 ```
 
-Promotion to live traffic is then a second alias move — `set_registered_model_alias(name, "champion", mv.version)` — and rollback is the same call pointing back at the previous version. Unlike stages, a version can carry `@champion` and `@canary` at once, which is what made the four fixed stage names too rigid.
+Promotion to live traffic is then a second alias move — `set_registered_model_alias(name, "champion", mv.version)` — and rollback is the same call pointing back at the previous version. A version can carry `@champion` and `@canary` at once, and you can invent whatever alias vocabulary your rollout actually uses — which is why a fixed status field is the wrong shape for this problem.
 
 **Pitfall 1 — Logging metrics every step.** Logging on every training step generates millions of points; the MLflow UI becomes unusable and the backend store bloats.
 
@@ -882,13 +876,13 @@ with mlflow.start_run(run_name="sweep"):
 
 **Why version data separately with DVC instead of committing it to git?** Git is built for text and chokes on large binary datasets. DVC stores a small pointer (content hash) in git and the actual data in remote object storage, so git stays lightweight while the dataset version is still pinned and retrievable with `dvc pull`. This couples code and data versions without bloating the repository.
 
-**What is the role of the Model Registry?** It is the source of truth for which model version is currently live, decoupling experimentation from deployment. Serving infrastructure loads a version by reference — in current MLflow that means an alias URI such as `models:/fraud-model@champion`, since the old Staging/Production stage names are deprecated — so promotion and rollback are metadata operations rather than redeploys, with an audit trail of who moved the alias.
+**What is the role of the Model Registry?** It is the source of truth for which model version is currently live, decoupling experimentation from deployment. Serving infrastructure loads a version by reference — in MLflow that means an alias URI such as `models:/fraud-model@champion` — so promotion and rollback are metadata operations rather than redeploys, with an audit trail of who moved the alias.
 
 **Why throttle metric logging?** Logging every step produces enormous numbers of points that slow the tracking backend and make charts unreadable, and the marginal information per extra point is tiny. Logging every N steps (plus epoch summaries) keeps the curves informative while keeping the store and UI responsive.
 
 **How do you organize a large hyperparameter sweep in MLflow?** Use a single parent run for the sweep and nested child runs per configuration. The parent groups the sweep and can hold aggregate tags; children hold individual params and metrics. This keeps the experiment list clean and makes it easy to compare configs within one sweep.
 
-**How do you decide when to promote a model from Staging to Production?** Gate on objective criteria: the offline metric must beat the current Production model by a meaningful margin on a fixed hold-out, it must pass a shadow-mode evaluation on live traffic, and it must meet latency and fairness checks. Promotion is then a registry transition, and the previous Production version is kept Archived for instant rollback.
+**How do you decide when to promote a model from challenger to champion?** Gate on objective criteria: the offline metric must beat the current champion by a meaningful margin on a fixed hold-out, it must pass a shadow-mode evaluation on live traffic, and it must meet latency and fairness checks. Promotion is then one alias move, and the previous version stays in the registry unchanged so rollback is the same move in reverse.
 
 **Pitfall — Logging metrics inside the training loop at every step causes I/O bottleneck.**
 
@@ -942,9 +936,9 @@ The two fixes compose: throttling divides by `LOG_INTERVAL` (100x) and batching 
 
 **How do you version datasets alongside models to ensure reproducibility?** Use DVC (Data Version Control) to track datasets in Git-compatible fashion without storing large files in Git. `dvc add data/features.parquet` creates `data/features.parquet.dvc` (a small YAML pointer holding the content hash, MD5 by default) that is committed to Git. The actual data is stored in a remote (S3, GCS). When reproducing a historical experiment, check out the Git commit and `dvc pull` — you get the exact dataset used. Link the DVC dataset hash to the MLflow run via `mlflow.log_param("dataset_hash", dvc_hash)`. This creates an auditable chain: Git commit → MLflow run ID → DVC dataset hash → S3 data.
 
-**What is an experiment tracking system's role in the ML lifecycle vs. a model registry?** An experiment tracking system (MLflow Tracking, W&B, Comet) logs the process: metrics over time, parameters, artifacts (model weights, confusion matrices, plots) for every training run. It answers "what happened during training." A model registry (MLflow Model Registry, Vertex AI Model Registry) manages the outcome: which trained models are in Staging vs. Production, who approved them, what aliases they have, and their lineage. The registry answers "what is currently deployed and what was deployed before." Use tracking for all experiments (including failed runs); promote only production-ready models to the registry with a review + approval process.
+**What is an experiment tracking system's role in the ML lifecycle vs. a model registry?** An experiment tracking system (MLflow Tracking, W&B, Comet) logs the process: metrics over time, parameters, artifacts (model weights, confusion matrices, plots) for every training run. It answers "what happened during training." A model registry (MLflow Model Registry, Vertex AI Model Registry) manages the outcome: which version currently holds `@champion` versus `@challenger`, who approved it, what tags it carries, and its lineage. The registry answers "what is currently deployed and what was deployed before." Use tracking for all experiments (including failed runs); promote only production-ready models to the registry with a review + approval process.
 
-**What is the difference between a run, an experiment, and a registered model in MLflow?** A run is a single training execution: it captures parameters, metrics, and artifacts (model weights, plots) for one specific configuration. An experiment is a named collection of runs — e.g., "fraud-model-v2-hyperparameter-search" contains 50 runs with different learning rates and regularization values. A registered model is a named entity in the model registry (separate from tracking) that links to the best run's artifact, carries numbered versions labelled by aliases and tags (the older Staging/Production/Archived stages are deprecated), and enables promotion workflows. Runs are cheap to create (log everything); experiments organize related runs; the registry manages the subset of runs that become deployable artifacts.
+**What is the difference between a run, an experiment, and a registered model in MLflow?** A run is a single training execution: it captures parameters, metrics, and artifacts (model weights, plots) for one specific configuration. An experiment is a named collection of runs — e.g., "fraud-model-v2-hyperparameter-search" contains 50 runs with different learning rates and regularization values. A registered model is a named entity in the model registry (separate from tracking) that links to the best run's artifact, carries numbered versions labelled by aliases and tags, and enables promotion workflows. Runs are cheap to create (log everything); experiments organize related runs; the registry manages the subset of runs that become deployable artifacts.
 
 ---
 

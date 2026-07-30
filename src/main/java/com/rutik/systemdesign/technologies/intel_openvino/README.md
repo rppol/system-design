@@ -1,13 +1,18 @@
 # Intel OpenVINO — CPU/Edge Inference & Model Optimization
 
-> **Version anchor:** OpenVINO **2025.2** (API 2.0 / `ov::` namespace era). Every
+> **Version anchor:** OpenVINO **2026.2** (API 2.0 / `ov::` namespace era). Every
 > version-specific behavior is tagged inline against the release it landed in — e.g.
 > `[2022.1]` for the `ov::` API, `[2024.0]` for the removal of the legacy
 > `InferenceEngine::` API, `[2025.0]` for the removal of the Model Optimizer (`mo`)
-> CLI. OpenVINO ships **quarterly** (`2025.0`, `2025.1`, `2025.2`, …) with occasional
-> LTS lines; treat any "current default" here as accurate for the 2025.x line and
-> re-verify a flag against the exact release you deploy, because defaults and device
-> support move release to release.
+> CLI. OpenVINO ships **quarterly** (`2026.0`, `2026.1`, `2026.2`, …); treat any
+> "current default" here as accurate for the 2026.x line and re-verify a flag against
+> the exact release you deploy, because defaults and device support move release to
+> release.
+>
+> **Platform floor as of `[2026.0]`:** the CPU plugin requires **AVX2** (SSE-only
+> hosts are no longer supported), Python packaging moved to `manylinux_2_28`, Linux
+> builds are RHEL 9-based, and macOS x86 and Ubuntu 20.04 are gone. Check the host
+> ISA before promising CPU inference on old fleet hardware.
 
 ---
 
@@ -386,7 +391,7 @@ ports) and a binary `.bin` holding the **weights**.
   with negligible accuracy loss (weights are decompressed to the compute precision at
   inference).
 - **Forward-compatibility rule:** a **newer** runtime reads an **older** IR, but not
-  the reverse. An IR built by a 2025.2 runtime may fail to load on a 2024.x runtime —
+  the reverse. An IR built by a 2026.2 runtime may fail to load on a 2025.x runtime —
   pin the runtime that *produces* your IR to ≤ the runtime that *consumes* it.
 
 ### 6.3 Conversion — `ovc` and `convert_model`
@@ -902,8 +907,8 @@ bottleneck, and eliminating it is the difference between real-time and dropped f
 - **AUTO silently landed on CPU.** The container was missing `/dev/dri` and the render
   group, so the GPU plugin wasn't visible; AUTO quietly used the CPU. Check
   `core.available_devices` at startup and pin `AUTO:GPU,CPU` explicitly.
-- **Newer-runtime IR read by an older runtime.** An IR built with 2025.2 failed to load
-  on a 2024.x replica during a partial rollout. IR is **forward-compatible only** — pin
+- **Newer-runtime IR read by an older runtime.** An IR built with 2026.2 failed to load
+  on a 2025.x replica during a partial rollout. IR is **forward-compatible only** — pin
   producer ≤ consumer runtime.
 - **Stateless LLM export.** An LLM exported without state re-uploaded the growing KV
   cache every token, dominating latency. Export **stateful** (the `optimum-intel`

@@ -82,7 +82,7 @@ the intersection that resolves a two-term AND stops being a single linear merge.
 
 ### BM25 Scoring Algorithm
 
-BM25 (Best Match 25) replaced TF-IDF as Elasticsearch's default scoring algorithm (ES 5.0+):
+BM25 (Best Match 25) is Elasticsearch's default scoring algorithm:
 
 ```
 BM25 score for document D, query term T:
@@ -200,7 +200,7 @@ Cluster:
   Coordinating nodes: route requests, aggregate results
 
 Index: a logical namespace
-  Primary shard: basic unit of data and scale (default 1, was 5 before ES 7)
+  Primary shard: basic unit of data and scale (default 1)
   Replica shard: copy of primary for HA and read scale
 
 Shard sizing:
@@ -295,7 +295,7 @@ Cold tier: cheaper storage, searchable but slower
   Allocate replicas=0 (lower overhead, less critical)
   Freeze: unload index from heap, load segments on demand
 
-Frozen tier (ES 7.12+): object storage (S3, GCS)
+Frozen tier: object storage (S3, GCS)
   Index cached in local cache on access, unloaded after
 
 Delete: based on age or size policy
@@ -482,16 +482,12 @@ GET /products/_search {
 → Returns next 100 docs after {price=29.99, id="prod-1234"}
 → O(log n) per page, no offset accumulation
 
-Fix 2: Scroll API (for export, not interactive pagination — deprecated):
-POST /products/_search?scroll=1m { "size": 1000 }
-→ Creates a snapshot, returns scroll_id
-GET /_search/scroll { "scroll_id": "..." }
-→ Iterate through all results without sorting overhead
-
-Fix 3: Point-in-time (PIT) + Search After (ES 7.10+, preferred):
+Fix 2: Point-in-time (PIT) + Search After — the answer for bulk export too:
 POST /products/_pit?keep_alive=1m
 GET /products/_search { "pit": { "id": "..." }, "search_after": [...] }
-→ Consistent snapshot + search_after pagination
+→ Consistent snapshot pinned by the PIT id + cursor pagination
+→ Sort by {"_shard_doc": "asc"} for the cheapest full-index walk
+→ DELETE /_pit when done, so the pinned segments can be merged away
 ```
 
 ```mermaid
@@ -700,7 +696,7 @@ BM25 scores a document based on: (1) IDF (Inverse Document Frequency): rare term
 **Q: What is the deep pagination problem in Elasticsearch and how do you solve it?**
 **Short:** search_after cursor pagination replaces from+size, which loads every skipped document into coordinator memory.
 
-Deep pagination with `from + size`: the coordinating node requests `from + size` results from all shards, merges them, and returns the requested page. At offset 100,000 with 10 shards: each shard returns 100,010 documents → 1,000,100 documents loaded in coordinator memory to return 10. Memory exhaustion and extreme latency at deep offsets. max_result_window defaults to 10,000 — attempts beyond this fail. Solutions: (1) `search_after` with a sort key (preferred): cursor-based pagination — include the sort values of the last returned document as the `search_after` parameter. O(log n) per page, no memory accumulation. (2) Point-in-time (PIT) + `search_after`: consistent snapshot for pagination — new documents don't appear mid-pagination. (3) Scroll API: deprecated but still used for data export scenarios (millions of documents).
+Deep pagination with `from + size`: the coordinating node requests `from + size` results from all shards, merges them, and returns the requested page. At offset 100,000 with 10 shards: each shard returns 100,010 documents → 1,000,100 documents loaded in coordinator memory to return 10. Memory exhaustion and extreme latency at deep offsets. max_result_window defaults to 10,000 — attempts beyond this fail. Solutions: (1) `search_after` with a sort key (preferred): cursor-based pagination — include the sort values of the last returned document as the `search_after` parameter. O(log n) per page, no memory accumulation. (2) Point-in-time (PIT) + `search_after`: consistent snapshot for pagination — new documents don't appear mid-pagination, and this is also the supported way to export millions of documents. Sorting on `_shard_doc` makes that walk cheapest, and `DELETE /_pit` afterwards releases the pinned segments so merging can resume.
 
 **Q: How do you change a field mapping without downtime using aliases?**
 **Short:** Reindex into a new index with the corrected mapping, then atomically swap the alias to point at it.
@@ -750,7 +746,7 @@ Tools: (1) Profile API: `GET /index/_search { "profile": true, "query": {...} }`
 **Q: What is the difference between a nested object and a flattened object in Elasticsearch?**
 **Short:** Nested mappings preserve field relationships in array objects by storing each object as its own hidden document.
 
-Standard object mapping: sub-document fields are flattened into the parent document's index. `{"author": {"name": "Alice", "city": "NYC"}}` → indexed as `author.name=Alice, author.city=NYC`. Problem: array of objects loses the relationship between fields of the same object: `authors: [{"name":"Alice","city":"NYC"}, {"name":"Bob","city":"LA"}]` → can incorrectly match a query for `author.name=Alice AND author.city=LA`. Nested mapping: each nested object stored as a separate hidden Lucene document, preserving field relationships. Queries use `nested` query type. Tradeoff: nested documents increase index size and query complexity. Flattened field type (ES 7.3+): stores all subfields in a single field, supports `term` and `range` queries, but not aggregations per subfield — useful for dynamic/unknown object structures.
+Standard object mapping: sub-document fields are flattened into the parent document's index. `{"author": {"name": "Alice", "city": "NYC"}}` → indexed as `author.name=Alice, author.city=NYC`. Problem: array of objects loses the relationship between fields of the same object: `authors: [{"name":"Alice","city":"NYC"}, {"name":"Bob","city":"LA"}]` → can incorrectly match a query for `author.name=Alice AND author.city=LA`. Nested mapping: each nested object stored as a separate hidden Lucene document, preserving field relationships. Queries use `nested` query type. Tradeoff: nested documents increase index size and query complexity. Flattened field type: stores all subfields in a single field, supports `term` and `range` queries, but not aggregations per subfield — useful for dynamic/unknown object structures.
 
 **Q: How do you scale Elasticsearch horizontally and what are the limits?**
 **Short:** Scaling adds data nodes and rebalances shards, but a shard count fixed at index creation caps growth without reindexing.

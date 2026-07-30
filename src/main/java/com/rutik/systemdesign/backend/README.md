@@ -1,6 +1,6 @@
 # Backend Engineering — Senior Engineer & Interview Prep Guide
 
-A comprehensive, production-focused reference for **backend engineering** — networking internals, API design, performance engineering, database deep dives, resilience patterns, security, testing, event-driven architecture, and microservices. Primary language is Java 21 with Spring Boot 3.x. Emphasis: interview Q&As, production war stories, tradeoff matrices, and design decisions.
+A comprehensive, production-focused reference for **backend engineering** — networking internals, API design, performance engineering, database deep dives, resilience patterns, security, testing, event-driven architecture, and microservices. Primary language is Java 25 (LTS) with Spring Boot 4.1. Emphasis: interview Q&As, production war stories, tradeoff matrices, and design decisions.
 
 ---
 
@@ -236,8 +236,9 @@ A 5-week plan over the Interview-Specific Path. Each week pairs modules with one
 | Java | 25 (LTS) | Virtual threads unpinned under `synchronized` (JEP 491, JDK 24), scoped values final (JEP 506), compact source files |
 | Spring Boot | 4.1+ | HTTP service client auto-configuration, API versioning properties, OpenTelemetry starter, Jackson 3 |
 | Spring Framework | 7.0 | Jakarta EE 11 baseline, JSpecify null-safety, API versioning, `@Retryable`/`@ConcurrencyLimit` |
-| Kafka | 4.3+ | KRaft-only (ZooKeeper removed in 4.0), KIP-848 consumer protocol, tiered storage |
-| Resilience4j | 2.4+ | Spring Boot 4 / Spring Cloud 5 compatible, virtual thread support |
+| Kafka | 4.2+ | KRaft-only (ZooKeeper removed in 4.0), KIP-848 consumer protocol, share groups (queues) GA |
+| Spring Cloud | 2025.1.x "Oakwood" | Built on Spring Framework 7 / Spring Boot 4; every project in the train is version 5.0.x |
+| Resilience4j | 2.4+ | `resilience4j-spring-boot4` starter for the Boot 4 auto-configuration, virtual thread support |
 | Micrometer | 1.17+ | Observation API, OTLP registry, exemplars |
 | OpenTelemetry | 1.x | W3C TraceContext, OTLP protocol, Spring integration |
 

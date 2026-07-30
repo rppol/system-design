@@ -45,13 +45,13 @@ Java has a rich profiling ecosystem: async-profiler for CPU and allocation profi
 
 ### 4.2 GC Algorithm Selection
 
-| GC | Default Since | Pause Target | Throughput | Use Case |
+| GC | Availability on Java 25 | Pause Target | Throughput | Use Case |
 |----|-------------|-------------|------------|---------|
-| Serial GC | - | N/A | High | Single-threaded, tiny heap |
-| Parallel GC | JDK 8 default | N/A | Highest | Batch processing |
-| G1 GC | JDK 9 default | 200ms (configurable) | High | Balanced latency/throughput |
-| ZGC | JDK 15 stable | Sub-millisecond (<1ms) | Good | Low-latency services |
-| Shenandoah | JDK 17+ | Sub-millisecond | Good | Low-latency |
+| Serial GC | `-XX:+UseSerialGC` | N/A | High | Single-threaded, tiny heap |
+| Parallel GC | `-XX:+UseParallelGC` (was the JDK 8 default) | N/A | Highest | Batch processing |
+| G1 GC | Default collector since JDK 9 | 200ms (configurable) | High | Balanced latency/throughput |
+| ZGC | `-XX:+UseZGC`; generational-only since JDK 24 (JEP 490) | Sub-millisecond (<1ms) | Good | Low-latency services |
+| Shenandoah | `-XX:+UseShenandoahGC`; generational mode is a product feature since JDK 25 (JEP 521), opt in with `-XX:ShenandoahGCMode=generational` | Sub-millisecond | Good | Low-latency |
 
 ### 4.3 Thread States for Diagnosis
 
@@ -119,7 +119,7 @@ Hotspot identification:
 ### GC Log Analysis
 
 ```
-G1GC Log (JDK 17+, -Xlog:gc*):
+G1GC Log (-Xlog:gc*):
 [1.234s][info][gc] GC(1) Pause Young (Normal) (G1 Evacuation Pause)
                    15M->8M(128M) 12.123ms
 
@@ -429,7 +429,7 @@ The x-axis represents time (or sample count) — width means how much time was s
 **Q: What are the JVM flags for GC logging in production?**
 **Short:** Enable unified JVM GC logging with -Xlog:gc* and log rotation to capture pause duration and heap occupancy trends.
 
-JDK 17+: `-Xlog:gc*:file=/tmp/gc.log:time,uptime,level,tags:filecount=10,filesize=20m`. This logs all GC events with timestamps, rotates after 20MB, keeping 10 files. Key events to watch: Pause duration (> MaxGCPauseMillis is a warning), Full GC events (severe latency impact), heap occupancy after GC (approaching heap limit means memory pressure). For G1: also log `-Xlog:gc+phases*` for detailed phase breakdown.
+Use unified logging: `-Xlog:gc*:file=/tmp/gc.log:time,uptime,level,tags:filecount=10,filesize=20m`. This logs all GC events with timestamps, rotates after 20MB, keeping 10 files. Key events to watch: Pause duration (> MaxGCPauseMillis is a warning), Full GC events (severe latency impact), heap occupancy after GC (approaching heap limit means memory pressure). For G1: also log `-Xlog:gc+phases*` for detailed phase breakdown.
 
 **Q: How do you profile memory allocation rate?**
 **Short:** Profile allocation with async-profiler's alloc event or JFR to find which code paths allocate the most and drive young GC.
@@ -452,7 +452,7 @@ Take a thread dump with jstack. Count threads in BLOCKED state — high BLOCKED 
 ```bash
 java \
   -Xms512m -Xmx2g \                          # heap sizing
-  -XX:+UseG1GC \                             # G1 GC (default JDK 9+)
+  -XX:+UseG1GC \                             # G1 GC (the JVM default; stated explicitly)
   -XX:MaxGCPauseMillis=200 \                 # G1 pause target
   -XX:+HeapDumpOnOutOfMemoryError \          # capture OOM heap dump
   -XX:HeapDumpPath=/var/log/app/heap.hprof \ # heap dump location
@@ -496,7 +496,7 @@ Off-heap leaks live outside the JVM heap entirely, so a heap dump shows normal u
 **Q: How do you choose between G1, ZGC, and Shenandoah for a production service?**
 **Short:** Choose G1 by default, and move to ZGC or Shenandoah when sub-millisecond pauses matter more than raw throughput.
 
-Choose G1 as the default for most services, and move to ZGC or Shenandoah when the requirement is sub-millisecond pauses regardless of heap size. G1 targets a configurable pause goal (default 200ms), which scales acceptably for typical heap sizes but grows less predictable as heaps reach tens of gigabytes. ZGC (stable since JDK 15) and Shenandoah (production-ready since JDK 15, JEP 379 dropped its experimental flag the same release as ZGC's JEP 377) both hold pause times under 1ms independent of heap size by doing most collection work concurrently with application threads, at the cost of somewhat lower throughput and higher CPU overhead. ZGC scales especially well on very large heaps because, unlike G1, its pause time does not grow with heap size — pick it when p99 latency requirements are tighter than G1's pause target can reliably hit.
+Choose G1 as the default for most services, and move to ZGC or Shenandoah when the requirement is sub-millisecond pauses regardless of heap size. G1 targets a configurable pause goal (default 200ms), which scales acceptably for typical heap sizes but grows less predictable as heaps reach tens of gigabytes. ZGC and Shenandoah — both production collectors since JDK 15, and both generational on Java 25 (ZGC generational-only since JDK 24 per JEP 490; Shenandoah's generational mode a product feature since JDK 25 per JEP 521, opt in with `-XX:ShenandoahGCMode=generational`) — hold pause times under 1ms independent of heap size by doing most collection work concurrently with application threads, at the cost of somewhat lower throughput and higher CPU overhead. ZGC scales especially well on very large heaps because, unlike G1, its pause time does not grow with heap size — pick it when p99 latency requirements are tighter than G1's pause target can reliably hit.
 
 ---
 

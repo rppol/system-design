@@ -370,7 +370,7 @@ public class PaymentSagaOrchestrator {
 
 | Technology | Usage |
 |------------|-------|
-| Spring Boot 3.2 | REST API, Kafka consumers, transaction management |
+| Spring Boot 4.1 | REST API, Kafka consumers, transaction management |
 | Spring Kafka | `@KafkaListener`, `KafkaTemplate` for command publishing |
 | Spring Data JPA | Saga state, idempotency table, audit log persistence |
 | PostgreSQL | Transactional storage for saga state and outbox |

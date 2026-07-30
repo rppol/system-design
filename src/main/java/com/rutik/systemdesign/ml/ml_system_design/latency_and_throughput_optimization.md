@@ -334,8 +334,8 @@ class DynamicBatchingServer:
         Request is batched with other concurrent requests.
         """
         if self._loop is None:
-            # get_running_loop(), not get_event_loop(): the latter is deprecated
-            # and, from Python 3.12 on, raises when there is no current loop.
+            # Cache the loop on first call: get_running_loop() is only valid
+            # from inside the running loop, so it cannot be fetched in __init__.
             self._loop = asyncio.get_running_loop()
 
         future: asyncio.Future = self._loop.create_future()
@@ -945,14 +945,14 @@ INT4 tensor-core path. Do not budget an INT4 compute multiplier on an H100.
 
 | Category | Tool | Notes |
 |----------|------|-------|
-| Model Serving | Dynamo-Triton (formerly Triton Inference Server; renamed March 2025) | NVIDIA; supports ONNX, TF, PyTorch; dynamic batching built-in |
-| Model Serving | TorchServe | PyTorch native; dynamic batching; model versioning |
+| Model Serving | Dynamo Triton (Triton Inference Server) | NVIDIA; supports ONNX, TF, PyTorch, TensorRT, Python backends; dynamic batching built-in |
+| Model Serving | KServe | Kubernetes CRD serving; standardized inference protocol, canary and autoscale-to-zero built in |
 | Model Serving | TF Serving | TensorFlow native; batching; gRPC + REST |
 | Model Serving | BentoML | Framework-agnostic; Kubernetes-friendly |
 | Model Serving | Ray Serve | Python-first; distributed; handles preprocessing |
 | Model Optimization | ONNX | Cross-framework model export format |
 | Model Optimization | ONNX Runtime | 1.5-2x CPU speedup via graph optimization |
-| Model Optimization | TensorRT | NVIDIA; FP16/INT8/FP8. TensorRT 11 removed implicit quantization (`IInt8Calibrator`, `--int8`/`--calib`) — quantize offline with NVIDIA ModelOpt, which inserts Q/DQ nodes, then build a strongly-typed engine |
+| Model Optimization | TensorRT | NVIDIA; FP16/INT8/FP8 via explicit quantization — quantize offline with NVIDIA ModelOpt, which inserts Q/DQ nodes into the ONNX graph, then build a strongly-typed engine |
 | Model Optimization | Intel Neural Compressor | INT8/INT4 quantization; CPU-focused |
 | ANN Search | FAISS | Meta; CPU + GPU; IVF, HNSW indexing |
 | ANN Search | ScaNN | Google; competitive throughput at high recall on large datasets |
@@ -1092,7 +1092,7 @@ Model was being reloaded from disk on every request. Fix: load model into GPU me
 Enable Triton batching: max_batch_size=64, max_wait=3ms. Serving 200 candidates per user means a single request is already a batch (200 forward passes). No benefit here — batching helps when single-request processing is underutilizing GPU. Instead: serve multiple concurrent users in the same GPU batch. At 1,000 QPS, 3ms window collects 3 requests * 200 candidates = 600 forward passes. GPU utilization increases from 15% to 55%. Throughput improvement allows smaller GPU fleet. Latency reduction: 38ms → 22ms P99 (GPU now fully utilized, no queuing). New P99: 34ms.
 
 **Optimization 3 — INT8 quantization (1 week)**:
-Quantize to INT8 with a calibration dataset of 10,000 ad auctions. On TensorRT 11 this is explicit quantization: run calibration offline with NVIDIA ModelOpt, which inserts Q/DQ nodes into the graph, then build a strongly-typed engine — the old implicit path (`IInt8Calibrator`, `trtexec --int8 --calib`) was removed in TensorRT 11. Quality loss: CTR AUC 0.832 → 0.829 (0.003 absolute, within the 0.005 tolerance). Throughput improvement: 2.8x. Inference latency: 22ms → 8ms P99. New P99: 20ms — still over the 15ms budget.
+Quantize to INT8 with a calibration dataset of 10,000 ad auctions. TensorRT uses explicit quantization: run calibration offline with NVIDIA ModelOpt, which inserts Q/DQ nodes into the ONNX graph, then build a strongly-typed engine so the Q/DQ placement — not a builder flag — decides the precision of every layer. Quality loss: CTR AUC 0.832 → 0.829 (0.003 absolute, within the 0.005 tolerance). Throughput improvement: 2.8x. Inference latency: 22ms → 8ms P99. New P99: 20ms — still over the 15ms budget.
 
 **Optimization 4 — Prediction caching for repeated ad-user pairs (3 days)**:
 Analysis shows 35% of ad-user pairs appear multiple times within 60 seconds (same user browsing multiple pages). Cache predictions with 60-second TTL, using cache key = SHA256(user_id + ad_id + model_version). Cache hit rate: 32%. Effective QPS reduction: 32%, and inference latency at the reduced load improves 8ms → 6ms P99.

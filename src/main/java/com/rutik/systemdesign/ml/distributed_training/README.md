@@ -116,8 +116,8 @@ The memory rows are the point: activations are freed after each micro-batch, and
 
 ## 4. Types / Architectures / Strategies
 
-**DataParallel (DP) — deprecated for multi-GPU**
-Single-process, multi-thread, one GPU is the master. Master sends model to other GPUs, collects gradients back — creates a bottleneck on the master GPU. Memory imbalanced (master holds activations + gradients for all GPUs). Not recommended; use DDP instead.
+**DataParallel (DP) — never use for multi-GPU**
+Single-process, multi-thread, one GPU is the master. Master sends model to other GPUs, collects gradients back — creates a bottleneck on the master GPU. Memory imbalanced (master holds activations + gradients for all GPUs). The PyTorch docs say to use `DistributedDataParallel` instead of this class for multi-GPU training even on a single node; DP survives only in older codebases you may inherit.
 
 **DistributedDataParallel (DDP)**
 Multi-process (one process per GPU), symmetric AllReduce — no master bottleneck. Uses NCCL backend over NVLink/InfiniBand. Overlaps gradient communication with backward computation (gradient buckets: default bucket size 25 MB). The production standard for data-parallel training on 1-64 GPUs.

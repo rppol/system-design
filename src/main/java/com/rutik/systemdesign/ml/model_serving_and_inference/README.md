@@ -55,13 +55,13 @@ Key insight: The bottleneck is almost never model accuracy — it is latency, th
 - Protocol: HTTP/2, Protocol Buffers (binary)
 - Best for: high-QPS production, microservice-to-microservice, latency-sensitive paths
 - Speedup over REST: 2–10x faster serialization, persistent connections, bidirectional streaming
-- Tools: grpcio, TorchServe gRPC endpoint, TF Serving gRPC
+- Tools: grpcio, Dynamo Triton gRPC endpoint, TF Serving gRPC
 
-### TorchServe (no longer maintained — study the design, do not start new work on it)
-- PyTorch-native model server. The upstream project states "This project is no longer actively maintained... there are no planned updates, bug fixes, new features, or security patches"; the `pytorch/serve` repo was archived read-only in August 2025. Treat it as a reference architecture, and pick Triton (Dynamo Triton), KServe, Ray Serve or BentoML for new deployments.
-- Handler-based: custom Python handlers for preprocessing, inference, postprocessing
-- Supports model versioning, dynamic batching (max_batch_size, batch_delay_ms), metrics
-- Management API (port 8081) for model registration/deregistration
+### Dynamo Triton (NVIDIA)
+- Multi-framework model server: TensorRT, ONNX Runtime, PyTorch, TensorFlow and Python backends behind one HTTP/gRPC surface
+- Backend-based: a Python-backend model implements `execute` (required) plus optional `initialize` / `finalize`, so preprocessing, inference and postprocessing stay user-authored while the server owns concurrency
+- Model repository layout gives versioning for free; `dynamic_batching { max_queue_delay_microseconds: ... }` in `config.pbtxt` turns on batching
+- HTTP on 8000, gRPC on 8001, Prometheus metrics on 8002; model-control API for load/unload
 
 ### TF Serving
 - TensorFlow-native, SavedModel format
@@ -102,8 +102,8 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     client(["Client\nHTTP POST /predict"]) --> lb["Load Balancer\nnginx / ALB / GLB"]
-    lb --> s1["Serving Instance 1\nFastAPI / TorchServe"]
-    lb --> s2["Serving Instance 2\nFastAPI / TorchServe"]
+    lb --> s1["Serving Instance 1\nFastAPI / Dynamo Triton"]
+    lb --> s2["Serving Instance 2\nFastAPI / Dynamo Triton"]
     s1 --> store[("Model Artifact Store\nS3 / GCS / NFS")]
     s2 --> store
     store -.->|"loaded at startup"| s1
@@ -245,7 +245,7 @@ _session: ort.InferenceSession | None = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # `@app.on_event("startup")` is deprecated; lifespan is the supported hook.
+    # Everything before `yield` runs once at startup; everything after, at shutdown.
     global _session
     # Use CUDAExecutionProvider if GPU available, fall back to CPU
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
@@ -361,8 +361,8 @@ class SimpleClassifier(nn.Module):
 def export_to_onnx(model: nn.Module, input_dim: int, path: str) -> None:
     model.eval()
     dummy_input = torch.randn(1, input_dim)  # batch_size=1, made dynamic below
-    # PyTorch 2.9+ defaults torch.onnx.export to dynamo=True, where `dynamic_axes`
-    # is deprecated in favour of `dynamic_shapes` keyed by the forward() arg name.
+    # `dynamic_shapes` is keyed by the forward() argument name (`x` here),
+    # not by the ONNX `input_names` strings.
     torch.onnx.export(
         model,
         (dummy_input,),
@@ -632,11 +632,11 @@ latency-vs-batch curve before quoting a saving to anyone.
 - Cross-framework portability required (TF model serving in PyTorch ecosystem)
 - Edge deployment with limited runtime
 
-**Use a dedicated model server (Triton / KServe / TF Serving / Ray Serve / BentoML) when:**
+**Use a dedicated model server (Dynamo Triton / KServe / TF Serving / Ray Serve / BentoML) when:**
 - Need production-grade model versioning, A/B testing out of the box
 - Multi-model serving on the same instance
 - Metrics and management API required without custom code
-- Note: TorchServe used to be the default answer for PyTorch here; it is no longer maintained (repo archived August 2025), so do not pick it for new systems
+- Serving PyTorch specifically: Dynamo Triton's PyTorch or Python backend, Ray Serve, or BentoML
 
 **Do NOT use GPU for:**
 - Low-QPS (< 10 RPS) synchronous single-request services — GPU cold-start dominates
@@ -658,24 +658,16 @@ torch.onnx.export(model, (torch.randn(1, 128),), "model.onnx")
 # At serving time a batch of 16 fails in ORT with INVALID_ARGUMENT:
 # "Got invalid dimensions for input ... index: 0 Got: 16 Expected: 1"
 
-# ALSO BROKEN: dynamic_axes keys that are not declared names are silently ignored,
-# so this exports the same fixed-batch graph as above.
-torch.onnx.export(
-    model, (torch.randn(1, 128),), "model.onnx",
-    dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
-)
-
-# FIXED (legacy exporter, dynamo=False): every dynamic_axes key must also appear
-# in input_names / output_names.
+# ALSO BROKEN: dynamic_shapes keyed by the ONNX tensor name instead of the
+# forward() parameter name. `forward(self, x)` means the key must be "x".
 torch.onnx.export(
     model, (torch.randn(1, 128),), "model.onnx",
     input_names=["input"], output_names=["output"],
-    dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}},
-    dynamo=False,
+    dynamic_shapes={"input": {0: torch.export.Dim.DYNAMIC}},
 )
 
-# FIXED (PyTorch 2.9+ default, dynamo=True): dynamic_axes is deprecated here;
-# dynamic_shapes is keyed by the forward() argument name.
+# FIXED: dynamic_shapes is keyed by the forward() argument name; input_names /
+# output_names only label the tensors in the exported graph.
 torch.onnx.export(
     model, (torch.randn(1, 128),), "model.onnx",
     input_names=["input"], output_names=["output"],
@@ -695,12 +687,11 @@ torch.onnx.export(
 |------|----------|-------|
 | FastAPI | REST serving | Async, Pydantic, OpenAPI docs auto-generated |
 | Flask | REST serving | Sync, simpler for prototypes |
-| TorchServe | PyTorch serving | Handler-based, dynamic batching, metrics. **No longer maintained — repo archived August 2025**; no bug fixes or security patches |
 | TF Serving | TF serving | SavedModel, versioning, A/B routing; still actively released |
 | ONNX | Model format | Cross-framework interchange |
 | ONNXRuntime | Inference engine | Graph fusion + no Python runtime; CPU speedup is model-dependent, GPU/NPU execution providers |
 | TensorRT | NVIDIA optimization | INT8/FP16, layer fusion, kernel auto-tuning on NVIDIA GPUs; speedup over eager PyTorch CUDA is model- and precision-dependent, so benchmark it |
-| Dynamo Triton (formerly Triton Inference Server) | Multi-framework | NVIDIA, renamed March 2025 when it became part of the Dynamo platform; supports TF/PyTorch/ONNX/TensorRT, HTTP+gRPC |
+| Dynamo Triton (Triton Inference Server) | Multi-framework | NVIDIA; TF/PyTorch/ONNX/TensorRT/Python backends, HTTP+gRPC, dynamic batching in `config.pbtxt` |
 | BentoML | Serving framework | Python-native, Docker/Kubernetes baked in |
 | Ray Serve | Distributed serving | Composable pipelines, autoscaling, model multiplexing |
 | Seldon Core | K8s-native serving | Inference graphs, drift detection sidecar |
@@ -739,16 +730,16 @@ Deploy both model versions as separate serving instances. Configure the load bal
 GPU maximizes throughput for large models and high QPS but has high fixed cost, cold-start latency, and is harder to autoscale quickly. CPU has lower per-instance cost, near-zero cold-start, and scales easily, but is insufficient for large models (LLMs, large CNNs) at production QPS. Rule of thumb: use CPU for models under ~10M parameters at < 50 RPS; use GPU for large models or when throughput demands batch sizes > 8.
 
 **Q: How do you handle model versioning in a production serving system?**
-**Short:** Version model artifacts in a registry with stage labels, and have serving load the Production-tagged model so rollback is an atomic pointer swap.
-Store model artifacts in a versioned artifact store (S3 with versioning, GCS, MLflow artifact store). Assign semantic or timestamp-based version identifiers. Register models in a model registry (MLflow Model Registry) with stage labels (Staging, Production). Serving infrastructure loads the model pinned to the Production stage. Rolling updates swap the serving pointer atomically, keeping the previous version registered for instant rollback.
+**Short:** Version model artifacts in a registry and point serving at a mutable alias like @champion, so promotion and rollback are both a single atomic pointer move.
+Store model artifacts in a versioned artifact store (S3 with versioning, GCS, MLflow artifact store). Assign semantic or timestamp-based version identifiers. Register each build in a model registry (MLflow Model Registry) and attach mutable **aliases** — `@champion` for the version serving live traffic, `@challenger` for the validated candidate — plus key-value tags for anything else you need to query on. Serving resolves `models:/<name>@champion` at load time rather than pinning a raw version number, so promotion is one `set_registered_model_alias` call and rollback is the same call pointing back at the prior version. Aliases beat a fixed promotion ladder because one model can carry several at once (per-region champions, a shadow candidate) without inventing new states.
 
 **Q: What observability signals should every model serving endpoint emit?**
 **Short:** Every serving endpoint should emit latency percentiles, throughput, error rate, and prediction distribution, all labelled by model version.
 Every endpoint must emit latency percentiles, throughput, error rate, and the prediction distribution, all labelled by model version. Concretely: request latency (P50, P95, P99) per model version; throughput (RPS); error rate (5xx, timeout); batch size distribution; input feature statistics (mean, std, null rate for drift detection); model output distribution (prediction score histogram); hardware utilization (GPU memory and utilization, CPU, memory). These should feed into Prometheus/Grafana with alerts on SLA breaches.
 
-**Q: How does TorchServe's handler architecture work?**
-**Short:** TorchServe's handler implements preprocess, inference, and postprocess, letting the server own infra concerns while engineers own only the handler.
-TorchServe loads a model archive (.mar file) containing the serialized model and a handler Python class. The handler implements three methods: `preprocess` (raw request bytes → tensor), `inference` (tensor → tensor via model.forward), and `postprocess` (tensor → response bytes). The server manages concurrency, batching, and versioning; the handler is the only user-authored code. This separation allows infrastructure teams to own the server and ML engineers to own the handler. Know the pattern, but note that TorchServe itself is no longer maintained (repo archived August 2025), so the same three-stage handler contract is what you now look for in Triton's Python backend or a BentoML service.
+**Q: How does a model server's handler/backend architecture separate infrastructure from model code?**
+**Short:** The server owns concurrency, batching and versioning while the user writes only a preprocess/inference/postprocess handler, so infra and ML teams own different code.
+Every mainstream model server splits the request path into a server-owned part and a user-owned part. In Dynamo Triton's Python backend the user-authored class implements `execute` (a batch of `InferenceRequest` objects in, `InferenceResponse` objects out) plus optional `initialize` and `finalize` for load-time setup and teardown; BentoML expresses the same thing as a service class with `@bentoml.api` methods. The three logical stages inside are always preprocess (raw request bytes → tensor), inference (tensor → tensor), and postprocess (tensor → response bytes). Concurrency, dynamic batching, model versioning, health endpoints and metrics stay with the server. That boundary is the point: an infrastructure team owns the server and its scaling behaviour, ML engineers own only the handler, and neither has to redeploy the other's code.
 
 **Q: What is shadow mode serving and when do you use it?**
 **Short:** Shadow mode runs a candidate model on live traffic without returning its output to users, logging predictions for safe offline comparison.
@@ -801,7 +792,7 @@ Use streaming for generative models so users see tokens as they are produced ins
 
 ## 14. Case Study
 
-**Scenario: Serving a 7B-parameter LLM with vLLM.** A chat product needs to serve a 7B model under 100 concurrent requests with streaming responses. vLLM provides PagedAttention (no KV-cache fragmentation) and continuous batching (new requests slot into gaps left by finished ones), with tensor parallelism across 2x A100. The deployment ships via shadow mode for a week before a canary rollout.
+**Scenario: Serving an 8B-parameter LLM with vLLM.** A chat product needs to serve an 8B model (`Qwen/Qwen3-8B`) under 100 concurrent requests with streaming responses. vLLM provides PagedAttention (no KV-cache fragmentation) and continuous batching (new requests slot into gaps left by finished ones), with tensor parallelism across 2x A100. The deployment ships via shadow mode for a week before a canary rollout.
 
 ```mermaid
 flowchart LR
@@ -835,7 +826,7 @@ flowchart LR
 
 *Illustrative operating point: ~3,000 output tok/s aggregate, p99 time-to-first-token ~800ms.*
 
-**Illustrative operating point, and how to sanity-check one.** Take ~3,000 output tokens/sec aggregate at 100-way concurrency. With continuous batching every live sequence advances one token per decode step, so that is ~30 steps/sec — about 30 tokens/sec per stream, and a 200-token completion streams over roughly 7 seconds. The user-visible number is time-to-first-token, ~800ms at p99; the 7 seconds is hidden by streaming. Check it against the hardware before believing it: 7B weights in FP16 are ~13.5GB, split across 2x A100-80GB (2,039 GB/s each), so the weight read alone floors a decode step at ~3.3ms, and at 100 sequences of a few thousand tokens the KV-cache read (~0.5MB per token per sequence) is the dominant term and lands the step in the tens of milliseconds — consistent with ~30 steps/sec. Published vLLM benchmarks put a 7-8B model on a single A100-80GB at roughly 2,500-2,800 output tok/s at 50 concurrent requests, so a few thousand tok/s across two GPUs is the right order of magnitude. Any "p99 800ms for the full 200-token completion" claim would mean 250 tok/s *per stream*, which is above what a single stream can do on this hardware and 8x the aggregate budget — that is the arithmetic trap to catch in a design review. PagedAttention lets many sequences share GPU memory efficiently; continuous batching keeps the GPU busy instead of waiting for the slowest sequence in a fixed batch.
+**Illustrative operating point, and how to sanity-check one.** Take ~3,000 output tokens/sec aggregate at 100-way concurrency. With continuous batching every live sequence advances one token per decode step, so that is ~30 steps/sec — about 30 tokens/sec per stream, and a 200-token completion streams over roughly 7 seconds. The user-visible number is time-to-first-token, ~800ms at p99; the 7 seconds is hidden by streaming. Check it against the hardware before believing it: 8.2B weights in BF16 are ~16.4GB, split across 2x A100-80GB (2,039 GB/s each), so the weight read alone floors a decode step at ~4.0ms, and at 100 sequences of a few thousand tokens the KV-cache read (~0.5MB per token per sequence) is the dominant term and lands the step in the tens of milliseconds — consistent with ~30 steps/sec. Published vLLM benchmarks put a 7-8B model on a single A100-80GB at roughly 2,500-2,800 output tok/s at 50 concurrent requests, so a few thousand tok/s across two GPUs is the right order of magnitude. Any "p99 800ms for the full 200-token completion" claim would mean 250 tok/s *per stream*, which is above what a single stream can do on this hardware and 8x the aggregate budget — that is the arithmetic trap to catch in a design review. PagedAttention lets many sequences share GPU memory efficiently; continuous batching keeps the GPU busy instead of waiting for the slowest sequence in a fixed batch.
 
 **Launching vLLM with tensor parallelism and bounded concurrency:**
 
@@ -844,7 +835,7 @@ from vllm import LLM, SamplingParams
 
 def build_engine() -> LLM:
     return LLM(
-        model="meta-llama/Llama-2-7b-chat-hf",
+        model="Qwen/Qwen3-8B",
         tensor_parallel_size=2,            # split across 2 A100s
         gpu_memory_utilization=0.90,       # fraction of GPU memory vLLM may use
                                            # (weights + activations + KV cache)
@@ -865,7 +856,7 @@ import uuid
 
 class LLMService:
     def __init__(self) -> None:
-        args = AsyncEngineArgs(model="meta-llama/Llama-2-7b-chat-hf",
+        args = AsyncEngineArgs(model="Qwen/Qwen3-8B",
                                tensor_parallel_size=2, max_num_seqs=100)
         self.engine = AsyncLLMEngine.from_engine_args(args)
 
@@ -971,6 +962,6 @@ def group_by_length(requests, bucket_sizes=(64, 128, 256, 512)):
     return buckets
 ```
 
-**How do you decide between a model server, ONNX Runtime, and TensorRT for serving?** They sit at different layers, so the question is really which one you need first. A model server (Triton, KServe, Ray Serve, BentoML — TorchServe filled this slot until the project was archived in August 2025) gives you the HTTP/gRPC surface, model archive, versioning and batching for the least engineering effort, and hosts Python-heavy pre/postprocessing. ONNX Runtime is a runtime, not a server: export to the ONNX graph IR and run on CPU/GPU/edge with no Python interpreter in the request path. TensorRT is a compiler: hardware-specific layer fusion, precision calibration (INT8/FP16) and kernel auto-tuning for one NVIDIA GPU family, which is also why its engines are not portable across GPU generations. Choose on constraint rather than on a quoted multiplier: ONNX for CPU and edge portability, TensorRT for maximum GPU throughput on fixed NVIDIA hardware, a model server for rapid iteration and multi-model hosting. Benchmark the speedup on your own model — it ranges from marginal to large depending on op mix and precision.
+**How do you decide between a model server, ONNX Runtime, and TensorRT for serving?** They sit at different layers, so the question is really which one you need first. A model server (Dynamo Triton, KServe, Ray Serve, BentoML) gives you the HTTP/gRPC surface, model archive, versioning and batching for the least engineering effort, and hosts Python-heavy pre/postprocessing. ONNX Runtime is a runtime, not a server: export to the ONNX graph IR and run on CPU/GPU/edge with no Python interpreter in the request path. TensorRT is a compiler: hardware-specific layer fusion, precision calibration (INT8/FP16) and kernel auto-tuning for one NVIDIA GPU family, which is also why its engines are not portable across GPU generations. Choose on constraint rather than on a quoted multiplier: ONNX for CPU and edge portability, TensorRT for maximum GPU throughput on fixed NVIDIA hardware, a model server for rapid iteration and multi-model hosting. Benchmark the speedup on your own model — it ranges from marginal to large depending on op mix and precision.
 
 **What is canary deployment for ML models and what metrics gate the rollout?** Canary deploys the new model to 5% of traffic. Gate metrics typically include: (1) primary business metric (CTR, AUC, revenue-per-user) vs. baseline — require no regression > 1%; (2) serving latency p99 — require no regression > 20%; (3) error rate — require < 0.01%. Monitor for 24-48 hours at each traffic step (5% → 25% → 50% → 100%). Automatic rollback triggers if any gate metric degrades. The key is what only a canary can measure: shadow mode also runs on mirrored production traffic, but because its responses are never returned it cannot measure any business metric that depends on a user reacting to the prediction.

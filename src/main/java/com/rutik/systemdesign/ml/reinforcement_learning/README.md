@@ -717,10 +717,10 @@ If rewards are in the range [-100, +100], the Q-network must output values up to
 | CleanRL | Single-file reference implementations | Best for learning; not production |
 | TorchRL | PyTorch-native RL library | Meta's official RL toolkit |
 | MuJoCo | Continuous control physics simulation | Standard benchmark for SAC, TD3 |
-| Isaac Lab (NVIDIA) | GPU-accelerated physics simulation | 10,000+ parallel environments on one GPU; supersedes the deprecated Isaac Gym Preview |
+| Isaac Lab (NVIDIA) | GPU-accelerated physics simulation | Built on Isaac Sim; thousands of parallel environments on one GPU |
 | TF-Agents | TensorFlow RL library | Google's official RL toolkit |
 | Tianshou | PyTorch RL, modular design | Strong support for offline RL |
-| Pearl (Meta) | Production RL agent library | Successor to ReAgent, which Meta has archived |
+| Pearl (Meta) | Production RL agent library | From Meta's Applied RL team; contextual bandits, offline RL, and safe-exploration modules |
 
 ---
 
@@ -759,7 +759,7 @@ PPO prevents the policy from updating too aggressively in any single step. Vanil
 **Q: What is SAC and when would you prefer it over PPO?**
 **Short:** SAC maximizes return plus entropy off-policy for continuous control; PPO is simpler and suits discrete actions.
 
-SAC (Soft Actor-Critic) maximizes both expected return and policy entropy: J = E[sum_t (r_t + alpha * H(pi(.|s_t)))]. The entropy bonus alpha encourages the policy to remain stochastic (exploring), and the optimal alpha is tuned automatically via a dual optimization. SAC is off-policy (uses experience replay) and operates in continuous action spaces. Prefer SAC over PPO when: action space is continuous (robotic control, continuous control benchmarks like HalfCheetah-v3), sample efficiency matters (SAC achieves MuJoCo benchmark performance in 1M steps vs PPO's 3-5M), and you have a replay buffer available. Prefer PPO when: action space is discrete (Atari, text generation), on-policy guarantees are required (RLHF training where distribution matters), or simplicity of implementation is prioritized.
+SAC (Soft Actor-Critic) maximizes both expected return and policy entropy: J = E[sum_t (r_t + alpha * H(pi(.|s_t)))]. The entropy bonus alpha encourages the policy to remain stochastic (exploring), and the optimal alpha is tuned automatically via a dual optimization. SAC is off-policy (uses experience replay) and operates in continuous action spaces. Prefer SAC over PPO when: action space is continuous (robotic control, continuous control benchmarks like HalfCheetah-v5), sample efficiency matters (SAC achieves MuJoCo benchmark performance in 1M steps vs PPO's 3-5M), and you have a replay buffer available. Prefer PPO when: action space is discrete (Atari, text generation), on-policy guarantees are required (RLHF training where distribution matters), or simplicity of implementation is prioritized.
 
 **Q: How does RLHF connect RL to LLM alignment?**
 **Short:** RLHF fine-tunes an LLM with PPO against a learned reward model, constrained by a KL penalty to the SFT policy.

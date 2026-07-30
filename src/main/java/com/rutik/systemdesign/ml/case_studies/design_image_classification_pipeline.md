@@ -338,22 +338,21 @@ def export_to_onnx(
     batch_size: int = 64,
 ) -> None:
     """Export PyTorch model to ONNX with dynamic batching support."""
-    model.eval()
+    model.eval()  # load-bearing: the exporter traces whatever mode it is given
     device = next(model.parameters()).device
     dummy_input = torch.randn(1, 3, 224, 224, device=device)
 
+    # torch.export-based exporter (dynamo=True is the default). Dynamic axes are
+    # declared with dynamic_shapes, positionally matching `args`; constant
+    # folding and graph optimization are always on.
     torch.onnx.export(
         model,
-        dummy_input,
+        (dummy_input,),
         output_path,
         opset_version=opset_version,
         input_names=["image"],
         output_names=["logits"],
-        dynamic_axes={
-            "image": {0: "batch_size"},    # dynamic batch dimension
-            "logits": {0: "batch_size"},
-        },
-        do_constant_folding=True,  # fold constant operations for speed
+        dynamic_shapes=({0: torch.export.Dim.DYNAMIC},),  # dynamic batch dim
     )
 
     # Verify ONNX model
@@ -572,9 +571,9 @@ Prototypical network approach: (1) Collect 5-20 representative images of the new
 
 ### Failure 2: Model Export Produces Different Predictions Than PyTorch Original
 
-**What failed:** After exporting EfficientNet-B3 to ONNX (opset 17), a systematic accuracy regression was discovered: top-1 accuracy on the validation set dropped from 95.2% to 93.8% (1.4 percentage points). Root cause: the model was still in training mode when `torch.onnx.export` was called, so BatchNorm exported with per-batch statistics rather than the eval-mode running statistics, and dropout was baked in live. `do_constant_folding=True` then fused those wrong BatchNorm constants into the preceding Conv2D weights, making the damage invisible in the graph.
+**What failed:** After exporting EfficientNet-B3 to ONNX (opset 17), a systematic accuracy regression was discovered: top-1 accuracy on the validation set dropped from 95.2% to 93.8% (1.4 percentage points). Root cause: the model was still in training mode when `torch.onnx.export` was called, so BatchNorm exported with per-batch statistics rather than the eval-mode running statistics, and dropout was baked in live. Constant folding — always on in the exporter — then fused those wrong BatchNorm constants into the preceding Conv2D weights, making the damage invisible in the graph.
 
-**Why the version matters here.** The legacy TorchScript exporter took a `training` argument that defaulted to `TrainingMode.EVAL` and forced eval mode for you, so this bug could not fire with default arguments. That argument is now **deprecated** — the docs say to "set the training mode of the model before exporting" — and since **PyTorch 2.9 `dynamo=True` is the export default**, which traces the module in whatever mode it is actually in. The safety net was removed; calling `model.eval()` yourself is now load-bearing.
+**Why `model.eval()` is load-bearing.** The `torch.export`-based exporter (`dynamo=True`, the default) traces the module in whatever mode it is actually in, and the PyTorch docs are explicit that you must "set the training mode of the model before exporting." Nothing in the export call flips the module to eval for you, so a training-mode module exports a training-mode graph and the export succeeds silently. Treat `model.eval()` as part of the export contract, not as hygiene.
 
 **Detection:** Post-export validation script compared ONNX output vs PyTorch output on 1,000 validation images. Mean absolute error between logits was 0.23 (should be < 0.001 for exact match). Time-to-detect: 30 minutes (post-export validation caught it before deployment).
 

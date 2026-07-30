@@ -198,9 +198,8 @@ def train_fraud_model(
         colsample_bytree=0.8,
         scale_pos_weight=scale_pos_weight,
         eval_metric=["logloss", "auc"],
-        # NOTE: use_label_encoder was deprecated in xgboost 1.7 and REMOVED in
-        # 2.0. Passing it now falls through **kwargs into the booster params and
-        # is silently ignored with a warning. Encode labels as 0..n-1 yourself.
+        # The sklearn wrapper does not encode labels for you: pass y already
+        # encoded as 0..n-1 (here 0 = legitimate, 1 = fraud).
         random_state=42,
         n_jobs=-1,
         tree_method="hist",  # faster for large datasets

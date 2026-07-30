@@ -442,7 +442,7 @@ stateDiagram-v2
 
     note right of Removed
         Fixes: TTL instead of DELETE (TWCS expires the whole SSTable);
-        tombstone_gc.mode=repair (4.1+); tombstone_threshold=0.1;
+        tombstone_threshold=0.1 with unchecked_tombstone_compaction=true;
         ALLOW FILTERING is never the fix.
     end note
 
@@ -533,7 +533,7 @@ bucket width that puts your busiest key under both limits, then remember the cos
 | Schema flexibility | Moderate | Rigid | High |
 | Query flexibility | Limited (partition key required) | Very High (SQL) | High (aggregation) |
 | Secondary indexes | Limited (local, materialized view) | Rich (B+tree, GIN, etc.) | Rich |
-| Transactions | Single partition or LWT | Full ACID | 4.0+ transactions |
+| Transactions | Single partition or LWT | Full ACID | Multi-document ACID (also across shards) |
 
 ---
 

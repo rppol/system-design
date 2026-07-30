@@ -476,8 +476,8 @@ public class CheckoutService {
 ### Graceful Shutdown
 
 ```java
-// Spring Boot 2.3+ — enable graceful shutdown
-// server.shutdown=graceful
+// Spring Boot 4.1 — graceful shutdown is the default for every embedded server.
+// Set server.shutdown=immediate to opt out; tune the grace period with:
 // spring.lifecycle.timeout-per-shutdown-phase=30s
 
 @Component
@@ -717,7 +717,7 @@ Size a thread pool bulkhead to expected peak concurrent calls to that dependency
 **Q: When should you use a semaphore bulkhead instead of a thread pool bulkhead?**
 **Short:** Use a semaphore bulkhead for cheap concurrency capping on fast calls, and a thread pool bulkhead to isolate the caller from a slow dependency.
 
-Use a semaphore bulkhead when call latency is low and you just want to cap concurrency cheaply, and a thread pool bulkhead when you need true isolation from a slow dependency. A semaphore bulkhead wraps the call with `Semaphore.tryAcquire()` on the caller's own thread — no new thread is created, so overhead is a handful of nanoseconds per call, but a hanging call still occupies one of the caller's own request-handling threads until it times out. A thread pool bulkhead submits the call to a dedicated executor, so if Payment Service hangs for 30 seconds, only the payment pool's threads block; the caller's own request thread returns immediately with a `CompletableFuture` and stays free to serve other requests. For a service on Java 21 virtual threads, semaphore bulkheads are usually enough since a stuck virtual thread costs kilobytes, not a full platform-thread stack; for a traditional 200-thread Tomcat pool, the extra hop of a thread pool bulkhead is worth it to protect that limited budget.
+Use a semaphore bulkhead when call latency is low and you just want to cap concurrency cheaply, and a thread pool bulkhead when you need true isolation from a slow dependency. A semaphore bulkhead wraps the call with `Semaphore.tryAcquire()` on the caller's own thread — no new thread is created, so overhead is a handful of nanoseconds per call, but a hanging call still occupies one of the caller's own request-handling threads until it times out. A thread pool bulkhead submits the call to a dedicated executor, so if Payment Service hangs for 30 seconds, only the payment pool's threads block; the caller's own request thread returns immediately with a `CompletableFuture` and stays free to serve other requests. For a service on virtual threads, semaphore bulkheads are usually enough since a stuck virtual thread costs kilobytes, not a full platform-thread stack; for a traditional 200-thread Tomcat pool, the extra hop of a thread pool bulkhead is worth it to protect that limited budget.
 
 ---
 

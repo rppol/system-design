@@ -170,7 +170,8 @@ allocated jobs that hold some GPUs while blocking on the rest — which is what 
 ### 4. MLflow as Experiment and Model Registry
 
 MLflow provides: experiment tracking (log parameters, metrics, artifacts at each training run),
-model registry (versioned models with stage transitions: Staging -> Production -> Archived),
+model registry (numbered model versions labelled by mutable aliases such as `@challenger` and
+`@champion`, plus version tags such as `validation_status: passed`),
 and artifact storage (S3 backend for model weights, preprocessors, configs). Model lineage is
 critical for compliance: each registered model version links to the training run, which links to
 the dataset version (S3 path + snapshot date) and the code commit (Git SHA). Full audit trail:
@@ -244,6 +245,7 @@ import redis
 import mlflow
 import mlflow.pytorch
 import mlflow.sklearn
+from mlflow.exceptions import MlflowException
 
 
 logger = logging.getLogger(__name__)
@@ -473,7 +475,7 @@ class ModelVersion:
     name: str
     version: int
     artifact_uri: str
-    stage: str                     # "Staging", "Production", "Archived"
+    aliases: list[str]             # e.g. ["champion"] or ["challenger"]
     run_id: str
     framework: str                 # "pytorch", "tensorflow", "sklearn", "xgboost"
     git_commit: str
@@ -484,13 +486,13 @@ class ModelVersion:
 class ModelRegistry:
     """
     Wrapper around MLflow Model Registry.
-    Enforces promotion workflow: model must pass validation before Production.
+    Enforces promotion workflow: a version must carry the `challenger` alias and
+    a passing validation tag before it can take the `champion` alias.
     Records full lineage: dataset + code + training run -> model version.
 
-    Note: registry *stages* (Staging/Production/Archived) have been deprecated
-    since MLflow 2.9 and still emit a deprecation warning in MLflow 3.x; new
-    deployments should use registry aliases plus tags instead. The stage calls
-    below still work and are kept because the platform predates the change.
+    Promotion is a *label* move, not a copy: aliases are mutable pointers, so
+    `models:/<name>@champion` always resolves to whatever version is live and
+    rollback is the same operation pointed at an older version.
     """
 
     def __init__(self, mlflow_tracking_uri: str = "http://mlflow.internal:5000") -> None:
@@ -505,7 +507,7 @@ class ModelRegistry:
     ) -> ModelVersion:
         """
         Register a model artifact as a new version in the registry.
-        New versions always start in 'None' stage (unvalidated).
+        New versions carry no alias until validation promotes them.
         """
         result = mlflow.register_model(artifact_uri, model_name)
         self._client.update_model_version(
@@ -516,35 +518,39 @@ class ModelRegistry:
         logger.info("Registered %s version %s", model_name, result.version)
         return self._get_version(model_name, int(result.version))
 
-    def promote_to_staging(self, model_name: str, version: int) -> None:
-        """Promote to Staging for integration testing and shadow mode evaluation."""
-        self._client.transition_model_version_stage(
-            name=model_name, version=str(version), stage="Staging"
-        )
-        logger.info("Promoted %s v%d to Staging", model_name, version)
+    def promote_to_challenger(self, model_name: str, version: int) -> None:
+        """Label as challenger for integration testing and shadow mode evaluation."""
+        self._client.set_registered_model_alias(model_name, "challenger", str(version))
+        logger.info("Aliased %s v%d as @challenger", model_name, version)
 
-    def promote_to_production(self, model_name: str, version: int) -> None:
+    def promote_to_champion(self, model_name: str, version: int) -> None:
         """
-        Promote to Production. Requires the version to be in Staging first.
-        Archives the previous Production version automatically.
+        Repoint @champion at this version. Requires it to already be the
+        challenger and to carry validation_status=passed.
         """
-        current_prod = self._client.get_latest_versions(model_name, stages=["Production"])
-        self._client.transition_model_version_stage(
-            name=model_name, version=str(version), stage="Production",
-            archive_existing_versions=True,
-        )
+        v = self._client.get_model_version(model_name, str(version))
+        if "challenger" not in v.aliases:
+            raise ValueError(f"{model_name} v{version} is not the current challenger")
+        if v.tags.get("validation_status") != "passed":
+            raise ValueError(f"{model_name} v{version} has not passed validation")
+
+        previous = self.get_champion_model(model_name)
+        # An alias points at exactly one version, so setting it here moves it
+        # off the incumbent; the old artifact is untouched and still loadable.
+        self._client.set_registered_model_alias(model_name, "champion", str(version))
+        self._client.delete_registered_model_alias(model_name, "challenger")
         logger.info(
-            "Promoted %s v%d to Production (archived: %s)",
+            "Promoted %s v%d to @champion (previous: %s)",
             model_name, version,
-            [v.version for v in current_prod],
+            previous.version if previous else None,
         )
 
-    def get_production_model(self, model_name: str) -> Optional[ModelVersion]:
-        """Fetch the currently active Production model version."""
-        versions = self._client.get_latest_versions(model_name, stages=["Production"])
-        if not versions:
+    def get_champion_model(self, model_name: str) -> Optional[ModelVersion]:
+        """Fetch the version currently holding the @champion alias."""
+        try:
+            v = self._client.get_model_version_by_alias(model_name, "champion")
+        except MlflowException:
             return None
-        v = versions[0]
         return self._get_version(model_name, int(v.version))
 
     def _get_version(self, model_name: str, version: int) -> ModelVersion:
@@ -555,7 +561,7 @@ class ModelRegistry:
             name=model_name,
             version=int(v.version),
             artifact_uri=v.source,
-            stage=v.current_stage,
+            aliases=list(v.aliases),
             run_id=v.run_id,
             framework=tags.get("model_type", "unknown"),
             git_commit=tags.get("git_commit", "unknown"),
@@ -842,28 +848,29 @@ ctr_7d_fv = FeatureView(
 # or feature_store.get_online_features() — same transformation, guaranteed parity
 ```
 
-**War Story 2 — Model registered as "Production" without challenger comparison caused revenue regression.**
+**War Story 2 — Model promoted to champion without challenger comparison caused revenue regression.**
 
 ```python
-# BROKEN: any model with AUC > 0.80 auto-promoted to Production
+# BROKEN: any model with AUC > 0.80 auto-promoted to champion
 # New model: AUC 0.82 (better on overall test set)
 # but NDCG@10 on top-1% revenue users dropped 8% → $40k/day revenue loss
 
-def auto_promote(run_id: str, client: MlflowClient) -> None:
+def auto_promote(run_id: str, version: str, client: MlflowClient) -> None:
     metrics = client.get_run(run_id).data.metrics
     if metrics["auc"] > 0.80:
-        client.transition_model_version_stage(MODEL_NAME, version, "Production")
-    # No comparison against current Production model on business-critical segment
+        client.set_registered_model_alias(MODEL_NAME, "champion", version)
+    # No comparison against the incumbent champion on the business-critical segment
 
-# FIX: champion/challenger comparison before promotion
-def promote_if_better(challenger_run_id: str, client: MlflowClient) -> bool:
-    challenger = client.get_run(challenger_run_id).data.metrics
-    champion_ver = client.get_latest_versions(MODEL_NAME, stages=["Production"])[0]
+# FIX: champion/challenger comparison before the alias moves
+def promote_if_better(challenger_version: str, client: MlflowClient) -> bool:
+    challenger_ver = client.get_model_version(MODEL_NAME, challenger_version)
+    challenger = client.get_run(challenger_ver.run_id).data.metrics
+    champion_ver = client.get_model_version_by_alias(MODEL_NAME, "champion")
     champion = client.get_run(champion_ver.run_id).data.metrics
 
     if (challenger["auc"] > champion["auc"] and
             challenger["ndcg_at_10_top_users"] >= champion["ndcg_at_10_top_users"] * 0.99):
-        client.transition_model_version_stage(MODEL_NAME, challenger_ver, "Production")
+        client.set_registered_model_alias(MODEL_NAME, "champion", challenger_version)
         return True
     return False
 ```
@@ -912,7 +919,7 @@ A/B testing for model promotion:
 
 **What is the difference between online and batch feature computation, and how does the platform serve both?** Batch features are computed on historical data in scheduled Spark/SQL jobs and stored in the offline feature store (Parquet/Delta Lake). Online features are computed in real-time (stream processing or point-in-time lookup) and stored in the online feature store (Redis/DynamoDB) for low-latency serving. The platform exposes a unified feature retrieval API: `get_historical_features()` for training (returns Parquet), `get_online_features()` for inference (returns Redis values). Feature definitions are written once; the platform materializes to both stores.
 
-**How do you handle model rollback when a production model causes a regression?** The model registry stores all versions with stage transitions audited. Rollback is a stage transition: `client.transition_model_version_stage(MODEL_NAME, previous_version, "Production")` — an API deprecated since MLflow 2.9, where the current equivalent is repointing a registry alias. The serving layer polls the registry every 60 seconds and hot-swaps the ONNX model without restart. Total rollback time: < 2 minutes. For catastrophic failures (OOM, crash loop), the serving infrastructure falls back to the last-known-good ONNX file cached on disk, independent of the registry.
+**How do you handle model rollback when a production model causes a regression?** The model registry stores all versions with every alias move audited. Rollback is repointing one alias: `client.set_registered_model_alias(MODEL_NAME, "champion", previous_version)` — the artifact never moves, so there is nothing to rebuild. The serving layer polls the registry every 60 seconds and hot-swaps the ONNX model without restart. Total rollback time: < 2 minutes. For catastrophic failures (OOM, crash loop), the serving infrastructure falls back to the last-known-good ONNX file cached on disk, independent of the registry.
 
 **What is a feature store and why is it worth the operational overhead?** A feature store solves three problems: (1) training/serving skew — features are computed once and read identically by both; (2) feature reuse — teams share computed features instead of re-implementing the same 7-day CTR in 5 different codebases; (3) point-in-time correctness — historical training data is fetched with the feature values that were available at each training example's timestamp, preventing future data leakage. The overhead (maintaining Feast/Tecton, running materialization jobs) pays off once 3+ teams share the same feature.
 

@@ -725,7 +725,7 @@ Note bin 3: mass unchanged, term exactly `0.0`. Bins that did not move contribut
 |----------|------|-------|
 | Open-Source Feature Store | Feast | Most mature OSS option; Python SDK; multiple backend support |
 | Managed Feature Store | Tecton | Managed platform from the team that originally built Feast, but its own SDK (Rift compute engine, Stream Ingest API) — not a Feast-compatible API |
-| Cloud Feature Store | Vertex AI Feature Store (GCP) | BigQuery as the data source; as of May 2026 Bigtable online serving is the only supported online-serving type ("optimized online serving" is deprecated) |
+| Cloud Feature Store | Agent Platform Feature Store (GCP, formerly Vertex AI Feature Store) | BigQuery as the data source; Bigtable online serving, with scheduled or continuous sync per feature view. Embeddings are served by Vector Search, not the feature store |
 | Cloud Feature Store | SageMaker Feature Store (AWS) | DynamoDB online; S3 offline; tight SageMaker integration |
 | Online Store | Redis | De facto standard for <5ms P99; requires cluster for >100GB |
 | Online Store | Apache Cassandra | Better for multi-region writes; 5-15ms P99 |

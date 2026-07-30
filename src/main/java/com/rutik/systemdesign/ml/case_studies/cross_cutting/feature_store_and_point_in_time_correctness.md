@@ -426,7 +426,7 @@ def detect_training_serving_skew(
 | Hopsworks | Open source managed | Full stack incl. training pipelines | Complex to self-host |
 | Chronon (Airbnb OSS) | Self-hosted | Single definition → dual compute | Requires event-sourced data |
 | Feathr (LinkedIn OSS) | Self-hosted (Spark) | Cross-platform, Azure/AWS/GCP; LF AI & Data project | Upstream dormant since April 2024 — check before adopting |
-| Vertex AI Feature Store | GCP managed | Fully managed; BigQuery offline source + Bigtable online serving | GCP lock-in; the older "Optimized" online serving path is deprecated in favour of Bigtable — check the current deprecation notice before building on it |
+| Vertex AI Feature Store | GCP managed | Fully managed; BigQuery offline source, Bigtable online serving for both scheduled and continuous sync | GCP lock-in; Bigtable online serving is the only online path to build on |
 | SageMaker Feature Store | AWS managed | Tight Sagemaker integration, online+offline | AWS lock-in |
 
 ---

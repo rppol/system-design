@@ -437,7 +437,7 @@ sequenceDiagram
 
 Thread B's write at v5 collides with Thread A's already-committed v5 and is rejected; only after reloading at v5 does its retry succeed at v6.
 
-Write latency to a well-tuned EventStoreDB or PostgreSQL event store: p50 ~1ms, p99 ~5ms for single-region, local disk. Cross-AZ replication adds 1–3ms.
+Write latency to a well-tuned KurrentDB or PostgreSQL event store: p50 ~1ms, p99 ~5ms for single-region, local disk. Cross-AZ replication adds 1–3ms.
 
 ---
 
@@ -445,7 +445,7 @@ Write latency to a well-tuned EventStoreDB or PostgreSQL event store: p50 ~1ms, 
 
 **Axon Framework + AxonServer (Java — ING Bank, CapGemini)**: ING Bank uses Axon for banking transaction systems where every account operation must be auditable. AxonServer is a purpose-built event store with built-in routing and dead-letter queue support. CapGemini builds insurance claim processing systems on Axon where claim state history is a regulatory requirement.
 
-**EventStoreDB**: A purpose-built event database with native projections, catch-up subscriptions, and competing consumers. Used by financial services firms (including trading platforms and insurance companies) for audit-critical systems. Supports persistent subscriptions that survive consumer restarts at ~5ms p99 delivery latency on same-AZ deployments.
+**KurrentDB**: A purpose-built event database with native projections, catch-up subscriptions, and competing consumers. Used by financial services firms (including trading platforms and insurance companies) for audit-critical systems. Supports persistent subscriptions that survive consumer restarts at ~5ms p99 delivery latency on same-AZ deployments.
 
 **Amazon Order Management**: Every state transition — placed, payment confirmed, inventory reserved, shipped, delivered, returned — is modeled as an event. The customer-facing order timeline page is a projection of all events. Customer service agents can query the full event history to diagnose delivery issues without accessing raw database tables.
 
@@ -512,7 +512,7 @@ Write latency to a well-tuned EventStoreDB or PostgreSQL event store: p50 ~1ms, 
 
 ## 11. Technologies & Tools
 
-**EventStoreDB**: Purpose-built event store. Native persistent subscriptions, catch-up subscriptions, competing consumers, server-side projections (JavaScript). Strong consistency within a stream. Available self-hosted or as Event Store Cloud. Write throughput: ~10,000 events/second per node on standard hardware.
+**KurrentDB**: Purpose-built event store. Native persistent subscriptions, catch-up subscriptions, competing consumers, server-side projections (JavaScript). Strong consistency within a stream. Available self-hosted or as Kurrent Cloud. Write throughput: ~10,000 events/second per node on standard hardware.
 
 **Apache Kafka**: Durable, ordered, partitioned event log. Consumer groups as competing consumers. Compacted topics for snapshot-like behavior (latest value per key). Not a purpose-built event store — no per-stream optimistic concurrency. Best for high-throughput platform-level event streaming. Typical write latency: ~5ms p99 on same-AZ, ~15ms cross-AZ.
 
@@ -775,11 +775,11 @@ stateDiagram-v2
 
 | Component | Technology | Rationale |
 |-----------|-----------|-----------|
-| Event Store | EventStoreDB | Per-stream optimistic concurrency; native catch-up subscriptions; 10K events/s write throughput |
+| Event Store | KurrentDB | Per-stream optimistic concurrency; native catch-up subscriptions; 10K events/s write throughput |
 | Customer status read model | PostgreSQL + Redis | Redis for hot-path reads (< 5ms); Postgres for durable source |
 | Fulfillment view | PostgreSQL | Relational queries; joins with warehouse config |
 | Revenue reporting | Elasticsearch | Aggregation queries; time-series analysis |
-| Saga orchestrator | Custom service + EventStoreDB | Saga state stored as events in a dedicated saga stream |
+| Saga orchestrator | Custom service + KurrentDB | Saga state stored as events in a dedicated saga stream |
 | Message bus | Apache Kafka | Cross-service event delivery; 7-day retention; consumer group isolation |
 
 ### Failure Modes and Mitigations
@@ -787,7 +787,7 @@ stateDiagram-v2
 | Failure | Impact | Mitigation |
 |---------|--------|-----------|
 | Projector restart | Read model serves stale data until caught up; lag ~1–30s | Checkpoint-based resume; monitor lag metric |
-| Event store node failure | Writes blocked during leader election (~5–10s for EventStoreDB) | Client retry with exponential backoff; 99.99% availability with 3-node cluster |
+| Event store node failure | Writes blocked during leader election (~5–10s for KurrentDB) | Client retry with exponential backoff; 99.99% availability with 3-node cluster |
 | Saga orchestrator crash | In-flight sagas paused until restart | Saga state is in the event store; resume from last committed saga event on restart |
 | Payment service timeout | Saga waits up to 30s, then compensates | Dead-letter saga commands after N retries; manual intervention queue |
 | Projection rebuild during schema change | Old read model serves traffic during rebuild | Blue/green projection rebuild; atomic namespace swap |
@@ -799,7 +799,7 @@ stateDiagram-v2
 - Event payload size: ~500 bytes average → 200 MB/day → 73 GB/year
 - Projection rebuild time at 100M events (~250 days of accumulation at this rate): ~8.3 minutes at 200K events/second processing rate
 - Snapshot threshold: every 50 events (Order aggregate rarely exceeds 20 events; Payment aggregate rarely exceeds 5)
-- Eventual consistency lag under normal load: 15–50ms (EventStoreDB catch-up subscription to PostgreSQL projector)
+- Eventual consistency lag under normal load: 15–50ms (KurrentDB catch-up subscription to PostgreSQL projector)
 
 **Stated plainly.** "Business volume times events-per-transaction gives you an event rate; that rate times payload size gives you a storage bill that never goes down, because nothing is ever deleted."
 
@@ -824,7 +824,7 @@ Both multiplications matter. Teams size the event store off order volume and for
   bytes/day   = 400,000 x 500 bytes        = 200,000,000 B = 200 MB/day
   per year    = 200 MB x 365               =      73,000 MB = 73 GB/year
 
-  headroom against EventStoreDB's ~10,000 events/sec per node:
+  headroom against KurrentDB's ~10,000 events/sec per node:
     10,000 / 50 peak = 200x
   -> throughput is a non-issue here; retention is the real constraint.
 ```

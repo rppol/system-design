@@ -146,10 +146,11 @@ Knowledge-Question Map and a 5-week Study Plan (interview-readiness prose; no to
 | Technology | Version |
 |------------|---------|
 | Java | 25 (LTS) |
-| Spring Boot | 4.1+ |
-| Spring Framework | 7.0 |
-| Kafka | 4.3+ (KRaft-only) |
-| Resilience4j | 2.4+ |
+| Spring Boot | 4.1.x |
+| Spring Framework | 7.x |
+| Spring Cloud | 2025.1.x "Oakwood" |
+| Kafka | 4.2+ (KRaft-only) |
+| Resilience4j | 2.4+ (`resilience4j-spring-boot4`) |
 | Micrometer | 1.17+ |
 | OpenTelemetry | 1.x |
 

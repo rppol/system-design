@@ -1,6 +1,6 @@
 # Apache Airflow
 
-> **Version pin:** This module targets **Airflow 3.0.x (released April 2025)**. Where Airflow 2.x behaves differently, the delta is tagged inline as **[2.x]**.
+> **Version pin:** This module targets the **Airflow 3 line, current stable 3.3.0 (July 2026)**. Where Airflow 2.x behaves differently, the delta is tagged inline as **[2.x]**; a **[3.0]** / **[3.1+]** / **[3.3]** tag marks which 3.x release first shipped the feature.
 
 Airflow is the de-facto open-source **batch workflow orchestrator**: you declare pipelines as Python, and a control plane schedules, retries, and observes them. It runs your business logic on a schedule with dependency awareness — it does not run the logic itself.
 
@@ -365,7 +365,7 @@ The backend is queried **first**, so a mis-scoped Vault path silently falls thro
 XCom ("cross-communication") passes **small** values between tasks via `xcom` rows in the metadata DB. The **TaskFlow API** ([2.x]+) makes this implicit — a returned value becomes an XCom, a function argument pulls it:
 
 ```python
-from airflow.decorators import dag, task
+from airflow.sdk import dag, task
 import pendulum
 
 @dag(schedule="@daily", start_date=pendulum.datetime(2026, 1, 1, tz="UTC"),
@@ -389,7 +389,7 @@ daily_sales()
 XComs are serialized into the DB, so they must stay small (KB, not MB). A 200 MB DataFrame pushed through XCom bloats the DB and can OOM the scheduler (§10, §12). For large payloads, register a **custom XCom backend** that transparently spills to S3 and stores only the pointer in the DB:
 
 ```python
-from airflow.models.xcom import BaseXCom
+from airflow.sdk import BaseXCom
 import uuid, boto3, pickle
 
 class S3XComBackend(BaseXCom):
@@ -444,17 +444,17 @@ BashOperator(
 
 Built-in macros include `{{ ds }}`, `{{ ds_nodash }}`, `{{ data_interval_start }}`, `{{ data_interval_end }}`, `{{ ts }}`, `{{ run_id }}`, and `{{ macros.ds_add(ds, -7) }}`. **Params** attach validated, UI-overridable inputs to a DAG (`params={"region": Param("us", enum=["us","eu"])}`), surfaced in the "Trigger DAG w/ config" form. Templating is why you must derive the processing window from `{{ ds }}` / `data_interval_start`, never `datetime.now()` (§10).
 
-### 6.8 TaskGroups (vs deprecated SubDAGs)
+### 6.8 TaskGroups
 
 **TaskGroups** visually and logically group tasks inside one DAG without spawning a child DAG:
 
 ```python
-from airflow.utils.task_group import TaskGroup
+from airflow.sdk import TaskGroup
 with TaskGroup("ingest") as ingest:
     a = extract(); b = validate(a)
 ```
 
-They are pure UI/organization sugar — the tasks still run in the parent DAG under the parent's concurrency limits. **SubDAGs are removed in 3.0** (deprecated since 2.0): they ran a whole child DAG under a `SubDagOperator` that itself occupied a worker slot, causing deadlocks when the SubDAG's tasks needed slots the operator was holding. Always use TaskGroups (or asset-linked separate DAGs) instead.
+They are pure UI/organization sugar — the tasks still run in the parent DAG under the parent's concurrency limits, so a group never introduces its own scheduling boundary or its own worker slot. When you want a *real* boundary — independent schedule, independent concurrency, independent ownership — do not nest DAGs; split into separate DAGs and wire them with assets (§6.10), which is the only decomposition that keeps each side independently schedulable.
 
 ### 6.9 Setup and teardown tasks ([2.7+])
 
@@ -650,7 +650,7 @@ Debugging workflow: Grid shows a red cell → click the failed task instance →
 Putting the pieces together — an idempotent daily ELT with a pool, retries, callbacks, a branch, and an asset outlet:
 
 ```python
-from airflow.decorators import dag, task
+from airflow.sdk import dag, task
 from airflow.providers.slack.notifications.slack import SlackNotifier
 from airflow.sdk import Asset
 import pendulum
@@ -737,7 +737,7 @@ Two extension points seniors write by hand. A **deferrable operator** pairs an o
 
 ```python
 from airflow.triggers.base import BaseTrigger, TriggerEvent
-from airflow.models import BaseOperator
+from airflow.sdk import BaseOperator
 import asyncio
 
 class S3KeyTrigger(BaseTrigger):

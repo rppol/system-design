@@ -933,7 +933,7 @@ aws elbv2 modify-listener --listener-arn $LISTENER \
 | Cache warmth         | Poor        | Poor        | Excellent       | Good    |
 | Reshuffling on scale | None        | None        | Minimal (~1/N)  | High    |
 | Latency-variance fit | Poor        | Excellent   | Poor            | Poor    |
-| Use case             | Static      | API         | WebSocket/Cache | Legacy  |
+| Use case             | Static      | API         | WebSocket/Cache | Affinity without a cookie |
 
 ### Metrics & Results
 

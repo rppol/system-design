@@ -31,9 +31,9 @@ A deployment without a strategy is like replacing airplane engines mid-flight wi
 - **Canary**: route small % to new version; monitor error rate; gradually increase percentage; progressive delivery
 
 **Image base choices**:
-- `eclipse-temurin:21-jre`: OpenJDK JRE, ~180MB
-- `eclipse-temurin:21-jre-alpine`: Alpine-based, ~120MB
-- `gcr.io/distroless/java21`: no shell, no package manager, ~75MB; minimal attack surface
+- `eclipse-temurin:25-jre`: OpenJDK JRE, ~180MB
+- `eclipse-temurin:25-jre-alpine`: Alpine-based, ~120MB
+- `gcr.io/distroless/java25`: no shell, no package manager, ~75MB; minimal attack surface
 - GraalVM native: binary executable, ~50MB, < 100ms startup; no JVM
 
 ---
@@ -53,15 +53,15 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     subgraph ST1["Stage 1: Builder (JDK)"]
-        jdk(["FROM ...21-jdk"]) --> pomCache["COPY pom.xml<br/>+ go-offline<br/>cached layer"]
+        jdk(["FROM ...25-jdk"]) --> pomCache["COPY pom.xml<br/>+ go-offline<br/>cached layer"]
         pomCache --> srcBuild["COPY src<br/>mvn package<br/>rebuilds on change"]
-        srcBuild --> extract["layertools<br/>extract"]
+        srcBuild --> extract["jarmode=tools<br/>extract --layers"]
     end
 
     subgraph ST2["Stage 2: Runtime (JRE only)"]
-        jre(["FROM ...21-jre"]) --> stableLayers["COPY deps + loader<br/>layers, rarely change"]
+        jre(["FROM ...25-jre"]) --> stableLayers["COPY deps + loader<br/>layers, rarely change"]
         stableLayers --> appLayer["COPY application<br/>layer, smallest,<br/>changes most"]
-        appLayer --> entry(["ENTRYPOINT<br/>JarLauncher"])
+        appLayer --> entry(["ENTRYPOINT<br/>java -jar<br/>application.jar"])
     end
 
     extract -.-> jre
@@ -112,7 +112,7 @@ flowchart LR
 
 ```dockerfile
 # Stage 1: Build the application
-FROM eclipse-temurin:21-jdk-jammy AS builder
+FROM eclipse-temurin:25-jdk-noble AS builder
 
 WORKDIR /build
 
@@ -125,12 +125,12 @@ RUN ./mvnw dependency:go-offline -B
 # Copy source (layer invalidated when source changes)
 COPY src ./src
 
-# Build the JAR and extract layers (Spring Boot Layertools)
+# Build the JAR and extract layers (the spring-boot-jarmode-tools "tools" jar mode)
 RUN ./mvnw package -DskipTests -B && \
-    java -Djarmode=layertools -jar target/*.jar extract --destination target/extracted
+    java -Djarmode=tools -jar target/*.jar extract --layers --destination target/extracted
 
 # Stage 2: Runtime image — only what's needed to run
-FROM eclipse-temurin:21-jre-jammy AS runtime
+FROM eclipse-temurin:25-jre-noble AS runtime
 
 # Non-root user (security best practice)
 RUN groupadd --system spring && useradd --system --gid spring spring
@@ -152,7 +152,9 @@ ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 \
 
 EXPOSE 8080
 
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS org.springframework.boot.loader.launch.JarLauncher"]
+# The extracted application/ layer carries a thin application.jar that references
+# the sibling layers — launch it directly, not the uber jar from the builder stage.
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar application.jar"]
 ```
 
 **Read it like this.** "Take 75 percent of *the container's* memory limit for the Java heap — and the two flags together are what make the JVM read the cgroup limit instead of the machine's total RAM."
@@ -161,11 +163,11 @@ The number 75 is the interesting part, but the word "container's" is the load-be
 
 | Symbol | What it is |
 |--------|------------|
-| `-XX:+UseContainerSupport` | Makes the JVM read the cgroup memory limit as "available RAM". Default on since Java 10 |
+| `-XX:+UseContainerSupport` | Makes the JVM read the cgroup memory limit as "available RAM". On by default |
 | `-XX:MaxRAMPercentage=75.0` | Max heap as a percentage of that available RAM |
 | Available RAM | The container's `resources.limits.memory` when container support is on; the *host's* total RAM when it is off |
 | The other 25% | Metaspace, code cache, JIT buffers, thread stacks, direct/Netty off-heap buffers, GC structures |
-| Default without the flag | `MaxRAMFraction=4`, i.e. 25% — applied to whatever the JVM believes "available" means |
+| Default without the flag | `MaxRAMPercentage=25.0`, i.e. 25% — applied to whatever the JVM believes "available" means |
 
 **Walk one example.** The same JVM, the same 25% default, two different bases:
 
@@ -588,7 +590,7 @@ CPU requests are used by the scheduler to find a node with sufficient available 
 **Q: How should you size JVM heap in a Kubernetes container?**
 **Short:** Enable container-aware JVM flags and cap the heap at roughly 75% of the container's memory limit.
 
-Always use `-XX:+UseContainerSupport` (default in Java 11+) to make the JVM container-aware — it reads cgroup memory limits instead of host total RAM. Set `-XX:MaxRAMPercentage=75.0` to allocate 75% of the container's memory limit to the heap. Reserve 25% for: JVM overhead (metaspace, code cache, JIT buffers), off-heap memory (direct buffers, Netty allocations), and OS/container overhead. Example: 1GB container limit → 768MB heap, 256MB for JVM overhead. Without these flags on Java < 11 or with UseContainerSupport disabled, the JVM sees the host's 64GB RAM and tries to use 16GB for heap, causing immediate OOM kill.
+Always use `-XX:+UseContainerSupport` (on by default) to make the JVM container-aware — it reads cgroup memory limits instead of host total RAM. Set `-XX:MaxRAMPercentage=75.0` to allocate 75% of the container's memory limit to the heap. Reserve 25% for: JVM overhead (metaspace, code cache, JIT buffers), off-heap memory (direct buffers, Netty allocations), and OS/container overhead. Example: 1GB container limit → 768MB heap, 256MB for JVM overhead. With `-XX:-UseContainerSupport` the JVM ignores the cgroup limit, sees the host's 64GB RAM and tries to use 16GB for heap, causing immediate OOM kill — which is why the flag is worth asserting explicitly in the image rather than trusting whatever a base image's `JAVA_TOOL_OPTIONS` happens to carry.
 
 **Q: What is a Pod Disruption Budget (PDB) and why is it important?**
 **Short:** A PDB sets the minimum pods that must stay available, stopping voluntary disruptions from draining a deployment's whole capacity at once.
@@ -638,7 +640,7 @@ Choose canary when you want gradual, metrics-gated exposure at roughly 1.2x reso
 **Q: What do you give up operationally by switching to a distroless base image, and why is it usually still worth it?**
 **Short:** Distroless images drop interactive shell debugging, but the smaller attack surface and CVE count are usually worth the tradeoff.
 
-A distroless image has no shell and no package manager, so you lose the ability to exec in and debug interactively inside a running container. The image base table in §4 lists `gcr.io/distroless/java21` at roughly 75MB versus 180MB for `eclipse-temurin:21-jre` — the size difference comes almost entirely from stripping bash, apt, curl, and every other userland binary an attacker could otherwise use once inside, which also shrinks the CVE surface Trivy has to scan. Cloudflare's approach in §7 is the model for operating without shell access: all debugging happens through structured logs, metrics, and traces, or an ephemeral debug container attached to the pod's process namespace, rather than exec-ing directly into the running container. The tradeoff is a steeper learning curve for teams used to interactive debugging, but it removes an entire class of container-escape and credential-theft techniques that depend on a shell being present.
+A distroless image has no shell and no package manager, so you lose the ability to exec in and debug interactively inside a running container. The image base table in §4 lists `gcr.io/distroless/java25` at roughly 75MB versus 180MB for `eclipse-temurin:25-jre` — the size difference comes almost entirely from stripping bash, apt, curl, and every other userland binary an attacker could otherwise use once inside, which also shrinks the CVE surface Trivy has to scan. Cloudflare's approach in §7 is the model for operating without shell access: all debugging happens through structured logs, metrics, and traces, or an ephemeral debug container attached to the pod's process namespace, rather than exec-ing directly into the running container. The tradeoff is a steeper learning curve for teams used to interactive debugging, but it removes an entire class of container-escape and credential-theft techniques that depend on a shell being present.
 
 **Q: What is the startup ordering guarantee for Kubernetes init containers versus native sidecar containers?**
 **Short:** Init containers finish fully before any container starts, while native sidecars reach Ready before the main container starts and then keep running.
@@ -654,12 +656,12 @@ Mounted secret volumes are generally safer than environment variables, because e
 
 ## 13. Best Practices
 
-- Use Spring Boot's layered JAR feature for optimal Docker layer caching (`jarmode=layertools`)
+- Use Spring Boot's layered JAR feature for optimal Docker layer caching (`java -Djarmode=tools -jar app.jar extract --layers`)
 - Set `JAVA_OPTS` via environment variable (not hardcoded in Dockerfile) for runtime tuning
 - Scan images with Trivy in CI pipeline: `trivy image --exit-code 1 --severity HIGH,CRITICAL company/order-service:1.0.0`
 - Run containers as non-root user (UID 1000) to limit container escape blast radius
 - Use `readOnlyRootFilesystem: true` in SecurityContext where possible
-- Pin base image versions to digest: `FROM eclipse-temurin:21-jre-jammy@sha256:...` for reproducibility
+- Pin base image versions to digest: `FROM eclipse-temurin:25-jre-noble@sha256:...` for reproducibility
 - Set `terminationGracePeriodSeconds` 2x the expected maximum request processing time
 - Use `topologySpreadConstraints` to spread pods across AZs — prevents all pods on one failing AZ
 - Label all deployments with `version` for canary traffic splitting and Kiali visualization

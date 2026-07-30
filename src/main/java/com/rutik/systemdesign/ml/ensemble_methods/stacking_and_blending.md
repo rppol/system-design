@@ -1112,9 +1112,8 @@ for model_idx, (model_name, model) in enumerate(base_models.items()):
                     callbacks=[lgb.early_stopping(100, verbose=False), lgb.log_evaluation(-1)],
                 )
             else:
-                # XGBoost >= 2.0: early_stopping_rounds is a CONSTRUCTOR argument.
-                # Passing it to fit() raises TypeError -- it was removed from the
-                # fit() signature (deprecated in 1.6).
+                # XGBoost: early_stopping_rounds is a CONSTRUCTOR argument, so
+                # set it on the estimator; fit() does not accept it.
                 fold_model.set_params(early_stopping_rounds=100)
                 fold_model.fit(
                     X_tr, y_tr,

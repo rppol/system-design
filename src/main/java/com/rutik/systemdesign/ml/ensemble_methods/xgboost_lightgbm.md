@@ -519,16 +519,16 @@ xgb_model = xgb.XGBClassifier(
     gamma=0.0,                 # minimum gain for split; 0-5 range; increase to prune
 
     # Training
-    tree_method="hist",        # always use hist for speed (was gpu_hist, now unified)
+    tree_method="hist",        # one method for CPU and GPU; pick the device below
     device="cpu",              # set "cuda" for GPU
     eval_metric="auc",         # validation metric for early stopping
     early_stopping_rounds=100, # stop if AUC doesn't improve for 100 rounds
 
     # Other
     scale_pos_weight=1.0,      # for imbalanced: sum(neg)/sum(pos)
-    # NOTE: do NOT pass use_label_encoder — it was removed in XGBoost 1.6 and is
-    # absent from the 2.x/3.x sklearn wrapper entirely. Passing it now falls into
-    # **kwargs and is forwarded to the booster as an unknown parameter.
+    # The sklearn wrapper does no label encoding: y must already be 0..n_classes-1.
+    # Unrecognised keywords fall into **kwargs and reach the booster as unknown
+    # params, so a typo here fails silently rather than raising.
     random_state=42,
     n_jobs=-1,
 )
@@ -568,8 +568,8 @@ lgb_model = lgb.LGBMClassifier(
 
     # LightGBM-specific
     boosting_type="gbdt",      # the sklearn wrapper accepts ONLY gbdt / dart / rf.
-                               # GOSS is no longer a boosting_type: pass
-                               # data_sample_strategy="goss" instead (default: "bagging").
+                               # GOSS is a sampling strategy, not a boosting type:
+                               # pass data_sample_strategy="goss" (default: "bagging").
     n_jobs=-1,
     random_state=42,
     verbose=-1,                # suppress training output
@@ -1061,15 +1061,15 @@ Always ensure training data missingness patterns match production. If a feature 
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| XGBoost | 2.0+ | Unified hist method (`tree_method="hist"` + `device="cuda"`; `gpu_hist` removed), native categoricals, multi-output. `use_label_encoder` gone since 1.6; `early_stopping_rounds` is a constructor arg, not a `fit()` arg, since 2.0 |
-| LightGBM | 4.0+ | Arrow/Pandas 2.0 support. GOSS moved out of `boosting_type` to `data_sample_strategy="goss"` and is **not** the default (`"bagging"` is) |
+| XGBoost | 3.x | One `tree_method="hist"` for CPU and GPU, selected with `device="cuda"`; native categoricals; multi-output. `early_stopping_rounds` is a constructor arg, not a `fit()` arg. `ExtMemQuantileDMatrix` gives terabyte-scale external-memory training. Needs CUDA 12+ and Python 3.10+ |
+| LightGBM | 4.x | Arrow and pandas support. GOSS is requested with `data_sample_strategy="goss"` and is **not** the default (`"bagging"` is); `boosting_type` accepts `gbdt`/`dart`/`rf` |
 | CatBoost | 1.2+ | text features, embeddings, monotone constraints |
-| SHAP | 0.44+ | TreeSHAP on all three (XGB/LGB/CB); GPU-accelerated SHAP coming |
-| Optuna | 3.3+ | Integrated XGBoost/LightGBM callbacks for pruning |
-| MLflow | 2.10+ | Auto-logging for all three: params, metrics, artifacts |
-| Ray Tune | 2.9+ | Distributed hyperparameter search for XGB/LGB |
-| XGBoost Dask | 2.0+ | Distributed XGBoost training on multi-node clusters |
-| LightGBM MPI | 4.0+ | Distributed LightGBM training |
+| SHAP | 0.5x | TreeSHAP on all three (XGB/LGB/CB) |
+| Optuna | 4.x | Integrated XGBoost/LightGBM callbacks for pruning |
+| MLflow | 3.x | Auto-logging for all three: params, metrics, artifacts |
+| Ray Tune | 2.x | Distributed hyperparameter search for XGB/LGB |
+| XGBoost Dask | 3.x | Distributed XGBoost training on multi-node clusters; import explicitly with `from xgboost import dask` |
+| LightGBM MPI | 4.x | Distributed LightGBM training |
 
 ---
 
@@ -1101,7 +1101,7 @@ learning_rate shrinks each tree's contribution, so a smaller step size needs mor
 
 **Q: What is the difference between tree_method=hist, exact, and approx in XGBoost?**
 **Short:** hist bins features into about 256 buckets for a 10-50x speedup over exact's optimal-but-slow sorted-value scan, and is XGBoost's unified default on CPU and GPU.
-hist bins each feature into ~256 buckets and scans histograms, exact evaluates every candidate split on sorted raw values, and approx uses per-tree quantile sketches. exact is O(N log N) per feature and finds the truly optimal split but is impractical beyond ~10K rows; hist trades a negligible accuracy loss for a 10-50x speedup and is the recommended default for all dataset sizes; approx sits between them and was largely superseded by hist. Since XGBoost 2.0, hist is the unified method for both CPU and GPU (device="cuda"), so hist is the right choice unless you have a small dataset where exact's marginal accuracy is worth the cost.
+hist bins each feature into ~256 buckets and scans histograms, exact evaluates every candidate split on sorted raw values, and approx uses per-tree quantile sketches. exact is O(N log N) per feature and finds the truly optimal split but is impractical beyond ~10K rows; hist trades a negligible accuracy loss for a 10-50x speedup and is the recommended default for all dataset sizes; approx sits between them, re-sketching before every tree instead of binning once, which is why it is slower than hist — and per the XGBoost docs, raising hist's max_bin usually matches or beats approx's accuracy anyway. hist is the one method for both CPU and GPU, with the target picked by device="cuda", so hist is the right choice unless you have a small dataset where exact's marginal accuracy is worth the cost.
 
 **Q: How does CatBoost's ordered boosting differ from standard GBDT and why does it matter for categorical features?**
 **Short:** CatBoost's ordered boosting computes each sample's target statistic only from prior samples in a random permutation, preventing the leakage plain target encoding causes.

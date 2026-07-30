@@ -666,9 +666,9 @@ MULTI/EXEC queues commands but doesn't execute them until EXEC — you cannot re
 | `MONITOR` | Real-time command stream (never in production — single-threaded bottleneck) |
 | `redis-memory-analyzer` | Analyze key distribution and memory usage |
 | `RedisInsight` | Official Redis GUI — keyspace browser, profiler, slowlog |
-| `KeyDB` | Redis fork with multi-threading support |
+| `Valkey` | BSD-licensed Linux Foundation fork of Redis 7.2.4; wire-compatible, and the default engine on AWS ElastiCache and MemoryDB |
 | `Dragonfly` | Redis-compatible, multi-threaded, higher memory efficiency |
-| `Valkey` | Linux Foundation Redis fork (community alternative) |
+| `valkey-cli` / `valkey-benchmark` | The Valkey-side equivalents of `redis-cli` and `redis-benchmark`; command-compatible |
 
 ---
 

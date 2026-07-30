@@ -85,7 +85,7 @@ HikariCP benchmarks show it handles 100,000s of borrow/return operations per sec
 | connectionTestQuery | none | Legacy drivers only — HikariCP "strongly recommends not setting this" if the driver supports JDBC4 `isValid()` |
 | validationTimeout | 5,000 ms | Timeout for isValid() check (min 250 ms) |
 
-Defaults above are from the HikariCP 7.x README and `HikariConfig` source. Spring Boot 4.1 manages HikariCP 7.0.2, but older Spring Boot 3.x lines manage HikariCP 5.x, where `keepaliveTime` still defaulted to 0 — check the version your build actually resolves before assuming keepalive is on.
+Defaults above are from the HikariCP 7.x README and `HikariConfig` source; Spring Boot 4.1 manages HikariCP 7.0.2. `keepaliveTime` is the one default that moved late (it was 0/disabled through HikariCP 6.2.0), so confirm the version your build actually resolves with `mvn dependency:tree` before assuming keepalive is on.
 
 ### 4.3 PgBouncer Connection Modes
 

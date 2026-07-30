@@ -158,15 +158,21 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 
-# datetime.utcnow() is deprecated from Python 3.12 — it returns a naive datetime
-# that silently misbehaves under arithmetic. Use timezone-aware now(timezone.utc).
+# Every timestamp here is timezone-aware UTC. A naive datetime silently
+# misbehaves under arithmetic once session state crosses a process or region
+# boundary, so build them with datetime.now(timezone.utc) throughout.
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 @dataclass
 class SessionState:
     session_id: str
     user_id: str
     events: list[dict] = field(default_factory=list)
-    last_updated: datetime = field(default_factory=datetime.utcnow)
+    last_updated: datetime = field(default_factory=_utc_now)
 
     def add_event(self, event_type: str, item_id: str, dwell_seconds: float = 0.0) -> None:
         self.events.append({

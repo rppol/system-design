@@ -77,7 +77,7 @@ Reverse API — the server pushes data to the client by calling a URL registered
 
 | Criterion          | REST       | GraphQL    | gRPC       |
 |--------------------|------------|------------|------------|
-| Protocol           | HTTP/1.1+  | HTTP/1.1+  | HTTP/2     |
+| Protocol           | HTTP/1.1-3 | HTTP/1.1-3 | HTTP/2     |
 | Payload format     | JSON/XML   | JSON       | Protobuf   |
 | Type safety        | Weak       | Strong     | Strong     |
 | Caching            | Excellent  | Hard       | Manual     |
@@ -454,7 +454,7 @@ PUT replaces the entire resource. PATCH applies a partial update. Example: PUT /
 **Q2: How do you handle API versioning?**
 **Short:** URL path, header, and query-parameter versioning are the three common API versioning strategies.
 
-Common strategies: URL path versioning (`/v1/`, `/v2/`), header versioning (`Accept: application/vnd.myapi.v2+json`), and query parameter versioning (`?version=2`). URL path versioning is most visible and commonly used. Always deprecate old versions with sunset headers before removing.
+Common strategies: URL path versioning (`/v1/`, `/v2/`), header versioning (`Accept: application/vnd.myapi.v2+json`), and query parameter versioning (`?version=2`). URL path versioning is most visible and commonly used. Always announce the retirement of an old version on the wire before removing it: `Deprecation` (RFC 9745) marks the moment the version became deprecated, and `Sunset` (RFC 8594) gives the date it stops responding.
 
 **Q3: What is the difference between authentication and authorization?**
 **Short:** Authentication verifies identity; authorization verifies what that identity may do.
@@ -499,7 +499,7 @@ gRPC uses Protocol Buffers over HTTP/2, providing binary serialization (smaller 
 **Q11: How do you handle breaking changes in a public API?**
 **Short:** Breaking API changes are handled by versioning, running versions in parallel, and a deprecation window.
 
-Version the API (introduce `/v2/`). Run both versions in parallel. Set a deprecation date, communicate via docs and `Deprecation` / `Sunset` headers. Give consumers at least 6-12 months to migrate. Use feature flags for gradual migration. Never silently change behavior of an existing version.
+Version the API (introduce `/v2/`). Run both versions in parallel. Set a deprecation date, communicate via docs and the two standardized headers: `Deprecation` (RFC 9745, a Proposed Standard) carries the timestamp the version became deprecated, and `Sunset` (RFC 8594) carries the date after which it stops responding — the Sunset date must not be earlier than the Deprecation one. Give consumers at least 6-12 months to migrate. Use feature flags for gradual migration. Never silently change behavior of an existing version.
 
 **Q12: What is CORS and how does it work?**
 **Short:** CORS lets a server opt browsers into cross-origin requests via the Access-Control-Allow-Origin header.

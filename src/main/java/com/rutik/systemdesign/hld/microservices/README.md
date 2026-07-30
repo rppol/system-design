@@ -880,9 +880,9 @@ Common sidecar uses:
 
 Netflix migrated from a monolith to cloud-native microservices between 2008 and January 2016, following a major database corruption incident. Key contributions to the ecosystem:
 - **Eureka**: service registry (open-sourced).
-- **Hystrix**: circuit breaker (open-sourced, now in maintenance; superseded by Resilience4j).
+- **Hystrix**: circuit breaker — the pattern's reference implementation, though new JVM services use Resilience4j (§11).
 - **Zuul**: API gateway.
-- **Ribbon**: client-side load balancing.
+- **Ribbon**: client-side load balancing, since folded into gRPC's own load-balancing interceptors.
 - **Chaos Monkey**: randomly terminates services in production to validate resilience.
 
 Netflix runs 700+ microservices handling 2+ billion API requests per day. Every service is independently deployable; the company does hundreds of deployments per day.
@@ -1133,7 +1133,7 @@ Notice that the latency number and the saturation number come from the same mult
 | Category | Tools | Notes |
 |----------|-------|-------|
 | Service Discovery | Eureka, Consul, Kubernetes DNS / kube-proxy, etcd, Apache ZooKeeper | Kubernetes DNS is the default in any K8s deployment; Eureka/Consul are common in non-K8s or hybrid environments |
-| API Gateway | Kong, AWS API Gateway, Envoy, Apigee, Zuul (legacy) | Envoy doubles as a gateway and a service-mesh data plane |
+| API Gateway | Kong, AWS API Gateway, Envoy, Apigee, Spring Cloud Gateway | Envoy doubles as a gateway and a service-mesh data plane; Spring Cloud Gateway is the JVM-native option |
 | Circuit Breaker | Resilience4j (current JVM standard), Polly (.NET), pybreaker (Python) | Resilience4j is lightweight and uses semaphore-based isolation by default, not thread pools — tune accordingly |
 | Service Mesh | Istio, Linkerd, Cilium Service Mesh, Consul service mesh; on AWS, Amazon ECS Service Connect (ECS) and VPC Lattice (EKS) | Istio is the most feature-rich but operationally heaviest; Linkerd is simpler to run; Cilium does it in eBPF with no per-pod sidecar |
 | Distributed Tracing | Jaeger, Zipkin, OpenTelemetry (instrumentation standard), AWS X-Ray, Datadog APM | OpenTelemetry is the vendor-neutral instrumentation layer; Jaeger/Zipkin/X-Ray/Datadog are backends it can export to |

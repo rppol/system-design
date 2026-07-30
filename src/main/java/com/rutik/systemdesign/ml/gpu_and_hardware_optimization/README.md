@@ -44,7 +44,7 @@ Key insight: the roofline model tells you which optimizations matter. Plot a mod
 **Mixed precision training**:
 - FP32 (4 bytes): full precision, used for loss accumulation and optimizer state
 - FP16 (2 bytes): half precision, fast on all NVIDIA GPUs with Tensor Cores, needs GradScaler
-- BF16 (2 bytes): same exponent range as FP32, preferred for LLM training (A100, H100, RTX 30/40 series)
+- BF16 (2 bytes): same exponent range as FP32, preferred for LLM training (A100, H100/H200, B200, RTX 30/40 series)
 - INT8 (1 byte): for inference only, quantized weights, requires calibration
 
 **Memory optimization techniques**:
@@ -65,8 +65,10 @@ Key insight: the roofline model tells you which optimizations matter. Plot a mod
 - Custom CUDA kernels: for operations not covered by PyTorch, write custom CUDA kernels (or use Triton to write them in Python)
 
 **GPU selection**:
-- A100 80GB SXM: best for large model training; 312 TFLOP/s BF16, 2 TB/s HBM3, 600 GB/s NVLink; ~$10-12/hr on cloud
-- H100 80GB SXM: successor to A100; 989 TFLOP/s BF16 (with sparsity), 3.35 TB/s HBM3, 900 GB/s NVLink; ~$30-35/hr on cloud
+- B200 180GB SXM (Blackwell): current flagship for frontier training and high-throughput inference; ~2,250 TFLOP/s BF16 dense, 8 TB/s HBM3e, 1.8 TB/s NVLink; ~$7/hr on cloud
+- H200 141GB SXM: H100 compute with far more memory and bandwidth — the practical inference GPU for large KV caches; 1,979 TFLOP/s BF16 (with sparsity), 4.8 TB/s HBM3e, 900 GB/s NVLink
+- H100 80GB SXM: the volume training GPU; 989 TFLOP/s BF16 (with sparsity), 3.35 TB/s HBM3, 900 GB/s NVLink; ~$4/hr on cloud
+- A100 80GB SXM: still ubiquitous and the cheapest way to get NVLink; 312 TFLOP/s BF16, 2 TB/s HBM2e, 600 GB/s NVLink; ~$2-3/hr on cloud
 - RTX 4090 24GB: best cost/performance for training medium models (<20B with quantization); 330 TFLOP/s BF16, 1 TB/s GDDR6X; ~$2,000 purchase
 - T4 16GB: inference workloads; 65 TFLOP/s FP16; very cost-effective for batch inference (~$0.35/hr on AWS)
 - L4 24GB: efficient inference + fine-tuning; 121 TFLOP/s BF16; $0.72/hr on GCP
@@ -774,14 +776,16 @@ to FSDP/ZeRO sharding or 8-bit optimizers — precision alone cannot fix an opti
 
 | GPU | VRAM | BF16 TFLOP/s | HBM Bandwidth | NVLink | Cloud Cost/hr | Best For |
 |---|---|---|---|---|---|---|
-| A100 80GB SXM | 80 GB | 312 | 2 TB/s | 600 GB/s | ~$10-12 | Large model training |
-| H100 80GB SXM | 80 GB | 989* | 3.35 TB/s | 900 GB/s | ~$30-35 | Cutting-edge training |
+| B200 180GB SXM | 180 GB | 2,250 | 8 TB/s | 1.8 TB/s | ~$7 | Frontier training, high-throughput inference |
+| H200 141GB SXM | 141 GB | 1,979* | 4.8 TB/s | 900 GB/s | varies | Large-KV-cache inference |
+| H100 80GB SXM | 80 GB | 989* | 3.35 TB/s | 900 GB/s | ~$4 | Volume training |
+| A100 80GB SXM | 80 GB | 312 | 2 TB/s | 600 GB/s | ~$2-3 | Large model training on a budget |
 | RTX 4090 24GB | 24 GB | 330* | 1 TB/s | None (PCIe) | ~$1.5 | Medium model training |
 | L4 24GB | 24 GB | 121 | 300 GB/s | None | ~$0.72 | Inference + fine-tuning |
 | T4 16GB | 16 GB | 65 | 300 GB/s | None | ~$0.35 | Batch inference |
 | A10G 24GB | 24 GB | 125 | 600 GB/s | None | ~$1-4 | Inference + LoRA |
 
-*with sparsity / structured sparsity enabled
+*with sparsity / structured sparsity enabled. Cloud rates are on-demand list prices and move often — re-check before quoting one.
 
 | Memory Technique | Memory Savings | Compute Overhead | Implementation Effort |
 |---|---|---|---|
@@ -797,7 +801,7 @@ to FSDP/ZeRO sharding or 8-bit optimizers — precision alone cannot fix an opti
 
 **Use gradient checkpointing when**: activations are the memory bottleneck (not parameters or optimizer), increasing batch size would improve training stability or throughput, or training very deep networks (>64 layers) where activation memory dominates.
 
-**Use BF16/mixed precision when**: hardware supports it (A100, H100, RTX 30/40, TPU v3+); always — there is no good reason to train in FP32 on modern hardware. The only exception is operations that need FP32 precision (loss accumulation, which autocast handles automatically).
+**Use BF16/mixed precision when**: hardware supports it (A100, H100/H200, B200, RTX 30/40, TPU v3+); always — there is no good reason to train in FP32 on modern hardware. The only exception is operations that need FP32 precision (loss accumulation, which autocast handles automatically).
 
 **Use pin_memory=True when**: training on GPU and DataLoader is the bottleneck (GPU utilization < 80% but CPU is at 100%). Do not use when: training on CPU, using shared memory datasets (pin_memory is incompatible with shared memory tensors).
 
@@ -817,8 +821,8 @@ Production incident: a team training an image classification model saw 65% GPU u
 **Pitfall 2 — Tensor dimension misalignment with Tensor Cores**
 A team implemented a custom embedding layer with embedding_dim=500 (chosen to match a feature dimension). Their GPU profiler showed 18 TFLOP/s on the embedding matmul instead of expected 100+ TFLOP/s. Root cause: 500 is not divisible by 8 — BF16 Tensor Cores require all matrix dimensions to be multiples of 8. The operation fell back to CUDA cores. Fix: pad embedding_dim to 512. The team also audited their entire model for odd dimension sizes; changing 5 layers from non-multiples of 8 to the next power of 2 increased overall training throughput by 22%.
 
-**Pitfall 3 — Gradient checkpointing with use_reentrant=True (deprecated behavior)**
-A team used `torch.utils.checkpoint.checkpoint(fn, *args)` (default use_reentrant=True) in a model that also used torch.compile. The reentrant checkpoint implementation is incompatible with TorchDynamo's graph capture — the compiler could not trace through the checkpoint boundary and fell back to eager mode, losing all compile benefits. Fix: set use_reentrant=False in checkpoint calls. The non-reentrant implementation is compatible with torch.compile and does not require inputs to have requires_grad=True.
+**Pitfall 3 — Gradient checkpointing with use_reentrant=True**
+A team wrote `torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=True)` in a model that also used torch.compile. The reentrant checkpoint implementation is incompatible with TorchDynamo's graph capture — the compiler could not trace through the checkpoint boundary and fell back to eager mode, losing all compile benefits, with no error raised. Fix: pass `use_reentrant=False`. The non-reentrant implementation is compatible with torch.compile and does not require inputs to have `requires_grad=True`. Note that `use_reentrant` is a required argument — omitting it raises rather than silently picking a path — so this is a decision you make explicitly on every call, and the answer is always `False` unless you are deliberately preserving old reentrant semantics.
 
 **Pitfall 4 — Pinned memory with multiprocessing causing deadlock**
 A team using pin_memory=True and num_workers=8 saw training hang intermittently (~1 in 50 epochs) on Linux. Root cause: pinned memory is allocated from the OS's locked memory pool (ulimit -l). With 8 workers each holding 2 prefetched batches of 256 images at FP32, the team was locking ~12 GB of physical memory. When the system ran other processes simultaneously, the locked memory limit was hit, causing workers to block indefinitely waiting for pin_memory allocation. Fix: reduce num_workers to 4 and prefetch_factor to 1, or increase ulimit -l, or use non-pinned memory and accept the slower GPU transfers.
@@ -870,7 +874,7 @@ with torch.no_grad():             # disable autograd graph construction
 | nvidia-smi | Command-line GPU monitoring (utilization, memory, temperature) |
 | py3nvml | Python bindings for nvidia-smi queries |
 | DeepSpeed | ZeRO optimizer, memory offloading, kernel injection |
-| Transformer Engine (NVIDIA) | FP8 training support for H100, automatic mixed precision management |
+| Transformer Engine (NVIDIA) | FP8 training on Hopper (H100/H200) and FP8/FP4 on Blackwell (B200); automatic mixed-precision management |
 
 ---
 
@@ -926,7 +930,7 @@ PyTorch's caching allocator maintains a pool of freed tensors to avoid repeated 
 
 **Q: Why does BF16 not require loss scaling while FP16 does?**
 **Short:** BF16 keeps FP32's 8-bit exponent range so small gradients don't underflow, while FP16's narrower exponent range forces GradScaler-based loss scaling to avoid overflow.
-BF16 keeps FP32's 8-bit exponent range, so small gradients do not underflow the way they do in FP16. FP16 has only 5 exponent bits and overflows above 65,504, which forces GradScaler to multiply the loss up before backward and divide the gradients back down — extra machinery that can still diverge. BF16 trades mantissa bits (7 vs FP16's 10) for that dynamic range, which matters far more for training stability on large models. Use BF16 on Ampere/Hopper/Ada (A100, H100, RTX 30/40); fall back to FP16 only on Volta/Turing (V100, T4) where BF16 hardware is absent.
+BF16 keeps FP32's 8-bit exponent range, so small gradients do not underflow the way they do in FP16. FP16 has only 5 exponent bits and overflows above 65,504, which forces GradScaler to multiply the loss up before backward and divide the gradients back down — extra machinery that can still diverge. BF16 trades mantissa bits (7 vs FP16's 10) for that dynamic range, which matters far more for training stability on large models. Use BF16 on Ampere and newer (A100, H100/H200, B200, RTX 30/40); fall back to FP16 only on Volta/Turing (V100, T4) where BF16 hardware is absent.
 
 **Q: Why can in-place operations like x.relu_() break autograd?**
 **Short:** In-place operations like relu_() can overwrite a tensor value autograd still needs for the backward pass, corrupting gradients or raising a version-counter error.
@@ -938,7 +942,7 @@ Appending model outputs that still carry their autograd graph accumulates activa
 
 **Q: Why can use_reentrant=True gradient checkpointing silently disable torch.compile?**
 **Short:** Reentrant gradient checkpointing can't be traced by TorchDynamo, so torch.compile silently falls back to slow eager mode there unless use_reentrant=False is set.
-The reentrant checkpoint implementation cannot be traced by TorchDynamo, so the compiler hits the checkpoint boundary and falls back to slow eager mode — losing every fusion benefit with no error. It also requires inputs to have `requires_grad=True`, which is easy to violate. Always pass `use_reentrant=False`; the non-reentrant path is compatible with `torch.compile`, does not need the requires_grad hack, and is the documented default going forward. The failure is silent, so verify by checking that compiled speedups actually appear in the profiler.
+The reentrant checkpoint implementation cannot be traced by TorchDynamo, so the compiler hits the checkpoint boundary and falls back to slow eager mode — losing every fusion benefit with no error. It also requires inputs to have `requires_grad=True`, which is easy to violate. Always pass `use_reentrant=False`; the non-reentrant path is compatible with `torch.compile` and does not need the requires_grad hack. `use_reentrant` has no default — the call raises if you omit it — so every checkpoint site is an explicit choice. The failure is silent, so verify by checking that compiled speedups actually appear in the profiler.
 
 **Q: How much extra memory does Adam consume versus SGD, and why does it dominate for large models?**
 **Short:** Adam stores two FP32 moment buffers per parameter, so its optimizer state alone is 8x the parameter byte count, often exceeding weights and gradients combined.
@@ -953,7 +957,7 @@ If GPU utilization sits below 80% while a CPU core is pegged at 100%, the data p
 ## 13. Best Practices
 
 - Profile before optimizing — run torch.profiler for 3-5 training steps before making any changes; bottlenecks are almost never where intuition says they are
-- Use BF16 mixed precision on all A100/H100/RTX 30/40 series hardware — the performance gain (2x memory, 4-8x compute for matmuls via Tensor Cores) has no correctness cost with autocast
+- Use BF16 mixed precision on all A100/H100/H200/B200/RTX 30/40 hardware — the performance gain (2x memory, 4-8x compute for matmuls via Tensor Cores) has no correctness cost with autocast
 - Ensure all matrix dimensions are multiples of 8 for BF16, 16 for INT8 — misalignment silently disables Tensor Cores and cuts throughput by 50-70%
 - Set DataLoader num_workers=4, pin_memory=True, persistent_workers=True, prefetch_factor=2 as the default starting point; profile to validate GPU utilization is >90% before tuning further
 - Apply torch.compile to the model and training step: `model = torch.compile(model)` provides 15-30% speedup with zero code change on PyTorch 2.0+; use mode="reduce-overhead" for training and mode="max-autotune" for inference serving
@@ -1104,7 +1108,7 @@ with torch.cuda.stream(stream_b):
 
 **How do you profile GPU utilization to find compute vs memory bottlenecks?** Use `torch.profiler` with `record_shapes=True, profile_memory=True, with_stack=True`. Export to Chrome trace format (`prof.export_chrome_trace("trace.json")`) and look for SM utilization (target > 80% for compute-bound), memory bandwidth utilization (target > 70% for memory-bound), and kernel launch overhead. Alternatively, `nvidia-smi dmon -s puc` samples power/utilization every second. An SM utilization of 30% on a compute-intensive workload indicates excessive kernel launch overhead or poor occupancy — check batch size and tensor shapes.
 
-**What is mixed precision training and when does BF16 outperform FP16?** Mixed precision (AMP) computes forward/backward in half precision (FP16 or BF16) and accumulates gradients in FP32. FP16 has 5 exponent bits and 10 mantissa bits — it overflows for values > 65,504 (requires loss scaling). BF16 has 8 exponent bits and 7 mantissa bits — same dynamic range as FP32, no overflow, no loss scaling needed. BF16 is preferred on Ampere/Ada A100/H100 GPUs and for LLM training where activation magnitudes can be large. Use FP16 only on Volta/Turing (V100, T4) where BF16 hardware support is absent.
+**What is mixed precision training and when does BF16 outperform FP16?** Mixed precision (AMP) computes forward/backward in half precision (FP16 or BF16) and accumulates gradients in FP32. FP16 has 5 exponent bits and 10 mantissa bits — it overflows for values > 65,504 (requires loss scaling). BF16 has 8 exponent bits and 7 mantissa bits — same dynamic range as FP32, no overflow, no loss scaling needed. BF16 is preferred on Ampere and newer (A100, H100/H200, B200) and for LLM training where activation magnitudes can be large. Use FP16 only on Volta/Turing (V100, T4) where BF16 hardware support is absent.
 
 **What is GPU memory bandwidth vs. compute throughput, and which limits LLM inference?** Compute throughput (FLOPS) limits matrix-multiply-heavy operations (prefill/prompt processing). Memory bandwidth limits memory-bound operations (token generation: loading KV cache from HBM for each token). An A100 has 312 TFLOPS (BF16) and 2TB/s memory bandwidth. For a 7B model with 4-byte (FP16) weights = 14GB, loading all weights takes 14GB / 2TB/s = 7ms — the minimum per-token generation time regardless of batch size. This is why LLM generation is memory-bandwidth bound and why techniques like speculative decoding and continuous batching matter: they increase arithmetic intensity to better utilize compute.
 

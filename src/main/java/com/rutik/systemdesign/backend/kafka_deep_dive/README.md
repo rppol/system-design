@@ -735,7 +735,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 ## 11. Technologies and Tools
 
 **Kafka Ecosystem**
-- Apache Kafka — core broker; cluster metadata is owned by the built-in KRaft controller quorum. Brokers, Connect and the CLI tools require Java 17+; clients and Streams require Java 11+.
+- Apache Kafka — core broker; cluster metadata is owned by the built-in KRaft controller quorum. Java 17, 21 and 25 are fully supported; Java 11 covers only a subset of modules (clients, Streams and related). Run brokers on the most recent LTS, Java 25.
 - Kafka Streams — embedded Java library for stateful stream processing. No separate cluster required.
 - ksqlDB — SQL-like query engine for Kafka streams. Suitable for simpler aggregations without full Java code.
 - Kafka Connect — scalable framework for source and sink connectors. 200+ connectors available (JDBC, Elasticsearch, S3, Debezium CDC).
