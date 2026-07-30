@@ -79,8 +79,12 @@ Names and semantics below follow **RFC 9110** (HTTP Semantics, 2022), the docume
 | 201 | Created | Successful POST (include Location header) |
 | 202 | Accepted | Async operation accepted (return task URL) |
 | 204 | No Content | Successful DELETE; PUT with no response body |
-| 301 | Moved Permanently | Permanent URL change |
+| 301 | Moved Permanently | Permanent URL change. RFC 9110 §15.4.2 notes that "for historical reasons" a user agent MAY rewrite POST to GET — use 308 when that must not happen |
+| 302 | Found | Temporary URL change. Carries the same historical POST-to-GET rewrite allowance (§15.4.3) — use 307 when the method must survive |
+| 303 | See Other | Redirect the client to a *different* resource, to be fetched with GET. The POST-Redirect-GET response (§15.4.4) |
 | 304 | Not Modified | Conditional GET, resource unchanged |
+| 307 | Temporary Redirect | Temporary, and the agent "MUST NOT change the request method" (§15.4.8). The method-preserving 302 |
+| 308 | Permanent Redirect | Permanent, method and body preserved (§15.4.9). The method-preserving 301 |
 | 400 | Bad Request | Client error in request (validation failure) |
 | 401 | Unauthorized | Not authenticated (missing/invalid token) |
 | 403 | Forbidden | Authenticated but not authorized |
