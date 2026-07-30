@@ -1,5 +1,7 @@
 # Producer-Consumer Pattern
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **One-line analogy**: Producer-Consumer is like a bakery conveyor belt — bakers (producers) place loaves at one end at their own pace; packagers (consumers) take them at their own pace — the belt absorbs the difference.

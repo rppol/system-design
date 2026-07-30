@@ -1,5 +1,7 @@
 # XGBoost and LightGBM — Deep Dive
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 XGBoost (Extreme Gradient Boosting, Chen & Guestrin 2016) and LightGBM (Light Gradient Boosting Machine, Ke et al. 2017) are production-grade gradient boosted decision tree (GBDT) implementations that dominate tabular ML benchmarks. Both implement the same core algorithmic framework as vanilla gradient boosting but introduce critical engineering innovations that make them 10-100x faster, more memory-efficient, and more accurate than sklearn's GradientBoostingClassifier.

@@ -1,5 +1,7 @@
 # Gradient Boosting — Deep Dive
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Gradient Boosting is a sequential ensemble method that builds an additive model by fitting a new weak learner at each step to the negative gradient of the loss function with respect to the current ensemble's predictions. The final model is a weighted sum of weak learners (typically shallow decision trees):

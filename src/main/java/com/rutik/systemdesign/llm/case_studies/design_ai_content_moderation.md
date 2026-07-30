@@ -1,5 +1,7 @@
 # Case Study: Design an AI Content Moderation System
 
+<!-- tiers: principal senior -->
+
 ## Intuition
 
 > **Design intuition**: A content moderation system is a multi-tier classification pipeline with human-in-the-loop escalation -- the core design challenge is balancing precision vs. recall at massive scale. Unlike spam detection (where false positives are annoying), content moderation false positives silence legitimate speech and drive users off the platform, while false negatives allow harm. The system must handle cultural context, sarcasm, reclaimed language, and evolving abuse patterns in 20+ languages.

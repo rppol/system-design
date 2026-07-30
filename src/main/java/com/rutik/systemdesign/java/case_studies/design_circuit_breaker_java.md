@@ -1,5 +1,7 @@
 # Design a Circuit Breaker (Java)
 
+<!-- tiers: principal -->
+
 > **A circuit breaker is a polite "I give up for now" signal.**  
 > Instead of hammering a failing service with 1,000 requests that will all timeout after 5
 > seconds, the circuit breaker detects the failure pattern, trips OPEN, and returns a fallback

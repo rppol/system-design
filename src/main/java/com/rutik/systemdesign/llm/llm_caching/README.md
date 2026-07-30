@@ -1,5 +1,7 @@
 # LLM Caching
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 LLM caching is the practice of storing and reusing model inputs or outputs to reduce latency and

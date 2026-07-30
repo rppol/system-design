@@ -1,5 +1,7 @@
 # Caching and Performance
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

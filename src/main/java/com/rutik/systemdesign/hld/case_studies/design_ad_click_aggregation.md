@@ -1,5 +1,7 @@
 # System Design: Ad Click Event Aggregation
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > **Design intuition**: An ad click aggregation system is a tug-of-war between **two clocks that can never agree**. One clock belongs to the advertiser dashboard, which wants a number *now* — "how many clicks has my campaign gotten in the last five minutes?" — even if that number is approximate and might shift slightly later. The other clock belongs to the billing pipeline, which wants a number that is *exact and final* — "how many clicks will I invoice this advertiser for, in a way that will survive an audit?" — even if that number isn't available until hours after the event happened. Every architectural decision in this design (windowing, watermarks, Lambda vs. Kappa, HyperLogLog vs. exact counts) is really an answer to the question: **how much should the fast path know, and how much should we be willing to wait for the slow path to be right?**

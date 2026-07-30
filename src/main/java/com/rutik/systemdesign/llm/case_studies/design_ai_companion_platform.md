@@ -1,5 +1,7 @@
 # Case Study: Design an AI Companion Platform
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > Running an AI companion platform is like operating a theme park where every ride is personalized — the economics only work at massive throughput, and the experience is ruined the instant a guest feels unsafe.

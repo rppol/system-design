@@ -1,5 +1,7 @@
 # Deployment Strategies
 
+<!-- tiers: senior -->
+
 > Phase 3 — CI/CD & GitOps · Difficulty: Advanced
 
 How you *release* a new version determines your blast radius when (not if) a deploy is bad. Rolling, blue-green, canary, and feature-flag strategies trade off speed, cost, rollback time, and risk exposure. Progressive delivery automates the safest of these — shifting a small fraction of traffic to the new version, watching metrics, and promoting or aborting automatically. Choosing and tuning the right strategy is a core production-readiness skill.

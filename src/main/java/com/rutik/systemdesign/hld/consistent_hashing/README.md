@@ -1,5 +1,7 @@
 # Consistent Hashing — High-Level Design
 
+<!-- tiers: senior -->
+
 ## Table of Contents
 1. [Overview and Motivation](#overview-and-motivation)
 2. [The Problem with Naive Modulo Hashing](#the-problem-with-naive-modulo-hashing)

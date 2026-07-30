@@ -1,5 +1,7 @@
 # Streams, Events & Concurrency
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 A CUDA **stream** is an ordered queue of GPU operations — kernel launches, memory copies,

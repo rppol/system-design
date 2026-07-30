@@ -1,5 +1,7 @@
 # Design: API Gateway for Microservices with Spring Cloud Gateway
 
+<!-- tiers: senior -->
+
 > "An API gateway is the post office for a microservices city — it accepts every incoming
 > envelope, stamps it (auth, trace ID, rate-limit token), routes it to the right address,
 > and returns the reply. The city runs fine without a post office, but nothing outside can

@@ -1,5 +1,7 @@
 # Retrieval Methods
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Retrieval is the step in RAG that finds relevant document chunks from an index given a user query. The quality of this retrieval step directly bounds the quality of the generated answer — no LLM can synthesize correct answers from irrelevant context. Three main retrieval paradigms exist: dense retrieval (semantic similarity using [embeddings](../embeddings_and_similarity_search/README.md)), sparse retrieval (keyword-based using inverted indices like BM25), and hybrid retrieval (combining both).

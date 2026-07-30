@@ -1,5 +1,7 @@
 # Spring HTTP Clients — RestTemplate, WebClient, RestClient, and @HttpExchange
 
+<!-- tiers: principal senior -->
+
 ---
 
 ## 1. Concept Overview

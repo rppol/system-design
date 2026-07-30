@@ -1,5 +1,7 @@
 # A/B Testing for ML Models
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 A/B testing (also called controlled experiments or randomized controlled trials) is the gold standard for evaluating ML model changes in production. It measures the causal impact of replacing a control model with a treatment model on a real business metric, by randomly assigning users to two groups and measuring the difference in outcomes.

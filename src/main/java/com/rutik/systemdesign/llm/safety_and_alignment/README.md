@@ -1,5 +1,7 @@
 # Safety & Alignment
 
+<!-- tiers: principal senior -->
+
 ## Deep Dive Files
 
 | File | Topic | Q&As |

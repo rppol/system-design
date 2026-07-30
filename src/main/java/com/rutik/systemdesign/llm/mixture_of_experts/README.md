@@ -1,5 +1,7 @@
 # Mixture of Experts (MoE)
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

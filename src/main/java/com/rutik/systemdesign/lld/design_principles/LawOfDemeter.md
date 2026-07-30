@@ -1,5 +1,7 @@
 # Law of Demeter (Principle of Least Knowledge)
 
+<!-- tiers: principal -->
+
 ## Origins
 
 Formulated at **Northeastern University in 1987** during the Demeter project (a software development project studying adaptive programming). Authors: **Ian Holland**, Karl Lieberherr, and colleagues.

@@ -1,5 +1,7 @@
 # Dependency Injection
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Dependency Injection (DI) is the mechanism by which the Spring container supplies a bean's dependencies, rather than the bean creating or fetching them itself. A bean declares what it needs (via constructor parameters, setter methods, or annotated fields), and the container resolves and provides the correct implementations at runtime.

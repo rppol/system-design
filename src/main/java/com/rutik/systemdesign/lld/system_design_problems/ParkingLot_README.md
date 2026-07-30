@@ -1,5 +1,7 @@
 # Parking Lot — Low-Level Design
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: Parking Lot is the classic LLD interview problem — it teaches entity modeling (Vehicle, Spot, Ticket), state machine (spot: Available → Occupied → Available), Strategy pattern (pricing: hourly vs. flat), Observer (display boards notified on changes), and Singleton (one lot instance).

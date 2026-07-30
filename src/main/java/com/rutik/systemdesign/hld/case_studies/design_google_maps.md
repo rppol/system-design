@@ -1,5 +1,7 @@
 # System Design: Google Maps (Geospatial & Navigation Service)
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > **Design intuition**: Google Maps is two systems wearing one UI: a **read-heavy spatial content-delivery system** (rendering and serving billions of map tiles, which behaves almost exactly like a CDN-backed static-asset service) bolted onto a **write-heavy, latency-sensitive graph-routing system** (turn-by-turn navigation over a 600-million-node road graph that must answer "shortest path" queries in milliseconds while traffic conditions change every minute). The unifying thread between both halves is **spatial indexing** — every subsystem, from "which tile covers this pixel" to "which POIs are near this point" to "which road segment did this GPS ping pass through," is fundamentally a question of "what is near what," answered by a 2D-to-1D space-filling-curve trick (geohash, S2, or H3) that turns a geometry problem into a string-prefix or integer-range problem a database already knows how to index.

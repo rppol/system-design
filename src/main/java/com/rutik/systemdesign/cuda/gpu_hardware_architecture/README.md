@@ -1,5 +1,7 @@
 # GPU Hardware Architecture
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 A GPU is not "one big fast processor" — it is an array of dozens to hundreds of small,

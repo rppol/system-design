@@ -1,5 +1,7 @@
 # Number Systems & Bit Manipulation
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

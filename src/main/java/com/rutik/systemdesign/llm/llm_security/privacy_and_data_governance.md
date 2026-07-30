@@ -1,5 +1,7 @@
 # Privacy & Data Governance for LLM Systems
 
+<!-- tiers: principal senior -->
+
 Deep-dive sub-file of [LLM Security](README.md). Covers training-data memorization and extraction, membership inference, PII engineering at every system boundary, differential privacy, machine unlearning, and the governance machinery (retention, residency, deletion requests) that production LLM systems need. Legal frame: see [AI Regulations & Compliance](../ai_regulations_and_compliance/README.md).
 
 ---

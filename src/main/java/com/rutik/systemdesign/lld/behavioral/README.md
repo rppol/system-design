@@ -1,5 +1,7 @@
 # Behavioral Patterns — Category Index
 
+<!-- tiers: principal senior -->
+
 Behavioral patterns define how objects communicate and distribute responsibility. They focus on algorithms and the assignment of responsibilities between objects. This is the navigation index for all 11 behavioral GoF patterns in this section.
 
 ---

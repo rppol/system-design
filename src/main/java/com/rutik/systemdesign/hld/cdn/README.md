@@ -1,5 +1,7 @@
 # Content Delivery Networks (CDN)
 
+<!-- tiers: senior -->
+
 ## Table of Contents
 1. [What is a CDN?](#what-is-a-cdn)
 2. [How CDN Works](#how-cdn-works)

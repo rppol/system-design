@@ -1,5 +1,7 @@
 # MCP — Model Context Protocol
 
+<!-- tiers: principal senior -->
+
 ## Sub-Files — Deep Dives
 
 | File | Topic | Q&As |

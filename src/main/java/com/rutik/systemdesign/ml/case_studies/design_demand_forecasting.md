@@ -1,5 +1,7 @@
 # Design a Demand Forecasting System (Retail Scale)
 
+<!-- tiers: senior -->
+
 ## Problem Statement
 
 Design a demand forecasting system for a large retailer with 1 million products (SKUs) across 10,000

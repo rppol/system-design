@@ -1,5 +1,7 @@
 # Spring Security — JWT and OAuth2
 
+<!-- tiers: principal senior -->
+
 ---
 
 ## 1. Concept Overview

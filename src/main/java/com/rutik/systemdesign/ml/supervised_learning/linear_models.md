@@ -1,5 +1,7 @@
 # Linear and Logistic Regression — Deep Dive
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Linear models are the foundation of supervised machine learning. They assume the target is either a linear combination of the input features (regression) or that the log-odds of the target is a linear combination of features (logistic regression). Despite their simplicity, linear models are competitive in many production settings because of their interpretability, training speed, and well-understood regularization behavior.

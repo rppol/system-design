@@ -1,5 +1,7 @@
 # Case Study: Design a Legal AI Platform
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > **Design intuition**: A legal AI platform is like a brilliant paralegal who has read every case in your jurisdiction, every contract your firm has ever drafted, and every regulatory update — and can be asked anything at 2am before a deal closes. The engineering challenge is not LLM quality but trust and isolation: every citation must be traceable to a source, every document must stay within its matter boundary, and the platform must never hallucinate a statute or case that does not exist.

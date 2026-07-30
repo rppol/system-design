@@ -1,5 +1,7 @@
 # Case Study: Design a Multi-Tenant SaaS Database
 
+<!-- tiers: principal -->
+
 ## Problem Statement
 
 Design the database architecture for a B2B SaaS CRM platform:

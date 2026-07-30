@@ -1,5 +1,7 @@
 # RAG Fundamentals
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 RAG (Retrieval-Augmented Generation) solves a fundamental problem with LLMs: they have a fixed knowledge cutoff and can't access private or up-to-date information. RAG extends LLMs with a retrieval component that fetches relevant documents at query time, injecting them into the prompt as context before generation.

@@ -1,5 +1,7 @@
 # HTTP Protocols
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 HTTP (Hypertext Transfer Protocol) is the application-layer protocol underpinning the web and virtually all backend API communication. Understanding how HTTP has evolved from HTTP/1.0 through HTTP/2 and HTTP/3 — and how TLS secures it — is essential for backend engineers designing APIs, configuring load balancers, debugging latency issues, and making informed infrastructure decisions.

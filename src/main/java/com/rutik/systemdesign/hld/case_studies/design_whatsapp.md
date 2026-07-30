@@ -1,5 +1,7 @@
 # Design WhatsApp
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: WhatsApp's core challenges are message delivery guarantees (at-least-once with acknowledgments), real-time presence (online/offline for 2 billion users), and end-to-end encryption (keys on device, not server). The persistent WebSocket connection architecture is what enables real-time message delivery without polling.

@@ -1,5 +1,7 @@
 # Distributed Transactions
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 A **distributed transaction** is a unit of work that spans multiple independent data stores, services, or even organizations, and that must appear to either fully succeed or fully fail — even though no single component can see or control the whole operation. A single-node ACID transaction gets atomicity for free from the database's write-ahead log and lock manager. The moment that "transaction" crosses a network boundary — Order Service writes to its own Postgres while Payment Service charges a card via Inventory Service's database — atomicity is no longer free. It must be engineered.

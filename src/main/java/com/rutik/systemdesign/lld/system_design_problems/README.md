@@ -1,5 +1,7 @@
 # LLD System Design Problems
 
+<!-- tiers: principal senior -->
+
 Canonical low-level design interview problems. Each problem exercises pattern identification, state machine design, and the ability to deliver a class design in 30 minutes under pressure.
 
 ---

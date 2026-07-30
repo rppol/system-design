@@ -1,5 +1,7 @@
 # System Design: Netflix
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > **Design intuition**: Netflix's central challenges are video delivery at global scale (solved by Open Connect — Netflix's own CDN, embedded inside partner ISPs and peered at 80+ internet exchanges in 25+ countries) and personalized recommendations (ML-driven, multi-factor ranking). Nearly all of Netflix's traffic is video bytes; CDN architecture is the dominant engineering concern.

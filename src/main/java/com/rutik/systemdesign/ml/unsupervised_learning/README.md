@@ -1,5 +1,7 @@
 # Unsupervised Learning
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Unsupervised learning discovers hidden structure in unlabeled data. There is no target variable — the algorithm finds patterns, groupings, or compressed representations purely from feature distributions. The three primary tasks are clustering (group similar observations), dimensionality reduction (compress features while preserving structure), and density estimation (model the underlying data distribution).

@@ -1,5 +1,7 @@
 # Design a Dependency Injection Container (Java)
 
+<!-- tiers: principal -->
+
 > **A DI container is a recipe book that cooks itself.**  
 > Given a set of classes annotated with instructions ("I need a `PaymentService` and a `Logger`"),
 > the container reads the recipes, resolves ingredients recursively, and assembles the final

@@ -1,5 +1,7 @@
 # State-Space Models & Linear Attention: Mamba, RWKV, RetNet, and the Sub-Quadratic Alternatives to Self-Attention
 
+<!-- tiers: senior -->
+
 > Deepens the "Alternative Architectures (Beyond Transformers)" table in
 > [Foundations & Architecture](README.md) §6 (Mamba/SSMs, Jamba, RWKV) and the long-context
 > comparisons in [Context Windows & Long Context](../context_windows_and_long_context/README.md).

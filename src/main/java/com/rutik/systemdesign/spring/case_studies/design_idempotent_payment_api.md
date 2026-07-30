@@ -1,5 +1,7 @@
 # Design: Idempotent Payment API (Spring Boot + Outbox Pattern)
 
+<!-- tiers: principal -->
+
 > **"A post office that refuses to deliver the same letter twice."**
 > Network retries are inevitable — mobile clients drop connections, load balancers time out,
 > and deployments cause brief unavailability. Without idempotency, every retry risks a duplicate

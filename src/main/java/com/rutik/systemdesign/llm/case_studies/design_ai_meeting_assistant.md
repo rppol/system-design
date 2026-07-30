@@ -1,5 +1,7 @@
 # Case Study: Design an AI Meeting Assistant
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: An AI meeting assistant is a court stenographer plus analyst embedded invisibly in every meeting — the challenge is doing it in real-time with millisecond audio segments, then synthesizing hours of conversation into two paragraphs that someone actually acts on.

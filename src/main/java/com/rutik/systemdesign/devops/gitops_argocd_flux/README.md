@@ -1,5 +1,7 @@
 # GitOps (ArgoCD & Flux)
 
+<!-- tiers: senior -->
+
 > Phase 3 — CI/CD & GitOps · Difficulty: Advanced
 
 GitOps makes **Git the single source of truth for the desired state of your infrastructure**, and an in-cluster agent continuously reconciles reality to match it. Instead of a pipeline pushing `kubectl apply` with cluster credentials, an operator (ArgoCD or Flux) *pulls* from Git, detects drift, and self-heals. The result: every change is a reviewed, audited Git commit; rollback is `git revert`; and the cluster can never silently diverge from what's declared.

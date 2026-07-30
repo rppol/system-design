@@ -1,5 +1,7 @@
 # Kubernetes Networking
 
+<!-- tiers: senior -->
+
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
 Kubernetes networking is where many engineers' understanding gets fuzzy — and where interviewers probe hardest. The model rests on a few rules (every Pod gets a routable IP; all Pods can reach each other without NAT) implemented by pluggable layers: the **CNI** (Pod IPs and connectivity), **Services + kube-proxy** (stable virtual IPs), **CoreDNS** (service discovery), **Ingress/Gateway API** (L7 entry), and **NetworkPolicy** (segmentation). This module traces a packet from the internet to a container and back.

@@ -1,5 +1,7 @@
 # Multi-Task and Multi-Objective Learning
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Multi-task learning (MTL) trains a single model to predict several related targets at once — for a feed ranker: probability of click (pCTR), probability of a long watch (pWatch), probability of share (pShare), and probability of a "not interested" report. Instead of one model per task, tasks share a common representation and branch into per-task heads. Multi-objective learning is the deployment-time counterpart: given those per-task predictions, produce a single ranking or decision that trades the objectives off against one another (maximize engagement *without* degrading satisfaction).

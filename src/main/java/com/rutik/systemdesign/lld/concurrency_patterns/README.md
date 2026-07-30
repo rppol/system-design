@@ -1,5 +1,7 @@
 # Concurrency Patterns
 
+<!-- tiers: senior -->
+
 Low-level design patterns that address coordination between threads sharing a JVM process. Each pattern targets a specific coordination failure mode.
 
 ---

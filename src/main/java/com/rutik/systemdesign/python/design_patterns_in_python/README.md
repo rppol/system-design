@@ -1,5 +1,7 @@
 # Design Patterns in Python
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Design patterns are reusable solutions to recurring software design problems. The Gang of Four (GoF) catalogue defines 23 patterns across three families: creational, structural, and behavioral. Python's first-class functions, dynamic typing, and protocol-oriented duck-typing mean that many classic Java-style pattern implementations are unnecessary ceremony in Python — the language already bakes in the mechanism.

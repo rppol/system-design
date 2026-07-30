@@ -1,5 +1,7 @@
 # Optimization Theory for ML
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Optimization is the process of finding parameter values that minimize (or maximize) an objective function. In machine learning, the objective is typically a loss function measuring how poorly the model's predictions match the ground truth. Training a neural network is entirely an optimization problem: starting from random weights, iteratively adjust them to reduce loss.

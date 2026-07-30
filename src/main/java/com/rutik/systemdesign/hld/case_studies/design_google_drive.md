@@ -1,5 +1,7 @@
 # System Design: Google Drive
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: Google Drive is two systems wearing one UI: underneath is a **dumb, durable blob store** — content-addressed chunks of bytes, replicated or erasure-coded, that don't know or care what a "file" or "folder" is (cross-ref [`./design_object_storage_s3.md`](./design_object_storage_s3.md)) — and on top of that is a **smart, mutable, hierarchical metadata tree** that knows everything: which chunks make up which version of which file, who owns it, who it's shared with, where it sits in a folder hierarchy, and what it looked like five edits ago. The blob layer almost never changes once a chunk is written — it is, in effect, append-only. The metadata tree changes constantly: every rename, move, share, permission change, sync cursor advance, and "restore version 12" is a metadata-only write. Almost every interesting problem in this case study — sync, sharing, versioning, deduplication, conflict resolution — lives in the metadata tree, not in the bytes.

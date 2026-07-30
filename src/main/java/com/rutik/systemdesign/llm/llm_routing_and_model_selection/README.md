@@ -1,5 +1,7 @@
 # LLM Routing and Model Selection
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

@@ -1,5 +1,7 @@
 # Strategy vs State Pattern
 
+<!-- tiers: principal senior -->
+
 ## Overview
 
 Both patterns delegate behavior to a separate object and look nearly identical in their class diagrams. The key difference lies in **who controls transitions** and **what the pattern is trying to solve**.

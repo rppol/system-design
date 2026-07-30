@@ -1,5 +1,7 @@
 # gRPC & Protocol Buffers
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 gRPC is a high-performance, open-source remote procedure call (RPC) framework developed by Google. It uses Protocol Buffers (protobuf) as the interface definition language and serialization format, and HTTP/2 as the transport. gRPC generates type-safe client and server stubs from .proto files in 10+ languages, making it ideal for polyglot microservice communication.

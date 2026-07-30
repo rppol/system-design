@@ -1,5 +1,7 @@
 # System Design: Google Docs (Real-Time Collaborative Editor)
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: A collaborative document editor looks like a CRUD app with a WebSocket bolted on, but the actual hard problem is one of *distributed consensus on a sequence*: when two people type at the same cursor position at the same instant, both edits must be applied, both users must end up looking at the *exact same final text*, and neither user should ever see their own keystroke "rubber-band" backward. This is the canonical Operational Transformation vs. CRDT interview question — and it's hard precisely because the obvious naive approach (just apply each edit as it arrives, in arrival order) silently produces *different* documents on different machines, with no error, no exception, and no easy way to detect the divergence until a user notices their paragraph is garbled.

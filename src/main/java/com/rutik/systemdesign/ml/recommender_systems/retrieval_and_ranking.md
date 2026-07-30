@@ -1,5 +1,7 @@
 # Retrieval and Ranking
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 The retrieval and ranking pipeline is the production architecture used by every large-scale recommendation system. It addresses a fundamental tension: a rich scoring model needs hundreds of features and milliseconds per candidate, but a catalog of 10 million items cannot be scored exhaustively per request. The solution is a two-stage pipeline — retrieval generates a small candidate set with high recall, and ranking scores that set with high precision.

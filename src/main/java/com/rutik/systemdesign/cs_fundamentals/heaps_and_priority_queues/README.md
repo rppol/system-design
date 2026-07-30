@@ -1,5 +1,7 @@
 # Heaps and Priority Queues
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 A **heap** is a complete binary tree stored in an array that satisfies the **heap property**: every node is ≤ (min-heap) or ≥ (max-heap) its children. This single structural guarantee delivers the best-possible complexity for "find/remove the extreme element": O(log n) for push and pop, O(1) for peek — without the overhead of a fully sorted structure.

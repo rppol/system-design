@@ -1,5 +1,7 @@
 # System Design: Distributed Message Queue
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: A distributed message queue is fundamentally **a distributed, append-only log pretending to be a queue**. Producers don't "send" messages to consumers — they append records to the end of a file. Consumers don't "receive" messages — they read sequentially from that file at whatever position they last stopped, and remember that position themselves. Everything else in this design — partitions, replication, consumer groups, exactly-once semantics — exists to make that one simple idea (a sequential file, read by independent readers tracking their own bookmarks) durable, horizontally scalable, and safe under partial failure. The reason this is more useful than a "real" queue (where the broker tracks per-message state and deletes on ACK) is that **a log can be replayed**: a new consumer, a buggy consumer that needs to reprocess, or an analytics job built six months later can all start reading from offset 0 without the producer ever knowing they exist.

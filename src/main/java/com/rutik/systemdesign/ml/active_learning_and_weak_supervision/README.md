@@ -1,5 +1,7 @@
 # Active Learning and Weak Supervision
 
+<!-- tiers: principal -->
+
 > Phase 5 (ML Systems & Infrastructure). This module covers how to build a labeled dataset
 > cheaply: active learning (let the model choose which examples to label) and weak supervision
 > (generate noisy labels programmatically). It explains the "active learning" loop that the

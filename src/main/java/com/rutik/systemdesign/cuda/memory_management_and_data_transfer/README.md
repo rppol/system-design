@@ -1,5 +1,7 @@
 # Memory Management & Data Transfer
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Every CUDA program begins and ends at the same boundary: the host (CPU) and the

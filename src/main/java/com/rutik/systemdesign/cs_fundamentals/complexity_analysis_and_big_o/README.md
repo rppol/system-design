@@ -1,5 +1,7 @@
 # Complexity Analysis & Big-O Notation
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

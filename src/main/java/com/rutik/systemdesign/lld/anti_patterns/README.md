@@ -1,5 +1,7 @@
 # Anti-Patterns in Low-Level Design
 
+<!-- tiers: principal senior -->
+
 Anti-patterns are recurring solutions to common problems that seem reasonable at first but cause more harm than good over time. Understanding them is as important as knowing design patterns — recognizing and avoiding them is a key skill for senior engineers and a common topic in system design and coding interviews.
 
 ---

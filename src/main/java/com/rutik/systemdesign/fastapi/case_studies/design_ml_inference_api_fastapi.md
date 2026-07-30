@@ -1,5 +1,7 @@
 # Design an ML Inference API with FastAPI
 
+<!-- tiers: senior -->
+
 ---
 
 ## Problem Statement

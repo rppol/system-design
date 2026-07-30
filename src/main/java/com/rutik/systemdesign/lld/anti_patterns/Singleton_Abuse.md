@@ -1,5 +1,7 @@
 # Anti-Pattern: Singleton Abuse
 
+<!-- tiers: senior -->
+
 ## What It Is
 
 The Singleton pattern — ensuring a class has only one instance and providing global access to it — is a legitimate creational pattern when used correctly. Singleton Abuse occurs when Singleton is applied to classes that do not genuinely require a single global instance, turning it into a mechanism for managing global mutable state.

@@ -1,5 +1,7 @@
 # Model Selection and Algorithm Choice
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Model selection is the discipline of choosing the right algorithm — or combination of algorithms — for a given ML problem. It sits at the intersection of problem framing, data characteristics, operational constraints, and business objectives. The decision is not purely technical: a model that cannot be explained to regulators, that exceeds inference latency budgets, or that requires more data than available is a wrong choice regardless of its offline accuracy.

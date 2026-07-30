@@ -1,5 +1,7 @@
 # Case Study: Design an LLM Fine-Tuning Platform
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > **Design intuition**: An LLM fine-tuning platform is a GPU-orchestrated training pipeline with a self-serve data management layer -- like a CI/CD system for model weights instead of application code. Users push data, configure training jobs, watch metrics converge in real time, evaluate results against baselines, and promote models through staging to production. The platform abstracts GPU cluster complexity behind a simple API.

@@ -1,5 +1,7 @@
 # Security & Cryptography
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Java ships one of the most complete cryptographic stacks of any managed platform: the **Java Cryptography Architecture (JCA)** and the **Java Cryptography Extension (JCE)**, together exposing every primitive a backend engineer needs — hashing, HMAC, symmetric and asymmetric ciphers, digital signatures, key agreement, key storage, secure random generation, and TLS. These live in `java.security.*` and `javax.crypto.*` and have been part of the JDK since Java 1.4 (JCE was merged in from an export-restricted add-on in Java 1.4/5).

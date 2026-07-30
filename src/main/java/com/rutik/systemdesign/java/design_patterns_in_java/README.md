@@ -1,5 +1,7 @@
 # Design Patterns in Java
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Design patterns are reusable solutions to commonly recurring software design problems. The Gang of Four (GoF) catalog from 1994 defines 23 patterns across three categories: Creational (object creation), Structural (composition), and Behavioral (communication). Java's standard library is itself a showcase of these patterns — `InputStream` hierarchy (Decorator), `Calendar.getInstance()` (Factory), `Comparable` (Strategy), `Thread` (Command), `Object.clone()` (Prototype).

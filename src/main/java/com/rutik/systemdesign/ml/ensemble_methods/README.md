@@ -1,5 +1,7 @@
 # Ensemble Methods
 
+<!-- tiers: senior -->
+
 ## Deep Dive Sub-Files
 
 | File | Topic |

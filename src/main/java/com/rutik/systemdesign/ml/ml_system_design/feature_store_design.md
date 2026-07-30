@@ -1,5 +1,7 @@
 # Feature Store Design
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 A feature store is a data system that manages the lifecycle of ML features: computation, storage, versioning, serving, and monitoring. It acts as the central contract between data engineers who compute features, ML engineers who train models, and serving engineers who need features at inference time.

@@ -1,5 +1,7 @@
 # Design: Real-Time Notification Service (Spring Boot + WebSocket + Redis Pub/Sub)
 
+<!-- tiers: senior -->
+
 > **"A digital PA system where every speaker knows which room to broadcast to."**
 > A real-time notification service must solve two problems simultaneously: maintain long-lived
 > connections efficiently, and route incoming events to exactly the right connections —

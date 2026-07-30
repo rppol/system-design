@@ -1,5 +1,7 @@
 # Circular Dependencies Anti-Pattern
 
+<!-- tiers: principal -->
+
 ## Overview
 
 Circular Dependencies occur when two or more modules, packages, or classes form a dependency cycle — A depends on B, B depends on C, and C depends back on A. The result is a tightly coupled cluster that behaves as a single indivisible unit, even though it appears to be modular. The anti-pattern is insidious because the cycle is not always obvious from reading a single file; it emerges from the aggregate of import statements and constructor parameters across the system. Circular dependencies destroy modularity: no part of the cycle can be compiled, deployed, or tested without the entire cycle being present. In Java specifically, they cause class initialization ordering problems, Spring bean creation failures, and unit test impossibility. At the architecture level, circular dependencies between packages or services are a signal that the system's boundaries are incorrectly drawn and that shared concepts have not been properly identified and extracted.

@@ -1,5 +1,7 @@
 # Dynamic Programming
 
+<!-- tiers: senior -->
+
 > Breaking a hard problem into overlapping sub-problems, solving each once, and remembering the answer.
 
 ---

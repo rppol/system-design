@@ -1,5 +1,7 @@
 # GRPO & RLVR — Reasoning RL with Verifiable Rewards
 
+<!-- tiers: senior -->
+
 Deep-dive sub-file of [Alignment & RLHF](README.md). Covers Group Relative Policy Optimization (GRPO), Reinforcement Learning from Verifiable Rewards (RLVR), the DeepSeek-R1 training pipeline, and the 2025-era refinements (DAPO, Dr. GRPO, GSPO) that now dominate reasoning-model post-training.
 
 ---

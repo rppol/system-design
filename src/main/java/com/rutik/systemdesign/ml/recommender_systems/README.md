@@ -1,5 +1,7 @@
 # Recommender Systems
 
+<!-- tiers: principal senior -->
+
 ## Deep Dive Files
 
 | Sub-File | Topic | Q&As |

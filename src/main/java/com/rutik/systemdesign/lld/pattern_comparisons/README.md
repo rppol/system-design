@@ -1,5 +1,7 @@
 # Design Pattern Comparisons - Master Reference
 
+<!-- tiers: principal senior -->
+
 This directory contains deep-dive comparisons of commonly confused GoF design patterns. Each file provides side-by-side analysis, code examples, and interview guidance.
 
 ---

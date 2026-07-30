@@ -1,5 +1,7 @@
 # Domain Adaptation
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Domain adaptation is the process of making a general-purpose LLM perform significantly better on a specialized domain — medical, legal, financial, scientific, code — through targeted fine-tuning. The domain may have specialized vocabulary, reasoning patterns, stylistic conventions, or factual content that wasn't well-represented in the base model's pre-training data.

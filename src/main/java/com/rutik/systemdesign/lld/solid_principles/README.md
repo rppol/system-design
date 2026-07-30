@@ -1,5 +1,7 @@
 # SOLID Principles - Master Overview
 
+<!-- tiers: principal senior -->
+
 SOLID is an acronym for five object-oriented design principles collected and named by Robert C. Martin (Uncle Bob) in his 2000 paper *Design Principles and Design Patterns*. Two of the five predate that collection and are not Martin's: the Open/Closed Principle is Bertrand Meyer's (*Object-Oriented Software Construction*, 1988) and the Liskov Substitution Principle is Barbara Liskov's (OOPSLA 1987 keynote, formalized with Jeannette Wing in 1994). The mnemonic **SOLID** itself was coined by Michael Feathers around 2004, not by Martin. These principles form the foundation of maintainable, scalable, and testable software design. They are not rigid rules but guidelines that help you reason about design decisions.
 
 ---

@@ -1,5 +1,7 @@
 # Java Logging — SLF4J, Logback & Log4j2
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Java logging is a two-layer system: a **facade** that application and library code calls, and an **implementation** (backend) that actually formats and writes the bytes. **SLF4J** (Simple Logging Facade for Java) is the near-universal facade; **Logback** and **Log4j2** are the two dominant implementations that bind to it, alongside the JDK's built-in **java.util.logging (JUL)**. The split exists because logging is a cross-cutting concern every library must touch, yet a library must never force a specific backend — with its own version constraints and vulnerabilities — onto every application that depends on it.

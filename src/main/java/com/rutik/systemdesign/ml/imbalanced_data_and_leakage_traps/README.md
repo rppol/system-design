@@ -1,5 +1,7 @@
 # Imbalanced Data & Data-Leakage Traps
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Imbalanced data and data leakage are the two most common ways an offline ML

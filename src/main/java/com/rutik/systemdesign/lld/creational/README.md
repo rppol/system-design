@@ -1,5 +1,7 @@
 # Creational Patterns — Master Index
 
+<!-- tiers: principal senior -->
+
 ---
 
 ## 1. Concept Overview

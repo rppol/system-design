@@ -1,5 +1,7 @@
 # Protocols and Structural Typing
 
+<!-- tiers: senior -->
+
 > Deep-dive sub-file for [`the_type_system_and_typing/README.md`](./README.md).
 > Python 3.8+ (`typing.Protocol`, PEP 544). All code targets Python 3.13/3.14.
 

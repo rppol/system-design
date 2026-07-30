@@ -1,5 +1,7 @@
 # Middleware and Lifecycle
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

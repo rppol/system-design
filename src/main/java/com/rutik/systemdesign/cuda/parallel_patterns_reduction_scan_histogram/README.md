@@ -1,5 +1,7 @@
 # Parallel Patterns: Reduction, Scan, Histogram
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Reduction, scan (prefix sum), and histogram are the three **canonical data-parallel

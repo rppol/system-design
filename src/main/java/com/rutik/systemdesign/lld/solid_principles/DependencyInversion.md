@@ -1,5 +1,7 @@
 # Dependency Inversion Principle (DIP)
 
+<!-- tiers: principal senior -->
+
 **Part of the SOLID series** | [Back to Overview](README.md)
 
 ---

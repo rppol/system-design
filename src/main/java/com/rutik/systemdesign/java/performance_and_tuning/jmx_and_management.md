@@ -1,5 +1,7 @@
 # JMX and Management — Deep Dive
 
+<!-- tiers: senior -->
+
 A deep dive into **JMX (Java Management Extensions)** — the JVM's built-in
 instrumentation and management bus. This is how JConsole reads your heap usage,
 how `ThreadMXBean` finds a deadlock, how a custom cache exposes its hit ratio to

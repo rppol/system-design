@@ -1,5 +1,7 @@
 # LLM Observability and Monitoring
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 LLM observability is the practice of instrumenting, measuring, and monitoring LLM-powered applications in production. Unlike traditional software observability -- which relies on the three pillars of metrics, logs, and traces -- LLM observability must address fundamentally different challenges: non-deterministic outputs, quality that cannot be measured by latency alone, token-based cost models, and failure modes that are semantic rather than structural (hallucination, relevance drift, instruction non-compliance).

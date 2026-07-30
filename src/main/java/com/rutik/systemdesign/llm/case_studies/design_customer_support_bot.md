@@ -1,5 +1,7 @@
 # Case Study: Design an AI Customer Support Bot
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: A customer support bot is a RAG + tools system with a human escalation path — the key design challenges are intent classification (support vs. off-topic), knowledge retrieval accuracy (wrong answer is worse than "I don't know"), safe tool use (update records only when confident), and graceful handoff to human agents.

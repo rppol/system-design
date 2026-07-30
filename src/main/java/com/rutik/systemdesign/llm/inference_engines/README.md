@@ -1,5 +1,7 @@
 # Inference Engines
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Inference engines are specialized software systems optimized for running LLM inference efficiently in production. While you can run an LLM with just Hugging Face Transformers' `model.generate()`, this approach leaves most GPU performance on the table. Production inference engines implement continuous batching, KV cache management, optimized CUDA kernels, quantization, and distributed serving to achieve up to ~24× better throughput than naive approaches (vLLM's own published figure versus Hugging Face Transformers).

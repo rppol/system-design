@@ -1,5 +1,7 @@
 # Sharding and Partitioning
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Sharding (horizontal scaling) splits data across multiple independent database instances so that no single server holds all the data or handles all requests. Partitioning splits data within a single database instance into logical segments (partitions) for query performance and manageability. Both involve dividing data by a key, but sharding crosses server boundaries while partitioning stays within one database.

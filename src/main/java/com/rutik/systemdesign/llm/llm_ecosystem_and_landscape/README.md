@@ -1,5 +1,7 @@
 # LLM Ecosystem & Landscape
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 The LLM landscape has evolved from a small number of proprietary models (GPT-3 in 2020) to a vibrant ecosystem with dozens of frontier models, thousands of fine-tuned variants, and a rich tooling layer. Understanding the landscape — who the major players are, how models compare, what the licensing landscape looks like, and how costs break down — is essential for making informed build vs. buy decisions.

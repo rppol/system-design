@@ -1,5 +1,7 @@
 # Case Study: Design an E-Commerce Product Catalog
 
+<!-- tiers: senior -->
+
 ## Problem Statement
 
 Design the database architecture for a product catalog serving a marketplace with:

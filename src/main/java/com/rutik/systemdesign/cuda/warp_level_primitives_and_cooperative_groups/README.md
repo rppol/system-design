@@ -1,5 +1,7 @@
 # Warp-Level Primitives & Cooperative Groups
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Every optimization technique studied so far in Phase 3 — coalescing, shared-memory tiling,

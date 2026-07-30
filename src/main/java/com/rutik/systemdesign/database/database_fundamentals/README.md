@@ -1,5 +1,7 @@
 # Database Fundamentals
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Database fundamentals cover the core theoretical guarantees and models that govern how database systems behave under concurrent access, failures, and network partitions. These concepts — ACID, BASE, CAP, PACELC, and isolation levels — form the vocabulary for reasoning about database correctness in distributed systems.

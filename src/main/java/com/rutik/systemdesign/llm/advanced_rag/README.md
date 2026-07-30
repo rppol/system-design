@@ -1,5 +1,7 @@
 # Advanced RAG
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 [Standard RAG](../rag_fundamentals/README.md) (retrieve → generate) works well for simple Q&A but breaks down on complex queries: multi-hop questions, queries requiring synthesis across many documents, questions about structured data, or tasks where the LLM needs to iteratively refine its retrieval strategy.

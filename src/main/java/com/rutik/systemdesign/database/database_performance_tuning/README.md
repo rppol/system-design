@@ -1,5 +1,7 @@
 # Database Performance Tuning
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Database performance tuning is the iterative process of measuring, diagnosing, and improving query throughput, latency, and resource utilization. The methodology is: instrument (enable slow query logging, collect metrics), diagnose (identify the limiting resource — CPU, I/O, memory, locks), then fix (indexes, query rewrites, configuration changes, hardware). Tuning without measurement is guesswork; measurement without a baseline is noise.

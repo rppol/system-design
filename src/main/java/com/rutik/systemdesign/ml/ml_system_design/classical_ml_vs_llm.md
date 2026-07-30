@@ -1,5 +1,7 @@
 # Classical ML vs LLM — The Build-Decision Framework
 
+<!-- tiers: principal -->
+
 > Deep-dive sub-file of [ml_system_design](README.md). Cross-reads:
 > [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md),
 > [../../llm/context_engineering](../../llm/context_engineering/README.md) (RAG-vs-fine-tuning),

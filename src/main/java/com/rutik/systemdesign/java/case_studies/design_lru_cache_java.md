@@ -1,5 +1,7 @@
 # Case Study: Design an LRU Cache in Pure Java
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > An LRU cache is a hotel with a fixed number of rooms. When it fills up, the guest who checked in longest ago (and hasn't moved since) is asked to leave to make room for the new arrival. The front desk keeps a list sorted by most recent activity — O(1) eviction because you always remove from the tail.

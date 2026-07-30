@@ -1,5 +1,7 @@
 # CUDA Memory Model & Hierarchy
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Every CUDA kernel is, underneath the arithmetic, a program that moves bytes between six distinct **memory spaces** — register, local, shared, global, constant, and texture — each with its own scope, lifetime, latency, and bandwidth. A GPU does not have one uniform "RAM"; it has a steep hierarchy where the fastest storage (registers) sits physically inside the streaming multiprocessor (SM) next to the ALUs, and the slowest (global memory / HBM) sits off-chip, shared by every SM on the device. The single biggest determinant of a kernel's performance is not its arithmetic — it is *which level of this hierarchy each memory access lands on*.

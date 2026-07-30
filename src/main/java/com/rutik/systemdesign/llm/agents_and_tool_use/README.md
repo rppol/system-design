@@ -1,5 +1,7 @@
 # Agents & Tool Use
 
+<!-- tiers: principal senior -->
+
 ## Sub-Files — Deep Dives (15 total)
 
 | File | Topic | Q&As |

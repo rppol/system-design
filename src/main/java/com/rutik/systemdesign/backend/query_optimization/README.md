@@ -1,5 +1,7 @@
 # Query Optimization
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Writing a correct SQL query is the beginning. Writing a query that scales to millions of rows, stays fast as data grows, and does not destroy database performance under load requires understanding how the database executes queries, what makes certain patterns catastrophically expensive, and how to diagnose problems in production. Query optimization is the skill that separates a developer who makes the database slow from one who keeps it fast.

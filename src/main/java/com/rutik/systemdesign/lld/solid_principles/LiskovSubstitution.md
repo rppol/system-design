@@ -1,5 +1,7 @@
 # Liskov Substitution Principle (LSP)
 
+<!-- tiers: principal senior -->
+
 **Part of the SOLID series** | [Back to Overview](README.md)
 
 ---

@@ -1,5 +1,7 @@
 # Positional Encoding — Deep Dive
 
+<!-- tiers: senior -->
+
 > This file is a deep-dive sub-file of the [Foundations & Architecture](README.md) module.
 > It covers positional encoding mathematical derivations, RoPE, ALiBi, YaRN, NTK-aware scaling,
 > and context extension techniques.

@@ -1,5 +1,7 @@
 # Pydantic v2 — Deep Dive
 
+<!-- tiers: senior -->
+
 > See `../../the_type_system_and_typing/README.md` for `TypeVar`, `Protocol`, and `Annotated` types used by Pydantic.
 > See `../dependency_injection_in_fastapi/README.md` for how Pydantic models are used as request bodies in FastAPI routes.
 

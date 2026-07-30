@@ -1,5 +1,7 @@
 # Spring Configuration
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Spring configuration is how you declare beans, their dependencies, and conditional wiring rules to the IoC container. Spring supports three configuration styles — XML (legacy), annotation-based (`@Component` scanning), and Java-based (`@Configuration` + `@Bean`) — plus a hybrid of all three. Understanding the semantics of `@Configuration` (full mode) vs `@Component` (lite mode) is critical for avoiding subtle production bugs with `@Bean` method calls.

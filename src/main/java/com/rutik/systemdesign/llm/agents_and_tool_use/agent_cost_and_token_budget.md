@@ -1,5 +1,7 @@
 # Agent Cost and Token Budget Management — Deep Dive
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

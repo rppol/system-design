@@ -1,5 +1,7 @@
 # Spring Cloud Config
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

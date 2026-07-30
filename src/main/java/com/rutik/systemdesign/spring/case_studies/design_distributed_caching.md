@@ -1,5 +1,7 @@
 # Design: Distributed Caching Layer with Redis and Caffeine
 
+<!-- tiers: senior -->
+
 > "A cache is a confidence trick: you convince the application that the data is right
 > here, sub-millisecond away. The moment the trick fails — a cold start, a Redis outage,
 > a stampede on expiry — the database behind the curtain absorbs a spike it was never

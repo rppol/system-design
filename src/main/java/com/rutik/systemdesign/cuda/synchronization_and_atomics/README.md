@@ -1,5 +1,7 @@
 # Synchronization & Atomics
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 A CUDA kernel launches thousands of threads that all read and write the same

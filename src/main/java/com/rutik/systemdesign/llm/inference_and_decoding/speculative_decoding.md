@@ -1,5 +1,7 @@
 # Speculative Decoding — Draft-and-Verify Inference Acceleration
 
+<!-- tiers: senior -->
+
 Deep-dive sub-file of [Inference & Decoding](README.md). Covers the rejection-sampling proof that speculative decoding is an *exact* sampler, the full landscape of draft strategies — independent draft models, self-speculative (LayerSkip), Medusa, EAGLE/EAGLE-2/EAGLE-3, lookahead (Jacobi) decoding, prompt-lookup/ngram decoding, and DeepSeek-V3 multi-token prediction — tree-based verification, and production tuning.
 
 ---

@@ -1,5 +1,7 @@
 # Data Model & Objects
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Python's data model is the set of interfaces — defined entirely through special ("dunder") methods — that every object in the language implements to participate in built-in operations. When you write `a + b`, Python calls `a.__add__(b)`. When you write `len(x)`, Python calls `x.__len__()`. When CPython evaluates `for item in collection`, it calls `collection.__iter__()` and repeatedly calls `next()` on the resulting iterator. The data model is the contract between user-defined code and the interpreter itself.

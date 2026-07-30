@@ -1,5 +1,7 @@
 # Design an Ads Click-Through Rate (CTR) Prediction System
 
+<!-- tiers: senior -->
+
 ## Problem Statement
 
 Design a CTR prediction system for online advertising. For every ad auction (1 million per second), predict P(click | user, ad, context) within 10ms. Training data consists of roughly 1-2 billion labelled impressions per day after negative subsampling (the capacity model in §10 derives ~1.72B from the served-impression rate, which is the number to size against). The model must be well-calibrated — predicted CTR should closely match actual observed CTR at the same predicted score level (a predicted CTR of 5% should correspond to a 5% actual click rate in aggregate). Miscalibration directly distorts auction mechanics: in a generalized second-price auction ads are *ranked* by bid × predicted CTR, and the winner is *charged* the runner-up's rank score divided by the winner's own predicted CTR — so a 2x calibration error halves or doubles what the platform collects per impression.

@@ -1,5 +1,7 @@
 # Distributed Training for ML
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Distributed training splits the work of training a machine learning model across multiple devices (GPUs) or multiple machines (nodes). It is necessary when either the dataset is too large to iterate over in reasonable time on a single GPU, or the model itself is too large to fit in a single GPU's VRAM.

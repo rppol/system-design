@@ -1,5 +1,7 @@
 # Database Migrations in Spring — Flyway & Liquibase
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

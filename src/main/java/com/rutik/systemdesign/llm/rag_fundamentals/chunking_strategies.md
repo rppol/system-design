@@ -1,5 +1,7 @@
 # Chunking Strategies
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Chunking is the process of splitting documents into smaller pieces before embedding and indexing for retrieval. The chunk is the atomic unit of retrieval: when a user query is issued, the system finds the most relevant chunks and injects them into the LLM's context. How you chunk determines what can be retrieved — a poorly chunked corpus means the right information is never retrievable, regardless of how good the embedding model is.

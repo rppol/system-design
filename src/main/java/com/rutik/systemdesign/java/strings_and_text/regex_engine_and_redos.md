@@ -1,5 +1,7 @@
 # Regex Engine and ReDoS — Deep Dive
 
+<!-- tiers: senior -->
+
 A deep dive into `java.util.regex` — how the `Pattern`/`Matcher` pair works, why
 Java uses a *backtracking NFA* engine (and what that costs you), and how
 seemingly harmless patterns turn into a denial-of-service vector called ReDoS.

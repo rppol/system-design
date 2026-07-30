@@ -1,5 +1,7 @@
 # Design an ETA Prediction System
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > An ETA prediction system is like a professional navigator in an unfamiliar city: good enough to get you there, but the real skill is communicating honest uncertainty — "probably 12 minutes, but could be 18 if the game just ended."

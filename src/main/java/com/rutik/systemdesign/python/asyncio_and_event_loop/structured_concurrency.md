@@ -1,5 +1,7 @@
 # Structured Concurrency in Python
 
+<!-- tiers: senior -->
+
 Deep-dive sub-file extending [asyncio & Event Loop](../README.md).
 
 ---

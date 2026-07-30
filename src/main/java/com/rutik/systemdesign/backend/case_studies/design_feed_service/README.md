@@ -1,5 +1,7 @@
 # Case Study: Social Media Home Feed Service
 
+<!-- tiers: senior -->
+
 ## Problem Statement
 
 Build a home feed service for a social media platform at Twitter/Instagram scale. When a user opens

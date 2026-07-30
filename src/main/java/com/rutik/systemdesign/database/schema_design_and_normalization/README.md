@@ -1,5 +1,7 @@
 # Schema Design and Normalization
 
+<!-- tiers: principal senior -->
+
 ## Deep Dive Files
 
 | File | Topic | Q&As |

@@ -1,5 +1,7 @@
 # Shared Memory & Bank Conflicts
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Shared memory is a small, fast, on-chip scratchpad that every thread block owns for the

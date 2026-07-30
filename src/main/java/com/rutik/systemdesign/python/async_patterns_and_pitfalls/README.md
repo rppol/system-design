@@ -1,5 +1,7 @@
 # Async Patterns & Pitfalls
 
+<!-- tiers: principal senior -->
+
 > Advanced companion to `../asyncio_and_event_loop/README.md`. Covers production patterns
 > that go beyond the event loop fundamentals: detecting and fixing blocking-in-async (the #1
 > FastAPI production bug), executor integration, async generators, rate limiting with

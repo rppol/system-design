@@ -1,5 +1,7 @@
 # Spring HATEOAS & REST Maturity
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 REST maturity is measured by the **Richardson Maturity Model (RMM)** — a four-level ladder from RPC-tunneled-over-HTTP (Level 0) to fully hypermedia-driven APIs (Level 3, HATEOAS). Most production "REST" APIs actually sit at **Level 2**: resource URIs plus correct HTTP verbs and status codes. Level 3 — **HATEOAS** (Hypermedia As The Engine Of Application State) — adds links to every response so the client discovers what it can do next instead of hardcoding URLs.

@@ -1,5 +1,7 @@
 # Type Inference and Bounds — Deep Dive
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

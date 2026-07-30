@@ -1,5 +1,7 @@
 # Exceptions & I/O
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Java's exception system and I/O stack are foundational to every production application. Understanding the distinction between checked and unchecked exceptions, the semantics of `try-with-resources`, suppressed exceptions, and the NIO.2 path API are critical for writing robust, resource-safe code.

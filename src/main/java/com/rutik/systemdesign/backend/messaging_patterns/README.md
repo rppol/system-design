@@ -1,5 +1,7 @@
 # Messaging Patterns
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Messaging patterns solve the fundamental challenges of reliable asynchronous communication between services: how to ensure a message is published exactly when a business operation completes, how to avoid processing the same message twice, how to handle messages that repeatedly fail processing, and how to evolve message schemas without breaking consumers. The outbox pattern, transactional inbox, dead letter queue, and schema evolution strategies address these challenges systematically.

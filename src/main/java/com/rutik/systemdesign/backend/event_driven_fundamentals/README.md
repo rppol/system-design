@@ -1,5 +1,7 @@
 # Event-Driven Fundamentals
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

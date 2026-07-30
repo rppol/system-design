@@ -1,5 +1,7 @@
 # Observability and Monitoring
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Observability is the ability to understand the internal state of a system by examining its external outputs. The three pillars are metrics (aggregated numeric measurements), logs (discrete timestamped events), and distributed traces (request flows across service boundaries). Monitoring asks "is the system working?" Observability asks "why is the system not working?"

@@ -1,5 +1,7 @@
 # Template Method Pattern
 
+<!-- tiers: senior -->
+
 ## 1. Pattern Name & Category
 
 **Pattern Name:** Template Method

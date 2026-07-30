@@ -1,5 +1,7 @@
 # Case Study: Design a Deep Research Agent
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: A deep research agent is like a PhD research assistant who is given a question, disappears for 30 minutes, reads 150 papers and web pages, synthesizes contradictory sources, and returns with a fully cited 10-page report. The engineering challenge is entirely different from RAG-based chatbots: this agent runs for 5-30 minutes, traverses 50-200 URLs, resolves contradictions across sources, and produces report-grade output — not chat-grade. The user is paying for depth, not speed.

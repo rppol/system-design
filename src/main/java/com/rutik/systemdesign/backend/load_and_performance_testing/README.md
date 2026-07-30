@@ -1,5 +1,7 @@
 # Load and Performance Testing
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Performance testing is the practice of applying synthetic load to a system to measure behavior under known conditions — throughput, latency percentiles, error rate, and resource utilization. Load testing validates behavior under expected production load. Stress testing finds the breaking point. Soak testing reveals slow degradation over hours. Spike testing measures resilience to sudden traffic bursts. Performance tests answer "how does the system behave?" while functional tests answer "does the system behave correctly?"

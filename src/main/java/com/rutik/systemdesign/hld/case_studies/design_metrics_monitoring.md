@@ -1,5 +1,7 @@
 # System Design: Metrics Monitoring and Alerting System
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > **Design intuition**: A metrics monitoring system is itself a database — but one optimized for exactly one brutal write pattern and one narrow read pattern, and nothing else. The write pattern: every second, tens of thousands of independent producers each emit a handful of monotonically-increasing or slowly-varying numbers, each stamped with "now." The read pattern: "give me the last N hours of *this exact* metric, aggregated into buckets, as fast as possible, so a human (or an alert rule) can decide if something is on fire." A generic relational database is catastrophically bad at both: it wasn't built to absorb millions of tiny timestamped inserts per second, and it wasn't built to scan months of rows just to compute one number per minute. Every architectural choice in this design — the columnar, time-partitioned storage engine; the downsampling/retention tiers; the pull-vs-push ingestion debate — exists because "store a number with a timestamp and some labels, then later ask for a windowed aggregate of it" is a different problem from "store a row and look it up by primary key," and treating it as the same problem is how teams end up running a TSDB on top of Postgres until it falls over.

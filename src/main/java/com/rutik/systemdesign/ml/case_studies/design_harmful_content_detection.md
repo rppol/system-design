@@ -1,5 +1,7 @@
 # Design a Harmful Content Detection System (Trust & Safety / Integrity)
 
+<!-- tiers: principal -->
+
 > "Content moderation is airport security for a platform that admits a billion travelers a second: you cannot hand-search everyone, the threats keep changing their disguises, and both a missed weapon and a strip-searched grandmother are front-page failures."
 
 **Key insight:** Harmful-content detection is not a classification problem, it is a *resourced decision system under adversarial, asymmetric, rare-positive conditions*. Three properties break every convention you carry over from a recommender: (1) **prevalence is tiny** — violating content is often 0.01–1% of volume, so accuracy is a useless metric and precision/recall/PR-AUC rule; (2) **error costs are policy-specific and asymmetric** — a false negative on child-safety or terrorism is catastrophic and legally mandated to be near-zero, while a false negative on spam is a nuisance, and a false positive that removes lawful speech is a different, censorship-shaped harm; (3) **the label distribution is adversarial and non-stationary** — bad actors mutate text (leetspeak, homoglyphs), images (crops, overlays), and behavior to evade whatever you deployed last week. The design that falls out is a **cascade** of cheap high-recall filters feeding expensive multimodal classifiers, which feed a **prioritized human-review queue**, closing a loop where human decisions become tomorrow's training labels.

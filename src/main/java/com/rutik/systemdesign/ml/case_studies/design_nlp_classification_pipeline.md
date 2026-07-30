@@ -1,5 +1,7 @@
 # Design an NLP Text Classification Pipeline at Scale
 
+<!-- tiers: senior -->
+
 > "An NLP classification pipeline is like a postal sorting office for language: it reads each document, understands its content, and routes it to the right destination — the challenge is doing this reliably for millions of documents per day with an ever-evolving set of categories."
 
 **Key insight:** Most NLP classification problems do not need BERT. A fine-tuned BERT adds significant infrastructure complexity and serving latency for a 5–15% accuracy improvement over a well-engineered TF-IDF + logistic regression baseline. The engineering question is not "which model achieves the best AUC?" but "which model achieves acceptable accuracy within the latency, cost, and operational budget available?"

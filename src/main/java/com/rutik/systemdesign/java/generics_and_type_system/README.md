@@ -1,5 +1,7 @@
 # Generics & Type System
 
+<!-- tiers: senior -->
+
 ## Deep Dive Files
 
 | File | Topic | Q&As |

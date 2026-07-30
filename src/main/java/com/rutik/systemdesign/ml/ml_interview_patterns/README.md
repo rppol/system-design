@@ -1,5 +1,7 @@
 # ML Interview Patterns and Preparation
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 ML interviews test three distinct skills: (1) theoretical understanding of algorithms, statistics, and optimization; (2) ML system design — architecting end-to-end production systems; and (3) coding — implementing ML algorithms from scratch. This module focuses on systematic frameworks and patterns for excelling at ML interviews at top-tier companies (FAANG, ML-first startups).

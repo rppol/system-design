@@ -1,5 +1,7 @@
 # LoRA (Low-Rank Adaptation)
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 LoRA (Low-Rank Adaptation, Hu et al. 2021) is a [parameter-efficient fine-tuning](peft_methods.md) method that adds small trainable matrices alongside frozen pre-trained weights. Instead of updating all d×k parameters in a weight matrix W, LoRA decomposes the update ΔW into a product of two low-rank matrices: ΔW = B × A, where A ∈ ℝ^(r×k) and B ∈ ℝ^(d×r) with rank r ≪ min(d, k).

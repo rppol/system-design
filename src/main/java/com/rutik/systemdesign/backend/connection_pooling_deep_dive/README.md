@@ -1,5 +1,7 @@
 # Connection Pooling Deep Dive
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 A connection pool maintains a set of pre-established database connections that are reused across requests. Opening a fresh one is not a single round trip — count them for PostgreSQL over TLS: TCP handshake, the `SSLRequest` negotiation packet, the TLS 1.3 handshake, then the startup message and a SCRAM-SHA-256 exchange that is itself two client-server round trips, and finally the server forking a backend process. That is five or six serial round trips plus a fork, so the wall-clock cost is *your RTT times six*: single-digit milliseconds on a same-AZ link, and well past 100ms across a region boundary. Do not memorise a number here — count round trips and multiply by the latency you actually have. A pool borrow, by contrast, is microseconds and touches no network at all, which is the entire point.

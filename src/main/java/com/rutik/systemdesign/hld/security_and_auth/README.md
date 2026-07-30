@@ -1,5 +1,7 @@
 # Security and Authentication/Authorization
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Every system design interview eventually reaches the question: "how do you secure this?" The answer has two distinct halves that are constantly conflated:

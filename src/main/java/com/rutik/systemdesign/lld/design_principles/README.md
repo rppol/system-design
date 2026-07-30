@@ -1,5 +1,7 @@
 # Design Principles
 
+<!-- tiers: principal -->
+
 General-purpose design principles that apply across all layers of software — not tied to a specific pattern or framework.
 
 ---

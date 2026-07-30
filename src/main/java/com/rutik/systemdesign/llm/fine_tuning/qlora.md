@@ -1,5 +1,7 @@
 # QLoRA (Quantized LoRA)
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 QLoRA (Dettmers et al. 2023, [arXiv:2305.14314](https://arxiv.org/abs/2305.14314)) combines two techniques to dramatically reduce GPU memory requirements for LLM fine-tuning: quantize the frozen base model to 4-bit NF4 (NormalFloat4) precision, and train [LoRA](lora.md) adapters in full BF16 precision on top of the quantized base. A 7B model that needs ~15GB for standard BF16 LoRA training needs only 5-6GB with QLoRA — enabling fine-tuning on a single 16GB consumer GPU.

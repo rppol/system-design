@@ -1,5 +1,7 @@
 # Spring Caching
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Spring Cache Abstraction provides a unified caching API that decouples application code from the underlying cache store. Introduced in Spring 3.1, it allows caching method results through annotations without changing business logic. The abstraction sits on top of concrete implementations (ConcurrentMap, Redis, Caffeine, EhCache) and is driven by AOP proxies that intercept annotated methods.

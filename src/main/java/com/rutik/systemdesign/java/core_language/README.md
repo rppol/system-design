@@ -1,5 +1,7 @@
 # Core Language
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Java's core language is built on **object-oriented programming** with a statically typed, garbage-collected runtime. Every construct — classes, interfaces, abstract classes, inner classes — is a tool with specific semantics that the compiler and JVM enforce. Understanding exactly what each construct does at the bytecode level separates engineers who write Java from engineers who *know* Java.

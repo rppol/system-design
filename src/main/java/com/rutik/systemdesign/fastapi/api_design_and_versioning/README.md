@@ -1,5 +1,7 @@
 # API Design and Versioning
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

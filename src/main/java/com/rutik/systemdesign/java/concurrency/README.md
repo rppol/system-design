@@ -1,5 +1,7 @@
 # Concurrency
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Java concurrency is the single hardest part of the language and the most common source of production bugs. Race conditions, deadlocks, and memory visibility issues are notoriously difficult to reproduce and diagnose. Java provides multiple layers of concurrency primitives: the low-level `synchronized`/`volatile` keywords tied to the Java Memory Model; the `java.util.concurrent` (JUC) package introduced in Java 5 with locks, queues, executors, and atomic variables; and Java 21's virtual threads and structured concurrency.

@@ -433,6 +433,70 @@ def _readme_tier_path(section, tier):
     return int(m.group(1)), slugs
 
 
+# TIER MARKERS -- the single source of truth for curated-path membership.
+#
+# Every file that belongs to a tier carries `<!-- tiers: senior principal -->` directly
+# under its H1. An HTML comment renders as nothing on GitHub and in the reader, so the
+# marker is invisible to a human and greppable to a tool. Membership therefore lives WITH
+# the content instead of in a hand-maintained array in app.js -- which is what let the two
+# drift in the first place.
+#
+#   module README marker -> the module is in those tiers
+#   sub-file marker      -> only those tiers see that sub-file
+#   case-study marker    -> that case study is in those tiers
+#   no marker            -> not in any curated tier (Full path only)
+#
+# ORDER still comes from STUDY_ORDER in app.js. A marker says WHETHER, never WHERE.
+TIER_MARK = re.compile(r"^<!--\s*tiers:\s*([a-z\s]+?)\s*-->\s*$", re.M)
+
+
+def _file_tiers(abs_path):
+    """The tiers a single file declares, or empty set."""
+    try:
+        head = open(abs_path, encoding="utf-8").read(4000)
+    except OSError:
+        return set()
+    m = TIER_MARK.search(head)
+    return set(m.group(1).split()) & set(TIERS) if m else set()
+
+
+def build_paths_from_markers(order):
+    """Derive {section: {senior, principal, seniorFiles, principalFiles, cases}} by walking
+    the tree and reading each file's marker. Ordering is imposed by STUDY_ORDER, so the
+    result is an ordered subset by construction and cannot drift out of order."""
+    out, problems = {}, []
+    for sec, mods in order.items():
+        cfg = {t: [] for t in TIERS}
+        cfg.update({t + "Files": {} for t in TIERS})
+        cfg["cases"] = {t: [] for t in TIERS}
+        for mod in mods:                                   # STUDY_ORDER order == path order
+            readme = os.path.join(BASE_DIR, mod, "README.md")
+            mt = _file_tiers(readme)
+            if not mt:
+                continue
+            subs = sorted((_module_sourcefiles(mod) or set()) - {"README.md"})
+            for tier in mt:
+                cfg[tier].append(mod)
+                keep = ["README.md"] + [f for f in subs
+                                        if tier in _file_tiers(os.path.join(BASE_DIR, mod, f))]
+                if subs:                                   # only record when there is a choice
+                    cfg[tier + "Files"][mod] = keep
+        csroot = os.path.join(BASE_DIR, sec, "case_studies")
+        if os.path.isdir(csroot):
+            for name in sorted(os.listdir(csroot)):
+                if name in CS_EXCLUDE_DIRS:
+                    continue
+                cand = (os.path.join(csroot, name, "README.md") if os.path.isdir(os.path.join(csroot, name))
+                        else os.path.join(csroot, name))
+                if not (cand.endswith(".md") and os.path.isfile(cand)) or os.path.basename(cand) == "README.md" and not os.path.isdir(os.path.join(csroot, name)):
+                    continue
+                for tier in _file_tiers(cand):
+                    cfg["cases"][tier].append(os.path.relpath(cand, BASE_DIR))
+        if any(cfg[t] for t in TIERS):
+            out[sec] = cfg
+    return out, problems
+
+
 def _module_sourcefiles(module):
     """Every sourceFile under a module, in the form extract.py emits (incl. nested
     `<pattern>/README.md`). None when the directory does not exist."""
@@ -503,13 +567,33 @@ def check_wiring(questions, strict):
         for slug in sorted(wired):
             if counts.get(slug, 0) == 0:
                 warns.append(f"STUDY_ORDER dead entry: {slug} extracted 0 questions (Q&A format broken?)")
-        mp = STUDY_PATHS_RE.search(app)
-        if mp:
-            body = mp.group(1)
-            tier_arrays = {t: _section_arrays(body, t) for t in TIERS}
-            tier_files = {t: _tier_objects(body, t + "Files") for t in TIERS}
-            cases_map = _tier_objects(body, "cases")
-            path_secs = sorted({s for t in TIERS for s in tier_arrays[t]})
+        # Tier membership is DERIVED from the `<!-- tiers: ... -->` markers, not read from a
+        # literal in app.js. Ordering is imposed by STUDY_ORDER during derivation, so the
+        # ordered-subset property holds by construction -- what remains worth checking is
+        # that every marker names a real tier, that a curated module's README carries one,
+        # and that the section READMEs still describe what the markers say.
+        derived, _ = build_paths_from_markers(order)
+        if derived:
+            tier_arrays = {t: {s: c[t] for s, c in derived.items()} for t in TIERS}
+            tier_files = {t: {s: c[t + "Files"] for s, c in derived.items()} for t in TIERS}
+            cases_map = {s: c["cases"] for s, c in derived.items()}
+            path_secs = sorted(derived)
+
+            # a marker naming something that is not a tier is a silent no-op otherwise
+            for dp, dn, fs in os.walk(BASE_DIR):
+                dn[:] = [d for d in dn if d not in SKIP_SECTIONS and not d.startswith(".")]
+                for f in fs:
+                    if not f.endswith(".md"):
+                        continue
+                    fp = os.path.join(dp, f)
+                    try:
+                        mm = TIER_MARK.search(open(fp, encoding="utf-8").read(4000))
+                    except OSError:
+                        continue
+                    if mm:
+                        unknown = set(mm.group(1).split()) - set(TIERS)
+                        if unknown:
+                            errors.append(f"{os.path.relpath(fp, BASE_DIR)}: unknown tier(s) in marker: {sorted(unknown)}")
 
             for sec in path_secs:
                 o = order.get(sec, [])
@@ -939,6 +1023,25 @@ def main():
     }
     with open(os.path.join(OUT_DIR, "index.json"), "w", encoding="utf-8") as fh:
         json.dump(index, fh, ensure_ascii=False, indent=2)
+
+    # Curated tier membership, DERIVED from each file's `<!-- tiers: ... -->` marker and
+    # ordered by STUDY_ORDER. Generated like the banks (gitignored, CI regenerates), so the
+    # module README is the single source of truth and app.js holds no hand-maintained copy
+    # to drift from.
+    try:
+        app_src = open(os.path.join(GAME_DIR, "app.js"), encoding="utf-8").read()
+        _order = _section_arrays(STUDY_ORDER_RE.search(app_src).group(1))
+        _paths, _ = build_paths_from_markers(_order)
+        with open(os.path.join(OUT_DIR, "paths.json"), "w", encoding="utf-8") as fh:
+            json.dump(_paths, fh, ensure_ascii=False, indent=1)
+        _nf = sum(len(v[t + "Files"].get(m, [1])) if v[t + "Files"].get(m) else 1
+                  for v in _paths.values() for t in TIERS for m in v[t])
+        print(f"Wrote tier paths -> {OUT_DIR}/paths.json  "
+              f"({len(_paths)} sections, "
+              f"{sum(len(v['senior']) for v in _paths.values())} senior + "
+              f"{sum(len(v['principal']) for v in _paths.values())} principal modules)")
+    except Exception as exc:                                   # never block the bank build
+        print(f"WARNING: could not derive tier paths: {exc}", file=sys.stderr)
 
     print(f"Wrote {len(questions)} questions -> {OUT_DIR}/<section>.json")
     print("Per-section counts:")

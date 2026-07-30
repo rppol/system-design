@@ -1,5 +1,7 @@
 # Collaborative Filtering
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Collaborative filtering (CF) is a recommendation paradigm that predicts a user's preferences based solely on the collective behavior of all users, without requiring any knowledge of item content. The central hypothesis is: users who have interacted similarly in the past will interact similarly in the future. CF is the backbone of most large-scale commercial recommendation systems and was the dominant technique validated by the Netflix Prize (2009).

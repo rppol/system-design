@@ -1,5 +1,7 @@
 # Graph and String Algorithms
 
+<!-- tiers: senior -->
+
 > Traversal, shortest paths, spanning trees, and pattern matching — the algorithms every backend system quietly relies on.
 
 ---

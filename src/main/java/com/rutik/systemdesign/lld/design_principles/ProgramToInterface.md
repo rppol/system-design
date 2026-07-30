@@ -1,5 +1,7 @@
 # Program to Interface, Not Implementation
 
+<!-- tiers: principal -->
+
 ## Origins
 
 The **first design principle** stated in the Gang of Four's "Design Patterns: Elements of Reusable Object-Oriented Software" (1994):

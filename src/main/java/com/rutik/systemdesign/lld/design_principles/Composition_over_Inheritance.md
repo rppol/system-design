@@ -1,5 +1,7 @@
 # Composition Over Inheritance
 
+<!-- tiers: principal -->
+
 ## Origins
 
 One of the **two golden rules** from the Gang of Four's "Design Patterns: Elements of Reusable Object-Oriented Software" (1994):

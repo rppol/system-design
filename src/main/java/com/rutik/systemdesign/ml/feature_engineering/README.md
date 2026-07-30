@@ -1,5 +1,7 @@
 # Feature Engineering
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Feature engineering is the process of transforming raw data into representations that machine learning algorithms can learn from effectively. It encompasses encoding categorical variables, transforming numeric distributions, imputing missing values, selecting informative features, and constructing new features from existing ones. The quality of features often matters more than the choice of algorithm — a linear model with well-engineered features routinely outperforms a gradient boosted tree with raw inputs.

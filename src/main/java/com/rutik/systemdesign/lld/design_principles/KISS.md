@@ -1,5 +1,7 @@
 # KISS — Keep It Simple, Stupid
 
+<!-- tiers: principal -->
+
 ## Origins
 
 Coined by **Kelly Johnson**, lead engineer at Lockheed's Skunk Works (advanced development division), in the 1960s. His design principle for the U-2 and SR-71 aircraft:

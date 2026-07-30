@@ -1,5 +1,7 @@
 # Token Economics and Cost Optimization
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 LLM costs are primarily token-based, making token economics critical for production viability. Every

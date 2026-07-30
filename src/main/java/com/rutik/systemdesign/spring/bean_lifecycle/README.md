@@ -1,5 +1,7 @@
 # Bean Lifecycle
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 The Spring bean lifecycle is the complete sequence of events from when a bean is requested from the container through its creation, initialization, use, and eventual destruction. Understanding this lifecycle is essential for writing correct Spring code — most initialization bugs, circular dependency errors, and resource-leak issues trace back to misunderstanding when each lifecycle phase executes.

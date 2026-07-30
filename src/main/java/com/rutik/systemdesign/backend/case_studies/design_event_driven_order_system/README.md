@@ -1,5 +1,7 @@
 # Case Study: Event-Driven Order System
 
+<!-- tiers: principal -->
+
 ## Problem Statement
 
 Design an order management system where the order lifecycle (Created → Inventory Reserved → Payment Processed → Shipped → Delivered) is driven by Kafka events. Multiple services consume order events. Requirements:

@@ -1,5 +1,7 @@
 # Function Calling & Tool Design
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Function calling (also called tool use) is the mechanism by which LLMs communicate their intent to invoke external code. The model outputs a structured call — a function name and arguments — rather than a prose answer. Your application code intercepts that call, executes the function, and injects the result back into the conversation. The model then produces a final response informed by the real-world result.

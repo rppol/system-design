@@ -1,5 +1,7 @@
 # NewSQL and Distributed SQL
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 NewSQL and Distributed SQL systems provide horizontally scalable databases that preserve the full ACID guarantees and SQL interface of traditional relational databases. They emerged to solve the conflict between two unsatisfactory choices: PostgreSQL/MySQL (strong consistency, limited scale) and NoSQL systems (horizontal scale, weakened consistency and expressiveness). The defining characteristic is distributed ACID transactions — linearizable reads and serializable writes across multiple nodes without the developer burden of application-level sharding.

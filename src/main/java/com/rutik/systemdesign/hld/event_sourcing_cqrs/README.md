@@ -1,5 +1,7 @@
 # Event Sourcing and CQRS
 
+<!-- tiers: principal -->
+
 > Architectural overview. For framework-level implementation (Axon annotations, Spring projections, Eventuate sagas), see the backend companion: [Event Sourcing & CQRS](../../backend/event_sourcing_and_cqrs/README.md).
 
 ---

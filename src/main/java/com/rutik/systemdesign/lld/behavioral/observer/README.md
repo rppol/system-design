@@ -1,5 +1,7 @@
 # Observer Pattern
 
+<!-- tiers: principal senior -->
+
 ## 1. Pattern Name & Category
 
 **Pattern:** Observer

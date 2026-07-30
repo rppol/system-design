@@ -1,5 +1,7 @@
 # Caching Strategies Deep Dive
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 A cache stores the results of expensive operations so subsequent requests can be served faster. Caching is the single highest-leverage performance optimization available to most backend systems — a well-designed cache can reduce database load by 95% and cut response times from 50ms to <1ms. But caching introduces complexity: cache invalidation is one of computer science's two hard problems, and a cache stampede can destroy a database just as effectively as removing the cache entirely.

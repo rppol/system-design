@@ -1,5 +1,7 @@
 # Design a Semantic Search Engine
 
+<!-- tiers: senior -->
+
 > "A semantic search engine is like a librarian who understands that 'cardiac arrest' and 'heart attack' mean the same thing — and returns relevant books regardless of which phrase the patron used."
 
 **Key insight:** The central architectural decision in semantic search is the bi-encoder/cross-encoder split. A bi-encoder (one BERT per document, one per query, dot-product similarity) runs fast enough to score millions of documents but sacrifices accuracy. A cross-encoder (one BERT that jointly encodes query + document) is highly accurate but too slow to score a full corpus. The solution is a two-stage pipeline: bi-encoder for fast candidate retrieval, cross-encoder for precise re-ranking of the top-100.

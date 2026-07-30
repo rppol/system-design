@@ -1,5 +1,7 @@
 # Sampling & Decoding Strategies — Token Selection Internals
 
+<!-- tiers: senior -->
+
 Deep-dive sub-file of [Inference & Decoding](README.md). Covers the full token-selection toolbox beyond temperature and top-p — min-p, typical/eta/epsilon sampling, Mirostat, repetition/presence/frequency penalties, DRY, contrastive search and contrastive decoding, XTC, beam search, the sampler-ordering gotcha, and determinism in production LLM APIs.
 
 ---

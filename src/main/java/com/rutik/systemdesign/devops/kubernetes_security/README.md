@@ -1,5 +1,7 @@
 # Kubernetes Security
 
+<!-- tiers: senior -->
+
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
 A Kubernetes cluster is a large attack surface: an API server, thousands of credentials (ServiceAccount tokens), Secrets, a shared kernel across tenants, and a network where everything talks to everything by default. Securing it means defense in depth across four planes — **authentication/authorization (RBAC)**, **workload hardening (Pod Security, securityContext)**, **network segmentation (NetworkPolicy)**, and **secrets + admission control**. This is among the most-tested DevOps interview areas.

@@ -1,5 +1,7 @@
 # Design: ETL Batch Pipeline with Spring Batch
 
+<!-- tiers: senior -->
+
 > "A batch job is a relay race where the baton is never dropped: if a runner falls
 > (crashed process), the race resumes from exactly that runner's baton position, not
 > from the starting line. Spring Batch's `JobRepository` is the race official who

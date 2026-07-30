@@ -1,5 +1,7 @@
 # Deployment & MLOps
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Deploying LLMs in production requires solving problems that don't exist with traditional software or even traditional ML: massive GPU memory requirements, extreme inference latency variability, multi-dimensional cost optimization (compute vs. API costs), and the challenge of monitoring outputs that are free-form text rather than discrete predictions.

@@ -1,5 +1,7 @@
 # Spring Data JPA — Deep Dive
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

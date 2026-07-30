@@ -1,5 +1,7 @@
 # Pre-Training
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Pre-training is the first and most expensive phase of building an LLM — the process of training a neural network on massive amounts of text data so it learns language, world knowledge, reasoning patterns, and common-sense understanding. A pre-trained model is a general-purpose "foundation" that can be specialized for downstream tasks through fine-tuning.

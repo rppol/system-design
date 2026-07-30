@@ -1,5 +1,7 @@
 # System Design: Search Autocomplete (Typeahead)
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: Autocomplete looks like a tiny feature bolted onto a search box, but it is one of the most latency-sensitive systems any engineer will build — every single keystroke is a query, and the response has to feel instantaneous or the feature feels broken and gets disabled by the user. The entire design pivots on one observation from the scale estimation: the data structure that answers "what are the top suggestions for this prefix?" is small enough to fit entirely in memory and be replicated everywhere, which eliminates the sharding problem that dominates almost every other large-scale system in this repo.

@@ -1,5 +1,7 @@
 # Factory Method vs Abstract Factory vs Builder
 
+<!-- tiers: senior -->
+
 ## Overview
 
 All three are creational patterns that hide object construction from the client. They differ in **complexity**, **what they create**, and **how much the client participates in construction**.

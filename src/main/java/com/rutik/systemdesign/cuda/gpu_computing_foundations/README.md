@@ -1,5 +1,7 @@
 # GPU Computing Foundations
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 A GPU (Graphics Processing Unit) is a massively parallel processor built to run the *same*

@@ -1,5 +1,7 @@
 # Decision Trees — Deep Dive
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 A decision tree is a hierarchical model that partitions the feature space into rectangular regions through a sequence of binary (CART) or multi-way splits. Each internal node tests a feature against a threshold; each leaf node contains a prediction (mean target value for regression, majority class or class distribution for classification). The CART (Classification and Regression Trees) algorithm is the standard implementation in sklearn and most modern frameworks.

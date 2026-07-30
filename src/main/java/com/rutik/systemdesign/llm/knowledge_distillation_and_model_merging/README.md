@@ -1,5 +1,7 @@
 # Knowledge Distillation and Model Merging
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

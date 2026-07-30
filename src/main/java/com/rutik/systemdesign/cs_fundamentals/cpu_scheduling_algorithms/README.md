@@ -1,5 +1,7 @@
 # CPU Scheduling Algorithms
 
+<!-- tiers: senior -->
+
 > The OS scheduler is a traffic controller deciding which process gets the runway next — optimising for throughput, fairness, and responsiveness simultaneously.
 
 ---

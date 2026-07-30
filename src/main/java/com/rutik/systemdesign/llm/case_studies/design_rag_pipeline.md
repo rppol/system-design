@@ -1,5 +1,7 @@
 # Case Study: Design a Production RAG Pipeline
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: A RAG pipeline is a document retrieval system + LLM generation — the retrieval quality bottleneck is the dominant engineering challenge. Most RAG failures are retrieval failures (wrong chunks retrieved), not generation failures (LLM given good context hallucinates less).

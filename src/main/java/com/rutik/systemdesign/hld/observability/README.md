@@ -1,5 +1,7 @@
 # Observability
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 **Observability** is the property of a system that lets you answer questions about its internal state using only the data it produces externally — without shipping new code to add a debug log for the specific question you have *today*. It is built from three complementary signal types, the "three pillars":

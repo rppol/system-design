@@ -1,5 +1,7 @@
 # vLLM Deep Dive
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **One-line analogy**: vLLM is to LLM serving what a database's buffer pool manager is to query execution — it reimagines memory management from scratch to eliminate waste and maximize throughput.

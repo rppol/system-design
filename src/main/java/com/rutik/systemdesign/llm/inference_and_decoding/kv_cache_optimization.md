@@ -1,5 +1,7 @@
 # KV Cache Optimization — Memory Footprint, Eviction, and Compression
 
+<!-- tiers: principal senior -->
+
 Deep-dive sub-file of [Inference & Decoding](README.md). Covers the canonical KV cache memory formula and capacity-planning arithmetic, eviction and compression strategies (H2O, SnapKV, StreamingLLM/attention sinks, Scissorhands), and cross-layer KV sharing (YOCO, CLA). Architectural reductions to KV size (GQA/MQA/MLA) and KV quantization are covered here only as *impact summaries* — for derivations, see [attention_mechanisms.md](../foundations_and_architecture/attention_mechanisms.md) and [optimization_and_quantization](../optimization_and_quantization/README.md)/[vLLM Deep Dive](../vllm_deep_dive/README.md).
 
 ---

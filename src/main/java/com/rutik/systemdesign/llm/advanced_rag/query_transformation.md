@@ -1,5 +1,7 @@
 # Query Transformation
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Query transformation is a pre-retrieval technique that rewrites, expands, or decomposes the user's raw query into a form better suited for retrieval. Raw user queries are often ambiguous, terse, colloquial, or phrased differently from the documents that answer them. Transforming the query before sending it to the retrieval system bridges the vocabulary and intent gap.

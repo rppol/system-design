@@ -1,5 +1,7 @@
 # ReAct & Reasoning Patterns
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 ReAct (Reasoning + Acting), Reflexion, Tree of Thoughts, and self-consistency are prompting patterns that guide LLMs through structured reasoning before and during action. They address a fundamental limitation: raw LLMs produce better outputs when their reasoning is made explicit and structured rather than implicit and one-shot.

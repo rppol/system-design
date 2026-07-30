@@ -1,5 +1,7 @@
 # Load Balancing
 
+<!-- tiers: senior -->
+
 ## Table of Contents
 1. [Concept Overview](#concept-overview)
 2. [Core Principles](#core-principles)

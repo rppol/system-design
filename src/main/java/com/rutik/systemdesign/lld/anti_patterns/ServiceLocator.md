@@ -1,5 +1,7 @@
 # Anti-Pattern: Service Locator
 
+<!-- tiers: principal -->
+
 ## What It Is
 
 The Service Locator pattern provides a centralized registry where services (dependencies) can be looked up by name or type at runtime. Any class can call the locator to obtain a dependency instead of receiving it through a constructor or setter.

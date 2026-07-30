@@ -1,5 +1,7 @@
 # The Type System & typing
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Python's type system is a **gradual, structural, and optional** annotation layer built on top of the

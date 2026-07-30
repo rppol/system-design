@@ -1,5 +1,7 @@
 # API Design
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 An API (Application Programming Interface) is a contract between a provider and a consumer that defines how software components communicate. In distributed systems, APIs are the backbone of service-to-service and client-to-server interaction.

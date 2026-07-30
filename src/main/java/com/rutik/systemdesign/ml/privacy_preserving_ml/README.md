@@ -1,5 +1,7 @@
 # Privacy-Preserving Machine Learning
 
+<!-- tiers: principal -->
+
 > Phase 7 (Advanced Topics). This module covers how to train and serve models when
 > the training data is sensitive and an adversary is trying to recover it: the threat
 > models (membership inference, model inversion, attribute inference, training-data

@@ -1,5 +1,7 @@
 # ML Design Interview Framework — 6-Step Deep Dive
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 The 6-step ML design interview framework is a structured methodology for scoping, designing, and communicating machine learning systems in a 45-60 minute interview. Each step corresponds to a distinct phase of real ML system development. The framework prevents the most common interview failure mode: jumping to model architecture before understanding requirements, data, or business context.

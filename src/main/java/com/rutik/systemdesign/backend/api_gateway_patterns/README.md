@@ -1,5 +1,7 @@
 # API Gateway Patterns
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

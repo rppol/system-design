@@ -1,5 +1,7 @@
 # Causal Inference and ML
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Causal inference is the discipline of estimating the effect of interventions — not just predicting outcomes from observations. Standard ML models learn correlations: P(Y|X). Causal inference estimates counterfactuals: P(Y|do(X=x)) — what would happen if we forcefully set X to x, regardless of how X is usually determined.

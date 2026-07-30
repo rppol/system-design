@@ -1,5 +1,7 @@
 # Trees & Binary Search Trees
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

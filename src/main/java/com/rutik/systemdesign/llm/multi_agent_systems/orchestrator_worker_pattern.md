@@ -1,5 +1,7 @@
 # Orchestrator-Worker Pattern — Deep Dive
 
+<!-- tiers: principal senior -->
+
 ---
 
 ## 1. Concept Overview

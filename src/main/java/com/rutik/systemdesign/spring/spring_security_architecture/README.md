@@ -1,5 +1,7 @@
 # Spring Security Architecture
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Spring Security is a comprehensive security framework for Java applications, providing authentication (who are you?) and authorization (what are you allowed to do?) as orthogonal concerns wired together through a servlet filter chain. It integrates with Spring's dependency injection and AOP infrastructure while remaining usable outside Spring MVC.

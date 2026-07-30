@@ -1,5 +1,7 @@
 # Probability and Statistics for ML
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Probability and statistics underpin every aspect of machine learning: how we model uncertainty in data, how we define and fit model parameters, how we compare model performance, and how we make decisions under uncertainty. ML is fundamentally about learning a probability distribution over data, parameters, or predictions.

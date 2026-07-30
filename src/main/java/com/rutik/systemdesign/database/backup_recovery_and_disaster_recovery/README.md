@@ -1,5 +1,7 @@
 # Backup, Recovery, and Disaster Recovery
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Backup and recovery is the discipline of ensuring that a database's data can be restored to a consistent, known-good state after a failure. The failure modes span a wide spectrum: disk failure, operator error (accidental DROP TABLE), software bugs, datacenter disasters, and ransomware. Each requires a different recovery approach. The key metrics are RPO (Recovery Point Objective — how much data loss is acceptable) and RTO (Recovery Time Objective — how long can the service be unavailable).

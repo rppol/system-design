@@ -1,5 +1,7 @@
 # Processes, Threads, and Context Switching
 
+<!-- tiers: senior -->
+
 > A process is a sealed container with its own world; a thread is a worker sharing the container with siblings.
 
 ---

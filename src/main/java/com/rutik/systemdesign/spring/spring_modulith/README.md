@@ -1,5 +1,7 @@
 # Spring Modulith (Modular Monolith)
 
+<!-- tiers: principal -->
+
 > How Spring Modulith lets you build a *modular monolith*: enforce module boundaries
 > at the package level, verify them with ArchUnit, decouple modules through
 > application events instead of direct calls, test one module in isolation, and

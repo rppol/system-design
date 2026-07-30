@@ -1,5 +1,7 @@
 # Design an ML Platform (Internal Tooling)
 
+<!-- tiers: principal senior -->
+
 ## Problem Statement
 
 Design an internal ML platform for a large tech company with 500 ML engineers and 1,000 models

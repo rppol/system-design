@@ -1,5 +1,7 @@
 # Embedding Models
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Embedding models convert text into dense numerical vectors that capture semantic meaning in a high-dimensional space. In RAG, embeddings power the retrieval step: both document chunks (at index time) and queries (at query time) are converted to vectors, and retrieval finds the chunks whose vectors are closest to the query vector by cosine similarity or dot product.

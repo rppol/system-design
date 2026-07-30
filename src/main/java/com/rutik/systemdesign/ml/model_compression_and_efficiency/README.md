@@ -1,5 +1,7 @@
 # Model Compression and Efficiency
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Model compression reduces the size, memory footprint, and compute requirements of a trained neural network while preserving as much predictive accuracy as possible. As models scale to billions of parameters, uncompressed deployment becomes cost-prohibitive or physically impossible on target hardware (mobile devices, edge chips, cost-constrained cloud instances).

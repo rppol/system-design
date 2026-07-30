@@ -1,5 +1,7 @@
 # DSA Pattern Playbooks — The Recognition Engine
 
+<!-- tiers: senior -->
+
 The pattern-recognition and strategy-selection layer for coding interviews. This section answers the question every L5 candidate must answer in under 5 minutes: *"Given this problem, what pattern do I apply, and why?"*
 
 > **Prerequisites**: [Phase 1–3 concept modules](../) (complexity, data structures, algorithms). Those teach *what* a heap or sliding window is. This section teaches *when* to reach for which one.

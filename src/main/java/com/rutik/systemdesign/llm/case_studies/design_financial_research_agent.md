@@ -1,5 +1,7 @@
 # Case Study: Design a Financial Research AI Agent
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > A financial research agent is a junior analyst who has read every 10-K, earnings call transcript, and analyst report ever filed — and never forgets, never guesses, and always shows its work.

@@ -1,5 +1,7 @@
 # Design a Video Recommendation System (YouTube "Watch Next")
 
+<!-- tiers: principal -->
+
 > "A video recommender is a TV channel that reprograms itself for every viewer between one video ending and the next one starting — and it is graded not on whether you press play, but on whether you are still watching an hour later."
 
 **Key insight:** The defining decision in video recommendation is the *objective*, not the architecture. If you optimize click-through rate you get clickbait — thumbnails and titles that win the click and lose the hour. YouTube's answer (Covington et al., 2016) is a ranking model trained as **weighted logistic regression** where each positive impression is weighted by its watch time, so the learned odds approximate *expected watch time per impression* rather than P(click). The 2019 successor (Zhao et al.) generalizes this by adopting **multi-gate mixture-of-experts (MMoE**, introduced by Ma et al., KDD 2018**)** to jointly predict many engagement and satisfaction signals, with a shallow tower that removes position/selection bias. Everything else — two-tower candidate generation, ANN retrieval, feature stores — is shared with any large recommender; the watch-time objective and the multitask ranking head are what make this problem *video*.

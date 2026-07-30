@@ -1,5 +1,7 @@
 # Java Interview Patterns
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 This module consolidates the most common Java patterns and gotchas that appear on senior Java interviews. Unlike the other modules which cover concepts deeply, this module is a consolidated reference of *recipes and gotchas* — the practical patterns you need to recognize and apply immediately in an interview setting.

@@ -1,5 +1,7 @@
 # Design a Multi-Tenant SaaS API with FastAPI
 
+<!-- tiers: principal -->
+
 ---
 
 ## Problem Statement

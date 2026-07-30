@@ -1,5 +1,7 @@
 # Case Study: Design a Connection Pool in Pure Java
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > Think of a connection pool as a parking garage with a fixed number of spaces: cars (queries) drive in, take a space, drive out, and release the space. Without the garage, every car would dig its own driveway — expensive, slow, and finite. The pool manages that shared finite resource so the application never pays the 20–200 ms TCP + TLS + auth handshake on every query.

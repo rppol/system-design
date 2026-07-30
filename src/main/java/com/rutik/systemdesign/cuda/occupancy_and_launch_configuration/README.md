@@ -1,5 +1,7 @@
 # Occupancy & Launch Configuration
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 **Occupancy** is the ratio of *active warps resident on a Streaming Multiprocessor (SM)* to

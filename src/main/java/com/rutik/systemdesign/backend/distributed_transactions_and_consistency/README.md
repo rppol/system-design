@@ -1,5 +1,7 @@
 # Distributed Transactions and Consistency
 
+<!-- tiers: principal senior -->
+
 **Cross-references:**
 - [Spring Transactions](../../spring/spring_transactions/README.md)
 - [Kafka Deep Dive](../kafka_deep_dive/README.md)

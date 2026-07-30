@@ -1,5 +1,7 @@
 # Inference & Decoding
 
+<!-- tiers: principal senior -->
+
 ## Deep Dive Files
 
 | File | Topic |

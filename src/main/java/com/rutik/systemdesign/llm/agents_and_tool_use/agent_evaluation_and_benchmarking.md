@@ -1,5 +1,7 @@
 # Agent Evaluation & Benchmarking
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Evaluating LLM agents is fundamentally different from evaluating single-call LLMs. Agent evaluation must account for multi-step trajectories, tool use correctness, error recovery, efficiency (steps taken, tokens used, cost per task), and final outcome quality. Standard NLP metrics (BLEU, ROUGE, perplexity) are nearly useless for agents.

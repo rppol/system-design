@@ -1,5 +1,7 @@
 # Recursion & Problem-Solving Patterns
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

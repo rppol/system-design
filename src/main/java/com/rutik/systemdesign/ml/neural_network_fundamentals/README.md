@@ -1,5 +1,7 @@
 # Neural Network Fundamentals
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 A neural network is a parameterized function approximator composed of stacked layers of interconnected units (neurons). Each neuron computes a weighted sum of its inputs followed by a nonlinear activation function. Networks with one hidden layer are universal approximators (Universal Approximation Theorem): they can represent any continuous function on a compact domain given enough hidden units. In practice, depth is more parameter-efficient than width, so modern networks stack many layers rather than making a single layer enormous.

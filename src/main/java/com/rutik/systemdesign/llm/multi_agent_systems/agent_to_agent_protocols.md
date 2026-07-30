@@ -1,5 +1,7 @@
 # Agent-to-Agent Protocols — Deep Dive
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

@@ -1,5 +1,7 @@
 # Case Study: Design an LLM Gateway
 
+<!-- tiers: principal -->
+
 ## Intuition
 
 > **Design intuition**: An LLM Gateway is an API proxy + intelligent router — like an API gateway but with LLM-specific features: model routing by capability/cost, semantic caching (identical-meaning requests get the same cached response), and observability over token usage. It's the "middleware layer" that abstracts provider diversity from application teams.

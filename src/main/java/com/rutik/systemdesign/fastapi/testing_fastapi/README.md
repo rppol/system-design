@@ -1,5 +1,7 @@
 # Testing FastAPI Applications
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Testing a FastAPI application involves verifying HTTP behaviour, dependency injection wiring, database interactions, background tasks, WebSocket endpoints, and authentication flows — all within a controlled, reproducible environment. FastAPI's test story is built on three complementary layers:

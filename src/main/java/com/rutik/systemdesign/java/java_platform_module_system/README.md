@@ -1,5 +1,7 @@
 # Java Platform Module System (JPMS)
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 The Java Platform Module System (JPMS), delivered by Project Jigsaw, is Java's built-in unit of encapsulation and dependency management above the package level. It shipped in **Java 9 (GA September 21, 2017)** as **JEP 261 ("Module System")**, backed by the umbrella JEP 200 ("The Modular JDK"). Before JPMS, a "module" was really just a JAR file: an unordered bag of classes with no compiler-enforced boundary, no declared dependencies, and no distinction between "this class is my public API" and "this class is an implementation detail I never wanted you to touch." JPMS adds a real unit — the module, described by a `module-info.java` file — that names itself, declares what it `requires` from other modules, and declares what it `exports` (and, separately, what it `opens` for reflection).

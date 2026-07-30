@@ -1,5 +1,7 @@
 # Case Study: Design an AI Data Analyst (Code Interpreter / Julius AI Style)
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: An AI Data Analyst is a natural language interface to data -- it combines text-to-code generation (SQL, pandas) with a secure execution sandbox and a visualization renderer. The core loop is: user asks question in English, system generates executable code, runs it in a sandboxed environment, captures the output (table, chart, statistic), and returns both the answer and the reasoning. Unlike chatbots that generate text, this system generates and executes code -- making correctness verifiable but also making sandboxing critical.

@@ -1,5 +1,7 @@
 # GPU Architecture & Roofline Analysis for LLMs
 
+<!-- tiers: principal senior -->
+
 Deep-dive sub-file of [Optimization & Quantization](README.md). Covers the hardware mental model every senior AI engineer is expected to reason with: GPU memory hierarchy, the roofline model, arithmetic intensity of prefill vs decode, tensor cores and FP8/FP4, interconnect topology, and accelerator spec literacy (A100 → H100 → H200 → B200, TPUs). Economics layer: see [gpu_pool_economics.md](../case_studies/cross_cutting/gpu_pool_economics.md).
 
 ---

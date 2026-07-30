@@ -1,5 +1,7 @@
 # Abstract Factory Pattern
 
+<!-- tiers: senior -->
+
 ## 1. Pattern Name & Category
 
 **Name:** Abstract Factory (also called Kit)

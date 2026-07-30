@@ -1,5 +1,7 @@
 # Design Pattern Interview Questions
 
+<!-- tiers: principal senior -->
+
 50+ design pattern interview questions organized by difficulty, with detailed answer outlines.
 Calibrated to the level expected at Google, Amazon, Meta, and similar companies.
 

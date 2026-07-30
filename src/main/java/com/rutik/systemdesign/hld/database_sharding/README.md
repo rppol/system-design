@@ -1,5 +1,7 @@
 # Database Sharding
 
+<!-- tiers: principal senior -->
+
 ## Table of Contents
 1. [What is Sharding?](#what-is-sharding)
 2. [Why Shard?](#why-shard)

@@ -1,5 +1,7 @@
 # Kubernetes Scheduling & Autoscaling
 
+<!-- tiers: senior -->
+
 > Phase 2 — Containers & Kubernetes · Difficulty: Advanced
 
 Scheduling decides *where* a Pod runs; autoscaling decides *how many* Pods and *how many* nodes exist. Together they determine whether your cluster is reliable (Pods land where they should, survive disruptions) and cost-efficient (you run the minimum capacity for the load). This module covers requests/limits/QoS, affinity/taints/topology, the three autoscalers (HPA, VPA, Cluster Autoscaler/Karpenter), KEDA event-driven scaling, and PodDisruptionBudgets.

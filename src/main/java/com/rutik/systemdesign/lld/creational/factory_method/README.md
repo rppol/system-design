@@ -1,5 +1,7 @@
 # Factory Method Pattern
 
+<!-- tiers: senior -->
+
 ## 1. Pattern Name & Category
 
 **Name:** Factory Method (also called Virtual Constructor)

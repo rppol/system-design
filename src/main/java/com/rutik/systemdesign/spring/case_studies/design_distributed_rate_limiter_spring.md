@@ -1,5 +1,7 @@
 # Design: Distributed Rate Limiter (Spring Boot + Redis)
 
+<!-- tiers: senior -->
+
 > **"A turnstile that counts arrivals across all lanes simultaneously."**
 > A single-node `synchronized` counter fails the moment your service scales to multiple pods —
 > each pod has its own counter and the global rate limit is multiplied by the pod count.

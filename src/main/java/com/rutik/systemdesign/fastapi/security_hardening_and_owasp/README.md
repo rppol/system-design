@@ -1,5 +1,7 @@
 # Security Hardening and OWASP
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Security hardening in FastAPI is the practice of closing the gap between "authenticated and working" and "production-safe". Authentication proves identity; hardening ensures the rest of the attack surface — authorization logic, resource consumption, input handling, configuration, and third-party data trust — does not hand that identity more power than it should have.

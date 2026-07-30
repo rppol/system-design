@@ -1,5 +1,7 @@
 # Agent Memory
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Agent memory encompasses all mechanisms by which an LLM agent stores and retrieves information across the span of a task and across sessions. Without memory, every agent invocation starts blank — no knowledge of past user preferences, prior task outcomes, or accumulated domain knowledge. Memory is what makes an agent feel coherent and capable over time rather than amnesiac.

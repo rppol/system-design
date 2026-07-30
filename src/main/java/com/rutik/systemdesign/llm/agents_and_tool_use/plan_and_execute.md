@@ -1,5 +1,7 @@
 # Plan and Execute
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Plan-and-Execute is a two-phase agent architecture that separates task planning from task execution. Phase 1: a Planner LLM generates a complete, structured plan — a numbered sequence of steps to accomplish the goal. Phase 2: an Executor Agent works through the plan step-by-step, calling tools and completing each step in order. The phases use different prompts, different system roles, and often different models.

@@ -1,5 +1,7 @@
 # Case Study: Design Social Media Feed Storage
 
+<!-- tiers: senior -->
+
 ## Problem Statement
 
 Design the database architecture for a social media platform's feed system:

@@ -1,5 +1,7 @@
 # Structural Patterns
 
+<!-- tiers: principal senior -->
+
 Structural patterns deal with object composition — how classes and objects are combined to form larger, more capable structures. They answer the question: "How do these pieces fit together?"
 
 ---

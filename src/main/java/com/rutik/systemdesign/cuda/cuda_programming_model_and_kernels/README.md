@@ -1,5 +1,7 @@
 # CUDA Programming Model & Kernels
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 CUDA (Compute Unified Device Architecture) exposes the GPU to the programmer as a

@@ -1,5 +1,7 @@
 # Iterators & Generators
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

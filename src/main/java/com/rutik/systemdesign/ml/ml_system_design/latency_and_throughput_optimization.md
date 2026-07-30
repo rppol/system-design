@@ -1,5 +1,7 @@
 # ML Inference Latency and Throughput Optimization
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 ML inference latency and throughput optimization is the discipline of reducing the time it takes for a model to produce a prediction (latency) and increasing the number of predictions that can be served per unit time (throughput), while maintaining acceptable model quality.

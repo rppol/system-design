@@ -1,5 +1,7 @@
 # MCP Registries and Ecosystem — Deep Dive
 
+<!-- tiers: principal -->
+
 ---
 
 ## 1. Concept Overview

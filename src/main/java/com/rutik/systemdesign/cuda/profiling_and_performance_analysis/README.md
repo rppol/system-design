@@ -1,5 +1,7 @@
 # Profiling & Performance Analysis
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Profiling is the discipline that turns "I think this kernel is slow because of X" into "I

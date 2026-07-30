@@ -1,5 +1,7 @@
 # ML Model Monitoring and Drift Detection
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 ML model monitoring is the practice of continuously observing a deployed model's inputs, outputs, and performance metrics to detect degradation, data distribution shifts, and operational failures before they cause significant business impact. Unlike traditional software where bugs are deterministic, ML models degrade silently — accuracy erodes gradually as the world changes in ways the training data no longer reflects.

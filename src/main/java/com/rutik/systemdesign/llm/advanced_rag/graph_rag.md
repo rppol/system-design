@@ -1,5 +1,7 @@
 # Graph RAG
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Graph RAG (Microsoft, 2024) extends [standard RAG](../rag_fundamentals/README.md) by extracting a knowledge graph from documents — entities as nodes, relationships as edges — and using that graph structure for retrieval. Documents are not just indexed as text chunks; they are analyzed for their entities, relationships, and the communities those entities form.

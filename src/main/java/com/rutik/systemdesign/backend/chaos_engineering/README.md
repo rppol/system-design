@@ -1,5 +1,7 @@
 # Chaos Engineering
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Chaos engineering is the practice of intentionally introducing failures into a system to verify that it can withstand turbulent conditions in production. It is not random destruction — it is a disciplined, hypothesis-driven experiment. You define what "normal" looks like (steady-state), hypothesize that the system will remain normal under a specific fault condition, inject that fault, observe, and learn. The goal is to discover weaknesses before they become incidents.

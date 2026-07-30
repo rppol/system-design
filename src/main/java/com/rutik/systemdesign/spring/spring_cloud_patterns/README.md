@@ -1,5 +1,7 @@
 # Spring Cloud Patterns — Gateway, Resilience, Service Discovery, Observability
 
+<!-- tiers: principal senior -->
+
 ## Deep Dive Files
 
 | File | Topic | Q&As |

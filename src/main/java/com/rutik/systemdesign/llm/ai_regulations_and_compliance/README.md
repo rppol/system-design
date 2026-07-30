@@ -1,5 +1,7 @@
 # AI Regulations and Compliance
 
+<!-- tiers: principal -->
+
 A senior AI engineer's complete reference for global AI regulatory frameworks, compliance engineering, and building AI systems that are legally deployable. Covers the EU AI Act, GDPR, US Executive Order on AI, NIST AI RMF, and the practical architecture required to meet each framework's obligations.
 
 ---

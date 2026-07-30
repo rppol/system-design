@@ -1,5 +1,7 @@
 # Observability and Tracing in Spring
 
+<!-- tiers: principal -->
+
 ## 1. Concept Overview
 
 Observability in a Spring Boot service means the ability to understand the system's behaviour from its external outputs — metrics, traces, and logs — without touching the running code (the "three pillars of observability").

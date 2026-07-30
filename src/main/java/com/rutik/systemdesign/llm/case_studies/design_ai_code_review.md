@@ -1,5 +1,7 @@
 # Case Study: Design an AI Code Review System (CodeRabbit / Copilot Code Review)
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: An AI code review system is an event-driven pipeline triggered by pull request webhooks -- it must parse diffs, reconstruct surrounding repository context (imports, class hierarchies, test files), run specialized detection passes (security, performance, style), and post prioritized, actionable comments back to the PR. The core challenge is assembling enough repository context to avoid false positives while staying within LLM context limits and completing reviews within 60 seconds.

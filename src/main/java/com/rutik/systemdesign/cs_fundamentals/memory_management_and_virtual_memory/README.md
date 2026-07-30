@@ -1,5 +1,7 @@
 # Memory Management and Virtual Memory
 
+<!-- tiers: senior -->
+
 > Virtual memory is the OS's greatest magic trick: every process believes it has the entire address space to itself, while the OS quietly manages the illusion.
 
 ---

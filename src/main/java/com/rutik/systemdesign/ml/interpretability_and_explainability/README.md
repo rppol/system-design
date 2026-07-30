@@ -1,5 +1,7 @@
 # Model Interpretability and Explainability
 
+<!-- tiers: principal senior -->
+
 > Phase 7 (Advanced Topics). This module is the consolidated home for post-hoc
 > and intrinsic interpretability of classical and deep models: Shapley/SHAP, LIME,
 > permutation importance, PDP/ICE, Integrated Gradients, Grad-CAM, and

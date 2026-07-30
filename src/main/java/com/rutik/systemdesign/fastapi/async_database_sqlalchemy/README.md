@@ -1,5 +1,7 @@
 # Async Database with SQLAlchemy 2.0
 
+<!-- tiers: principal senior -->
+
 > See `../dependency_injection_in_fastapi/README.md` for `yield`-based session dependencies and `use_cache=False` scoping.
 > See `../pydantic_v2_deep_dive/README.md` for Pydantic model integration with SQLModel.
 

@@ -1,5 +1,7 @@
 # Spring Boot Actuator
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Spring Boot Actuator adds production-ready features to Spring Boot applications: health checks, metrics, HTTP request tracing, bean introspection, logger configuration, thread dumps, and more — all accessible via HTTP endpoints or JMX. Actuator integrates with Micrometer for dimensional metrics and supports Kubernetes liveness/readiness probes out of the box.

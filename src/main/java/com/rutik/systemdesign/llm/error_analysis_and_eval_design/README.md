@@ -1,5 +1,7 @@
 # Error Analysis & Eval Design
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Most teams shipping an LLM product can measure. Very few can say **what they should be measuring**.

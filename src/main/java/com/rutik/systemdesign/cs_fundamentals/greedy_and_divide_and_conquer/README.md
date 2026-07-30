@@ -1,5 +1,7 @@
 # Greedy Algorithms and Divide & Conquer
 
+<!-- tiers: senior -->
+
 > Greedy bets on the local optimum; divide and conquer bets on clean sub-problem independence.
 
 ---

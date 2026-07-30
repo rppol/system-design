@@ -1,5 +1,7 @@
 # Natural Language Processing (Classical + Pre-Transformer Deep Learning)
 
+<!-- tiers: senior -->
+
 > This module covers classical and pre-transformer NLP. Transformer-based LLMs are covered in the LLM section (`llm/foundations_and_architecture/`).
 
 ---

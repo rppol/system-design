@@ -1,5 +1,7 @@
 # Rate Limiting In Depth
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Rate limiting is the practice of controlling how many requests a client can make to a service within a given time window. Without rate limiting, a single misbehaving client — whether an automated bot, a buggy application, a denial-of-service attacker, or a legitimate customer that grew unexpectedly fast — can consume all available capacity and starve other clients. Rate limiting is also the primary mechanism for enforcing API pricing tiers: free users get 100 requests per minute, paid users get 10,000, enterprise users get 1,000,000.

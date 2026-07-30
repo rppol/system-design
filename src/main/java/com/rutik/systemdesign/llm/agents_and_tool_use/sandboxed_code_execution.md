@@ -1,5 +1,7 @@
 # Sandboxed Code Execution — Deep Dive
 
+<!-- tiers: principal senior -->
+
 ---
 
 ## 1. Concept Overview

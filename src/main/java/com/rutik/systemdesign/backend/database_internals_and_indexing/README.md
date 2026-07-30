@@ -1,5 +1,7 @@
 # Database Internals & Indexing
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Understanding how databases store and retrieve data is essential for writing efficient queries, designing appropriate indexes, and diagnosing performance problems. Modern relational databases (PostgreSQL, MySQL) are built on a foundation of B+trees for indexes, Write-Ahead Logging (WAL) for durability, and Multi-Version Concurrency Control (MVCC) for isolation. Knowing these internals transforms you from a developer who runs EXPLAIN and hopes for the best into one who can predict query behavior and design schemas for performance.

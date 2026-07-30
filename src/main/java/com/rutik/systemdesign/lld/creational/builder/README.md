@@ -1,5 +1,7 @@
 # Builder Pattern
 
+<!-- tiers: senior -->
+
 ## 1. Pattern Name & Category
 
 **Name:** Builder

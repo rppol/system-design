@@ -1,5 +1,7 @@
 # Structured Concurrency and Project Loom
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Project Loom is the JVM-level effort to make concurrent programming simple and efficient by introducing **virtual threads** — lightweight threads managed by the JVM rather than the OS. Virtual threads enable writing straightforward, blocking-style concurrent code that scales like asynchronous code without callback complexity.

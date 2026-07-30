@@ -1,5 +1,7 @@
 # Spring Events and Scheduling
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Spring provides two complementary mechanisms for decoupling application logic:

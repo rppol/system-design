@@ -1,5 +1,7 @@
 # Storage Engines Internals
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 A storage engine is the component of a database system responsible for storing, retrieving, and managing data on disk. The choice of storage engine determines fundamental performance characteristics: read/write latency, throughput, compression ratios, recovery time, and space amplification. Two dominant storage engine families are B+tree-based engines (PostgreSQL heap + index, InnoDB) and LSM-tree-based engines (RocksDB, LevelDB, Cassandra SSTables).

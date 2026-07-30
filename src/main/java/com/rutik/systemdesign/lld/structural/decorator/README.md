@@ -1,5 +1,7 @@
 # Decorator Pattern
 
+<!-- tiers: senior -->
+
 ## 1. Pattern Name & Category
 
 **Pattern:** Decorator (also known as Wrapper)

@@ -1,5 +1,7 @@
 # Deadlocks and Synchronization
 
+<!-- tiers: senior -->
+
 > A deadlock is two threads at a crossroads, each waiting for the other to move first — forever.
 
 ---

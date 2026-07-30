@@ -1,5 +1,7 @@
 # Model Serving and Inference
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Model serving is the process of deploying a trained ML model into a production environment where it can receive requests, run inference, and return predictions. It bridges the gap between offline model training and online value delivery. Inference refers to the execution of a trained model on new input data to produce predictions.

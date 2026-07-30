@@ -1,5 +1,7 @@
 # Embeddings & Similarity Search
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Embeddings are dense vector representations that capture the semantic meaning of text, images, or other data. Similar content maps to nearby points in the embedding space — this is the foundation of semantic search, recommendation systems, clustering, and RAG pipelines.

@@ -1,5 +1,7 @@
 # Sorting and Searching
 
+<!-- tiers: senior -->
+
 > Putting things in order and finding things fast — the two most pervasive operations in all of computing.
 
 ---

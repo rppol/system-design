@@ -1,5 +1,7 @@
 # Case Study: Design a Real-Time AI Translation System
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: A real-time translation system is a multi-model routing pipeline with streaming output -- the key design challenges are language detection accuracy on short text, sub-second latency for conversational feel, domain-specific terminology enforcement, and quality estimation without reference translations.

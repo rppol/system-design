@@ -1,5 +1,7 @@
 # Supervised Learning
 
+<!-- tiers: senior -->
+
 ## Deep Dive Files
 
 | File | Topic | Q&As |

@@ -1,5 +1,7 @@
 # Agentic Workflow Patterns
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Agentic workflow patterns are reusable structural blueprints for orchestrating LLMs in multi-step pipelines. Anthropic's "Building Effective Agents" taxonomy draws a sharp line: **workflows** are systems where LLMs complete predefined steps with fixed control flow determined by the developer, while **agents** are systems where the LLM itself dynamically decides the control flow at runtime.

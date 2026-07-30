@@ -1,5 +1,7 @@
 # Java Streams — Deep Dive
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 The Stream API (`java.util.stream`, Java 8) is a functional-style pipeline for processing sequences of elements. A stream is **not a data structure** — it is a view over a data source (collection, array, I/O channel, generator) that describes a series of transformations. The pipeline is evaluated lazily: no work happens until a terminal operation is invoked, at which point the pipeline is fused and executed in a single pass where possible.

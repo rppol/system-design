@@ -1,5 +1,7 @@
 # System Design: Distributed Unique ID Generator
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: A distributed unique ID generator is what happens when you take the humble `AUTO_INCREMENT` primary key — a single counter, a single lock, a single point of truth — and ask it to survive being run on a thousand machines at once with no shared state and sub-millisecond latency. The classic answer (Twitter's Snowflake, 2010) is to stop trying to coordinate a single counter at all, and instead **encode "who" and "when" directly into the ID itself**: a 64-bit integer becomes a tiny self-describing record — a timestamp, a machine identity, and a per-millisecond sequence number, bit-packed together. Uniqueness no longer requires a network round trip; it falls out of arithmetic, as long as no two machines are ever assigned the same identity at the same moment.

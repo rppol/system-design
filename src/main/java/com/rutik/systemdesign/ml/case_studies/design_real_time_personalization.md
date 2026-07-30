@@ -1,5 +1,7 @@
 # Design a Real-Time Personalization System
 
+<!-- tiers: senior -->
+
 > "Real-time personalization is like a concierge who reads your most recent request and instantly connects it with everything they know about your past visits — without making you wait."
 
 **Key insight:** The core tension in real-time personalization is *freshness vs stability*. Historical features (user's 12-month purchase history) are stable but stale. Session features (what the user clicked in the last 5 minutes) are fresh but noisy. The best systems maintain a two-stream architecture: a slow, stable user representation updated daily, and a fast, session representation updated in milliseconds, with a fusion layer that blends both at serving time.

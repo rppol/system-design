@@ -1,5 +1,7 @@
 # Caching
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Caching is the process of storing copies of frequently accessed data in a high-speed storage layer (the cache) so that future requests can be served faster without hitting the slower, authoritative data source. It is one of the most impactful performance optimizations in system design — the difference between a 1ms response and a 100ms response often comes down to whether data was served from cache.

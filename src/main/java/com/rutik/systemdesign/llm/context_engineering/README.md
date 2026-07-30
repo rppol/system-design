@@ -1,5 +1,7 @@
 # Context Engineering
 
+<!-- tiers: principal senior -->
+
 ## 1. Concept Overview
 
 Context engineering is the discipline of deciding *what information to place in the context window,

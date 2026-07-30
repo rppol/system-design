@@ -1,5 +1,7 @@
 # System Design: Web Crawler
 
+<!-- tiers: senior -->
+
 ## Intuition
 
 > **Design intuition**: A web crawler is a graph traversal algorithm wearing a distributed-systems trench coat. The "graph" is the entire web — billions of nodes (pages) and tens of billions of edges (hyperlinks) — and you're doing a giant, never-terminating BFS/priority-traversal over it. The hard parts aren't the traversal logic (that's a queue and a visited-set from Algorithms 101); the hard parts are everything that graph theory pretends doesn't exist: the graph is infinite (crawler traps generate new nodes forever), adversarial (some nodes actively try to ban you), and owned by millions of independent operators who will get angry — and block your IP range — if you visit their node too fast.

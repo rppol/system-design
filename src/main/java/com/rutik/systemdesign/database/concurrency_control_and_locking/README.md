@@ -1,5 +1,7 @@
 # Concurrency Control and Locking
 
+<!-- tiers: senior -->
+
 ## 1. Concept Overview
 
 Concurrency control ensures that concurrent database transactions produce results equivalent to some serial execution. Two main approaches: pessimistic (locking — block conflicting operations) and optimistic (MVCC — allow concurrent reads/writes, detect conflicts at commit). Understanding when each wins, and the specific lock types and anomalies involved, is critical for building correct concurrent applications.

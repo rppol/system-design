@@ -1,5 +1,7 @@
 # Linked Lists, Stacks & Queues
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview

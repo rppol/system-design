@@ -1,5 +1,7 @@
 # Arrays, Strings & Hashing
 
+<!-- tiers: senior -->
+
 ---
 
 ## 1. Concept Overview
