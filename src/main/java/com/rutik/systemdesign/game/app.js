@@ -4457,6 +4457,10 @@ async function renderTech() {
       writeFacets(); repaint();
     });
   }
+  // Facets restore from localStorage, so the URL must be re-synced on FIRST paint too.
+  // Without this a reopened screen showed "#/tech" while rendering a filtered view --
+  // the address bar lied, and copying the link handed someone a different screen.
+  if (bankOn) writeFacets();
   repaint();
 
   // One delegated listener for the whole list: a tech row fans out to ~4,000 buttons
