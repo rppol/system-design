@@ -49,7 +49,7 @@ Phase 7: Architecture & Selection
 | [PostgreSQL Internals](postgresql_internals/README.md) | Expert | 18 | VACUUM, autovacuum, EXPLAIN, TOAST, replication slots, partitioning |
 | [MySQL InnoDB Internals](mysql_innodb_internals/README.md) | Advanced | 15 | Clustered index, redo/undo log, binary log, online DDL, GTID |
 | [SQL Query Optimization](sql_query_optimization/README.md) | Advanced | 18 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
-| [Schema Design & Normalization](schema_design_and_normalization/README.md) | Intermediate | 15 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB |
+| [Schema Design & Normalization](schema_design_and_normalization/README.md) | Intermediate | 15 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB — with 1 deep-dive sub-file ([surrogate vs natural keys](schema_design_and_normalization/surrogate_vs_natural_keys.md)) |
 | [Database Migrations (Zero Downtime)](database_migrations_zero_downtime/README.md) | Intermediate | 12 | Flyway, Liquibase, expand-contract, gh-ost, ADD INDEX CONCURRENTLY |
 
 ### Phase 3 — NoSQL Databases

@@ -18,7 +18,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `collections_internals/` | HashMap, ArrayList, LinkedHashMap, NavigableMap, Spliterator internals |
 | `exceptions_and_io/` | Checked/unchecked, try-with-resources, NIO.2, FileChannel, serialization |
 | `functional_programming/` | Composition, custom Collectors, parallel streams, immutability |
-| `generics_and_type_system/` | PECS, erasure, bridge methods, wildcards, MethodHandle, dynamic proxies |
+| `generics_and_type_system/` | PECS, erasure, bridge methods, wildcards, MethodHandle, dynamic proxies — sub-file: `type_inference_and_bounds` |
 | `performance_and_tuning/` | GC tuning, JMH, CPU cache, JIT inlining, tiered compilation |
 | `java_interview_patterns/` | Immutable class, Builder, enum singleton, Integer cache |
 | `design_patterns_in_java/` | GoF patterns (Creational, Structural, Behavioral), concurrency patterns |

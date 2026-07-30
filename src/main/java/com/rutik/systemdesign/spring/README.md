@@ -34,7 +34,7 @@ This section covers:
 | 3 | [dependency_injection](dependency_injection/) | 1 — Core Container | Beginner | Constructor vs. field vs. setter injection, circular deps, @Qualifier, @Primary |
 | 4 | [spring_configuration](spring_configuration/) | 1 — Core Container | Beginner | @Configuration, @Bean, @ComponentScan, @PropertySource, @Profile, @Conditional |
 | 5 | [spring_proxies](spring_proxies/) | 2 — Proxies & AOP | Advanced | JDK dynamic proxy, CGLIB, proxyTargetClass, self-invocation bypass, proxy order |
-| 6 | [spring_aop](spring_aop/) | 2 — Proxies & AOP | Advanced | Pointcut expressions, advice types, AspectJ weaving, @Around, proxy limitations |
+| 6 | [spring_aop](spring_aop/) | 2 — Proxies & AOP | Advanced | Pointcut expressions, advice types, AspectJ weaving, @Around, proxy limitations — with 1 deep-dive sub-file ([pointcut designators](spring_aop/pointcut_designators.md)) |
 | 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | 3 — Spring Boot | Intermediate | @EnableAutoConfiguration, AutoConfiguration.imports, @Conditional* |
 | 8 | [spring_boot_configuration](spring_boot_configuration/) | 3 — Spring Boot | Beginner | @ConfigurationProperties, relaxed binding, config server, secrets management |
 | 9 | [spring_boot_actuator](spring_boot_actuator/) | 3 — Spring Boot | Intermediate | Health indicators, metrics (Micrometer), custom endpoints, security, Prometheus |
@@ -51,7 +51,7 @@ This section covers:
 | 20 | [spring_security_architecture](spring_security_architecture/) | 6 — Security | Advanced | SecurityFilterChain, AuthenticationManager, SecurityContext, CSRF, CORS |
 | 21 | [spring_security_jwt_oauth](spring_security_jwt_oauth/) | 6 — Security | Advanced | JWT validation, OAuth2 resource server, PKCE, Spring Authorization Server |
 | 22 | [spring_cloud_config](spring_cloud_config/) | 7 — Cloud & Messaging | Intermediate | Config server, refresh scope, Vault integration, config encryption |
-| 23 | [spring_cloud_patterns](spring_cloud_patterns/) | 7 — Cloud & Messaging | Advanced | Eureka, Resilience4j, Spring Cloud Gateway, load balancer, circuit breaker |
+| 23 | [spring_cloud_patterns](spring_cloud_patterns/) | 7 — Cloud & Messaging | Advanced | Eureka, Resilience4j, Spring Cloud Gateway, load balancer, circuit breaker — with 1 deep-dive sub-file ([gateway server webmvc](spring_cloud_patterns/gateway_server_webmvc.md)) |
 | 24 | [spring_messaging](spring_messaging/) | 7 — Cloud & Messaging | Intermediate | @KafkaListener, @RabbitListener, message converters, DLQ, idempotency |
 | 25 | [spring_batch](spring_batch/) | 7 — Cloud & Messaging | Advanced | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope, JobRepository, partitioning, skip/retry |
 | 26 | [spring_events_and_scheduling](spring_events_and_scheduling/) | 7 — Cloud & Messaging | Intermediate | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |

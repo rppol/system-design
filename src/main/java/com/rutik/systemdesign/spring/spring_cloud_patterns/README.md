@@ -1,5 +1,11 @@
 # Spring Cloud Patterns — Gateway, Resilience, Service Discovery, Observability
 
+## Deep Dive Files
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [gateway_server_webmvc.md](gateway_server_webmvc.md) | The servlet flavour of Spring Cloud Gateway: WebMvc.fn routes, `HandlerFilterFunction` filters, why blocking is legal here and fatal in WebFlux, virtual threads after JEP 491, and migrating a route set between the flavours | 18 |
+
 ---
 
 ## 1. Concept Overview
@@ -10,7 +16,7 @@ The version this module is written against is the **Spring Cloud 2025.1.0 "Oakwo
 
 This module covers the six pillars of production Spring Cloud deployments:
 
-1. **Spring Cloud Gateway** — API gateway; edge routing, filtering, rate limiting. Ships in two flavours: `gateway-server-webflux` (reactive, Netty) and `gateway-server-webmvc` (blocking, ideal with virtual threads).
+1. **Spring Cloud Gateway** — API gateway; edge routing, filtering, rate limiting. Ships in two flavours: `gateway-server-webflux` (reactive, Netty) and `gateway-server-webmvc` (blocking, ideal with virtual threads). Every code sample in this module is the reactive flavour — for the servlet flavour's route DSL, filter signature and threading model, -> Deep dive: [gateway_server_webmvc.md](gateway_server_webmvc.md).
 2. **Resilience4j** — fault tolerance library; circuit breaker, retry, rate limiter, bulkhead.
 3. **Spring Cloud LoadBalancer** — client-side load balancing.
 4. **OpenFeign** — declarative HTTP client; integrates with LoadBalancer and Resilience4j.
@@ -943,7 +949,7 @@ public class OrderService {
 | Tool | Role | Notes |
 |------|------|-------|
 | spring-cloud-starter-gateway-server-webflux | API Gateway (reactive, Netty) | Routes under `spring.cloud.gateway.server.webflux.*` |
-| spring-cloud-starter-gateway-server-webmvc | API Gateway (blocking, Servlet) | Same filters on Spring MVC; pairs well with virtual threads |
+| spring-cloud-starter-gateway-server-webmvc | API Gateway (blocking, Servlet) | Same filters on Spring MVC; pairs well with virtual threads. -> Deep dive: [gateway_server_webmvc.md](gateway_server_webmvc.md) |
 | spring-cloud-starter-circuitbreaker-resilience4j | Circuit breaker, retry, rate limiter | The `CircuitBreaker` gateway filter needs this on the classpath |
 | spring-cloud-starter-openfeign | Declarative HTTP client | Integrates with LoadBalancer and Resilience4j |
 | spring-cloud-starter-loadbalancer | Client-side load balancing | Resolves `lb://` URIs from any `DiscoveryClient` |

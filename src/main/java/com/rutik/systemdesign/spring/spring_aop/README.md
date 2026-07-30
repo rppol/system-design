@@ -1,5 +1,13 @@
 # Spring AOP
 
+## Deep Dive Files
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [pointcut_designators.md](pointcut_designators.md) | All ten designators — static vs dynamic matching, `args`/`@args`/`target`/`@target`/`this` binding, Spring-only `bean()`, and why unqualified type names silently match nothing | 20 |
+
+---
+
 ## 1. Concept Overview
 
 Aspect-Oriented Programming (AOP) is a programming paradigm that separates cross-cutting concerns — logging, security, transactions, metrics, retries — from business logic. Spring AOP implements this by wrapping beans in proxies that intercept method calls and execute advice code before, after, or around the target method.
@@ -57,6 +65,8 @@ Think of AOP like airport security checks. Every passenger (method call) enterin
 | `target(...)` | Target object is an instance of a type |
 | `@target(...)` | Target class is annotated |
 | `@within(...)` | Methods in a class annotated with a specific annotation |
+
+-> Deep dive: [pointcut_designators.md](pointcut_designators.md) — this table names nine designators (plus Spring's `bean`), but only `execution`, `within`, `@within` and `@annotation` are developed below. The sub-file covers the other five, the static-vs-dynamic matching split that decides what each one costs per call, argument and annotation binding, and the `this()` vs `target()` proxy-type trap.
 
 ### Spring AOP vs AspectJ
 

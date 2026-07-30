@@ -18,7 +18,7 @@ A comprehensive, one-stop reference for understanding everything about Large Lan
 
 ## What This Section Covers
 
-This section is organized into **52 topic directories** plus **29 real-world case studies**, covering the full LLM lifecycle. Thirteen topics have **deep-dive sub-files** (82 sub-files total — 73 module sub-files + 9 cross-cutting case study sub-files — see the Sub-Files Index below):
+This section is organized into **53 topic directories** plus **29 real-world case studies**, covering the full LLM lifecycle. Fifteen topics have **deep-dive sub-files** (85 sub-files total — 75 module sub-files + 10 cross-cutting case study sub-files — see the Sub-Files Index below):
 
 - How models are built (architecture, tokenization, pre-training, fine-tuning, alignment)
 - How to use models effectively (prompting, RAG, reasoning, code generation)
@@ -75,7 +75,7 @@ column reflects learning sequence, not addition order.
 | 37 | 5c — Quality Gate | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md) | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAS | Intermediate |
 | 38 | 5c — Quality Gate | [Error Analysis & Eval Design](error_analysis_and_eval_design/README.md) | Trace sampling, open/axial coding, failure taxonomies, assertion-first eval design, annotator agreement, judge alignment, slice coverage | Intermediate |
 | 39 | 5c — Quality Gate | [LLM Testing Strategies](llm_testing_strategies/README.md) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | Intermediate |
-| 40 | 5c — Quality Gate | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters | Intermediate |
+| 40 | 5c — Quality Gate | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters — with 1 deep-dive sub-file (guardrail evaluation & operations) | Intermediate |
 | 41 | 6 — Advanced | [Safety & Alignment](safety_and_alignment/README.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming — with 1 deep-dive sub-file (automated jailbreak algorithms) | Intermediate |
 | 42 | 6 — Advanced | [Mechanistic Interpretability](mechanistic_interpretability/README.md) | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | Advanced |
 | 43 | 6 — Advanced | [LLM Security](llm_security/README.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming — with 1 deep-dive sub-file (privacy & data governance) | Advanced |
@@ -220,6 +220,11 @@ Topics marked with sub-files above contain individual deep-dive files in additio
 | File | Topic |
 |------|-------|
 | [automated_jailbreak_algorithms.md](safety_and_alignment/automated_jailbreak_algorithms.md) | GCG, AutoDAN/AutoDAN-Turbo, TAP, BEAST, GPTFuzzer, PAP — gradient-based and automated jailbreak search, layered defenses |
+
+### Guardrails & Content Safety (`guardrails_and_content_safety/`)
+| File | Topic |
+|------|-------|
+| [guardrail_evaluation_and_operations.md](guardrails_and_content_safety/guardrail_evaluation_and_operations.md) | Operating a shipped guardrail — labelled eval sets, shadow/canary policy rollout, classifier drift, false-negative post-mortems, appeal loops, guardrail SLOs, coverage matrices, cost-based operating points |
 
 ### LLM Security (`llm_security/`)
 | File | Topic |

@@ -23,7 +23,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `postgresql_internals/` | Expert | 17 | VACUUM, autovacuum, EXPLAIN, TOAST, replication slots, partitioning |
 | `mysql_innodb_internals/` | Advanced | 15 | Clustered index, redo/undo log, binary log, online DDL, GTID |
 | `sql_query_optimization/` | Advanced | 15 | Join algorithms, CBO statistics, keyset pagination, N+1, window functions |
-| `schema_design_and_normalization/` | Intermediate | 16 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB |
+| `schema_design_and_normalization/` | Intermediate | 16 | Normal forms, temporal data, audit trails, multi-tenancy, JSONB — sub-file: `surrogate_vs_natural_keys` |
 | `database_migrations_zero_downtime/` | Intermediate | 16 | Flyway, Liquibase, expand-contract, gh-ost, ADD INDEX CONCURRENTLY |
 
 ### Phase 3 — NoSQL Databases

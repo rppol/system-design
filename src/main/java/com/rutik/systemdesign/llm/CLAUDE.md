@@ -33,7 +33,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `inference_engines/` | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | — |
 | `optimization_and_quantization/` | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation | gpu_architecture_and_roofline |
 | `deployment_and_mlops/` | Serving, GPU cost, monitoring, routing, edge deployment | — |
-| `guardrails_and_content_safety/` | NeMo Guardrails, Llama Guard, input/output filters | — |
+| `guardrails_and_content_safety/` | NeMo Guardrails, Llama Guard, input/output filters | guardrail_evaluation_and_operations |
 | `safety_and_alignment/` | Jailbreaking, prompt injection, hallucination, bias, red teaming | automated_jailbreak_algorithms |
 | `mechanistic_interpretability/` | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | — |
 | `evaluation_and_benchmarks/` | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAs | — |

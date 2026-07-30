@@ -1,5 +1,13 @@
 # Schema Design and Normalization
 
+## Deep Dive Files
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [surrogate_vs_natural_keys.md](surrogate_vs_natural_keys.md) | Which value goes in the primary key: natural vs surrogate, IDENTITY/SERIAL/UUIDv4/UUIDv7/ULID/Snowflake, index locality and WAL amplification, composite-key FK width, and the internal-BIGINT plus external-opaque-id two-key pattern | 17 |
+
+---
+
 ## 1. Concept Overview
 
 Schema design determines how data is structured in tables, what relationships exist, and what constraints enforce correctness. Normalization is the formal process of organizing columns and tables to reduce redundancy and preserve data integrity. Denormalization is the deliberate reversal — duplicating data or combining tables to improve read performance at the cost of update complexity.
@@ -108,6 +116,10 @@ BIGINT     -- 8 bytes, ±9.2×10^18. Use for: high-volume tables, user_id at sca
 SERIAL     -- 4-byte auto-increment integer (PostgreSQL)
 BIGSERIAL  -- 8-byte auto-increment integer (PostgreSQL)
 ```
+
+-> Deep dive: [surrogate_vs_natural_keys.md](surrogate_vs_natural_keys.md) — these are widths, not
+values. Which key value belongs in them (identity vs UUIDv4 vs UUIDv7 vs a natural key), and what
+each costs in index locality, WAL, and every child table's foreign key, is argued there.
 
 **String types**:
 ```sql
@@ -634,6 +646,9 @@ JSON stores the raw text and re-parses it on every query, while JSONB stores a p
 ## 13. Best Practices
 
 1. Use BIGINT GENERATED ALWAYS AS IDENTITY (or BIGSERIAL) for primary keys in PostgreSQL.
+   -> Deep dive: [surrogate_vs_natural_keys.md](surrogate_vs_natural_keys.md) argues this rule —
+   why a surrogate beats a natural key, why IDENTITY beats SERIAL, and when UUIDv7 is the right
+   exception.
 2. Always use TIMESTAMPTZ, never TIMESTAMP — prevents timezone bugs.
 3. Store monetary values as BIGINT cents, never FLOAT or DOUBLE.
 4. Always index foreign key columns — prevents full scans on DELETE from parent table.

@@ -14,7 +14,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `dependency_injection/` | 1 | Constructor/setter/field injection, @Primary, @Qualifier, ObjectProvider |
 | `spring_configuration/` | 1 | @Configuration full vs lite mode, @Conditional, @Profile, @Import |
 | `spring_proxies/` | 2 | JDK proxy vs CGLIB, self-invocation problem, proxyTargetClass |
-| `spring_aop/` | 2 | Pointcut expressions, advice types, @Around, AspectJ vs Spring AOP |
+| `spring_aop/` | 2 | Pointcut expressions, advice types, @Around, AspectJ vs Spring AOP — sub-file: `pointcut_designators` |
 | `spring_boot_autoconfiguration/` | 3 | @EnableAutoConfiguration, AutoConfiguration.imports, custom starters |
 | `spring_boot_configuration/` | 3 | @ConfigurationProperties, relaxed binding, property source priority |
 | `spring_boot_actuator/` | 3 | Health indicators, Micrometer, custom endpoints, K8s probes |
@@ -29,7 +29,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `spring_security_architecture/` | 6 | FilterChainProxy, AuthenticationManager, CSRF, method security |
 | `spring_security_jwt_oauth/` | 6 | JWT, OAuth2 resource server, PKCE, refresh token rotation |
 | `spring_cloud_config/` | 7 | Config Server, @RefreshScope, Spring Cloud Bus, Vault |
-| `spring_cloud_patterns/` | 7 | Gateway, Resilience4j, Feign, Eureka, Micrometer Tracing |
+| `spring_cloud_patterns/` | 7 | Gateway, Resilience4j, Feign, Eureka, Micrometer Tracing — sub-file: `gateway_server_webmvc` |
 | `spring_messaging/` | 7 | Kafka, RabbitMQ, Spring Cloud Stream, @Async, WebSocket |
 | `spring_batch/` | 7 | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope/@JobScope, JobRepository, skip/retry, partitioning |
 | `spring_events_and_scheduling/` | 7 | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled/@Async, ShedLock |

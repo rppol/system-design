@@ -1,5 +1,13 @@
 # Generics & Type System
 
+## Deep Dive Files
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [type_inference_and_bounds.md](type_inference_and_bounds.md) | Intersection/multiple bounds and erasure to the leftmost bound, target typing and poly expressions, capture conversion, diamond and `var` inference, reading inference-failure errors | 19 |
+
+---
+
 ## 1. Concept Overview
 
 Java generics provide compile-time type safety while preserving backward compatibility with pre-Java 5 code through **type erasure**. Understanding generics deeply means knowing not just how to use `<T>` syntax, but *why* certain things are illegal (can't create `new T[]`), what bridge methods are, how wildcards enable PECS, and how reflection + the `TypeToken` pattern circumvent erasure.
@@ -41,6 +49,8 @@ The type system also includes annotations (retention, processors), reflection, a
 | `List<?>` | Unknown type | Yes (as Object) | No (except null) |
 | `List<? extends T>` | T or any subtype | Yes (as T) | No |
 | `List<? super T>` | T or any supertype | Yes (as Object) | Yes (T or subtype) |
+
+-> Deep dive: [type_inference_and_bounds.md](type_inference_and_bounds.md) — the declaration-site counterpart of this table (intersection bounds, f-bounds, `Object &`), plus how the compiler infers the type arguments you leave out.
 
 ### 4.2 PECS (Producer Extends, Consumer Super)
 
@@ -567,6 +577,8 @@ A developer annotated a method `@SafeVarargs` that mutated the varargs array. Th
 ---
 
 ## 12. Interview Questions with Answers
+
+-> Deep dive: [type_inference_and_bounds.md](type_inference_and_bounds.md) — 19 further Q&As on where Q17's recursive bound goes next: multiple bounds (`& Serializable`) and erasure to the leftmost one, why the JDK writes `<T extends Object & Comparable<? super T>>`, why reordering bounds is a binary-incompatible change, and how to read an inference-failure error.
 
 **Q1: Explain PECS with a real example.**
 **Short:** PECS means use extends for producers you read from and super for consumers you write into.

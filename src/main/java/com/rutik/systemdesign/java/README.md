@@ -25,7 +25,7 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 |---|--------|-------------|------------|
 | 1 | [Core Language](core_language/README.md) | OOP, equals/hashCode, inner classes, polymorphism, Object methods | Intermediate |
 | 2 | [Strings and Text](strings_and_text/README.md) | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concatenation, StringBuilder, text blocks, Unicode correctness | Intermediate |
-| 3 | [Generics & Type System](generics_and_type_system/README.md) | PECS, type erasure, bridge methods, wildcards, dynamic proxies | Advanced |
+| 3 | [Generics & Type System](generics_and_type_system/README.md) | PECS, type erasure, bridge methods, wildcards, dynamic proxies — with 1 deep-dive sub-file ([type inference & bounds](generics_and_type_system/type_inference_and_bounds.md)) | Advanced |
 | 4 | [Exceptions & I/O](exceptions_and_io/README.md) | Checked/unchecked, try-with-resources, NIO.2, serialization | Intermediate |
 | 5 | [Java 8 Features](java8_features/README.md) | Lambdas, Streams overview, Optional, Collectors, Date/Time API | Intermediate |
 | 6 | [Java Streams — Deep Dive](java_streams/README.md) | All ops, lazy eval, flatMap, reduce, collect, Spliterator, parallel rules | Intermediate |

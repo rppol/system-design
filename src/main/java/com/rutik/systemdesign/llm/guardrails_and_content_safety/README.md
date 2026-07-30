@@ -1,5 +1,13 @@
 # Guardrails & Content Safety
 
+## Deep Dive Files
+
+| File | Topic | Q&As |
+|------|-------|------|
+| [guardrail_evaluation_and_operations.md](guardrail_evaluation_and_operations.md) | Operating a shipped guardrail — labelled eval sets, shadow/canary policy rollout, classifier drift, false-negative post-mortems, appeal loops, guardrail SLOs, coverage matrices, cost-based operating points | 18 |
+
+---
+
 ## 1. Concept Overview
 
 Guardrails are safety mechanisms that sit around LLM systems to detect and prevent harmful inputs and outputs. They are distinct from [alignment](../alignment_and_rlhf/README.md) (which teaches the model itself to behave safely) — guardrails are external filters that operate at the API/application layer, providing defense-in-depth regardless of what the underlying model does.
@@ -499,6 +507,8 @@ The ROC curve is not a model quality report — it is the menu of policies a sin
 
 **Why the monitoring formula above is a lower bound, not the FPR.** `user complaints / total blocks` is not `FP / (FP + TN)`. Its denominator is the blocks, not the benign population, and its numerator counts only the wrongly-blocked users who bothered to complain — realistically a single-digit percentage of them. Treat it as a cheap production tripwire that catches a threshold regression, and measure the real FPR offline against a labeled benign set. A team that tunes on the complaint ratio alone will keep tightening the filter, because silence reads as success.
 
+-> Deep dive: [guardrail_evaluation_and_operations.md](guardrail_evaluation_and_operations.md) — the machinery behind the five solutions above: building the labelled eval set that measures the real FPR (and how large it must be), rolling a threshold change through shadow and canary, and the appeal loop for wrongly-blocked users.
+
 ### Enterprise Compliance
 
 ```
@@ -576,6 +586,18 @@ GDPR (EU):
 | LLM-based | 500-2000ms | Lowest | Highest | High |
 | NeMo Guardrails | 200-1000ms | Low | High | Medium |
 | Llama Guard | 100-200ms | Low | High | GPU |
+
+**Read the latency column as an ordering, not as measurements.** Neither NVIDIA nor Meta
+publishes a latency figure for these, and a guardrail's latency is set almost entirely by
+things this table does not state: model size, GPU, batch size, and how long the prompt being
+screened is. The Llama Guard row assumes a **short prompt, batch 1, on a datacentre GPU, with
+the smaller text-only Llama Guard 3 8B** — Llama Guard 4 is a 12B model and will be slower on
+the same hardware, and either one on CPU is a different order of magnitude. The NeMo range is
+wide because a Colang rail runs an LLM call of its own, so its latency is a *model* latency
+plus rail overhead, not a library overhead. What is durable here is the ranking — regex, then
+a small encoder classifier, then a purpose-built safety model, then a general LLM judge — each
+step roughly an order of magnitude slower and correspondingly better at nuance. Measure your
+own before you write it into an SLA.
 
 ---
 
@@ -723,6 +745,8 @@ A: All three screen both prompts and responses and are callable standalone, so t
 6. **Keep classifiers updated** — jailbreak techniques evolve; your injection detection must evolve too.
 7. **Define escalation paths** — when the guardrail is uncertain, should it block, flag for review, or ask for clarification?
 
+-> Deep dive: [guardrail_evaluation_and_operations.md](guardrail_evaluation_and_operations.md) — the mechanism behind practices 3 and 6: what "continuously" means as a schedule, why the complaint stream cannot be the tuning signal, scheduled re-benchmarking against classifier drift, guardrail SLOs, and the false-negative post-mortem.
+
 ---
 
 ## 14. Case Study: HIPAA-Compliant Medical Chatbot Guardrails
@@ -828,7 +852,7 @@ A message asking how to hurt a person is "violence".""",
 
 **How do you tune a content safety classifier to reduce false positives without increasing false negatives?** Start by building a labeled evaluation set of at least 500 real-user messages (not synthetic) with ground truth labels. Plot the precision-recall curve for your classifier across decision thresholds. Identify the threshold that meets your false negative budget first (e.g., <0.1% harmful content passes) then choose the threshold that maximizes precision at that recall. For educational chatbots, a 2-stage approach works well: a fast keyword pre-filter with very low false negative rate passes flagged messages to a semantic classifier that eliminates false positives at the cost of one additional LLM call.
 
-**What are the latency constraints for real-time content safety in a children's chatbot, and how do you meet them?** Users aged 8-12 have lower patience than adults; perceived latency above 1.5 seconds for a response causes dropout. Input guardrail budget: <50ms (rule-based or small classifier model). LLM generation: 800-1200ms (stream from first token). Output guardrail budget: <100ms (parallel scan during streaming, block only if triggered). Total: <1.5 seconds. Use a fine-tuned DistilBERT classifier (12ms inference on CPU) for input guardrails rather than an LLM call (200ms+). Run output guardrails on a sliding window of generated tokens in parallel with streaming, not after generation completes.
+**What are the latency constraints for real-time content safety in a children's chatbot, and how do you meet them?** Fix a total budget first and divide it, rather than measuring what you happen to build. This case study's team chose **1.5 seconds end to end** — that is a product decision, not a research finding, and there is no study establishing a dropout threshold specific to 8-to-12-year-olds. The nearest real anchor is the classic HCI response-time work (Miller 1968, Card et al. 1991, popularised by Nielsen): ~1 second is the limit for a user's flow of thought to stay uninterrupted, ~10 seconds for holding attention at all. Pick a number in that band, defend it, and write it down before you allocate. This team's division of 1.5s: input guardrail budget: <50ms (rule-based or small classifier model). LLM generation: 800-1200ms (stream from first token). Output guardrail budget: <100ms (parallel scan during streaming, block only if triggered). Total: <1.5 seconds. Use a fine-tuned DistilBERT classifier (12ms inference on CPU) for input guardrails rather than an LLM call (200ms+). Run output guardrails on a sliding window of generated tokens in parallel with streaming, not after generation completes.
 
 **Quick-reference table:**
 
