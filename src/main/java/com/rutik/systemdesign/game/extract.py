@@ -3,7 +3,7 @@
 extract.py - Build the game's question bank from the repo's Markdown.
 
 Walks every sibling content section (java/, hld/, llm/, ...), parses the
-"## 12. Interview Questions" Q&A blocks out of every module README AND its
+"## 12. Interview Questions" Q&A blocks out of every module page AND its
 deep-dive sub-files (e.g. llm/advanced_rag/graph_rag.md), and emits per-section
 question files the static game loads. Case studies are excluded. No third-party deps.
 
@@ -46,8 +46,13 @@ OUT_DIR = os.path.join(GAME_DIR, "questions")  # per-section files + index.json
 # Sections to skip entirely (the game app; book IS extracted).
 SKIP_SECTIONS = {"game"}
 
-# Path components that exclude a README from the bank (e.g. case studies).
+# Path components that exclude a page from the bank (e.g. case studies).
 SKIP_PATH_PARTS = {"case_studies"}
+
+# The case-studies learning-path INDEX inside <section>/case_studies/. Named for its
+# folder like every other page since 2026-07-30 (it was case_studies/README.md). It
+# carries the tier markers AND the curated order, and it is not itself a case study.
+CS_INDEX_NAME = "case_studies.md"
 
 # Bounds for the SHORT answer shown as an MCQ option. A first sentence longer
 # than SHORT_MAX is TRIMMED to a clean clause boundary (see make_short) rather
@@ -197,13 +202,13 @@ def make_short(text):
 
 
 def parse_md(path, section, module, hdr=INTERVIEW_HDR, source_file=None):
-    """Yield per-question dicts from one .md file (a module README or deep-dive
+    """Yield per-question dicts from one .md file (a module page or deep-dive
     sub-file). Each dict carries both the stripped text (used for ids, options,
     and distractors) and, when they differ, markdown-preserving display variants.
 
     source_file is module-relative, so a file in a sub-directory of the module
-    (lld/creational/prototype/README.md) carries "prototype/README.md" and the
-    reader still resolves module + "/" + sourceFile to the real path."""
+    (lld/creational/prototype/prototype.md) carries "prototype/prototype.md" and
+    the reader still resolves module + "/" + sourceFile to the real path."""
     source_file = source_file or os.path.basename(path)
     with open(path, encoding="utf-8") as fh:
         lines = fh.readlines()
@@ -520,7 +525,7 @@ def _readme_tier_path(section, tier):
 # the content instead of in a hand-maintained array in app.js -- which is what let the two
 # drift in the first place.
 #
-#   module README marker -> the module is in those tiers
+#   module page marker   -> the module is in those tiers
 #   sub-file marker      -> only those tiers see that sub-file
 #   case-study marker    -> that case study is in those tiers
 #   no marker            -> not in any curated tier (Full path only)
@@ -533,7 +538,7 @@ TIER_LINE = re.compile(r"^\s*([a-z]+)\s*:\s*(.+?)\s*$", re.M)
 def _declared_paths(abs_path):
     """{tier: [file, ...]} from a `<!-- study-paths ... -->` block, or {}.
 
-    The block lives ONCE per module README (and once per section case-study index) and
+    The block lives ONCE per module page (and once per section case-study index) and
     names the files that module contributes to each tier. Deep-dive sub-files and
     case-study files carry NO metadata of their own -- study content stays study content.
     """
@@ -585,14 +590,14 @@ def build_paths_from_markers(order):
                                     f"'{_module_page(mod)}' -- the module page is never optional")
                 if len(real) > 1:                          # only record when there is a choice
                     cfg[tier + "Files"][mod] = [f for f in keep if f in real]
-        csidx = os.path.join(BASE_DIR, sec, "case_studies", "case_studies.md")
+        csidx = os.path.join(BASE_DIR, sec, "case_studies", CS_INDEX_NAME)
         for tier, names in _declared_paths(csidx).items():
             for name in names:
                 rel = os.path.join(sec, "case_studies", name)
                 if any(p in CS_EXCLUDE_DIRS for p in rel.split(os.sep)):
-                    problems.append(f"{sec}/case_studies/case_studies.md study-paths[{tier}]: '{name}' is under an excluded dir")
+                    problems.append(f"{sec}/case_studies/{CS_INDEX_NAME} study-paths[{tier}]: '{name}' is under an excluded dir")
                 elif not os.path.isfile(os.path.join(BASE_DIR, rel)):
-                    problems.append(f"{sec}/case_studies/case_studies.md study-paths[{tier}]: no such case study '{name}'")
+                    problems.append(f"{sec}/case_studies/{CS_INDEX_NAME} study-paths[{tier}]: no such case study '{name}'")
                 else:
                     cfg["cases"][tier].append(rel)
         if any(cfg[t] for t in TIERS):
@@ -602,7 +607,7 @@ def build_paths_from_markers(order):
 
 def _module_sourcefiles(module):
     """Every sourceFile under a module, in the form extract.py emits (incl. nested
-    `<pattern>/README.md`). None when the directory does not exist."""
+    `<pattern>/<pattern>.md`). None when the directory does not exist."""
     root = os.path.join(BASE_DIR, module)
     if not os.path.isdir(root):
         return None
@@ -673,7 +678,7 @@ def check_wiring(questions, strict):
         # Tier membership is DERIVED from the `<!-- tiers: ... -->` markers, not read from a
         # literal in app.js. Ordering is imposed by STUDY_ORDER during derivation, so the
         # ordered-subset property holds by construction -- what remains worth checking is
-        # that every marker names a real tier, that a curated module's README carries one,
+        # that every marker names a real tier, that a curated module's page carries one,
         # and that the section READMEs still describe what the markers say.
         derived, _derive_problems = build_paths_from_markers(order)
         if derived:
@@ -683,7 +688,7 @@ def check_wiring(questions, strict):
             path_secs = sorted(derived)
 
             # a study-paths block naming a missing file, an unknown tier, or omitting
-            # README.md is a silent no-op otherwise -- surface it
+            # the module page is a silent no-op otherwise -- surface it
             errors.extend(_derive_problems)
 
             for sec in path_secs:
@@ -707,7 +712,7 @@ def check_wiring(questions, strict):
                     elif idxs != sorted(idxs):
                         errors.append(f"STUDY_PATHS.{sec}.{tier} order deviates from STUDY_ORDER")
 
-                    # (2-4) sub-file allowlist: keys in-tier, files real, README.md present
+                    # (2-4) sub-file allowlist: keys in-tier, files real, module page present
                     fmap = tier_files[tier].get(sec, {})
                     for mod, lst in fmap.items():
                         if mod not in arr:
@@ -776,13 +781,20 @@ def check_wiring(questions, strict):
 
 
 # Order a module's deep-dive files by the LEARNING sequence, not alphabetically.
-# The parent README links its sub-files in pedagogical order (e.g. dsa_patterns'
-# numbered 1..25 pattern table), so first-link-appearance in the README is the
-# curated order. README.md always leads; any file the README never links falls
+# The module page links its sub-files in pedagogical order (e.g. dsa_patterns'
+# numbered 1..25 pattern table), so first-link-appearance in that page is the
+# curated order. The module page always leads; any file it never links falls
 # back to the alphabetical tail so nothing is dropped.
+#
+# The module page is `<folder>.md` since 2026-07-30 (see _module_page). Matching
+# "readme.md" here would find nothing, the page would lose its guaranteed first
+# slot, _SUBLINK_RE would never be run over it, and EVERY multi-file module's
+# sub-files would collapse to the alphabetical tail -- reordering the reader's
+# left tree, the Study fan-out and the sub-file picker.
 _SUBLINK_RE = re.compile(r"\(\.?/?([a-z0-9_]+\.md)(?:#[^)]*)?\)")
 def order_md_files(module_root, md_files):
-    readme = next((f for f in md_files if f.lower() == "readme.md"), None)
+    page = _module_page(module_root)
+    readme = next((f for f in md_files if f == page), None)
     rest = [f for f in md_files if f != readme]
     ordered, seen = [], set()
     if readme:
@@ -803,11 +815,18 @@ def order_md_files(module_root, md_files):
 # (SKIP_PATH_PARTS) and from file_tree. This separate pass indexes them so the game
 # can surface a READ-ONLY "Case Studies" study track (a third path beside Full and
 # Interview). Two shapes coexist: a flat page (design_x.md) and a per-study directory
-# (design_x/README.md, linked in the README as `design_x/`). Order + display names
-# come from the case_studies/README.md "Full Learning Path" links (README-curated,
-# same philosophy as order_md_files); orphans not linked there are an alpha tail so
-# nothing is dropped. cross_cutting/ reference notes and dot-dirs are not case studies.
-CS_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:\./)?([a-z0-9_]+)(?:\.md|/(?:README\.md)?)(?:#[^)]*)?\)")
+# (design_x/design_x.md, historically linked in the index as `design_x/`). Order +
+# display names come from the case-studies index page (case_studies.md) "Full Learning
+# Path" links (index-curated, same philosophy as order_md_files); orphans not linked
+# there are an alpha tail so nothing is dropped. cross_cutting/ reference notes and
+# dot-dirs are not case studies.
+#
+# The link shape must tolerate all three historical forms -- `design_x.md`,
+# `design_x/`, `design_x/README.md` -- plus the post-rename `design_x/design_x.md`.
+# Miss the last one and every slug falls through to the orphan alpha tail, losing both
+# the curated order and the index-authored display name.
+CS_LINK_RE = re.compile(
+    r"\[([^\]]+)\]\((?:\./)?([a-z0-9_]+)(?:\.md|/(?:README\.md|\2\.md)?)(?:#[^)]*)?\)")
 CS_EXCLUDE_DIRS = {"cross_cutting"}
 
 
@@ -821,16 +840,19 @@ def collect_case_studies(section, base_dir):
             continue
         full = os.path.join(cs_root, name)
         if os.path.isdir(full):
-            if name not in CS_EXCLUDE_DIRS and os.path.isfile(os.path.join(full, "README.md")):
-                universe[name] = f"{section}/case_studies/{name}/README.md"
-        elif name.endswith(".md") and name.lower() != "readme.md":
+            # A directory-shaped case study's page is named for its folder.
+            if name not in CS_EXCLUDE_DIRS and os.path.isfile(os.path.join(full, name + ".md")):
+                universe[name] = f"{section}/case_studies/{name}/{name}.md"
+        elif name.endswith(".md") and name.lower() not in (CS_INDEX_NAME.lower(), "readme.md"):
+            # CS_INDEX_NAME is the learning-path INDEX for this directory, not a case
+            # study -- index it as one and the track grows a phantom "Case Studies" entry.
             universe[name[:-3]] = f"{section}/case_studies/{name}"
     if not universe:
         return []
-    # Order + names from the README's "Full Learning Path" section (fall back to the
-    # whole README if that heading is absent).
+    # Order + names from the index page's "Full Learning Path" section (fall back to
+    # the whole index page if that heading is absent).
     text = ""
-    readme = os.path.join(cs_root, "README.md")
+    readme = os.path.join(cs_root, CS_INDEX_NAME)
     if os.path.isfile(readme):
         try:
             text = open(readme, encoding="utf-8").read()
@@ -992,6 +1014,11 @@ def clean_tech_name(raw):
     # the tail of a cell rather than a name ("Boot 3)", "reactive streams)", "ICU4J)").
     if (name.endswith(")") and "(" not in name) or (name.endswith("]") and "[" not in name):
         return None
+    # ...and the symmetric case. An unmatched OPENER means a split landed mid-parenthetical
+    # and this is the HEAD of the cell ("ICU (ICU4C", "Gemini 3.x (3.1"). Only the closer
+    # was guarded, so every such head shipped as a mangled name while its tail was dropped.
+    if ("(" in name and ")" not in name) or ("[" in name and "]" not in name):
+        return None
     # A CLI flag is documentation of a tool, not a tool. Triton's §11 has a whole
     # flags-reference table; indexing "--model-repository" as a technology buries the
     # products the same section actually names.
@@ -1008,8 +1035,34 @@ def tech_key(name):
     return re.sub(r"\s+", " ", key).strip(" .")
 
 
+def _split_outside_parens(cell):
+    """Split on the separators, but NEVER inside brackets.
+
+    `ICU (ICU4C / ICU4J)` is ONE tool whose parenthetical happens to contain a slash.
+    Splitting blind produced 'ICU (ICU4C' (kept -- the guard below only caught an
+    unmatched CLOSER) and 'ICU4J)' (dropped), i.e. one real tool turned into one
+    mangled name. Same shape for 'Gemini 3.x (3.1, 3.0)' and
+    'MongoDB Java Driver (sync / reactive)'. 20 entries in the shipped index."""
+    depth, buf, out = 0, [], []
+    i = 0
+    while i < len(cell):
+        ch = cell[i]
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth = max(0, depth - 1)
+        if depth == 0:
+            mo = NAME_SPLIT_RE.match(cell, i)
+            if mo:
+                out.append("".join(buf)); buf = []
+                i = mo.end(); continue
+        buf.append(ch); i += 1
+    out.append("".join(buf))
+    return out
+
+
 def _tech_names(cell):
-    for part in NAME_SPLIT_RE.split(cell):
+    for part in _split_outside_parens(cell):
         got = clean_tech_name(part)
         if got:
             yield got
@@ -1186,7 +1239,7 @@ def build_questions(raw, rng):
     """raw parsed Q&As -> MCQ entries (dedup + IDF-related distractors). Called
     for BOTH the main bank and the separate case-study reader-quiz pool; each pool
     computes its own IDF and draws distractors only from within itself."""
-    # Drop exact repeats of the same question within a module (README vs sub-file
+    # Drop exact repeats of the same question within a module (module page vs sub-file
     # overlap) so the bank and the spaced-repetition ids stay collision-free.
     seen_q = set()
     deduped = []
@@ -1338,7 +1391,7 @@ def main():
         if SKIP_PATH_PARTS.intersection(parts):
             continue  # exclude case studies etc.
         # A module key is ALWAYS "<section>/<module>" -- exactly two segments. A file living
-        # deeper (lld/creational/prototype/README.md) folds into its parent module the same
+        # deeper (lld/creational/prototype/prototype.md) folds into its parent module the same
         # way a deep-dive sub-file does, carrying the extra path inside source_file. `book`
         # is the one section that genuinely nests three deep (book/<book>/<chapter>) and is
         # the only section STUDY_ORDER expects to be 3-segment.
@@ -1429,7 +1482,7 @@ def main():
 
     # Curated tier membership, DERIVED from each file's `<!-- tiers: ... -->` marker and
     # ordered by STUDY_ORDER. Generated like the banks (gitignored, CI regenerates), so the
-    # module README is the single source of truth and app.js holds no hand-maintained copy
+    # module page is the single source of truth and app.js holds no hand-maintained copy
     # to drift from.
     try:
         app_src = open(os.path.join(GAME_DIR, "app.js"), encoding="utf-8").read()
