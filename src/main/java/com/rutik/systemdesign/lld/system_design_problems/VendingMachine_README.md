@@ -96,6 +96,8 @@ classDiagram
 
 All five concrete states realize `VendingMachineState` and hold a back-reference to their `VendingMachine` context; the context itself holds only a single `currentState` pointer, so reassigning that one field — not a growing `if/else` — is the entire transition. The five state instances are created once in the constructor and reused for the life of the machine (Flyweight; see the Patterns Used table below).
 
+One field in that diagram is a deliberate demo shortcut, and you should be the one to point it out: `balance` is a `double`. Binary floating point cannot represent 0.10 or 0.25 exactly, so a run of coin insertions accumulates drift and an `==` comparison against a price eventually fails. Real money is `BigDecimal` or a `long` count of cents. The same shortcut is in `ATM.java` and `OnlineBookingSystem.java` — it keeps the listings short, and naming it is a cheap point in an interview.
+
 ---
 
 ## Why State Pattern?
@@ -228,7 +230,7 @@ In `HasMoneyState.selectProduct()` — the state that has context about balance.
 
 1. **Payment methods**: Add `CreditCardState` — card inserted triggers a different payment flow
 2. **Multiple product slots**: Inventory supports multiple slots per item
-3. **Restocking interface**: Admin can trigger restock from `OutOfStockState`
+3. **Restocking interface**: Admin can trigger restock from `OutOfStockState`. Half of this already exists — `Inventory.restock(code, quantity)` is implemented but nothing calls it, and `OutOfStockState` exposes no entry point, so today the machine cannot return to service on its own. The missing piece is a `VendingMachine.restock(code, qty)` that also transitions `OUT_OF_STOCK -> IDLE`, mirroring `ATMContext.refillCash()`
 4. **Product expiry**: Items with expiry date; machine won't dispense expired items
 5. **Receipt printing**: Decorator on `DispensingState` to print receipt
 6. **Network-connected machine**: Remote monitoring of stock levels via Observer

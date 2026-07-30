@@ -64,9 +64,9 @@ LLD describes how individual components are implemented — class relationships,
 | Design a parking lot | Strategy, Factory, State | [ParkingLot](system_design_problems/ParkingLot_README.md) |
 | Design an elevator | State, Observer | [ElevatorSystem](system_design_problems/ElevatorSystem_README.md) |
 | Design a library management system | Builder, Observer, Strategy | [LibraryManagement](system_design_problems/LibraryManagement_README.md) |
-| Design a chess game | Composite, Command, State | [ChessGame](system_design_problems/ChessGame_README.md) |
+| Design a chess game | Command, Observer, Singleton | [ChessGame](system_design_problems/ChessGame_README.md) |
 | Design a vending machine | State, Strategy, Factory | [VendingMachine](system_design_problems/VendingMachine_README.md) |
-| Design an ATM | State, Template Method | [ATM](system_design_problems/ATM_README.md) |
+| Design an ATM | State, Command, Facade | [ATM](system_design_problems/ATM_README.md) |
 | Design a movie/flight/hotel booking system | Strategy, Observer, Builder | [OnlineBookingSystem](system_design_problems/OnlineBookingSystem_README.md) |
 | Design a ride-sharing app | Strategy, Observer, Factory, State | [RideSharing](system_design_problems/RideSharing_README.md) |
 | Design an LRU cache (+ LFU variant) | Decorator (thread-safe wrapper) | [LRUCache](system_design_problems/LRUCache_README.md) |
@@ -157,7 +157,7 @@ interview shortcuts) over the same 12 problems, not separate case-study write-up
 ## Adding a New LLD Pattern
 
 1. Create `<category>/<pattern_name>/README.md` — 14-section template
-2. Include: UML ASCII diagram, motivation, participants, Java implementation, real-world example, tradeoffs, Q&As
+2. Include: UML class diagram (Mermaid `classDiagram` preferred per the Content Rules above; ASCII only where alignment carries the meaning), motivation, participants, Java implementation, real-world example, tradeoffs, Q&As
 3. Show the problem it solves (before-code) and the pattern applied (after-code)
 4. Update the relevant **category** `README.md` (e.g., `behavioral/README.md`) — add a row to the pattern catalogue table
 5. Update the **master** `README.md` (the LLD master index) — add a row to the appropriate section table

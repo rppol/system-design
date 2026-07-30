@@ -202,7 +202,7 @@ sequenceDiagram
 - **Duplication**: The Builder mirrors the Product's fields — keeping both in sync during refactoring is an extra maintenance burden.
 - **Mutable intermediate state**: The Builder itself is mutable. If shared across threads during construction, it needs synchronization.
 - **Cannot build in a loop without resetting**: A single Builder instance cannot be reused to build two different Products without resetting all optional fields.
-- **Directory coupling**: If a Director hardcodes a specific construction sequence, it becomes tightly coupled to a particular use case.
+- **Director coupling**: If a Director hardcodes a specific construction sequence, it becomes tightly coupled to a particular use case.
 
 ---
 

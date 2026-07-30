@@ -392,12 +392,19 @@ public class OrderExportBatchConfig extends DefaultBatchConfiguration {
 
 public class UnsafeOrderRepository extends JdbcTemplate {
 
+    // Note the signature: JdbcTemplate.execute declares only the unchecked
+    // DataAccessException, so the override cannot add `throws SQLException`
+    // — it is forced to catch. The catch is the only correct thing here.
     @Override
     public <T> T execute(ConnectionCallback<T> action) {
         // WRONG: subclass re-implements the template, skipping finally-block cleanup
-        Connection conn = getDataSource().getConnection();
-        return action.doInConnection(conn);
-        // conn is never returned to pool if action throws — pool exhausted in seconds
+        try {
+            Connection conn = obtainDataSource().getConnection();
+            return action.doInConnection(conn);
+            // conn is never returned to pool if action throws — pool exhausted in seconds
+        } catch (SQLException ex) {
+            throw new UncategorizedSQLException("execute", null, ex);
+        }
     }
 }
 ```

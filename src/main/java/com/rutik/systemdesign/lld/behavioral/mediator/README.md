@@ -489,7 +489,7 @@ flowchart TD
 
 ## 16. Interview Questions with Answers
 
-**Common interview questions:**
+### Common interview questions
 
 **Q: What is the Mediator pattern?**
 **Short:** Mediator centralizes how objects communicate, turning O(n squared) direct coupling into an O(n) hub-and-spoke topology.

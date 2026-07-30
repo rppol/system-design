@@ -282,7 +282,9 @@ Java Stream operations (filter, map, collect) over the 50M-row dataset with full
 `trySplit()` partitions the key range for parallel stream processing: 8 parallel threads each
 own a non-overlapping `[minId, maxId)` range, achieving ~500k records/sec throughput.
 
-**Scale numbers:**
+**Scale numbers** — illustrative for this one hypothetical export pipeline (order-of-magnitude,
+not a published benchmark; the parallel figure in particular assumes the database is not the
+bottleneck, which on a single local PostgreSQL it usually is):
 - 50M records; page size 1,000 rows; 50,000 JDBC fetches total
 - Memory footprint: ~500 KB (one page in memory at a time; GC'd after processing)
 - Throughput: 500,000 records/sec at p99 < 2 ms per page fetch from local PostgreSQL
@@ -602,7 +604,7 @@ flowchart LR
 
 ## 16. Interview Questions with Answers
 
-**Common interview questions:**
+### Common interview questions
 
 **Q: What is the Iterator pattern and why does Java use it?**
 **Short:** Iterator lets Java traverse any collection uniformly via hasNext()/next() without exposing its internal structure.

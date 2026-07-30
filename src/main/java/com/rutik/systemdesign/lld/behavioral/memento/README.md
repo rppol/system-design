@@ -477,7 +477,7 @@ A: The Originator sees the Memento through a "wide" interface — it can read an
 
 4. **Deep copy all mutable references** — Collections, arrays, and other mutable objects must be deep-copied, not reference-copied.
 
-5. **Consider serialization for persistence** — if Mementos need to survive process restarts (game saves, document recovery), implement `Serializable` on the Memento.
+5. **Serialize to a versioned format for persistence** — if Mementos need to survive process restarts (game saves, document recovery), write them as JSON or Protobuf with an explicit schema version and a migration path. Reach for raw Java `Serializable` only for a short-lived in-JVM handoff: a renamed field or a missing `serialVersionUID` breaks deserialization of every Memento captured by an older build.
 
 6. **Name Mementos descriptively** — if supporting labeled snapshots ("before bulk edit", "version 2.0"), add a timestamp or label to the Memento.
 

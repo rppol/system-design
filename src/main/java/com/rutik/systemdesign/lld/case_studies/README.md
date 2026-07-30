@@ -67,13 +67,13 @@ when preparing for a specific pattern question:
 
 | Pattern | Vending | Parking | Library | Chess | Elevator | ATM | Booking | RideSharing | LRUCache | RateLimiter | TicTacToe | Splitwise |
 |---------|---------|---------|---------|-------|----------|-----|---------|-------------|----------|-------------|-----------|-----------|
-| State | Primary | Supporting | — | — | Primary | Primary | — | Primary | — | — | Supporting | — |
+| State | Primary | — | — | — | Primary | Primary | — | — | — | — | Supporting | — |
 | Strategy | — | Primary | — | — | Supporting | — | Primary | Primary | — | Primary | Primary | Primary |
 | Factory | — | Primary | — | — | — | — | — | Supporting | — | Supporting | — | Supporting |
 | Observer | — | Supporting | Primary | Supporting | Supporting | — | Supporting | Supporting | Supporting | — | — | — |
 | Command | — | — | — | Primary | — | Supporting | — | — | — | — | — | — |
 | Builder | — | — | Supporting | — | — | — | Supporting | — | — | — | — | — |
-| Singleton | Supporting | Primary | — | Supporting | — | — | — | — | — | — | — | — |
+| Singleton | — | Primary | — | Supporting | — | — | — | — | — | — | — | — |
 | Iterator | — | — | Primary | — | — | — | — | — | — | — | — | — |
 | Decorator | — | — | — | — | — | — | — | — | Primary | Supporting | — | — |
 | Facade | — | — | — | — | — | Supporting | — | — | — | — | — | — |
@@ -87,6 +87,14 @@ Two patterns interviewers often expect here appear in **none** of the twelve: **
 it would be plain polymorphism wearing a pattern name) and **Composite** (no problem in this set
 has a genuine part/whole tree). Splitwise likewise considers Observer and deliberately omits it.
 Naming a pattern you did *not* use, and why, is a stronger interview signal than padding the list.
+
+Three cells read `—` for a reason worth knowing, because each problem argues the omission in its
+own write-up. **Ride Sharing** has a six-state lifecycle but no GoF State: `RideState.canTransitionTo()`
+is a `switch` inside an enum — a guarded transition table, not a class per state — because the states
+carry legality rules and no behaviour of their own. **Vending Machine** rejects Singleton outright so
+that a test can hold several independent machines; "one machine per physical unit" is a fact about the
+hardware, not a reason for global uniqueness. **Parking Lot** has no State pattern either — a spot is
+occupied or free, which is a boolean, not a state machine.
 
 ---
 

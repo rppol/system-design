@@ -301,6 +301,10 @@ public final class SelectNode implements SqlNode {
 }
 ```
 
+The visitor below elides the expression-node classes to keep the traversal readable: `EqualsExpr`,
+`ColumnRef`, the static `WhereNode.and(WhereNode, WhereNode)` combinator, and `FromNode.tableName()`
+are all assumed to exist with the obvious shapes. Only the visitor's own logic is shown.
+
 ```java
 public final class TenantFilterVisitor implements SqlVisitor<SqlNode> {
     private final long tenantId;

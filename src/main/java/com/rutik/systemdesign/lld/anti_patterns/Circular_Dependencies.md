@@ -29,7 +29,7 @@ Circular Dependencies occur when two or more modules, packages, or classes form 
 - Architects describe the design as "everything connects to everything" or draw dependency diagrams with bidirectional arrows
 - Deployment ordering cannot be determined: "which service do we start first?"
 - A refactor in `ClassA` always forces a change in `ClassB` and then back in `ClassA`
-- SonarQube, JDepend, or IntelliJ's dependency analysis reports a cycle
+- SonarQube's architecture rules, ArchUnit, or IntelliJ's dependency analysis reports a cycle
 - The `@Lazy` annotation is used on Spring bean injections to "fix" startup failures (a workaround that masks the underlying cycle)
 - Methods in class A take a parameter of type B and methods in class B take a parameter of type A
 
@@ -492,20 +492,23 @@ flowchart LR
 
 **1. Use Dependency Analysis Tools in CI**
 
-JDepend can be run as part of your build to detect package-level cycles:
+Let the scanner fail the pipeline before review does. SonarQube's Java architecture rules detect
+class cycles directly: `javaarchitecture:S7027` flags circular dependencies between classes in the
+same package, and `javaarchitecture:S7091` flags them across packages. Turn both on in the quality
+profile and make new cycles block the quality gate:
 
-```java
-// JUnit test that fails the build if package cycles exist
-@Test
-public void noCyclicPackageDependenciesShouldExist() throws IOException {
-    JDepend jdepend = new JDepend();
-    jdepend.addDirectory("target/classes");
-    jdepend.analyze();
-    assertFalse(jdepend.containsCycles(), "Cyclic dependencies found!");
-}
+```yaml
+# sonar-project.properties equivalents — enable in the quality profile,
+# then gate on "no new issues" so an existing cycle backlog does not block every build.
+sonar.qualitygate.wait=true
 ```
 
-SonarQube's "Package Tangle Index" and "Cyclic Dependencies" rules provide continuous monitoring.
+Two footnotes worth knowing so you do not chase dead tooling. SonarQube's old design metrics —
+Package Tangle Index and the Dependency Structure Matrix — were dropped in SonarQube 5.2 and are
+not coming back; the architecture rules above replaced them. And **JDepend**, the tool most blog
+posts still name for this, last shipped 2.9.1 in 2005: it reads pre-generics bytecode, knows
+nothing about JPMS modules, and should not be added to a new build. IntelliJ's Analyze ->
+Dependency Structure Matrix is still useful interactively, but it is not a CI gate.
 
 **2. Apply the Dependency Inversion Principle (DIP)**
 High-level modules should not depend on low-level modules. Both should depend on abstractions. When two services need to communicate, define an interface in the shared or upstream module and have the downstream module implement it.
@@ -577,7 +580,7 @@ A system had two configuration classes with a static initialization cycle simila
 | **Primary Symptom** | A depends on B, B depends on A (or longer chains); Spring BeanCurrentlyInCreationException |
 | **Key Code Smells** | Bidirectional imports between packages, `@Lazy` used to "fix" Spring startup, cannot test class A without class B |
 | **Main Harm** | Application startup failures, unit test impossibility, deployment ordering deadlocks, class loading race conditions |
-| **Detection Tools** | JDepend, SonarQube Cyclic Dependencies, ArchUnit, IntelliJ Dependency Analysis |
+| **Detection Tools** | ArchUnit `slices().should().beFreeOfCycles()`, SonarQube architecture rules `javaarchitecture:S7027`/`S7091`, IntelliJ Dependency Structure Matrix |
 | **Fix Strategy** | Introduce domain events (publisher/subscriber), extract shared interface, move shared concept to a core module |
 | **Prevention** | Acyclic Dependencies Principle, ArchUnit fitness functions, package-by-feature structure, design reviews |
 | **Effort to Fix** | Medium to High — requires identifying root responsibility mismatch, not just moving imports |

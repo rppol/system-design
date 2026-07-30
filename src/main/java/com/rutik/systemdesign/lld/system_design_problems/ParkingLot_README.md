@@ -181,6 +181,7 @@ The `max(1, ...)` floor is not decoration: it is why a vehicle that leaves after
 | Ticket stores a direct reference to `ParkingSpot` | Store only spotId | Simpler; spot reference valid for the lifetime of the ticket |
 | `requiredSpotType()` on Vehicle | Mapping table in the lot | Encapsulation — vehicle knows its own requirements |
 | Synchronized `getInstance` | Double-checked locking | Simpler; startup is not on the hot path |
+| Two overloads: `getInstance(name, strategy)` initialises, no-arg `getInstance()` throws `IllegalStateException` until it has | One `getInstance(name, strategy)` for both roles | Keeps the accessor honest. Note the residual sharp edge: calling the two-arg form a *second* time silently ignores both arguments and returns the existing instance — first call wins. A cleaner API renames it `initialize(name, strategy)` and makes a second call throw. |
 
 ---
 

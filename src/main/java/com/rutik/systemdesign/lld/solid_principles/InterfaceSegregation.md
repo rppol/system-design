@@ -307,6 +307,10 @@ public interface Fax {
     void fax(Document d);
 }
 
+public interface Stapler {
+    void staple(Document d);
+}
+
 public interface DuplexPrinter extends Printer {
     void printDuplex(Document d);
 }
@@ -318,13 +322,19 @@ public class BasicLaserPrinter implements Printer {
 }
 
 // Advanced MFC printer implements everything it supports
-public class OfficeMFCPrinter implements Printer, Scanner, Fax, DuplexPrinter {
+public class OfficeMFCPrinter implements Printer, Scanner, Fax, Stapler, DuplexPrinter {
     @Override public void print(Document d) { System.out.println("MFC printing..."); }
     @Override public void scan(Document d) { System.out.println("MFC scanning..."); }
     @Override public void fax(Document d) { System.out.println("MFC faxing..."); }
+    @Override public void staple(Document d) { System.out.println("MFC stapling..."); }
     @Override public void printDuplex(Document d) { System.out.println("MFC duplex..."); }
 }
 ```
+
+Count the capabilities on both sides: the violating `MultifunctionPrinter` declares five, so the
+compliant refactor must produce five too. Dropping `staple()` on the way through would quietly
+re-introduce the original sin from the other direction — a capability the fat interface promised
+and the segregated design silently lost.
 
 ---
 

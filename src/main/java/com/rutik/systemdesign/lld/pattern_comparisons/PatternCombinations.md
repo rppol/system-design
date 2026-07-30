@@ -260,8 +260,8 @@ class AuthHandler implements Handler {
     }
 }
 
-class RateLimitHandler implements Handler { ... }
-class LoggingHandler implements Handler { ... }
+class RateLimitHandler implements Handler { /* same shape as AuthHandler */ }
+class LoggingHandler   implements Handler { /* same shape as AuthHandler */ }
 
 class ExecutionHandler implements Handler {
     @Override

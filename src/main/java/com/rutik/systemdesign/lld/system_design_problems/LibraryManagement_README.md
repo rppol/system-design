@@ -8,7 +8,7 @@
 
 **Why it matters**: Library Management combines three patterns that individually feel abstract but together model a real workflow elegantly. It also introduces the concept of a reservation queue, which requires careful ordering and notification logic.
 
-**Key insight**: The borrowing flow has multiple failure modes: book not found, no available copies, member limit exceeded, member suspended. Model these as explicit return types or exceptions — not silent boolean returns — so callers can distinguish and respond to each case.
+**Key insight**: The borrowing flow has multiple failure modes: book not found, no available copies, member limit exceeded, member suspended. Model these as explicit return types or exceptions — not silent boolean returns — so callers can distinguish and respond to each case. The reference `LibraryManagement.java` deliberately does *not* do this: `borrowBook`/`returnBook` return a bare `boolean` and print the reason to stdout, which keeps the demo short enough to read in one pass. Treat that as the thing to fix in the interview, not the thing to copy — a sealed `BorrowResult` with one case per failure mode is the answer that scores.
 
 ---
 
@@ -240,7 +240,7 @@ FIFO ordering — first member to reserve gets first pick when a copy becomes av
 A Loan is a domain concept with its own lifecycle (borrow → return → overdue). It enables loan history, fine calculation, and report generation. Single Responsibility.
 
 **Q: How is the reservation notification triggered?**
-In `returnBook()` — when a copy is returned, the library immediately checks the reservation queue. If non-empty, it marks the copy as RESERVED and notifies the first waiter. This is event-driven (better than a cron job polling).
+In `returnBook()` — when a copy is returned, the library immediately checks the reservation queue. If non-empty, it marks the copy as RESERVED and notifies the first waiter. This is event-driven (better than a cron job polling). Name the dead end before the interviewer does: `RESERVED` is terminal in this demo. `findAvailableCopy()` filters on `AVAILABLE`, there is no `claimReservation(memberId, isbn)` to flip `RESERVED -> BORROWED` for the head of the queue, and no TTL to revert `RESERVED -> AVAILABLE` if nobody collects — so the copy is stranded and the polled waitlist entry is gone with it. A production design needs both the claim call and the expiry sweep, and the expiry must re-offer the copy to the next waiter rather than silently returning it to the shelf.
 
 ---
 

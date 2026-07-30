@@ -537,7 +537,7 @@ order.get(0).setNext(order.get(1)).setNext(order.get(2));
 
 ## 16. Interview Questions with Answers
 
-**Common interview questions:**
+### Common interview questions
 
 **Q: What is the Chain of Responsibility pattern?**
 **Short:** Chain of Responsibility passes a request along a chain of handlers, decoupling the sender from any specific receiver.

@@ -326,7 +326,7 @@ A 6-week plan over the Interview-Specific Path. Each week pairs the pattern theo
 | 2 | Creational Patterns | [Creational Patterns](creational/README.md) — Singleton, Factory Method, Abstract Factory, Builder, Prototype | [Parking Lot](system_design_problems/ParkingLot_README.md) — Factory (spot type) + Strategy (pricing); the most common LLD opener |
 | 3 | Structural Patterns | [Structural Patterns](structural/README.md) — Adapter, Decorator, Proxy, Facade, Composite, Bridge, Flyweight | [LRU Cache](system_design_problems/LRUCache_README.md) — Decorator as a thread-safe wrapper around the core cache |
 | 4 | Behavioral Patterns | [Behavioral Patterns](behavioral/README.md) — Strategy, Observer, Command, State, Template Method, and 6 more | [Ride Sharing](system_design_problems/RideSharing_README.md) — Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) |
-| 5 | Pattern Mastery + Anti-Patterns | [Pattern Comparisons](pattern_comparisons/README.md), [Anti-Patterns](anti_patterns/README.md) | [ATM](system_design_problems/ATM_README.md) — justify State + Template Method over the alternatives; spot the anti-patterns a naive transaction flow invites |
+| 5 | Pattern Mastery + Anti-Patterns | [Pattern Comparisons](pattern_comparisons/README.md), [Anti-Patterns](anti_patterns/README.md) | [ATM](system_design_problems/ATM_README.md) — justify State + Command (with rollback) behind a Facade over the alternatives; spot the anti-patterns a naive transaction flow invites |
 | 6 | Apply: System Design Problems | [System Design Problems](system_design_problems/README.md) | timeboxed 30-minute runs through the remaining problems via the [interview shortcuts](case_studies/README.md) |
 
 ---

@@ -442,9 +442,15 @@ public class UserServiceTest {
    ```java
    @Autowired
    private MySQLUserRepository userRepository;  // concrete class injected
-   // Should be:
-   @Autowired
-   private UserRepository userRepository;        // interface injected
+
+   // Should be — the interface, supplied through the constructor.
+   // Spring injects a single constructor without any annotation, the field
+   // can be final, and the dependency is visible in the type signature.
+   private final UserRepository userRepository;
+
+   public ReportService(UserRepository userRepository) {
+       this.userRepository = userRepository;
+   }
    ```
 
 3. **Calling static utility methods from business logic:**
@@ -558,4 +564,4 @@ A: The single place in the application where all concrete implementations are wi
 
 ---
 
-**Interview Tip:** Connect DIP to testability immediately. Say: "Without DIP, unit tests for business logic require real databases and external services. With DIP, I inject in-memory stubs and the tests run in milliseconds with no external dependencies." This shows you understand the practical value, not just the academic definition. Also mention that Spring's `@Autowired` with interface types is the canonical enterprise Java application of DIP.
+**Interview Tip:** Connect DIP to testability immediately. Say: "Without DIP, unit tests for business logic require real databases and external services. With DIP, I inject in-memory stubs and the tests run in milliseconds with no external dependencies." This shows you understand the practical value, not just the academic definition. Also mention that constructor injection of interface types is the canonical enterprise Java application of DIP — Spring wires a single constructor with no `@Autowired` annotation at all, which is why field injection is the form to avoid: it hides the dependency, permits an object to exist half-built, and blocks `final` fields.

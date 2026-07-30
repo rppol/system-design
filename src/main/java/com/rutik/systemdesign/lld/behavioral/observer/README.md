@@ -235,9 +235,10 @@ development/staging, then promotes to `AsyncEventBus` backed by a bounded `Threa
 for production. The payment thread posts the event and returns immediately — each subscriber
 processes asynchronously within its own executor thread.
 
-**Scale numbers:**
+**Scale numbers** — illustrative for this one hypothetical service (order-of-magnitude, not a
+published benchmark; Guava ships no official `EventBus` JMH numbers):
 - 50,000 payment events/sec peak throughput
-- Guava `EventBus` (sync, no I/O): ~900,000 dispatches/sec on a single core
+- Guava `EventBus` (sync, no I/O): ~1M dispatches/sec, single-threaded
 - `AsyncEventBus` with 16-thread pool: payment thread post latency drops from 800ms to <1ms
 - Bounded queue (capacity 10,000): back-pressure prevents OOM during subscriber lag spikes
 - Memory: each `@Subscribe` registration costs ~80 bytes (a `Subscriber` holding a reflective `Method` plus a STRONG reference to the target — Guava never wraps subscribers in a `WeakReference`)
@@ -390,6 +391,13 @@ public class FraudCheckSubscriber {
 - **RxJava `Observable.subscribe()`**: reactive push-based observer with backpressure, error channels,
   and completion signals; `Subject` classes (`PublishSubject`, `BehaviorSubject`) act as both
   Observable and Observer.
+- **Reactor `Flux.subscribe(CoreSubscriber)`**: Project Reactor's reactive Observer; `publishOn` /
+  `subscribeOn` decide which scheduler each subscriber runs on.
+- **Hibernate `@EntityListeners` / `@PostPersist`**: entity-lifecycle Observer, the mechanism behind
+  Spring Data auditing (`@CreatedDate`, `@LastModifiedDate`).
+- **Android `LiveData.observe(LifecycleOwner, Observer)`**: lifecycle-aware Observer that
+  auto-unregisters when the owner reaches DESTROYED — the framework's built-in answer to the
+  never-unregistered leak below.
 
 ---
 
@@ -565,10 +573,13 @@ public class FraudObserver {
 **Move AWAY FROM Observer (to a message broker) when:**
 - Subscribers are in different processes or services — use Kafka or RabbitMQ instead of
   in-process EventBus.
-- You need at-least-once delivery guarantees across restarts — in-process EventBus loses
-  events on JVM crash; use a durable queue.
+- You need at-least-once delivery, exactly-once semantics, or guaranteed ordering across
+  restarts — an in-process EventBus loses events on JVM crash; use a durable queue, and an
+  outbox table if the events must be atomic with a database write.
 - The number of event types exceeds ~20 — Guava EventBus uses runtime type dispatch which
   becomes hard to audit; switch to explicit Kafka topics with schema registry.
+- The observer graph becomes cyclic (A notifies B, B notifies A) — switch to a Mediator or an
+  explicit event-driven state machine before the reentrancy bites.
 
 ---
 
@@ -756,19 +767,6 @@ public class BillingSubscriber {
 }
 ```
 
-### Famous Codebase Usages
-
-| Framework / Library | Class / Method | Notes |
-|---|---|---|
-| **Java SDK** | `java.beans.PropertyChangeSupport` | `firePropertyChange()` notifies all `PropertyChangeListener`s; used in JavaBeans/Swing data binding |
-| **Java Swing/AWT** | `AbstractButton.addActionListener()` | Every `addXxxListener()` = `attach()`; listener list = `EventListenerList` (`add`/`remove` are synchronized and swap in a fresh array, so a live iteration is never disturbed) |
-| **Spring Framework** | `SimpleApplicationEventMulticaster.multicastEvent()` | Synchronous default; becomes async if `taskExecutor` is set |
-| **RxJava** | `Observable.subscribe(Observer)` | Reactive Observer with `onNext`, `onError`, `onComplete`; adds backpressure via `Flowable` |
-| **Reactor** | `Flux.subscribe(CoreSubscriber)` | Project Reactor's reactive Observer; `publishOn` / `subscribeOn` control thread dispatch |
-| **Guava** | `EventBus.register()` / `EventBus.post()` | Routes by event type; `AsyncEventBus` posts to an `Executor` |
-| **Hibernate** | `@EntityListeners`, `@PostPersist` | Entity lifecycle Observer; used in auditing (`@CreatedDate`, `@LastModifiedDate`) |
-| **Android** | `LiveData.observe(LifecycleOwner, Observer)` | Lifecycle-aware Observer; auto-unregisters on DESTROYED to prevent leaks |
-
 ### Anti-Patterns with Broken and Fix
 
 **Anti-Pattern 1: Observer Never Unregistered (Memory Leak)**
@@ -877,29 +875,20 @@ public class EmailObserver implements OrderObserver {
 // Email failures do not affect inventory or billing observers
 ```
 
-### Performance Numbers
+### Throughput Reference Numbers
+
+(The latency/isolation table earlier in this section covers post latency and subscriber isolation;
+this one covers raw dispatch throughput and the cost of the data structures behind it.)
 
 | Measurement | Value | Notes |
 |---|---|---|
-| Guava `EventBus.post()` throughput | ~1,000,000 events/sec | Single-threaded, no I/O, synthetic benchmark |
+| Guava `EventBus.post()` throughput | ~1M dispatches/sec | Single-threaded, no I/O; order-of-magnitude, Guava publishes no official EventBus benchmark |
 | Spring `ApplicationEventPublisher.publishEvent()` | ~500,000 events/sec | Synchronous multicaster, no async executor |
 | `@Async` dispatch overhead | ~2ms | Thread pool handoff latency at low contention |
 | Synchronous SMTP observer latency | ~800ms | Blocks entire notification chain |
 | `CopyOnWriteArrayList` read (no lock) | ~10ns | Best for read-heavy observer lists |
 | `CopyOnWriteArrayList` write (copy) | O(n) | ~1µs for 100 observers — acceptable for infrequent register/unregister |
 | `WeakReference.get()` overhead | ~1ns | Negligible; use when Observers may be GC'd |
-
-### Migration Story
-
-**Adopt Observer when:**
-- 2 or more independent consumers react to the same state change (e.g., inventory + billing + email all care about "order placed")
-- The publisher should not know the identity of its consumers
-- You need to add consumers at runtime without modifying the publisher
-
-**Migrate away from Observer when:**
-- Consumers need guaranteed ordering, exactly-once delivery, or durability — use a message broker (Kafka, RabbitMQ) instead
-- Event fan-out crosses process boundaries — replace `EventBus` with an outbox pattern + async messaging
-- Observer graph becomes cyclic (A notifies B, B notifies A) — switch to a mediator or event-driven state machine
 
 ---
 

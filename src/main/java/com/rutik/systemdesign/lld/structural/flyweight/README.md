@@ -243,7 +243,7 @@ per-instance extrinsic bytes.
 given   N           = 10,000,000 instances
         U           =        256 distinct glyphs
         S_intrinsic =      2,048 bytes  (2 KB per glyph)
-        S_extrinsic =         32 bytes  (12-B header + ref + x + y + color, 8-B aligned)
+        S_extrinsic =         32 bytes  (12-B header + 4-B ref + x + y + color, 8-B aligned)
 
 naive       N x S_total = 10,000,000 x 2,048      = 20,480,000,000 B = 20.48 GB
 flyweight   U x S_intrinsic =    256 x 2,048      =        524,288 B =  0.52 MB
@@ -254,6 +254,13 @@ reduction   20,480,000,000 / 320,524,288                             = 63.9x
 
 sharing factor  N / U = 10,000,000 / 256                             = 39,062 instances/glyph
 ```
+
+That 32 B assumes HotSpot's default 12-byte object header with compressed oops, which is still the
+default through JDK 26. Run with `-XX:+UseCompactObjectHeaders` (JEP 519, a product feature since
+JDK 25 but opt-in) and the header drops to 8 bytes, so the same `GlyphInstance` fits in 24 B and the
+extrinsic total falls to 240 MB (240.5 MB with the shared table) — an 85.1x reduction instead of
+63.9x. JEP 534 proposes making compact
+headers the default in JDK 27, at which point 24 B becomes the number to quote.
 
 Result: 20.48GB collapses to 320.5MB — the difference between an OOM kill and a frame that fits
 in RAM. Notice that the shared glyph table is only 0.52MB of the 320.5MB total: past a sharing

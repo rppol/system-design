@@ -8,7 +8,7 @@
 
 **Why it matters**: This problem combines Builder (complex Movie/Show construction), Strategy (pricing algorithms), Observer (email/SMS/loyalty notifications), and concurrency thinking — making it a comprehensive interview problem that tests both patterns and distributed systems instincts.
 
-**Key insight**: The most common interview miss is ignoring seat lock expiry. Model the reservation as a time-bounded lock: if payment isn't completed within N minutes, the seat is released. This also requires a cleanup mechanism (scheduler or TTL).
+**Key insight**: The most common interview miss is ignoring seat lock expiry. Model the reservation as a time-bounded lock: if payment isn't completed within N minutes, the seat is released. This also requires a cleanup mechanism (scheduler or TTL). The reference `OnlineBookingSystem.java` omits it on purpose — `Seat.reserved` is a plain `boolean` with `reserve()`/`release()` and no timestamp, so an abandoned checkout holds the seat for the life of the JVM. Adding an `expiresAt` field plus a `ScheduledExecutorService` sweep in `BookingService` (or a Redis key with a TTL, once there is more than one JVM) is the first extension to name out loud.
 
 ---
 

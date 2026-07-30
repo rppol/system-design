@@ -658,7 +658,7 @@ public class DocumentCommandInvoker {
 
 ## 16. Interview Questions with Answers
 
-**Common interview questions:**
+### Common interview questions
 
 **Q: What is the Command pattern? When would you use it?**
 **Short:** Command encapsulates an operation as an object, enabling undo/redo, queuing, and macro recording.
