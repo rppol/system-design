@@ -90,7 +90,7 @@ HLD modules intentionally stay at architectural-overview depth. For implementati
 
 1. Create `<module_name>/README.md` — 14-section template
 2. Stay at architectural-overview depth — no framework-specific code
-3. Minimum 10 Q&As
+3. Minimum 15 Q&As (the hard floor in root `CLAUDE.md`)
 4. Add cross-references in the Cross-Reference Map above pointing to backend/ and database/ for deeper dives
 5. Update `README.md` HLD module table
 6. Add the module dir to `STUDY_ORDER.hld` in `game/app.js` at its learning-path position —

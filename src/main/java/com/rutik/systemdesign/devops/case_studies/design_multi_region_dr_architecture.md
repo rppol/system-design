@@ -18,7 +18,7 @@ A single region — even a multi-AZ deployment — shares correlated failure dom
 
 **Why this system exists:** A payments platform that processes $50M/day cannot tell regulators "us-east-1 was down for 4 hours so we stopped settling." The architecture's entire job is to make a region failure a *non-event* visible only in dashboards, not in the customer's bank statement.
 
-This builds on [`../disaster_recovery_and_resilience/README.md`](../disaster_recovery_and_resilience/README.md) (DR strategy taxonomy) and [`../cloud_networking_and_cdn/README.md`](../cloud_networking_and_cdn/README.md) (DNS, anycast, global load balancing).
+This builds on [`../disaster_recovery_and_resilience/README.md`](../disaster_recovery_and_resilience/disaster_recovery_and_resilience.md) (DR strategy taxonomy) and [`../cloud_networking_and_cdn/README.md`](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) (DNS, anycast, global load balancing).
 
 ---
 
@@ -440,7 +440,7 @@ resource "aws_route53_record" "api_secondary" {
 }
 ```
 
-ALIAS records are resolved by Route 53 itself (the IP is never cached by the client for an ALB), so the only client-side cache is the short A-record TTL where applicable. Health checks run from multiple AWS vantage points to avoid a single checker's network blip triggering a false failover. See [`../cloud_networking_and_cdn/README.md`](../cloud_networking_and_cdn/README.md) for anycast-vs-DNS tradeoffs (anycast — Cloudflare/Global Accelerator — removes DNS-TTL from the RTO entirely; covered in §5).
+ALIAS records are resolved by Route 53 itself (the IP is never cached by the client for an ALB), so the only client-side cache is the short A-record TTL where applicable. Health checks run from multiple AWS vantage points to avoid a single checker's network blip triggering a false failover. See [`../cloud_networking_and_cdn/README.md`](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) for anycast-vs-DNS tradeoffs (anycast — Cloudflare/Global Accelerator — removes DNS-TTL from the RTO entirely; covered in §5).
 
 ---
 

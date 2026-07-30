@@ -437,7 +437,7 @@ class DistillationLoss(nn.Module):
 | BERT-base (fine-tuned) | 0.90 | 80ms | 2h (GPU) | Low |
 | Frontier LLM (few-shot, 5 examples) | 0.85 | 1,200ms | None (inference cost) | None |
 
-The cascade (TF-IDF+LR → DistilBERT → LLM) achieves 0.89 macro F1 at 8ms average latency and < 25ms p99. This beats any single-model approach on the accuracy × latency Pareto front. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+The cascade (TF-IDF+LR → DistilBERT → LLM) achieves 0.89 macro F1 at 8ms average latency and < 25ms p99. This beats any single-model approach on the accuracy × latency Pareto front. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md).
 
 ```mermaid
 xychart-beta

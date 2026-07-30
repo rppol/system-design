@@ -1,6 +1,6 @@
 # Attention Mechanisms and Sequence-to-Sequence Models
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers attention mechanism evolution, encoder-decoder architectures, and decoding strategies.
 > Self-attention and transformer internals are covered in the LLM section (`llm/foundations_and_architecture/`).
 > LSTM/GRU internals and Bahdanau attention implementation are covered in `ml/recurrent_neural_networks/`.

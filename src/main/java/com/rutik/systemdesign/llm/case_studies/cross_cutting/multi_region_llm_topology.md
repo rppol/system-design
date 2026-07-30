@@ -620,7 +620,7 @@ A team configured their DNS records with a 300-second TTL (5 minutes) to reduce 
 | Redis Cluster | Session state store | Cross-region conversation history; async replication between regional clusters |
 | DynamoDB Global Tables | Global state | Strongly consistent session metadata; deployment locks; GDPR residency tags |
 | AWS S3 + CRR | Model weight storage | Cross-region replication for model checkpoints and LoRA adapters |
-| vLLM | Inference engine | PagedAttention for KV cache memory efficiency; continuous batching; see [vLLM Deep Dive](../../vllm_deep_dive/README.md) |
+| vLLM | Inference engine | PagedAttention for KV cache memory efficiency; continuous batching; see [vLLM Deep Dive](../../vllm_deep_dive/vllm_deep_dive.md) |
 | Terraform | IaC | Multi-region GPU cluster provisioning; region parity enforcement via shared modules |
 | Datadog / Grafana | Observability | Cross-region latency dashboards; per-region GPU utilization; cache hit rate tracking |
 
@@ -633,7 +633,7 @@ A team configured their DNS records with a 300-second TTL (5 minutes) to reduce 
 | DNS health-check failover (Route 53) | 60–180 s | No | No | $0.50/health check/month |
 | Application-layer routing (custom) | 0–5 s | Yes | Yes (if designed for it) | Engineering cost |
 
-Related: [Deployment and MLOps](../../deployment_and_mlops/README.md) for serving infrastructure patterns; [LLM Routing and Model Selection](../../llm_routing_and_model_selection/README.md) for application-level routing across models.
+Related: [Deployment and MLOps](../../deployment_and_mlops/deployment_and_mlops.md) for serving infrastructure patterns; [LLM Routing and Model Selection](../../llm_routing_and_model_selection/llm_routing_and_model_selection.md) for application-level routing across models.
 
 ---
 
@@ -740,4 +740,4 @@ The platform implements a three-level routing hierarchy: (1) hard constraints (d
 
 ---
 
-*Cross-references: [vLLM Deep Dive](../../vllm_deep_dive/README.md) for PagedAttention and KV cache internals; [Deployment and MLOps](../../deployment_and_mlops/README.md) for serving infrastructure patterns; [LLM Routing and Model Selection](../../llm_routing_and_model_selection/README.md) for application-layer model routing; [Inference Engines](../../inference_engines/README.md) for vLLM, TensorRT-LLM, and SGLang regional deployment.*
+*Cross-references: [vLLM Deep Dive](../../vllm_deep_dive/vllm_deep_dive.md) for PagedAttention and KV cache internals; [Deployment and MLOps](../../deployment_and_mlops/deployment_and_mlops.md) for serving infrastructure patterns; [LLM Routing and Model Selection](../../llm_routing_and_model_selection/llm_routing_and_model_selection.md) for application-layer model routing; [Inference Engines](../../inference_engines/inference_engines.md) for vLLM, TensorRT-LLM, and SGLang regional deployment.*

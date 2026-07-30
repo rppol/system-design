@@ -1,9 +1,9 @@
 # Byte-Level & Tokenizer-Free Language Models: MEGABYTE, SpaceByte, and the Byte Latent Transformer (BLT)
 
-> Deepens the tokenization discussion in [Tokenization & Embeddings](README.md) — that module
+> Deepens the tokenization discussion in [Tokenization & Embeddings](tokenization_and_embeddings.md) — that module
 > assumes a learned subword vocabulary (BPE/WordPiece/Unigram); this file covers what happens
 > when a model gives that vocabulary up entirely. Cross-references
-> [Foundations & Architecture](../foundations_and_architecture/README.md) for the standard
+> [Foundations & Architecture](../foundations_and_architecture/foundations_and_architecture.md) for the standard
 > Transformer block these architectures modify, and
 > [State-Space Models & Linear Attention](../foundations_and_architecture/state_space_models_and_linear_attention.md)
 > for a different sub-quadratic strategy (a fixed-size recurrent state) that this module's
@@ -14,7 +14,7 @@
 ## 1. Concept Overview
 
 Byte-level and tokenizer-free language models operate directly on raw UTF-8 bytes instead of a
-learned subword vocabulary. Where [Tokenization & Embeddings](README.md) covers how BPE,
+learned subword vocabulary. Where [Tokenization & Embeddings](tokenization_and_embeddings.md) covers how BPE,
 WordPiece, and Unigram LM compress text into 32K-200K learned subword units, this file covers the
 family of architectures that remove that compression step altogether: the model's only "vocabulary"
 is the 256 possible byte values — fixed by the UTF-8 standard, not learned from any corpus.
@@ -1304,10 +1304,10 @@ specifically diagnosed failure mode, not a fleet-wide architecture migration (Se
 
 ## Related
 
-- [Tokenization & Embeddings](README.md) — the subword vocabulary (BPE, WordPiece, SentencePiece)
+- [Tokenization & Embeddings](tokenization_and_embeddings.md) — the subword vocabulary (BPE, WordPiece, SentencePiece)
   this file's architectures remove, and the multilingual fertility / OOV monitoring numbers
   referenced throughout
-- [Foundations & Architecture](../foundations_and_architecture/README.md) — the standard
+- [Foundations & Architecture](../foundations_and_architecture/foundations_and_architecture.md) — the standard
   Transformer block (self-attention, FFN, residual connections) that MEGABYTE, SpaceByte, and BLT
   restructure into local/global components
 - [State-Space Models & Linear Attention](../foundations_and_architecture/state_space_models_and_linear_attention.md) —

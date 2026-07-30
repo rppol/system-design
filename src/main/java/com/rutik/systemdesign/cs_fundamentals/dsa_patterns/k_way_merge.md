@@ -524,14 +524,14 @@ shapes above fits better.
 
 ## 10. Cross-links
 
-- Concept module: [heaps_and_priority_queues](../heaps_and_priority_queues/)
+- Concept module: [heaps_and_priority_queues](../heaps_and_priority_queues/heaps_and_priority_queues.md)
   — heap mechanics, `heapify`, why `O(log k)` per operation.
-- Concept module: [sorting_and_searching](../sorting_and_searching/) — merge
+- Concept module: [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — merge
   sort's merge step generalizes directly to k-way merge; external sort.
-- Applied: [java/collections_internals](../../java/collections_internals/) —
+- Applied: [java/collections_internals](../../java/collections_internals/collections_internals.md) —
   `PriorityQueue` as the heap implementation; `Comparator` for tie-breaking
   without raw tuples.
-- Master recognition engine: [dsa_patterns/README.md](README.md).
+- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
 - Sibling patterns: [top_k_elements.md](top_k_elements.md),
   [two_heaps.md](two_heaps.md), [two_pointers.md](two_pointers.md).
 

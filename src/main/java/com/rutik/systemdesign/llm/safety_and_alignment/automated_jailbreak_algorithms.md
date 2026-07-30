@@ -1,15 +1,15 @@
 # Automated Jailbreak Algorithms: GCG, AutoDAN, TAP, and the Optimization View of Alignment Failure
 
-> Deepens [Safety & Alignment](README.md) §4.1 (Jailbreaking) and §11 (PAIR, AdvBench, Garak) by
+> Deepens [Safety & Alignment](safety_and_alignment.md) §4.1 (Jailbreaking) and §11 (PAIR, AdvBench, Garak) by
 > covering the **algorithmic** jailbreak-generation methods that automate and scale what §4.1
 > describes manually. For defenses grounded in interpretability (RepE, circuit breakers), see
-> [Mechanistic Interpretability](../mechanistic_interpretability/README.md).
+> [Mechanistic Interpretability](../mechanistic_interpretability/mechanistic_interpretability.md).
 
 ---
 
 ## 1. Concept Overview
 
-The jailbreaks in [Safety & Alignment §4.1](README.md) — role-play personas, many-shot priming —
+The jailbreaks in [Safety & Alignment §4.1](safety_and_alignment.md) — role-play personas, many-shot priming —
 are largely **hand-crafted**: a human writes a prompt, tries it, and iterates. **Automated jailbreak
 algorithms** instead treat jailbreaking as an **optimization or search problem**: given a harmful
 request and black-box (or white-box) access to a target model, an algorithm searches a space of
@@ -49,8 +49,8 @@ preservation of the original request).
 **Why it matters**: a single successful hand-crafted jailbreak is an anecdote; an automated
 algorithm that achieves a **measured success rate across hundreds of harmful-behavior prompts and
 multiple target models** is a robustness *metric* — the basis for red-team reports, Responsible
-Scaling Policy evaluations (referenced in [Safety & Alignment §11](README.md)), and regulatory
-model cards (see [AI Regulations & Compliance](../ai_regulations_and_compliance/README.md)).
+Scaling Policy evaluations (referenced in [Safety & Alignment §11](safety_and_alignment.md)), and regulatory
+model cards (see [AI Regulations & Compliance](../ai_regulations_and_compliance/ai_regulations_and_compliance.md)).
 Automated algorithms also reveal **transferability**: a suffix optimized against an open-weight
 model (e.g., Vicuna) frequently transfers — with reduced but nonzero success — to closed
 production APIs (GPT-4, Claude, Gemini at the time of the original GCG paper), because alignment
@@ -59,7 +59,7 @@ training across models shares failure-mode structure.
 **Key insight**: a jailbreak is **an adversarial example for a discrete, language-conditioned
 classifier** (the model's implicit "is this request OK?" decision) — the same fundamental
 phenomenon as adversarial perturbations for image classifiers (see
-[Adversarial ML](../../ml/adversarial_ml_and_robustness/README.md) if present in the ML section),
+[Adversarial ML](../../ml/adversarial_ml_and_robustness/adversarial_ml_and_robustness.md) if present in the ML section),
 but operating in a discrete token space, which is why **gradients alone aren't sufficient** (§3.2)
 and why genetic/search-based methods (§3.4-3.5) are competitive alternatives.
 
@@ -178,7 +178,7 @@ open-weight models simultaneously) often **transfers** to other models it was ne
 against — including black-box production APIs. The mechanism is debated, but the leading
 explanation is that safety fine-tuning across different base models and labs produces **similar
 refusal-direction representations** (connecting to [linear representation hypothesis,
-Mechanistic Interpretability §3](../mechanistic_interpretability/README.md)) — perturbing that
+Mechanistic Interpretability §3](../mechanistic_interpretability/mechanistic_interpretability.md)) — perturbing that
 shared direction has correlated effects across models. Transferability is *why* automated
 jailbreak research matters for closed-model safety even when the algorithm itself requires
 white-box (gradient) access: **optimize against open-weight proxies, evaluate transfer to closed
@@ -279,7 +279,7 @@ family** — there is no single defense that covers both ends.
 | **BEAST** | 2024 | Gray-box (token probabilities) | Beam search over adversarial suffix tokens | Semi-readable suffixes; runs in under a minute on one GPU |
 | **GPTFuzzer** | 2023 | Black-box | Fuzzing: seed templates + mutation operators (synonym swap, role-play rewrites), success-driven seed selection | Mutated natural-language templates |
 | **PAP** (Persuasive Adversarial Prompts) | 2024 | Black-box, **no optimization** | Applies social-science persuasion techniques (authority endorsement, logical appeal, foot-in-the-door, etc.) directly via prompt templates | Fully natural, persuasion-framed requests |
-| **Many-shot jailbreaking** | 2024, Anthropic | Black-box | Long-context in-context priming with many compliant examples — see [Safety & Alignment §4.1](README.md) | Long conversational context, no suffix |
+| **Many-shot jailbreaking** | 2024, Anthropic | Black-box | Long-context in-context priming with many compliant examples — see [Safety & Alignment §4.1](safety_and_alignment.md) | Long conversational context, no suffix |
 | **Crescendo** (Russinovich, Salem & Eldan, Microsoft) | 2024; USENIX Security '25 | Black-box | Multi-turn escalation: open with a benign question, then ratchet each turn by referencing the *model's own* prior replies. Automated as **Crescendomation** in PyRIT | Ordinary-looking conversation; no suffix, and often no individually harmful turn |
 
 **Every algorithm above except Crescendo and many-shot searches over a *single* prompt** — which is
@@ -711,7 +711,7 @@ def _random_char_perturb(text: str, rate: float) -> str: ...
   "DAN", role-play) — demonstrating that the space of effective jailbreak strategies extends
   well beyond known human-discovered patterns.
 - **TAP (2023)** — outperformed the earlier **PAIR** algorithm (referenced in
-  [Safety & Alignment §11](README.md)) on both axes at once: on GPT-4, **90% jailbreak rate at
+  [Safety & Alignment §11](safety_and_alignment.md)) on both axes at once: on GPT-4, **90% jailbreak rate at
   28.8 average queries vs PAIR's 60% at 39.6**; on GPT-4-Turbo, **84% at 22.5 queries vs PAIR's
   44% at 47.1** — the paper summarizes this as jailbreaking 40% more prompts while sending 52%
   fewer queries. The gain comes from the tree-pruning step (§3.5) avoiding wasted exploration of
@@ -727,7 +727,7 @@ def _random_char_perturb(text: str, rate: float) -> str: ...
   remaining effective against jailbreak strategies the defense was never trained against,
   because the defense targets the *internal representation of "about to produce harmful
   content"* rather than surface-level input patterns — see
-  [Mechanistic Interpretability §6](../mechanistic_interpretability/README.md) for the underlying
+  [Mechanistic Interpretability §6](../mechanistic_interpretability/mechanistic_interpretability.md) for the underlying
   activation-steering mechanism.
 
 ---
@@ -771,7 +771,7 @@ def _random_char_perturb(text: str, rate: float) -> str: ...
 - Conducting **pre-launch and recurring red-team evaluations** — automated algorithms provide
   reproducible, quantifiable attack-success-rate metrics across hundreds of harmful-behavior
   prompts, feeding directly into Responsible Scaling Policy gates and regulatory model cards
-  ([AI Regulations & Compliance](../ai_regulations_and_compliance/README.md)).
+  ([AI Regulations & Compliance](../ai_regulations_and_compliance/ai_regulations_and_compliance.md)).
 - **Testing transferability** of safety mitigations — running GCG against an open-weight proxy
   and checking transfer to your production model reveals whether your safety training shares
   failure modes with the proxy (§3.3).
@@ -784,11 +784,11 @@ def _random_char_perturb(text: str, rate: float) -> str: ...
 
 - **As your only red-teaming method** — automated algorithms find *optimization-discoverable*
   vulnerabilities; domain-expert manual red-teaming (per [Safety & Alignment
-  §12](README.md)'s discussion of red-team structure) finds *domain-specific* vulnerabilities
+  §12](safety_and_alignment.md)'s discussion of red-team structure) finds *domain-specific* vulnerabilities
   (e.g., a biosecurity expert recognizing a subtly dangerous synthesis route that no generic
   algorithm would target).
 - **As a one-time gate** — per [Safety & Alignment §10 Pitfall
-  4](README.md) ("one-time red teaming"), new algorithms (AutoDAN-Turbo's strategy discovery is
+  4](safety_and_alignment.md) ("one-time red teaming"), new algorithms (AutoDAN-Turbo's strategy discovery is
   itself evidence the space keeps expanding) are published continuously; a defense validated
   against 2023-era GCG/AutoDAN may have known gaps against 2025-era methods.
 - **As justification for adversarial training as your primary defense** — training against known
@@ -823,7 +823,7 @@ A 5% attack success rate sounds low until you consider *what* the 5% of successf
 elicit. An algorithm that succeeds rarely but, when it does, extracts detailed CBRN synthesis
 information is a more severe finding than one that succeeds often but only elicits mildly
 impolite text. Red-team reports should pair **success rate** with **severity distribution**
-(per [Safety & Alignment §3](README.md): "safety is not binary").
+(per [Safety & Alignment §3](safety_and_alignment.md): "safety is not binary").
 
 **Stated plainly.** "Attack success rate is just successes divided by prompts tried — which means
 it is an estimate with an error bar, and on a small prompt set that error bar is wide enough to
@@ -894,9 +894,9 @@ jailbreak benchmarks (AdvBench-style) to action-level harm.
 | **nanoGCG** | Lightweight, modern GCG reimplementation — common starting point for red-team automation |
 | **AutoDAN / AutoDAN-Turbo (open repos)** | Reference genetic-algorithm and strategy-discovery implementations |
 | **EasyJailbreak** | Unified framework implementing GCG, AutoDAN, PAIR, TAP, GPTFuzzer, and others under one interface — standard for comparative red-team evaluation |
-| **Garak** | LLM vulnerability scanner referenced in [Safety & Alignment §11](README.md); includes probes for several algorithms in this module |
+| **Garak** | LLM vulnerability scanner referenced in [Safety & Alignment §11](safety_and_alignment.md); includes probes for several algorithms in this module |
 | **SmoothLLM (reference implementation)** | Randomized-smoothing defense (§8.3) |
-| **RepE / circuit-breaker tooling** | See [Mechanistic Interpretability §11](../mechanistic_interpretability/README.md) for activation-steering and representation-engineering tooling |
+| **RepE / circuit-breaker tooling** | See [Mechanistic Interpretability §11](../mechanistic_interpretability/mechanistic_interpretability.md) for activation-steering and representation-engineering tooling |
 
 ---
 
@@ -912,7 +912,7 @@ GCG computes the gradient of the loss (probability of NOT producing an affirmati
 
 **Q3: Why do GCG suffixes transfer to models they weren't optimized against, including closed APIs?**
 **Short:** GCG suffixes transfer because different labs' safety fine-tuning tends to produce a similar shared refusal-direction representation, so perturbing it in one model affects others too.
-The leading explanation connects to the linear representation hypothesis (see [Mechanistic Interpretability](../mechanistic_interpretability/README.md)): safety fine-tuning across different base models and labs tends to produce similar "refusal direction" representations in activation space, because they're solving a structurally similar problem (suppress compliance for a class of requests). A suffix that perturbs this shared direction in one model has a correlated, if weaker, effect in others. Practically, this means white-box attacks against open-weight proxies remain a meaningful evaluation signal for closed models (Pitfall 10.4) — you don't need access to the target to learn something about its vulnerabilities.
+The leading explanation connects to the linear representation hypothesis (see [Mechanistic Interpretability](../mechanistic_interpretability/mechanistic_interpretability.md)): safety fine-tuning across different base models and labs tends to produce similar "refusal direction" representations in activation space, because they're solving a structurally similar problem (suppress compliance for a class of requests). A suffix that perturbs this shared direction in one model has a correlated, if weaker, effect in others. Practically, this means white-box attacks against open-weight proxies remain a meaningful evaluation signal for closed models (Pitfall 10.4) — you don't need access to the target to learn something about its vulnerabilities.
 
 **Q4: A team deploys only a perplexity filter and reports "we're protected against jailbreaks." What's wrong with this claim?**
 **Short:** A perplexity filter alone catches only gibberish suffixes like GCG's, while fluent attacks like AutoDAN and PAP sail through unchanged, so the protection claim is false.
@@ -936,17 +936,17 @@ SmoothLLM applies small random perturbations (e.g., randomly flipping ~5% of cha
 
 **Q9: What makes RepE/circuit-breaker defenses qualitatively different from the other defenses in §8.3?**
 **Short:** RepE and circuit-breaker defenses monitor internal activations for harmful-content-forming representations instead of input text, making them robust to novel attack strategies.
-Every other defense in §8.3 operates on the *input text* (perplexity, perturbation, paraphrasing) or on *training-time exposure to known attacks* (adversarial training) — meaning each has a corresponding attack category it's blind to (gibberish-only, fragile-only, known-attacks-only). RepE/circuit-breaker defenses instead monitor the model's *internal activations during generation*, looking for representations associated with "about to produce harmful content" regardless of what input text triggered that internal state (connecting to [Mechanistic Interpretability's activation steering, §6](../mechanistic_interpretability/README.md)). This makes them robust to *novel* strategies (like AutoDAN-Turbo's self-discovered ones) that were never seen during defense construction — at the cost of requiring activation-level access (not available for third-party closed APIs you don't control) and ongoing research into false-positive rates on legitimate requests that touch similar topics.
+Every other defense in §8.3 operates on the *input text* (perplexity, perturbation, paraphrasing) or on *training-time exposure to known attacks* (adversarial training) — meaning each has a corresponding attack category it's blind to (gibberish-only, fragile-only, known-attacks-only). RepE/circuit-breaker defenses instead monitor the model's *internal activations during generation*, looking for representations associated with "about to produce harmful content" regardless of what input text triggered that internal state (connecting to [Mechanistic Interpretability's activation steering, §6](../mechanistic_interpretability/mechanistic_interpretability.md)). This makes them robust to *novel* strategies (like AutoDAN-Turbo's self-discovered ones) that were never seen during defense construction — at the cost of requiring activation-level access (not available for third-party closed APIs you don't control) and ongoing research into false-positive rates on legitimate requests that touch similar topics.
 
 **Q10: AutoDAN-Turbo claims the "highest" attack success rate by discovering its own strategies. What does this imply about the completeness of human-curated jailbreak taxonomies?**
 **Short:** AutoDAN-Turbo discovering its own attack strategies implies human-curated jailbreak taxonomies are necessarily incomplete, covering only strategies humans thought to publish.
-It implies human-curated taxonomies (role-play, many-shot, crescendo — per [Safety & Alignment §4.1](README.md)) are necessarily incomplete — they're the strategies humans have *thought of and published*, not the full space of effective strategies. AutoDAN-Turbo's lifelong exploration discovers novel strategies by searching the space directly rather than starting from a human-seeded list, and reportedly finds approaches outside the known taxonomy. The practical implication for defenses: any defense validated only against a fixed, named list of attack *categories* has an unknown-sized blind spot — which is the core argument for representation-level defenses (§Q9) that don't require enumerating categories at all.
+It implies human-curated taxonomies (role-play, many-shot, crescendo — per [Safety & Alignment §4.1](safety_and_alignment.md)) are necessarily incomplete — they're the strategies humans have *thought of and published*, not the full space of effective strategies. AutoDAN-Turbo's lifelong exploration discovers novel strategies by searching the space directly rather than starting from a human-seeded list, and reportedly finds approaches outside the known taxonomy. The practical implication for defenses: any defense validated only against a fixed, named list of attack *categories* has an unknown-sized blind spot — which is the core argument for representation-level defenses (§Q9) that don't require enumerating categories at all.
 
 **Q11: How would you design a red-team evaluation pipeline incorporating automated jailbreak algorithms for a new model release?**
 **Short:** A thorough red-team pipeline combines white-box GCG for transfer signal, black-box AutoDAN and TAP for realistic coverage, and strategy-discovery methods for unknown categories.
-Combine white-box and black-box, gibberish and fluent: run GCG (white-box, against an open-weight proxy if the target is closed) for transferability signal; run AutoDAN and TAP (black-box, fluent) directly against the target for realistic attack-surface coverage; include AutoDAN-Turbo or similar strategy-discovery methods to probe beyond known categories; run PAP to test susceptibility to pure social-engineering framing with zero optimization. Score each on attack success rate AND severity (Pitfall 10.3) across a harm-category-stratified prompt set (AdvBench-style, per [Safety & Alignment §11](README.md)). Layer this with manual domain-expert red-teaming (Pitfall not covered by automation, §9) and re-run on a recurring cadence (Pitfall 10.2/§10 Pitfall 4 in the parent README) — not as a one-time pre-launch gate.
+Combine white-box and black-box, gibberish and fluent: run GCG (white-box, against an open-weight proxy if the target is closed) for transferability signal; run AutoDAN and TAP (black-box, fluent) directly against the target for realistic attack-surface coverage; include AutoDAN-Turbo or similar strategy-discovery methods to probe beyond known categories; run PAP to test susceptibility to pure social-engineering framing with zero optimization. Score each on attack success rate AND severity (Pitfall 10.3) across a harm-category-stratified prompt set (AdvBench-style, per [Safety & Alignment §11](safety_and_alignment.md)). Layer this with manual domain-expert red-teaming (Pitfall not covered by automation, §9) and re-run on a recurring cadence (Pitfall 10.2/§10 Pitfall 4 in the parent README) — not as a one-time pre-launch gate.
 
-**Q12: What's the relationship between this module's content and prompt injection (covered in [Safety & Alignment §4.4](README.md))?**
+**Q12: What's the relationship between this module's content and prompt injection (covered in [Safety & Alignment §4.4](safety_and_alignment.md))?**
 **Short:** Jailbreak algorithms target the end user's own request to bypass safety training, while prompt injection's attacker controls data the model processes to hijack instructions instead.
 They're related but distinct threat models. Jailbreak algorithms (this module) target the *deploying user's own* request — the attacker is the end user trying to get the model to violate its own safety training. Prompt injection's attacker controls *data the model processes* (a webpage, document, email) and tries to make the model follow attacker instructions instead of the developer's — the "victim" is the application/developer, and the end user may be unaware. Both exploit instruction-following, and defenses sometimes overlap (input sanitization, activation monitoring), but the threat models, attacker positions, and primary defenses (instruction hierarchy for injection vs. perplexity/SmoothLLM/circuit-breakers for jailbreaks) differ — see [Multi-Agent Security](../multi_agent_systems/multi_agent_security.md) for how both compound in agentic systems.
 
@@ -983,7 +983,7 @@ Because multi-turn attacks are never measured by it — each turn is individuall
 7. **For agentic systems, extend evaluation beyond text-generation ASR to action-level harm** (§Q16) — text-jailbreak benchmarks don't measure tool-call risk.
 8. **Document explicitly which attack families a given evaluation run did NOT cover** (§Q15) — false confidence from partial coverage is a recurring failure mode.
 9. **Use EasyJailbreak or similar unified frameworks for comparative evaluation** — running each algorithm with consistent prompt sets and scoring makes attack-success-rate numbers comparable across runs.
-10. **Cross-reference findings with [Mechanistic Interpretability](../mechanistic_interpretability/README.md)** when investigating *why* a jailbreak succeeded — activation patching/steering can reveal whether a successful attack suppressed a specific "refusal" direction, informing whether a circuit-breaker defense would generalize to it.
+10. **Cross-reference findings with [Mechanistic Interpretability](../mechanistic_interpretability/mechanistic_interpretability.md)** when investigating *why* a jailbreak succeeded — activation patching/steering can reveal whether a successful attack suppressed a specific "refusal" direction, informing whether a circuit-breaker defense would generalize to it.
 
 ---
 
@@ -1061,9 +1061,9 @@ measured `20%` of mild impoliteness. Narrow error bars measure confidence, never
 
 ## Related
 
-- [Safety & Alignment README](README.md) — parent module: jailbreak taxonomy (§4.1), red-teaming process (§5, §12), AdvBench/PAIR/Garak (§11)
-- [Mechanistic Interpretability](../mechanistic_interpretability/README.md) — RepE, activation steering, circuit breakers (§6, §11) underlying the representation-level defenses in §8.3
-- [LLM Security](../llm_security/README.md) — adversarial robustness and broader attack-surface coverage beyond jailbreaking
+- [Safety & Alignment README](safety_and_alignment.md) — parent module: jailbreak taxonomy (§4.1), red-teaming process (§5, §12), AdvBench/PAIR/Garak (§11)
+- [Mechanistic Interpretability](../mechanistic_interpretability/mechanistic_interpretability.md) — RepE, activation steering, circuit breakers (§6, §11) underlying the representation-level defenses in §8.3
+- [LLM Security](../llm_security/llm_security.md) — adversarial robustness and broader attack-surface coverage beyond jailbreaking
 - [Multi-Agent Security](../multi_agent_systems/multi_agent_security.md) — extension of this threat model to agentic/tool-using systems (§Q16)
 - [Red Team Eval Harness](../case_studies/cross_cutting/red_team_eval_harness.md) — production infrastructure for running this module's algorithms at scale
-- [AI Regulations & Compliance](../ai_regulations_and_compliance/README.md) — how attack-success-rate evaluations feed regulatory model cards and RSP gates
+- [AI Regulations & Compliance](../ai_regulations_and_compliance/ai_regulations_and_compliance.md) — how attack-success-rate evaluations feed regulatory model cards and RSP gates

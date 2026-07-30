@@ -514,7 +514,7 @@ def get_cold_start_item_embedding(
 | Two-tower + session encoder | Good | Yes | 0.85 | 4ms |
 | Graph-based (PinSage) | Good | Partial | 0.87 | 15ms |
 
-Use two-tower with session encoder. Graph-based methods achieve +2pp AUC but require 4× longer retrieval latency and a graph infrastructure that is operationally expensive. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+Use two-tower with session encoder. Graph-based methods achieve +2pp AUC but require 4× longer retrieval latency and a graph infrastructure that is operationally expensive. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md).
 
 **Decision 2: Feature freshness SLOs — when is "real-time" needed?**
 

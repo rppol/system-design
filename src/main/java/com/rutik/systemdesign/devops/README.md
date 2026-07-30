@@ -48,13 +48,13 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 
 | Already covered in... | DevOps section does NOT re-teach | DevOps section DOES cover |
 |-----------------------|----------------------------------|---------------------------|
-| [`backend/service_mesh_and_service_discovery`](../backend/service_mesh_and_service_discovery/) | Istio/Envoy internals, xDS, mTLS theory | Operating a mesh across clusters; mesh as a platform capability |
-| [`backend/chaos_engineering`](../backend/chaos_engineering/) | Steady-state hypothesis, fault-injection taxonomy | DR drills, GameDays as an SRE operational practice |
-| [`backend/observability_and_monitoring`](../backend/observability_and_monitoring/) | App-level instrumentation (Micrometer, MDC, SLO concepts in code) | Running the observability *infrastructure* — Prometheus/Loki/Tempo/Grafana/Alertmanager at scale |
-| [`backend/backend_security_owasp`](../backend/backend_security_owasp/) | Application code vulnerabilities (SQLi/XSS/CSRF) | Supply-chain & infra security — image scanning, SBOM, signing, admission policy |
-| [`backend/container_and_deployment_patterns`](../backend/container_and_deployment_patterns/) | App-developer view of Docker/K8s deploy basics | Cluster operation, runtime internals, multi-tenant platform concerns |
-| [`database/backup_recovery_and_disaster_recovery`](../database/backup_recovery_and_disaster_recovery/) | DB-specific PITR/WAL backup mechanics | Infra-wide multi-region DR architecture and failover |
-| [`database/replication_and_high_availability`](../database/replication_and_high_availability/) | DB replication/HA internals | Infra HA topology, multi-AZ/region failover |
+| [`backend/service_mesh_and_service_discovery`](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | Istio/Envoy internals, xDS, mTLS theory | Operating a mesh across clusters; mesh as a platform capability |
+| [`backend/chaos_engineering`](../backend/chaos_engineering/chaos_engineering.md) | Steady-state hypothesis, fault-injection taxonomy | DR drills, GameDays as an SRE operational practice |
+| [`backend/observability_and_monitoring`](../backend/observability_and_monitoring/observability_and_monitoring.md) | App-level instrumentation (Micrometer, MDC, SLO concepts in code) | Running the observability *infrastructure* — Prometheus/Loki/Tempo/Grafana/Alertmanager at scale |
+| [`backend/backend_security_owasp`](../backend/backend_security_owasp/backend_security_owasp.md) | Application code vulnerabilities (SQLi/XSS/CSRF) | Supply-chain & infra security — image scanning, SBOM, signing, admission policy |
+| [`backend/container_and_deployment_patterns`](../backend/container_and_deployment_patterns/container_and_deployment_patterns.md) | App-developer view of Docker/K8s deploy basics | Cluster operation, runtime internals, multi-tenant platform concerns |
+| [`database/backup_recovery_and_disaster_recovery`](../database/backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | DB-specific PITR/WAL backup mechanics | Infra-wide multi-region DR architecture and failover |
+| [`database/replication_and_high_availability`](../database/replication_and_high_availability/replication_and_high_availability.md) | DB replication/HA internals | Infra HA topology, multi-AZ/region failover |
 | [`hld/`](../hld/) | Distributed-systems theory (CAP, consistent hashing, sharding) | Operating those systems in production |
 
 **DevOps owns**: Linux/OS internals for ops, cloud networking, container *runtime internals*, the full Kubernetes stack, CI/CD & GitOps, IaC, cloud platforms, the observability *infrastructure*, SRE practice (SLO math, incident command, on-call), DevSecOps supply chain, policy-as-code, infra DR, platform engineering, and FinOps.
@@ -65,47 +65,47 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 
 | # | Module Directory | Phase | Difficulty | Key Topics |
 |---|-----------------|-------|------------|------------|
-| 1 | [linux_and_os_fundamentals](linux_and_os_fundamentals/) | 1 — Foundations | Intermediate | Processes, signals, file descriptors, cgroups v2, namespaces, systemd, /proc, ulimits, OOM killer |
-| 2 | [shell_scripting_and_automation](shell_scripting_and_automation/) | 1 — Foundations | Beginner | Bash, `sed`/`awk`/`jq`, Python for ops, idempotent scripts, exit codes, `set -euo pipefail` |
-| 3 | [networking_for_devops](networking_for_devops/) | 1 — Foundations | Intermediate | DNS, DHCP, CIDR/subnetting, NAT, firewalls, L4/L7 load balancing, TLS/mTLS/certs, Nginx/Envoy reverse proxy |
-| 4 | [version_control_and_git_workflows](version_control_and_git_workflows/) | 1 — Foundations | Beginner | Git internals, trunk-based vs GitFlow, monorepo vs polyrepo, hooks, release tagging |
-| 5 | [containers_and_docker](containers_and_docker/) | 2 — Containers & K8s | Intermediate | Namespaces/cgroups, image layers, multi-stage builds, distroless, BuildKit, registries, Dockerfile best practices |
-| 6 | [container_runtimes_and_oci](container_runtimes_and_oci/) | 2 — Containers & K8s | Advanced | containerd, runc, CRI-O, OCI image/runtime spec, gVisor/Kata isolation |
-| 7 | [kubernetes_architecture](kubernetes_architecture/) | 2 — Containers & K8s | Advanced | API server, etcd, scheduler, controller-manager, kubelet, kube-proxy, reconciliation loop |
-| 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/) | 2 — Containers & K8s | Intermediate | Pods, Deployments, StatefulSets, DaemonSets, Jobs/CronJobs, Services, Ingress, ConfigMap/Secret |
-| 9 | [kubernetes_networking](kubernetes_networking/) | 2 — Containers & K8s | Advanced | CNI (Calico/Cilium/eBPF), kube-proxy modes, Ingress controllers, Gateway API, NetworkPolicy, CoreDNS |
-| 10 | [kubernetes_storage_and_state](kubernetes_storage_and_state/) | 2 — Containers & K8s | Intermediate | PV/PVC, StorageClass, CSI, StatefulSet storage, volume snapshots |
-| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/) | 2 — Containers & K8s | Advanced | Affinity/taints/tolerations, requests/limits, QoS, HPA/VPA/KEDA, Cluster Autoscaler/Karpenter, PDB |
-| 12 | [kubernetes_security](kubernetes_security/) | 2 — Containers & K8s | Advanced | RBAC, ServiceAccounts, Pod Security Standards, admission control, secrets-at-rest, image policy |
-| 13 | [helm_and_package_management](helm_and_package_management/) | 2 — Containers & K8s | Intermediate | Helm charts/templating/releases, Kustomize overlays, repositories |
-| 14 | [kubernetes_operators_and_crds](kubernetes_operators_and_crds/) | 2 — Containers & K8s | Advanced | CRDs, custom controllers, operator pattern, Operator SDK, reconcile loop |
-| 15 | [ci_cd_fundamentals](ci_cd_fundamentals/) | 3 — CI/CD & GitOps | Intermediate | Pipeline anatomy, stages, artifacts, caching, parallelism, ephemeral runners |
-| 16 | [ci_cd_platforms](ci_cd_platforms/) | 3 — CI/CD & GitOps | Intermediate | GitHub Actions, GitLab CI, Jenkins, Argo Workflows/Tekton, CircleCI (comparison) |
-| 17 | [deployment_strategies](deployment_strategies/) | 3 — CI/CD & GitOps | Advanced | Rolling/blue-green/canary, feature flags, progressive delivery (Argo Rollouts/Flagger) |
-| 18 | [gitops_argocd_flux](gitops_argocd_flux/) | 3 — CI/CD & GitOps | Advanced | Declarative delivery, ArgoCD, Flux, drift detection, app-of-apps, sync waves |
-| 19 | [artifact_and_registry_management](artifact_and_registry_management/) | 3 — CI/CD & GitOps | Intermediate | Container/artifact registries, Artifactory/Nexus, SemVer, promotion across envs |
-| 20 | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/) | 4 — IaC & Config | Advanced | Core, state, modules, providers, workspaces, drift, import, remote backends, locking |
-| 21 | [terraform_advanced_and_alternatives](terraform_advanced_and_alternatives/) | 4 — IaC & Config | Advanced | Terragrunt, Pulumi, CloudFormation/CDK, OpenTofu, Terratest, policy (Sentinel/OPA) |
-| 22 | [configuration_management](configuration_management/) | 4 — IaC & Config | Intermediate | Ansible/Chef/Puppet/Salt, idempotency, push vs pull, immutable infra, Packer |
-| 23 | [secrets_management](secrets_management/) | 4 — IaC & Config | Advanced | HashiCorp Vault, dynamic secrets, AWS/GCP secret managers, External Secrets Operator, SOPS, sealed-secrets, rotation |
-| 24 | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/) | 5 — Cloud | Intermediate | IAM, VPC, EC2, S3/EBS, ELB/ALB, Route53, RDS, EKS, Well-Architected Framework |
-| 25 | [gcp_and_azure_essentials](gcp_and_azure_essentials/) | 5 — Cloud | Intermediate | GKE/GCS/Cloud Run/IAM, AKS/Blob/Entra ID; AWS↔GCP↔Azure mapping |
-| 26 | [serverless_and_faas](serverless_and_faas/) | 5 — Cloud | Intermediate | Lambda/Cloud Functions/Knative, cold starts, event-driven, API Gateway, Step Functions |
-| 27 | [cloud_networking_and_cdn](cloud_networking_and_cdn/) | 5 — Cloud | Advanced | VPC peering, Transit Gateway, PrivateLink, CloudFront/Cloudflare CDN, global LB, DNS strategies |
-| 28 | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/) | 5 — Cloud | Intermediate | Tagging, rightsizing, spot/reserved/savings plans, FinOps practice, cost allocation/showback |
-| 29 | [observability_metrics_prometheus](observability_metrics_prometheus/) | 6 — Observability & SRE | Advanced | Prometheus architecture, PromQL, exporters, recording/alerting rules, Thanos/Mimir/Cortex, cardinality |
-| 30 | [observability_logging](observability_logging/) | 6 — Observability & SRE | Intermediate | Aggregation, EFK/ELK, Loki, structured logging, retention/sampling, parsing pipelines |
-| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/) | 6 — Observability & SRE | Advanced | OpenTelemetry collector pipelines, Jaeger/Tempo, sampling, span propagation |
-| 32 | [visualization_and_alerting](visualization_and_alerting/) | 6 — Observability & SRE | Intermediate | Grafana dashboards, Alertmanager routing, PagerDuty/OpsGenie, alert fatigue, SLO burn-rate alerts |
-| 33 | [sre_principles_and_slos](sre_principles_and_slos/) | 6 — Observability & SRE | Advanced | SLI/SLO/SLA, error budgets, toil, capacity planning, Google SRE practices |
-| 34 | [incident_management_and_oncall](incident_management_and_oncall/) | 6 — Observability & SRE | Intermediate | Incident command, severity levels, on-call rotations, blameless postmortems, runbooks, MTTR/MTTD |
-| 35 | [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/) | 7 — DevSecOps & Reliability | Advanced | SAST/DAST/SCA, image scanning (Trivy/Grype), SBOM, Sigstore/cosign, SLSA levels, secret scanning |
-| 36 | [policy_as_code_and_compliance](policy_as_code_and_compliance/) | 7 — DevSecOps & Reliability | Advanced | OPA/Rego, Gatekeeper, Kyverno, CIS benchmarks, SOC2/PCI/HIPAA controls, admission control |
-| 37 | [disaster_recovery_and_resilience](disaster_recovery_and_resilience/) | 7 — DevSecOps & Reliability | Advanced | RTO/RPO, multi-region DR (active-active/passive), failover, restore drills |
-| 38 | [platform_engineering_and_idp](platform_engineering_and_idp/) | 7 — DevSecOps & Reliability | Intermediate | Internal developer platforms, Backstage, golden paths, self-service, Crossplane |
-| 39 | [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure/) | 8 — Specialized Platforms & Performance | Advanced | NVIDIA GPU Operator, device plugin, MIG/time-slicing, Karpenter GPU NodePools, Kubeflow/Ray on K8s, training vs serving infra |
-| 40 | [event_streaming_operations](event_streaming_operations/) | 8 — Specialized Platforms & Performance | Advanced | Strimzi/Kafka operator, partition & disk sizing, consumer-lag monitoring, rebalancing, rack awareness, tiered storage |
-| 41 | [performance_and_load_testing](performance_and_load_testing/) | 8 — Specialized Platforms & Performance | Intermediate | k6, Locust, distributed load generation, soak/spike/capacity tests, latency percentiles, CI performance gates |
+| 1 | [linux_and_os_fundamentals](linux_and_os_fundamentals/linux_and_os_fundamentals.md) | 1 — Foundations | Intermediate | Processes, signals, file descriptors, cgroups v2, namespaces, systemd, /proc, ulimits, OOM killer |
+| 2 | [shell_scripting_and_automation](shell_scripting_and_automation/shell_scripting_and_automation.md) | 1 — Foundations | Beginner | Bash, `sed`/`awk`/`jq`, Python for ops, idempotent scripts, exit codes, `set -euo pipefail` |
+| 3 | [networking_for_devops](networking_for_devops/networking_for_devops.md) | 1 — Foundations | Intermediate | DNS, DHCP, CIDR/subnetting, NAT, firewalls, L4/L7 load balancing, TLS/mTLS/certs, Nginx/Envoy reverse proxy |
+| 4 | [version_control_and_git_workflows](version_control_and_git_workflows/version_control_and_git_workflows.md) | 1 — Foundations | Beginner | Git internals, trunk-based vs GitFlow, monorepo vs polyrepo, hooks, release tagging |
+| 5 | [containers_and_docker](containers_and_docker/containers_and_docker.md) | 2 — Containers & K8s | Intermediate | Namespaces/cgroups, image layers, multi-stage builds, distroless, BuildKit, registries, Dockerfile best practices |
+| 6 | [container_runtimes_and_oci](container_runtimes_and_oci/container_runtimes_and_oci.md) | 2 — Containers & K8s | Advanced | containerd, runc, CRI-O, OCI image/runtime spec, gVisor/Kata isolation |
+| 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | 2 — Containers & K8s | Advanced | API server, etcd, scheduler, controller-manager, kubelet, kube-proxy, reconciliation loop |
+| 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) | 2 — Containers & K8s | Intermediate | Pods, Deployments, StatefulSets, DaemonSets, Jobs/CronJobs, Services, Ingress, ConfigMap/Secret |
+| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | 2 — Containers & K8s | Advanced | CNI (Calico/Cilium/eBPF), kube-proxy modes, Ingress controllers, Gateway API, NetworkPolicy, CoreDNS |
+| 10 | [kubernetes_storage_and_state](kubernetes_storage_and_state/kubernetes_storage_and_state.md) | 2 — Containers & K8s | Intermediate | PV/PVC, StorageClass, CSI, StatefulSet storage, volume snapshots |
+| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | 2 — Containers & K8s | Advanced | Affinity/taints/tolerations, requests/limits, QoS, HPA/VPA/KEDA, Cluster Autoscaler/Karpenter, PDB |
+| 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | 2 — Containers & K8s | Advanced | RBAC, ServiceAccounts, Pod Security Standards, admission control, secrets-at-rest, image policy |
+| 13 | [helm_and_package_management](helm_and_package_management/helm_and_package_management.md) | 2 — Containers & K8s | Intermediate | Helm charts/templating/releases, Kustomize overlays, repositories |
+| 14 | [kubernetes_operators_and_crds](kubernetes_operators_and_crds/kubernetes_operators_and_crds.md) | 2 — Containers & K8s | Advanced | CRDs, custom controllers, operator pattern, Operator SDK, reconcile loop |
+| 15 | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md) | 3 — CI/CD & GitOps | Intermediate | Pipeline anatomy, stages, artifacts, caching, parallelism, ephemeral runners |
+| 16 | [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md) | 3 — CI/CD & GitOps | Intermediate | GitHub Actions, GitLab CI, Jenkins, Argo Workflows/Tekton, CircleCI (comparison) |
+| 17 | [deployment_strategies](deployment_strategies/deployment_strategies.md) | 3 — CI/CD & GitOps | Advanced | Rolling/blue-green/canary, feature flags, progressive delivery (Argo Rollouts/Flagger) |
+| 18 | [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | 3 — CI/CD & GitOps | Advanced | Declarative delivery, ArgoCD, Flux, drift detection, app-of-apps, sync waves |
+| 19 | [artifact_and_registry_management](artifact_and_registry_management/artifact_and_registry_management.md) | 3 — CI/CD & GitOps | Intermediate | Container/artifact registries, Artifactory/Nexus, SemVer, promotion across envs |
+| 20 | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) | 4 — IaC & Config | Advanced | Core, state, modules, providers, workspaces, drift, import, remote backends, locking |
+| 21 | [terraform_advanced_and_alternatives](terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md) | 4 — IaC & Config | Advanced | Terragrunt, Pulumi, CloudFormation/CDK, OpenTofu, Terratest, policy (Sentinel/OPA) |
+| 22 | [configuration_management](configuration_management/configuration_management.md) | 4 — IaC & Config | Intermediate | Ansible/Chef/Puppet/Salt, idempotency, push vs pull, immutable infra, Packer |
+| 23 | [secrets_management](secrets_management/secrets_management.md) | 4 — IaC & Config | Advanced | HashiCorp Vault, dynamic secrets, AWS/GCP secret managers, External Secrets Operator, SOPS, sealed-secrets, rotation |
+| 24 | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) | 5 — Cloud | Intermediate | IAM, VPC, EC2, S3/EBS, ELB/ALB, Route53, RDS, EKS, Well-Architected Framework |
+| 25 | [gcp_and_azure_essentials](gcp_and_azure_essentials/gcp_and_azure_essentials.md) | 5 — Cloud | Intermediate | GKE/GCS/Cloud Run/IAM, AKS/Blob/Entra ID; AWS↔GCP↔Azure mapping |
+| 26 | [serverless_and_faas](serverless_and_faas/serverless_and_faas.md) | 5 — Cloud | Intermediate | Lambda/Cloud Functions/Knative, cold starts, event-driven, API Gateway, Step Functions |
+| 27 | [cloud_networking_and_cdn](cloud_networking_and_cdn/cloud_networking_and_cdn.md) | 5 — Cloud | Advanced | VPC peering, Transit Gateway, PrivateLink, CloudFront/Cloudflare CDN, global LB, DNS strategies |
+| 28 | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) | 5 — Cloud | Intermediate | Tagging, rightsizing, spot/reserved/savings plans, FinOps practice, cost allocation/showback |
+| 29 | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md) | 6 — Observability & SRE | Advanced | Prometheus architecture, PromQL, exporters, recording/alerting rules, Thanos/Mimir/Cortex, cardinality |
+| 30 | [observability_logging](observability_logging/observability_logging.md) | 6 — Observability & SRE | Intermediate | Aggregation, EFK/ELK, Loki, structured logging, retention/sampling, parsing pipelines |
+| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | 6 — Observability & SRE | Advanced | OpenTelemetry collector pipelines, Jaeger/Tempo, sampling, span propagation |
+| 32 | [visualization_and_alerting](visualization_and_alerting/visualization_and_alerting.md) | 6 — Observability & SRE | Intermediate | Grafana dashboards, Alertmanager routing, PagerDuty/OpsGenie, alert fatigue, SLO burn-rate alerts |
+| 33 | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) | 6 — Observability & SRE | Advanced | SLI/SLO/SLA, error budgets, toil, capacity planning, Google SRE practices |
+| 34 | [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) | 6 — Observability & SRE | Intermediate | Incident command, severity levels, on-call rotations, blameless postmortems, runbooks, MTTR/MTTD |
+| 35 | [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) | 7 — DevSecOps & Reliability | Advanced | SAST/DAST/SCA, image scanning (Trivy/Grype), SBOM, Sigstore/cosign, SLSA levels, secret scanning |
+| 36 | [policy_as_code_and_compliance](policy_as_code_and_compliance/policy_as_code_and_compliance.md) | 7 — DevSecOps & Reliability | Advanced | OPA/Rego, Gatekeeper, Kyverno, CIS benchmarks, SOC2/PCI/HIPAA controls, admission control |
+| 37 | [disaster_recovery_and_resilience](disaster_recovery_and_resilience/disaster_recovery_and_resilience.md) | 7 — DevSecOps & Reliability | Advanced | RTO/RPO, multi-region DR (active-active/passive), failover, restore drills |
+| 38 | [platform_engineering_and_idp](platform_engineering_and_idp/platform_engineering_and_idp.md) | 7 — DevSecOps & Reliability | Intermediate | Internal developer platforms, Backstage, golden paths, self-service, Crossplane |
+| 39 | [ml_platform_and_gpu_infrastructure](ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) | 8 — Specialized Platforms & Performance | Advanced | NVIDIA GPU Operator, device plugin, MIG/time-slicing, Karpenter GPU NodePools, Kubeflow/Ray on K8s, training vs serving infra |
+| 40 | [event_streaming_operations](event_streaming_operations/event_streaming_operations.md) | 8 — Specialized Platforms & Performance | Advanced | Strimzi/Kafka operator, partition & disk sizing, consumer-lag monitoring, rebalancing, rack awareness, tiered storage |
+| 41 | [performance_and_load_testing](performance_and_load_testing/performance_and_load_testing.md) | 8 — Specialized Platforms & Performance | Intermediate | k6, Locust, distributed load generation, soak/spike/capacity tests, latency percentiles, CI performance gates |
 
 ---
 
@@ -201,28 +201,28 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [linux_and_os_fundamentals](linux_and_os_fundamentals/) | README only |
-| 3 | [networking_for_devops](networking_for_devops/) | README only |
-| 5 | [containers_and_docker](containers_and_docker/) | README only |
-| 7 | [kubernetes_architecture](kubernetes_architecture/) | README only |
-| 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/) | README only |
-| 9 | [kubernetes_networking](kubernetes_networking/) | README only |
-| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/) | README only |
-| 12 | [kubernetes_security](kubernetes_security/) | README only |
-| 15 | [ci_cd_fundamentals](ci_cd_fundamentals/) | README only |
-| 16 | [ci_cd_platforms](ci_cd_platforms/) | README only |
-| 17 | [deployment_strategies](deployment_strategies/) | README only |
-| 18 | [gitops_argocd_flux](gitops_argocd_flux/) | README only |
-| 20 | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/) | README only |
-| 23 | [secrets_management](secrets_management/) | README only |
-| 24 | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/) | README only |
-| 26 | [serverless_and_faas](serverless_and_faas/) | README only |
-| 27 | [cloud_networking_and_cdn](cloud_networking_and_cdn/) | README only |
-| 29 | [observability_metrics_prometheus](observability_metrics_prometheus/) | README only |
-| 30 | [observability_logging](observability_logging/) | README only |
-| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/) | README only |
-| 33 | [sre_principles_and_slos](sre_principles_and_slos/) | README only |
-| 34 | [incident_management_and_oncall](incident_management_and_oncall/) | README only |
+| 1 | [linux_and_os_fundamentals](linux_and_os_fundamentals/linux_and_os_fundamentals.md) | module page only |
+| 3 | [networking_for_devops](networking_for_devops/networking_for_devops.md) | module page only |
+| 5 | [containers_and_docker](containers_and_docker/containers_and_docker.md) | module page only |
+| 7 | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) | module page only |
+| 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) | module page only |
+| 9 | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | module page only |
+| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | module page only |
+| 12 | [kubernetes_security](kubernetes_security/kubernetes_security.md) | module page only |
+| 15 | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md) | module page only |
+| 16 | [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md) | module page only |
+| 17 | [deployment_strategies](deployment_strategies/deployment_strategies.md) | module page only |
+| 18 | [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | module page only |
+| 20 | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) | module page only |
+| 23 | [secrets_management](secrets_management/secrets_management.md) | module page only |
+| 24 | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) | module page only |
+| 26 | [serverless_and_faas](serverless_and_faas/serverless_and_faas.md) | module page only |
+| 27 | [cloud_networking_and_cdn](cloud_networking_and_cdn/cloud_networking_and_cdn.md) | module page only |
+| 29 | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md) | module page only |
+| 30 | [observability_logging](observability_logging/observability_logging.md) | module page only |
+| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | module page only |
+| 33 | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) | module page only |
+| 34 | [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) | module page only |
 
 **Not in this path** (19 of 41, Full Path only): `shell_scripting_and_automation`, `version_control_and_git_workflows`, `container_runtimes_and_oci`, `kubernetes_storage_and_state`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `artifact_and_registry_management`, `terraform_advanced_and_alternatives`, `configuration_management`, `gcp_and_azure_essentials`, `cloud_cost_optimization_finops`, `visualization_and_alerting`, `devsecops_and_supply_chain_security`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `platform_engineering_and_idp`, `ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`
 <!-- /study-path-table -->
@@ -243,30 +243,30 @@ A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview*
 
 ## Knowledge-Question Map
 
-The highest-frequency DevOps *knowledge* questions mapped to the file that answers them. For *system design* ("design a CI/CD platform", "design an observability stack") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+The highest-frequency DevOps *knowledge* questions mapped to the file that answers them. For *system design* ("design a CI/CD platform", "design an observability stack") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
-| Why was my Pod OOMKilled even though the node had free memory? | [linux_and_os_fundamentals](linux_and_os_fundamentals/) |
-| DNS resolution, CIDR/subnetting, and TLS/mTLS — where does a request actually terminate and route? | [networking_for_devops](networking_for_devops/) |
-| What happens end-to-end when you `kubectl apply` a Deployment? | [kubernetes_architecture](kubernetes_architecture/) |
-| Deployment vs StatefulSet vs DaemonSet vs Job/CronJob — when does each apply? | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/) |
-| How does a rolling update stay zero-downtime (maxUnavailable/maxSurge, readiness probes)? | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/), [deployment_strategies](deployment_strategies/) |
-| How does a CNI plugin wire Pod-to-Pod networking, and how does NetworkPolicy restrict it? | [kubernetes_networking](kubernetes_networking/) |
-| Requests vs limits, QoS classes, and how HPA/VPA/Cluster Autoscaler/Karpenter interact? | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/) |
-| Design RBAC and Pod Security Standards for a multi-tenant cluster. | [kubernetes_security](kubernetes_security/) |
-| Design a CI pipeline with caching, parallel stages, and ephemeral runners — how do GitHub Actions/GitLab CI/Jenkins compare? | [ci_cd_fundamentals](ci_cd_fundamentals/), [ci_cd_platforms](ci_cd_platforms/) |
-| How does a canary deployment shift traffic and decide to promote or roll back? | [deployment_strategies](deployment_strategies/) |
-| Push-based CI/CD vs pull-based GitOps (ArgoCD/Flux) — what's the real security/drift tradeoff? | [gitops_argocd_flux](gitops_argocd_flux/) |
-| What is Terraform state, and why is a stale or lost state file dangerous? | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/) |
-| Dynamic secrets (Vault) vs static cloud secrets — why does rotation matter? | [secrets_management](secrets_management/) |
-| Walk through IAM, VPC, and security groups for a 3-tier AWS application. | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/) |
-| Why do serverless functions have cold starts, and how do you mitigate them? | [serverless_and_faas](serverless_and_faas/) |
-| How does a CDN plus global load balancer cut latency for users worldwide? | [cloud_networking_and_cdn](cloud_networking_and_cdn/) |
-| Why is high-cardinality labeling dangerous in Prometheus? | [observability_metrics_prometheus](observability_metrics_prometheus/) |
-| Structured logging vs raw text at scale — why standardize on Loki/EFK? | [observability_logging](observability_logging/) |
-| How does a trace context propagate across service boundaries in OpenTelemetry? | [observability_tracing_and_otel](observability_tracing_and_otel/) |
-| What is an error budget, how does it gate release velocity, and how do you run a blameless postmortem? | [sre_principles_and_slos](sre_principles_and_slos/), [incident_management_and_oncall](incident_management_and_oncall/) |
+| Why was my Pod OOMKilled even though the node had free memory? | [linux_and_os_fundamentals](linux_and_os_fundamentals/linux_and_os_fundamentals.md) |
+| DNS resolution, CIDR/subnetting, and TLS/mTLS — where does a request actually terminate and route? | [networking_for_devops](networking_for_devops/networking_for_devops.md) |
+| What happens end-to-end when you `kubectl apply` a Deployment? | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md) |
+| Deployment vs StatefulSet vs DaemonSet vs Job/CronJob — when does each apply? | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md) |
+| How does a rolling update stay zero-downtime (maxUnavailable/maxSurge, readiness probes)? | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md), [deployment_strategies](deployment_strategies/deployment_strategies.md) |
+| How does a CNI plugin wire Pod-to-Pod networking, and how does NetworkPolicy restrict it? | [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) |
+| Requests vs limits, QoS classes, and how HPA/VPA/Cluster Autoscaler/Karpenter interact? | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) |
+| Design RBAC and Pod Security Standards for a multi-tenant cluster. | [kubernetes_security](kubernetes_security/kubernetes_security.md) |
+| Design a CI pipeline with caching, parallel stages, and ephemeral runners — how do GitHub Actions/GitLab CI/Jenkins compare? | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md), [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md) |
+| How does a canary deployment shift traffic and decide to promote or roll back? | [deployment_strategies](deployment_strategies/deployment_strategies.md) |
+| Push-based CI/CD vs pull-based GitOps (ArgoCD/Flux) — what's the real security/drift tradeoff? | [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) |
+| What is Terraform state, and why is a stale or lost state file dangerous? | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) |
+| Dynamic secrets (Vault) vs static cloud secrets — why does rotation matter? | [secrets_management](secrets_management/secrets_management.md) |
+| Walk through IAM, VPC, and security groups for a 3-tier AWS application. | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) |
+| Why do serverless functions have cold starts, and how do you mitigate them? | [serverless_and_faas](serverless_and_faas/serverless_and_faas.md) |
+| How does a CDN plus global load balancer cut latency for users worldwide? | [cloud_networking_and_cdn](cloud_networking_and_cdn/cloud_networking_and_cdn.md) |
+| Why is high-cardinality labeling dangerous in Prometheus? | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md) |
+| Structured logging vs raw text at scale — why standardize on Loki/EFK? | [observability_logging](observability_logging/observability_logging.md) |
+| How does a trace context propagate across service boundaries in OpenTelemetry? | [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) |
+| What is an error budget, how does it gate release velocity, and how do you run a blameless postmortem? | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md), [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) |
 
 ---
 
@@ -276,12 +276,12 @@ A 6-week plan over the Senior Path. Each week pairs modules with one or two case
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|
-| 1 | Foundations + Containers | [linux_and_os_fundamentals](linux_and_os_fundamentals/), [networking_for_devops](networking_for_devops/), [containers_and_docker](containers_and_docker/) | skim [Kubernetes Platform](case_studies/design_kubernetes_platform.md) |
-| 2 | Kubernetes Core | [kubernetes_architecture](kubernetes_architecture/), [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/), [kubernetes_networking](kubernetes_networking/), [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/), [kubernetes_security](kubernetes_security/) | [Kubernetes Platform](case_studies/design_kubernetes_platform.md) (full), [Autoscaling Platform](case_studies/design_autoscaling_platform.md) |
-| 3 | CI/CD & GitOps | [ci_cd_fundamentals](ci_cd_fundamentals/), [ci_cd_platforms](ci_cd_platforms/), [deployment_strategies](deployment_strategies/), [gitops_argocd_flux](gitops_argocd_flux/) | [CI/CD Platform](case_studies/design_ci_cd_platform.md), [GitOps Delivery Pipeline](case_studies/design_gitops_delivery_pipeline.md) |
-| 4 | IaC, Secrets & Cloud | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/), [secrets_management](secrets_management/), [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/), [serverless_and_faas](serverless_and_faas/), [cloud_networking_and_cdn](cloud_networking_and_cdn/) | [Secrets Management Platform](case_studies/design_secrets_management_platform.md) |
-| 5 | Observability | [observability_metrics_prometheus](observability_metrics_prometheus/), [observability_logging](observability_logging/), [observability_tracing_and_otel](observability_tracing_and_otel/) | [Observability Platform](case_studies/design_observability_platform.md), [Log Aggregation Pipeline](case_studies/design_log_aggregation_pipeline.md) |
-| 6 | SRE + Incident + drills | [sre_principles_and_slos](sre_principles_and_slos/), [incident_management_and_oncall](incident_management_and_oncall/) | [Incident Response System](case_studies/design_incident_response_system.md); 2-3 more via the [interview shortcuts](case_studies/README.md) |
+| 1 | Foundations + Containers | [linux_and_os_fundamentals](linux_and_os_fundamentals/linux_and_os_fundamentals.md), [networking_for_devops](networking_for_devops/networking_for_devops.md), [containers_and_docker](containers_and_docker/containers_and_docker.md) | skim [Kubernetes Platform](case_studies/design_kubernetes_platform.md) |
+| 2 | Kubernetes Core | [kubernetes_architecture](kubernetes_architecture/kubernetes_architecture.md), [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/kubernetes_workloads_and_objects.md), [kubernetes_networking](kubernetes_networking/kubernetes_networking.md), [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md), [kubernetes_security](kubernetes_security/kubernetes_security.md) | [Kubernetes Platform](case_studies/design_kubernetes_platform.md) (full), [Autoscaling Platform](case_studies/design_autoscaling_platform.md) |
+| 3 | CI/CD & GitOps | [ci_cd_fundamentals](ci_cd_fundamentals/ci_cd_fundamentals.md), [ci_cd_platforms](ci_cd_platforms/ci_cd_platforms.md), [deployment_strategies](deployment_strategies/deployment_strategies.md), [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | [CI/CD Platform](case_studies/design_ci_cd_platform.md), [GitOps Delivery Pipeline](case_studies/design_gitops_delivery_pipeline.md) |
+| 4 | IaC, Secrets & Cloud | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/infrastructure_as_code_terraform.md), [secrets_management](secrets_management/secrets_management.md), [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md), [serverless_and_faas](serverless_and_faas/serverless_and_faas.md), [cloud_networking_and_cdn](cloud_networking_and_cdn/cloud_networking_and_cdn.md) | [Secrets Management Platform](case_studies/design_secrets_management_platform.md) |
+| 5 | Observability | [observability_metrics_prometheus](observability_metrics_prometheus/observability_metrics_prometheus.md), [observability_logging](observability_logging/observability_logging.md), [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | [Observability Platform](case_studies/design_observability_platform.md), [Log Aggregation Pipeline](case_studies/design_log_aggregation_pipeline.md) |
+| 6 | SRE + Incident + drills | [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md), [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md) | [Incident Response System](case_studies/design_incident_response_system.md); 2-3 more via the [interview shortcuts](case_studies/case_studies.md) |
 
 ---
 
@@ -339,18 +339,18 @@ Worked examples use AWS; this is the quick translation table referenced througho
 
 | Module | Also See |
 |--------|----------|
-| [networking_for_devops](networking_for_devops/) | [`backend/tcp_ip_deep_dive`](../backend/tcp_ip_deep_dive/), [`backend/osi_model_and_networking`](../backend/osi_model_and_networking/), [cloud_networking_and_cdn](cloud_networking_and_cdn/) |
-| [containers_and_docker](containers_and_docker/) | [container_runtimes_and_oci](container_runtimes_and_oci/), [linux_and_os_fundamentals](linux_and_os_fundamentals/), [`backend/container_and_deployment_patterns`](../backend/container_and_deployment_patterns/) |
-| [kubernetes_networking](kubernetes_networking/) | [`backend/service_mesh_and_service_discovery`](../backend/service_mesh_and_service_discovery/), [networking_for_devops](networking_for_devops/) |
-| [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/) | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/), [sre_principles_and_slos](sre_principles_and_slos/) |
-| [gitops_argocd_flux](gitops_argocd_flux/) | [deployment_strategies](deployment_strategies/), [infrastructure_as_code_terraform](infrastructure_as_code_terraform/) |
-| [infrastructure_as_code_terraform](infrastructure_as_code_terraform/) | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/), [secrets_management](secrets_management/), [policy_as_code_and_compliance](policy_as_code_and_compliance/) |
-| [secrets_management](secrets_management/) | [kubernetes_security](kubernetes_security/), [`database/database_security_and_compliance`](../database/database_security_and_compliance/) |
-| [observability_tracing_and_otel](observability_tracing_and_otel/) | [`backend/observability_and_monitoring`](../backend/observability_and_monitoring/), [`llm/case_studies/cross_cutting/opentelemetry_for_llm_apps.md`](../llm/case_studies/cross_cutting/opentelemetry_for_llm_apps.md) |
-| [sre_principles_and_slos](sre_principles_and_slos/) | [incident_management_and_oncall](incident_management_and_oncall/), [`backend/observability_and_monitoring`](../backend/observability_and_monitoring/) |
-| [disaster_recovery_and_resilience](disaster_recovery_and_resilience/) | [`backend/chaos_engineering`](../backend/chaos_engineering/), [`database/backup_recovery_and_disaster_recovery`](../database/backup_recovery_and_disaster_recovery/), [`database/replication_and_high_availability`](../database/replication_and_high_availability/) |
-| [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/) | [`backend/backend_security_owasp`](../backend/backend_security_owasp/), [policy_as_code_and_compliance](policy_as_code_and_compliance/) |
-| [policy_as_code_and_compliance](policy_as_code_and_compliance/) | [kubernetes_security](kubernetes_security/), [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/) |
+| [networking_for_devops](networking_for_devops/networking_for_devops.md) | [`backend/tcp_ip_deep_dive`](../backend/tcp_ip_deep_dive/tcp_ip_deep_dive.md), [`backend/osi_model_and_networking`](../backend/osi_model_and_networking/osi_model_and_networking.md), [cloud_networking_and_cdn](cloud_networking_and_cdn/cloud_networking_and_cdn.md) |
+| [containers_and_docker](containers_and_docker/containers_and_docker.md) | [container_runtimes_and_oci](container_runtimes_and_oci/container_runtimes_and_oci.md), [linux_and_os_fundamentals](linux_and_os_fundamentals/linux_and_os_fundamentals.md), [`backend/container_and_deployment_patterns`](../backend/container_and_deployment_patterns/container_and_deployment_patterns.md) |
+| [kubernetes_networking](kubernetes_networking/kubernetes_networking.md) | [`backend/service_mesh_and_service_discovery`](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md), [networking_for_devops](networking_for_devops/networking_for_devops.md) |
+| [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) | [cloud_cost_optimization_finops](cloud_cost_optimization_finops/cloud_cost_optimization_finops.md), [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) |
+| [gitops_argocd_flux](gitops_argocd_flux/gitops_argocd_flux.md) | [deployment_strategies](deployment_strategies/deployment_strategies.md), [infrastructure_as_code_terraform](infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) |
+| [infrastructure_as_code_terraform](infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md), [secrets_management](secrets_management/secrets_management.md), [policy_as_code_and_compliance](policy_as_code_and_compliance/policy_as_code_and_compliance.md) |
+| [secrets_management](secrets_management/secrets_management.md) | [kubernetes_security](kubernetes_security/kubernetes_security.md), [`database/database_security_and_compliance`](../database/database_security_and_compliance/database_security_and_compliance.md) |
+| [observability_tracing_and_otel](observability_tracing_and_otel/observability_tracing_and_otel.md) | [`backend/observability_and_monitoring`](../backend/observability_and_monitoring/observability_and_monitoring.md), [`llm/case_studies/cross_cutting/opentelemetry_for_llm_apps.md`](../llm/case_studies/cross_cutting/opentelemetry_for_llm_apps.md) |
+| [sre_principles_and_slos](sre_principles_and_slos/sre_principles_and_slos.md) | [incident_management_and_oncall](incident_management_and_oncall/incident_management_and_oncall.md), [`backend/observability_and_monitoring`](../backend/observability_and_monitoring/observability_and_monitoring.md) |
+| [disaster_recovery_and_resilience](disaster_recovery_and_resilience/disaster_recovery_and_resilience.md) | [`backend/chaos_engineering`](../backend/chaos_engineering/chaos_engineering.md), [`database/backup_recovery_and_disaster_recovery`](../database/backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md), [`database/replication_and_high_availability`](../database/replication_and_high_availability/replication_and_high_availability.md) |
+| [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) | [`backend/backend_security_owasp`](../backend/backend_security_owasp/backend_security_owasp.md), [policy_as_code_and_compliance](policy_as_code_and_compliance/policy_as_code_and_compliance.md) |
+| [policy_as_code_and_compliance](policy_as_code_and_compliance/policy_as_code_and_compliance.md) | [kubernetes_security](kubernetes_security/kubernetes_security.md), [devsecops_and_supply_chain_security](devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) |
 
 ---
 
@@ -507,6 +507,6 @@ Recommended order for interview preparation:
 2. **Week 2 — Kubernetes depth + CI/CD**: finish Phase 2, then Phase 3 (pipelines, GitOps, deployment strategies).
 3. **Week 3 — IaC + Cloud**: Phase 4 (Terraform first), then Phase 5 (AWS-primary).
 4. **Week 4 — Observability, SRE, Security**: Phase 6 (Prometheus + SLOs are most-tested), then Phase 7.
-5. **Review**: work the case studies end-to-end — see [case_studies/README.md](case_studies/README.md) for the guided path.
+5. **Review**: work the case studies end-to-end — see [case_studies/README.md](case_studies/case_studies.md) for the guided path.
 
-Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/README.md`](../llm/foundations_and_architecture/README.md) as the format reference, and [`../llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) for the principal case-study format.
+Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/README.md`](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference, and [`../llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) for the principal case-study format.

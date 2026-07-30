@@ -4,7 +4,7 @@
 
 ## 1. Concept Overview
 
-LiteLLM (BerriAI, open-source 2023, Y Combinator W23) is a unified interface to 100+ LLM providers. Its core value: write code once against an OpenAI-compatible API, swap between Anthropic, Google, Azure, AWS Bedrock, Groq, Cohere, local Ollama, and more by configuration. The proxy server variant (LiteLLM Proxy) adds production features critical for enterprise multi-team LLM deployments: virtual API keys with per-team budgets, automatic provider failover, [model routing](../llm_routing_and_model_selection/README.md), cost tracking, rate limit handling, semantic caching, and Prometheus/Datadog observability.
+LiteLLM (BerriAI, open-source 2023, Y Combinator W23) is a unified interface to 100+ LLM providers. Its core value: write code once against an OpenAI-compatible API, swap between Anthropic, Google, Azure, AWS Bedrock, Groq, Cohere, local Ollama, and more by configuration. The proxy server variant (LiteLLM Proxy) adds production features critical for enterprise multi-team LLM deployments: virtual API keys with per-team budgets, automatic provider failover, [model routing](../llm_routing_and_model_selection/llm_routing_and_model_selection.md), cost tracking, rate limit handling, semantic caching, and Prometheus/Datadog observability.
 
 In agent stacks, LiteLLM occupies the "API gateway" role — sitting between your agents and the provider APIs, abstracting provider details, enforcing budgets, providing reliability. Many production agent deployments use LiteLLM Proxy as a hard requirement before deploying to multiple teams.
 
@@ -54,7 +54,7 @@ Map friendly names to specific deployments: `gpt-4o` → `azure/my-deployment-ea
 
 ### 4.5 Semantic Caching
 
-Embed prompts; if new prompt cosine similarity > threshold to cached, return cached response. 20-40% cost reduction on chatty workloads. See [LLM Caching](../llm_caching/README.md) for cache-design depth beyond the proxy layer.
+Embed prompts; if new prompt cosine similarity > threshold to cached, return cached response. 20-40% cost reduction on chatty workloads. See [LLM Caching](../llm_caching/llm_caching.md) for cache-design depth beyond the proxy layer.
 
 ---
 
@@ -455,7 +455,7 @@ Typical 5-20ms overhead per request (network hop + proxy logic). Negligible vs L
 
 **Q: Can LiteLLM call MCP servers?**
 **Short:** No -- it is a model-routing layer, not a tool layer; MCP tool integration remains the application's own responsibility.
-LiteLLM Proxy is primarily a model-routing layer, not a tool layer. Tool integration is your application's responsibility. Some recent LiteLLM features add MCP-aware passthrough — see [MCP](../mcp_model_context_protocol/README.md) for the tool-layer protocol itself.
+LiteLLM Proxy is primarily a model-routing layer, not a tool layer. Tool integration is your application's responsibility. Some recent LiteLLM features add MCP-aware passthrough — see [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) for the tool-layer protocol itself.
 
 **Q: How does LiteLLM handle streaming?**
 **Short:** It passes through OpenAI-compatible SSE streaming chunks, with caching bypassed for streaming requests by default.

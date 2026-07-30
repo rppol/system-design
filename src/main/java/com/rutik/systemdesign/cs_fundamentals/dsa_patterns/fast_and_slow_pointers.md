@@ -437,10 +437,10 @@ def has_cycle_fixed(head):
 
 ## 10. Cross-links
 
-- Concept module: [linked_lists_stacks_and_queues](../linked_lists_stacks_and_queues/) — linked list fundamentals, node structure, dummy heads
-- [recursion_and_problem_solving_patterns](../recursion_and_problem_solving_patterns/) — many linked-list problems have elegant recursive alternatives; fast/slow is the *iterative, O(1)-space* answer
-- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/README.md) — `LinkedList` internals, why Java's `LinkedList` is rarely the right default choice vs `ArrayDeque`
-- Master index: [dsa_patterns/README.md](README.md)
+- Concept module: [linked_lists_stacks_and_queues](../linked_lists_stacks_and_queues/linked_lists_stacks_and_queues.md) — linked list fundamentals, node structure, dummy heads
+- [recursion_and_problem_solving_patterns](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md) — many linked-list problems have elegant recursive alternatives; fast/slow is the *iterative, O(1)-space* answer
+- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — `LinkedList` internals, why Java's `LinkedList` is rarely the right default choice vs `ArrayDeque`
+- Master index: [dsa_patterns/README.md](dsa_patterns.md)
 
 ---
 

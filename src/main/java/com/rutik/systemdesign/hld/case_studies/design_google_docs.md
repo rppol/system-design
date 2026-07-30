@@ -92,9 +92,9 @@ flowchart LR
     class Snap frozen
 ```
 
-**Routing**: Consistent hashing on `doc_id` (see [Consistent Hashing](../consistent_hashing/README.md)) ensures every client editing the same document connects — directly or via gateway redirect — to the *same* collab-server shard. This single-writer-per-document property is what allows the collab server to assign a simple incrementing global sequence number to every operation without distributed consensus.
+**Routing**: Consistent hashing on `doc_id` (see [Consistent Hashing](../consistent_hashing/consistent_hashing.md)) ensures every client editing the same document connects — directly or via gateway redirect — to the *same* collab-server shard. This single-writer-per-document property is what allows the collab server to assign a simple incrementing global sequence number to every operation without distributed consensus.
 
-**Persistence**: The operation log is the system of record — this *is* event sourcing (see [Event Sourcing & CQRS](../event_sourcing_cqrs/README.md)). The current document is always derivable by replaying the log from the beginning (or, in practice, from the most recent snapshot).
+**Persistence**: The operation log is the system of record — this *is* event sourcing (see [Event Sourcing & CQRS](../event_sourcing_cqrs/event_sourcing_cqrs.md)). The current document is always derivable by replaying the log from the beginning (or, in practice, from the most recent snapshot).
 
 **Presence**: Cursor positions and selection ranges are broadcast over the same WebSocket channel but are explicitly *not* written to the operation log or any durable store — they are transient UI state that becomes meaningless the instant a user disconnects.
 
@@ -502,13 +502,13 @@ By contrast, OT's per-operation overhead is just the operation itself (`siteId`,
   2. Server replies with: the current document snapshot (or a diff from the client's last-known sequence), plus any operations the client missed.
   3. Client and server exchange operations bidirectionally for the duration of the session.
   4. On disconnect, the server removes the session from its broadcast list; the document continues to exist and accept edits from other connected clients.
-- **Sharding by `doc_id`**: consistent hashing (see [Consistent Hashing](../consistent_hashing/README.md)) maps `doc_id` to a collab-server shard. When a shard is added or removed, only the documents whose hash falls in the affected ring segment need to be reassigned — bounding the "blast radius" of a rebalance.
+- **Sharding by `doc_id`**: consistent hashing (see [Consistent Hashing](../consistent_hashing/consistent_hashing.md)) maps `doc_id` to a collab-server shard. When a shard is added or removed, only the documents whose hash falls in the affected ring segment need to be reassigned — bounding the "blast radius" of a rebalance.
 
 ---
 
 ### 4.4 Persistence — Operation Log + Snapshots
 
-The operation log is the durable source of truth — a textbook application of **event sourcing** (see [Event Sourcing & CQRS](../event_sourcing_cqrs/README.md) and [Event Sourcing & CQRS — Backend Deep Dive](../../backend/event_sourcing_and_cqrs/README.md)):
+The operation log is the durable source of truth — a textbook application of **event sourcing** (see [Event Sourcing & CQRS](../event_sourcing_cqrs/event_sourcing_cqrs.md) and [Event Sourcing & CQRS — Backend Deep Dive](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md)):
 
 ```
 Operation Log (Kafka topic, partitioned by doc_id):
@@ -700,13 +700,13 @@ The throughline across all five: **the harder a system leans toward "the server 
 
 | Component | Technology | Why |
 |---|---|---|
-| Client-server real-time channel | WebSocket | Bidirectional push for ops, acks, and presence with sub-second latency — see [WebSockets & SSE](../../backend/websockets_and_sse/README.md) |
+| Client-server real-time channel | WebSocket | Bidirectional push for ops, acks, and presence with sub-second latency — see [WebSockets & SSE](../../backend/websockets_and_sse/websockets_and_sse.md) |
 | Collab server | Stateful service (per `doc_id` shard) | Hosts the OT transform engine / CRDT merge logic and assigns global sequence numbers |
 | Cross-shard presence fan-out | Redis Pub/Sub | When a document's editors happen to be split across multiple collab-server replicas (e.g., during a rebalance), presence updates need to reach all of them without going through the operation log |
-| Operation log / event store | Kafka (partitioned by `doc_id`) | Durable, ordered, replayable append-only log — the event-sourcing backbone, see [Event Sourcing & CQRS](../event_sourcing_cqrs/README.md) and [Event Sourcing & CQRS — Backend](../../backend/event_sourcing_and_cqrs/README.md) |
+| Operation log / event store | Kafka (partitioned by `doc_id`) | Durable, ordered, replayable append-only log — the event-sourcing backbone, see [Event Sourcing & CQRS](../event_sourcing_cqrs/event_sourcing_cqrs.md) and [Event Sourcing & CQRS — Backend](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) |
 | Snapshot storage | S3-style blob storage | Periodic full-document snapshots for fast reload and log compaction |
-| Routing / sharding | Consistent hashing on `doc_id` | Routes all clients of a document to the same collab-server shard, see [Consistent Hashing](../consistent_hashing/README.md) |
-| Reconnect resilience | Jittered exponential backoff | Prevents thundering-herd reconnect storms after deploys, see [Resilience Patterns](../resilience_patterns/README.md) |
+| Routing / sharding | Consistent hashing on `doc_id` | Routes all clients of a document to the same collab-server shard, see [Consistent Hashing](../consistent_hashing/consistent_hashing.md) |
+| Reconnect resilience | Jittered exponential backoff | Prevents thundering-herd reconnect storms after deploys, see [Resilience Patterns](../resilience_patterns/resilience_patterns.md) |
 | Rich-text CRDT (alternative stack) | Yjs / Automerge | Production-grade sequence/JSON CRDT implementations with metadata-overhead mitigations |
 
 ---
@@ -724,7 +724,7 @@ The throughline across all five: **the harder a system leans toward "the server 
 | Reconnect rate | Spikes indicate network issues or a recent deploy triggering mass reconnects (§9 War Story 2) |
 | Operation log consumer lag | If snapshot-writers or analytics consumers fall behind, compaction stalls |
 
-These map onto the standard three pillars (metrics, logs, traces) — see [Observability](../observability/README.md) for the general framework.
+These map onto the standard three pillars (metrics, logs, traces) — see [Observability](../observability/observability.md) for the general framework.
 
 ### Runbook: Collab-Server Crash
 
@@ -813,7 +813,7 @@ sequenceDiagram
 ```
 The result was a multi-minute period where the *deploy itself* (not any underlying capacity shortfall) caused widespread connection failures across the fleet — a self-inflicted thundering herd.
 
-**Fix**: **Jittered exponential backoff** on reconnect (see [Resilience Patterns](../resilience_patterns/README.md)). On disconnect, each client waits `min(maxDelay, baseDelay * 2^attempt) * random(0.5, 1.5)` before reconnecting — the random jitter ensures that even though all 40,000 clients disconnected within the same 100ms window, their reconnect attempts spread across several seconds, smoothing the load spike on the newly-started instance. Combined with a **rolling deploy that staggers restarts** across the fleet (rather than a tight simultaneous window) and a brief **connection-accept rate limit** on freshly-started instances (reject-and-retry-later rather than accept-and-overflow), the same deploy produced a smooth, barely-visible blip in connection counts instead of a multi-minute incident.
+**Fix**: **Jittered exponential backoff** on reconnect (see [Resilience Patterns](../resilience_patterns/resilience_patterns.md)). On disconnect, each client waits `min(maxDelay, baseDelay * 2^attempt) * random(0.5, 1.5)` before reconnecting — the random jitter ensures that even though all 40,000 clients disconnected within the same 100ms window, their reconnect attempts spread across several seconds, smoothing the load spike on the newly-started instance. Combined with a **rolling deploy that staggers restarts** across the fleet (rather than a tight simultaneous window) and a brief **connection-accept rate limit** on freshly-started instances (reject-and-retry-later rather than accept-and-overflow), the same deploy produced a smooth, barely-visible blip in connection counts instead of a multi-minute incident.
 
 ### War Story 3: CRDT Clock Skew — "Time Travel" Edits
 
@@ -868,7 +868,7 @@ The [WhatsApp case study](./design_whatsapp.md) cites Erlang/OTP servers handlin
 
 ### Sharding Strategy
 
-- **Consistent hashing on `doc_id`** (see [Consistent Hashing](../consistent_hashing/README.md)) maps each document to a collab-server shard. Virtual nodes (e.g., 100-200 per physical instance) keep the distribution of documents-per-instance even even as instances are added/removed.
+- **Consistent hashing on `doc_id`** (see [Consistent Hashing](../consistent_hashing/consistent_hashing.md)) maps each document to a collab-server shard. Virtual nodes (e.g., 100-200 per physical instance) keep the distribution of documents-per-instance even even as instances are added/removed.
 - **Rebalancing cost**: adding or removing one collab-server instance only reassigns the documents in the affected arc of the hash ring (roughly 1/N of all documents, where N is the instance count) — those documents' active sessions reconnect to their new owning shard, reload from snapshot + log replay (§8), and resume. The vast majority of documents/sessions are unaffected.
 - **Hot-document mitigation**: if a single document's transform-queue depth (§8) consistently exceeds a threshold — e.g., a document with 50+ simultaneous editors generating bursty traffic — that document can be flagged for a finer-grained ownership model (e.g., Notion's per-block CRDT approach, §6) so that edits to disjoint regions of the document don't all funnel through one transform queue.
 
@@ -945,7 +945,7 @@ A: Property-based / exhaustive operation-pair testing: for every pair of operati
 A: At 50 editors × ~1 op/sec average (with bursts higher), the document generates on the order of 50-200 ops/sec — still well within a single collab-server instance's processing capacity for running `transform()` (§2's whole point is that per-document throughput stays low even at high editor counts). The main risks are (a) the **transform-queue depth** metric (§8) climbing if `transform()` calls start taking longer than the inter-arrival time of new operations — monitored and alerted on — and (b) **broadcast fan-out cost**: every applied operation must be sent to all 50 connected clients, so broadcast cost scales with editor count even though transform cost doesn't. If a document consistently runs hot, the long-term mitigation is finer-grained ownership — e.g., splitting the document into independently-CRDT-managed blocks (Notion's model, §6) so that edits to disjoint sections of the document don't all serialize through one transform queue.
 
 **Q: Why route by `doc_id` with consistent hashing instead of, say, round-robin load balancing across collab servers?**
-A: Round-robin would send different clients editing the *same* document to *different* collab-server instances, each of which would have to independently maintain (and keep in sync with each other) the canonical state and sequence numbering for that document — reintroducing the exact multi-writer coordination problem that routing-by-`doc_id` is designed to avoid. Consistent hashing on `doc_id` (§3, §10, [Consistent Hashing](../consistent_hashing/README.md)) guarantees all clients of a given document land on the same shard, making that shard the natural single ordering authority for the document, with the added benefit that adding/removing shards only reassigns ~1/N of documents rather than requiring a global remap.
+A: Round-robin would send different clients editing the *same* document to *different* collab-server instances, each of which would have to independently maintain (and keep in sync with each other) the canonical state and sequence numbering for that document — reintroducing the exact multi-writer coordination problem that routing-by-`doc_id` is designed to avoid. Consistent hashing on `doc_id` (§3, §10, [Consistent Hashing](../consistent_hashing/consistent_hashing.md)) guarantees all clients of a given document land on the same shard, making that shard the natural single ordering authority for the document, with the added benefit that adding/removing shards only reassigns ~1/N of documents rather than requiring a global remap.
 
 **Q: How would you extend this design to support comments and suggested edits ("Suggesting mode"), which are common follow-up questions?**
 A: Comments and suggestions can be modeled as a **parallel, secondary operation stream anchored to ranges in the primary text**, rather than as mutations to the text itself — a comment is `AddComment(range, commentId, body)`, and the underlying text the comment is anchored to continues to be edited normally via the OT/CRDT pipeline, with the comment's anchor range transformed alongside regular operations (the same `transform()` machinery that adjusts an `InsertOp`'s position when a concurrent edit shifts the document also adjusts a comment anchor's range). "Suggesting mode" edits are similar: a suggested insertion/deletion is recorded as a *proposed* operation with an associated author and status (pending/accepted/rejected) rather than being immediately applied to the canonical text — accepting a suggestion is then just applying its underlying operation through the normal pipeline, while rejecting it discards the proposed operation without ever mutating canonical state. Both extensions reuse the existing transform/ordering infrastructure; they add new operation *types*, not new *infrastructure*.
@@ -965,8 +965,8 @@ A: Comments and suggestions can be modeled as a **parallel, secondary operation 
 
 ## Cross-References
 
-- **Operation log as event-sourced source of truth (§4.4, §4.1)** -> [`../event_sourcing_cqrs/README.md`](../event_sourcing_cqrs/README.md), [`../../backend/event_sourcing_and_cqrs/README.md`](../../backend/event_sourcing_and_cqrs/README.md)
-- **Document-to-shard routing via consistent hashing (§3, §10)** -> [`../consistent_hashing/README.md`](../consistent_hashing/README.md)
-- **Jittered exponential backoff for reconnects (§9 War Story 2)** -> [`../resilience_patterns/README.md`](../resilience_patterns/README.md)
-- **WebSocket session lifecycle and protocol details (§4.3, §7)** -> [`../../backend/websockets_and_sse/README.md`](../../backend/websockets_and_sse/README.md)
+- **Operation log as event-sourced source of truth (§4.4, §4.1)** -> [`../event_sourcing_cqrs/README.md`](../event_sourcing_cqrs/event_sourcing_cqrs.md), [`../../backend/event_sourcing_and_cqrs/README.md`](../../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md)
+- **Document-to-shard routing via consistent hashing (§3, §10)** -> [`../consistent_hashing/README.md`](../consistent_hashing/consistent_hashing.md)
+- **Jittered exponential backoff for reconnects (§9 War Story 2)** -> [`../resilience_patterns/README.md`](../resilience_patterns/resilience_patterns.md)
+- **WebSocket session lifecycle and protocol details (§4.3, §7)** -> [`../../backend/websockets_and_sse/README.md`](../../backend/websockets_and_sse/websockets_and_sse.md)
 - **Connection-density comparison for capacity planning (§10)** -> [`./design_whatsapp.md`](./design_whatsapp.md)

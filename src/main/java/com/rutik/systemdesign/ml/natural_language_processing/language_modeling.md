@@ -1,12 +1,12 @@
 # Language Modeling (Classical + Neural Basics)
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers what a language model is (chain rule, next-token probability), n-gram models,
 > the sparsity / zero-probability problem, smoothing (Laplace, Good-Turing, Kneser-Ney),
 > backoff vs interpolation, perplexity, and the basic neural LMs (Bengio feedforward,
 > RNN/LSTM, weight tying) that precede transformers.
 > Transformer-LM **pretraining** (GPT-style causal LM, scaling laws, the training loop at
-> billion-parameter scale) is out of scope here — see [LLM Foundations](../../llm/foundations_and_architecture/README.md).
+> billion-parameter scale) is out of scope here — see [LLM Foundations](../../llm/foundations_and_architecture/foundations_and_architecture.md).
 > Perplexity as an evaluation metric is treated in depth in [NLP Evaluation and Metrics](nlp_evaluation_and_metrics.md);
 > decoding (greedy/beam/temperature/nucleus) is covered in [Attention and Seq2Seq](attention_and_seq2seq.md).
 
@@ -122,7 +122,7 @@ The Markov assumption above and this estimator are a matched pair: the assumptio
 | **n-gram (3–5)** | last n-1 tokens | huge sparse count tables | fast, interpretable, strong with lots of data | sparsity, fixed window, no generalization |
 | **Bengio feedforward NLM (2003)** | fixed window, embedded | dense, small | learns word embeddings, generalizes | still a fixed window |
 | **RNN / LSTM LM** | unbounded (in theory) | dense, small–medium | variable-length history, no fixed n | vanishing gradients limit real range to ~200 tokens |
-| **Transformer LM** | full context via attention | large | parallel, long-range, SOTA | quadratic attention, data-hungry — see [LLM Foundations](../../llm/foundations_and_architecture/README.md) |
+| **Transformer LM** | full context via attention | large | parallel, long-range, SOTA | quadratic attention, data-hungry — see [LLM Foundations](../../llm/foundations_and_architecture/foundations_and_architecture.md) |
 
 ### 4.2 Smoothing methods (n-gram)
 
@@ -204,7 +204,7 @@ Notice what did *not* happen in the second row: no special case, no branch, no b
 ### 4.4 Neural LM strategies
 
 - **Fixed-window feedforward (Bengio):** concatenate the embeddings of the last `n-1` tokens, pass through a hidden layer, softmax over the vocabulary. First model to learn word embeddings as a byproduct.
-- **RNN/LSTM:** feed tokens one at a time, carry a recurrent hidden state; the state is a lossy summary of the entire history. LSTM/GRU gates mitigate the vanishing-gradient problem that cripples vanilla RNNs. (Cell internals: [Recurrent Neural Networks](../recurrent_neural_networks/README.md).)
+- **RNN/LSTM:** feed tokens one at a time, carry a recurrent hidden state; the state is a lossy summary of the entire history. LSTM/GRU gates mitigate the vanishing-gradient problem that cripples vanilla RNNs. (Cell internals: [Recurrent Neural Networks](../recurrent_neural_networks/recurrent_neural_networks.md).)
 - **Weight tying:** share the input embedding matrix with the output softmax projection. Cuts parameters by `|V| × d` (for a 50k vocab and d=512 that is ~25M params) and typically *improves* perplexity by 1–3 points because both matrices are learning the same word-meaning geometry.
 
 ---
@@ -709,7 +709,7 @@ Each dropped order costs a flat factor of `0.4`, so two drops cost `0.16` and th
 - You need **variable-length context** without committing to a fixed n.
 - You are building a component (e.g., a small on-device completion model) where a full transformer is overkill.
 
-### Prefer a transformer LM (see [LLM Foundations](../../llm/foundations_and_architecture/README.md)) when:
+### Prefer a transformer LM (see [LLM Foundations](../../llm/foundations_and_architecture/foundations_and_architecture.md)) when:
 
 - You have **large data and compute** and need long-range dependencies and SOTA quality.
 - The task is open-ended generation, in-context learning, or anything that benefits from scale.
@@ -885,7 +885,7 @@ Intrinsic evaluation measures the model in isolation — perplexity on held-out 
 
 **Q: Why do vanilla RNN language models struggle with long-range dependencies, and what fixed it?**
 **Short:** Vanilla RNNs suffer vanishing gradients through time, and LSTMs and transformers were built specifically to preserve long-range signal.
-Vanilla RNNs suffer from vanishing gradients: backpropagation through time multiplies many Jacobians, and gradients shrink exponentially, so the model cannot learn dependencies more than a few dozen tokens apart. LSTMs and GRUs added gating and a nearly-linear cell-state path that lets gradients flow, extending the effective range to a couple hundred tokens. Transformers removed recurrence entirely, using self-attention to connect any two positions in one step — which is why they, not RNNs, power modern LMs (see [LLM Foundations](../../llm/foundations_and_architecture/README.md)).
+Vanilla RNNs suffer from vanishing gradients: backpropagation through time multiplies many Jacobians, and gradients shrink exponentially, so the model cannot learn dependencies more than a few dozen tokens apart. LSTMs and GRUs added gating and a nearly-linear cell-state path that lets gradients flow, extending the effective range to a couple hundred tokens. Transformers removed recurrence entirely, using self-attention to connect any two positions in one step — which is why they, not RNNs, power modern LMs (see [LLM Foundations](../../llm/foundations_and_architecture/foundations_and_architecture.md)).
 
 **Q: What was the key contribution of Bengio's 2003 neural probabilistic language model?**
 **Short:** Bengio's 2003 model introduced learned word embeddings inside a neural language model, the direct ancestor of word2vec and every later neural LM.
@@ -912,7 +912,7 @@ The footprint is dominated by the number of distinct n-gram *types*, not tokens 
 7. **Clip gradients (norm 0.25–1.0) and use truncated BPTT with detached hidden states** when training RNN LMs, or loss will diverge to NaN.
 8. **Prune low-count n-grams and quantize** (KenLM-style) for on-device or latency-critical serving; a pruned 5-gram trie answers in nanoseconds.
 9. **Validate perplexity on a held-out set every epoch and early-stop** — neural LMs overfit quickly, and perplexity is a cheap, sensitive signal.
-10. **Know when to graduate to a transformer** — if you have large data, need long-range context, and can afford the compute, a transformer LM will beat both n-grams and RNNs ([LLM Foundations](../../llm/foundations_and_architecture/README.md)).
+10. **Know when to graduate to a transformer** — if you have large data, need long-range context, and can afford the compute, a transformer LM will beat both n-grams and RNNs ([LLM Foundations](../../llm/foundations_and_architecture/foundations_and_architecture.md)).
 
 ---
 

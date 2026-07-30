@@ -475,7 +475,7 @@ to a heap of size k unless one of the four narrower shapes above fits better.
 - **[Modified Binary Search](modified_binary_search.md)** — when `k` is large
   (close to `n`) or the value range is small/discrete, binary search on the
   answer can beat `O(n log k)` (e.g., LC 378's matrix variant).
-- **Quickselect** (covered in [sorting_and_searching](../sorting_and_searching/))
+- **Quickselect** (covered in [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md))
   — for a one-shot (non-streaming) "k-th value only" query on a static array,
   average `O(n)` beats `O(n log k)`.
 
@@ -483,16 +483,16 @@ to a heap of size k unless one of the four narrower shapes above fits better.
 
 ## 10. Cross-links
 
-- Concept module: [heaps_and_priority_queues](../heaps_and_priority_queues/)
+- Concept module: [heaps_and_priority_queues](../heaps_and_priority_queues/heaps_and_priority_queues.md)
   — binary heap internals, `heapify` in O(n), heap invariant proofs.
-- Applied: [java/collections_internals](../../java/collections_internals/) —
+- Applied: [java/collections_internals](../../java/collections_internals/collections_internals.md) —
   `PriorityQueue` is a binary heap array under the hood; note Java's
   `PriorityQueue` is a *max-heap* by default only with a reversed comparator
   (default is min-heap, like Python's `heapq`).
-- Applied: [hld/caching](../../hld/caching/) — LFU cache eviction is a live
+- Applied: [hld/caching](../../hld/caching/caching.md) — LFU cache eviction is a live
   "top-k by frequency" problem at system scale, often implemented with a
   frequency-bucketed doubly linked list instead of a heap for O(1) operations.
-- Master recognition engine: [dsa_patterns/README.md](README.md).
+- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
 - Sibling patterns: [k_way_merge.md](k_way_merge.md), [two_heaps.md](two_heaps.md).
 
 ---

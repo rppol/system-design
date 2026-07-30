@@ -581,13 +581,13 @@ pattern that actually fits the shape.
 
 ## 10. Cross-links
 
-- Concept module: [sorting_and_searching](../sorting_and_searching/) — binary
+- Concept module: [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — binary
   search fundamentals, time complexity proofs, comparison-based search lower
   bounds.
-- Applied: [python/collections_and_data_structures](../../python/collections_and_data_structures/)
+- Applied: [python/collections_and_data_structures](../../python/collections_and_data_structures/collections_and_data_structures.md)
   — the `bisect` module (`bisect_left`, `bisect_right`, `insort`) is a direct,
   production-ready implementation of `lower_bound`/`upper_bound`.
-- Master recognition engine: [dsa_patterns/README.md](README.md) — see the
+- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md) — see the
   Constraints -> Complexity -> Pattern table (large `n` with small answer
   range is the strongest "binary search on the answer" tell).
 - Sibling patterns: [two_pointers.md](two_pointers.md),

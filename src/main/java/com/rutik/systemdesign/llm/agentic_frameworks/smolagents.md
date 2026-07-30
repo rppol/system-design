@@ -29,7 +29,7 @@ The framework offers two agent types: `CodeAgent` (LLM writes Python; executed i
 - **Sandboxed execution**: LocalPythonExecutor (RestrictedPython-like) or E2B integration.
 - **Multi-model**: any HF model, OpenAI, Anthropic, Litellm.
 - **Built-in tools**: web_search (DuckDuckGo/Serper), Python interpreter, image generation, OCR.
-- **MCP support**: `ToolCollection` connects to MCP servers (see [MCP](../mcp_model_context_protocol/README.md)).
+- **MCP support**: `ToolCollection` connects to MCP servers (see [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md)).
 - **Type-hinted tools**: `@tool` decorator + Python signatures → tool schema.
 
 ---

@@ -504,7 +504,7 @@ You cannot run a 500-feature DNN over 100M videos in 200 ms. Two stages let retr
 Weighted logistic is the default because it yields a *calibrated expected-watch-time* score that composes cleanly with the other MMoE heads.
 
 **Decision 3: MMoE vs shared-bottom vs PLE for multitask.**
-Shared-bottom is simplest but suffers negative transfer when objectives conflict (watch time vs "not interested"). MMoE gives each task its own gate over shared experts, reducing the seesaw. PLE (Progressive Layered Extraction) adds task-specific experts and often beats MMoE when tasks are very heterogeneous, at higher parameter cost. See [../multi_task_and_multi_objective_learning/README.md](../multi_task_and_multi_objective_learning/README.md).
+Shared-bottom is simplest but suffers negative transfer when objectives conflict (watch time vs "not interested"). MMoE gives each task its own gate over shared experts, reducing the seesaw. PLE (Progressive Layered Extraction) adds task-specific experts and often beats MMoE when tasks are very heterogeneous, at higher parameter cost. See [../multi_task_and_multi_objective_learning/README.md](../multi_task_and_multi_objective_learning/multi_task_and_multi_objective_learning.md).
 
 **Decision 4: Position/selection-bias correction — shallow tower vs inverse propensity weighting (IPW).**
 The shallow-tower ("bias tower") approach learns the position effect jointly and is dropped at serving; IPW reweights training examples by `1/P(click|position)`. The shallow tower is simpler to serve and avoids high-variance propensity estimates, but IPW is more principled when you have reliable position-CTR estimates. Both are valid; state the tradeoff.

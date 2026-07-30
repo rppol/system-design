@@ -23,9 +23,9 @@
 - The kernel must be re-launchable thousands of times per second (this is the inner primitive of a training loop's loss computation) without host-side overhead dominating — motivates minimizing kernel-launch count per reduction
 
 ### Out of Scope
-- Segmented reduction (reducing many independent sub-arrays in a single launch, e.g. per-row reduction of a matrix) — covered by the row-reduction pattern in [`../parallel_patterns_reduction_scan_histogram/README.md`](../parallel_patterns_reduction_scan_histogram/README.md), not re-derived here
+- Segmented reduction (reducing many independent sub-arrays in a single launch, e.g. per-row reduction of a matrix) — covered by the row-reduction pattern in [`../parallel_patterns_reduction_scan_histogram/README.md`](../parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md), not re-derived here
 - Non-associative or non-commutative reduction operators (string concatenation, matrix multiplication as the combine op) — this case study assumes `+` (directly generalizes to `min`/`max`/`&`/`|` with no structural change)
-- Multi-GPU reduction (NCCL all-reduce) — see [`../multi_gpu_programming_and_nccl/`](../multi_gpu_programming_and_nccl/)
+- Multi-GPU reduction (NCCL all-reduce) — see [`../multi_gpu_programming_and_nccl/`](../multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md)
 
 ---
 
@@ -162,7 +162,7 @@ is scheduled onto real hardware (warp alignment, idle-thread count, and
 whether shared memory or a warp register shuffle carries the value).
 ```
 
-*This is the same 16-leaf tree shape used throughout [`../parallel_patterns_reduction_scan_histogram/README.md`](../parallel_patterns_reduction_scan_histogram/README.md) §5 — that module stops at rung 2 (sequential addressing); this case study is the "rungs 3-7" continuation it hands off to.*
+*This is the same 16-leaf tree shape used throughout [`../parallel_patterns_reduction_scan_histogram/README.md`](../parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md) §5 — that module stops at rung 2 (sequential addressing); this case study is the "rungs 3-7" continuation it hands off to.*
 
 ---
 
@@ -612,7 +612,7 @@ __global__ void reduce7_cooperativeGrid(const float* __restrict__ g_idata,
 }
 ```
 
-Option A is simpler and portable; Option B avoids the second kernel-launch latency entirely (relevant when this reduction is called millions of times per training run) but requires cooperative-launch support and one grid-wide `atomicAdd` per block (contention across only `gridDim.x` blocks — typically ~132 on an A100 sized to one block/SM — not across all `N` threads, so the atomic cost is negligible relative to the memory traffic). See [`../warp_level_primitives_and_cooperative_groups/`](../warp_level_primitives_and_cooperative_groups/) for the full cooperative-groups API and grid-synchronization guarantees.
+Option A is simpler and portable; Option B avoids the second kernel-launch latency entirely (relevant when this reduction is called millions of times per training run) but requires cooperative-launch support and one grid-wide `atomicAdd` per block (contention across only `gridDim.x` blocks — typically ~132 on an A100 sized to one block/SM — not across all `N` threads, so the atomic cost is negligible relative to the memory traffic). See [`../warp_level_primitives_and_cooperative_groups/`](../warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md) for the full cooperative-groups API and grid-synchronization guarantees.
 
 **Measured (A100, N = 2^24, grid sized to 132 blocks = 1/SM):**
 
@@ -649,7 +649,7 @@ Rungs 1->7 are an **11.9x** speedup from the naive baseline using only single-ke
 | When to hand-roll anyway | Only when fusing into a larger kernel (e.g. FlashAttention's row-max/row-sum) | Always hand-roll for "control" | A standalone reduction gains nothing from hand-rolling that CUB doesn't already provide; a fused reduction avoids an entire extra HBM round-trip of the intermediate result, which a library call structurally cannot do |
 | Grid combine strategy | Two-kernel launch (Option A) for portability; cooperative-groups grid sync (Option B) only when launch-count matters at scale | Single giant block covering all of N | A single block cannot exceed 1,024 threads, so it cannot cover large N at all; multi-block + combine is mandatory past `N > 2 * max_threads_per_block` |
 | Shared memory vs. warp shuffle for the intra-block tree | Warp shuffle for the last 5 levels (rung 7); shared memory for levels above one warp | Shared memory for all levels (rung 6) | Shuffle removes shared-memory read/write and any possibility of a bank conflict for those levels; multi-warp levels still need shared memory because shuffle only operates within one warp |
-| Block size | 256 threads | 128 or 512 | 256 balances register pressure per SM against enough warps resident to hide the ~400-800 cycle global load latency; see [`../occupancy_and_launch_configuration/README.md`](../occupancy_and_launch_configuration/README.md) for the general tuning method |
+| Block size | 256 threads | 128 or 512 | 256 balances register pressure per SM against enough warps resident to hide the ~400-800 cycle global load latency; see [`../occupancy_and_launch_configuration/README.md`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) for the general tuning method |
 | Precision of the accumulator | FP32 accumulate in-kernel, verify against FP64 CPU reference | FP64 accumulate on-device | FP64 arithmetic throughput is a fraction of FP32 on consumer/most datacenter parts (varies by GPU: e.g. 1:2 on some, 1:32+ on others) and doubles the bytes moved for the same element count if inputs must also be FP64 — verify with a tolerance instead of forcing FP64 compute (see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md)) |
 | Reduction order determinism | Not guaranteed bit-identical across block-size or grid-size changes | Force a fixed, bit-reproducible tree | Cross-run determinism at a *fixed* configuration is achievable (see Section 9); cross-configuration determinism is not attempted because it would forbid the very grid-sizing tuning that gets CUB from 21% to 88% of peak |
 
@@ -661,7 +661,7 @@ Rungs 1->7 are an **11.9x** speedup from the naive baseline using only single-ke
 - **Thrust's `thrust::reduce`** is a thin, STL-like wrapper directly over `cub::DeviceReduce` — identical performance, simpler call syntax, no template policy tuning exposed to the caller.
 - **CuPy's `cupy.sum`/`cupy.max`/`cupy.min`** dispatch the same CUB device-wide primitives from Python, which is why the "just call the library" baseline in Section 4.0 already reaches near-CUB performance with zero custom kernel code.
 - **PyTorch's `torch.sum`/`torch.mean`/loss reductions** use ATen's CUDA backend, which for simple standalone reductions calls into CUB-equivalent kernels, and for reductions fused with an adjacent op (softmax's row-sum, LayerNorm's mean/variance) hand-writes a fused kernel using exactly the warp-shuffle technique in rung 7 to avoid materializing an intermediate tensor to HBM.
-- **NCCL's `ncclAllReduce`** solves the *multi-GPU* generalization of this problem (partial sums must combine across GPUs over NVLink/InfiniBand, not just across blocks on one GPU) using ring or tree algorithms chosen by topology — see [`../multi_gpu_programming_and_nccl/`](../multi_gpu_programming_and_nccl/); the single-GPU ladder in this case study is the primitive NCCL's per-GPU local reduction step still relies on before the cross-GPU combine.
+- **NCCL's `ncclAllReduce`** solves the *multi-GPU* generalization of this problem (partial sums must combine across GPUs over NVLink/InfiniBand, not just across blocks on one GPU) using ring or tree algorithms chosen by topology — see [`../multi_gpu_programming_and_nccl/`](../multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md); the single-GPU ladder in this case study is the primitive NCCL's per-GPU local reduction step still relies on before the cross-GPU combine.
 - **Mark Harris's original 2007 NVIDIA whitepaper** ("Optimizing Parallel Reduction in CUDA") is the canonical source for rungs 1-6 of this exact progression; rung 7 (warp shuffle) postdates that paper — `__shfl_down_sync` shipped with Kepler (compute capability 3.0) and cooperative groups with CUDA 9 — and is the modern continuation NVIDIA's own later sample code and CUB adopted.
 
 ---
@@ -675,7 +675,7 @@ Rungs 1->7 are an **11.9x** speedup from the naive baseline using only single-ke
 | `cupy.sum` | Simplest correct production call from Python | CUB-backed; matches the Section 4.0 baseline |
 | Nsight Compute (`ncu`) | Measures the exact metrics cited at every rung: DRAM throughput %, warp execution efficiency, shared-memory bank-conflict count, stall reasons | See [`./cross_cutting/nsight_profiling_workflow.md`](./cross_cutting/nsight_profiling_workflow.md) for the full profiling loop and CLI recipes used to produce every table in Section 4 |
 | `compute-sanitizer --tool racecheck` | Validates rungs 5-7's warp-synchronous assumptions (no missing `__syncthreads()` where one is actually still required) | Run once per new rung before trusting its measured speed — a race can silently produce a *plausible-looking* wrong answer |
-| `nvcc -Xptxas -v` | Reports register usage per kernel — used to confirm rung 6's templated unroll does not blow the register budget and hurt occupancy as a side effect of unrolling | Cross-reference against [`../occupancy_and_launch_configuration/README.md`](../occupancy_and_launch_configuration/README.md)'s occupancy calculator |
+| `nvcc -Xptxas -v` | Reports register usage per kernel — used to confirm rung 6's templated unroll does not blow the register budget and hurt occupancy as a side effect of unrolling | Cross-reference against [`../occupancy_and_launch_configuration/README.md`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md)'s occupancy calculator |
 | Cooperative Groups (`cooperative_groups.h`) | Enables rung 7 Option B's single-launch grid-wide combine via `grid.sync()` | Requires `cudaLaunchCooperativeKernel`; device support gated on `cudaDevAttrCooperativeLaunch` |
 
 ---

@@ -24,7 +24,7 @@ Two complementary evaluation modes exist: trajectory-level evaluation (was each 
 - **Benchmark ≠ production quality**: all benchmarks have distributional gaps from real tasks; treat benchmark scores as directional, not absolute.
 - **Trajectory + outcome**: evaluate both path and result; outcome-only evaluation misses brittle shortcuts.
 - **Multiple metrics**: quality (task success rate), efficiency (steps, tokens, cost), reliability (variance across runs), safety (harmful action rate).
-- **LLM-as-judge at scale**: human evaluation is gold but expensive; LLM-as-judge with calibrated rubrics is the practical alternative (see [Evaluation & Benchmarks](../evaluation_and_benchmarks/README.md) for judge calibration fundamentals).
+- **LLM-as-judge at scale**: human evaluation is gold but expensive; LLM-as-judge with calibrated rubrics is the practical alternative (see [Evaluation & Benchmarks](../evaluation_and_benchmarks/evaluation_and_benchmarks.md) for judge calibration fundamentals).
 - **Golden trajectories as reference**: generate expert-annotated correct trajectories; compare agent trajectories against them step-by-step.
 
 ---

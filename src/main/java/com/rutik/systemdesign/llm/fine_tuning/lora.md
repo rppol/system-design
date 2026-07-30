@@ -658,7 +658,7 @@ print(f"Trainable: {trainable_params:,} / {all_params:,} = {100*trainable_params
 - Adapters ship as separate weights; swappable over the same base model
 
 ### Multi-adapter serving (vLLM)
-- [vLLM](../vllm_deep_dive/README.md) supports serving multiple LoRA adapters from a single base model
+- [vLLM](../vllm_deep_dive/vllm_deep_dive.md) supports serving multiple LoRA adapters from a single base model
 - Different adapters loaded per request based on a routing tag
 - Enables serving 50+ specialized models from 1 GPU serving one base model
 

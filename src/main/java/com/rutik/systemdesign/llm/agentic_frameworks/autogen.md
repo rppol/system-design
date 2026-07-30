@@ -74,7 +74,7 @@ AutoGen 0.2 established the conversation-based paradigm. AutoGen 0.4 (released l
 4. **Sequential**: Chain of two-agent pairs (A↔B, then B↔C, then C↔D)
 
 Group-chat coordination generalizes to the debate/consensus and orchestrator-worker patterns in
-[Multi-Agent Systems](../multi_agent_systems/README.md).
+[Multi-Agent Systems](../multi_agent_systems/multi_agent_systems.md).
 
 ---
 

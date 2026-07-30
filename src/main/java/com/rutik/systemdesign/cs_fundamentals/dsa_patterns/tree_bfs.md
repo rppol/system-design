@@ -580,17 +580,17 @@ rather than crashing — easy to miss if the test only checks total node count.
 
 ## 10. Cross-links
 
-- Concept module: [trees_and_binary_search_trees](../trees_and_binary_search_trees/)
+- Concept module: [trees_and_binary_search_trees](../trees_and_binary_search_trees/trees_and_binary_search_trees.md)
   — tree terminology (depth, height, balance), traversal order proofs.
-- Applied: [database/indexing_deep_dive](../../database/indexing_deep_dive/)
+- Applied: [database/indexing_deep_dive](../../database/indexing_deep_dive/indexing_deep_dive.md)
   — B+Tree node layout is inherently level-structured; range scans traverse
   leaf-level linked lists, conceptually similar to "process one level, move
   to the next."
-- Applied: [java/collections_internals](../../java/collections_internals/) —
+- Applied: [java/collections_internals](../../java/collections_internals/collections_internals.md) —
   `ArrayDeque` is the standard Java BFS queue (avoid `LinkedList` as a queue
   for performance); `TreeMap`'s red-black tree balancing relates to the
   `trees_and_binary_search_trees` concept module.
-- Master recognition engine: [dsa_patterns/README.md](README.md).
+- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
 - Sibling pattern: [tree_dfs.md](tree_dfs.md).
 
 ---

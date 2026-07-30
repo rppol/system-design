@@ -1,6 +1,6 @@
 # Sequence Labeling and Conditional Random Fields
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers the *modeling* of sequence labeling — POS tagging, NER, chunking — from HMMs through
 > MEMMs (and their label-bias flaw) to linear-chain CRFs and BiLSTM-CRF. The end-to-end *production
 > system* (serving, sliding windows, active learning, ops) lives in

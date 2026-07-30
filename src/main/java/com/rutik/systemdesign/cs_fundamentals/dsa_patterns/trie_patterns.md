@@ -39,7 +39,7 @@ less when words share prefixes.
   are simpler -> [`hashing_patterns.md`](hashing_patterns.md)
 - Single-string pattern matching (find occurrences of pattern P in text T) —
   that's KMP/Z-algorithm territory, covered in
-  [`graph_and_string_algorithms`](../graph_and_string_algorithms/README.md),
+  [`graph_and_string_algorithms`](../graph_and_string_algorithms/graph_and_string_algorithms.md),
   not a trie
 - "Generate all subsets/permutations" with no dictionary involved ->
   [`backtracking.md`](backtracking.md)
@@ -666,9 +666,9 @@ found.
 
 ## 10. Cross-links
 
-- Concept module: [`graphs_tries_and_advanced_structures/`](../graphs_tries_and_advanced_structures/README.md) —
+- Concept module: [`graphs_tries_and_advanced_structures/`](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) —
   trie node structure, space/time complexity proofs, comparison with hashmaps
-- Applied: [`../../database/search_engines/`](../../database/search_engines/README.md) —
+- Applied: [`../../database/search_engines/`](../../database/search_engines/search_engines.md) —
   inverted indexes and prefix-based term lookups in real search engines are
   the production-scale analog of a trie's `startsWith` query
 

@@ -579,7 +579,7 @@ This is why the `eval_steps=200` above never fires: with packing off it would ha
 
 ### LLaMA-3-Instruct (Meta, 2024)
 - LLaMA-3-8B-Base + six rounds of SFT followed by rejection sampling and DPO
-  ([alignment](../alignment_and_rlhf/README.md)) — the paper does not publish an
+  ([alignment](../alignment_and_rlhf/alignment_and_rlhf.md)) — the paper does not publish an
   absolute SFT example count
 - The reported SFT data mix (Llama 3 paper, Table 7): 52.7% general English,
   21.2% reasoning and tool use, 14.9% code, 8.1% exam-like, 3.0% multilingual,
@@ -880,7 +880,7 @@ General capability regression (MMLU -1.8%) stayed well within the acceptable 5% 
 
 #### Tradeoffs and Alternatives
 
-**Instruction tuning vs. RAG.** For factual accuracy on evolving medical knowledge (new drug approvals, updated guidelines), [RAG](../rag_fundamentals/README.md) is superior — fine-tuning encodes knowledge at training time and becomes stale. The implemented system combined both: fine-tuning taught format and reasoning structure; RAG retrieved current guideline text at query time. Neither alone achieved the target quality.
+**Instruction tuning vs. RAG.** For factual accuracy on evolving medical knowledge (new drug approvals, updated guidelines), [RAG](../rag_fundamentals/rag_fundamentals.md) is superior — fine-tuning encodes knowledge at training time and becomes stale. The implemented system combined both: fine-tuning taught format and reasoning structure; RAG retrieved current guideline text at query time. Neither alone achieved the target quality.
 
 **6,000 examples vs. larger dataset.** Attempting to scale to 50,000 synthetic examples (GPT-4 generated, unreviewed) degraded physician evaluation scores from 4.3 to 3.8 — the larger noisy dataset hurt quality. The LIMA finding held: 4,800 quality-filtered examples outperformed 50,000 unfiltered examples in human evaluation.
 

@@ -651,10 +651,10 @@ tentative distance, and **happily overwrote it** — there's no notion of
 
 ## 10. Cross-links
 
-- Concept module: [`graph_and_string_algorithms/`](../graph_and_string_algorithms/README.md) —
+- Concept module: [`graph_and_string_algorithms/`](../graph_and_string_algorithms/graph_and_string_algorithms.md) —
   formal correctness proofs for Dijkstra's greedy invariant and Bellman-Ford's
   relaxation bound
-- Applied: [`../../backend/osi_model_and_networking/`](../../backend/osi_model_and_networking/README.md) —
+- Applied: [`../../backend/osi_model_and_networking/`](../../backend/osi_model_and_networking/osi_model_and_networking.md) —
   link-state routing protocols (OSPF) run Dijkstra on a graph of routers;
   distance-vector protocols (RIP) run a distributed form of Bellman-Ford —
   the "negative cycle = arbitrage" intuition maps to "routing loop" detection

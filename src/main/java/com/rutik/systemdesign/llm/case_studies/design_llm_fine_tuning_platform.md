@@ -396,7 +396,7 @@ class FineTuningTrainer:
         return DataLoader(load_from_disk(path), batch_size=1, shuffle=True)
 ```
 
-> See [Training Infrastructure](../training_infrastructure/README.md) for the full FSDP wrap policy and ZeRO sharding details.
+> See [Training Infrastructure](../training_infrastructure/training_infrastructure.md) for the full FSDP wrap policy and ZeRO sharding details.
 
 ### 4.3 Hyperparameter Management
 
@@ -596,7 +596,7 @@ class EvalGate:
         raise NotImplementedError("See evaluation_and_benchmarks module.")
 ```
 
-> See [LLM Evaluation and Benchmarks](../evaluation_and_benchmarks/README.md) for the full eval harness including LLM-as-judge pipelines and RAGAS integration.
+> See [LLM Evaluation and Benchmarks](../evaluation_and_benchmarks/evaluation_and_benchmarks.md) for the full eval harness including LLM-as-judge pipelines and RAGAS integration.
 
 ### 4.5 Model Registry
 
@@ -739,7 +739,7 @@ class LoRAServingManager:
         return local
 ```
 
-> See [Inference Engines](../inference_engines/README.md) for vLLM's LoRA multiplexing implementation and PagedAttention KV cache interaction with multi-adapter serving.
+> See [Inference Engines](../inference_engines/inference_engines.md) for vLLM's LoRA multiplexing implementation and PagedAttention KV cache interaction with multi-adapter serving.
 
 ### 4.6 Multi-Tenancy and Isolation
 
@@ -1089,7 +1089,7 @@ Every fine-tuning job must pass the eval gate before promotion. Gate runs automa
 3. Task-specific metric (BLEU / pass@1 / accuracy / ROUGE-L).
 4. Decision: PASS auto-promotes; FAIL surfaces regression diff in dashboard; REVIEW routes to human queue.
 
-See [LLM Evaluation and Benchmarks](../evaluation_and_benchmarks/README.md) for the full eval harness.
+See [LLM Evaluation and Benchmarks](../evaluation_and_benchmarks/evaluation_and_benchmarks.md) for the full eval harness.
 
 ### Observability (OpenTelemetry trace per job)
 
@@ -1101,7 +1101,7 @@ job_span: job_id, tenant_id, base_model, method, dataset_hash
   +-- eval_span: perplexity_delta_pct, task_metric_delta_pct, gate_decision
 ```
 
-GPU-seconds per span tagged with tenant_id + job_id feed billing directly. See [LLM Observability and Monitoring](../llm_observability_and_monitoring/README.md).
+GPU-seconds per span tagged with tenant_id + job_id feed billing directly. See [LLM Observability and Monitoring](../llm_observability_and_monitoring/llm_observability_and_monitoring.md).
 
 ### Incident Runbooks
 

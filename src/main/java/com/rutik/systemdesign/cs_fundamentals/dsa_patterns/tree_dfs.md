@@ -565,19 +565,19 @@ directions) are different quantities — track them separately.
 
 ## 10. Cross-links
 
-- Concept module: [trees_and_binary_search_trees](../trees_and_binary_search_trees/)
+- Concept module: [trees_and_binary_search_trees](../trees_and_binary_search_trees/trees_and_binary_search_trees.md)
   — traversal order definitions, BST invariants, balancing.
-- Concept module: [recursion_and_problem_solving_patterns](../recursion_and_problem_solving_patterns/)
+- Concept module: [recursion_and_problem_solving_patterns](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md)
   — general recursion design (base cases, "trust the recursion," combining
   subproblem results).
-- Applied: [database/indexing_deep_dive](../../database/indexing_deep_dive/)
+- Applied: [database/indexing_deep_dive](../../database/indexing_deep_dive/indexing_deep_dive.md)
   — B+Tree search descends root-to-leaf like a BST DFS, but is shallow and
   wide (high fanout) rather than deep and narrow.
-- Applied: [java/collections_internals](../../java/collections_internals/) —
+- Applied: [java/collections_internals](../../java/collections_internals/collections_internals.md) —
   `TreeMap`'s red-black tree maintains BST ordering invariants; an inorder
   traversal of `TreeMap`'s internal tree yields sorted key order, mirroring
   `is_valid_bst`'s inorder-sortedness property.
-- Master recognition engine: [dsa_patterns/README.md](README.md).
+- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
 - Sibling pattern: [tree_bfs.md](tree_bfs.md).
 
 ---

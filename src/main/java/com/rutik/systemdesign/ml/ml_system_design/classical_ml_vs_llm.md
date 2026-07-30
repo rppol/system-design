@@ -1,8 +1,8 @@
 # Classical ML vs LLM — The Build-Decision Framework
-> Deep-dive sub-file of [ml_system_design](README.md). Cross-reads:
-> [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md),
-> [../../llm/context_engineering](../../llm/context_engineering/README.md) (RAG-vs-fine-tuning),
-> [../../llm/token_economics_and_cost_optimization](../../llm/token_economics_and_cost_optimization/README.md).
+> Deep-dive sub-file of [ml_system_design](ml_system_design.md). Cross-reads:
+> [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md),
+> [../../llm/context_engineering](../../llm/context_engineering/context_engineering.md) (RAG-vs-fine-tuning),
+> [../../llm/token_economics_and_cost_optimization](../../llm/token_economics_and_cost_optimization/token_economics_and_cost_optimization.md).
 
 ## 1. Concept Overview
 
@@ -41,7 +41,7 @@ The realistic option space is not binary — it is a ladder from cheapest-to-bui
 | GBDT / logistic / two-tower | Days + labels | Very low (µs) | Tabular, ranking, CTR, high QPS |
 | **Distill LLM → small model** | LLM labels + train | Very low | Have LLM quality, need classical economics |
 
-The distillation row is the bridge: use the LLM as a *teacher* to label data or transfer capability into a small task-specific model that meets the latency/cost budget. See [../../llm/knowledge_distillation_and_model_merging](../../llm/knowledge_distillation_and_model_merging/README.md).
+The distillation row is the bridge: use the LLM as a *teacher* to label data or transfer capability into a small task-specific model that meets the latency/cost budget. See [../../llm/knowledge_distillation_and_model_merging](../../llm/knowledge_distillation_and_model_merging/knowledge_distillation_and_model_merging.md).
 
 ## 5. Architecture Diagrams
 
@@ -317,4 +317,4 @@ Classical models offer SHAP values, monotonic constraints, and coefficient-level
 
 ## 14. Case Study
 
-See [design_harmful_content_detection](../case_studies/design_harmful_content_detection.md) for a production system that is explicitly a hybrid: cheap classical filters and small encoders carry the volume, while LLM guardrail models handle nuanced, novel, and generated content — chosen exactly along the axes in this framework (volume, latency, task structure, adversarial change). For the intra-LLM branch of the decision (RAG vs fine-tuning vs long context), see [../../llm/context_engineering](../../llm/context_engineering/README.md); for turning LLM quality into classical economics, see [../../llm/knowledge_distillation_and_model_merging](../../llm/knowledge_distillation_and_model_merging/README.md).
+See [design_harmful_content_detection](../case_studies/design_harmful_content_detection.md) for a production system that is explicitly a hybrid: cheap classical filters and small encoders carry the volume, while LLM guardrail models handle nuanced, novel, and generated content — chosen exactly along the axes in this framework (volume, latency, task structure, adversarial change). For the intra-LLM branch of the decision (RAG vs fine-tuning vs long context), see [../../llm/context_engineering](../../llm/context_engineering/context_engineering.md); for turning LLM quality into classical economics, see [../../llm/knowledge_distillation_and_model_merging](../../llm/knowledge_distillation_and_model_merging/knowledge_distillation_and_model_merging.md).

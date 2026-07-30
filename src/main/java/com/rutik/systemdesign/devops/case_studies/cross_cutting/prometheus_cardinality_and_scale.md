@@ -12,7 +12,7 @@ This multiplicative behavior is the root of the cardinality explosion problem. T
 
 Prometheus stores each active series in its in-memory head block at roughly 1-3 KB of resident memory (chunk buffer + label index entries + symbol table references). A million active series therefore costs on the order of 1-3 GB of RAM just to hold the head, before query overhead. Cardinality is the single dominant factor in Prometheus memory consumption, query latency, and TSDB stability — far more than scrape interval or retention duration.
 
-This file is the shared reference for cardinality budgeting, measurement, mitigation (recording rules, relabeling, limits), and horizontal scale (Thanos, Mimir, Cortex, federation vs remote_write). It is linked from DevOps case studies that touch metrics pipelines. See also [observability_metrics_prometheus](../../observability_metrics_prometheus/README.md).
+This file is the shared reference for cardinality budgeting, measurement, mitigation (recording rules, relabeling, limits), and horizontal scale (Thanos, Mimir, Cortex, federation vs remote_write). It is linked from DevOps case studies that touch metrics pipelines. See also [observability_metrics_prometheus](../../observability_metrics_prometheus/observability_metrics_prometheus.md).
 
 ---
 
@@ -605,4 +605,4 @@ func record(region, method, tier, merchantID, traceID string, sec float64) {
 
 A `sample_limit: 200000` was added to the scrape config as a circuit breaker, plus an alert on `rate(prometheus_tsdb_head_series_created_total[5m]) > 5000` to catch future churn spikes. A `promtool tsdb analyze` check was added to CI asserting no metric exceeds 50k series. Post-fix, `checkout_latency_seconds_bucket` sits at 624 series, total server cardinality returns to ~900k, RAM stabilizes at 6 GB, and engineers still jump from a slow-bucket exemplar straight to the offending merchant's trace.
 
-**Lesson**: The instinct was to scale out to Thanos to "handle the load." The real fix was a single label removed at instrumentation time. Always diagnose cardinality before scaling — scaling out a cardinality bug just makes it more expensive to crash. See [observability_metrics_prometheus](../../observability_metrics_prometheus/README.md) for the broader metrics pipeline context.
+**Lesson**: The instinct was to scale out to Thanos to "handle the load." The real fix was a single label removed at instrumentation time. Always diagnose cardinality before scaling — scaling out a cardinality bug just makes it more expensive to crash. See [observability_metrics_prometheus](../../observability_metrics_prometheus/observability_metrics_prometheus.md) for the broader metrics pipeline context.

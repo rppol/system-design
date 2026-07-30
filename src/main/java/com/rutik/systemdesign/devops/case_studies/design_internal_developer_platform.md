@@ -18,7 +18,7 @@
 
 The portal (Backstage) is the windshield over all three. If you only build the windshield, you have a wiki. The engineering is in the reconciliation underneath.
 
-**Why this system exists.** At 2000 engineers and 4000 services, the bottleneck is no longer compute — it is *coordination*. Without an IDP, every new service is a 6–9 day scavenger hunt across Confluence pages, Slack pings to the platform team, hand-copied Terraform, and a CODEOWNERS file nobody updates. Cognitive load is the tax. An IDP amortizes that tax: the platform team encodes the "right way" once into a template and a composition, and 2000 engineers consume it self-service in under 25 minutes. The shift is from *ticket-ops* (humans translating intent to infra) to *platform-as-product* (intent declared, machines reconcile). See [`../platform_engineering_and_idp/README.md`](../platform_engineering_and_idp/README.md) for the discipline framing.
+**Why this system exists.** At 2000 engineers and 4000 services, the bottleneck is no longer compute — it is *coordination*. Without an IDP, every new service is a 6–9 day scavenger hunt across Confluence pages, Slack pings to the platform team, hand-copied Terraform, and a CODEOWNERS file nobody updates. Cognitive load is the tax. An IDP amortizes that tax: the platform team encodes the "right way" once into a template and a composition, and 2000 engineers consume it self-service in under 25 minutes. The shift is from *ticket-ops* (humans translating intent to infra) to *platform-as-product* (intent declared, machines reconcile). See [`../platform_engineering_and_idp/README.md`](../platform_engineering_and_idp/platform_engineering_and_idp.md) for the discipline framing.
 
 ---
 
@@ -50,7 +50,7 @@ The portal (Backstage) is the windshield over all three. If you only build the w
 ### Out of Scope
 
 - The runtime serving plane itself (K8s cluster ops) — cross-referenced, not designed here; see [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md).
-- The CI/CD execution engine internals (runners, caching) — the IDP *triggers* CI; see [`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/README.md) for the delivery half.
+- The CI/CD execution engine internals (runners, caching) — the IDP *triggers* CI; see [`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/gitops_argocd_flux.md) for the delivery half.
 - Cost-allocation/FinOps billing pipelines (consumed as a plugin data source, not built here).
 - Identity provider (assume Okta/Entra exists; we consume OIDC groups).
 
@@ -1002,4 +1002,4 @@ DORA metrics on services served by the platform plus adoption signals. Track dep
 On recovered engineer-time, not infra savings. The infra is ~$1.1k/mo and the platform team ~$50k/mo; that's negligible against 2000 engineers. If the IDP saves each engineer just 30 min/week (faster onboarding, instant owner lookup, self-service infra), that's ~1000 engineer-hours/week ≈ ~$90k/week of recovered productivity — roughly a 7x return on the all-in cost. You frame it as cognitive-load amortization: encode the "right way" once, 2000 people consume it cheaply, and the platform team scales sub-linearly with the org.
 
 **Q: How do you secure the plugin and provisioning supply chain?**
-Treat plugins and Compositions as code with full supply-chain controls — signed artifacts, SBOMs, pinned dependencies, and review gates — because a malicious or buggy plugin runs inside the backend (war story #2 showed a benign one stalling the whole catalog). Provisioning is constrained by XRD schemas (only paved-road tiers), Composition Functions that pin safe defaults (`publiclyAccessible: false`), and OPA policies on who can provision expensive infra. The detailed pipeline — provenance, signing, admission — is in [`cross_cutting/supply_chain_security_pipeline.md`](cross_cutting/supply_chain_security_pipeline.md), and the GitOps delivery half is in [`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/README.md).
+Treat plugins and Compositions as code with full supply-chain controls — signed artifacts, SBOMs, pinned dependencies, and review gates — because a malicious or buggy plugin runs inside the backend (war story #2 showed a benign one stalling the whole catalog). Provisioning is constrained by XRD schemas (only paved-road tiers), Composition Functions that pin safe defaults (`publiclyAccessible: false`), and OPA policies on who can provision expensive infra. The detailed pipeline — provenance, signing, admission — is in [`cross_cutting/supply_chain_security_pipeline.md`](cross_cutting/supply_chain_security_pipeline.md), and the GitOps delivery half is in [`../gitops_argocd_flux/README.md`](../gitops_argocd_flux/gitops_argocd_flux.md).

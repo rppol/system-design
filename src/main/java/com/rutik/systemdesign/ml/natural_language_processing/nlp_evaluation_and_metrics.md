@@ -1,6 +1,6 @@
 # NLP Evaluation Metrics and Text Augmentation
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers generation evaluation metrics (BLEU, ROUGE, METEOR, BERTScore), sequence labeling metrics
 > (NER entity-level F1), calibration for NLP classifiers, and text augmentation techniques.
 > LLM-specific evaluation (MMLU, HumanEval, LLM-as-judge) is covered in `llm/evaluation_and_benchmarks/`.

@@ -361,10 +361,10 @@ flowchart LR
 
 ## 10. Cross-links
 
-- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/) — array fundamentals, in-place algorithms
-- [sorting_and_searching](../sorting_and_searching/) — counting sort, pigeonhole principle
-- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/) — amortized analysis (why total swaps are bounded by n)
-- Master index: [dsa_patterns/README.md](README.md)
+- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — array fundamentals, in-place algorithms
+- [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — counting sort, pigeonhole principle
+- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — amortized analysis (why total swaps are bounded by n)
+- Master index: [dsa_patterns/README.md](dsa_patterns.md)
 
 ---
 

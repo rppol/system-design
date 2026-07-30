@@ -827,10 +827,10 @@ A hash match is a *necessary* condition for a real match, not a *sufficient* one
 | Suffix Array / Suffix Automaton | For offline multi-query substring problems — O(n log n) build, O(m log n) query |
 
 See also:
-- [Graphs, Tries, and Advanced Structures module](../graphs_tries_and_advanced_structures/README.md) — trie theory and radix trie
-- [Graph and String Algorithms module](../graph_and_string_algorithms/README.md) — Z-algorithm, suffix arrays, Manacher's algorithm
-- [Sorting and Searching module](../sorting_and_searching/README.md) — binary search on sorted word list as an alternative to trie for read-only dictionaries
-- [Arrays, Strings, and Hashing module](../arrays_strings_and_hashing/README.md) — rolling hash theory and hash table collision analysis
+- [Graphs, Tries, and Advanced Structures module](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) — trie theory and radix trie
+- [Graph and String Algorithms module](../graph_and_string_algorithms/graph_and_string_algorithms.md) — Z-algorithm, suffix arrays, Manacher's algorithm
+- [Sorting and Searching module](../sorting_and_searching/sorting_and_searching.md) — binary search on sorted word list as an alternative to trie for read-only dictionaries
+- [Arrays, Strings, and Hashing module](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — rolling hash theory and hash table collision analysis
 
 ---
 

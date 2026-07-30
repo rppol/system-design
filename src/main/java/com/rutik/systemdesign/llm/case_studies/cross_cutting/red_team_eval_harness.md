@@ -1,8 +1,8 @@
 # Red Team Evaluation Harness
 
-> Related: [Safety and Alignment](../../safety_and_alignment/README.md) |
-> [Guardrails and Content Safety](../../guardrails_and_content_safety/README.md) |
-> [Evaluation and Benchmarks](../../evaluation_and_benchmarks/README.md)
+> Related: [Safety and Alignment](../../safety_and_alignment/safety_and_alignment.md) |
+> [Guardrails and Content Safety](../../guardrails_and_content_safety/guardrails_and_content_safety.md) |
+> [Evaluation and Benchmarks](../../evaluation_and_benchmarks/evaluation_and_benchmarks.md)
 >
 > Referenced by: design_chatgpt, design_ai_content_moderation, design_customer_support_bot,
 > design_legal_ai_platform, design_computer_use_agent
@@ -793,8 +793,8 @@ a mitigation is verified against the full privilege-leakage dataset.
 
 ---
 
-*Cross-references*: [Safety and Alignment](../../safety_and_alignment/README.md) |
-[Guardrails and Content Safety](../../guardrails_and_content_safety/README.md) |
-[Evaluation and Benchmarks](../../evaluation_and_benchmarks/README.md) |
-[LLM Security](../../llm_security/README.md) |
-[LLM Testing Strategies](../../llm_testing_strategies/README.md)
+*Cross-references*: [Safety and Alignment](../../safety_and_alignment/safety_and_alignment.md) |
+[Guardrails and Content Safety](../../guardrails_and_content_safety/guardrails_and_content_safety.md) |
+[Evaluation and Benchmarks](../../evaluation_and_benchmarks/evaluation_and_benchmarks.md) |
+[LLM Security](../../llm_security/llm_security.md) |
+[LLM Testing Strategies](../../llm_testing_strategies/llm_testing_strategies.md)

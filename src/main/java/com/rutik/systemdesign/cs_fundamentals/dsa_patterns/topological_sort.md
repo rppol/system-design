@@ -584,11 +584,11 @@ sort underneath.*
 
 ## 10. Cross-links
 
-- Concept module: [`graph_and_string_algorithms/`](../graph_and_string_algorithms/README.md) —
+- Concept module: [`graph_and_string_algorithms/`](../graph_and_string_algorithms/graph_and_string_algorithms.md) —
   formal proofs of Kahn's algorithm correctness and DFS post-order equivalence
-- Concept module: [`graphs_tries_and_advanced_structures/`](../graphs_tries_and_advanced_structures/README.md) —
+- Concept module: [`graphs_tries_and_advanced_structures/`](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) —
   adjacency list representation, in-degree/out-degree definitions
-- Applied: [`../../devops/infrastructure_as_code_terraform/`](../../devops/infrastructure_as_code_terraform/README.md) —
+- Applied: [`../../devops/infrastructure_as_code_terraform/`](../../devops/infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) —
   Terraform builds a dependency graph of resources and topologically sorts it
   to determine create/destroy order; a cycle in `depends_on` is exactly the
   "Course Schedule I" failure mode

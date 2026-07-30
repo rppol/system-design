@@ -58,10 +58,10 @@ This section is deliberately scoped to the **kernel author's** view of the GPU a
 | Already covered in... | CUDA section does NOT re-teach | CUDA section DOES cover |
 |-----------------------|--------------------------------|--------------------------|
 | [`llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) | Multi-tenant serving, KV-cache paging, autoscaling on MBU, GPU-fleet economics | The *kernels* underneath — GEMV/attention/quantized-matmul kernel engineering |
-| [`llm/optimization_and_quantization/gpu_architecture_and_roofline.md`](../llm/optimization_and_quantization/) | Roofline used to reason about *transformer inference* cost | Roofline as a *kernel-optimization* loop; per-kernel arithmetic intensity |
-| [`ml/gpu_and_hardware_optimization/`](../ml/gpu_and_hardware_optimization/) | Training-time hardware use (gradient checkpointing, mixed-precision training recipes, multi-GPU training strategy) | Writing and optimizing the CUDA kernels themselves; the SIMT/memory/occupancy mechanics |
-| [`ml/distributed_training/`](../ml/distributed_training/) | Data/model/pipeline parallelism strategy, ZeRO, FSDP | NCCL collectives and NVLink/P2P from the CUDA-programming viewpoint |
-| [`devops/ml_platform_and_gpu_infrastructure/`](../devops/ml_platform_and_gpu_infrastructure/) | GPU Operator, MIG/time-slicing, Karpenter GPU pools on Kubernetes | On-device MIG/streams as a *programming* concern; not cluster operations |
+| [`llm/optimization_and_quantization/gpu_architecture_and_roofline.md`](../llm/optimization_and_quantization/optimization_and_quantization.md) | Roofline used to reason about *transformer inference* cost | Roofline as a *kernel-optimization* loop; per-kernel arithmetic intensity |
+| [`ml/gpu_and_hardware_optimization/`](../ml/gpu_and_hardware_optimization/gpu_and_hardware_optimization.md) | Training-time hardware use (gradient checkpointing, mixed-precision training recipes, multi-GPU training strategy) | Writing and optimizing the CUDA kernels themselves; the SIMT/memory/occupancy mechanics |
+| [`ml/distributed_training/`](../ml/distributed_training/distributed_training.md) | Data/model/pipeline parallelism strategy, ZeRO, FSDP | NCCL collectives and NVLink/P2P from the CUDA-programming viewpoint |
+| [`devops/ml_platform_and_gpu_infrastructure/`](../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) | GPU Operator, MIG/time-slicing, Karpenter GPU pools on Kubernetes | On-device MIG/streams as a *programming* concern; not cluster operations |
 
 **CUDA owns**: the SIMT execution model, GPU hardware architecture from the programmer's viewpoint, the CUDA C++ / PTX programming model, kernel-level performance engineering (coalescing, shared memory, occupancy, warp primitives, Tensor Cores), streams/graphs/multi-GPU as programming constructs, the CUDA library and Python-GPU ecosystems, kernel profiling/debugging, and GPU portability.
 
@@ -71,30 +71,30 @@ This section is deliberately scoped to the **kernel author's** view of the GPU a
 
 | # | Module Directory | Phase | Difficulty | Key Topics |
 |---|-----------------|-------|------------|------------|
-| 1 | [gpu_computing_foundations](gpu_computing_foundations/) | 1 — GPU Foundations | Beginner | Throughput vs latency, SIMT vs SIMD, Amdahl/Gustafson, host/device model, PCIe vs NVLink, when the GPU wins |
-| 2 | [gpu_hardware_architecture](gpu_hardware_architecture/) | 1 — GPU Foundations | Intermediate | SM anatomy, CUDA cores, warp schedulers, register file, L1/L2/HBM, generations (Volta→Blackwell), compute capability, Tensor Cores |
-| 3 | [cuda_toolkit_and_compilation](cuda_toolkit_and_compilation/) | 1 — GPU Foundations | Intermediate | nvcc pipeline, PTX vs SASS, fatbin/JIT, `compute_XX`/`sm_XX`, `__CUDA_ARCH__`, driver vs runtime API, nvrtc, CMake |
-| 4 | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/) | 2 — Core CUDA | Beginner | `<<<grid,block>>>`, thread hierarchy, `threadIdx`/`blockIdx`, 1D/2D/3D indexing, grid-stride loops, `__global__`/`__device__`/`__host__` |
-| 5 | [warps_and_simt_execution](warps_and_simt_execution/) | 2 — Core CUDA | Intermediate | warp=32, lockstep, warp scheduling, divergence + predication, `__syncwarp`, active mask, independent thread scheduling |
-| 6 | [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/) | 2 — Core CUDA | Intermediate | global/shared/local/constant/texture/register, scope + lifetime, unified virtual addressing, L1/L2/HBM, `__restrict__` |
-| 7 | [memory_management_and_data_transfer](memory_management_and_data_transfer/) | 2 — Core CUDA | Intermediate | `cudaMalloc`/`cudaMemcpy`, pinned vs pageable, unified memory (prefetch/advise), zero-copy, async copy, error checking |
-| 8 | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/) | 3 — Performance Engineering | Advanced | Coalesced vs strided, 128-byte transactions, alignment, AoS vs SoA, vectorized loads (`float4`), the transpose problem |
-| 9 | [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/) | 3 — Performance Engineering | Advanced | Tiling, 32 banks, conflicts + padding, broadcast, dynamic shared memory, shared-mem GEMM tile |
-| 10 | [occupancy_and_launch_configuration](occupancy_and_launch_configuration/) | 3 — Performance Engineering | Advanced | Occupancy, register/shared-mem limits, occupancy calculator, block-size tuning, latency hiding, register spilling, `__launch_bounds__` |
-| 11 | [synchronization_and_atomics](synchronization_and_atomics/) | 3 — Performance Engineering | Advanced | `__syncthreads`, races, `atomicAdd`/CAS, memory fences, atomic contention, `cuda::atomic`, cooperative-groups intro |
-| 12 | [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/) | 3 — Performance Engineering | Advanced | Reduction ladder, scan/prefix-sum, histogram, the canonical optimization walkthroughs |
-| 13 | [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/) | 3 — Performance Engineering | Advanced | `__shfl_*_sync`, vote/ballot, warp-aggregated atomics, cooperative groups, grid sync, warp reduction |
-| 14 | [streams_events_and_concurrency](streams_events_and_concurrency/) | 4 — Advanced Execution | Advanced | Streams, async, events/timing, overlap compute+transfer, default vs per-thread-default stream, priorities, callbacks |
-| 15 | [cuda_graphs](cuda_graphs/) | 4 — Advanced Execution | Advanced | Graph capture, instantiate, launch-overhead reduction, graph update, when it wins |
-| 16 | [multi_gpu_programming_and_nccl](multi_gpu_programming_and_nccl/) | 4 — Advanced Execution | Advanced | P2P, NVLink/NVSwitch, GPUDirect, device selection, NCCL collectives, data/model decomposition |
-| 17 | [dynamic_parallelism_and_advanced_kernels](dynamic_parallelism_and_advanced_kernels/) | 4 — Advanced Execution | Advanced | Device-side launch, nested parallelism, persistent kernels, producer-consumer, when it helps vs hurts |
-| 18 | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/) | 5 — Libraries & Tensor Cores | Advanced | WMMA/`mma`, FP16/BF16/TF32/FP8, matrix fragments, loss scaling, cuBLAS/cuDNN TC paths, when TC engages |
-| 19 | [cuda_math_and_dnn_libraries](cuda_math_and_dnn_libraries/) | 5 — Libraries & Tensor Cores | Intermediate | cuBLAS, cuDNN, CUTLASS, cuFFT, cuSPARSE, cuRAND, Thrust; library-vs-custom-kernel; CUTLASS templating |
-| 20 | [python_gpu_ecosystem](python_gpu_ecosystem/) | 5 — Libraries & Tensor Cores | Intermediate | CuPy, Numba CUDA, PyCUDA, PyTorch custom CUDA/C++ extensions, `torch.compile`/Inductor, DLPack |
-| 21 | [triton_and_kernel_dsls](triton_and_kernel_dsls/) | 5 — Libraries & Tensor Cores | Advanced | Triton programming model, block-level abstraction, autotuning, Triton vs CUDA C++, where Triton wins/loses |
-| 22 | [profiling_and_performance_analysis](profiling_and_performance_analysis/) | 6 — Profiling & Production | Advanced | Nsight Systems vs Compute, roofline, achieved occupancy, DRAM throughput, warp-stall reasons, guided analysis |
-| 23 | [debugging_correctness_and_numerics](debugging_correctness_and_numerics/) | 6 — Profiling & Production | Advanced | cuda-gdb, compute-sanitizer (memcheck/racecheck/synccheck/initcheck), error macros, FP/FMA, determinism, fast-math |
-| 24 | [gpu_portability_hip_sycl_and_beyond](gpu_portability_hip_sycl_and_beyond/) | 6 — Profiling & Production | Intermediate | HIP/ROCm, SYCL/oneAPI, Metal, WebGPU, legacy OpenCL, `hipify`, portability-vs-peak-performance tradeoff |
+| 1 | [gpu_computing_foundations](gpu_computing_foundations/gpu_computing_foundations.md) | 1 — GPU Foundations | Beginner | Throughput vs latency, SIMT vs SIMD, Amdahl/Gustafson, host/device model, PCIe vs NVLink, when the GPU wins |
+| 2 | [gpu_hardware_architecture](gpu_hardware_architecture/gpu_hardware_architecture.md) | 1 — GPU Foundations | Intermediate | SM anatomy, CUDA cores, warp schedulers, register file, L1/L2/HBM, generations (Volta→Blackwell), compute capability, Tensor Cores |
+| 3 | [cuda_toolkit_and_compilation](cuda_toolkit_and_compilation/cuda_toolkit_and_compilation.md) | 1 — GPU Foundations | Intermediate | nvcc pipeline, PTX vs SASS, fatbin/JIT, `compute_XX`/`sm_XX`, `__CUDA_ARCH__`, driver vs runtime API, nvrtc, CMake |
+| 4 | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md) | 2 — Core CUDA | Beginner | `<<<grid,block>>>`, thread hierarchy, `threadIdx`/`blockIdx`, 1D/2D/3D indexing, grid-stride loops, `__global__`/`__device__`/`__host__` |
+| 5 | [warps_and_simt_execution](warps_and_simt_execution/warps_and_simt_execution.md) | 2 — Core CUDA | Intermediate | warp=32, lockstep, warp scheduling, divergence + predication, `__syncwarp`, active mask, independent thread scheduling |
+| 6 | [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) | 2 — Core CUDA | Intermediate | global/shared/local/constant/texture/register, scope + lifetime, unified virtual addressing, L1/L2/HBM, `__restrict__` |
+| 7 | [memory_management_and_data_transfer](memory_management_and_data_transfer/memory_management_and_data_transfer.md) | 2 — Core CUDA | Intermediate | `cudaMalloc`/`cudaMemcpy`, pinned vs pageable, unified memory (prefetch/advise), zero-copy, async copy, error checking |
+| 8 | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) | 3 — Performance Engineering | Advanced | Coalesced vs strided, 128-byte transactions, alignment, AoS vs SoA, vectorized loads (`float4`), the transpose problem |
+| 9 | [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) | 3 — Performance Engineering | Advanced | Tiling, 32 banks, conflicts + padding, broadcast, dynamic shared memory, shared-mem GEMM tile |
+| 10 | [occupancy_and_launch_configuration](occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) | 3 — Performance Engineering | Advanced | Occupancy, register/shared-mem limits, occupancy calculator, block-size tuning, latency hiding, register spilling, `__launch_bounds__` |
+| 11 | [synchronization_and_atomics](synchronization_and_atomics/synchronization_and_atomics.md) | 3 — Performance Engineering | Advanced | `__syncthreads`, races, `atomicAdd`/CAS, memory fences, atomic contention, `cuda::atomic`, cooperative-groups intro |
+| 12 | [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md) | 3 — Performance Engineering | Advanced | Reduction ladder, scan/prefix-sum, histogram, the canonical optimization walkthroughs |
+| 13 | [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md) | 3 — Performance Engineering | Advanced | `__shfl_*_sync`, vote/ballot, warp-aggregated atomics, cooperative groups, grid sync, warp reduction |
+| 14 | [streams_events_and_concurrency](streams_events_and_concurrency/streams_events_and_concurrency.md) | 4 — Advanced Execution | Advanced | Streams, async, events/timing, overlap compute+transfer, default vs per-thread-default stream, priorities, callbacks |
+| 15 | [cuda_graphs](cuda_graphs/cuda_graphs.md) | 4 — Advanced Execution | Advanced | Graph capture, instantiate, launch-overhead reduction, graph update, when it wins |
+| 16 | [multi_gpu_programming_and_nccl](multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md) | 4 — Advanced Execution | Advanced | P2P, NVLink/NVSwitch, GPUDirect, device selection, NCCL collectives, data/model decomposition |
+| 17 | [dynamic_parallelism_and_advanced_kernels](dynamic_parallelism_and_advanced_kernels/dynamic_parallelism_and_advanced_kernels.md) | 4 — Advanced Execution | Advanced | Device-side launch, nested parallelism, persistent kernels, producer-consumer, when it helps vs hurts |
+| 18 | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) | 5 — Libraries & Tensor Cores | Advanced | WMMA/`mma`, FP16/BF16/TF32/FP8, matrix fragments, loss scaling, cuBLAS/cuDNN TC paths, when TC engages |
+| 19 | [cuda_math_and_dnn_libraries](cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md) | 5 — Libraries & Tensor Cores | Intermediate | cuBLAS, cuDNN, CUTLASS, cuFFT, cuSPARSE, cuRAND, Thrust; library-vs-custom-kernel; CUTLASS templating |
+| 20 | [python_gpu_ecosystem](python_gpu_ecosystem/python_gpu_ecosystem.md) | 5 — Libraries & Tensor Cores | Intermediate | CuPy, Numba CUDA, PyCUDA, PyTorch custom CUDA/C++ extensions, `torch.compile`/Inductor, DLPack |
+| 21 | [triton_and_kernel_dsls](triton_and_kernel_dsls/triton_and_kernel_dsls.md) | 5 — Libraries & Tensor Cores | Advanced | Triton programming model, block-level abstraction, autotuning, Triton vs CUDA C++, where Triton wins/loses |
+| 22 | [profiling_and_performance_analysis](profiling_and_performance_analysis/profiling_and_performance_analysis.md) | 6 — Profiling & Production | Advanced | Nsight Systems vs Compute, roofline, achieved occupancy, DRAM throughput, warp-stall reasons, guided analysis |
+| 23 | [debugging_correctness_and_numerics](debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) | 6 — Profiling & Production | Advanced | cuda-gdb, compute-sanitizer (memcheck/racecheck/synccheck/initcheck), error macros, FP/FMA, determinism, fast-math |
+| 24 | [gpu_portability_hip_sycl_and_beyond](gpu_portability_hip_sycl_and_beyond/gpu_portability_hip_sycl_and_beyond.md) | 6 — Profiling & Production | Intermediate | HIP/ROCm, SYCL/oneAPI, Metal, WebGPU, legacy OpenCL, `hipify`, portability-vs-peak-performance tradeoff |
 
 ---
 
@@ -187,7 +187,7 @@ flowchart TB
 - Phase 3 (Performance Engineering) is where interviews live and depends on the full memory model (Phase 2, module 6). Study coalescing → shared memory → occupancy in order; each builds on the last.
 - Phases 4 and 5 can be studied in parallel after Phase 3; streams/graphs and Tensor Cores/libraries are independent tracks that both consume the performance fundamentals.
 - Phase 6 (Profiling) is best interleaved *throughout* — the profiler is how you verify every Phase 3 optimization. It is placed last only so the roofline/metrics vocabulary is fully grounded.
-- The case studies (see [case_studies/README.md](case_studies/README.md)) integrate Phases 2–6 end-to-end: the tiled-GEMM case study alone touches coalescing, shared memory, occupancy, and Tensor Cores.
+- The case studies (see [case_studies/README.md](case_studies/case_studies.md)) integrate Phases 2–6 end-to-end: the tiled-GEMM case study alone touches coalescing, shared memory, occupancy, and Tensor Cores.
 
 ---
 
@@ -204,22 +204,22 @@ The complete curriculum in the order above — see [6-Phase Learning Path](#4-6-
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [gpu_computing_foundations](gpu_computing_foundations/) | README only |
-| 2 | [gpu_hardware_architecture](gpu_hardware_architecture/) | README only |
-| 4 | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/) | README only |
-| 5 | [warps_and_simt_execution](warps_and_simt_execution/) | README only |
-| 6 | [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/) | README only |
-| 7 | [memory_management_and_data_transfer](memory_management_and_data_transfer/) | README only |
-| 8 | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/) | README only |
-| 9 | [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/) | README only |
-| 10 | [occupancy_and_launch_configuration](occupancy_and_launch_configuration/) | README only |
-| 11 | [synchronization_and_atomics](synchronization_and_atomics/) | README only |
-| 12 | [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/) | README only |
-| 13 | [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/) | README only |
-| 14 | [streams_events_and_concurrency](streams_events_and_concurrency/) | README only |
-| 18 | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/) | README only |
-| 22 | [profiling_and_performance_analysis](profiling_and_performance_analysis/) | README only |
-| 23 | [debugging_correctness_and_numerics](debugging_correctness_and_numerics/) | README only |
+| 1 | [gpu_computing_foundations](gpu_computing_foundations/gpu_computing_foundations.md) | module page only |
+| 2 | [gpu_hardware_architecture](gpu_hardware_architecture/gpu_hardware_architecture.md) | module page only |
+| 4 | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md) | module page only |
+| 5 | [warps_and_simt_execution](warps_and_simt_execution/warps_and_simt_execution.md) | module page only |
+| 6 | [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) | module page only |
+| 7 | [memory_management_and_data_transfer](memory_management_and_data_transfer/memory_management_and_data_transfer.md) | module page only |
+| 8 | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) | module page only |
+| 9 | [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) | module page only |
+| 10 | [occupancy_and_launch_configuration](occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) | module page only |
+| 11 | [synchronization_and_atomics](synchronization_and_atomics/synchronization_and_atomics.md) | module page only |
+| 12 | [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md) | module page only |
+| 13 | [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md) | module page only |
+| 14 | [streams_events_and_concurrency](streams_events_and_concurrency/streams_events_and_concurrency.md) | module page only |
+| 18 | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) | module page only |
+| 22 | [profiling_and_performance_analysis](profiling_and_performance_analysis/profiling_and_performance_analysis.md) | module page only |
+| 23 | [debugging_correctness_and_numerics](debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) | module page only |
 
 **Not in this path** (8 of 24, Full Path only): `cuda_toolkit_and_compilation`, `cuda_graphs`, `multi_gpu_programming_and_nccl`, `dynamic_parallelism_and_advanced_kernels`, `cuda_math_and_dnn_libraries`, `python_gpu_ecosystem`, `triton_and_kernel_dsls`, `gpu_portability_hip_sycl_and_beyond`
 <!-- /study-path-table -->
@@ -239,31 +239,31 @@ A ruthless cut to what a **senior GPU / CUDA / ML-infra interview** actually pro
 
 ## Knowledge-Question Map
 
-The highest-frequency CUDA *knowledge* questions mapped to the file that answers them. For *design/optimize* ("optimize this GEMM", "implement a fast reduction") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+The highest-frequency CUDA *knowledge* questions mapped to the file that answers them. For *design/optimize* ("optimize this GEMM", "implement a fast reduction") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
-| Why is a GPU faster than a CPU, and when is it *not* worth using one? | [gpu_computing_foundations](gpu_computing_foundations/) |
-| What is an SM, a warp, and the register file — and how do they bound occupancy? | [gpu_hardware_architecture](gpu_hardware_architecture/) |
-| What is the difference between PTX and SASS, and what does nvcc actually produce? | [cuda_toolkit_and_compilation](cuda_toolkit_and_compilation/) |
-| Given a 1D array, write the index math to map threads to elements (and handle N not a multiple of blockDim). | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/) |
-| What is warp divergence and how does it hurt performance? | [warps_and_simt_execution](warps_and_simt_execution/) |
-| Walk through the memory spaces (register/shared/local/constant/global) — latency, scope, lifetime. | [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/) |
-| Pinned vs pageable vs unified memory — when does each matter and why? | [memory_management_and_data_transfer](memory_management_and_data_transfer/) |
-| What is memory coalescing, and why is an uncoalesced access up to 8-32× slower? | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/) |
-| What is a shared-memory bank conflict, and how does the padding trick fix it? | [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/) |
-| What is occupancy, is higher always better, and what caps it? | [occupancy_and_launch_configuration](occupancy_and_launch_configuration/) |
-| How do atomics work on a GPU, and why can atomic contention destroy throughput? | [synchronization_and_atomics](synchronization_and_atomics/) |
-| Optimize a parallel reduction — walk the ladder from divergent to warp-shuffle. | [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/) |
-| What does `__shfl_down_sync` do, and how does a warp-level reduction avoid shared memory? | [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/) |
-| How do you overlap a `cudaMemcpy` with kernel execution using streams? | [streams_events_and_concurrency](streams_events_and_concurrency/) |
-| When do CUDA graphs help, and what overhead do they remove? | [cuda_graphs](cuda_graphs/) |
-| What is an all-reduce, and how does NCCL use NVLink/ring/tree algorithms? | [multi_gpu_programming_and_nccl](multi_gpu_programming_and_nccl/) |
-| When do Tensor Cores actually engage, and what precisions do they support (FP16/BF16/TF32/FP8)? | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/) |
-| When should you write a custom kernel vs call cuBLAS/cuDNN/CUTLASS? | [cuda_math_and_dnn_libraries](cuda_math_and_dnn_libraries/) |
-| Triton vs CUDA C++ — what does Triton abstract away and what do you give up? | [triton_and_kernel_dsls](triton_and_kernel_dsls/) |
-| Is my kernel memory-bound or compute-bound, and how would Nsight Compute tell you? | [profiling_and_performance_analysis](profiling_and_performance_analysis/) |
-| How do you catch a data race or out-of-bounds access in a kernel? | [debugging_correctness_and_numerics](debugging_correctness_and_numerics/) |
+| Why is a GPU faster than a CPU, and when is it *not* worth using one? | [gpu_computing_foundations](gpu_computing_foundations/gpu_computing_foundations.md) |
+| What is an SM, a warp, and the register file — and how do they bound occupancy? | [gpu_hardware_architecture](gpu_hardware_architecture/gpu_hardware_architecture.md) |
+| What is the difference between PTX and SASS, and what does nvcc actually produce? | [cuda_toolkit_and_compilation](cuda_toolkit_and_compilation/cuda_toolkit_and_compilation.md) |
+| Given a 1D array, write the index math to map threads to elements (and handle N not a multiple of blockDim). | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md) |
+| What is warp divergence and how does it hurt performance? | [warps_and_simt_execution](warps_and_simt_execution/warps_and_simt_execution.md) |
+| Walk through the memory spaces (register/shared/local/constant/global) — latency, scope, lifetime. | [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) |
+| Pinned vs pageable vs unified memory — when does each matter and why? | [memory_management_and_data_transfer](memory_management_and_data_transfer/memory_management_and_data_transfer.md) |
+| What is memory coalescing, and why is an uncoalesced access up to 8-32× slower? | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) |
+| What is a shared-memory bank conflict, and how does the padding trick fix it? | [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) |
+| What is occupancy, is higher always better, and what caps it? | [occupancy_and_launch_configuration](occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) |
+| How do atomics work on a GPU, and why can atomic contention destroy throughput? | [synchronization_and_atomics](synchronization_and_atomics/synchronization_and_atomics.md) |
+| Optimize a parallel reduction — walk the ladder from divergent to warp-shuffle. | [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md) |
+| What does `__shfl_down_sync` do, and how does a warp-level reduction avoid shared memory? | [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md) |
+| How do you overlap a `cudaMemcpy` with kernel execution using streams? | [streams_events_and_concurrency](streams_events_and_concurrency/streams_events_and_concurrency.md) |
+| When do CUDA graphs help, and what overhead do they remove? | [cuda_graphs](cuda_graphs/cuda_graphs.md) |
+| What is an all-reduce, and how does NCCL use NVLink/ring/tree algorithms? | [multi_gpu_programming_and_nccl](multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md) |
+| When do Tensor Cores actually engage, and what precisions do they support (FP16/BF16/TF32/FP8)? | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) |
+| When should you write a custom kernel vs call cuBLAS/cuDNN/CUTLASS? | [cuda_math_and_dnn_libraries](cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md) |
+| Triton vs CUDA C++ — what does Triton abstract away and what do you give up? | [triton_and_kernel_dsls](triton_and_kernel_dsls/triton_and_kernel_dsls.md) |
+| Is my kernel memory-bound or compute-bound, and how would Nsight Compute tell you? | [profiling_and_performance_analysis](profiling_and_performance_analysis/profiling_and_performance_analysis.md) |
+| How do you catch a data race or out-of-bounds access in a kernel? | [debugging_correctness_and_numerics](debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) |
 
 ---
 
@@ -273,11 +273,11 @@ A 5-week plan over the Senior Path. Each week pairs modules with one or two case
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|
-| 1 | Foundations + kernel basics | [gpu_computing_foundations](gpu_computing_foundations/), [gpu_hardware_architecture](gpu_hardware_architecture/), [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/) | skim [Port a CPU Pipeline to GPU](case_studies/port_a_cpu_pipeline_to_gpu.md) |
-| 2 | Warps + memory model | [warps_and_simt_execution](warps_and_simt_execution/), [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/), [memory_management_and_data_transfer](memory_management_and_data_transfer/) | [Port a CPU Pipeline to GPU](case_studies/port_a_cpu_pipeline_to_gpu.md) (full) |
-| 3 | Performance core I | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/), [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/), [occupancy_and_launch_configuration](occupancy_and_launch_configuration/) | [Optimize Matrix Multiplication](case_studies/optimize_matrix_multiplication_kernel.md) |
-| 4 | Performance core II | [synchronization_and_atomics](synchronization_and_atomics/), [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/), [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/) | [High-Performance Reduction](case_studies/implement_high_performance_reduction.md), [2D Convolution & Stencil](case_studies/accelerate_2d_convolution_and_stencil.md) |
-| 5 | Streams, Tensor Cores, profiling | [streams_events_and_concurrency](streams_events_and_concurrency/), [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/), [profiling_and_performance_analysis](profiling_and_performance_analysis/), [debugging_correctness_and_numerics](debugging_correctness_and_numerics/) | [Flash Attention Kernel](case_studies/build_a_flash_attention_kernel.md), [Optimize LLM Inference Kernels](case_studies/optimize_llm_inference_kernels.md) |
+| 1 | Foundations + kernel basics | [gpu_computing_foundations](gpu_computing_foundations/gpu_computing_foundations.md), [gpu_hardware_architecture](gpu_hardware_architecture/gpu_hardware_architecture.md), [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/cuda_programming_model_and_kernels.md) | skim [Port a CPU Pipeline to GPU](case_studies/port_a_cpu_pipeline_to_gpu.md) |
+| 2 | Warps + memory model | [warps_and_simt_execution](warps_and_simt_execution/warps_and_simt_execution.md), [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md), [memory_management_and_data_transfer](memory_management_and_data_transfer/memory_management_and_data_transfer.md) | [Port a CPU Pipeline to GPU](case_studies/port_a_cpu_pipeline_to_gpu.md) (full) |
+| 3 | Performance core I | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md), [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md), [occupancy_and_launch_configuration](occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) | [Optimize Matrix Multiplication](case_studies/optimize_matrix_multiplication_kernel.md) |
+| 4 | Performance core II | [synchronization_and_atomics](synchronization_and_atomics/synchronization_and_atomics.md), [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/parallel_patterns_reduction_scan_histogram.md), [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/warp_level_primitives_and_cooperative_groups.md) | [High-Performance Reduction](case_studies/implement_high_performance_reduction.md), [2D Convolution & Stencil](case_studies/accelerate_2d_convolution_and_stencil.md) |
+| 5 | Streams, Tensor Cores, profiling | [streams_events_and_concurrency](streams_events_and_concurrency/streams_events_and_concurrency.md), [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md), [profiling_and_performance_analysis](profiling_and_performance_analysis/profiling_and_performance_analysis.md), [debugging_correctness_and_numerics](debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) | [Flash Attention Kernel](case_studies/build_a_flash_attention_kernel.md), [Optimize LLM Inference Kernels](case_studies/optimize_llm_inference_kernels.md) |
 
 ---
 
@@ -325,13 +325,13 @@ Constants worth memorizing (used throughout): **warp = 32 threads**; a coalesced
 
 | Module | Also See |
 |--------|----------|
-| [gpu_hardware_architecture](gpu_hardware_architecture/) | [`ml/gpu_and_hardware_optimization`](../ml/gpu_and_hardware_optimization/), [`llm/optimization_and_quantization`](../llm/optimization_and_quantization/) |
-| [occupancy_and_launch_configuration](occupancy_and_launch_configuration/) | [profiling_and_performance_analysis](profiling_and_performance_analysis/), [case_studies/cross_cutting/roofline_and_arithmetic_intensity.md](case_studies/cross_cutting/roofline_and_arithmetic_intensity.md) |
-| [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/) | [`llm/optimization_and_quantization`](../llm/optimization_and_quantization/), [`ml/model_compression_and_efficiency`](../ml/model_compression_and_efficiency/) |
-| [multi_gpu_programming_and_nccl](multi_gpu_programming_and_nccl/) | [`ml/distributed_training`](../ml/distributed_training/), [`devops/ml_platform_and_gpu_infrastructure`](../devops/ml_platform_and_gpu_infrastructure/) |
-| [triton_and_kernel_dsls](triton_and_kernel_dsls/) | [`llm/inference_engines`](../llm/inference_engines/), [`llm/vllm_deep_dive`](../llm/vllm_deep_dive/) |
-| [profiling_and_performance_analysis](profiling_and_performance_analysis/) | [`llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) |
-| [cuda_math_and_dnn_libraries](cuda_math_and_dnn_libraries/) | [`ml/gpu_and_hardware_optimization`](../ml/gpu_and_hardware_optimization/), [`cs_fundamentals/computer_architecture_and_memory_hierarchy`](../cs_fundamentals/computer_architecture_and_memory_hierarchy/) |
+| [gpu_hardware_architecture](gpu_hardware_architecture/gpu_hardware_architecture.md) | [`ml/gpu_and_hardware_optimization`](../ml/gpu_and_hardware_optimization/gpu_and_hardware_optimization.md), [`llm/optimization_and_quantization`](../llm/optimization_and_quantization/optimization_and_quantization.md) |
+| [occupancy_and_launch_configuration](occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) | [profiling_and_performance_analysis](profiling_and_performance_analysis/profiling_and_performance_analysis.md), [case_studies/cross_cutting/roofline_and_arithmetic_intensity.md](case_studies/cross_cutting/roofline_and_arithmetic_intensity.md) |
+| [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) | [`llm/optimization_and_quantization`](../llm/optimization_and_quantization/optimization_and_quantization.md), [`ml/model_compression_and_efficiency`](../ml/model_compression_and_efficiency/model_compression_and_efficiency.md) |
+| [multi_gpu_programming_and_nccl](multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md) | [`ml/distributed_training`](../ml/distributed_training/distributed_training.md), [`devops/ml_platform_and_gpu_infrastructure`](../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) |
+| [triton_and_kernel_dsls](triton_and_kernel_dsls/triton_and_kernel_dsls.md) | [`llm/inference_engines`](../llm/inference_engines/inference_engines.md), [`llm/vllm_deep_dive`](../llm/vllm_deep_dive/vllm_deep_dive.md) |
+| [profiling_and_performance_analysis](profiling_and_performance_analysis/profiling_and_performance_analysis.md) | [`llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) |
+| [cuda_math_and_dnn_libraries](cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md) | [`ml/gpu_and_hardware_optimization`](../ml/gpu_and_hardware_optimization/gpu_and_hardware_optimization.md), [`cs_fundamentals/computer_architecture_and_memory_hierarchy`](../cs_fundamentals/computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) |
 
 ---
 
@@ -465,6 +465,6 @@ Recommended order for interview preparation:
 2. **Week 2 — Core CUDA**: finish Phase 2 (warps, memory model, transfers). You should be able to write a correct, if unoptimized, kernel.
 3. **Week 3-4 — Performance Engineering**: Phase 3 in order (coalescing → shared memory → occupancy → atomics → reduction/scan → warp primitives). This is the interview core; profile every optimization.
 4. **Week 5 — Advanced + ecosystem + profiling**: streams, Tensor Cores, and Nsight profiling; skim the libraries and Triton.
-5. **Review**: work the case studies end-to-end — see [case_studies/README.md](case_studies/README.md) for the guided path; the tiled-GEMM and reduction studies are the two most-asked.
+5. **Review**: work the case studies end-to-end — see [case_studies/README.md](case_studies/case_studies.md) for the guided path; the tiled-GEMM and reduction studies are the two most-asked.
 
-Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/README.md`](../llm/foundations_and_architecture/README.md) as the format reference, and [`../llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) for the principal case-study format.
+Each module follows the standard 14-section template. See [`../llm/foundations_and_architecture/README.md`](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference, and [`../llm/case_studies/design_gpu_inference_platform.md`](../llm/case_studies/design_gpu_inference_platform.md) for the principal case-study format.

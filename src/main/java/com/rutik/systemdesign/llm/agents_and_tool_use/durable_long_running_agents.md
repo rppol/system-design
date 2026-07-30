@@ -27,7 +27,7 @@ The fundamental shift from short-lived to durable agents is moving from in-proce
 - **Per-step checkpoints**: every meaningful step writes a checkpoint before reporting complete.
 - **Idempotency required**: every tool call must be safe to re-execute (use idempotency keys for external APIs).
 - **Crash recovery on restart**: process startup loads latest checkpoint and resumes from there.
-- **Context compaction over time**: summarize old history to stay within model's context window (see [Context Engineering](../context_engineering/README.md)).
+- **Context compaction over time**: summarize old history to stay within model's context window (see [Context Engineering](../context_engineering/context_engineering.md)).
 - **Cost caps enforced**: terminate if cumulative cost exceeds threshold (especially for long-running); budgeting patterns in [Agent Cost & Token Budgets](agent_cost_and_token_budget.md).
 - **Human-in-the-loop signals**: durable wait points where the agent pauses for human input (could be hours/days).
 

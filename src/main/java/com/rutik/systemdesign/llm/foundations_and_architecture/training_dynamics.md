@@ -1,9 +1,9 @@
 # Training Dynamics at Scale
 
-> This file is a deep-dive sub-file of the [Foundations & Architecture](README.md) module.
+> This file is a deep-dive sub-file of the [Foundations & Architecture](foundations_and_architecture.md) module.
 > It covers LR warmup theory, WSD schedule, loss spikes, BF16 vs FP16, batch scaling,
 > muP (maximal update parametrization), and data mixing at billion-parameter scale.
-> Distributed training infrastructure (DDP, FSDP, ZeRO) is covered in the [LLM Training Infrastructure](../training_infrastructure/README.md) module.
+> Distributed training infrastructure (DDP, FSDP, ZeRO) is covered in the [LLM Training Infrastructure](../training_infrastructure/training_infrastructure.md) module.
 
 ---
 
@@ -45,7 +45,7 @@ Key insight: muP (Maximal Update Parametrization) is the most important practica
 
 **muP (Maximal Update Parametrization):** Standard initialization and learning rate parametrization causes features and weights to scale with model width — hyperparameters that work for a 100M model don't work for a 7B model. muP reparametrizes so that updates are of the same magnitude at any width, enabling hyperparameter transfer across model scales.
 
-**Data mixing:** The mixture of domains in pretraining data directly determines model capabilities. Web data teaches general language; code teaches structured reasoning; math teaches precise calculation; multilingual data teaches cross-lingual transfer. The mixing ratios must be tuned; too much code makes the model verbose and literal; too little makes it poor at programming. Corpus construction and filtering pipelines are covered in [Pre-Training](../pre_training/README.md).
+**Data mixing:** The mixture of domains in pretraining data directly determines model capabilities. Web data teaches general language; code teaches structured reasoning; math teaches precise calculation; multilingual data teaches cross-lingual transfer. The mixing ratios must be tuned; too much code makes the model verbose and literal; too little makes it poor at programming. Corpus construction and filtering pipelines are covered in [Pre-Training](../pre_training/pre_training.md).
 
 ---
 
@@ -583,7 +583,7 @@ QK-norm in the architecture from step 0 — retrofitting it into a checkpoint th
 q/k norms changes the function the model computes and needs re-training, so it is not a fix you can
 reach for once the spikes start. The sibling intervention for the *other* instability, output-logit
 divergence, is an auxiliary z-loss on the log-partition; its MoE-router analogue is covered in
-[Mixture of Experts](../mixture_of_experts/README.md).
+[Mixture of Experts](../mixture_of_experts/mixture_of_experts.md).
 
 ### BF16 vs FP16 Numerical Analysis
 

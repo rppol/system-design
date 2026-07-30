@@ -69,6 +69,23 @@ repo, which understates the work by making parked scope look unfinished.
 
 **Do not dispatch work at these sections** until the owner re-opens them.
 
+**What "parked" does and does not cover (owner-clarified 2026-07-30).** Parked means the
+CONTENT passes are paused: the factual audit, the `**Short:**` migration, modernization,
+and any authoring of new prose or Q&As. It has never meant the files are frozen. Repo-wide
+STRUCTURAL and CORRECTNESS work still applies to every section, parked or not, because
+leaving four sections behind on a mechanical change is what creates the next inconsistency:
+
+- renames and file-layout changes (e.g. the 2026-07-30 `README.md` -> `<folder>.md` pass,
+  which the owner explicitly directed to run "everywhere", naming book, cs_fundamentals
+  and devops)
+- link fixes, dead-link repair, and cross-reference updates
+- build-machinery and wiring changes (`study-paths` markers, `STUDY_ORDER`, generated blocks)
+- broken-diagram and broken-fence repair
+
+If you are an agent and a parked section appears in a structural task, that is intended;
+do not refuse it on the strength of the paragraph above. Refuse only if the task would
+CHANGE THE PROSE OR THE Q&As of a parked section.
+
 **The `cuda` trap, for whoever resumes it.** Units 48-52 are genuinely audited and committed
 (`b223d21`). Units 53-57 have an **interrupted partial batch** committed as `2fca64f`: five
 files carry real corrections, but the agent was stopped mid-§14 and never produced a verdict

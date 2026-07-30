@@ -929,13 +929,13 @@ A: Kafka-based location ingestion is the first thing that breaks. At ~5M updates
 
 ## Cross-References
 
-- **Geospatial and consistent hashing theory** -> [`../consistent_hashing/README.md`](../consistent_hashing/README.md)
-- **Wide-column trip storage (Cassandra/Schemaless-style sharding)** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/README.md)
-- **Redis internals for the hot driver-location index** -> [`../../database/key_value_stores/README.md`](../../database/key_value_stores/README.md)
-- **Sharding and resharding strategy (per-city domain boundaries)** -> [`../../database/sharding_and_partitioning/README.md`](../../database/sharding_and_partitioning/README.md)
-- **Kafka internals for the location-ingestion and event pipeline** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/README.md)
-- **Caching strategy for the hot geospatial index** -> [`../../backend/caching_strategies_deep_dive/README.md`](../../backend/caching_strategies_deep_dive/README.md)
-- **LWT / Paxos-based consistency for trip-state transitions** -> [`../../database/consistency_models_and_consensus/README.md`](../../database/consistency_models_and_consensus/README.md)
-- **Microservices decomposition (per-city services, DISCO, payments)** -> [`../microservices/README.md`](../microservices/README.md)
-- **Multi-region failover patterns** -> [`../../backend/fault_tolerance_patterns/README.md`](../../backend/fault_tolerance_patterns/README.md)
+- **Geospatial and consistent hashing theory** -> [`../consistent_hashing/README.md`](../consistent_hashing/consistent_hashing.md)
+- **Wide-column trip storage (Cassandra/Schemaless-style sharding)** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/wide_column_databases.md)
+- **Redis internals for the hot driver-location index** -> [`../../database/key_value_stores/README.md`](../../database/key_value_stores/key_value_stores.md)
+- **Sharding and resharding strategy (per-city domain boundaries)** -> [`../../database/sharding_and_partitioning/README.md`](../../database/sharding_and_partitioning/sharding_and_partitioning.md)
+- **Kafka internals for the location-ingestion and event pipeline** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
+- **Caching strategy for the hot geospatial index** -> [`../../backend/caching_strategies_deep_dive/README.md`](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md)
+- **LWT / Paxos-based consistency for trip-state transitions** -> [`../../database/consistency_models_and_consensus/README.md`](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md)
+- **Microservices decomposition (per-city services, DISCO, payments)** -> [`../microservices/README.md`](../microservices/microservices.md)
+- **Multi-region failover patterns** -> [`../../backend/fault_tolerance_patterns/README.md`](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md)
 

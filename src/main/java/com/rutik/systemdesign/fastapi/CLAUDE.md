@@ -124,7 +124,7 @@ Format: `[FastAPI 0.110+]` inline or `Added in FastAPI 0.110`.
 
 ## Q&A Minimums (FastAPI-specific)
 
-- Standard modules: 10+ Q&As (15+ hard floor per root `CLAUDE.md`)
+- Standard modules: 15+ Q&As (the hard floor in root `CLAUDE.md`)
 - Deep modules (15–18 required): `pydantic_v2_deep_dive`, `dependency_injection_in_fastapi`, `async_database_sqlalchemy`, `authentication_and_security`
 
 ## Adding a New FastAPI Module

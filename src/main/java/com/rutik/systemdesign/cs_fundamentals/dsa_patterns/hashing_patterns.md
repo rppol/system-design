@@ -23,7 +23,7 @@ Use a hash table (`dict`/`set`/`Counter`) to trade O(n) extra space for collapsi
 - The array **is sorted** (or can be sorted without losing required information) and you need a pair sum — **[Two Pointers](two_pointers.md)** achieves the same O(n) (after an O(n log n) sort) with O(1) space instead of O(n)
 - "K-th largest/smallest" — a hashmap doesn't give you *order*; use a **[Heap](top_k_elements.md)** or quickselect
 - "Range queries" (sum/min/max over `[i,j]`) — hashing doesn't help with ranges; use **[Prefix Sum](prefix_sum.md)** or a segment tree
-- You need **insertion order** or **LRU eviction** — plain `dict`/`Counter` doesn't track recency; use `OrderedDict` or a hashmap + doubly-linked list (see [hld/caching](../../hld/caching/))
+- You need **insertion order** or **LRU eviction** — plain `dict`/`Counter` doesn't track recency; use `OrderedDict` or a hashmap + doubly-linked list (see [hld/caching](../../hld/caching/caching.md))
 - "Find missing/duplicate number in `[1, n]`" with an **O(1) space** constraint — hashing uses O(n) space; **[Cyclic Sort](cyclic_sort.md)** achieves O(1) by using the array itself as the hash table
 
 The defining test: **do you need to answer "have I seen X?" or "how many times have I seen X?" or "what's associated with X?" in O(1), without caring about order or magnitude relationships between keys?** If yes, hashing. If the question is about *order* (sorted, k-th, range), a different structure usually wins.
@@ -293,7 +293,7 @@ because that occupancy is the only thing standing between "O(1) average" and
 - **Grouping by derived key** — bucket items by a canonical transformation ([Group Anagrams (LC 49)](https://leetcode.com/problems/group-anagrams/))
 - **Set-based existence / sequence detection** — "is X present?" in O(1); "longest run" by checking only sequence starts ([Longest Consecutive Sequence (LC 128)](https://leetcode.com/problems/longest-consecutive-sequence/))
 - **Hashmap + prefix sum** — the hashmap stores cumulative values, not raw values ([prefix_sum.md](prefix_sum.md))
-- **Hashmap + doubly linked list** — O(1) insert/delete/access-by-key with order preservation, the basis of LRU caches ([LRU Cache (LC 146)](https://leetcode.com/problems/lru-cache/), see [hld/caching](../../hld/caching/))
+- **Hashmap + doubly linked list** — O(1) insert/delete/access-by-key with order preservation, the basis of LRU caches ([LRU Cache (LC 146)](https://leetcode.com/problems/lru-cache/), see [hld/caching](../../hld/caching/caching.md))
 - **Hashmap + dynamic array (O(1) random access by index)** — "Insert Delete GetRandom O(1)": hashmap maps value → array index, enabling O(1) removal via swap-with-last ([Insert Delete GetRandom O(1) (LC 380)](https://leetcode.com/problems/insert-delete-getrandom-o1/))
 - **Rolling hash** — for substring matching (Rabin-Karp), hash a sliding window incrementally in O(1) per shift instead of O(k) re-hashing ([Repeated DNA Sequences (LC 187)](https://leetcode.com/problems/repeated-dna-sequences/))
 
@@ -315,7 +315,7 @@ because that occupancy is the only thing standing between "O(1) average" and
 | [Subarray Sum Equals K (LC 560)](https://leetcode.com/problems/subarray-sum-equals-k/) | Medium | Hashmap + prefix sum | See [prefix_sum.md](prefix_sum.md) |
 | [4Sum II (LC 454)](https://leetcode.com/problems/4sum-ii/) | Medium | Two-hashmap meet-in-the-middle | Precompute pairwise sums of two arrays into a hashmap |
 | [Insert Delete GetRandom O(1) (LC 380)](https://leetcode.com/problems/insert-delete-getrandom-o1/) | Medium | Hashmap + array | O(1) removal via swap-with-last |
-| [LRU Cache (LC 146)](https://leetcode.com/problems/lru-cache/) | Medium | Hashmap + doubly linked list | See [hld/caching](../../hld/caching/) for production context |
+| [LRU Cache (LC 146)](https://leetcode.com/problems/lru-cache/) | Medium | Hashmap + doubly linked list | See [hld/caching](../../hld/caching/caching.md) for production context |
 | [Repeated DNA Sequences (LC 187)](https://leetcode.com/problems/repeated-dna-sequences/) | Medium | Rolling hash / fixed-window set | Fixed-length substrings, frequency-based |
 | [LFU Cache (LC 460)](https://leetcode.com/problems/lfu-cache/) | Hard | Two hashmaps + frequency buckets | key→node, freq→ordered list; evict least-frequent then least-recent (extends LRU) |
 
@@ -413,11 +413,11 @@ flowchart LR
 
 ## 10. Cross-links
 
-- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/) — hash table internals, collision resolution, load factor
-- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/README.md) — `HashMap`/`HashSet` internals: bucket array, treeification at 8 collisions (Java 8+), resize at load factor 0.75
-- Applied: [`../../python/collections_and_data_structures/README.md`](../../python/collections_and_data_structures/README.md) — Python `dict`/`set` implementation (open addressing, not chaining)
-- [`../../hld/caching/README.md`](../../hld/caching/README.md) — hashmap + doubly linked list as the LRU cache implementation
-- Master index: [dsa_patterns/README.md](README.md)
+- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — hash table internals, collision resolution, load factor
+- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — `HashMap`/`HashSet` internals: bucket array, treeification at 8 collisions (Java 8+), resize at load factor 0.75
+- Applied: [`../../python/collections_and_data_structures/README.md`](../../python/collections_and_data_structures/collections_and_data_structures.md) — Python `dict`/`set` implementation (open addressing, not chaining)
+- [`../../hld/caching/README.md`](../../hld/caching/caching.md) — hashmap + doubly linked list as the LRU cache implementation
+- Master index: [dsa_patterns/README.md](dsa_patterns.md)
 
 ---
 

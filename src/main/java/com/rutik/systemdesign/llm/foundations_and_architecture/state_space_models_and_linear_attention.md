@@ -1,7 +1,7 @@
 # State-Space Models & Linear Attention: Mamba, RWKV, RetNet, and the Sub-Quadratic Alternatives to Self-Attention
 > Deepens the "Alternative Architectures (Beyond Transformers)" table in
-> [Foundations & Architecture](README.md) §6 (Mamba/SSMs, Jamba, RWKV) and the long-context
-> comparisons in [Context Windows & Long Context](../context_windows_and_long_context/README.md).
+> [Foundations & Architecture](foundations_and_architecture.md) §6 (Mamba/SSMs, Jamba, RWKV) and the long-context
+> comparisons in [Context Windows & Long Context](../context_windows_and_long_context/context_windows_and_long_context.md).
 > For the quadratic self-attention internals these architectures replace or hybridize with, see
 > [Attention Mechanisms](attention_mechanisms.md).
 
@@ -942,7 +942,7 @@ SSMs originate from continuous-time control theory (`dh/dt = Ah + Bx`), but lang
 **Q15: A hybrid model underperforms a pure-attention baseline on long-context retrieval. How do you debug it?**
 **Short:** Check the attention-layer ratio and placement, confirm evaluation stays within the trained context length, then isolate exact-copy failures from general long-document understanding.
 
-First, check the attention-layer ratio and placement (§5.4) — too few attention layers, or attention layers placed too early/late in the stack, can bottleneck recall even in a "hybrid." Second, verify the evaluation isn't exceeding the model's *trained* context length — SSM/hybrid models can have different extrapolation behavior than RoPE-based Transformers (see [Context Windows & Long Context](../context_windows_and_long_context/README.md)). Third, check whether the failure is specifically on *exact-copy/retrieval* tasks (expected to be the SSM layers' weak point, §8.1) vs. general long-document understanding (where hybrids often do fine) — these have different remediations: the former may need more/better-placed attention layers, the latter may be a training-data or context-extension issue unrelated to the architecture.
+First, check the attention-layer ratio and placement (§5.4) — too few attention layers, or attention layers placed too early/late in the stack, can bottleneck recall even in a "hybrid." Second, verify the evaluation isn't exceeding the model's *trained* context length — SSM/hybrid models can have different extrapolation behavior than RoPE-based Transformers (see [Context Windows & Long Context](../context_windows_and_long_context/context_windows_and_long_context.md)). Third, check whether the failure is specifically on *exact-copy/retrieval* tasks (expected to be the SSM layers' weak point, §8.1) vs. general long-document understanding (where hybrids often do fine) — these have different remediations: the former may need more/better-placed attention layers, the latter may be a training-data or context-extension issue unrelated to the architecture.
 
 **Q16: "Will SSMs/linear attention replace Transformer attention?" — how do you frame this for an interviewer?**
 **Short:** Attention is being supplemented for specific bottlenecks by hybrids and task-specific pure SSMs, not categorically replaced across all workloads.
@@ -997,9 +997,9 @@ shorter-context, retrieval-critical workflows where the 3-point gap matters more
 
 ## Related
 
-- [Foundations & Architecture README](README.md) — Transformer architecture, scaling laws, the "Alternative Architectures" overview this file deepens
+- [Foundations & Architecture README](foundations_and_architecture.md) — Transformer architecture, scaling laws, the "Alternative Architectures" overview this file deepens
 - [Attention Mechanisms](attention_mechanisms.md) — the quadratic self-attention internals (Flash Attention, MQA/GQA/MLA) these architectures are alternatives to or hybridize with
-- [Context Windows & Long Context](../context_windows_and_long_context/README.md) — RoPE/ALiBi/YaRN context-extension techniques for attention-based long context, and where Jamba/Mamba fit as alternatives
-- [Diffusion Language Models](../diffusion_language_models/README.md) — another non-standard sequence-generation paradigm explored in Phase 6
-- [vLLM Deep Dive](../vllm_deep_dive/README.md) — serving-engine internals, including current state-space-model support status (Pitfall 10.6)
+- [Context Windows & Long Context](../context_windows_and_long_context/context_windows_and_long_context.md) — RoPE/ALiBi/YaRN context-extension techniques for attention-based long context, and where Jamba/Mamba fit as alternatives
+- [Diffusion Language Models](../diffusion_language_models/diffusion_language_models.md) — another non-standard sequence-generation paradigm explored in Phase 6
+- [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) — serving-engine internals, including current state-space-model support status (Pitfall 10.6)
 - [Voice Cloning / TTS Platform Case Study](../case_studies/design_voice_cloning_tts_platform.md) — Cartesia Sonic's production use of a Mamba-based architecture (§5, §7)

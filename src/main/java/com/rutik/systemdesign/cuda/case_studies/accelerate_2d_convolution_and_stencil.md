@@ -68,7 +68,7 @@ common case.
   peak (Section 6/7); this case study is about the direct-convolution kernel-authoring
   discipline, not re-deriving cuDNN's Winograd/implicit-GEMM algorithm selection.
 - Multi-GPU / distributed stencil decomposition (halo exchange across devices via NCCL) —
-  see [`multi_gpu_programming_and_nccl`](../multi_gpu_programming_and_nccl/README.md).
+  see [`multi_gpu_programming_and_nccl`](../multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md).
 - Backward-pass / autodiff support — this is an inference/signal-processing kernel, not a
   trainable convolution layer.
 
@@ -278,7 +278,7 @@ The filter coefficients are read identically by every thread in a warp at each s
 inner loop (`filter[fr][fc]` does not depend on `row`/`col`) — the textbook case for
 **constant memory**'s broadcast fast path: one fetch serves all 32 lanes in a single
 cycle-equivalent access, backed by a dedicated 64 KB constant cache per SM. See
-[`cuda_memory_model_and_hierarchy`](../cuda_memory_model_and_hierarchy/README.md) Section 4
+[`cuda_memory_model_and_hierarchy`](../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md) Section 4
 for the general mechanics of the broadcast fast path.
 
 ```cuda
@@ -414,7 +414,7 @@ land exactly at `dim` (one past the last valid index) — the *last* halo row of
 blocks. `compute-sanitizer --tool memcheck` catches this immediately as an out-of-bounds
 global read; without it, the read may land in adjacent, unrelated device memory and produce
 a subtly wrong pixel instead of a crash (Section 9's war story). See
-[`debugging_correctness_and_numerics`](../debugging_correctness_and_numerics/README.md) for
+[`debugging_correctness_and_numerics`](../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) for
 the general compute-sanitizer workflow this bug should be caught by in CI.
 
 **Bank-conflict caution on this exact tile shape.** With a `16x16` thread block, a warp (32
@@ -424,7 +424,7 @@ banks 0-15); lanes with `ty=1` read addresses `20+tx` (20..35, which wrap to ban
 20..31,0,1,2,3 modulo the 32 banks) — the last 4 lanes of the `ty=1` half collide with the
 first 4 lanes of the `ty=0` half on banks 0-3, a measurable 2-way partial conflict visible in
 Nsight Compute's shared-memory bank-conflict counter. See
-[`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/README.md) for the
+[`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) for the
 general padding fix (`SHARED_DIM + 1` row stride) and why `blockDim.x >= 32` (e.g. a
 `32 x 8` tile) sidesteps the issue entirely by keeping every warp inside one tile row.
 
@@ -479,7 +479,7 @@ memory and a second kernel reads it back — this **doubles** physical HBM traff
 FMAs than the non-separable tiled kernel. **Measured, two-pass, r=2: ~1,300 GB/s effective
 (43% of peak)** — worse than the non-separable tiled kernel's 72% at this radius, because
 the "effective bandwidth" metric (logical single-read-single-write bytes / measured time,
-same convention used in [`cuda_memory_model_and_hierarchy`](../cuda_memory_model_and_hierarchy/README.md)
+same convention used in [`cuda_memory_model_and_hierarchy`](../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md)
 Section 14) penalizes the extra physical pass.
 
 A **fused single-kernel** separable implementation avoids the round-trip by keeping the
@@ -695,7 +695,7 @@ DRAM-throughput metric rather than trusting the wall-clock figure alone.
 | Boundary handling | Clamp-to-edge (`min/max`) as the default, with zero-pad and periodic-wrap as compile-time variants | Branching per-thread boundary checks (`if row/col in range`) | Clamp via `min/max` is branch-free (no warp divergence at the boundary) and matches the semantics of `scipy.ndimage.convolve(mode="nearest")`, the reference this kernel is verified against |
 | Separable vs. non-separable | Separable (fused single-kernel) for any filter that factors (Gaussian, box); non-separable tiled kernel otherwise (Sobel-combined, arbitrary learned kernels) | Always non-separable | Separable cuts FMAs `K^2 -> 2K`; the win compounds with radius (2.5x at r=2, 7.5x at r=7) but only applies when the filter is mathematically separable — most learned/arbitrary kernels are not |
 | Filter coefficient storage | `__constant__` memory (broadcast, 64 KB cache) | Global memory pointer passed to the kernel | Every thread in a warp reads the identical coefficient at each loop step — the textbook constant-memory broadcast case; global memory would waste L1/L2 capacity on data with zero spatial locality benefit |
-| Register tiling factor | 2 outputs/thread (vertical pair) | 1 output/thread (baseline) or 4 outputs/thread | 2x amortizes halo-loading cost with a modest register-pressure increase; 4x risks register spilling on wide filters (`r>=4`) — verify against the occupancy calculator in [`occupancy_and_launch_configuration`](../occupancy_and_launch_configuration/README.md) before widening further |
+| Register tiling factor | 2 outputs/thread (vertical pair) | 1 output/thread (baseline) or 4 outputs/thread | 2x amortizes halo-loading cost with a modest register-pressure increase; 4x risks register spilling on wide filters (`r>=4`) — verify against the occupancy calculator in [`occupancy_and_launch_configuration`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) before widening further |
 | Precision | FP32 throughout | FP16/TF32 intermediate accumulation | Stencil/convolution accuracy requirements (esp. for PDE solvers) are sensitive to accumulation error over many taps; FP32 is the safe default, with FP16 reserved for filters explicitly tolerant of it (most image blur use cases) |
 
 ---
@@ -740,7 +740,7 @@ DRAM-throughput metric rather than trusting the wall-clock figure alone.
 | **NPP** | Hand-tuned image-processing primitives (Gaussian, Sobel, morphology) | Off-the-shelf image filters in a video/imaging pipeline with no custom fusion need |
 | **OpenCV CUDA module** | GPU classical CV (filter2D, Sobel, resize) with a familiar CPU-OpenCV-compatible API | Rapid prototyping or when the rest of the pipeline is already OpenCV-based |
 | **Halide** | Auto-scheduled stencil/image-processing DSL — separates algorithm from schedule (tiling, fusion, vectorization) | When you need to explore many tiling/fusion schedules for a stencil pipeline without hand-writing each variant |
-| **Triton** | Python-embedded kernel DSL; good fit for a fused, tunable custom stencil kernel without hand-written PTX-level tiling logic | When you want autotuned tile sizes without maintaining raw CUDA C++ (see [`triton_and_kernel_dsls`](../triton_and_kernel_dsls/README.md)) |
+| **Triton** | Python-embedded kernel DSL; good fit for a fused, tunable custom stencil kernel without hand-written PTX-level tiling logic | When you want autotuned tile sizes without maintaining raw CUDA C++ (see [`triton_and_kernel_dsls`](../triton_and_kernel_dsls/triton_and_kernel_dsls.md)) |
 | **CUB / CUTLASS** | Building blocks for the GEMM path if you choose im2col+GEMM instead of direct convolution | Large-batch, large-channel-count convolutions where GEMM's Tensor-Core throughput outweighs direct-convolution's simplicity |
 | **Nsight Compute** | Confirms DRAM throughput %, shared-memory bank-conflict counts, achieved occupancy at every rung of this ladder | Every step of Section 4 — never trust a wall-clock number without a profiler confirming *why* |
 | **compute-sanitizer** | Catches the exact off-by-one halo bug in Section 4.3/9 (`memcheck`) and any missing `__syncthreads()` (`racecheck`) | Every new tiled kernel, before it reaches a benchmark, let alone production |
@@ -771,7 +771,7 @@ variant that fit under 48 KB while the fix is prepared.
 Resolution: switch the array to `extern __shared__` and call
 `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, requested_bytes)`
 before launch, passing the dynamic size as the third `<<<>>>` launch parameter — see
-[`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/README.md) for the
+[`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) for the
 dynamic-shared-memory declaration pattern.
 
 **Runbook 2 — Nightly visual-regression alert: SSIM drop vs. CPU reference**
@@ -831,7 +831,7 @@ Mitigation: revert to the single-output tiled kernel for this filter shape while
 Resolution: apply `__launch_bounds__(TILE*TILE, target_blocks_per_sm)` to cap register
 allocation, or reduce the register-tiling factor from 2 back to a shape the occupancy
 calculator confirms does not spill — see
-[`occupancy_and_launch_configuration`](../occupancy_and_launch_configuration/README.md).
+[`occupancy_and_launch_configuration`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md).
 
 ---
 
@@ -858,7 +858,7 @@ compute loop before other threads in the block have finished writing their porti
 halo, producing outputs that use garbage or stale shared-memory contents for the border
 taps only — again silent, and again only visible near tile boundaries.
 `compute-sanitizer --tool racecheck` catches this class of bug directly; see
-[`synchronization_and_atomics`](../synchronization_and_atomics/README.md) for why a barrier
+[`synchronization_and_atomics`](../synchronization_and_atomics/synchronization_and_atomics.md) for why a barrier
 placed inside a divergent `if` is itself a second, related bug (not every thread reaches it).
 
 **Choosing a tile shape that looks fine until profiled.** A team chose `TILE=32` (1024
@@ -866,7 +866,7 @@ threads/block, "maximum occupancy") for an `r=4` filter without checking the res
 shared-memory footprint: `(32+8)^2 * 4 bytes = 6,400 bytes` per block is small in isolation,
 but combined with the register pressure of an already-unrolled 9x9 inner loop, the compiler
 spilled registers to local memory (itself physically global memory — see
-[`cuda_memory_model_and_hierarchy`](../cuda_memory_model_and_hierarchy/README.md)'s "local
+[`cuda_memory_model_and_hierarchy`](../cuda_memory_model_and_hierarchy/cuda_memory_model_and_hierarchy.md)'s "local
 memory is not fast" gotcha), and achieved occupancy came in far below the naive
 theoretical maximum the team expected from "1024 threads per block." Nsight Compute's
 "Registers Per Thread" and "Achieved Occupancy" metrics caught it; the fix was

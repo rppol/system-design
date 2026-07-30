@@ -484,7 +484,7 @@ own geo tests before quoting a number to stakeholders.
 | Shapley (Monte Carlo) | Good (usually slightly closer than Markov) | Low | Medium (hours for >30M paths) | Full (any coalition interaction) |
 | LSTM conversion prediction | Best on paper | Very low | High | Full |
 
-Use Markov chain as the primary production model (fast, stable, reasonably accurate). Use Shapley for quarterly strategic allocation decisions where computation budget is available. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+Use Markov chain as the primary production model (fast, stable, reasonably accurate). Use Shapley for quarterly strategic allocation decisions where computation budget is available. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md).
 
 **Decision 2: Lookback window**
 

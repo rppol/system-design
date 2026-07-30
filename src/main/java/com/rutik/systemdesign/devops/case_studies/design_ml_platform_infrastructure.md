@@ -630,7 +630,7 @@ Spot cost = avg_training_gpus × hours × $1.25/GPU-hr
   worked: 120 × 730 hr × $1.25 ≈ $109.5k/month (vs ~$359k On-Demand)
 ```
 
-Per-replica serving sizing (from a capacity test, see [`../performance_and_load_testing/`](../performance_and_load_testing/)):
+Per-replica serving sizing (from a capacity test, see [`../performance_and_load_testing/`](../performance_and_load_testing/performance_and_load_testing.md)):
 ```
 measured: fraud-scorer sustains ~50 RPS/replica (MIG slice) at p99 < 150ms (knee at ~70 RPS)
 peak aggregate: 22,000 RPS across all models
@@ -699,6 +699,6 @@ Through the eval gate, not a direct swap. First an offline eval on a golden hold
 
 **Cross-cutting references used:** [gpu_node_lifecycle](./cross_cutting/gpu_node_lifecycle.md) · [kubernetes_production_hardening](./cross_cutting/kubernetes_production_hardening.md) · [slo_error_budget_math](./cross_cutting/slo_error_budget_math.md) · [prometheus_cardinality_and_scale](./cross_cutting/prometheus_cardinality_and_scale.md) · [multi_cluster_networking](./cross_cutting/multi_cluster_networking.md)
 
-**Related modules:** [ml_platform_and_gpu_infrastructure](../ml_platform_and_gpu_infrastructure/) · [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/) · [kubernetes_operators_and_crds](../kubernetes_operators_and_crds/) · [performance_and_load_testing](../performance_and_load_testing/) · [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/)
+**Related modules:** [ml_platform_and_gpu_infrastructure](../ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) · [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) · [kubernetes_operators_and_crds](../kubernetes_operators_and_crds/kubernetes_operators_and_crds.md) · [performance_and_load_testing](../performance_and_load_testing/performance_and_load_testing.md) · [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md)
 
 **Related case studies:** [design_kubernetes_platform](./design_kubernetes_platform.md) · [design_autoscaling_platform](./design_autoscaling_platform.md) · [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md)

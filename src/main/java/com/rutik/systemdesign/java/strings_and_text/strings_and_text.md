@@ -1,0 +1,662 @@
+# Strings and Text in Java
+
+<!-- study-paths
+senior: strings_and_text.md, regex_engine_and_redos.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+Java strings are immutable, interned objects backed by a `byte[]` array (Java 9+, Compact Strings). The `String` class participates in a JVM-level string table (the constant pool / string table), `invokedynamic`-based concatenation at the bytecode level, and a rich set of text-manipulation APIs added through Java 15 (text blocks). String templates were previewed in Java 21 and 22 and then withdrawn, so `String.format`/`formatted` and `StringBuilder` remain the interpolation story.
+
+Key capabilities:
+- String immutability + constant pool sharing
+- `String.intern()` and JVM string table (heap-resident since Java 7u40)
+- Compact Strings (JEP 254, Java 9): `LATIN1` vs `UTF16` coder
+- `StringBuilder` vs `StringBuffer` vs `+` operator (invokedynamic / `StringConcatFactory`)
+- Text blocks (JEP 378, Java 15 GA)
+- `String.format` vs `formatted()` vs `MessageFormat`
+- `String.chars()` / `codePoints()` and Unicode correctness
+- Pattern matching and regular expressions
+- Immutable value semantics as a design pattern
+
+---
+
+## 2. Intuition
+
+> A `String` is like a sealed, laminated label: once printed you never erase it — you print a new one and the old goes to the recycling bin (GC). The JVM keeps a dictionary of these labels (`String` table) so two pieces of code asking for the same label get the exact same physical object.
+
+**Key insight:** Immutability is not a limitation — it is a *guarantee* that makes Strings safe for use as map keys, cache keys, thread-shared constants, and class-loader paths without any synchronisation. Every mutating operation (concatenation, replace, trim) returns a new object; that is the design, not a bug.
+
+**Why this matters in interviews:** String immutability, constant pool, and memory layout are perennial senior-level questions. Understanding *why* `+` in a loop is acceptable in Java 9+ (but still suboptimal), why `intern()` moved from PermGen to heap, and how much Compact Strings actually saves once fixed object overhead is counted, directly impacts production memory sizing decisions.
+
+---
+
+## 3. Core Principles
+
+1. **Immutability** — `String` is `final`; its `byte[] value` is `final` and `private`; every "modification" creates a new `String` instance.
+2. **String constant pool** — string literals are automatically interned; two literals with the same content share one object (`"a" == "a"` is `true`; `new String("a") == "a"` is `false`).
+3. **Compact Strings (JEP 254)** — uses `byte[]` + a 1-byte `coder` field (`LATIN1=0`, `UTF16=1`). Strings that fit in ISO-8859-1 use 1 byte/char instead of 2 bytes/char (UTF-16). This halves the *character data* of a Latin-1 string; the saving on the whole object is smaller because the two object headers and the cached hash do not shrink (see the worked example in Section 5).
+4. **String table is on the heap** — since Java 7u40, interned strings reside in the main heap (not PermGen / Metaspace). They are GC-eligible; string table size is tunable via `-XX:StringTableSize`.
+5. **Concatenation via `invokedynamic`** — since Java 9, the compiler emits a single `invokedynamic` call-site instead of a `new StringBuilder` chain. `StringConcatFactory.makeConcatWithConstants()` generates the actual strategy at link time.
+6. **`StringBuilder` is for explicit multi-step mutation in a single thread**; `StringBuffer` is synchronized (rarely needed since Java 5; prefer `StringBuilder` + explicit locks).
+
+---
+
+## 4. Types / Architectures / Strategies
+
+### 4.1 String Representation (Java 9+ Compact Strings)
+
+```
+                String object
+       ┌────────────────────────────┐
+       │ byte[] value               │  ← 1 byte/char (LATIN1) or 2 bytes/char (UTF16)
+       │ byte   coder  (0 or 1)     │  ← LATIN1=0, UTF16=1
+       │ int    hash   (cached)     │
+       │ boolean hashIsZero         │
+       └────────────────────────────┘
+```
+
+Java 8 and earlier used `char[] value` (always 2 bytes/char, even for pure-ASCII strings). The switch to `byte[]` in JEP 254 (Java 9) halves the backing array for Latin-1 content; measured end to end, a five-character string shrinks 14% and a forty-character one 33%, because the fixed per-object overhead does not compact.
+
+### 4.2 String Constant Pool vs Heap
+
+```
+       Source                  Storage                  Lifecycle
+  ─────────────────────────────────────────────────────────────────
+  String literal "abc"    →  string table (heap)      GC-eligible (Java 7u40+)
+  String.intern()         →  string table (heap)      GC-eligible
+  new String("abc")       →  ordinary heap object     GC-eligible
+  String.valueOf(42)      →  ordinary heap object      never interned; Integer.toString(int)
+                                                        allocates a fresh String every call
+```
+
+### 4.3 Concatenation Strategies
+
+| Strategy | When Compiler Generates It | Notes |
+|---|---|---|
+| `invokedynamic` + `StringConcatFactory` | Java 9+, any `+` in source | Exact-size `MethodHandle` path up to 20 arguments; a generated `StringBuilder` class above that |
+| `new StringBuilder().append()...toString()` | Java 8 and below | Still valid to write explicitly |
+| `StringBuilder` in a loop | Any version, explicit loop | Best for unknown N iterations |
+| `String.join` / `Collectors.joining` | Stream/array join | Overhead: creates a `StringJoiner` internally |
+| `String.format` / `formatted()` | Formatted output | 3–5x slower than `+` due to printf parsing |
+
+### 4.4 Text Blocks (JEP 378, Java 15 GA)
+
+```java
+// Before Java 15
+String json = "{\n" +
+              "  \"id\": 1,\n" +
+              "  \"name\": \"Alice\"\n" +
+              "}";
+
+// Java 15+
+String json = """
+              {
+                "id": 1,
+                "name": "Alice"
+              }
+              """;
+```
+
+Incidental whitespace is stripped based on the position of the closing `"""`. The result is a regular `String`; text blocks are a compile-time transformation.
+
+---
+
+## 5. Architecture Diagrams
+
+### String Interning Flow
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    LIT(["#quot;hello#quot; literal"]) --> LDC["LDC #2\nload constant"]
+    LDC --> LOOKUP{"string table\nlookup"}
+    LOOKUP -->|found| RET(["return existing ref"])
+    LOOKUP -->|missing| ALLOC["allocate on heap,\nadd to table"]
+    ALLOC --> RET2(["return ref"])
+
+    NEWSTR(["new String(#quot;hello#quot;)"]) --> HEAP["new heap allocation\nalways a separate object"]
+
+    class LIT,RET,RET2,NEWSTR io
+    class LDC,ALLOC mathOp
+    class LOOKUP req
+    class HEAP frozen
+```
+Even though `"hello"` is already interned, `new String("hello")` always allocates a fresh heap object — the two paths never share a reference unless you explicitly call `.intern()`.
+
+### Concatenation Bytecode (Java 9+)
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SRC(["String result = a + #quot; #quot; + b;"])
+
+    subgraph J8["Java 8 bytecode"]
+        NSB["new StringBuilder"] --> INIT["invokespecial StringBuilder.&lt;init&gt;"]
+        INIT --> AP1["aload a → invokevirtual append"]
+        AP1 --> AP2["ldc #quot; #quot; → invokevirtual append"]
+        AP2 --> AP3["aload b → invokevirtual append"]
+        AP3 --> TOS["invokevirtual toString"]
+    end
+
+    subgraph J9["Java 9+ bytecode"]
+        LA["aload a"] --> LB["aload b"]
+        LB --> IDY["invokedynamic makeConcatWithConstants(...)\nsingle call-site; JVM picks strategy at link-time"]
+    end
+
+    SRC --> NSB
+    SRC --> LA
+
+    class SRC io
+    class NSB,INIT,AP1,AP2,AP3 frozen
+    class TOS mathOp
+    class LA,LB frozen
+    class IDY train
+```
+
+### Compact String Memory Layout
+
+```
+  Java 8  ("Hello"):   [ 'H','e','l','l','o' ]   → 5 chars × 2 bytes = 10 bytes for value
+  Java 9+ ("Hello"):   [ 72, 101,108,108,111 ]   → 5 bytes for value (LATIN1 coder)
+  Java 9+ ("Hεllo"):   [ 72,0, 181,3, ... ]      → 10 bytes for value (UTF16 coder, 2 bytes/char)
+                                                    (Greek epsilon is U+03B5 > 255; "Héllo"
+                                                     stays LATIN1 because é is U+00E9 <= 255)
+```
+
+**In plain terms.** "Compact Strings halve the *character data*, not the whole object — the header, the array header and the cached hash are the same size either way, so the real saving depends on how long your strings are."
+
+That distinction is why the reported saving varies between roughly 40 and 50 percent. For long strings the array dominates and you approach the full 50; for a five-character string the fixed overhead dominates and one non-Latin1 character wipes the saving out entirely.
+
+| Symbol | What it is |
+|--------|------------|
+| `coder` | 1 byte: `LATIN1 = 0` (1 byte/char) or `UTF16 = 1` (2 bytes/char) |
+| `byte[] value` | The character data. Its own object, with its own 16-byte array header |
+| array header | 12-byte object header + 4-byte length field, then the data, padded to 8 |
+| `String` object | Header 12 + `value` reference 4 + `coder` 1 + `hash` 4 + `hashIsZero` 1, padded |
+| whole-object size | `String` object + `byte[]` object — two allocations per string |
+| the trigger | One code point above 255 flips the whole string to UTF16; there is no mixing |
+
+**Walk one example.** `"Hello"` as two objects, Java 8 versus Java 9+:
+
+```
+  Java 9+ (LATIN1)
+    String object   12 + 4 + 1 + 4 + 1 = 22  -> padded to 24 bytes
+    byte[5]         12 + 4 + 5 = 21          -> padded to 24 bytes
+    total                                     = 48 bytes
+
+  Java 8 (char[])
+    String object                             = 24 bytes (no coder field, same size after pad)
+    char[5]         12 + 4 + 10 = 26          -> padded to 32 bytes
+    total                                     = 56 bytes
+                                                saving = 8 of 56 = 14 percent
+
+  A realistic 40-character log token
+    Java 8: 24 + (12 + 4 + 80 -> 96)          = 120 bytes
+    Java 9: 24 + (12 + 4 + 40 -> 56)          =  80 bytes
+                                                saving = 40 of 120 = 33 percent
+
+  One million such strings: 114.4 MB -> 76.3 MB, i.e. 38.1 MB reclaimed.
+```
+
+The value array itself does halve exactly — 80 bytes to 40 — which is the number the JEP quotes. Everything below 50 percent in the totals above is fixed overhead you cannot compact away, so the practical lesson is that Compact Strings pay best on long strings and barely register on a heap full of two-character keys. And because the coder is per-string, a single emoji in a field promotes that entire string back to 2 bytes per character, including all its ASCII.
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 String Immutability Contract
+
+```java
+public final class String implements Serializable, Comparable<String>, CharSequence {
+    @Stable private final byte[] value;   // @Stable = trusted final by JIT
+    private final byte coder;             // LATIN1 = 0, UTF16 = 1
+    private int hash;                     // lazily computed, benign data race (JMM §17.5)
+    private boolean hashIsZero;
+}
+```
+
+The `@Stable` annotation on `value` tells the JIT compiler to trust it as effectively constant, enabling aggressive scalar replacement and loop optimisations.
+
+### 6.2 String.intern() Mechanics
+
+```java
+// intern() returns the canonical representation from the string table.
+// Two strings with identical content yield the same reference after interning.
+
+String s1 = new String("abc");
+String s2 = new String("abc");
+
+System.out.println(s1 == s2);           // false — two heap objects
+System.out.println(s1.intern() == s2.intern()); // true — both return the table entry
+
+// String table size default: 65536 buckets (power-of-2 hash table)
+// Tune with: -XX:StringTableSize=1048576  (1M buckets for intern-heavy apps)
+// Inspect: jcmd <pid> VM.stringtable statistics
+```
+
+**When intern() helps:** deduplicate millions of short, repeating strings (IP addresses, HTTP headers, enum-like constants from database). Not for arbitrary user input — unbounded growth fills the table.
+
+**String Deduplication** (`-XX:+UseStringDeduplication`): the collector automatically deduplicates the `byte[]` backing arrays of equal `String`s without programmer involvement. Introduced for G1 in Java 8u20 and extended to Serial, Parallel, ZGC and Shenandoah in Java 18, so it is no longer a G1-only lever. Different from interning (separate `String` references, one shared array).
+
+### 6.3 StringBuilder Performance
+
+```java
+// BROKEN: O(n^2) due to quadratic string copies
+String result = "";
+for (String word : words) {
+    result += word + " ";   // creates a new String each iteration
+}
+
+// FIX: O(n) — one buffer, one final toString()
+StringBuilder sb = new StringBuilder(words.size() * 16); // pre-size the buffer
+for (String word : words) {
+    sb.append(word).append(' ');
+}
+String result = sb.toString();
+```
+
+**Capacity matters:** `StringBuilder` defaults to 16 characters. Each resize grows the buffer to `2 * old + 2` characters and copies — note this is *not* `ArrayList`'s 1.5x growth; `StringBuilder` roughly doubles. Pre-sizing to approximate final length avoids 3–5 resize + copy cycles for large outputs.
+
+### 6.4 StringConcatFactory Strategies (Java 9+)
+
+Early JDK 9 builds shipped a menu of six selectable strategies behind a `-Djava.lang.invoke.stringConcat` system property. That menu is gone; the surviving code picks between exactly two paths on **arity**, with no user-facing switch:
+
+- **`generateMHInlineCopy`** — the normal path, taken when the call site has 20 or fewer arguments (`HIGH_ARITY_THRESHOLD`). It composes `MethodHandle`s that first *mix* every argument to compute the exact final length and coder, allocate one `byte[]` of precisely that size, then *prepend* each argument into it back to front. No intermediate `StringBuilder`, no resize, no copy.
+- **`SimpleStringBuilderStrategy`** — the fallback above 20 arguments, where composing that many method handles costs more than it saves. It spins a hidden class that does the obvious `StringBuilder` sequence.
+
+A call site whose arguments exceed 200 JVM slots (`MAX_INDY_CONCAT_ARG_SLOTS`) is rejected outright and javac falls back to emitting `StringBuilder` code itself.
+
+The exact-size path is why `+` beats Java 8's `StringBuilder` chain for short fixed-arity concatenations such as `"id=" + id + " name=" + name`: `StringBuilder` starts at 16 characters and may resize and copy, while the concat call site allocates the final array once and never grows it.
+
+### 6.5 String.format vs formatted() vs MessageFormat
+
+```java
+// String.format — static, uses printf-style format string, ~3–5x slower than +
+String s1 = String.format("Hello, %s! You are %d years old.", name, age);
+
+// .formatted() — Java 15+, instance method, identical semantics, more readable in fluent chains
+String s2 = "Hello, %s! You are %d years old.".formatted(name, age);
+
+// MessageFormat — for localised, indexed placeholders; supports plural rules
+String s3 = MessageFormat.format("Hello, {0}! You are {1,number,integer} years old.", name, age);
+
+// Performance hierarchy (fastest to slowest for single invocation):
+//   + (invokedynamic) > StringBuilder.append > String.format ≈ formatted() > MessageFormat
+```
+
+### 6.6 Text Blocks — Incidental Whitespace and Escape Sequences
+
+```java
+// The closing """ position determines how much leading whitespace is stripped.
+String sql = """
+        SELECT id, name
+        FROM users
+        WHERE active = true
+        """;
+// Strips 8 spaces of leading whitespace from each line (position of "SELECT").
+// Trailing newline IS included (closing """ is on its own line).
+
+// No trailing newline:
+String inline = """
+        SELECT *""";  // closing """ on same line as content = no trailing newline
+
+// Escape sequences in text blocks:
+String noNewline = """
+        line1 \
+        line2
+        """;   // \<newline> continuation → "line1 line2\n"
+
+String noTrailing = """
+        trailing spaces here   \s
+        """;   // \s anchor prevents trailing whitespace stripping
+```
+
+### 6.7 Unicode Correctness: chars() vs codePoints()
+
+```java
+String emoji = "Hello 😀";  // emoji is a surrogate pair (2 char values, 1 code point)
+
+// BROKEN: iterates char values, surrogate pairs appear as 2 separate chars
+emoji.chars()
+     .forEach(c -> System.out.print((char) c));   // prints garbage for the emoji
+
+// FIX: iterate code points — Unicode scalar values
+emoji.codePoints()
+     .forEach(cp -> System.out.print(new String(Character.toChars(cp))));
+
+// String length vs code point count
+emoji.length();           // 8 (6 chars for "Hello " + 2 chars for surrogate pair)
+emoji.codePointCount(0, emoji.length()); // 7 (6 + 1 emoji)
+```
+
+---
+
+## 7. Real-World Examples
+
+### 7.1 HTTP Header Names as Shared Constants (Netty)
+
+Netty does not lean on `String.intern()` for header names — it defines them as `AsciiString` constants (`HttpHeaderNames.CONTENT_TYPE`, `HttpHeaderNames.AUTHORIZATION`). `AsciiString` wraps a `byte[]` directly, caches its hash, and compares without decoding to UTF-16, so header handling never allocates a `String` at all on the hot path. The transferable lesson is the one interning also teaches: for a small, closed vocabulary used millions of times, hoist it into shared constants once instead of materialising it per request — but a purpose-built type beats the global string table, which you cannot bound.
+
+### 7.2 Charset and Class Names Inside the JDK
+
+The JDK itself relies on constant pooling for its own hot vocabularies. `StandardCharsets.UTF_8` is a single shared `Charset` instance rather than a name looked up per stream, and class and package names are interned during class loading so the loader's internal maps can compare keys by reference. Both are the same pattern: a closed, JVM-controlled set of values where sharing one instance is provably safe.
+
+### 7.3 Log4j 2 / Logback Pattern Caching
+
+Logging frameworks cache compiled `MessagePattern` objects keyed by the pattern `String`. They rely on `String.equals()` for map key equality — not `==` — which is why `String.intern()` is not needed here. The lesson: use `intern()` only when `==` comparison speed matters AND you control all input paths.
+
+### 7.4 Metadata Strings Built Once at Startup
+
+ORMs and serialization frameworks resolve entity field names, column names, and property paths once when they build their metadata model, then reuse those `String` instances for the life of the process. The saving is not the interning mechanism specifically — it is that a name resolved at bootstrap is never rebuilt per row, so a loop mapping 50,000 rows allocates no name strings at all. Applying `intern()` to values that arrive at runtime would invert this and grow the table without bound.
+
+---
+
+## 8. Tradeoffs
+
+| Approach | Pros | Cons | Best For |
+|---|---|---|---|
+| `+` concatenation (Java 9+) | Readable; `StringConcatFactory` optimises fixed arity | Still creates objects per expression in complex loops | Short, readable one-liners outside loops |
+| `StringBuilder` | Explicit control; best for N-iteration loops | Verbose; easy to forget `toString()` | Loops, dynamic content building |
+| `StringBuffer` | Thread-safe without external sync | ~20–30% slower than `StringBuilder` due to synchronized; almost never needed | Only in legacy APIs requiring `StringBuffer` |
+| `String.join` / `Collectors.joining` | Clean API for collections/arrays | Creates `StringJoiner` overhead; not for mixed content | Joining arrays/lists with delimiter |
+| `String.format` / `formatted()` | Readable formatted output | 3–5x slower than `+`; parsing overhead each call | Debug messages, logs, human output |
+| `MessageFormat` | Locale-aware, supports plurals | Slowest; verbose API | I18N / L10N requirements |
+| `String.intern()` | Reduces heap for repeated strings | Risk of table overflow; moved to heap (GC-eligible) in Java 7u40+ | Controlled, finite set of known strings |
+| String deduplication | Transparent; no code change needed | Only shares `byte[]` backing arrays; `String` references remain separate, so `==` is still false | GC-managed dedup without code coupling |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+### Use `StringBuilder` when:
+- Building a `String` in a loop with unknown or large N (> ~3 concatenations)
+- Constructing SQL/HTML/JSON by parts in a method
+- Appending to a growing buffer in a generator or formatter class
+
+### Use `+` (invokedynamic) when:
+- 2–5 fixed-arity concatenations in one expression
+- Readability is more important than micro-performance
+- Java 9+ (the `StringConcatFactory` makes it safe)
+
+### Use `String.format` / `formatted()` when:
+- Output format is important and `printf`-style placeholders aid clarity
+- Not in a hot path (avoid in tight loops processing >100k items/sec)
+
+### Use `String.intern()` when:
+- You have a finite, known set of strings (enum-like constants from external data)
+- You are implementing a `Symbol` or `Name` type where `==` identity checks are a performance feature
+- NOT for arbitrary user input — unbounded interning causes memory pressure and GC pauses
+
+### Do NOT use `StringBuffer` unless:
+- A legacy API requires it (e.g., `append(StringBuffer)` method signature you cannot change)
+- You are targeting pre-Java 5 environments (irrelevant for any modern work)
+
+---
+
+## 10. Common Pitfalls
+
+### Pitfall 1: `+` in a loop compiling to quadratic copies (Java 8)
+```java
+// Java 8 BROKEN: each += creates a new String, copying all previous content
+String log = "";
+for (LogEntry e : entries) {
+    log += e.getMessage() + "\n";  // O(n^2) memory allocations
+}
+// Fix: StringBuilder. Java 9+ helps only WITHIN one expression: the loop body is a single
+// fixed-arity concat, so each iteration executes its own invokedynamic call site and builds
+// a whole new String from the accumulated one -- still O(n^2) copying, just a faster constant.
+StringBuilder log = new StringBuilder();
+for (LogEntry e : entries) {
+    log.append(e.getMessage()).append('\n');
+}
+```
+
+### Pitfall 2: Comparing strings with `==`
+```java
+// BROKEN
+String input = request.getParameter("action");
+if (input == "delete") {  // false — input is a new heap object, not the literal
+    performDelete();
+}
+
+// FIX
+if ("delete".equals(input)) {  // null-safe; uses .equals()
+    performDelete();
+}
+```
+
+### Pitfall 3: Interning unbounded data
+```java
+// BROKEN: username comes from HTTP — unbounded; attacker can flood the string table
+String user = username.intern();  // denial-of-service via string table overflow
+
+// FIX: only intern known-finite sets
+private static final Map<String, String> ALLOWED_HEADERS = Map.of(
+    "content-type", "content-type".intern(),
+    "authorization", "authorization".intern()
+);
+```
+
+### Pitfall 4: substring memory leak (Java 6 and earlier)
+In Java 6 and earlier, `substring()` kept a reference to the original `char[]` backing array. Long strings in memory for the lifetime of a small substring. Fixed in Java 7u6 by making `substring()` copy the backing array.
+
+### Pitfall 5: `charAt()` on emoji / surrogate pairs
+```java
+// BROKEN: emoji is 2 chars, but one code point
+String s = "A😀B";
+System.out.println(s.charAt(1));  // '\uD83D' — high surrogate, not printable
+System.out.println(s.length());   // 4, not 3
+
+// FIX: use codePoints() or handle surrogate pairs explicitly
+s.codePoints().forEach(cp -> System.out.print(new String(Character.toChars(cp))));
+```
+
+### Pitfall 6: `String.format` in hot logging paths
+```java
+// BROKEN: formats the string even if log level is INFO and debug is off
+logger.debug("Processing record: " + record.toString());  // Java 8 style, still builds String
+
+// FIX: use SLF4J parameterised logging (defers toString until level is enabled)
+logger.debug("Processing record: {}", record);
+```
+
+---
+
+## 11. Technologies & Tools
+
+| Tool / Feature | Version | Purpose |
+|---|---|---|
+| `StringConcatFactory` | Java 9 (JEP 280) | `invokedynamic` bootstrap for `+` operator |
+| Compact Strings | Java 9 (JEP 254) | `byte[]` + coder; halves memory for ASCII strings |
+| Text Blocks | Java 13 preview → Java 15 GA (JEP 378) | Multi-line string literals with incidental whitespace stripping |
+| String Templates | Previewed in Java 21 (JEP 430) and 22 (JEP 459), then **withdrawn**; not present in Java 23 or later | A redesign may return in a future release; there is no shipping interpolation syntax today |
+| String deduplication | G1 since Java 8u20; all collectors since Java 18 | `-XX:+UseStringDeduplication`; shares equal `byte[]` backing arrays |
+| `String.intern()` | All versions | Returns canonical instance; table on heap since Java 7u40 |
+| `jcmd VM.stringtable` | Java 7+ | Dumps string table stats (count, table size, histogram) |
+| `String.chars()` | Java 8 | Returns `IntStream` of `char` values (UTF-16 code units) |
+| `String.codePoints()` | Java 8 | Returns `IntStream` of Unicode code points (correct for emoji) |
+| `String.isBlank()` | Java 11 | Returns `true` if empty or whitespace only (`Character.isWhitespace`) |
+| `String.strip()` | Java 11 | Unicode-aware trim; use over `trim()` which only handles `<= U+0020` |
+| `String.repeat(n)` | Java 11 | Repeats string n times; uses `Arrays.copyOf` internally |
+| `String.indent(n)` | Java 12 | Adjusts leading whitespace, normalises line endings |
+| `String.formatted(args)` | Java 15 | Instance version of `String.format`; same performance |
+| Apache Commons Text | Library | `StringUtils`, `WordUtils`, `StrSubstitutor` for advanced manipulation |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q1: Why is `String` immutable in Java, and what would break if it were mutable?**
+**Short:** String is immutable so it can be safely shared across threads, cached in hash maps, and pooled in the constant pool.
+`String` is immutable so it can be safely shared across threads, used as a `HashMap` key, and placed in the string constant pool without copying. If `String` were mutable, a cached `hashCode()` would become stale after modification, map lookups would fail silently, and a class name passed to `ClassLoader.loadClass()` could be mutated mid-load to trigger privilege escalation — a well-known historical security concern. Immutability gives compile-time guarantees the JIT exploits via `@Stable` on the backing array.
+
+**Q2: What is the difference between `new String("abc")` and `"abc"`?**
+**Short:** "abc" is an interned compile-time literal, while new String("abc") allocates a separate heap object that fails == against it.
+`"abc"` is a compile-time literal; the JVM automatically interns it — the first time it is loaded, one object is created in the string table and all references to `"abc"` share it. `new String("abc")` bypasses the table and allocates a fresh `String` object on the heap; `==` against the literal returns `false` even though `.equals()` returns `true`. The literal in the constructor argument is still interned, but the result of `new String(...)` is not. To force the heap object into the table, call `.intern()`.
+
+**Q3: What changed in Java 9 regarding how String concatenation is compiled?**
+**Short:** Java 9 replaced the compiler-built StringBuilder chain for concatenation with a single invokedynamic call via StringConcatFactory.
+Before Java 9, the compiler translated `a + b + c` into `new StringBuilder().append(a).append(b).append(c).toString()` — fixed bytecode. In Java 9 (JEP 280), this became a single `invokedynamic` call-site bootstrapped by `StringConcatFactory.makeConcatWithConstants()`. The JVM selects the best strategy at link-time (`MH_INLINE_COPY` by default): it pre-allocates an exact-size `byte[]`, copies all parts in, and wraps it without an intermediate `StringBuilder`. This is faster for fixed-arity expressions and produces smaller bytecode. However, a `+` inside a loop still emits a `StringConcatFactory` call per iteration — `StringBuilder` is still needed for loops.
+
+**Q4: Explain Compact Strings (JEP 254). How do they save memory, and when are they NOT active?**
+**Short:** Compact Strings store content in a byte[] using one byte per character when every code point fits in Latin-1, otherwise two bytes.
+Compact Strings (Java 9, JEP 254) store `String` content in a `byte[]` instead of `char[]`. When all code points fit in ISO-8859-1 (Latin-1), the `coder` byte is `LATIN1 (0)` and each character uses 1 byte. When any character requires UTF-16, `coder` is `UTF16 (1)` and each character uses 2 bytes. JEP 254's stated motivation is that in typical applications the great majority of `String` instances hold only Latin-1 content — logs, SQL, HTTP headers, JSON keys — so the backing array halves for almost all of them. Measure your own heap before assuming a figure; the share is workload-specific and the *object-level* saving is smaller than the array-level one. Compact Strings are NOT active when: (a) `-XX:-CompactStrings` is set, (b) the string contains any character outside ISO-8859-1 (code point > 255), or (c) building on Java 8 or earlier.
+
+**Q5: When should you use `String.intern()`, and what are the risks?**
+**Short:** String.intern() should only be used for a finite, controlled set of repeated strings, since flooding the table causes memory pressure.
+Use `intern()` only for a finite, controlled set of repeated strings where reference-equality comparison provides a measured benefit. Typical qualifying sets are HTTP header names, column names from a fixed schema, and enum-like values from a configuration file. The risks: (1) the string table is bounded; flooding it with arbitrary user input causes memory pressure and long GC pauses; (2) interned strings were in PermGen (fixed size) before Java 7u40 — in modern Java they are heap-resident and GC-eligible, but the table itself is a hash table with modest default capacity (65,536 buckets); resize with `-XX:StringTableSize`; (3) profiling with `jcmd <pid> VM.stringtable` is essential before committing to an interning strategy.
+
+**Q6: What is String Deduplication and how does it differ from interning?**
+**Short:** String deduplication shares the backing byte[] between equal strings while their String objects and == stay distinct, unlike interning.
+Deduplication shares the backing `byte[]` between equal strings; interning shares the `String` object itself. The collector transparently finds `String` objects on the heap whose backing arrays hold identical content and replaces all but one of those arrays with a shared reference. Unlike interning, the `String` object references remain separate — `==` between deduplicated strings is still `false`. Deduplication is transparent to the application and costs GC work rather than application CPU. It shipped for G1 in Java 8u20 and was extended to Serial, Parallel, ZGC and Shenandoah in Java 18, so the "G1 only" restriction people remember no longer applies. It is most effective in applications with many short, repeated strings created via `new String(...)` or deserialization.
+
+**Q7: Show the memory layout difference between `String` in Java 8 and Java 9+.**
+**Short:** Java 8 strings store a char[] at 2 bytes per character, while Java 9+ strings store a byte[] at 1 byte per character for Latin-1 content.
+Java 8: `String` holds `char[] value` (each `char` = 2 bytes, regardless of actual content). `"hello"` backs to `char[5]` = 10 bytes.
+Java 9+: `String` holds `byte[] value` + `byte coder`. `"hello"` (pure ASCII): `byte[5]` = 5 bytes, `coder = 0 (LATIN1)`. `"héllo"` is *also* `byte[5]` with `coder = 0`, because the trigger is ISO-8859-1, not ASCII, and `é` is U+00E9. Only a code point above U+00FF flips it: `"hεllo"` (Greek epsilon, U+03B5) becomes `byte[10]` with `coder = 1 (UTF16)`. Measured with JOL on JDK 23, `"Hello"` is a 24-byte `String` plus a 24-byte `byte[5]`; the Java 8 equivalent is 24 bytes plus a 32-byte `char[5]`. The `coder` and `hashIsZero` fields are Java 9+ and Java 13+ respectively; `hash` is present in both.
+
+**Q8: Why is `StringBuilder` not thread-safe, and how do you handle multi-threaded string building?**
+**Short:** StringBuilder.append() is not atomic, so concurrent calls from multiple threads can interleave and corrupt the buffer.
+`StringBuilder` has no synchronisation — `append()` is not atomic: it checks capacity, possibly reallocates the buffer, then copies bytes. Two threads calling `append()` concurrently can interleave these steps, producing garbled output or an `ArrayIndexOutOfBoundsException`. For multi-threaded building: (1) use `StringBuffer` (all methods synchronized, ~20–30% slower), (2) use a per-thread `StringBuilder` and combine results at the end (best performance), or (3) use a `ConcurrentLinkedDeque<String>` + single-threaded join step. In practice, option (2) via thread-local or stream-style aggregation is almost always preferred over `StringBuffer`.
+
+**Q9: What does a text block look like after the compiler processes it, and how is incidental whitespace stripped?**
+**Short:** A text block is a compile-time transformation into a normal String constant, so it strips incidental whitespace and carries no runtime cost.
+Text blocks are a compile-time transformation (JEP 378). The compiler: (1) line-terminates consistently (CRLF/CR → LF); (2) strips "incidental whitespace" — defined as the longest common leading-whitespace prefix across all non-blank content lines and the closing-`"""` line; (3) strips trailing whitespace from each line (use `\s` escape to preserve intentional trailing spaces); (4) interprets `\<newline>` as a line continuation. The result is a regular `String` constant — text blocks have zero runtime overhead. Two text blocks with the same content after processing are the same compile-time constant and may be interned like any literal.
+
+**Q10: What is the difference between `String.chars()` and `String.codePoints()`, and when does it matter?**
+**Short:** chars() yields UTF-16 code units that split supplementary characters into surrogate pairs, while codePoints() yields one int per character.
+`chars()` returns an `IntStream` of UTF-16 code units (Java `char` values, 16-bit). For code points in the Basic Multilingual Plane (U+0000–U+FFFF), one code unit equals one code point. For supplementary characters (e.g., emoji, CJK Extension B), one code point spans two `char` values (a surrogate pair, U+D800–U+DFFF). `codePoints()` returns an `IntStream` of actual Unicode code points — it always gives one `int` per logical character. Use `codePoints()` whenever the input may contain emoji, symbols from supplementary planes, or when implementing Unicode-correct string length, reversal, or iteration.
+
+**Q11: How would you efficiently reverse a `String` that may contain emoji?**
+**Short:** Reversing a string that may contain emoji requires iterating Unicode code points instead of char values, so surrogate pairs stay intact.
+Iterate code points rather than `char` values, so a surrogate pair is moved as one unit instead of being split.
+
+```java
+// BROKEN: reverses char values, splits surrogate pairs
+String reversed = new StringBuilder("Hello 😀").reverse().toString();
+// "reverse()" in StringBuilder IS smart about surrogates (it swaps them back)
+// but a naive char-by-char approach would break them:
+char[] chars = s.toCharArray();
+// ... swap chars[i] with chars[n-1-i] → splits surrogate pairs
+
+// FIX: code-point-aware reversal
+public static String reverseCPAware(String s) {
+    int[] cps = s.codePoints().toArray();
+    StringBuilder sb = new StringBuilder(s.length());
+    for (int i = cps.length - 1; i >= 0; i--) {
+        sb.appendCodePoint(cps[i]);
+    }
+    return sb.toString();
+}
+// Note: StringBuilder.reverse() handles surrogate pairs correctly, but be explicit
+// in an interview to show you know *why*.
+```
+`StringBuilder.reverse()` does handle surrogate pairs internally. Knowing this distinction is what separates correct Unicode handling from accidental correctness.
+
+**Q12: What are the four String comparison methods and their correct use cases?**
+**Short:** == compares object identity, equals() and equalsIgnoreCase() compare content, and compareTo() gives a lexicographic sort order.
+`==` compares object identity (reference equality) — use only when comparing interned strings or the exact same reference. `.equals()` compares content character by character — use for all user-facing equality. `.equalsIgnoreCase()` compares character by character using `Character.toUpperCase()` then `Character.toLowerCase()` and is **locale-independent**, so `"i".equalsIgnoreCase("I")` is `true` in every locale, Turkish included. The Turkish-I trap belongs to `toLowerCase()`/`toUpperCase()` *without* an explicit `Locale` argument, which do consult the default locale: in `tr-TR`, `"i".toUpperCase()` yields `"\u0130"` (dotted capital I), so a case-normalise-then-compare idiom breaks where `equalsIgnoreCase` would not. Pass `Locale.ROOT` whenever you case-fold for protocol purposes. `.compareTo()` / `.compareToIgnoreCase()` gives a lexicographic ordering — use for sorting. For locale-correct comparison (sorting names, user input), use `java.text.Collator` which honours locale-specific ordering rules (e.g., accented characters in French, ß in German).
+
+**Q13: How does `String.hashCode()` work, and why can a hash code be 0 for a non-empty string?**
+**Short:** String.hashCode() computes a polynomial hash with base 31 and caches it, with a Java 13 hashIsZero flag avoiding recomputation of a zero hash.
+`hashCode()` computes `s[0]*31^(n-1) + s[1]*31^(n-2) + ... + s[n-1]` modulo the `int` overflow boundary (31 is a small prime that reduces collisions). The result is cached in the `hash` field after first computation. Java 8 has a race (two threads compute it simultaneously) — both compute the same value, making the benign data race safe by the JMM's guarantee that `int` writes are atomic and the computation is deterministic. In Java 13+, a second field `hashIsZero` is added: if the hash computes to exactly 0, it is stored as 0 and `hashIsZero = true` prevents re-computation on every call (before Java 13 such a string re-hashed on every single call — `""` and the classic `"polygenelubricants"` are the well-known examples). Practical implication: never rely on `hash == 0` to mean "not computed."
+
+**Q14: How does `String.strip()` differ from `String.trim()`, and why should you prefer `strip()` in Java 11+?**
+**Short:** strip() removes Unicode whitespace via Character.isWhitespace(), while trim() only strips characters at or below code point U+0020.
+`trim()` removes leading and trailing characters with code point ≤ U+0020 (space and ASCII control characters). `strip()` (Java 11) uses `Character.isWhitespace()`, which additionally removes Unicode whitespace like U+00A0 (no-break space), U+2009 (thin space), U+3000 (ideographic space), and others. Modern web and database content often includes these Unicode whitespace characters from copy-paste, rich-text editors, or non-English sources. `trim()` on such a string returns a string that still looks padded to the user. `stripLeading()` and `stripTrailing()` are available for asymmetric stripping. Prefer `strip()` for all new code on Java 11+.
+
+**Q15: Describe three places in the JDK where `String` interning or constant pooling provides a concrete performance benefit.**
+**Short:** Interned strings speed up class loading, Boolean.toString(), and enum name comparisons by letting == replace content equality checks.
+(1) **Class loading**: class and package names are interned during class loading. `Class.getName()` returns an interned string, allowing the class loader's internal hash maps to use `==` for key comparison. (2) **`Boolean.toString()`**: returns `"true"` or `"false"`, both compile-time literals that are already interned — no allocation occurs. The contrast is instructive: `Integer.toString(int)` has *no* such cache and allocates a fresh `byte[]` and `String` on every call, even for single digits, which is why logging an int in a hot loop allocates and logging a boolean does not. (3) **Enum name constants**: every enum's `.name()` field is initialised from a string literal interned at compile time. Two references to `Status.ACTIVE.name()` return the same `String` object, so `==` comparisons in switch expressions on enum names are safe (though `.equals()` is still safer for external input).
+
+---
+
+## 13. Best Practices
+
+1. **Prefer `+` for ≤5 fixed parts; use `StringBuilder` for loops** — the JIT optimises small fixed-arity concatenation but cannot hoist loop-body `String` allocations.
+2. **Use `"literal".equals(variable)` pattern** — avoids `NullPointerException`; `null.equals(...)` would throw, `"literal".equals(null)` returns `false`.
+3. **`String.strip()` over `String.trim()`** in Java 11+ — Unicode-correct whitespace removal.
+4. **`String.isBlank()` over `.isEmpty()`** when whitespace-only strings count as "empty" for your use case.
+5. **Use `codePoints()` for any Unicode iteration** that must be correct for emoji and supplementary characters.
+6. **Limit `intern()` to finite, controlled string sets**; monitor the table with `jcmd VM.stringtable`.
+7. **Enable String Deduplication** (`-XX:+UseStringDeduplication`) when heap analysis shows a meaningful share of live heap is duplicate string data (check with `jmap -histo` or JOL's `string-compress` mode); supported on every collector since Java 18.
+8. **Pre-size `StringBuilder`** when the final length is predictable: `new StringBuilder(expectedLength)` avoids resize copies.
+9. **Text blocks for multi-line literals** (Java 15+): no escaping of inner `"`, incidental whitespace is stripped, content is version-control friendly (no `\n` noise).
+10. **For locale-sensitive string comparison** (user-facing sort, search), use `java.text.Collator.getInstance(locale)` rather than `compareTo()` / `equalsIgnoreCase()`.
+
+---
+
+## 14. Case Study
+
+**Scenario: Bulk log-line builder in a high-throughput audit service**
+
+A financial audit service processes 50,000 events per second, building a structured log line per event for an immutable audit trail. Initial code used `String.format()` inside the hot loop.
+
+**Before (production incident — 18% CPU on string formatting):**
+```java
+public String buildAuditLine(AuditEvent e) {
+    return String.format(
+        "[%s] user=%s action=%s resource=%s result=%s duration=%dms",
+        e.getTimestamp(), e.getUserId(), e.getAction(),
+        e.getResource(), e.getResult(), e.getDurationMs()
+    );
+}
+// Called 50,000 × per second → 50,000 × printf parse overhead
+```
+
+**After (profiling-driven fix):**
+```java
+private static final int AVG_LINE_LEN = 120;
+
+public String buildAuditLine(AuditEvent e) {
+    return new StringBuilder(AVG_LINE_LEN)
+        .append('[').append(e.getTimestamp()).append("] user=")
+        .append(e.getUserId()).append(" action=")
+        .append(e.getAction()).append(" resource=")
+        .append(e.getResource()).append(" result=")
+        .append(e.getResult()).append(" duration=")
+        .append(e.getDurationMs()).append("ms")
+        .toString();
+}
+// Zero printf parsing; pre-sized buffer; single toString() allocation.
+// Result: 18% CPU → 4% CPU for string building; allocation rate -60%
+```
+
+**Measurement — illustrative shape, not a published benchmark.** Re-run it on your own hardware and JDK before quoting a number; what generalises is the *ordering* and the rough ratio, not the absolute figures:
+```
+Benchmark                    Mode  Cnt   Score   Error  Units
+StringFormat.format          avgt   10   412 ±   8  ns/op
+StringFormat.sbAppend        avgt   10    78 ±   2  ns/op
+StringFormat.invokedynamic   avgt   10   105 ±   3  ns/op  (+ operator, 6 parts)
+```
+
+`StringBuilder.append()` is ~5x faster than `String.format()` for fixed-arity, high-frequency log building. For low-frequency human-readable output, `String.format()` remains preferable for clarity.
+
+**See also:**
+- [Performance and Tuning](../performance_and_tuning/performance_and_tuning.md) — JMH benchmarking methodology
+- [JVM Internals](../jvm_internals/jvm_internals.md) — object header layout, GC impact of allocation rate
+
+---
+
+## Related / See Also
+
+- [Core Language](../core_language/core_language.md) — Java object model, immutability contract, equals/hashCode for String
+- [Java 9–21 Features](../java9_to_21_features/java9_to_21_features.md) — text blocks (JEP 378, Java 15), invokedynamic string concat (JEP 280)
+- [Performance & Tuning](../performance_and_tuning/performance_and_tuning.md) — String allocation cost, StringBuilder vs String.format benchmarks with JMH
+- [Java Memory Model](../java_memory_model/java_memory_model.md) — `hash` field benign data race in `String.hashCode()`
+- [Arrays, Strings & Hashing](../../cs_fundamentals/arrays_strings_and_hashing/arrays_strings_and_hashing.md) — language-agnostic string/hashing fundamentals underlying `String.hashCode()` and interning

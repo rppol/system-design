@@ -446,7 +446,7 @@ def validate_demand_model(
 | Per-category model | Good | Good (SKU inherits category) | 50 models, 20 min each | Mild |
 | Global model with SKU embeddings | Good | Good (embedding similarity) | 1 model, 45 min | Mild |
 
-Use per-category models for top-20 categories (80% of revenue), global model for the long tail. New SKUs inherit the category model immediately. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+Use per-category models for top-20 categories (80% of revenue), global model for the long tail. New SKUs inherit the category model immediately. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md).
 
 **Decision 2: Revenue maximization vs margin maximization**
 

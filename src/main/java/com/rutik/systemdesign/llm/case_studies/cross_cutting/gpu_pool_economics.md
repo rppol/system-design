@@ -10,7 +10,7 @@ The two dominant phases of LLM inference have opposing resource profiles. Prefil
 
 This memory-bound nature means the economics of GPU inference are driven by batch size. One GPU idle costs the same per hour whether it is processing 1 request or 256. Continuous batching — the practice of filling in-flight requests into decode slots as they complete — is the single most impactful operational decision for GPU pool economics. Without it, a $5.00/hr H100 on-demand instance generating 30 tokens/second for one user costs $46.30 per 1M tokens. With continuous batching at batch size 64 and 65% MBU, the same GPU generates 1,920 tokens/second and costs $0.72 per 1M tokens — a 64x reduction.
 
-**References**: [vLLM deep dive](../../vllm_deep_dive/README.md) | [Inference engines](../../inference_engines/README.md) | [Quantization](../../optimization_and_quantization/README.md)
+**References**: [vLLM deep dive](../../vllm_deep_dive/vllm_deep_dive.md) | [Inference engines](../../inference_engines/inference_engines.md) | [Quantization](../../optimization_and_quantization/optimization_and_quantization.md)
 
 ---
 
@@ -938,8 +938,8 @@ Work the batch arithmetic: 50 steps for a batch of 4 images is 50 x 6 TFLOP x 4 
 ---
 
 *Cross-references*:
-- Inference engines: [`../../inference_engines/README.md`](../../inference_engines/README.md)
-- vLLM internals: [`../../vllm_deep_dive/README.md`](../../vllm_deep_dive/README.md)
-- Quantization (FP8, INT8): [`../../optimization_and_quantization/README.md`](../../optimization_and_quantization/README.md)
-- Token cost modeling: [`../../token_economics_and_cost_optimization/README.md`](../../token_economics_and_cost_optimization/README.md)
-- Deployment and MLOps: [`../../deployment_and_mlops/README.md`](../../deployment_and_mlops/README.md)
+- Inference engines: [`../../inference_engines/README.md`](../../inference_engines/inference_engines.md)
+- vLLM internals: [`../../vllm_deep_dive/README.md`](../../vllm_deep_dive/vllm_deep_dive.md)
+- Quantization (FP8, INT8): [`../../optimization_and_quantization/README.md`](../../optimization_and_quantization/optimization_and_quantization.md)
+- Token cost modeling: [`../../token_economics_and_cost_optimization/README.md`](../../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md)
+- Deployment and MLOps: [`../../deployment_and_mlops/README.md`](../../deployment_and_mlops/deployment_and_mlops.md)

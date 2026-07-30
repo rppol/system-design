@@ -426,10 +426,10 @@ SLA: 99.9% = 8.7 hours downtime/year
 
 **Scaling bottleneck:** The GPU inference cluster is the primary scaling constraint. Unlike web servers that scale horizontally trivially, adding more GPU capacity costs $15-30K per A100 GPU.
 
-**Key insight — context window as a resource:** The KV cache for a 128K context uses 2GB+ of GPU memory per request. This is why [PagedAttention](../vllm_deep_dive/README.md) is critical — naive allocation would mean each A100 can only serve ~10-20 concurrent long-context requests.
+**Key insight — context window as a resource:** The KV cache for a 128K context uses 2GB+ of GPU memory per request. This is why [PagedAttention](../vllm_deep_dive/vllm_deep_dive.md) is critical — naive allocation would mean each A100 can only serve ~10-20 concurrent long-context requests.
 
 **Q: Trade-off question: Why not cache all responses?**
-Conversations are personalized and contextual — the same question "what should I do next?" has completely different answers depending on conversation history. Only context-independent queries (factual lookups) are cacheable. [Semantic caching](../llm_caching/README.md) applies only to a subset.
+Conversations are personalized and contextual — the same question "what should I do next?" has completely different answers depending on conversation history. Only context-independent queries (factual lookups) are cacheable. [Semantic caching](../llm_caching/llm_caching.md) applies only to a subset.
 
 **Q: Follow-up: How would you handle a 10× traffic spike?**
 Short term: queue requests, lower context limits, route more traffic to the small/cheap tier. Long term: predictive auto-scaling (expand GPU cluster 30 minutes before expected peak based on historical patterns).

@@ -86,7 +86,7 @@ Inject all N tool schemas into the system prompt unconditionally. Works for N <=
 
 ### 4.2 RAG-over-tools
 
-Embed every tool description offline using a text embedding model (e.g., `text-embedding-3-small`, 1536 dimensions). At query time, embed the user message and retrieve top-k tools by cosine similarity. Inject only retrieved tools into the context. Embedding-model selection and ANN index tradeoffs are covered in [Embeddings & Similarity Search](../embeddings_and_similarity_search/README.md).
+Embed every tool description offline using a text embedding model (e.g., `text-embedding-3-small`, 1536 dimensions). At query time, embed the user message and retrieve top-k tools by cosine similarity. Inject only retrieved tools into the context. Embedding-model selection and ANN index tradeoffs are covered in [Embeddings & Similarity Search](../embeddings_and_similarity_search/embeddings_and_similarity_search.md).
 
 Key parameters:
 - k = 5 to 10. The worked figures below use Recall@10 = 0.95 and Recall@5 = 0.88 as *illustrative* working assumptions; recall is catalogue-specific and must be measured on your own labelled (query, expected_tool) set

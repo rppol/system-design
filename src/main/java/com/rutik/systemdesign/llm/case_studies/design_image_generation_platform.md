@@ -460,7 +460,7 @@ CFG scale tuning: cfg_scale=1.0 disables guidance — the output is the conditio
 
 ### 4.3 Content Safety Pipeline
 
-Safety is two-phase: fast pre-generation (block before GPU compute) and post-generation (catch what slipped through or was generated indirectly). The classifier layering pattern generalizes across modalities — see [Guardrails & Content Safety](../guardrails_and_content_safety/README.md).
+Safety is two-phase: fast pre-generation (block before GPU compute) and post-generation (catch what slipped through or was generated indirectly). The classifier layering pattern generalizes across modalities — see [Guardrails & Content Safety](../guardrails_and_content_safety/guardrails_and_content_safety.md).
 
 ```python
 from __future__ import annotations

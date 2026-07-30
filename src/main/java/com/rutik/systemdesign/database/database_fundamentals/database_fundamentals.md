@@ -1,0 +1,591 @@
+# Database Fundamentals
+
+<!-- study-paths
+senior: database_fundamentals.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+Database fundamentals cover the core theoretical guarantees and models that govern how database systems behave under concurrent access, failures, and network partitions. These concepts — ACID, BASE, CAP, PACELC, and isolation levels — form the vocabulary for reasoning about database correctness in distributed systems.
+
+---
+
+## 2. Intuition
+
+Think of a database as a shared ledger that thousands of accountants access simultaneously. ACID guarantees that each accountant's transaction is all-or-nothing, isolated from others, and durable once committed. CAP says that during a network split, the ledger must choose between being accurate (consistent) or always accessible (available) — it cannot be both.
+
+- **Why it matters**: Choosing the wrong consistency model leads to money being double-spent, inventory oversold, or user data corrupted.
+- **Key insight**: Most applications need "sufficient" consistency, not perfect consistency — understanding the tradeoffs lets you pick the right point on the spectrum.
+
+---
+
+## 3. Core Principles
+
+### ACID Properties
+
+**Atomicity**: A transaction is all-or-nothing. If a bank transfer debits account A and credits account B, both must succeed or neither does. On failure, the database rolls back to the pre-transaction state. Implemented via undo logs.
+
+**Consistency**: A transaction brings the database from one valid state to another. Constraints (foreign keys, CHECK, UNIQUE) are enforced at commit time. Note: consistency in ACID is about application-defined invariants, NOT the "C" in CAP.
+
+**Isolation**: Concurrent transactions appear to execute serially. The degree of isolation is configurable (see isolation levels below). Implemented via MVCC or locking.
+
+**Durability**: Once committed, a transaction survives crashes. Implemented via Write-Ahead Log (WAL) — changes are written to a durable log before being applied to data pages.
+
+### BASE Model
+
+Stands for: **B**asically **A**vailable, **S**oft state, **E**ventually consistent.
+
+Used by distributed NoSQL systems (Cassandra, DynamoDB) where strong consistency would require coordination that hurts availability and latency.
+
+- **Basically Available**: System responds to every request, possibly with stale data.
+- **Soft state**: State can change over time even without input (due to replication convergence).
+- **Eventually consistent**: All replicas will converge to the same value given no new updates.
+
+### CAP Theorem
+
+A distributed system can guarantee at most two of three properties simultaneously:
+
+```
+          Consistency (C)
+               /\
+              /  \
+             /    \
+            /  CA  \
+           /--------\
+          / CP |  AP \
+         /     |      \
+        /      |       \
+Availability (A)------Partition Tolerance (P)
+```
+
+- **CA** (no partition tolerance): Single-node RDBMS. If network partitions can occur, CA is not viable in distributed systems.
+- **CP** (consistency + partition tolerance): System refuses to serve stale data during partition. Example: HBase, ZooKeeper, etcd.
+- **AP** (availability + partition tolerance): System serves potentially stale data during partition. Example: Cassandra (with eventual consistency), DynamoDB.
+
+**Real production scenario**: A Cassandra cluster with RF=3 and CL=QUORUM experiences a network partition. Two nodes are on one side, one on the other. QUORUM requires 2/3 responses. The minority side (1 node) cannot serve QUORUM reads/writes — it sacrifices availability for consistency at QUORUM. Switch to CL=ONE and you get AP behavior with potential stale reads.
+
+```
+QUORUM  = floor(RF / 2) + 1      <- minimum replicas that must answer a QUORUM request
+overlap = W + R > RF             <- true means the read set must intersect the write set
+```
+
+**Stated plainly.** "Consistency is not a property of the database — it is an overlap test between how many replicas you write to and how many you read from." If those two sets are guaranteed to share at least one node, a read cannot miss the latest write; if they are not, it can.
+
+| Symbol | What it is |
+|--------|------------|
+| `RF` | Replication factor — copies of each row. `3` in the scenario above |
+| `CL` | Consistency level a single query demands: `ONE`, `QUORUM`, or `ALL` |
+| `QUORUM` | `floor(RF/2) + 1` replicas must answer. That is `2` when `RF = 3` |
+| `W`, `R` | Replicas that must acknowledge a write / answer a read |
+| `W + R > RF` | The overlap test — true means the read set must contain a replica that saw the write |
+
+**Walk one example.** The same RF=3 cluster, at two consistency levels and then split by a partition:
+
+```
+  RF = 3   ->   QUORUM = floor(3/2) + 1 = 2 replicas
+
+  CL=QUORUM :  W + R  =  2 + 2  =  4   >  3   ->  sets must overlap, no stale read
+  CL=ONE    :  W + R  =  1 + 1  =  2  <=  3   ->  no overlap guaranteed, stale read possible
+
+  Partition splits the ring into [2 nodes] and [1 node], at CL=QUORUM:
+    majority side :  2 reachable  >=  2 needed  ->  keeps serving      (stays consistent)
+    minority side :  1 reachable   <  2 needed  ->  returns an error   (gives up availability)
+```
+
+This is CAP made arithmetic. Nothing about the cluster changed between the two rows — same nodes, same partition, same data. Only `W + R` changed, and that single inequality is what decides whether the minority side behaves as CP (errors out) or AP (answers with possibly stale data). It also explains why `CL=ALL` is rarely used: `W + R = 3 + 3` certainly overlaps, but any single node failure takes the whole cluster down for that key.
+
+### PACELC Extension
+
+CAP only covers behavior during partitions. PACELC adds the else case: even when no partition, there is a tradeoff between **Latency** and **Consistency**.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Read/write<br/>request"]) --> p{"Partition<br/>occurring?"}
+    p -->|"PAC: yes"| ac{"pick one"}
+    p -->|"ELC: else"| lc{"pick one"}
+    ac --> avail["Availability"]
+    ac --> cons1["Consistency"]
+    lc --> lat["Latency"]
+    lc --> cons2["Consistency"]
+
+    class start req
+    class p,ac,lc mathOp
+    class avail train
+    class cons1,cons2 frozen
+    class lat io
+```
+
+PACELC's else-branch is the everyday case: PostgreSQL with synchronous replication pays latency to stay consistent, while Cassandra's default pays consistency to stay fast — a tradeoff CAP never mentions because no partition is happening.
+
+Examples:
+- PostgreSQL with sync replication: PC/EC (partition → block rather than diverge, so consistency; no partition → still pay the replica round trip on every commit, so consistency again)
+- Cassandra default: PA/EL (partitions → available, no partition → low latency, eventual consistency)
+- DynamoDB: PA/EL (similar to Cassandra)
+
+---
+
+## 4. Consistency Models
+
+From strongest to weakest:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A["Linearizability<br/>real-time order,<br/>coordinate every read"] --> B["Sequential Consistency<br/>program order per process"]
+    B --> C["Causal Consistency<br/>preserves happens-before"]
+    C --> D["Read-Your-Writes<br/>client sees its own write"]
+    D --> E["Monotonic Read<br/>never regress to older value"]
+    E --> F["Eventual Consistency<br/>replicas converge, no ordering"]
+
+    class A train
+    class B mathOp
+    class C req
+    class D io
+    class E frozen
+    class F lossN
+```
+
+Each rung down this ladder drops a guarantee to buy back latency: linearizability forces a coordination round-trip on every read (etcd, ZooKeeper, Spanner), while eventual consistency (DNS, S3, Cassandra at CL=ONE) gives no ordering promise at all in exchange for never blocking.
+
+**In plain terms.** "Linearizability means every operation waits for a majority of nodes to agree before it counts — so the network round-trip to that majority becomes a hard floor under how fast a single key can change." The cost is not CPU or disk; it is the speed of light between your nodes.
+
+| Symbol | What it is |
+|--------|------------|
+| `RTT` | Round-trip time from the leader to a majority of nodes and back |
+| majority | `floor(N/2) + 1` nodes that must acknowledge before the write is visible |
+| `1000 / RTT` | Ceiling on strictly ordered operations per second against one key |
+| contended key | A single row every request must serialize on — a lock, a counter, a seat |
+
+**Walk one example.** The RTT figures quoted in Section 12, turned into a throughput ceiling:
+
+```
+  RTT to majority       1000 / RTT  =  serial ops/sec on ONE key    typical topology
+      1 ms                              1,000                       same rack (etcd)
+     10 ms                                100                       same region, across AZs
+     50 ms                                 20                       two nearby regions
+    200 ms                                  5                       cross-continent quorum
+```
+
+Read the bottom row carefully: a globally distributed linearizable store can serve enormous aggregate throughput and still permit only five updates per second to any *one* contended row. That is why linearizability is reserved for coordination primitives — leader election, distributed locks, config — where the key count is small and the write rate is naturally low, and why putting a hot counter behind it is the classic way to discover this number the hard way.
+
+---
+
+## 5. Transaction Isolation Levels
+
+SQL standard defines four isolation levels, each preventing certain anomalies:
+
+| Isolation Level | Dirty Read | Non-Repeatable Read | Phantom Read | Write Skew |
+|---|---|---|---|---|
+| READ UNCOMMITTED | Possible | Possible | Possible | Possible |
+| READ COMMITTED | Not possible | Possible | Possible | Possible |
+| REPEATABLE READ | Not possible | Not possible | Possible (*) | Possible |
+| SERIALIZABLE | Not possible | Not possible | Not possible | Not possible |
+
+(*) The SQL standard ALLOWS phantom reads at REPEATABLE READ; neither of the two
+engines you are likely to be asked about actually permits them. InnoDB blocks them
+with next-key locks. PostgreSQL blocks them because Repeatable Read is implemented
+as snapshot isolation — the PostgreSQL docs state outright that "PostgreSQL's
+Repeatable Read implementation does not allow phantom reads," which the standard
+permits because stronger guarantees are always acceptable. What PostgreSQL's
+Repeatable Read DOES allow is a serialization anomaly (write skew) — that is the
+column to watch, not the phantom column.
+PostgreSQL also maps READ UNCOMMITTED onto READ COMMITTED, so dirty reads are
+impossible at every level it offers.
+
+**Anomaly Definitions:**
+
+- **Dirty read**: Transaction reads uncommitted data from another transaction.
+- **Non-repeatable read**: Re-reading a row returns different data because another transaction committed between the two reads.
+- **Phantom read**: A query returning a set of rows returns different rows when re-executed (insert/delete by another transaction).
+- **Lost update**: Two transactions read a value, both modify it, one update overwrites the other.
+- **Write skew**: Two transactions read overlapping data and make decisions that together violate a constraint (classic: two on-call doctors both check "at least one on call" and both go off-call).
+
+**PostgreSQL default**: READ COMMITTED
+**MySQL/InnoDB default**: REPEATABLE READ
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### ACID Implementation in PostgreSQL
+
+```sql
+-- Atomicity: if the debit succeeds but credit fails, entire transaction rolls back
+BEGIN;
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+UPDATE accounts SET balance = balance + 100 WHERE id = 2;
+COMMIT; -- Both or neither
+
+-- If crash occurs after debit but before commit:
+-- PostgreSQL reads WAL on restart, finds uncommitted xact, applies UNDO
+```
+
+### MVCC Mechanics
+
+Multi-Version Concurrency Control maintains multiple versions of rows:
+
+```
+PostgreSQL Row Header:
++--------+--------+--------+--------+
+| xmin   | xmax   | cmin   | ctid   |
++--------+--------+--------+--------+
+  txn that  txn that  cmd id   pointer
+  inserted  deleted           to row
+```
+
+- When a row is updated: old row gets `xmax = current_txn_id`, new row gets `xmin = current_txn_id`
+- A read at snapshot time T sees rows where `xmin <= T` and (`xmax = 0` or `xmax > T`)
+- No locks required for reads — readers never block writers, writers never block readers
+
+**What the formula is telling you.** "Of all the versions of this row sitting in the heap, show me the one that was already born and not yet dead as of the instant my snapshot was taken." Two comparisons against a single number replace what locking databases need an actual lock to decide.
+
+| Symbol | What it is |
+|--------|------------|
+| `xmin` | XID of the transaction that created this row version |
+| `xmax` | XID of the transaction that deleted or superseded it; `0` means still live |
+| `T` | The reading transaction's snapshot horizon — work committed after it is invisible |
+| `xmin <= T` | Birth test: this version already existed when the snapshot was taken |
+| `xmax = 0 or xmax > T` | Death test: not deleted, or deleted only after the snapshot |
+
+**Walk one example.** Four versions of the same logical row, read at snapshot `T = 500`:
+
+```
+  version   xmin   xmax     xmin <= 500 ?        xmax = 0 or > 500 ?      visible?
+  v1         100    250     yes                  no  (250 <= 500)         no  - superseded
+  v2         250    480     yes                  no  (480 <= 500)         no  - superseded
+  v3         480      0     yes                  yes (still live)         YES - this one
+  v4         620      0     no  (620 > 500)      yes                      no  - from the future
+```
+
+Exactly one version passes both tests, and it does so without consulting any other transaction. That is the whole trick: the reader never blocks, because visibility is decided by integer comparison against a snapshot rather than by waiting for a lock to clear. The price appears in the first two rows — `v1` and `v2` are dead to every current reader but still occupy heap space until VACUUM removes them, which is why MVCC buys concurrency with storage and a background cleanup job.
+
+### Durability Is a Dial, Not a Boolean
+
+Section 3 states that a committed transaction survives crashes. Every production database lets you weaken that, and the settings are the first thing to check when someone reports "we lost committed data."
+
+| PostgreSQL `synchronous_commit` | What `COMMIT` waits for | Survives |
+|---|---|---|
+| `off` | nothing — the client is told success before the WAL is flushed | nothing; up to `3 x wal_writer_delay` of commits can vanish |
+| `local` | local WAL flushed to durable storage | primary crash |
+| `remote_write` | standby received the record and wrote it to its filesystem | standby process crash, not standby OS crash |
+| `on` (default) | standby flushed the record to durable storage | primary loss, given a surviving synchronous standby |
+| `remote_apply` | standby applied it and it is visible to queries there | as `on`, and adds read-your-writes on the standby |
+
+InnoDB exposes the same dial as `innodb_flush_log_at_trx_commit`: `1` (the default) flushes the log at every commit; `2` writes to the OS at commit but flushes once a second, so a MySQL crash loses nothing and an OS crash loses up to a second; `0` neither writes nor flushes per commit and loses up to a second on either.
+
+Two things follow. First, `synchronous_commit = off` is not the same class of risk as `fsync = off`: the PostgreSQL docs are explicit that recent commits may be lost but the database is not left inconsistent — the lost transactions look exactly as if they had been cleanly aborted. `fsync = off` risks actual corruption. Second, the remote settings only mean anything when `synchronous_standby_names` is non-empty; with no synchronous standby configured, `remote_apply`, `remote_write` and `local` all collapse to the same local flush as `on`, which is a common way to believe you have cross-node durability and not have it. See [`storage_engines_internals/`](../storage_engines_internals/storage_engines_internals.md) for how the WAL itself is written and [`replication_and_high_availability/`](../replication_and_high_availability/replication_and_high_availability.md) for choosing synchronous standbys.
+
+### Isolation Level Anomaly: Write Skew
+
+```sql
+-- Two on-call doctors, constraint: at least one must be on-call
+-- Session 1                        Session 2
+BEGIN;                              BEGIN;
+SELECT COUNT(*) FROM oncall         SELECT COUNT(*) FROM oncall
+WHERE on_duty = true;               WHERE on_duty = true;
+-- Returns 2                        -- Returns 2 (reads same snapshot)
+
+UPDATE oncall SET on_duty = false   UPDATE oncall SET on_duty = false
+WHERE doctor_id = 1;                WHERE doctor_id = 2;
+
+COMMIT;                             COMMIT;
+-- Result: 0 doctors on call — constraint violated!
+-- Fix: Use SERIALIZABLE isolation or SELECT FOR UPDATE
+```
+
+The two sessions race on the same snapshot, so each `UPDATE` looks safe in isolation while the pair together breaks the constraint:
+
+```mermaid
+sequenceDiagram
+    participant S1 as Session 1
+    participant DB as oncall table
+    participant S2 as Session 2
+
+    S1->>DB: BEGIN
+    S2->>DB: BEGIN
+    S1->>DB: SELECT COUNT(*) WHERE on_duty=true
+    DB-->>S1: 2
+    S2->>DB: SELECT COUNT(*) WHERE on_duty=true
+    DB-->>S2: 2 (same snapshot)
+    S1->>DB: UPDATE doctor 1 on_duty=false
+    S2->>DB: UPDATE doctor 2 on_duty=false
+    S1->>DB: COMMIT
+    S2->>DB: COMMIT
+    Note over S1,S2: Both commit — 0 doctors on call, constraint violated
+```
+
+Neither session ever sees the other's write before committing, because both take the same snapshot (`COUNT = 2`) — the fix is SERIALIZABLE isolation or an explicit `SELECT ... FOR UPDATE` lock.
+
+### Two-Phase Commit (2PC) Protocol
+
+2PC implements distributed atomicity across independent participants with a coordinator-driven prepare/vote/commit handshake:
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant P1 as Participant 1
+    participant P2 as Participant 2
+
+    C->>P1: PREPARE
+    C->>P2: PREPARE
+    P1-->>C: vote yes
+    P2-->>C: vote yes
+    Note over C: all voted yes
+    C->>P1: COMMIT
+    C->>P2: COMMIT
+    P1-->>C: ack
+    P2-->>C: ack
+```
+
+If the coordinator crashes after sending PREPARE but before sending COMMIT, both participants are left holding locks in an uncertain state. This is the blocking property of 2PC and it is not fixable by a timeout: a prepared participant has already promised it can commit and may not unilaterally abort, because the coordinator may have decided COMMIT before it died. The window lasts until the coordinator recovers from its log or an operator resolves the transaction by hand (`COMMIT PREPARED` / `ROLLBACK PREPARED` in PostgreSQL) — indefinitely, in principle, which is exactly why saga-style compensation is preferred over 2PC across service boundaries.
+
+---
+
+## 7. Real-World Examples
+
+- **Banking**: ACID required. PostgreSQL SERIALIZABLE for double-entry bookkeeping ledger. Any weaker isolation risks lost updates.
+- **Shopping cart**: Read-your-writes sufficient. Session-pinned to primary replica.
+- **Social media likes count**: Eventual consistency acceptable. Counter can lag by seconds — Redis INCR with async sync.
+- **DNS**: Eventual consistency. TTL-based propagation across resolvers.
+- **etcd (Kubernetes state store)**: Linearizability required. Raft consensus for every write.
+- **Cassandra (sensor data)**: BASE/AP. 1000s of writes/second from IoT sensors. Stale reads acceptable.
+
+---
+
+## 8. Tradeoffs
+
+### ACID vs BASE
+
+| Dimension | ACID | BASE |
+|-----------|------|------|
+| Consistency guarantee | Strong | Eventual |
+| Availability | Lower (coordination required) | Higher |
+| Latency | Higher (sync replication) | Lower |
+| Scalability | Vertical / limited horizontal | Horizontal |
+| Use case | Financial, inventory, healthcare | Social, analytics, IoT |
+| Examples | PostgreSQL, MySQL, Oracle | Cassandra, DynamoDB, CouchDB |
+
+### CAP: CP vs AP
+
+| Scenario | CP | AP |
+|----------|----|----|
+| Network partition | Reject requests | Serve stale data |
+| Split-brain risk | No (sacrifices availability) | Yes (must reconcile) |
+| Best for | Banking, coordination services | Social features, shopping |
+| Examples | HBase, etcd, CockroachDB | Cassandra, DynamoDB, Riak |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+**Require ACID/SERIALIZABLE**:
+- Financial transactions (payments, ledger, accounting)
+- Inventory management where overselling is unacceptable
+- Booking systems (seat reservation, appointment scheduling)
+
+**Eventual consistency acceptable**:
+- Social media feeds, likes, follower counts
+- Metrics, analytics, logging
+- Product catalog reads (tolerate 1-2 second lag)
+- DNS, CDN caching
+
+**Require linearizability (strongest)**:
+- Distributed lock managers
+- Leader election
+- Configuration stores (etcd, ZooKeeper)
+- Any "exactly once" coordination
+
+**Do not use SERIALIZABLE when**:
+- Write throughput is the primary concern
+- Operations are naturally idempotent
+- Business logic can tolerate slight staleness
+
+---
+
+## 10. Common Pitfalls
+
+**Pitfall 1: Confusing ACID Consistency with CAP Consistency**
+ACID's C = application invariants (constraints). CAP's C = linearizability (all nodes see same data at same time). They are completely different concepts using the same word.
+
+**Pitfall 2: Assuming READ COMMITTED prevents write skew**
+Production incident: An airline overbooking system ran at READ COMMITTED. Two booking transactions both read "1 seat available," both booked it. Fix: SERIALIZABLE isolation or pessimistic locking with `SELECT ... FOR UPDATE`.
+
+**Pitfall 3: Thinking "eventually consistent" is eventually wrong**
+Eventual consistency means data converges — it does not mean data can be permanently wrong. In Cassandra's LWW model, the last write (by timestamp) wins. If clocks drift, the "last" write may not be the intended one. Fix: NTP synchronization, or use conditional writes (CAS operations).
+
+**Pitfall 4: Ignoring PACELC**
+Teams choosing Cassandra for "high availability" don't realize they also chose high latency over consistency in the PACELC else-branch. For same-datacenter applications, a well-tuned PostgreSQL with connection pooling often has lower latency than Cassandra.
+
+**Pitfall 5: A long snapshot is a storage leak, not just a stale read**
+Any MVCC engine must keep every row version that the oldest live snapshot might still need. A reporting transaction left open at REPEATABLE READ therefore pins that horizon: in PostgreSQL, VACUUM can reclaim nothing newer than it and the table bloats; in InnoDB the equivalent symptom is the undo history list growing without bound because purge is blocked. Note this bites hardest on the engine whose *default* is REPEATABLE READ — MySQL/InnoDB — while PostgreSQL's READ COMMITTED default takes a fresh snapshot per statement and releases the horizon between them. Fix (PostgreSQL): set `idle_in_transaction_session_timeout`, watch `pg_stat_activity` for old `xact_start` values, and run long reports on a replica. Fix (InnoDB): watch `History list length` in `SHOW ENGINE INNODB STATUS` and keep reporting transactions short.
+
+---
+
+## 11. Technologies & Tools
+
+| Category | Options | Notes |
+|----------|---------|-------|
+| ACID RDBMS | PostgreSQL, MySQL, Oracle, SQL Server | Full ACID with configurable isolation |
+| NewSQL (global ACID) | CockroachDB, Spanner, TiDB | ACID + horizontal scale |
+| AP NoSQL | Cassandra, DynamoDB, Riak | Tunable consistency |
+| CP NoSQL | HBase, MongoDB (`w:"majority"` + `readConcern:"majority"`), etcd | Consistency over availability |
+| Coordination | ZooKeeper, etcd | Linearizable KV, leader election |
+| Testing isolation | PostgreSQL's `isolationtester` permutation specs, Jepsen | Verify isolation level behavior under concurrency |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q: What are the four ACID properties and what failure does each prevent?**
+**Short:** Atomicity stops partial writes, consistency stops constraint violations, isolation stops concurrency anomalies, and durability stops data loss.
+
+Atomicity prevents partial writes (all-or-nothing). Consistency prevents constraint violations. Isolation prevents concurrency anomalies (dirty reads, lost updates). Durability prevents data loss after commit. Each is implemented by a different mechanism: undo logs for atomicity, constraint checking for consistency, MVCC/locking for isolation, WAL for durability.
+
+**Q: Explain CAP theorem with a concrete production scenario.**
+**Short:** In a Cassandra partition, the minority side must choose between going unavailable or serving stale reads, showing CP versus AP in practice.
+
+During a network partition in a Cassandra cluster with RF=3, CL=QUORUM requires 2/3 nodes. If the partition splits into [2 nodes] and [1 node], the minority partition cannot form a quorum and must choose: go unavailable (CP behavior) or serve stale reads with CL=ONE (AP behavior). Cassandra defaults to AP — it returns stale data rather than erroring. Zookeeper makes the opposite choice: minority nodes stop serving reads to preserve consistency.
+
+**Q: What is PACELC and why is it a better model than CAP?**
+**Short:** PACELC improves on CAP by also modeling the latency-versus-consistency tradeoff that exists during normal, partition-free operation.
+
+CAP only describes behavior during network partitions. PACELC extends it: when there IS a partition (P), choose A or C; ELSE (no partition), choose between Latency and Consistency. Most production systems face the latency vs consistency tradeoff far more often than actual partitions. PACELC reveals that synchronous replication (low latency sacrifice for consistency) vs asynchronous (low latency, eventual consistency) is an ELC tradeoff.
+
+**Q: What is the difference between READ COMMITTED and REPEATABLE READ isolation levels?**
+**Short:** READ COMMITTED takes a fresh snapshot per statement, while REPEATABLE READ holds one consistent snapshot for the whole transaction.
+
+READ COMMITTED takes a new snapshot before each statement in a transaction — reads see committed data from concurrent transactions. REPEATABLE READ takes a snapshot at transaction start — all reads in the transaction see the same consistent view regardless of concurrent commits. In practice, PostgreSQL REPEATABLE READ implements snapshot isolation; MySQL InnoDB implements it using next-key locks to additionally prevent phantom reads.
+
+**Q: What is write skew and how do you prevent it?**
+**Short:** Write skew happens when two transactions each read overlapping data and jointly violate a constraint neither violated alone.
+
+Write skew occurs when two concurrent transactions read overlapping data and make decisions that together violate a constraint, even though each transaction individually is consistent. Classic example: two doctors both check "at least one on-call" and both go off-call. Prevention options: (1) SERIALIZABLE isolation (PostgreSQL uses Serializable Snapshot Isolation, SSI), (2) explicit locking with SELECT FOR UPDATE, (3) application-level coordination.
+
+**Q: When is eventual consistency acceptable, and when is it dangerous?**
+**Short:** Eventual consistency is fine for cosmetic staleness like counts, but dangerous wherever stale reads cause financial or security harm.
+
+Acceptable when: stale data causes only a degraded user experience (social like counts, feed order, search index lag). Dangerous when: stale data causes financial loss (balance reads), security bypass (permission checks), or inventory oversell (stock reads). The test: ask "what is the worst case if two clients see different values simultaneously?" If the answer involves money or safety, require strong consistency.
+
+**Q: How does MVCC differ from pessimistic locking for concurrency control?**
+**Short:** MVCC lets readers and writers proceed without blocking each other, unlike pessimistic locking's mutual blocking waits.
+
+MVCC maintains multiple row versions — readers see a consistent snapshot without blocking writers; writers create new versions without blocking readers. Pessimistic locking blocks reads when a write lock is held (in 2PL) — readers wait for writers and vice versa. MVCC has lower contention but higher storage cost (dead tuples require VACUUM). Pessimistic locking has higher contention but simpler storage. PostgreSQL and MySQL InnoDB use MVCC.
+
+**Q: What is linearizability and why is it expensive?**
+**Short:** Linearizability is expensive because every write needs a round trip to a majority of nodes before it can be acknowledged.
+
+Linearizability guarantees that every operation appears to take effect atomically at some point between its start and completion, and the global order is consistent with real time. It's expensive because: every write must be seen by all nodes before acknowledging, requiring at minimum one round-trip to a majority of nodes (Raft commit). This adds latency proportional to network RTT — typically 1–10ms in a local cluster, 50–200ms across regions.
+
+**Q: Explain read-your-writes consistency and when it breaks.**
+**Short:** Read-your-writes breaks when a load balancer routes a post-write read to a lagging replica instead of back to the writer.
+
+Read-your-writes guarantees that after you write, you always see your own write. It breaks with: (1) load balancers routing your read to a replica that hasn't received the write yet (replication lag), (2) session cookie loss (server-side state cleared), (3) switching from session-sticky read routing to round-robin. Fix: route reads for same user session to primary for a short TTL after writes, or use synchronous replication.
+
+**Q: If ACID guarantees durability, how can a database still lose a committed transaction?**
+**Short:** A committed transaction can still be lost because durability settings like synchronous_commit are a configurable dial, not an absolute.
+
+Because durability is a configurable dial and "committed" only means whatever the current setting waits for. PostgreSQL's `synchronous_commit` ranges from `off`, which returns success before the WAL is even flushed and can lose up to three times `wal_writer_delay` worth of commits, through `local` (local flush only), `remote_write` and the default `on` (a synchronous standby flushed it), up to `remote_apply`. InnoDB's `innodb_flush_log_at_trx_commit` is the same dial: `1` flushes per commit, `2` survives a MySQL crash but not an OS crash, `0` survives neither. Two traps worth naming: the remote settings do nothing at all unless `synchronous_standby_names` is non-empty, so a config that reads `remote_apply` may be giving you plain local durability; and `synchronous_commit = off` is not `fsync = off` — the former loses recent commits as though they had been cleanly aborted, the latter risks genuine corruption. Practical guidance: leave the default on anything financial, and treat a weakened setting as an explicit, documented RPO rather than a performance tweak.
+
+**Q: What is the difference between durability and availability?**
+**Short:** Durability and availability are orthogonal: a system can keep committed writes safe while down, or stay responsive while losing data.
+
+Durability: once committed, a write survives any single-node crash (WAL ensures this). Availability: the system can serve requests at any time. They are orthogonal — a system can be durable but unavailable (committed writes survive crash but system is down for recovery), or available but not durable (in-memory store loses data on crash but was always responsive).
+
+**Q: How does the 2PC protocol relate to ACID and what is its failure mode?**
+**Short:** 2PC's failure mode is a coordinator crash between PREPARE and COMMIT, leaving participants stuck holding locks with no safe way to time out.
+
+2PC (two-phase commit) implements distributed atomicity. Phase 1: coordinator sends PREPARE to all participants, each votes yes/no. Phase 2: if all voted yes, coordinator sends COMMIT. Failure mode: the coordinator crashes after PREPARE but before COMMIT, leaving participants stuck in an uncertain state holding locks. There is no safe timeout out of that state — a participant that voted yes has promised it can commit and cannot unilaterally abort, because the coordinator may already have decided COMMIT and told someone else. Resolution requires the coordinator to recover from its log, or an operator to run `COMMIT PREPARED` / `ROLLBACK PREPARED` manually; a prepared transaction in PostgreSQL also pins the xmin horizon and blocks VACUUM the entire time. This blocking property, not its latency, is the reason cross-service designs prefer sagas with compensating actions.
+
+**Q: What is the difference between soft state and eventual consistency in BASE?**
+**Short:** Soft state describes state changing in the background from replication, while eventual consistency is the guarantee that it converges.
+
+Soft state means the state of the system can change over time without any input, due to replication processes converging in the background. Eventual consistency is the guarantee that this convergence will eventually reach the same value across all replicas given no new updates. Soft state describes the mechanism; eventual consistency is the liveness guarantee.
+
+**Q: In PostgreSQL, what is the MVCC visibility rule for a row?**
+**Short:** A row version is visible only if its xmin had committed by the snapshot and its xmax had not yet completed.
+
+A row version R is visible to transaction T if xmin(R) had committed as of T's snapshot AND xmax(R) had not. Concretely, a snapshot is the triple `xmin:xmax:xip_list` returned by `pg_current_snapshot()`: an XID counts as "completed before the snapshot" when it is below the snapshot's `xmin` (the fast path, no lookup needed), or below the snapshot's `xmax` and absent from the in-progress `xip_list` and recorded as committed in `pg_xact`. Anything at or above the snapshot's `xmax` had not completed and is invisible. Apply that test to xmin to decide whether the version was born yet, and to xmax to decide whether it was already retired; visible means born and not retired. Note the common slip: the test is against the snapshot's `xmax`, not its `xmin` — using `xmin` as the ceiling would hide almost every recently committed row.
+
+**Q: What is causal consistency and how is it stronger than eventual consistency?**
+**Short:** Causal consistency is stronger than eventual consistency because it preserves happens-before order, preventing read-your-own-writes violations.
+
+Causal consistency preserves happens-before relationships: if operation A causally preceded operation B (A's result influenced B), then all nodes see A before B. But concurrent operations (no causal link) can be seen in different orders. Stronger than eventual because it prevents read-your-own-writes violations and "going back in time" anomalies. MongoDB sessions provide causal consistency within a session.
+
+**Q: How do you choose between SERIALIZABLE and REPEATABLE READ in production?**
+**Short:** Use REPEATABLE READ for ordinary OLTP and reporting, but SERIALIZABLE wherever a cross-row invariant like "if count < N" must hold.
+
+Use REPEATABLE READ (or Snapshot Isolation) for: reporting queries needing a consistent view, typical OLTP workloads without cross-row constraint invariants. Use SERIALIZABLE for: financial transactions, booking systems, any logic like "if count < N then insert." PostgreSQL's SSI (Serializable Snapshot Isolation) adds minimal overhead for non-conflicting transactions; only truly conflicting transactions are aborted and retried.
+
+---
+
+## 13. Best Practices
+
+1. Default to READ COMMITTED for OLTP, upgrade to SERIALIZABLE only where business logic requires it.
+2. Set `idle_in_transaction_session_timeout = '30s'` to prevent long-held locks from idle transactions.
+3. Monitor `pg_stat_activity` and `pg_locks` for blocked queries in production.
+4. Understand your database's actual isolation level — MySQL/InnoDB defaults differ from PostgreSQL.
+5. Test write skew scenarios explicitly before going to production for booking or financial systems.
+6. For read-your-writes in microservices, use a short-lived primary read window after writes, not permanent primary reads.
+7. Design data models with the consistency model in mind — do not use eventual-consistent Cassandra for inventory that cannot oversell.
+8. Use `pg_stat_statements` to identify long-running transactions causing MVCC bloat.
+
+---
+
+## 14. Case Study
+
+**Scenario**: An e-commerce platform runs flash sales where a limited-quantity item (100 units) is available. Under load (10,000 concurrent users), items are being oversold. The team is using PostgreSQL with READ COMMITTED.
+
+**Root cause**: Read-modify-write at READ COMMITTED allows a lost update. Both transactions read `stock = 1`, both compute `1 - 1 = 0` in application code, and both write the absolute value `0`. The second write silently overwrites the first: two units are sold out of a stock of one, and the counter still reads `0` so nothing looks wrong.
+
+**Solution applied**:
+
+```sql
+-- Broken: the arithmetic happens in the APPLICATION, so the write is absolute
+-- Session 1:
+BEGIN;
+SELECT stock FROM products WHERE id = 42; -- Returns 1
+-- application computes new_stock = 1 - 1 = 0
+-- (Session 2 concurrently reads the same 1 and computes the same 0)
+UPDATE products SET stock = 0 WHERE id = 42;   -- absolute write, blind to Session 2
+COMMIT; -- both commit, stock = 0, but TWO units were sold. The decrement is lost.
+
+-- Fix 1: Pessimistic lock (SELECT FOR UPDATE)
+BEGIN;
+SELECT stock FROM products WHERE id = 42 FOR UPDATE; -- Blocks Session 2
+UPDATE products SET stock = stock - 1 WHERE id = 42 AND stock > 0;
+COMMIT;
+
+-- Fix 2: Optimistic concurrency with row version
+BEGIN;
+SELECT stock, version FROM products WHERE id = 42;
+-- Check stock > 0 in application
+UPDATE products SET stock = stock - 1, version = version + 1
+WHERE id = 42 AND version = :read_version AND stock > 0;
+-- If rows_affected = 0, retry
+COMMIT;
+
+-- Fix 3: Atomic update (best for this case)
+UPDATE products SET stock = stock - 1
+WHERE id = 42 AND stock > 0
+RETURNING stock;
+-- If returns no row, stock was 0 — handle in application
+```
+
+Fix 3 is safe for a reason worth stating precisely, because it is the interview follow-up: the decrement is relative rather than absolute, and at READ COMMITTED a concurrent `UPDATE` that blocks on the row lock re-evaluates its `WHERE` clause against the newly committed version once the lock clears. So the second transaction sees `stock = 0`, fails `stock > 0`, and updates zero rows — the engine, not the application, adjudicates the race. Note the corollary: this re-evaluation is a READ COMMITTED behaviour. Under REPEATABLE READ the same statement raises `ERROR: could not serialize access due to concurrent update` instead, and the application must retry.
+
+The team chose Fix 3 as it requires no explicit transaction management and is the lowest-latency option. They added a database-level CHECK constraint `CHECK (stock >= 0)` as a safety net. Throughput on the sale is ultimately bounded by how fast one row can be serially updated — every buyer contends on `id = 42` — so the win was in eliminating the application round trip between the read and the write, not in raising a per-row ceiling that no isolation level can move.

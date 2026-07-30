@@ -583,7 +583,7 @@ answer (for `amount=0`), making it a uniquely bad sentinel here.
 
 ## 9. Related Patterns & When to Switch
 
-- **[`recursion_and_problem_solving_patterns`](../recursion_and_problem_solving_patterns/README.md)** —
+- **[`recursion_and_problem_solving_patterns`](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md)** —
   DP IS memoized recursion. If you can write the brute-force recursive
   solution and identify its repeated `(state)` arguments, you've already
   done 80% of the DP work — the rest is adding a cache (top-down) or
@@ -633,11 +633,11 @@ flowchart TD
 
 ## 10. Cross-links
 
-- Concept module: [`dynamic_programming/`](../dynamic_programming/README.md) —
+- Concept module: [`dynamic_programming/`](../dynamic_programming/dynamic_programming.md) —
   formal recurrence derivations, state-design heuristics
 - Case study: [`../case_studies/dynamic_programming_patterns.md`](../case_studies/dynamic_programming_patterns.md) —
   the 900-1100 line deep worked-example companion to this playbook
-- Applied: [`../../database/sql_query_optimization/`](../../database/sql_query_optimization/README.md) —
+- Applied: [`../../database/sql_query_optimization/`](../../database/sql_query_optimization/sql_query_optimization.md) —
   query planners use DP to choose join order (the optimal order to join `n`
   tables is itself an interval-DP-shaped problem over subsets of tables)
 

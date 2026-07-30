@@ -20,7 +20,7 @@ Precompute cumulative sums (`prefix[i] = sum(nums[0..i-1])`) so that the sum of 
 **Anti-signals — looks like prefix sum but isn't:**
 
 - The array is **non-negative** and the question asks for the **longest/shortest** contiguous subarray under a sum constraint — **[Sliding Window](sliding_window.md)** is more direct (O(1) space vs O(n) for the hashmap) when monotonicity holds
-- The array is **mutable** (point updates interleaved with range queries) — plain prefix sum requires O(n) to rebuild after each update; use a **Fenwick tree (Binary Indexed Tree)** or **segment tree** instead (covered in [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/))
+- The array is **mutable** (point updates interleaved with range queries) — plain prefix sum requires O(n) to rebuild after each update; use a **Fenwick tree (Binary Indexed Tree)** or **segment tree** instead (covered in [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md))
 - "Maximum subarray sum" with **no target** — that's Kadane's algorithm (a DP/greedy hybrid), not prefix sum + hashmap (though prefix sum *can* solve it: `max(prefix[j] - min(prefix[i] for i < j))`, this is more naturally framed as DP)
 - You need the actual **subarray itself**, not just a count or existence check, AND the subarray boundaries depend on more than two prefix values — may need a different DP formulation
 
@@ -338,18 +338,18 @@ def subarray_sum_equals_k_fixed(nums: list[int], k: int) -> int:
 
 - **[Sliding Window](sliding_window.md)** — switch when all values are **non-negative** and you need the longest/shortest subarray (not a count) — sliding window is O(1) space vs prefix sum's O(n).
 - **[Hashing Patterns](hashing_patterns.md)** — prefix sum + hashmap *is* a hashing pattern; the "complement" being looked up is `prefix[j] - k` instead of `target - nums[i]`. If you understand Two Sum's complement trick, prefix sum's hashmap trick is the same idea applied to cumulative sums.
-- **Fenwick tree / Segment tree** (see [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/)) — switch when the array is **mutable** (point updates interleaved with range sum queries); plain prefix sums require O(n) rebuild per update, Fenwick trees do both in O(log n).
+- **Fenwick tree / Segment tree** (see [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md)) — switch when the array is **mutable** (point updates interleaved with range sum queries); plain prefix sums require O(n) rebuild per update, Fenwick trees do both in O(log n).
 - **[Dynamic Programming](dynamic_programming.md)** — "maximum subarray sum" (Kadane's) can be derived from prefix sums (`max(prefix[j] - min_prefix_so_far)`) but is usually taught and recognized as a 1-D DP / greedy hybrid.
 
 ---
 
 ## 10. Cross-links
 
-- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/) — array fundamentals, hashmap internals (`defaultdict`, average O(1) operations)
-- [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/) — Fenwick tree / segment tree for the *mutable* version of this problem
-- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/) — why O(n) + O(n) hashmap beats O(n^2) brute force
-- Applied: [`../../database/indexing_deep_dive/README.md`](../../database/indexing_deep_dive/README.md) — materialized aggregate columns / running totals in databases are a real-world prefix-sum analog
-- Master index: [dsa_patterns/README.md](README.md)
+- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — array fundamentals, hashmap internals (`defaultdict`, average O(1) operations)
+- [graphs_tries_and_advanced_structures](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) — Fenwick tree / segment tree for the *mutable* version of this problem
+- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — why O(n) + O(n) hashmap beats O(n^2) brute force
+- Applied: [`../../database/indexing_deep_dive/README.md`](../../database/indexing_deep_dive/indexing_deep_dive.md) — materialized aggregate columns / running totals in databases are a real-world prefix-sum analog
+- Master index: [dsa_patterns/README.md](dsa_patterns.md)
 
 ---
 

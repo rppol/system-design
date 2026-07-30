@@ -427,7 +427,7 @@ isn't enough (every-other-value appears `k > 2` times):
   two has exactly one set bit, and clearing the lowest set bit yields 0
 - `n & (-n)` isolates the LOWEST set bit itself (rather than clearing it) —
   useful in Fenwick trees / Binary Indexed Trees for the "next/previous index"
-  step (see [`database_and_storage_fundamentals/`](../database_and_storage_fundamentals/README.md) for index structures that use this)
+  step (see [`database_and_storage_fundamentals/`](../database_and_storage_fundamentals/database_and_storage_fundamentals.md) for index structures that use this)
 - [Power of Two (LC 231)](https://leetcode.com/problems/power-of-two/), Power of Four (LC 342)
 
 **In plain terms.** "Negating a number in two's complement leaves
@@ -687,8 +687,8 @@ the positions where the total isn't a multiple of `k`.
 
 ## 10. Cross-links
 
-- Concept module: [`number_systems_and_bit_manipulation/`](../number_systems_and_bit_manipulation/README.md) — two's complement representation, signed/unsigned shift semantics, bitwise operator reference, floating-point bit layout
-- Applied cross-link: [`../../java/collections_internals/README.md`](../../java/collections_internals/README.md) — `HashMap`'s resize/rehash uses `(n - 1) & hash` for bucket indexing and a bit-spread function (`h ^ (h >>> 16)`) to mix high and low bits of the hash code, a direct production use of the bit-masking ideas in this file
+- Concept module: [`number_systems_and_bit_manipulation/`](../number_systems_and_bit_manipulation/number_systems_and_bit_manipulation.md) — two's complement representation, signed/unsigned shift semantics, bitwise operator reference, floating-point bit layout
+- Applied cross-link: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — `HashMap`'s resize/rehash uses `(n - 1) & hash` for bucket indexing and a bit-spread function (`h ^ (h >>> 16)`) to mix high and low bits of the hash code, a direct production use of the bit-masking ideas in this file
 
 ---
 
@@ -782,9 +782,9 @@ O(n^2) brute-force pairwise comparison.
 module matter beyond these LeetCode tricks?** Because two's complement,
 sign-extension, and bit-masking aren't just interview party tricks — they
 underpin how `HashMap` spreads hash codes into bucket indices
-([`java/collections_internals/`](../../java/collections_internals/README.md)),
+([`java/collections_internals/`](../../java/collections_internals/collections_internals.md)),
 how Bloom filters and bitset-based data structures pack boolean flags 64-to-a-word,
 and how network protocols pack flags/fields into header bytes
-([`networking_fundamentals/`](../networking_fundamentals/README.md)). The
+([`networking_fundamentals/`](../networking_fundamentals/networking_fundamentals.md)). The
 LeetCode patterns here are the "first contact" with operations you'll
 recognize throughout systems code.

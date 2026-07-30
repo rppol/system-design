@@ -639,13 +639,13 @@ Match phase.*
 
 ## 6. Cross-Links
 
-- [dsa_patterns/README.md](README.md) — the recognition engine these
+- [dsa_patterns/README.md](dsa_patterns.md) — the recognition engine these
   problems drill; if a problem here surprises you (you expected a different
   pattern), revisit §4/§5 (cue table / decision tree)
 - [interview_execution_playbook.md](interview_execution_playbook.md) — once
   you can solve a problem, practice EXECUTING it with full UMPIRE narration,
   not just arriving at the right code
-- [case_studies/](../case_studies/README.md) — 6 problems from this guide
+- [case_studies/](../case_studies/case_studies.md) — 6 problems from this guide
   (LRU Cache, and others) have full 900-1100 line principal-template
   walkthroughs there, including production system context
 - Each pattern's own `.md` file, §7 Problem Bank — for additional drill

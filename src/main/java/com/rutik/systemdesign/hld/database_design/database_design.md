@@ -1,0 +1,996 @@
+# Database Design
+
+<!-- study-paths
+senior: database_design.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+Database design is the process of structuring how data is stored, organized, accessed, and maintained. Good database design directly determines a system's scalability, consistency, query performance, and maintainability. Poor design creates technical debt that compounds exponentially as data volume and traffic grow.
+
+At the highest level, the two dominant paradigms are:
+- **Relational databases (SQL)**: Structured data in tables with a fixed schema, powerful querying via SQL, and strict consistency guarantees (ACID).
+- **Non-relational databases (NoSQL)**: Flexible schemas, optimized for specific access patterns (documents, key-value, column-family, graph), and typically trade consistency for availability and partition tolerance.
+
+Understanding when to use each, how to model data effectively, and how to scale both paradigms is foundational to system design.
+
+---
+
+## Intuition
+
+> **One-line analogy**: Choosing between SQL and NoSQL is like choosing between a filing cabinet with labeled folders (SQL — organized, queryable) and a storage unit where you can put anything anywhere (NoSQL — flexible, scalable).
+
+**Mental model**: SQL databases organize data into tables with rigid schemas and give you ACID guarantees — you always get consistent, correct data. NoSQL databases trade these guarantees for flexibility (any schema), scalability (horizontal sharding), and speed (optimized for specific access patterns). Neither is universally better; the choice depends on your access patterns, scale requirements, and consistency needs.
+
+**Why it matters**: Database design decisions are the hardest to change later. A poorly chosen database type or data model creates performance problems that can't be fixed without expensive migrations. Getting this right at the design stage is critical.
+
+**Key insight**: The SQL vs NoSQL decision hinges on one question: do you need flexible querying (arbitrary WHERE, JOIN, GROUP BY) or do you know exactly how you'll access data? If you need flexible queries, use SQL; if you have a fixed access pattern that needs scale, consider NoSQL.
+
+---
+
+## 2. Core Principles
+
+- **Data Integrity**: Enforcing rules (constraints, foreign keys, types) to prevent corrupt or inconsistent data.
+- **Normalization vs. Denormalization**: Eliminating redundancy (normalize for writes, denormalize for reads).
+- **Indexing**: Trading write overhead and storage for faster reads.
+- **Consistency Models**: ACID (strong) vs. BASE (eventual) — choosing the right model for the use case.
+- **Replication**: Keeping copies of data on multiple nodes for availability and read scaling.
+- **Partitioning/Sharding**: Splitting data across nodes for horizontal write scaling.
+- **Access Pattern First**: Design schemas around how data will be queried, not just how it's structured (especially critical for NoSQL).
+
+---
+
+## 3. SQL vs. NoSQL
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Q1{Need flexible ad-hoc<br/>queries or joins?} -->|yes| SQL([SQL<br/>Postgres, MySQL, Spanner])
+    Q1 -->|no| Q2{What is the<br/>access pattern?}
+
+    Q2 -->|simple key lookup| KV(Key-Value<br/>Redis, DynamoDB)
+    Q2 -->|flexible JSON docs| DOC(Document<br/>MongoDB, Firestore)
+    Q2 -->|write-heavy time series| WIDE(Wide-Column<br/>Cassandra, HBase)
+    Q2 -->|graph traversal| GRAPH(Graph<br/>Neo4j, Neptune)
+    Q2 -->|full-text search| SEARCH(Search<br/>Elasticsearch, Solr)
+
+    class Q1,Q2 mathOp
+    class SQL,KV,DOC,WIDE,GRAPH,SEARCH base
+```
+*The whole SQL-vs-NoSQL choice collapses to two questions: do you need flexible ad-hoc queries, and if not, which access pattern dominates — each NoSQL family below is optimized for exactly one answer to that second question.*
+
+### SQL (Relational)
+
+**Examples:** PostgreSQL, MySQL, Amazon Aurora, CockroachDB, Google Spanner
+
+**Characteristics:**
+- Tabular structure with a defined schema (columns, types, constraints).
+- Relationships via foreign keys; joins across tables.
+- Full SQL query language — flexible, ad-hoc queries.
+- ACID transactions across multiple tables/rows.
+- Vertical scaling primary; horizontal via read replicas or distributed SQL (Spanner, CockroachDB).
+
+**Best for:** Financial systems, ERP, e-commerce orders, any domain requiring complex relational queries and strong consistency.
+
+---
+
+### NoSQL
+
+#### Key-Value Stores
+**Examples:** Redis, DynamoDB (also document), Memcached
+
+- Simplest model: key maps to opaque blob.
+- O(1) reads/writes. No schema.
+- Best for: sessions, caches, feature flags, shopping carts.
+
+#### Document Stores
+**Examples:** MongoDB, Couchbase, Firestore
+
+- Stores JSON/BSON documents. Flexible schema.
+- Rich query support within documents; limited cross-document joins.
+- Best for: content management, catalogs, user profiles, event data.
+
+#### Wide-Column (Column-Family)
+**Examples:** Apache Cassandra, HBase, Amazon Keyspaces
+
+- Rows identified by a partition key. Columns are dynamic per row.
+- Optimized for write-heavy, time-series, append workloads.
+- Best for: IoT telemetry, activity logs, time-series data, recommendation events.
+
+#### Graph Databases
+**Examples:** Neo4j, Amazon Neptune, JanusGraph
+
+- Nodes and edges with properties. Optimized for traversal queries.
+- Best for: social networks, fraud detection, knowledge graphs, recommendation engines.
+
+#### Search Engines (Specialized NoSQL)
+**Examples:** Elasticsearch, Apache Solr, OpenSearch
+
+- Inverted indexes for full-text search.
+- Best for: log analytics, product search, document retrieval.
+
+---
+
+## 4. ACID vs. BASE
+
+### ACID (SQL / Relational)
+
+| Property | Meaning |
+|----------|---------|
+| **Atomicity** | A transaction is all-or-nothing. Either all operations commit or all roll back. |
+| **Consistency** | A transaction moves the database from one valid state to another, respecting all constraints. |
+| **Isolation** | Concurrent transactions behave as if they ran sequentially (configurable via isolation levels). |
+| **Durability** | Committed transactions survive crashes (persisted to durable storage, WAL). |
+
+**Isolation Levels (SQL):**
+- **Read Uncommitted**: Dirty reads possible.
+- **Read Committed**: No dirty reads; non-repeatable reads possible. (PostgreSQL default)
+- **Repeatable Read**: No dirty/non-repeatable reads; phantom reads possible. (MySQL InnoDB default)
+- **Serializable**: Full isolation — no anomalies. Lowest throughput.
+
+### BASE (NoSQL / Distributed)
+
+| Property | Meaning |
+|----------|---------|
+| **Basically Available** | System guarantees availability (per CAP), possibly serving stale data. |
+| **Soft State** | State may change over time even without input (due to eventual consistency propagation). |
+| **Eventually Consistent** | The system will become consistent over time, given no new updates. |
+
+---
+
+## 5. Normalization
+
+Organizing tables to reduce redundancy and improve data integrity.
+
+### Normal Forms
+
+| Form | Rule |
+|------|------|
+| **1NF** | Atomic column values; no repeating groups. Each cell has one value. |
+| **2NF** | 1NF + no partial dependencies (non-key column depends on whole composite key). |
+| **3NF** | 2NF + no transitive dependencies (non-key column depends only on the primary key, not another non-key column). |
+| **BCNF** | Stricter 3NF — every determinant is a candidate key. |
+| **4NF** | No multi-valued dependencies. |
+
+### When to Denormalize
+
+Denormalization intentionally introduces redundancy for read performance:
+- Store computed aggregates (total order count on user table).
+- Duplicate data to avoid expensive joins (embed category name in product table).
+- Pre-join tables for frequently queried combinations.
+
+Trade-off: Faster reads, but updates must propagate to multiple places — risk of inconsistency.
+
+### Constraints — Where Data Integrity Is Actually Enforced
+
+Normalization decides where a fact *lives*; constraints decide whether an invalid fact can be
+written at all. This is the Data Integrity principle from §2, and the reason Best Practice #8
+says to enforce it in the database rather than only in application code: the database is the
+one component every writer must go through. Application-only validation is bypassed by a
+second service, a batch job, a data-fix script, or a psql session — and it cannot see a
+concurrent transaction, so two requests can both pass an application-level "is this email
+taken?" check and both insert.
+
+| Constraint | Guarantees | Note |
+|-----------|------------|------|
+| `NOT NULL` | The column always has a value | Cheapest possible check |
+| `UNIQUE` | No two rows share the value | Backed by an index, so it costs a write like any index |
+| `PRIMARY KEY` | `UNIQUE` + `NOT NULL`, one per table | In InnoDB it also decides physical row order (clustered) |
+| `FOREIGN KEY` | The referenced row exists | Needs an index on the referencing column or every check is a scan |
+| `CHECK` | A boolean expression holds per row | Good for domain rules: `price >= 0`, valid status values |
+| `EXCLUDE` | No two rows *conflict* under chosen operators | PostgreSQL-specific — the clean way to forbid overlapping bookings |
+
+Three behaviours that surprise people:
+
+- **`UNIQUE` does not stop duplicate NULLs.** By default PostgreSQL treats two NULLs as
+  distinct, so a "unique" column can hold any number of NULL rows. `UNIQUE NULLS NOT
+  DISTINCT` is the opt-in that makes NULLs collide.
+- **A foreign key's default `ON DELETE` action is `NO ACTION`, not `CASCADE`.** `NO ACTION`
+  and `RESTRICT` both block the delete; the difference is that `NO ACTION` can be deferred to
+  commit time while `RESTRICT` fires immediately. `CASCADE`, `SET NULL` and `SET DEFAULT`
+  change the child rows instead of rejecting the parent delete — pick deliberately, because
+  `CASCADE` on a widely-referenced table turns one `DELETE` into an unbounded one.
+- **Constraints are not free at scale.** Every `UNIQUE` is an index (a write cost, per §6),
+  and an unindexed FK column makes every parent delete a full scan of the child table — which
+  is exactly Common Pitfall #1.
+
+The counter-argument you will hear is that constraints are painful across shards and in
+NoSQL: a `FOREIGN KEY` cannot span shards, and DynamoDB or Cassandra offer nothing beyond
+per-item conditional writes. That is true, and it is a real cost of the sharded and
+non-relational designs elsewhere in this module — you trade an enforced invariant for a
+reconciliation job that finds violations after the fact.
+
+---
+
+## 6. Indexing
+
+Indexes are data structures that trade storage and write overhead for faster read queries.
+
+### B-Tree Index (Default)
+- Balanced tree; O(log n) lookups, range queries.
+- Excellent for equality and range predicates on ordered data.
+- Used by: PostgreSQL, MySQL, SQL Server.
+
+```
+f = page / entry
+
+  depth    = ceil(log_f(N))
+  capacity = f ^ depth
+```
+
+**What it means.** "`O(log n)` understates how good this is in practice — a B-tree node is a whole disk page holding hundreds of keys, not two, so the tree is astonishingly shallow and a lookup in a hundred-million-row table costs about three page reads."
+
+The reason the base of the logarithm matters so much here is that it is set by hardware, not by the algorithm: the page size divided by the entry size *is* the branching factor. That is why B-trees, not binary search trees, are what databases actually use on disk.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of rows (index entries) |
+| `page` | Disk/buffer-pool page size — `8192` bytes in PostgreSQL, 16KB in InnoDB |
+| `entry` | Bytes per index entry: key plus child pointer. `16` bytes for an 8-byte key plus 8-byte pointer |
+| `f` | Fanout (branching factor): `page / entry` — how many children one node can point at |
+| `depth` | Levels traversed: `ceil(log_f(N))`. Each level is one page read |
+| `capacity` | Rows a tree of a given depth can address: `f ^ depth` |
+
+**Walk one example.** An 8KB page with 16-byte entries, indexing the case study's 100M listings:
+
+```
+  fanout   f = 8192 / 16                    = 512 entries per node
+
+  capacity by depth:
+    depth 1 :  512^1                        =         512 rows
+    depth 2 :  512^2                        =     262,144 rows
+    depth 3 :  512^3                        = 134,217,728 rows
+    depth 4 :  512^4                        = about 68.7 billion rows
+
+  100,000,000 rows  ->  fits inside depth 3 (134M capacity)
+  lookup cost       ->  3 page reads, and the top 2 levels are
+                        almost always already in the buffer pool
+                        so the real cost is ~1 disk read
+```
+
+Two consequences fall straight out of this. First, going from 100M to 1B rows adds exactly one level — index lookups barely degrade with scale, which is why "add an index" is such a reliable fix. Second, the index is not free storage: every one of those 512-entry nodes is a page that must be updated on write, which is the concrete cost behind "each index slows writes" in the pitfalls below.
+
+### Hash Index
+- O(1) exact lookups. No range queries.
+- Used by: Redis, some memory-optimized tables.
+
+### Composite Index
+- Index on (col_a, col_b). Usable for queries on col_a alone OR (col_a, col_b). NOT col_b alone (leftmost prefix rule).
+
+### Covering Index
+- Index contains all columns needed for a query — no table row lookup needed. Very fast.
+
+### Partial Index
+- Index only rows matching a condition: `CREATE INDEX ON orders(user_id) WHERE status = 'active'`.
+
+### Full-Text Index
+- Inverted index for text search. PostgreSQL `tsvector`, MySQL FULLTEXT, Elasticsearch.
+
+### Index Pitfalls
+- Over-indexing: Each index slows writes and uses storage.
+- Index on low-cardinality columns (boolean, status with 3 values) — often ignored by the query planner.
+- Not using `EXPLAIN ANALYZE` to verify index usage.
+
+---
+
+## 7. Replication
+
+Replication copies data from one node (primary) to others (replicas).
+
+### Primary-Replica (Master-Slave)
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    W([Writes]) --> P(Primary)
+    P -->|WAL / binlog| R1(Replica 1)
+    P -->|WAL / binlog| R2(Replica 2)
+    P -->|WAL / binlog| R3(Replica 3<br/>read traffic)
+
+    class W req
+    class P base
+    class R1,R2,R3 frozen
+```
+*Writes land on the primary and stream via WAL/binlog to every replica; whether the primary waits for a replica to confirm (below) determines the durability/latency tradeoff.*
+
+- **Synchronous replication**: Primary waits for at least one replica to confirm before acknowledging write. Stronger durability, higher write latency.
+- **Asynchronous replication**: Primary acknowledges immediately; replicas catch up. Lower latency, risk of data loss on failover.
+- **Semi-synchronous**: At least one replica must acknowledge.
+
+### Read Replicas
+- Direct read traffic to replicas, writes to primary.
+- Replicas may lag (replication lag) — stale reads possible.
+- Scale reads horizontally without scaling writes.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant P as Primary
+    participant R as Replica
+
+    App->>P: write balance = 900
+    P-->>App: write ack
+    P->>R: async replication in flight
+    App->>R: read balance
+    Note over R: replication lag window<br/>update not yet applied
+    R-->>App: balance = 1000, stale
+    Note over P,R: replica catches up moments later
+```
+*Because replication is asynchronous, a read sent to the replica immediately after a write to the primary can still return the pre-write value — the read-your-own-writes gap called out in Common Pitfall #7.*
+
+### Multi-Primary (Multi-Master)
+- Multiple nodes accept writes. Conflict resolution required.
+- Examples: MySQL Group Replication, CockroachDB, Cassandra (leaderless).
+
+### Leaderless Replication (Dynamo-style)
+- Any node accepts writes. Uses quorum writes/reads (W + R > N for consistency).
+- `N` = replication factor, `W` = write quorum, `R` = read quorum.
+- Examples: Cassandra, DynamoDB, Riak.
+
+**The idea behind it.** "If the set of nodes you wrote to and the set you read from are big enough that they cannot possibly be disjoint, then every read is guaranteed to touch at least one node holding the newest write — and a timestamp comparison picks it out."
+
+It is the pigeonhole principle applied to replicas. There is no coordination, no leader, and no consensus round involved; the guarantee comes purely from set sizes being forced to overlap. What you tune is *where* you pay for that overlap — on the write side, the read side, or split between them.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Replication factor — how many nodes hold a copy of each key |
+| `W` | Write quorum — nodes that must acknowledge before a write is reported successful |
+| `R` | Read quorum — nodes that must respond before a read is answered |
+| `W + R > N` | The overlap condition. Guarantees at least `W + R - N` nodes are common to both sets |
+| `N - W` | Node failures a write can survive and still succeed |
+| `N - R` | Node failures a read can survive and still succeed |
+
+**Walk one example.** The N=3 configuration in the Cassandra Quorum diagram below, compared with a fast-but-unsafe alternative:
+
+```
+  N = 3, W = 2, R = 2   (the diagram's setting)
+    W + R = 2 + 2 = 4  >  3          -> overlap = 4 - 3 = 1 node
+    guaranteed : every read sees >= 1 node with the latest write
+    tolerates  : N - W = 1 node down on write
+                 N - R = 1 node down on read
+
+  N = 3, W = 1, R = 1   (lowest latency)
+    W + R = 1 + 1 = 2  is NOT > 3    -> overlap = -1, i.e. none guaranteed
+    a read can hit the two nodes that never received the write
+    -> stale value returned, silently
+
+  N = 3, W = 3, R = 1   (read-optimized, still safe)
+    W + R = 3 + 1 = 4  >  3          -> overlap = 1
+    reads are single-node fast, but ANY node down blocks all writes
+```
+
+Read the three together and the tuning knob is obvious: the sum is what buys correctness, and how you split it between `W` and `R` decides whether writes or reads carry the availability risk. Cassandra and DynamoDB expose exactly this as a per-query setting, which is why the same cluster can serve a strongly-consistent balance read and an eventually-consistent view counter.
+
+---
+
+## 8. Architecture Diagrams
+
+### Primary-Replica Setup
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    A([Application]) -->|write| P(Primary)
+    A -->|read| R1(Replica 1)
+    A -->|read| R2(Replica 2)
+    P -.->|async replication| R1
+    P -.->|async replication| R2
+
+    class A io
+    class P base
+    class R1,R2 frozen
+```
+*The application routes writes to the primary and reads to either replica; the primary asynchronously streams changes to both replicas after it has already acknowledged the write.*
+
+### Cassandra Quorum
+```mermaid
+sequenceDiagram
+    participant CL as Client
+    participant NA as Node A / Coordinator
+    participant NB as Node B
+    participant NC as Node C
+
+    CL->>NA: write key, value
+    NA->>NB: replicate
+    NA->>NC: replicate
+    NB-->>NA: ack
+    NC-->>NA: ack
+    Note over NA: 2 of 3 acks received, write succeeds
+    NA-->>CL: write ack
+
+    CL->>NA: read key
+    NA->>NB: read
+    NB-->>NA: value at timestamp
+    Note over NA: 2 of 3 responses, latest value wins
+    NA-->>CL: read response
+```
+*With N=3, W=2, R=2 (W+R > N), the coordinator only needs 2-of-3 acks to satisfy a write and 2-of-3 responses to resolve a read to the latest value — guaranteeing at least one replica overlaps between any write and any read.*
+
+### ACID Transaction Flow
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    T([BEGIN TRANSACTION<br/>2 UPDATEs + COMMIT]) --> W(WAL persisted to disk<br/>before commit ack)
+    W --> B(Data pages updated<br/>in buffer pool)
+    B --> C([Committed<br/>durable, atomic])
+
+    class T req
+    class W mathOp
+    class B base
+    class C train
+```
+*The WAL is fsynced to disk before the client's COMMIT is acknowledged — durability comes from the log, not from the later, buffered data-page write.*
+
+---
+
+## 9. Real-World Examples
+
+### Amazon
+- **DynamoDB**: Key-value/document store for shopping cart, sessions, product catalog.
+- **Aurora**: MySQL/PostgreSQL-compatible relational DB with 6-way replication across 3 AZs.
+- **Redshift**: Columnar data warehouse for analytics.
+- Orders/payments use ACID relational DBs; catalog/sessions use DynamoDB for scale.
+
+### Netflix
+- **Cassandra**: Stores viewing history, playback state, user activity (write-heavy, append).
+- **MySQL**: Account, billing, and subscription data (ACID required).
+- **EVCache (Redis)**: Session and metadata caching.
+
+### Twitter / X
+- **MySQL** with heavy sharding for tweet storage, later migrated to Manhattan, their proprietary distributed key-value store.
+- **FlockDB** for the social graph — a MySQL-backed distributed graph store holding over 13 billion edges at 20k writes/sec and 100k reads/sec, since folded into Manhattan.
+- **Redis** for materialized home timelines (fan-out-on-write into a per-user list).
+- **Snowflake** (their ID generator) for globally unique, roughly time-ordered tweet IDs.
+
+### Google
+- **Bigtable**: Wide-column store for Search indexes, Maps, Gmail.
+- **Spanner**: Globally distributed relational DB with external consistency (TrueTime API).
+- **Firestore**: Document store for Firebase apps.
+
+### Uber
+- **Schemaless** (MySQL-based): Custom wide-column layer on top of MySQL, holding core trip data.
+- Migrated off PostgreSQL to MySQL in 2016: Postgres replicates physical WAL rather than logical rows, and its immutable-tuple/indirect-index layout meant an update to one indexed column rewrote every index entry for that row — both amplified writes and replication bandwidth at Uber's scale.
+
+---
+
+## 10. Tradeoffs
+
+| Dimension | SQL | NoSQL |
+|-----------|-----|-------|
+| Schema | Rigid, enforced | Flexible, schemaless |
+| Consistency | Strong (ACID) | Eventual (BASE) |
+| Query flexibility | High (SQL) | Limited (access-pattern-driven) |
+| Horizontal scaling | Hard (distributed SQL helps) | Easier (built for distribution) |
+| Joins | Native | Application-level or denormalized |
+| Transactions | Multi-row, multi-table | Often single-row only |
+| Maturity | Decades, well-understood | Varies by system |
+
+---
+
+## 11. When to Use / When NOT to Use
+
+### SQL — Use When:
+- Data has complex relationships requiring joins.
+- Strong consistency and ACID transactions are required (payments, inventory).
+- Ad-hoc querying needs are unknown at design time.
+- Team is more familiar with relational modeling.
+
+### SQL — Avoid When:
+- Massive write throughput exceeds a single primary's capacity.
+- Data is hierarchical/nested (JSON documents) — schema rigidity becomes a burden.
+- Access pattern is purely key-value lookups.
+
+### NoSQL — Use When:
+- Extremely high write throughput (IoT, logging, analytics).
+- Access patterns are well-known and simple (lookup by ID, range by timestamp).
+- Schema flexibility is needed (evolving product attributes).
+- Horizontal scalability is a primary requirement.
+
+### NoSQL — Avoid When:
+- Complex transactional integrity across multiple entities is required.
+- Team needs ad-hoc analytical queries.
+- Strong consistency is non-negotiable.
+
+---
+
+## 12. Common Pitfalls
+
+1. **Missing indexes on foreign keys**: Every join condition should have an index. Unmissed FK indexes cause full table scans.
+2. **N+1 query problem**: Fetching a list, then querying each item individually. Use JOINs or batch fetches.
+3. **Selecting all columns (`SELECT *`)**: Fetches unnecessary data; prevents covering indexes.
+4. **No connection pooling**: New DB connection per request = 5-50ms overhead + connection limit exhaustion.
+5. **Over-normalization for read-heavy workloads**: Joins are expensive at scale; consider selective denormalization.
+6. **Schema migrations without a plan**: Adding a column to a billion-row table locks the table in MySQL. Use pt-online-schema-change or pg_repack.
+7. **Ignoring replication lag**: Read replicas can be seconds behind. Reading immediately after writing to replica returns stale data.
+8. **Not using EXPLAIN**: Assuming queries are using indexes without verifying via query planner.
+9. **Storing large blobs in DB**: Images, PDFs in database columns waste memory and slow replication. Use object storage (S3) and store URLs.
+10. **Poor shard key selection**: Monotonically increasing keys (auto-increment) cause hot partitions in distributed systems.
+
+```
+total = Q x rt
+
+  Q_naive = 1 + N
+  Q_batch = 2
+  Q_join  = 1
+```
+
+**Stated plainly.** "The N+1 problem is not that any single query is slow — it is that you pay the network round trip `N` extra times, so a page that renders 100 rows spends 100 round trips doing what one round trip could have done."
+
+The name is the diagnosis: `1` query to get the list, then `N` more to hydrate each item. Nothing in the query plan looks wrong, which is why it survives code review and only shows up when the list grows.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Rows in the fetched list — the loop count |
+| `Q_naive` | Queries issued by the naive pattern: `1 + N` |
+| `Q_join` | Queries after a JOIN or eager load: `1` |
+| `Q_batch` | Queries after a batched `WHERE id IN (...)`: `2` — one for the list, one for all children |
+| `rt` | Round-trip cost per query — network plus parse plus plan, not the row work itself |
+| `total` | Wall-clock cost: `Q x rt` |
+
+**Walk one example.** A list page rendering 100 rows, at a modest 2ms per round trip:
+
+```
+  naive   : Q = 1 + 100 = 101 queries  ->  101 x 2ms  =  202 ms
+  batched : Q = 2 queries              ->    2 x 2ms  =    4 ms
+  join    : Q = 1 query                ->    1 x 2ms  =    2 ms
+
+  speedup, naive -> join   : 202 / 2   =  101x
+  speedup, naive -> batched: 202 / 4   =   50x
+```
+
+Note that the cost is linear in `N` while the fix is constant, so this defect gets worse exactly as the product gets more successful — a list that was 10 items in testing and 100 in production turns a 22ms page into a 202ms one with no code change. Batching to 2 queries captures nearly all of the win and is usually easier than restructuring into a JOIN.
+
+---
+
+## 13. Technologies & Tools
+
+| Technology | Type | Notes |
+|------------|------|-------|
+| PostgreSQL | Relational SQL | Feature-rich, JSONB support, great for most use cases |
+| MySQL / Aurora | Relational SQL | Web workloads, AWS-native Aurora adds replication |
+| CockroachDB | Distributed SQL | Geo-distributed ACID, Postgres-compatible |
+| Google Spanner | Distributed SQL | Global consistency via TrueTime |
+| MongoDB | Document | Flexible schema, rich queries, ACID in v4+ |
+| Cassandra | Wide-column | Massive write scale, tunable consistency |
+| DynamoDB | Key-value + document | Fully managed, predictable performance |
+| Redis | Key-value | In-memory, also used as primary DB for some use cases |
+| Neo4j | Graph | Cypher query language, ACID |
+| Elasticsearch | Search + analytics | Inverted index, full-text search, log analytics |
+| ClickHouse | Columnar OLAP | Extremely fast analytical queries |
+| Snowflake | Cloud data warehouse | OLAP at scale, separation of compute/storage |
+
+---
+
+## 14. Interview Questions with Answers
+
+**Q1: When would you choose NoSQL over SQL?**
+**Short:** NoSQL suits known, simple access patterns where horizontal write scalability outweighs query flexibility.
+
+A: Choose NoSQL when the access pattern is known and simple, and horizontal write scalability matters more than query flexibility. That covers key-value or range lookups, schema flexibility for evolving documents, and data models that naturally fit a non-relational structure (graphs, time-series, documents).
+
+**Q2: What is the N+1 query problem and how do you fix it?**
+**Short:** The N+1 query problem is one query per list item, fixed by a single JOIN or batch WHERE IN.
+
+A: Fetching a list of N entities, then making one additional query per entity. Fix: use a JOIN in a single query, or use an ORM eager-loading feature (`include`/`select_related`), or batch fetch with a WHERE id IN (...) clause.
+
+**Q3: Explain the difference between clustered and non-clustered indexes.**
+**Short:** A clustered index defines a table's on-disk row order; a non-clustered index stores pointers to those rows.
+
+A: A clustered index defines the physical order of rows on disk (there can only be one per table — in MySQL InnoDB, the primary key is always clustered). A non-clustered index is a separate structure that stores the indexed column(s) plus a pointer to the actual row. Clustered indexes make range scans on the primary key very fast.
+
+**Q4: What is a covering index?**
+**Short:** A covering index contains every column a query needs, letting the planner skip the table entirely.
+
+A: An index that contains all columns required to satisfy a query — the query planner never needs to access the actual table rows (index-only scan). Example: query `SELECT name FROM users WHERE email = ?` — an index on `(email, name)` covers it entirely.
+
+**Q5: What is database sharding and when would you use it?**
+**Short:** Database sharding horizontally partitions rows across nodes, used when one node can't handle the load.
+
+A: Horizontal partitioning of data across multiple database nodes, each holding a subset of rows. Use it when a single DB node cannot handle the write throughput or data volume. The shard key determines which node stores each row.
+
+**Q6: What is eventual consistency and when is it acceptable?**
+**Short:** Eventual consistency lets replicas converge over time and suits data where slight staleness is tolerable.
+
+A: A consistency model where, given no new updates, all replicas will converge to the same value over time. Acceptable when slight staleness is tolerable: social media likes/counts, product view counts, recommendation data. Not acceptable for: bank balances, inventory, authentication tokens.
+
+**Q7: How would you handle schema migrations on a live production database?**
+**Short:** Live schema migrations use expand-then-contract so old and new code both work against the schema at once.
+
+A: Use backward-compatible migrations in an expand-then-contract sequence, so old and new application code can both run against the schema at once. Concretely: add columns before removing them; version migrations with Flyway or Liquibase; use online schema change tools (pt-osc, gh-ost for MySQL; pg_repack for PostgreSQL) to avoid table locks; deploy application code that handles both old and new schema; then drop the old schema in a follow-up migration.
+
+**Q8: What are the tradeoffs of read replicas?**
+**Short:** Read replicas scale read throughput but introduce replication lag and complicate failover.
+
+A: Pros: Scale read throughput, geographic distribution, offload analytics. Cons: Replication lag causes stale reads, adds operational complexity, failover to replica requires application reconfiguration or use of a proxy (ProxySQL, RDS Proxy).
+
+**Q9: Explain the difference between optimistic and pessimistic locking.**
+**Short:** Pessimistic locking blocks concurrent readers/writers upfront; optimistic locking checks a version counter on write.
+
+A: Pessimistic locking: lock the row when reading, preventing concurrent modifications until the lock is released (`SELECT FOR UPDATE`). Suitable when conflicts are frequent. Optimistic locking: no lock on read; on write, verify a version counter hasn't changed — if it has, retry. Better for low-contention scenarios.
+
+**Q10: What is a write-ahead log (WAL)?**
+**Short:** A write-ahead log durably records changes before they're applied, enabling crash recovery and replication.
+
+A: A durability mechanism where changes are written to a sequential log (WAL) before being applied to data pages. On crash recovery, the WAL is replayed to restore committed transactions. It enables ACID durability and is the foundation of streaming replication in PostgreSQL.
+
+**Q11: How does Cassandra achieve high write throughput?**
+**Short:** Cassandra achieves high write throughput with LSM-trees: sequential memtable and commit-log writes flushed to SSTables.
+
+A: Cassandra uses LSM-trees (Log-Structured Merge trees). Writes go to an in-memory memtable + commit log (sequential disk write). Memtable is periodically flushed to immutable SSTable files on disk. SSTables are periodically compacted. Sequential writes are extremely fast; reads are more complex (merge multiple SSTables).
+
+**Q12: What is the difference between OLTP and OLAP databases?**
+**Short:** OLTP handles high-throughput normalized transactions; OLAP handles denormalized analytical aggregations.
+
+A: OLTP (Online Transaction Processing): high-throughput short transactions, normalized schemas, row-oriented storage, low latency. Examples: PostgreSQL, MySQL. OLAP (Online Analytical Processing): complex aggregations over large datasets, denormalized star/snowflake schemas, columnar storage, high throughput analytical queries. Examples: Redshift, BigQuery, ClickHouse.
+
+**Q13: When would you deliberately denormalize a schema, and what does it cost you?**
+**Short:** Denormalize when read latency matters more than write simplicity, accepting that updates must propagate to duplicates.
+
+A: Denormalize when read latency matters more than write simplicity, by storing a computed aggregate or duplicating data to avoid an expensive join. Section 5 frames the tradeoff directly: normalization eliminates redundancy and keeps updates cheap (change one row), while denormalization duplicates that data across rows or tables so a read never has to join, at the cost that every update must now propagate to every duplicate or risk inconsistency. A common middle ground is normalizing the write path (source of truth) while maintaining a denormalized read-optimized copy updated asynchronously — exactly what a cache-aside layer or a materialized view does. Denormalize only the specific fields a hot query path actually needs, not entire tables, so the blast radius of an inconsistency stays small.
+
+**Q14: Why doesn't a composite index on `(col_a, col_b)` speed up a query that filters only on `col_b`?**
+**Short:** A composite index on (col_a, col_b) cannot serve a col_b-only filter due to the leftmost-prefix rule.
+
+A: A composite B-tree index is physically sorted by the first column, then the second within each first-column value. This is the leftmost-prefix rule from Section 6: a query on `col_a` alone, or on `(col_a, col_b)` together, can use the index directly since both match a contiguous range of the sorted structure, but a query on `col_b` alone has to check every distinct `col_a` value's sub-range, which degrades toward a full index scan. If both single-column lookups are common, you generally need two separate indexes — one on `(col_a, col_b)` and one on `(col_b)` alone — rather than expecting one composite index to serve both directions. Always confirm with `EXPLAIN ANALYZE` (Section 6's Index Pitfalls) rather than assuming a composite index covers a query it doesn't.
+
+**Q15: Why would you vertically split a table into "hot" and "cold" columns instead of keeping everything in one row?**
+**Short:** Splitting hot and cold columns keeps frequently-accessed data small enough to stay resident in the buffer pool.
+
+A: Splitting keeps frequently-accessed columns small enough to stay resident in the buffer pool while large, rarely-read columns don't compete for that memory. The Vitess case study's Key Design Decision #4 does exactly this: `listings_hot` holds price, availability, title, and photo_url (queried on every search result), while `listings_cold` holds the full description, amenities JSON, and house rules (loaded only on the listing detail page) — keeping the hot table around 5GB, small enough to fit entirely in InnoDB's buffer pool so search queries hit memory instead of disk. This is a column-store technique retrofitted onto a row-oriented database: instead of fetching an entire wide row for a query that only needs four fields, you fetch only the table that has those four fields. Split along access-frequency lines, not along logical/entity lines — the goal is keeping the frequently-scanned working set small, not achieving a "clean" schema.
+
+**Q16: Why do monotonically increasing shard keys (like an auto-increment ID) create hot partitions?**
+**Short:** Monotonically increasing shard keys create hot partitions because every new row lands on the same shard.
+
+A: A key that always increases means every new row's key is greater than all previous keys, so every insert lands on the same shard. Section 12's pitfall #10 calls this out directly, and the Vitess case study hits a variant of it: a single property-management company's 12M listings all shared one `user_id`, so that shard's storage grew to 800GB (versus ~125GB for others) and its write throughput ran at 4x its peers. The fix in both cases is the same shape — choose a shard key with naturally distributed values (a hash of the ID, not the ID itself) or detect and manually split outlier keys, which the case study does by splitting the company into 50 regional sub-accounts. Always plot the expected key distribution before picking a shard key, since a key that looks fine at 1M rows can concentrate catastrophically at 100M.
+
+**Q17: Why enforce integrity with database constraints instead of validating in application code?**
+**Short:** Database constraints enforce integrity for every writer and catch races application-level checks miss.
+
+A: Because the database is the one component every writer has to pass through, and it is the only layer that sees concurrent transactions. Application-level validation is bypassed the moment a second service, a batch job, a data-fix script, or a `psql` session writes to the same table — and even within one service, two concurrent requests can both pass an "is this email taken?" check and both insert, because neither sees the other's uncommitted row; a `UNIQUE` constraint rejects the second one. Section 5's constraint table maps each guarantee to its enforcement cost: `NOT NULL` is nearly free, `UNIQUE` is an index (so it carries the write cost of §6), and a `FOREIGN KEY` on an unindexed child column turns every parent delete into a full scan, which is Common Pitfall #1. Two defaults regularly catch people out — `UNIQUE` permits unlimited NULL rows unless you write `UNIQUE NULLS NOT DISTINCT`, and a foreign key's default `ON DELETE` action is `NO ACTION` (block the delete), not `CASCADE`. Enforce every invariant you can in the schema, and accept that the ones you cannot (cross-shard references, NoSQL stores with no constraint layer) now need a reconciliation job instead.
+
+---
+
+## 15. Best Practices
+
+1. **Design for access patterns**: In NoSQL, design your schema around the queries you'll run, not the entity relationships.
+2. **Use connection pooling**: PgBouncer (PostgreSQL), ProxySQL (MySQL) — never create raw connections per request.
+3. **Index foreign keys**: Any column used in a JOIN or WHERE clause should be indexed.
+4. **Use EXPLAIN ANALYZE**: Always verify query plans on production-like data volumes.
+5. **Set up replication before you need it**: Retrospectively enabling replication on a large DB is painful.
+6. **Avoid `SELECT *`**: Always specify required columns; it prevents table bloat from affecting query performance.
+7. **Use pagination**: Never return unbounded result sets; use LIMIT/OFFSET or cursor-based pagination.
+8. **Enforce constraints in the DB**: Don't rely solely on application logic; use DB-level NOT NULL, UNIQUE, and FK constraints.
+9. **Monitor slow query log**: Enable and review regularly.
+10. **Test with production-like data volume**: Queries that work fine on 10K rows may fail on 100M rows.
+
+---
+
+## Cross-Perspective: LLD Connections
+
+**LLD View — Design Patterns That Implement Database Design**
+
+- **Repository** — Abstracts data access behind an interface (`UserRepository`, `OrderRepository`). The service layer depends on the interface; the concrete class uses JDBC, JPA, or a NoSQL driver. Swapping databases requires only a new Repository implementation, not touching business logic.
+- **Factory** — A connection factory creates and pools database connections, hiding driver-specific construction details (URL, credentials, pool size) from callers.
+- **Strategy** — Query routing (read replica vs primary write), transaction isolation levels, and index selection strategies are encapsulated as interchangeable Strategy implementations configured per-operation.
+- **Decorator** — Caching and query-logging decorators wrap Repository calls, adding observability and performance without modifying the Repository implementations.
+
+---
+
+**Cross-references:** [backend/database_internals_and_indexing](../../backend/database_internals_and_indexing/database_internals_and_indexing.md) (B-tree/LSM internals behind the indexing strategies above), [backend/query_optimization](../../backend/query_optimization/query_optimization.md), [database/README](../../database/README.md) (all 29 modules — schema design, normalization, NoSQL data modeling), [database/schema_design_and_normalization](../../database/schema_design_and_normalization/schema_design_and_normalization.md), [hld/database_sharding](../database_sharding/database_sharding.md) (the Partitioning/Sharding principle in §2, developed in full: shard-key selection, resharding, hotspots, cross-shard queries), [hld/cap_theorem](../cap_theorem/cap_theorem.md) (why the ACID-vs-BASE choice in §4 is forced, and what PACELC adds to it).
+
+---
+
+## 16. Case Study: Designing a Database for an E-Commerce Platform
+
+**Requirements:** 10M products, 50M users, 100M orders/year. Reads: 100K/sec. Writes: 5K/sec. Latency: <50ms for product page, <200ms for order placement.
+
+**Design:**
+
+1. **Product Catalog** → MongoDB (document store): Products have variable attributes (a shoe has size/color, a book has ISBN/author). Flexible schema is ideal. Index on category, price, brand for filtering.
+
+2. **User Accounts + Auth** → PostgreSQL: Structured, relational. User → Address (1:N), User → PaymentMethod (1:N). ACID for account updates.
+
+3. **Orders + Payments** → PostgreSQL with ACID: Critical financial data. Tables: orders, order_items, payments, refunds. Use transactions to ensure atomicity of order placement + inventory decrement.
+
+4. **Inventory** → PostgreSQL with pessimistic locking: `SELECT FOR UPDATE` on inventory row during order placement to prevent overselling.
+
+5. **Session + Cart** → Redis: Fast key-value, TTL-based expiry, write-back persistence to DB.
+
+6. **Search** → Elasticsearch: Full-text search across product name, description. Sync from MongoDB via change streams.
+
+7. **Analytics** → Redshift/BigQuery: Nightly ETL from OLTP stores. Ad-hoc queries on orders, revenue, funnel analysis.
+
+8. **Read scaling** → PostgreSQL read replicas for user/order reads. Redis caching for product detail pages (cache-aside, 5-minute TTL).
+
+**Result:** Product pages at 8ms P99 (Redis hit), order placement at 120ms P99 (DB write), full-text search at 30ms P99 (Elasticsearch).
+
+---
+
+## Case Study: Monolithic MySQL to Vitess Migration (Listings Marketplace)
+
+> **How to read this case study**: this is an **illustrative composite** modelled on a
+> short-term-rental marketplace, not a post-mortem of any named company. Vitess itself and
+> everything it does here is real and publicly documented — VTGate, VSchema, vindexes,
+> VReplication/MoveTables, and its production use at YouTube, Slack, GitHub, Square,
+> Shopify, Etsy and Pinterest (see `vitessio/vitess` `ADOPTERS.md`). The scale figures,
+> latency numbers, costs and incident details below are constructed so the arithmetic that
+> follows each one is concrete and checkable; treat them as a worked example, not as
+> published metrics. The same convention as the explicitly fictional case studies elsewhere
+> in this repo.
+
+### Problem Statement
+
+The marketplace operated a monolithic MySQL database for its listings, bookings, and reviews. The database had hit IOPS limits at 70% capacity; a hardware upgrade would extend runway by ~12 months but would not solve the underlying scaling ceiling. Scale at migration time:
+
+- 100M listings, 500M reviews, 200M user accounts
+- Data volume: 2 TB on the primary MySQL instance
+- Write throughput: 30k QPS sustained, 50k QPS peak (booking surges)
+- Read throughput: 250k QPS (after caching layer)
+- Latency SLA: p99 read < 20 ms, p99 booking write < 100 ms
+- Availability target: 99.99% during migration (zero-downtime requirement)
+- Growth rate: 40% YoY for both data volume and QPS
+
+The goal was to shard while keeping MySQL wire-protocol compatibility so the existing 600+ application services and ORM (Active Record / JDBC) would not need to be rewritten. Vitess (the YouTube-originated sharding layer) was selected.
+
+### Architecture Overview
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    App([App services<br/>Rails / Java]) -->|MySQL wire protocol| GW(VTGate proxy<br/>stateless, autoscale)
+
+    GW -->|routes by VSchema| T0
+    GW -->|routes by VSchema| T1
+    GW -->|routes by VSchema| T2
+    T0@{ icon: "logos:mysql", form: "square", label: "VTTablet shard0<br/>MySQL", pos: "b", h: 44 }
+    T1@{ icon: "logos:mysql", form: "square", label: "VTTablet shard1<br/>MySQL", pos: "b", h: 44 }
+    T2@{ icon: "logos:mysql", form: "square", label: "VTTablet shard2<br/>MySQL", pos: "b", h: 44 }
+
+    T0 --> Topo(Topology service<br/>etcd / ZooKeeper)
+    T1 --> Topo
+    T2 --> Topo
+
+    class App io
+    class GW mathOp
+    class Topo frozen
+```
+*VTGate is a stateless MySQL-wire-protocol proxy that routes to 16 VTTablet-managed shards by VSchema (3 of 16 shown); each tablet reports its shard map, VSchema, and health back to the etcd/ZooKeeper-backed topology service.*
+
+### Key Design Decisions
+
+1. **Vitess for MySQL wire-protocol compatibility** — VTGate speaks MySQL protocol. Application code, ORMs, and admin tools (mysqldump, mysqlshell) work unchanged. Avoided rewriting 600+ services.
+   - *Alternative rejected*: CockroachDB (Postgres dialect; required ORM rewrite, untested at this write QPS in 2018).
+
+2. **Shard key = `user_id` (host_id for listings, guest_id for bookings)** — Collocates a host's listings, calendar, and reviews on one shard so the most common query (host dashboard) is single-shard. Avoided sharding on `listing_id` which would scatter a single host's data.
+   - *Alternative rejected*: `listing_id` — scatters by listing; host dashboard becomes 16-shard scatter-gather.
+
+3. **16 logical shards initially, designed for expansion to 256** — Vitess supports online resharding by hash-prefix splits. Starting at 16 leaves headroom for 16x growth without re-architecting. Each shard ~125 GB initially.
+
+4. **Vertical column splitting: hot vs cold** — Hot columns (price, availability, title, photo_url) in `listings_hot` table; cold/large columns (full description, amenity JSON blob, full review text) in `listings_cold`. Hot table fits in buffer pool entirely.
+
+5. **VReplication for online migration** — Vitess's MoveTables workflow copies data from the source MySQL to sharded targets in real time, then performs a coordinated cutover. Took 6 weeks for the full dataset; zero downtime.
+
+6. **Read replicas dedicated to analytics** — Replicate from each shard to a single MariaDB instance for analyst ad-hoc queries (which cannot run on production shards without risking IOPS spikes).
+
+7. **VSchema for cross-shard queries** — Defines lookup vindexes for non-shard-key lookups (e.g., find listing by `listing_id`). The lookup table maps `listing_id → user_id` and is itself stored in a lookup keyspace, replicated to all shards via materialized view.
+
+### Implementation
+
+VSchema definition for the listings keyspace:
+
+```json
+{
+  "sharded": true,
+  "vindexes": {
+    "hash": { "type": "hash" },
+    "listing_lookup": {
+      "type": "consistent_lookup_unique",
+      "params": {
+        "table": "lookup.listing_to_user",
+        "from": "listing_id",
+        "to": "user_id"
+      },
+      "owner": "listings"
+    }
+  },
+  "tables": {
+    "listings": {
+      "column_vindexes": [
+        { "column": "user_id", "name": "hash" },
+        { "column": "listing_id", "name": "listing_lookup" }
+      ]
+    }
+  }
+}
+```
+
+Vertical split schema:
+
+```sql
+-- Hot table, fits in buffer pool
+CREATE TABLE listings_hot (
+  listing_id BIGINT PRIMARY KEY,
+  user_id    BIGINT NOT NULL,
+  title      VARCHAR(120),
+  price_usd  DECIMAL(10,2),
+  available  BOOLEAN,
+  updated_at TIMESTAMP,
+  KEY idx_user (user_id)
+) ENGINE=InnoDB;
+
+-- Cold table, accessed only on detail page
+CREATE TABLE listings_cold (
+  listing_id    BIGINT PRIMARY KEY,
+  user_id       BIGINT NOT NULL,
+  description   MEDIUMTEXT,
+  amenities     JSON,
+  house_rules   TEXT,
+  FOREIGN KEY (listing_id) REFERENCES listings_hot(listing_id)
+) ENGINE=InnoDB;
+```
+
+Online schema change with pt-online-schema-change:
+
+```bash
+pt-online-schema-change \
+  --alter "ADD COLUMN cancellation_policy ENUM('flex','mod','strict') DEFAULT 'mod'" \
+  --execute \
+  --max-load Threads_running=50 \
+  --critical-load Threads_running=200 \
+  D=marketplace,t=listings_hot
+```
+
+### Tradeoffs
+
+| Approach | Schema flexibility | Migration complexity | App rewrite | Operational maturity |
+|----------|-------------------|---------------------|-------------|---------------------|
+| Vitess (chosen) | MySQL DDL | Medium (VReplication) | None | High (YouTube proven) |
+| CockroachDB | Postgres DDL | High (full cutover) | Heavy (ORM changes) | Medium (newer) |
+| Application sharding | Any | Very high | Heavy | Low (homegrown) |
+| Stay on monolith + scale up | Any | None | None | Low headroom |
+
+### Metrics & Results
+
+- p99 read latency: 14 ms (was 22 ms on monolith)
+- p99 write latency: 38 ms (was 90 ms during peaks)
+- Sustained QPS capacity: 8x of monolith (16 shards × ~50% headroom each)
+- Migration duration: 6 weeks of VReplication + 30-second cutover per keyspace
+- Zero data loss, zero downtime during cutover (verified by row-count diffs)
+- Infrastructure cost: +35% vs monolith (16 shard hosts vs 1 large + replicas), justified by 8x capacity
+- Storage per shard: 110–145 GB (std dev 8%)
+
+**In plain terms.** "Pick a shard count by dividing today's data and traffic by it and asking whether one machine can comfortably hold that slice — then check that the same count still works after several years of growth, because changing it later is the expensive part."
+
+The term that does the real work here is headroom. Sizing shards to be exactly full at launch means the first growth spike forces a reshard; sizing each to roughly half capacity is what converts 16 shards into 8x the monolith's throughput rather than 16x-on-paper-and-0x-in-practice.
+
+| Symbol | What it is |
+|--------|------------|
+| `D` | Total dataset size — `2 TB` on the source monolith |
+| `S` | Logical shard count — `16` initially, `256` by design |
+| `D / S` | Storage per shard |
+| `QPS_w`, `QPS_r` | Cluster-wide write and read throughput: `30k` and `250k` QPS |
+| `headroom` | Fraction of each shard's capacity left unused — about `50%` here |
+| `capacity gain` | Effective throughput multiplier: `S x headroom` |
+| `growth` | 40% YoY compounding, applied to both data and QPS |
+
+**Walk one example.** The migration-time numbers divided across 16 shards:
+
+```
+  storage per shard :  2,000 GB / 16          = 125 GB    (matches "~125 GB each")
+  writes per shard  :  30,000 QPS / 16        = 1,875 QPS
+  reads per shard   :  250,000 QPS / 16       = 15,625 QPS
+
+  observed spread   :  110-145 GB, std dev 8%
+                       -> within about +/-16% of the 125 GB target,
+                          so the hash vindex is distributing evenly
+
+  capacity gain     :  16 shards x 50% headroom = 8x the monolith
+                       (this is exactly the reported "8x")
+
+  designed expansion:  2,000 GB / 256          = 7.8 GB per shard
+                       256 / 16                = 16x room before
+                                                 re-architecting
+```
+
+The last two lines are the design decision in numeric form. Choosing 16 now and 256 later works because Vitess splits shards by hash prefix, so each split is a clean halving — you never have to rehash the whole keyspace, which is the operation that makes shard-count changes so painful elsewhere.
+
+### Common Pitfalls / Lessons Learned
+
+1. **Cross-shard JOINs as scatter-gather** — Broken: a "trip search" query joined `bookings` and `listings` across all 16 shards; p99 climbed to 800 ms. Fix: denormalized the booking row to include `listing_title`, `listing_city`, `host_id` so search runs on a single shard (or hits the Elasticsearch index entirely).
+
+2. **Hotspot shard from a power host** — Broken: one property-management company controlled 12M listings under one user_id; that shard's storage hit 800 GB and write QPS was 4x the others. Fix: detected the outlier via per-shard size metrics, split the company into 50 sub-accounts (one per region), and reshuffled to balance.
+
+3. **Schema migration locking a 100M-row table** — Broken: an `ALTER TABLE` to add an index on `listings` blocked all writes for 45 minutes. Fix: switched to pt-online-schema-change (Percona) which creates a ghost copy, triggers to keep it in sync, then swaps atomically. New migration time: 4 hours but zero downtime.
+
+4. **Forgetting to update VSchema after adding a column** — Broken: a new `listing_uuid` column was added but no vindex was created. Reads by `listing_uuid` became scatter-gather across all 16 shards. Fix: enforce in CI that every column used in a WHERE clause must have an entry in VSchema or be the shard key itself.
+
+**Read it like this.** "A shard key only balances the cluster if the values are spread out — one value that owns 12% of all rows will drag its shard to several times the size of every other shard no matter how good the hash function is, because hashing distributes keys, not the rows behind a single key."
+
+This is the failure mode the size-based alerting in discussion point Q5 exists to catch. The ratio to the median, not the absolute size, is the signal — a shard at 800 GB is not itself alarming, but a shard at 6x its siblings always is.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Rows owned by the outlier key — `12,000,000` listings under one `user_id` |
+| `L_total` | Total rows in the cluster — `100,000,000` listings |
+| `share` | Fraction of the dataset trapped on one shard: `L / L_total` |
+| `size_hot` | Storage on the affected shard — `800 GB` |
+| `size_median` | Storage on a typical shard — about `125 GB` |
+| `skew` | `size_hot / size_median` — the hotspot ratio |
+| `alert threshold` | `1.5 x` the cluster median, from discussion point Q5 |
+
+**Walk one example.** The property-management company that broke shard balance:
+
+```
+  share of dataset :  12,000,000 / 100,000,000     = 0.12  = 12%
+                      -- one key holding 12% of all rows
+
+  storage skew     :  800 GB / 125 GB              = 6.4x median
+  write QPS skew   :  reported                     = 4.0x peers
+  alert threshold  :  1.5 x 125 GB                 = 187.5 GB
+
+  800 GB is 4.3x past the alert line -- this was detectable
+  long before it became an incident
+
+  after the fix: split into 50 regional sub-accounts
+    12,000,000 / 50                                = 240,000 rows each
+    those 50 keys now hash independently across the 16 shards
+```
+
+The fix works because it changes the *number of distinct shard-key values*, which is the only lever hashing responds to. Note also that the storage skew (6.4x) and the write skew (4.0x) do not match — storage reflects accumulated history while QPS reflects current activity, so a shard can be oversized long before it is overloaded, or the reverse. Alert on both.
+
+### Interview Discussion Points
+
+**Q1: Why shard on user_id instead of listing_id?**
+Because most queries are scoped to a single host or single guest (dashboard, calendar, message thread, payouts). Sharding on user_id keeps all of a host's data on one shard, so these queries hit one node. Sharding on listing_id would split a host's listings across shards, making every host-level query a scatter-gather.
+
+**Q2: How does Vitess handle a query that doesn't include the shard key?**
+VTGate parses the query, consults VSchema, and chooses a strategy: (a) if a lookup vindex exists for the WHERE column, it queries the lookup keyspace to resolve to a shard key, then routes; (b) otherwise it broadcasts to all shards (scatter), aggregates results in VTGate. Scatter queries are expensive — design VSchema to minimize them.
+
+**Q3: How was the migration done without downtime?**
+Vitess's VReplication continuously copied source data to sharded tablets, transforming rows according to the shard key. Once lag was < 1 second, a 30-second cutover atomically (a) stopped writes on the source, (b) drained in-flight replication, (c) flipped VTGate routing to the sharded keyspace. Application services pointed at VTGate throughout — they saw a brief pause but no errors.
+
+**Q4: Why split listings into hot and cold tables?**
+The hot table (price, availability, title) is queried on every search result; the cold table (full description, JSON amenities) is only loaded on detail page view. Keeping hot at ~5 GB lets it fit fully in the InnoDB buffer pool; queries hit memory, not disk. This is a column-store technique applied within row-oriented MySQL.
+
+**Q5: How would you detect a hotspot shard early?**
+Monitor per-shard: storage size, write QPS, replication lag, CPU. Alert when any shard exceeds 1.5x the cluster median on any of these. Also instrument the application to track top-N user_ids by row count and request rate — a 100x outlier is a future hotspot. Stripe and Slack publish similar runbooks.
+
+**Q6: What's the difference between Vitess and a simple PgBouncer/ProxySQL?**
+PgBouncer/ProxySQL are connection poolers and basic read/write splitters — they don't understand sharding or VSchema. Vitess is a full sharding layer: query parsing, vindex routing, online resharding, schema migration coordination, and topology management. PgBouncer would not have solved the marketplace's IOPS ceiling.
+
+**Q7: When is the right time to migrate from a monolith DB to sharding?**
+When (a) you're consistently at 60%+ of IOPS or storage on the largest available instance, (b) vertical scaling has < 18 months of runway, and (c) your traffic growth makes ceiling-hit predictable. Migrating earlier wastes effort; migrating later means doing it under fire when the database is already failing.

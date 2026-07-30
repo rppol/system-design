@@ -1,5 +1,5 @@
 # Open/Closed Principle (OCP)
-**Part of the SOLID series** | [Back to Overview](README.md)
+**Part of the SOLID series** | [Back to Overview](solid_principles.md)
 
 ---
 

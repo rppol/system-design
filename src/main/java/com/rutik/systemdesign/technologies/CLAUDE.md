@@ -18,16 +18,16 @@ A technology earns a module here **only when no existing section already owns it
 Before adding a module, check whether the technology is already the worked example in
 another section's concept module — if so, cross-link into that module instead of
 duplicating it here. Examples: Kafka is owned by
-[`backend/kafka_deep_dive`](../backend/kafka_deep_dive/README.md) — do not add
+[`backend/kafka_deep_dive`](../backend/kafka_deep_dive/kafka_deep_dive.md) — do not add
 `technologies/apache_kafka`; vLLM is owned by
-[`llm/vllm_deep_dive`](../llm/vllm_deep_dive/README.md) — do not add
+[`llm/vllm_deep_dive`](../llm/vllm_deep_dive/vllm_deep_dive.md) — do not add
 `technologies/vllm`. This section is for technologies that don't already have a
 canonical home — an orchestrator like Airflow or an inference server like Triton has
 no single owning section, so it lives here instead.
 
 **Naming convention:** `<vendor>_<product>`, lowercase snake_case. Disambiguate
 collisions explicitly in the module's intro — e.g. `nvidia_triton_inference_server`
-(NVIDIA's model-serving server) vs [`cuda/triton_and_kernel_dsls`](../cuda/triton_and_kernel_dsls/README.md)
+(NVIDIA's model-serving server) vs [`cuda/triton_and_kernel_dsls`](../cuda/triton_and_kernel_dsls/triton_and_kernel_dsls.md)
 (OpenAI Triton, the GPU kernel DSL). Same word, unrelated products; both files must
 say so on first mention.
 
@@ -37,9 +37,9 @@ say so on first mention.
 
 | Dir | Category | Key Concepts | Version Studied |
 |-----|----------|-------------|-----------------|
-| [`apache_airflow/`](apache_airflow/README.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.3.0 |
-| [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/README.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
-| [`intel_openvino/`](intel_openvino/README.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.2 |
+| [`apache_airflow/`](apache_airflow/apache_airflow.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.3.0 |
+| [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
+| [`intel_openvino/`](intel_openvino/intel_openvino.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.2 |
 
 ---
 

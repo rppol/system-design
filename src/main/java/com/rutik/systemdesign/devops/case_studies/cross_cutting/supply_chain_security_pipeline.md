@@ -483,7 +483,7 @@ Use minimal, continuously-rebuilt base images (distroless, Wolfi/Chainguard) so 
 9. **Keep the vuln DB fresh** (≤24h) and fail the build on stale DB.
 10. **Minimize base images** (distroless/Wolfi) to shrink both attack surface and scan friction.
 11. **Audit Rekor** for unexpected signing identities or volume spikes.
-12. Cross-reference [DevSecOps & Supply Chain Security](../../devsecops_and_supply_chain_security/README.md) for the broader control catalog and [Policy as Code & Compliance](../../policy_as_code_and_compliance/README.md) for the admission-policy authoring patterns.
+12. Cross-reference [DevSecOps & Supply Chain Security](../../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) for the broader control catalog and [Policy as Code & Compliance](../../policy_as_code_and_compliance/policy_as_code_and_compliance.md) for the admission-policy authoring patterns.
 
 ---
 

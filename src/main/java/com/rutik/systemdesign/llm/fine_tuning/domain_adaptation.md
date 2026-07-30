@@ -38,7 +38,7 @@ Two primary techniques: (1) continued pre-training (CPT) on a large domain corpu
 | Approach | Domain knowledge | General capability | Cost | Applies when |
 |----------|-----------------|--------------------|------|--------------|
 | General model + prompting | Base level | Full | None | Domain is adjacent to general web text |
-| [RAG](../rag_fundamentals/README.md) | Retrieved at query time | Full | Low | Knowledge is lookupable and changes often |
+| [RAG](../rag_fundamentals/rag_fundamentals.md) | Retrieved at query time | Full | Low | Knowledge is lookupable and changes often |
 | Instruction tuning only | Base + task format | Good | Low (10-100x cheaper than CPT) | Behavior and format are needed, not knowledge |
 | CPT only | High | Moderate risk | High | Knowledge without a conversational surface |
 | CPT + instruction tuning ("domain-then-instruct") | Excellent | Good, with mixing | High | Production domain assistant |
@@ -671,7 +671,7 @@ Half a percent of the model for a 30% larger effective window is a good trade *i
 - Budget is limited; instruction tuning is 10-100× cheaper than CPT
 
 ### Do Not Use Domain Adaptation When:
-- [RAG](../rag_fundamentals/README.md) can provide the domain knowledge at query time (more flexible, cheaper)
+- [RAG](../rag_fundamentals/rag_fundamentals.md) can provide the domain knowledge at query time (more flexible, cheaper)
 - Domain changes frequently (CPT must be re-run to update knowledge)
 - General model + few-shot prompting achieves >80% of the target quality
 

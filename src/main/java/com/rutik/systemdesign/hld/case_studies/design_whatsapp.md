@@ -930,12 +930,12 @@ The connection layer scales roughly linearly, going from ~500 to ~5,000 chat ser
 
 ## Cross-References
 
-- **Wide-column message storage** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/README.md)
-- **Redis for presence and connection routing** -> [`../../database/key_value_stores/README.md`](../../database/key_value_stores/README.md)
-- **Kafka as the durability buffer** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/README.md)
-- **Eventual consistency and cross-region replication** -> [`../../database/consistency_models_and_consensus/README.md`](../../database/consistency_models_and_consensus/README.md)
-- **Service decomposition (chat, group, push, media services)** -> [`../microservices/README.md`](../microservices/README.md)
-- **"Let it crash" supervision and failure recovery** -> [`../../backend/fault_tolerance_patterns/README.md`](../../backend/fault_tolerance_patterns/README.md)
-- **Media delivery via CDN** -> [`../../devops/cloud_networking_and_cdn/README.md`](../../devops/cloud_networking_and_cdn/README.md)
-- **Partitioning by conversation_id and data residency sharding** -> [`../../database/sharding_and_partitioning/README.md`](../../database/sharding_and_partitioning/README.md)
+- **Wide-column message storage** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/wide_column_databases.md)
+- **Redis for presence and connection routing** -> [`../../database/key_value_stores/README.md`](../../database/key_value_stores/key_value_stores.md)
+- **Kafka as the durability buffer** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
+- **Eventual consistency and cross-region replication** -> [`../../database/consistency_models_and_consensus/README.md`](../../database/consistency_models_and_consensus/consistency_models_and_consensus.md)
+- **Service decomposition (chat, group, push, media services)** -> [`../microservices/README.md`](../microservices/microservices.md)
+- **"Let it crash" supervision and failure recovery** -> [`../../backend/fault_tolerance_patterns/README.md`](../../backend/fault_tolerance_patterns/fault_tolerance_patterns.md)
+- **Media delivery via CDN** -> [`../../devops/cloud_networking_and_cdn/README.md`](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md)
+- **Partitioning by conversation_id and data residency sharding** -> [`../../database/sharding_and_partitioning/README.md`](../../database/sharding_and_partitioning/sharding_and_partitioning.md)
 

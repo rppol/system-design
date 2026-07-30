@@ -822,7 +822,7 @@ public class SegmentingTokenizer implements LocaleTokenizer {
 | **p99 suggestion latency** | The core SLA (<100ms) — directly tied to user-perceived responsiveness on every keystroke |
 | **Redis hot-prefix cache hit rate** | A drop indicates either a cache issue or a sudden shift in traffic pattern (e.g., a new prefix becoming hot) |
 | **Trie rebuild duration** | Must stay well under the 10-minute cadence — if rebuild duration approaches or exceeds 10 minutes, rebuilds start overlapping or falling behind, widening the staleness window |
-| **Resulting staleness window** | The actual end-to-end time from "a query happens" to "it's reflected in the live trie" — should track close to the 10-minute target; cross-reference [observability](../observability/README.md) for how to instrument and alert on this as an SLO |
+| **Resulting staleness window** | The actual end-to-end time from "a query happens" to "it's reflected in the live trie" — should track close to the 10-minute target; cross-reference [observability](../observability/observability.md) for how to instrument and alert on this as an SLO |
 | **Trending-detector flag rate** | Sudden increases may indicate either a genuine news event (good) or an abuse pattern (bad — see runbook below) |
 | **Snapshot distribution time** | How long it takes the new ~1.25GB snapshot to reach all replicas — if this grows, the swap window (and momentary double-memory usage) grows with it |
 
@@ -841,7 +841,7 @@ public class SegmentingTokenizer implements LocaleTokenizer {
 **Symptom**: The Trending Detector has flagged a query as "spiking" and it's now appearing prominently in autocomplete results, but it's actually being driven by a bot/scraper hammering the same query, not genuine user interest.
 
 **Action**:
-1. **Rate-limit query-log ingestion per client/IP/session *before* it reaches the trending pipeline** — this is the primary preventive control. A single client (or small IP range) generating an outsized share of the events for one query should have those events capped or discarded before they ever influence the 1-minute window's counts. (Cross-reference [rate limiting](../rate_limiting/README.md).)
+1. **Rate-limit query-log ingestion per client/IP/session *before* it reaches the trending pipeline** — this is the primary preventive control. A single client (or small IP range) generating an outsized share of the events for one query should have those events capped or discarded before they ever influence the 1-minute window's counts. (Cross-reference [rate limiting](../rate_limiting/rate_limiting.md).)
 2. If a false positive slips through anyway, the trending-overrides store entry can be manually cleared/expired by an on-call engineer — since it's a small, fast-access overlay structure (§4.4), this is a quick, low-risk operation that doesn't touch the base trie at all.
 3. Post-incident, tune the trending detector's threshold (the "20x baseline" multiplier and minimum absolute-count floor from §4.4) if the false-positive pattern recurs — e.g., raise the absolute floor so that low-baseline queries (which are easiest for a small bot to spike) need a larger absolute count to trigger.
 
@@ -878,7 +878,7 @@ public class SegmentingTokenizer implements LocaleTokenizer {
 
 **Fixed**: Two complementary changes:
 1. **Jittered TTL**: instead of a fixed TTL (e.g., exactly 5 seconds for every hot-prefix cache entry), add random jitter (e.g., 5 seconds +/- 1 second, randomized per key). This spreads expirations out over time instead of having many keys (or, worse, the *same* key being repopulated with a deterministic TTL each time) expire in lockstep.
-2. **Single-flight / lock pattern on cache repopulation**: when a cache miss occurs for a given prefix, only the *first* request that observes the miss actually queries the Typeahead Service and repopulates the cache; concurrent requests for the same prefix that arrive during this brief window wait (briefly) for that first request's result rather than all independently querying the backend. This is the standard cache-stampede-prevention pattern (cross-referenced in [database caching patterns](../../database/database_caching_patterns/README.md)).
+2. **Single-flight / lock pattern on cache repopulation**: when a cache miss occurs for a given prefix, only the *first* request that observes the miss actually queries the Typeahead Service and repopulates the cache; concurrent requests for the same prefix that arrive during this brief window wait (briefly) for that first request's result rather than all independently querying the backend. This is the standard cache-stampede-prevention pattern (cross-referenced in [database caching patterns](../../database/database_caching_patterns/database_caching_patterns.md)).
 
 ### War Story 4: Uneven Load from Naive Prefix Sharding (Broken -> Fixed)
 
@@ -892,7 +892,7 @@ public class SegmentingTokenizer implements LocaleTokenizer {
 
 **Impact**: The integration's user base was a small fraction of total traffic, but it was concentrated in one region (§4.7), pushing that region's request rate to roughly 3-4x its provisioned capacity (~9 replicas x ~20K QPS/replica, §10). Because the regional replicas shared a bounded connection-handling thread pool, the flood didn't just slow the integration's own requests — it exhausted available connections for *all* requests in that region, including ordinary users, pushing regional p99 latency from ~40ms to over 800ms for roughly 20 minutes before on-call traced the source to the single API key.
 
-**Fixed**: Two changes, neither of which depends on client cooperation. First, **per-API-key rate limiting** (cross-reference [rate limiting](../rate_limiting/README.md)) at the edge layer caps any single client identity to a request rate consistent with debounced human typing (e.g., ~10 requests/sec/session); a client exceeding this gets a 429 rather than consuming shared capacity. Second, a **minimum-prefix-length floor** — refusing to serve suggestions for prefixes shorter than 2 characters, enforced server-side regardless of what the client sends — caps the worst-case per-query request multiplier from any client by roughly 10x on its own, since single-character prefixes are both the highest-volume and lowest-precision case (§4.2). The lesson generalizes well beyond this system: capacity plans (§10) that assume client-side behaviors like debounce need server-side enforcement of those assumptions, not just client-side cooperation.
+**Fixed**: Two changes, neither of which depends on client cooperation. First, **per-API-key rate limiting** (cross-reference [rate limiting](../rate_limiting/rate_limiting.md)) at the edge layer caps any single client identity to a request rate consistent with debounced human typing (e.g., ~10 requests/sec/session); a client exceeding this gets a 429 rather than consuming shared capacity. Second, a **minimum-prefix-length floor** — refusing to serve suggestions for prefixes shorter than 2 characters, enforced server-side regardless of what the client sends — caps the worst-case per-query request multiplier from any client by roughly 10x on its own, since single-character prefixes are both the highest-volume and lowest-precision case (§4.2). The lesson generalizes well beyond this system: capacity plans (§10) that assume client-side behaviors like debounce need server-side enforcement of those assumptions, not just client-side cooperation.
 
 ---
 
@@ -997,8 +997,8 @@ A: Deploy regional replica pools (§4.7) and geo-route users to the nearest one 
 
 ## Cross-References
 
-- **Hot-prefix Redis cache, jittered TTLs, and the single-flight stampede-prevention pattern (§4.2, §5, §9 War Story 3)** -> [`../caching/README.md`](../caching/README.md), [`../../database/database_caching_patterns/README.md`](../../database/database_caching_patterns/README.md)
-- **Why prefix-based sharding creates hot shards, and the alternative partitioning strategies (§4.2, §9 War Story 4)** -> [`../database_sharding/README.md`](../database_sharding/README.md)
-- **In-memory data structures and Redis sorted sets as an alternative suggestion index (§5)** -> [`../../database/in_memory_databases/README.md`](../../database/in_memory_databases/README.md)
-- **Elasticsearch Completion Suggester / FST and search-engine indexing internals (§6)** -> [`../../database/search_engines/README.md`](../../database/search_engines/README.md)
-- **Rate-limiting query-log ingestion to prevent trending false positives (§8)** -> [`../rate_limiting/README.md`](../rate_limiting/README.md)
+- **Hot-prefix Redis cache, jittered TTLs, and the single-flight stampede-prevention pattern (§4.2, §5, §9 War Story 3)** -> [`../caching/README.md`](../caching/caching.md), [`../../database/database_caching_patterns/README.md`](../../database/database_caching_patterns/database_caching_patterns.md)
+- **Why prefix-based sharding creates hot shards, and the alternative partitioning strategies (§4.2, §9 War Story 4)** -> [`../database_sharding/README.md`](../database_sharding/database_sharding.md)
+- **In-memory data structures and Redis sorted sets as an alternative suggestion index (§5)** -> [`../../database/in_memory_databases/README.md`](../../database/in_memory_databases/in_memory_databases.md)
+- **Elasticsearch Completion Suggester / FST and search-engine indexing internals (§6)** -> [`../../database/search_engines/README.md`](../../database/search_engines/search_engines.md)
+- **Rate-limiting query-log ingestion to prevent trending false positives (§8)** -> [`../rate_limiting/README.md`](../rate_limiting/rate_limiting.md)

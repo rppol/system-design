@@ -33,9 +33,9 @@ The LLM observability ecosystem has three layers: (1) framework-specific tools (
 
 **Correlation IDs**: Every trace needs a unique ID; every span references the trace ID. This allows filtering "show me all spans from this one agent run" or "show me all agent runs for user X." In LangSmith: `run_id`. In Langfuse: `trace_id`. In OpenTelemetry: `trace_id`.
 
-**Evaluation integration**: Observability data is the foundation for evaluation. Capture production traces → sample them → run [LLM-as-judge evaluation](../evaluation_and_benchmarks/README.md) → identify failure patterns → improve prompts/retrieval → measure improvement.
+**Evaluation integration**: Observability data is the foundation for evaluation. Capture production traces → sample them → run [LLM-as-judge evaluation](../evaluation_and_benchmarks/evaluation_and_benchmarks.md) → identify failure patterns → improve prompts/retrieval → measure improvement.
 
-**Cost tracking**: Every LLM call has a dollar cost. Aggregate by model, by endpoint, by user, by team. Set budget alerts. Without observability, you get a surprise cloud bill at month-end. See [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/README.md) for per-model pricing math and budget-enforcement patterns.
+**Cost tracking**: Every LLM call has a dollar cost. Aggregate by model, by endpoint, by user, by team. Set budget alerts. Without observability, you get a surprise cloud bill at month-end. See [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) for per-model pricing math and budget-enforcement patterns.
 
 ---
 

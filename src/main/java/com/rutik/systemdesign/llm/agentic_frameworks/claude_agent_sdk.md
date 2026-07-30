@@ -556,7 +556,7 @@ the precondition that makes the arithmetic work.
 |---|---|---|
 | `anthropic` (Python SDK) | Official SDK | `pip install anthropic`; sync and async clients |
 | `@anthropic-ai/sdk` (TS) | Official TypeScript SDK | npm install; same API surface |
-| MCP servers | Pre-built tools | Connect via stdio/HTTP, expose as Claude tools — see [MCP](../mcp_model_context_protocol/README.md) |
+| MCP servers | Pre-built tools | Connect via stdio/HTTP, expose as Claude tools — see [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) |
 | Computer use docker reference | Sandbox for computer tool | `ghcr.io/anthropics/anthropic-quickstarts` |
 | `aiohttp` / `httpx` | Async HTTP in tools | For parallel external API calls |
 | OpenTelemetry | Manual tracing | Wrap LLM calls to send to Jaeger/Honeycomb |

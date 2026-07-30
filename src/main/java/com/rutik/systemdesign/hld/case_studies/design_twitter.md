@@ -868,10 +868,10 @@ A: It's an empirically-tuned constant balancing two costs: set it too low, and t
 
 ## Cross-References
 
-- **Manhattan / wide-column tweet storage** -> [`../../database/wide_column_databases/`](../../database/wide_column_databases/README.md), [`../../database/key_value_stores/`](../../database/key_value_stores/README.md)
-- **Fan-out pipeline on Kafka** -> [`../../backend/kafka_deep_dive/`](../../backend/kafka_deep_dive/README.md)
-- **Redis timeline cache + cold-start mitigation** -> [`../../backend/caching_strategies_deep_dive/`](../../backend/caching_strategies_deep_dive/README.md), [`../../database/database_caching_patterns/`](../../database/database_caching_patterns/README.md)
-- **Sharding the tweet/social-graph stores** -> [`../../database/sharding_and_partitioning/`](../../database/sharding_and_partitioning/README.md), [`../../hld/consistent_hashing/`](../consistent_hashing/README.md)
+- **Manhattan / wide-column tweet storage** -> [`../../database/wide_column_databases/`](../../database/wide_column_databases/wide_column_databases.md), [`../../database/key_value_stores/`](../../database/key_value_stores/key_value_stores.md)
+- **Fan-out pipeline on Kafka** -> [`../../backend/kafka_deep_dive/`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
+- **Redis timeline cache + cold-start mitigation** -> [`../../backend/caching_strategies_deep_dive/`](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md), [`../../database/database_caching_patterns/`](../../database/database_caching_patterns/database_caching_patterns.md)
+- **Sharding the tweet/social-graph stores** -> [`../../database/sharding_and_partitioning/`](../../database/sharding_and_partitioning/sharding_and_partitioning.md), [`../../hld/consistent_hashing/`](../consistent_hashing/consistent_hashing.md)
 - **Snowflake ID generator implementation** -> [`../../java/case_studies/design_snowflake_id_generator_java.md`](../../java/case_studies/design_snowflake_id_generator_java.md)
-- **Rate-limiting fan-out writes for near-celebrity accounts** -> [`../rate_limiting/README.md`](../rate_limiting/README.md)
+- **Rate-limiting fan-out writes for near-celebrity accounts** -> [`../rate_limiting/README.md`](../rate_limiting/rate_limiting.md)
 

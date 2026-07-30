@@ -11,7 +11,7 @@ Three major open specifications emerged in 2024-2025, and the field has since co
 - **ACP** (Agent Communication Protocol, BeeAI/IBM, March 2025): REST-based, synchronous and asynchronous message threading. **ACP merged into A2A under the Linux Foundation in August 2025 and its repository is archived**; the BeeAI platform now speaks A2A. It is covered here for historical context and because its design choices (message threads, REST idioms) are still worth contrasting — not as a live alternative to pick.
 - **ANP** (Agent Network Protocol): decentralized peer-to-peer agent discovery via Decentralized Identifiers (DID), no central registry dependency. Still an early specification with a much smaller ecosystem.
 
-These protocols sit above [MCP (Model Context Protocol)](../mcp_model_context_protocol/README.md), which handles LLM-to-tool communication. A2A/ACP/ANP handle agent-to-agent peer communication — a fundamentally different concern.
+These protocols sit above [MCP (Model Context Protocol)](../mcp_model_context_protocol/mcp_model_context_protocol.md), which handles LLM-to-tool communication. A2A/ACP/ANP handle agent-to-agent peer communication — a fundamentally different concern.
 
 ---
 

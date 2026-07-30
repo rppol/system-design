@@ -1,0 +1,943 @@
+# API Design
+
+<!-- study-paths
+senior: api_design.md
+principal: api_design.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+An API (Application Programming Interface) is a contract between a provider and a consumer that defines how software components communicate. In distributed systems, APIs are the backbone of service-to-service and client-to-server interaction.
+
+Good API design is not just about making things work — it is about creating stable, evolvable, and developer-friendly contracts that remain consistent across years of product change. A poorly designed API is one of the most expensive technical debts you can accumulate: once published, consumers depend on it, and breaking changes cascade into multi-team coordination nightmares.
+
+Why it matters:
+- APIs outlive the code behind them. The contract is harder to change than the implementation.
+- Developer experience directly affects adoption and time-to-integration.
+- Well-designed APIs reduce support burden and internal coupling.
+- In microservices architectures, the entire system is essentially a graph of API calls.
+
+---
+
+## Intuition
+
+> **One-line analogy**: API design is like designing a restaurant menu — you decide what dishes to offer (endpoints), what information customers need to order (request format), and what they'll receive (response format). Once published, changing the menu is painful.
+
+**Mental model**: An API is a contract between two parties (producer and consumer). REST uses URLs to represent resources and HTTP verbs to represent actions — it's stateless, cacheable, and universally understood. gRPC uses protocol buffers and HTTP/2 for high-performance service-to-service communication. GraphQL lets clients request exactly the fields they need. Each has its sweet spot.
+
+**Why it matters**: APIs outlive the code behind them. Once external consumers depend on your API, breaking changes require coordinating across teams, codebases, and sometimes companies. Good API design with proper versioning prevents years of accumulated technical debt.
+
+**Key insight**: Stability trumps cleverness. A simpler, more consistent API that never changes is worth far more than a sophisticated API that requires frequent breaking changes. Versioning from day one (v1, v2) is cheaper than retrofitting it later.
+
+---
+
+## 2. Core Principles
+
+**Consistency** — Use the same naming conventions, error formats, and patterns across all endpoints. Developers should be able to predict how a new endpoint works from prior experience with your API.
+
+**Statelessness** — Each request should carry all the information needed to fulfill it. The server should not rely on stored client context between requests. This enables horizontal scaling and simplifies failure recovery.
+
+**Resource Orientation** — Design around nouns (resources), not verbs (actions). `GET /orders/123` is better than `GET /getOrder?id=123`.
+
+**Least Surprise** — The API should behave in the way a reasonable developer would expect. Avoid surprising behaviors in edge cases.
+
+**Versioning from Day One** — Assume your API will change. Build versioning in before you have consumers, not after.
+
+**Fail Gracefully** — Return meaningful error codes and messages. Never expose internal stack traces. Distinguish between client errors (4xx) and server errors (5xx).
+
+**Idempotency** — Unsafe operations (PUT, DELETE, and ideally POST with idempotency keys) should be safe to retry without side effects.
+
+**Security by Default** — Authentication and authorization are not features to add later. Design them in from the first endpoint.
+
+---
+
+## 3. Types / Strategies
+
+### REST (Representational State Transfer)
+The dominant paradigm for HTTP APIs. Leverages HTTP verbs (GET, POST, PUT, PATCH, DELETE) mapped to CRUD operations on resources. Stateless, cacheable, and well-understood.
+
+**Best for:** Public APIs, mobile/web clients, resource-centric data models.
+
+### GraphQL
+A query language for APIs developed by Facebook. The client specifies exactly the shape of the data it needs. A single endpoint handles all queries and mutations.
+
+**Best for:** Complex UIs that need to aggregate data from multiple resources, reducing over-fetching and under-fetching, rapid frontend iteration.
+
+### gRPC (Google Remote Procedure Call)
+A high-performance RPC framework using Protocol Buffers (binary serialization) over HTTP/2. Strongly typed contracts defined in `.proto` files. Supports streaming.
+
+**Best for:** Internal microservice communication, low-latency high-throughput systems, polyglot environments (auto-generate clients in many languages).
+
+### WebSockets
+Bidirectional, persistent connection between client and server. Enables real-time push from server to client without polling.
+
+**Best for:** Chat, live notifications, collaborative editing, trading dashboards.
+
+### Webhooks
+Reverse API — the server pushes data to the client by calling a URL registered by the client. Event-driven.
+
+**Best for:** Asynchronous event notification (payment processed, file uploaded, etc.).
+
+### Comparison Table
+
+| Criterion          | REST       | GraphQL    | gRPC       |
+|--------------------|------------|------------|------------|
+| Protocol           | HTTP/1.1-3 | HTTP/1.1-3 | HTTP/2     |
+| Payload format     | JSON/XML   | JSON       | Protobuf   |
+| Type safety        | Weak       | Strong     | Strong     |
+| Caching            | Excellent  | Hard       | Manual     |
+| Browser support    | Native     | Native     | Limited    |
+| Streaming          | SSE/WS     | Subscriptions | Native  |
+| Learning curve     | Low        | Medium     | Medium     |
+| Best use           | Public APIs| Flexible UIs| Internal  |
+
+---
+
+## 4. Architecture Diagrams
+
+### REST API Request Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GW as API Gateway
+    participant US as User Service
+    participant DB as Database
+
+    C->>GW: GET /api/v1/users/42
+    Note over GW: Authenticate (JWT), rate limit<br/>(token bucket), then route to service
+    GW->>US: forward request
+    Note over US: Controller, service layer,<br/>then repository
+    US->>DB: query
+    DB-->>US: rows
+    US-->>GW: JSON payload
+    GW-->>C: JSON payload
+```
+
+The request threads through gateway checks (auth, rate limiting, routing) and service-layer logic before reaching the database, then retraces the same path back to the client as the response.
+
+### GraphQL vs REST Data Fetching
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: REST — N+1 problem (3 round trips)
+    C->>S: GET /users/1
+    S-->>C: id, name, avatarId
+    C->>S: GET /avatars/99
+    S-->>C: avatar url, size
+    C->>S: GET /posts?userId=1
+    S-->>C: list of posts
+
+    Note over C,S: GraphQL — 1 round trip
+    C->>S: POST /graphql (user + avatar + posts)
+    S-->>C: single response, all fields
+```
+
+REST's resource-per-endpoint model costs 3 round trips to assemble one view; GraphQL's single query resolves the same data in 1 round trip.
+
+**The idea behind it.** "On a mobile network the server's processing time is almost irrelevant — what the user feels is the number of times the phone had to talk to the server, multiplied by the round-trip time. Collapsing three sequential requests into one is a 3x latency win before a single line of server code gets faster."
+
+The reason these round trips cannot overlap is that they are *dependent*: the client cannot request `/avatars/99` until the first response tells it the avatar ID is 99. Independent requests could be issued in parallel; a dependency chain must be paid serially, which is what makes it a latency problem rather than a throughput one.
+
+| Symbol | What it is |
+|--------|------------|
+| `rt` | Round-trip time on the client's network — `100ms` is a reasonable mobile figure |
+| `k` | Sequential dependent round trips the client must make |
+| `latency` | Wall-clock time to assemble the view: `k x rt` |
+| `N` | List length in the N+1 shape — one request for the list, one per item |
+| `k_rest` | REST round trips: `3` in the diagram, `1 + N` in the general N+1 case |
+| `k_graphql` | GraphQL round trips: `1`, regardless of how many resources the query touches |
+
+**Walk one example.** The diagram's three-request sequence at a 100ms mobile round trip, then the same shape on a 50-item list:
+
+```
+  REST, diagram    : k = 3        ->  3 x 100ms   =   300 ms
+  GraphQL          : k = 1        ->  1 x 100ms   =   100 ms
+  saving                                          =   200 ms  (3x)
+
+  N+1 on a 50-item list:
+    REST           : k = 1 + 50   ->  51 x 100ms  = 5,100 ms  (5.1 s)
+    GraphQL        : k = 1        ->   1 x 100ms  =   100 ms
+    saving                                        = 5,000 ms  (51x)
+```
+
+The 51x figure is why this pattern gets called a problem rather than an inefficiency. Note though that GraphQL does not delete the work — it moves it server-side, where the same 50 lookups happen inside resolvers. That is precisely the "N+1 problem moves to server" entry in the Section 7 tradeoff table, and why DataLoader-style batching is mandatory rather than optional.
+
+### gRPC Internal Service Communication
+
+```mermaid
+sequenceDiagram
+    participant A as Service A (Go)
+    participant B as Service B (Python)
+
+    Note over A: proto-generated client stub
+    A->>B: HTTP/2 + Protobuf (binary, multiplexed)
+    B-->>A: response stream
+```
+
+A single stub call is transparently carried as multiplexed binary Protobuf frames over one HTTP/2 connection, with the server able to stream back multiple responses.
+
+---
+
+## 5. How It Works — Detailed Mechanics
+
+### REST Mechanics
+
+HTTP verbs map to operations:
+- `GET` — retrieve resource, safe and idempotent
+- `POST` — create resource, neither safe nor idempotent
+- `PUT` — replace resource entirely, idempotent
+- `PATCH` — partial update, not necessarily idempotent
+- `DELETE` — remove resource, idempotent
+
+Status codes and method semantics are defined by **RFC 9110 (HTTP Semantics, June 2022)** — the single spec that now carries the whole HTTP core:
+- `200 OK`, `201 Created`, `204 No Content`
+- `400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `409 Conflict`, `422 Unprocessable Content`
+- `429 Too Many Requests`
+- `500 Internal Server Error`, `503 Service Unavailable`
+
+### Pagination Strategies
+
+**Offset-based:** `GET /items?offset=40&limit=20`
+- Simple to implement
+- Breaks under concurrent inserts (item skipped or duplicated as page shifts)
+- Poor performance at high offsets (DB scans all rows up to offset)
+
+**Cursor-based:** `GET /items?after=eyJpZCI6MTAwfQ&limit=20`
+- Cursor encodes position (e.g., base64 of last seen ID + timestamp)
+- Stable under inserts/deletes
+- Cannot jump to arbitrary pages
+- Used by Twitter, Facebook, GitHub
+
+**Keyset pagination:** `GET /items?last_id=100&limit=20`
+- Similar to cursor, uses an indexed column
+- Very fast with proper index (`WHERE id > 100 LIMIT 20`)
+
+**Page-based:** `GET /items?page=3&per_page=20`
+- Human-friendly
+- Suffers same offset problems
+
+**In plain terms.** "`OFFSET 100000` does not skip 100,000 rows — the database has to walk past every one of them before it can return your twenty. Keyset pagination instead says 'start after this indexed value', so the cost of page 5000 is identical to the cost of page 1."
+
+The term that explains everything here is *seek versus scan*. OFFSET is a counting operation the database performs after retrieving rows; a keyset predicate is a range condition the index can jump straight to. That is the whole difference, and it is why deep pagination quietly degrades as a catalog grows.
+
+| Symbol | What it is |
+|--------|------------|
+| `T` | Total rows in the collection being paginated |
+| `L` | Page size (`limit`, `per_page`) — `20` in the examples above |
+| `pages` | Number of pages the client can walk: `ceil(T / L)` |
+| `offset` | Rows to skip — `(page - 1) x L` for page-based pagination |
+| `rows_offset` | Rows the database actually touches with OFFSET: `offset + L` |
+| `rows_keyset` | Rows touched by `WHERE id > last_id LIMIT L`: exactly `L`, at any depth |
+
+**Walk one example.** A 1M-row collection at the section's 20-per-page size:
+
+```
+  total pages : 1,000,000 / 20                 = 50,000 pages
+
+  rows scanned to serve a page:
+    page      1  (offset      0) :      0 + 20 =        20 rows
+    page      3  (offset     40) :     40 + 20 =        60 rows
+    page  5,001  (offset 100,000):100,000 + 20 =   100,020 rows
+    page 50,000  (offset 999,980):999,980 + 20 = 1,000,000 rows
+
+  keyset equivalent, every page  :               =        20 rows
+
+  cost ratio at page 5,001 : 100,020 / 20       = 5,001x more work
+  cost ratio at the last page                   = 50,000x more work
+```
+
+Two practical consequences. First, offset pagination is perfectly fine for a UI that only ever shows the first few pages — the cost only explodes deep in the list, which is exactly where crawlers and scripted exports go. Second, `pages = 50,000` is itself a design signal: if a client would need 50,000 requests to read the collection, the right answer is probably a bulk export endpoint, not a faster paginator.
+
+### Authentication
+
+**API Keys** — static tokens in headers (`X-API-Key: abc123`). Simple but not user-specific, hard to rotate per-user.
+
+**OAuth 2.0** — authorization framework. The grant types to build with, per **RFC 9700 / BCP 240 (OAuth 2.0 Security Best Current Practice, January 2025)**:
+1. Authorization Code + PKCE (RFC 7636) — every user-facing client, browser or native. Public clients MUST use PKCE; authorization servers MUST support it
+2. Client Credentials (service-to-service) — no user involved
+3. Device Authorization Grant (RFC 8628) — TVs, CLIs, anything without a browser
+
+RFC 9700 also rules out the two grants you will still meet in older codebases: the resource owner password credentials grant **MUST NOT** be used, and clients **SHOULD NOT** use the implicit grant.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start{"Which client type?"} -->|"web app,<br/>server-side"| ac["Authorization Code<br/>+ PKCE"]
+    start -->|"SPA or native app<br/>(public client)"| acp["Authorization Code<br/>+ PKCE (no secret)"]
+    start -->|"service-to-service,<br/>no user"| cc["Client Credentials"]
+    start -->|"TV, console, CLI<br/>(no browser)"| dev["Device Authorization<br/>Grant (RFC 8628)"]
+
+    class start mathOp
+    class ac,acp,cc,dev train
+```
+
+Every user-facing path lands on Authorization Code + PKCE — the client type only changes whether a client secret exists, not the grant. Client Credentials covers machine-to-machine, and the Device Authorization Grant covers input-constrained devices.
+
+**JWT (JSON Web Token)** — self-contained token with header, payload, signature. Stateless verification (server checks signature without DB lookup). Structure: `base64(header).base64(payload).signature`.
+
+Payload contains claims: `sub` (subject), `iat` (issued at), `exp` (expiry), `iss` (issuer), custom claims.
+
+Risk: stolen JWTs are valid until expiry. Mitigate with short expiry + refresh tokens.
+
+### Idempotency
+
+For non-idempotent operations (POST), use an idempotency key:
+
+```
+POST /payments
+Idempotency-Key: client-generated-uuid-here
+{ "amount": 100, "currency": "USD" }
+```
+
+Server stores (key → result) with a TTL. On retry with same key, return cached result without re-executing the operation. Stripe and PayPal use this pattern.
+
+### HATEOAS (Hypermedia as the Engine of Application State)
+
+Responses include links to related actions, allowing clients to discover capabilities dynamically:
+
+```json
+{
+  "id": 42,
+  "status": "pending",
+  "_links": {
+    "self": { "href": "/orders/42" },
+    "cancel": { "href": "/orders/42/cancel", "method": "POST" },
+    "payment": { "href": "/orders/42/payment" }
+  }
+}
+```
+
+Rarely implemented fully in practice, but link inclusion is common.
+
+### Webhook Delivery
+
+A webhook inverts the call direction — your service becomes the HTTP *client* and the consumer's registered URL becomes the endpoint. That inversion is why the five hard problems are all on the delivery side, not the request side.
+
+**Signature verification.** The receiver cannot trust that a POST to its public callback URL came from you, so every event carries an HMAC. Stripe's scheme is the reference: the `Stripe-Signature` header carries `t=<unix timestamp>,v1=<hex>`, where `v1` is HMAC-SHA256 over the string `"<t>.<raw request body>"` keyed by the endpoint's signing secret. The receiver recomputes it over the *raw* bytes (any JSON re-serialization breaks the comparison) and compares in constant time.
+
+**Replay protection.** A valid signature alone does not make a request fresh — a captured POST can be resent forever. Binding the timestamp into the signed string lets the receiver reject anything outside a tolerance window; Stripe's default is 5 minutes.
+
+**At-least-once, never exactly-once.** A delivery whose response is lost is indistinguishable from one that never arrived, so the sender retries and the receiver sees duplicates. Stripe retries a failing endpoint with exponential backoff for up to 3 days in live mode. The receiver's contract is therefore the mirror of the idempotency-key contract above: log the event ID and skip anything already processed.
+
+**No ordering guarantee.** Retries and parallel dispatch mean `invoice.paid` can land before `invoice.created`. Handlers must be order-independent: key off the object's own version or `created` timestamp, or re-fetch current state from the API rather than reconstructing it from the event stream.
+
+**Ack fast, work later.** The receiver must return `2xx` before doing anything slow — a handler that writes to three downstream systems inline will eventually exceed the sender's timeout, get marked failed, and be retried, multiplying the very work that made it slow. Enqueue and return.
+
+```
+POST /hooks/stripe                       receiver pseudocode
+Stripe-Signature: t=1492774577,v1=5257a8...
+
+  1. body   = raw bytes (do NOT parse first)
+  2. expect = hmac_sha256(secret, f"{t}.{body}")
+  3. if not constant_time_eq(expect, v1):        -> 400
+  4. if abs(now - t) > 300:                      -> 400   (replay)
+  5. if seen(event.id):                          -> 200   (duplicate)
+  6. enqueue(event); mark_seen(event.id)         -> 200   (ack fast)
+```
+
+---
+
+## 6. Real-World Examples
+
+**Stripe** — widely considered the gold standard for REST API design. Consistent error objects, idempotency keys on all write operations, webhook signatures for security, excellent versioning (`Stripe-Version` header + date-based versions), comprehensive SDK generation.
+
+**GitHub** — offers both a REST API and a GraphQL API. The REST API is versioned by date via the `X-GitHub-Api-Version` header (currently `2022-11-28`); the GraphQL API exists because REST required many requests to fetch PR data with associated reviews, checks, and comments. Power users migrated to GraphQL for efficiency.
+
+**Twitter/X** — moved from REST to GraphQL-like patterns internally. Public API uses REST with cursor-based pagination (`next_token` in responses).
+
+**Google** — gRPC is used extensively for internal service communication. Public-facing APIs follow the Google API Design Guide (AIP — API Improvement Proposals), which defines a resource-oriented REST style called "Google API Style."
+
+**Netflix** — uses GraphQL Federation at the API Gateway layer (Federated Graph). Each domain team owns their schema slice. The gateway composes them into a unified graph for clients.
+
+**Amazon AWS** — uses a consistent REST-like style across thousands of APIs with Signature Version 4 authentication (HMAC-SHA256 request signing). API Gateway product lets teams expose their services externally with built-in throttling, caching, and auth.
+
+---
+
+## 7. Tradeoffs
+
+### REST
+| Gain | Lose |
+|------|------|
+| Simple, universal, HTTP-native caching | Over-fetching (extra fields) and under-fetching (N+1 requests) |
+| Works in any browser natively | No strong schema enforcement without OpenAPI |
+| Easy to debug with curl/Postman | Multiple round trips for related data |
+
+### GraphQL
+| Gain | Lose |
+|------|------|
+| Fetch exactly what you need | Complex server-side query analysis and execution |
+| Strongly typed schema | HTTP caching is hard (POST requests) |
+| Excellent for rapid UI iteration | N+1 problem moves to server (use DataLoader) |
+
+### gRPC
+| Gain | Lose |
+|------|------|
+| Extremely fast binary serialization | No native browser support (requires grpc-web proxy) |
+| Bidirectional streaming | Harder to debug (binary, not human-readable) |
+| Auto-generated type-safe clients | Proto schema management overhead |
+
+---
+
+## 8. When to Use
+
+- **REST** — public APIs, mobile/web clients, when HTTP caching matters, when the team knows HTTP well
+- **GraphQL** — complex UIs aggregating multiple data sources, when clients have varying data needs, BFF (Backend for Frontend) pattern
+- **gRPC** — internal microservices, high-throughput low-latency pipelines, streaming data (IoT, telemetry), polyglot environments
+- **WebSockets** — real-time features: live scores, chat, collaborative editing
+- **Webhooks** — event-driven integrations (CI/CD triggers, payment notifications, CRM syncs)
+
+---
+
+## 9. When NOT to Use
+
+- Do not use **REST** for real-time bidirectional communication (use WebSockets or gRPC streaming)
+- Do not use **GraphQL** for simple CRUD APIs — the complexity overhead is not worth it
+- Do not use **gRPC** for public browser-facing APIs unless you add a translation layer
+- Do not add **HATEOAS** in full purity unless your clients are truly hypermedia-driven — most clients ignore the links
+- Do not use **webhooks** when the consumer needs synchronous confirmation of the result
+
+---
+
+## 10. Common Pitfalls
+
+**Verb-based URLs** — `POST /createUser` violates REST. Use `POST /users`.
+
+**Inconsistent error formats** — different endpoints returning different error shapes forces consumers to handle each case specially. Standardize on one error envelope; **RFC 9457 (Problem Details for HTTP APIs, July 2023)** is the off-the-shelf answer — media type `application/problem+json` with `type`, `title`, `status`, `detail`, and `instance` members, all optional and extensible with your own fields.
+
+**Ignoring HTTP status codes** — returning `200 OK` with `{ "success": false }` in the body is an anti-pattern. Use appropriate 4xx/5xx codes.
+
+**Not versioning from the start** — adding `/v2/` later forces all consumers to migrate. Start with `/v1/` on day one.
+
+**Synchronous calls for async work** — making `POST /reports` block for 30 seconds while generating the report. Instead return `202 Accepted` with a job ID and a polling or webhook mechanism.
+
+**Exposing database IDs** — sequential integer IDs leak information (how many users you have). Prefer UUIDs or opaque IDs.
+
+**Missing rate limiting on public endpoints** — any unauthenticated endpoint will be abused without rate limiting.
+
+**Over-nesting resources** — `/users/1/orders/2/items/3/reviews` is too deep. Flatten where possible: `/reviews?item_id=3`.
+
+**Not documenting breaking vs non-breaking changes** — adding a required field is breaking. Adding an optional field is not. Communicate this clearly in changelogs.
+
+**Missing idempotency on payment/order creation** — network retries without idempotency keys cause duplicate charges.
+
+---
+
+## 11. Technologies & Tools
+
+| Category | Tools |
+|----------|-------|
+| API Frameworks (REST) | Express.js, FastAPI, Django REST Framework, Spring Boot, Rails |
+| API Frameworks (GraphQL) | Apollo Server, Strawberry, Hasura, Pothos |
+| API Frameworks (gRPC) | grpc-go, grpc-java, grpcio, grpc-node |
+| API Gateway | Kong, AWS API Gateway, Apigee, Traefik, Envoy |
+| Documentation | OpenAPI 3.2 (released 2025-09-19), Redoc, Stoplight, GraphQL Playground |
+| Testing | Postman, Insomnia, k6, Hurl, Karate |
+| Mocking | WireMock, Mockoon, Microcks |
+| SDK Generation | OpenAPI Generator, Buf (for protobuf) |
+| Auth | Auth0, Keycloak, AWS Cognito, Okta |
+
+---
+
+## 12. Interview Questions
+
+**Q1: What is the difference between PUT and PATCH?**
+**Short:** PUT replaces the entire resource, while PATCH applies a partial update to it.
+
+PUT replaces the entire resource. PATCH applies a partial update. Example: PUT /users/1 requires sending all user fields; PATCH /users/1 can send only `{ "email": "new@example.com" }`.
+
+**Q2: How do you handle API versioning?**
+**Short:** URL path, header, and query-parameter versioning are the three common API versioning strategies.
+
+Common strategies: URL path versioning (`/v1/`, `/v2/`), header versioning (`Accept: application/vnd.myapi.v2+json`), and query parameter versioning (`?version=2`). URL path versioning is most visible and commonly used. Always announce the retirement of an old version on the wire before removing it: `Deprecation` (RFC 9745) marks the moment the version became deprecated, and `Sunset` (RFC 8594) gives the date it stops responding.
+
+**Q3: What is the difference between authentication and authorization?**
+**Short:** Authentication verifies identity; authorization verifies what that identity may do.
+
+Authentication verifies identity ("who are you?" — JWT, session cookie). Authorization verifies permission ("are you allowed?" — RBAC, ABAC, scope checks). Both are needed; confusing them is a common security mistake.
+
+**Q4: How would you design a pagination strategy for a high-traffic API?**
+**Short:** Cursor-based pagination stays O(1) per page, unlike OFFSET which rescans all preceding rows.
+
+Use cursor-based pagination instead of offset. Store the cursor as a base64-encoded pointer to the last seen row (ID or timestamp). This ensures stable pages under concurrent writes and is O(1) with a proper index, unlike OFFSET which scans all preceding rows.
+
+**Q5: What is idempotency and why does it matter in API design?**
+**Short:** An idempotent operation returns the same result whether it runs once or many times.
+
+An idempotent operation produces the same result whether called once or many times. GET and DELETE are naturally idempotent. POST is not; you add idempotency by accepting a client-provided key that the server uses to deduplicate retries. Critical for payment and order APIs where network failures cause retries.
+
+**Q6: Explain REST constraints.**
+**Short:** REST constraints are statelessness, client-server separation, uniform interface, layered system, cacheability, and optional code-on-demand.
+
+Stateless, client-server separation, uniform interface (resource identification, manipulation through representations, self-descriptive messages, HATEOAS), layered system, cacheable, optional code-on-demand.
+
+**Q7: How does GraphQL solve the N+1 problem on the server side?**
+**Short:** GraphQL's DataLoader batches per-field resolver lookups into one query per event-loop tick.
+
+Using DataLoader: batch individual database lookups that occur during field resolution into a single batched query per tick of the event loop. Instead of 100 separate DB calls to fetch 100 users' avatars, DataLoader fires one `SELECT WHERE id IN (...)` query.
+
+**Q8: What are the tradeoffs of JWT vs opaque session tokens?**
+**Short:** JWTs scale statelessly but cannot be revoked early; opaque tokens can be revoked but need a lookup.
+
+JWTs are stateless (no DB lookup to verify) enabling horizontal scaling, but cannot be invalidated before expiry. Opaque tokens require a DB/cache lookup per request but can be revoked instantly. Hybrid: short-lived JWTs (15 min) + long-lived refresh tokens stored in a revocation store.
+
+**Q9: How would you design rate limiting at the API gateway level?**
+**Short:** API gateway rate limiting typically uses a token bucket or sliding window backed by Redis.
+
+Use a token bucket or sliding window algorithm. Store state in Redis (for distributed rate limiting). Key by IP for unauthenticated endpoints and by user/API key for authenticated ones. Return `429 Too Many Requests` with `Retry-After` and `X-RateLimit-*` headers.
+
+**Q10: What is gRPC and when would you prefer it over REST?**
+**Short:** gRPC uses Protocol Buffers over HTTP/2 for smaller payloads and bidirectional streaming.
+
+gRPC uses Protocol Buffers over HTTP/2, providing binary serialization (smaller payloads), multiplexed streams, bidirectional streaming, and auto-generated type-safe clients. Prefer it for internal service-to-service communication where latency and throughput matter, or when you need streaming.
+
+**Q11: How do you handle breaking changes in a public API?**
+**Short:** Breaking API changes are handled by versioning, running versions in parallel, and a deprecation window.
+
+Version the API (introduce `/v2/`). Run both versions in parallel. Set a deprecation date, communicate via docs and the two standardized headers: `Deprecation` (RFC 9745, a Proposed Standard) carries the timestamp the version became deprecated, and `Sunset` (RFC 8594) carries the date after which it stops responding — the Sunset date must not be earlier than the Deprecation one. Give consumers at least 6-12 months to migrate. Use feature flags for gradual migration. Never silently change behavior of an existing version.
+
+**Q12: What is CORS and how does it work?**
+**Short:** CORS lets a server opt browsers into cross-origin requests via the Access-Control-Allow-Origin header.
+
+Cross-Origin Resource Sharing. Browsers block requests from `a.com` to `b.com` unless `b.com` responds with `Access-Control-Allow-Origin: a.com`. Preflight requests (`OPTIONS`) are sent for non-simple requests. Server-side concern, not an API design concern per se, but APIs must handle it for browser clients.
+
+**Q13: How should an API handle an operation that takes 30+ seconds, like generating a report?**
+**Short:** Long-running work should return 202 Accepted with a job ID instead of blocking the HTTP connection.
+
+Return `202 Accepted` immediately with a job ID instead of holding the HTTP connection open, then let the client poll a status endpoint or receive a webhook when the work finishes. Section 10 calls out "synchronous calls for async work" as a common pitfall — blocking `POST /reports` for 30 seconds ties up a server thread or connection per in-flight request, and most client/proxy timeouts (30-60s) will kill the connection before the work completes anyway. The Stripe case study uses this pattern for the card-network leg: `POST /payment_intents` returns `status: processing` immediately, and the client's registered webhook receives `payment_intent.succeeded` asynchronously (Case Study Step 5). Design `GET /jobs/{id}` to return the same resource shape as the webhook payload so clients can use either mechanism interchangeably.
+
+**Q14: Why is exposing sequential auto-incrementing database IDs in API responses risky?**
+**Short:** Sequential auto-incrementing IDs let attackers enumerate resources and infer business volume.
+
+Sequential integer IDs let attackers enumerate resources by incrementing the ID in the URL, exposing insecure direct object reference (IDOR) risks. For example, an attacker can iterate `GET /orders/1`, `/orders/2`, `/orders/3` to probe records that lack proper per-resource authorization, and competitors can estimate signup or order volume by diffing IDs over time. Section 10 lists this among the common pitfalls precisely because auto-increment primary keys are the free default most ORMs hand you. The fix is to keep the sequential ID as the internal database primary key for index performance, but expose a UUID, ULID, or opaque hashid as the public-facing resource identifier. Always pair opaque IDs with real authorization checks — an unguessable ID alone is not an access-control mechanism, it just removes the cheapest attack.
+
+**Q15: What problem does an API gateway solve, and what risk does it create as more logic gets pushed into it?**
+**Short:** An API gateway centralizes cross-cutting concerns but risks becoming a single point of failure and a logic dump.
+
+An API gateway centralizes cross-cutting concerns — authentication, rate limiting, routing — so individual services don't reimplement them. It acts as a Facade over the service mesh (see Cross-Perspective: LLD Connections). In the REST request lifecycle diagram (§4), the gateway authenticates via JWT and applies a token bucket before the request ever reaches the User Service, meaning all client traffic funnels through one component. The risk is twofold: it becomes a single point of failure that needs its own horizontal scaling and HA setup, and it becomes a dumping ground for business logic — once teams add service-specific transformations, independently deployable services get recoupled at the edge into something close to a monolith. Keep the gateway limited to genuinely cross-cutting concerns and push domain-specific validation back into the owning service.
+
+**Q: How does a webhook receiver prove the request really came from the sender, and how does it stop the same signed request being replayed forever?**
+**Short:** A webhook verifies an HMAC over the raw body and rejects requests outside a short timestamp window.
+
+It verifies an HMAC over the raw body and rejects any request whose signed timestamp falls outside a short tolerance window. Section 5's webhook mechanics use Stripe's scheme as the reference: the `Stripe-Signature` header carries `t=<unix timestamp>,v1=<hex>`, where `v1` is HMAC-SHA256 over the literal string `"<t>.<raw body>"` keyed by the endpoint's signing secret. Two details are load-bearing. First, the HMAC must be recomputed over the exact bytes received — parsing the JSON and re-serializing it changes whitespace or key order and breaks the comparison — and the comparison itself must be constant-time so an attacker cannot use response timing to guess the digest byte by byte. Second, a signature alone only proves authenticity, not freshness: without binding the timestamp into the signed string, a captured POST stays valid forever, which is why the timestamp is part of the signed payload and why Stripe rejects anything more than 5 minutes old by default. A signature check is authentication, not deduplication — you still need the event ID and a seen-set, because retries deliver the same correctly-signed event more than once.
+
+**Q16: What security risk is unique to GraphQL's flexible querying model?**
+**Short:** GraphQL's flexible queries enable complexity-based denial-of-service via deeply nested fields.
+
+A single GraphQL query can request deeply nested or duplicated fields that fan out into an enormous number of resolver calls — a query-complexity denial-of-service. One request can do the database work of thousands of REST calls. The GraphQL tradeoffs table (§7) already flags that server-side query execution is complex to analyze; that complexity is exactly what an attacker exploits by nesting fields like `friends { friends { friends { ... } } }` a few levels deep. Mitigate with query depth limits, a cost/complexity scoring system that rejects queries above a threshold, per-field resolver timeouts, and persisted queries (allow-listing known query shapes) for public-facing schemas. Never expose an unbounded GraphQL schema to untrusted clients without depth limiting and complexity analysis in front of it.
+
+---
+
+## 13. Best Practices
+
+- Use nouns for resource URLs: `/users`, `/orders`, not `/getUsers`, `/createOrder`
+- Use plural nouns consistently: `/users/42`, not `/user/42`
+- Return consistent JSON envelope: `{ "data": {}, "meta": {}, "errors": [] }`
+- Always include pagination metadata: `{ "data": [...], "meta": { "next_cursor": "...", "has_more": true } }`
+- Document every endpoint with an OpenAPI 3.2 description before implementing
+- Use semantic versioning in the path: `/v1/`, `/v2/`
+- Provide `Retry-After` headers on `429` and `503` responses
+- Validate and sanitize all inputs server-side — never trust the client
+- Log request IDs (`X-Request-Id`) for distributed tracing
+- Use HTTPS everywhere; reject HTTP
+- Set `Content-Type: application/json` explicitly
+- Return `405 Method Not Allowed` for unsupported methods, not `404`
+- Use `ETag` and `Last-Modified` headers for cacheable resources
+- Design for mobile: minimize payload size, support partial responses (`?fields=id,name`)
+
+---
+
+## 14. Metrics & Monitoring
+
+| Metric | Description | Alert Threshold |
+|--------|-------------|-----------------|
+| Request Latency (p50/p95/p99) | Response time distribution | p99 > 500ms |
+| Error Rate (4xx/5xx) | % of requests resulting in errors | >1% 5xx |
+| Throughput (RPS) | Requests per second | Baseline deviation |
+| Availability | Uptime percentage | <99.9% |
+| Rate Limit Hit Rate | % of requests hitting rate limits | >5% sustained |
+| Cache Hit Rate | For cacheable endpoints | <80% |
+| Auth Failure Rate | % of requests failing auth | Spike detection |
+| Payload Size | Average response size | >100KB (investigate) |
+
+**Stated plainly.** "Response size is not just a client concern — multiply it by your request rate and it becomes an egress bandwidth number, which is why a 100KB average payload is worth investigating rather than shrugging at."
+
+The reason a payload threshold belongs in a metrics table at all is that it is the one API-design decision that shows up directly on the infrastructure bill. Trimming fields is usually the cheapest performance work available, because it reduces serialization cost, transfer time, and egress charges simultaneously.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Average response payload size — the table's `100KB` investigate threshold |
+| `RPS` | Requests per second on the endpoint |
+| `throughput` | Egress in bytes per second: `S x RPS` |
+| `Mbps` | The same figure in network units: `S x RPS x 8 / 1,000,000` |
+| `1024` | Bytes per KB (binary units, as sizing tools report them) |
+
+**Walk one example.** The 100KB threshold at the Stripe case study's 800 req/sec peak, then the effect of trimming the payload:
+
+```
+  100KB x 800 RPS   : 102,400 x 800  = 81,920,000 bytes/sec
+                                      =     81.9 MB/sec
+                                      =    655.4 Mbps sustained
+
+  at the 25 RPS average instead      =     20.5 Mbps
+
+  trim payload to 10KB (fields=... or a leaner schema):
+  10KB  x 800 RPS                    =     65.5 Mbps
+  reduction                          =    589.9 Mbps saved, a 10x cut
+```
+
+655 Mbps of sustained egress from a single endpoint is a real line item, and it is proportional to payload size with no other variable involved. This is the concrete argument behind the "design for mobile: minimize payload size, support partial responses" best practice above — the field-selection parameter is not a nicety, it is a 10x lever on both user-visible latency and bandwidth cost.
+
+Key tools: Datadog APM, AWS X-Ray, Prometheus + Grafana, New Relic, Jaeger (distributed tracing).
+
+---
+
+## Cross-Perspective: LLD Connections
+
+**LLD View — Design Patterns That Implement API Design**
+
+- **Facade** — An API gateway is a Facade over a microservice mesh: it presents a unified, simplified interface to clients while hiding backend routing, protocol translation, and service topology.
+- **Chain of Responsibility** — The middleware pipeline (auth → rate limit → validation → handler → response transform) is Chain of Responsibility. Each middleware decides whether to handle the request or pass it to the next link.
+- **Builder** — Request/response objects with many optional fields (headers, query params, body, auth, timeout) are natural Builder candidates. HTTP client builders (`OkHttpClient.Builder`, gRPC stub builders) follow this pattern directly.
+- **Strategy** — Authentication mechanisms (JWT, OAuth 2.0, API key, mTLS) and versioning strategies (URL path, header, content-type negotiation) are interchangeable Strategy implementations configured per-route.
+
+---
+
+**Cross-references:** [backend/rest_api_design](../../backend/rest_api_design/rest_api_design.md) (resource modeling, HATEOAS, status codes), [backend/grpc_and_protobuf](../../backend/grpc_and_protobuf/grpc_and_protobuf.md) (binary protocols, streaming RPC), [backend/graphql](../../backend/graphql/graphql.md) (schema design, N+1 resolution), [backend/api_gateway_patterns](../../backend/api_gateway_patterns/api_gateway_patterns.md) (gateway-level versioning, auth, rate limiting).
+
+---
+
+## 15. Case Study: Designing the Stripe Payments API
+
+**Problem:** Build a payments API that handles card charges from web and mobile clients, supports retries safely, and integrates with partner platforms.
+
+**Step 1 — Resource Modeling**
+Core resources: `PaymentIntent`, `Customer`, `PaymentMethod`, `Refund`, `Webhook`. Separate the intent (what we want to do) from the attempt (what we tried) — this allows multi-step payment flows.
+
+**Step 2 — Idempotency**
+Every `POST /payment_intents` must accept an `Idempotency-Key` header. Store `(key, user_id) -> response` in Redis with 24h TTL. Network retries return the same `PaymentIntent` object without double-charging.
+
+**Step 3 — Versioning**
+Release as `/v1/`. All API keys are pinned to the API version at time of key creation. When `/v2/` launches, existing keys continue to use v1 behavior. Customers opt in to new versions explicitly.
+
+**Step 4 — Authentication**
+API keys are `sk_live_...` (secret, server-side only) or `pk_live_...` (publishable, client-side, limited scope). OAuth for platform accounts (Stripe Connect). JWTs issued by Stripe for frontend-to-gateway calls.
+
+**Step 5 — Webhooks for Async Events**
+Payment processing is async. `POST /payment_intents` returns immediately with `status: processing`. The client registers a webhook URL. Stripe sends `payment_intent.succeeded` or `payment_intent.payment_failed` events. Webhooks include a `Stripe-Signature` header (HMAC-SHA256) for verification.
+
+**Step 6 — Rate Limiting**
+Stripe's published global limit is 100 requests/second per account in live mode (25/second in a sandbox), with individual endpoints capped at 25 requests/second unless documented otherwise. Return `429` with `Retry-After: 1` and a `Stripe-Rate-Limited-Reason` header naming which limit was hit. Stripe also uses exponential backoff with jitter in their SDKs.
+
+**Step 7 — Error Design**
+All errors return a consistent shape:
+```json
+{
+  "error": {
+    "type": "card_error",
+    "code": "insufficient_funds",
+    "message": "Your card has insufficient funds.",
+    "param": "amount",
+    "request_id": "req_abc123"
+  }
+}
+```
+
+**Outcome:** An API that handles billions of dollars in transactions daily, with near-zero double-charge incidents, high developer adoption, and a support burden dramatically lower than the industry average.
+
+---
+
+## Case Study: Stripe's Idempotent Payment API
+
+### Problem Statement
+
+Design the `POST /v1/charges` endpoint at Stripe.
+
+- **Volume:** 1M payment requests/day, 25 req/sec average, 800 req/sec peak (Black Friday)
+- **Reliability:** every successful charge must be charged exactly once; clients retry on any 5xx or timeout
+- **Latency SLA:** p99 < 500ms, p50 < 120ms
+- **Correctness:** zero tolerance for double-charge — a single duplicate at $50k/incident credit cost
+- **Retry behavior:** clients (mobile SDK, server-side libs) retry on network timeout up to 3 times with exponential backoff
+- **Cross-region:** request may arrive in us-east-1 on attempt 1, us-west-2 on attempt 2 (DNS failover)
+- **Customers:** 4M businesses, request rate per customer ranges from 0.001 to 200 req/sec
+
+### Architecture Overview
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    client(["Client SDK<br/>retries on timeout"]) -->|"Idempotency-Key: ik_4242"| gw["API Gateway<br/>rate limit + auth"]
+    gw --> mw{"Idempotency Middleware<br/>key = sha256(account+ik+route)<br/>lookup in Redis"}
+    mw -->|hit| cached(["return cached response"])
+    mw -->|miss| lock["SET key=STARTED NX PX 60000<br/>(distributed lock)"]
+    lock --> psm["Payment State Machine<br/>(Saga)"]
+    psm --> pg["Postgres<br/>(charges)"]
+    psm --> card["Card Network"]
+    pg --> persist["Persist final response<br/>+ result to Redis (24h)"]
+    card --> persist
+
+    gw@{ icon: "logos:aws-api-gateway", form: "square", label: "API Gateway", pos: "b", h: 44 }
+    pg@{ icon: "logos:postgresql", form: "square", label: "Postgres", pos: "b", h: 44 }
+
+    class client io
+    class mw,psm mathOp
+    class cached,persist train
+    class lock,card frozen
+```
+
+A Redis-backed idempotency check either short-circuits with a cached response (hit) or acquires a 60-second distributed lock before invoking the payment state machine and the card network (miss); the successful result then persists to Postgres and back to Redis for 24 hours.
+
+### Key Design Decisions
+
+1. **Client-supplied `Idempotency-Key` header.** Client generates UUID for each logical request; resends same key on retry. *Alternative rejected:* server-generated dedup — client cannot signal that a retry IS the same operation.
+
+2. **Composite key namespace `account_id:route:idempotency_key`.** Prevents collision when two customers happen to choose the same UUID. *Alternative rejected:* global key space — UUID collisions theoretically possible, and a malicious customer could probe other customers' keys.
+
+3. **State machine: STARTED → SUCCEEDED / FAILED.** Recorded in Redis with 24h TTL and replicated to Postgres for durability. *Alternative rejected:* boolean done/not-done — cannot distinguish "in progress, please wait" from "completed, here's response".
+
+4. **Distributed lock during execution.** `SET key:lock STARTED NX PX 60000` blocks concurrent retries of the same key. Second request returns 409 `Conflict` with `retry_after`. *Alternative rejected:* allow parallel execution — both might call card network, causing double charge.
+
+5. **Payload hash validation.** Store sha256(body) with the key; reject 422 if a retry has a different payload. *Alternative rejected:* trust the key alone — broken client reusing a key for different requests would receive a stale, incorrect response.
+
+6. **Redis fail-closed.** If Redis is unreachable, return 503 rather than process without dedup check. *Alternative rejected:* fail-open (process anyway) — risks double-charge during Redis outage.
+
+7. **24h key TTL.** Long enough for client retries (max retry window = 30 min), short enough to bound Redis memory at ~40GB. *Alternative rejected:* permanent storage — unbounded growth, no business need beyond retry window.
+
+```mermaid
+stateDiagram-v2
+    [*] --> New
+    New --> STARTED: request arrives, lock SET NX PX 60000
+    STARTED --> STARTED: retry within 60s returns 409
+    STARTED --> New: lock expires, no completion (crash)
+    STARTED --> SUCCEEDED: handler returns under 500
+    STARTED --> FAILED: handler returns 500 or higher
+    SUCCEEDED --> [*]: 24h TTL expiry
+    FAILED --> [*]: 24h TTL expiry
+```
+
+The idempotency key's lifecycle is what makes retries safe: a same-key retry inside the 60-second lock window gets back a 409, a mid-flight crash lets the lock expire and reopens the key to a fresh attempt, and terminal SUCCEEDED/FAILED results are replayed to any retry for the full 24-hour TTL.
+
+**Read it like this.** "A TTL is a memory budget in disguise. Keeping every key for 24 hours means the store holds exactly one day's worth of requests at all times, so the memory it needs is daily request volume multiplied by the size of one stored entry — nothing else."
+
+The steady state is the key idea: with a fixed TTL, keys expire at the same rate they arrive, so memory plateaus instead of growing. Decision 7's rejected alternative (permanent storage) removes that plateau entirely, which is why "unbounded growth" is the stated reason for rejecting it.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Request volume — `1,000,000` payment requests/day |
+| `TTL` | Key retention window — `24h`, i.e. exactly one day |
+| `keys` | Keys resident at steady state: `V x TTL_in_days` |
+| `s` | Bytes per entry: the cached response body, body hash, state, and status code |
+| `memory` | Redis footprint: `keys x s` — the reported `38GB` |
+| `budget` | The `~40GB` bound decision 7 is sizing against |
+
+**Walk one example.** Working backwards from the reported footprint to find what one entry costs:
+
+```
+  resident keys  : 1,000,000/day x 1 day        = 1,000,000 keys
+
+  implied size   : 38 GB / 1,000,000 keys       = 38,000 bytes/key
+                   -- about 38KB, dominated by the cached
+                      response body, not the key metadata
+
+  budget check   : 38 GB / 40 GB                = 95% of budget
+
+  what a longer TTL would cost:
+    48h TTL      : 2,000,000 keys x 38 KB       = 76 GB  (2x, over budget)
+    7-day TTL    : 7,000,000 keys x 38 KB       = 266 GB (7x)
+```
+
+Two things this exposes. First, at 95% of budget there is essentially no headroom — the 10x scaling question in the discussion points is not hypothetical, it is close. Second, 38KB per entry means the cached *response* is the memory cost, not the idempotency bookkeeping; storing a response pointer instead of the full body would cut the footprint far more than shortening the TTL would, and without touching the retry-safety window.
+
+### Implementation
+
+Java idempotency middleware (Spring):
+
+```java
+@Component
+public class IdempotencyFilter extends OncePerRequestFilter {
+    private final RedisCommands<String, String> redis;
+    private static final Duration TTL = Duration.ofHours(24);
+    private static final long LOCK_MS = 60_000;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest req,
+                                    HttpServletResponse res,
+                                    FilterChain chain) throws IOException, ServletException {
+        String ik = req.getHeader("Idempotency-Key");
+        if (ik == null) { chain.doFilter(req, res); return; }
+
+        String account = (String) req.getAttribute("account_id");
+        String body = readBody(req);
+        String bodyHash = sha256(body);
+        String key = "idem:" + account + ":" + req.getRequestURI() + ":" + ik;
+
+        // Check existing
+        Map<String, String> existing = redis.hgetall(key);
+        if (!existing.isEmpty()) {
+            if (!bodyHash.equals(existing.get("body_hash"))) {
+                res.setStatus(422);
+                res.getWriter().write("{\"error\":\"idempotency_key_payload_mismatch\"}");
+                return;
+            }
+            if ("STARTED".equals(existing.get("state"))) {
+                res.setStatus(409);
+                res.setHeader("Retry-After", "1");
+                return;
+            }
+            // Replay cached response
+            res.setStatus(Integer.parseInt(existing.get("status")));
+            res.getWriter().write(existing.get("response"));
+            return;
+        }
+
+        // Acquire lock on a SEPARATE key -- `key` itself holds a hash,
+        // and a string SET on it would fail every later HSET with WRONGTYPE
+        String ok = redis.set(key + ":lock", "STARTED",
+                              SetArgs.Builder.nx().px(LOCK_MS));
+        if (ok == null) {
+            res.setStatus(409); res.setHeader("Retry-After", "1"); return;
+        }
+        redis.hset(key, Map.of("state", "STARTED", "body_hash", bodyHash));
+        redis.expire(key, TTL.toSeconds());
+
+        // Execute and capture response
+        ContentCachingResponseWrapper wrapper = new ContentCachingResponseWrapper(res);
+        try {
+            chain.doFilter(req, wrapper);
+            String responseBody = new String(wrapper.getContentAsByteArray());
+            redis.hset(key, Map.of(
+                "state", wrapper.getStatus() < 500 ? "SUCCEEDED" : "FAILED",
+                "status", String.valueOf(wrapper.getStatus()),
+                "response", responseBody));
+            wrapper.copyBodyToResponse();
+        } catch (Exception e) {
+            redis.hset(key, "state", "FAILED");
+            throw e;
+        }
+    }
+}
+```
+
+Postgres durability backstop:
+
+```sql
+CREATE TABLE idempotency_keys (
+    account_id   BIGINT NOT NULL,
+    route        TEXT   NOT NULL,
+    key          TEXT   NOT NULL,
+    body_hash    BYTEA  NOT NULL,
+    state        TEXT   NOT NULL,  -- STARTED/SUCCEEDED/FAILED
+    response     JSONB,
+    status_code  INT,
+    created_at   TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (account_id, route, key)
+) PARTITION BY RANGE (created_at);
+
+-- Async writer mirrors Redis state for durability beyond 24h Redis TTL
+```
+
+### Tradeoffs
+
+| Approach                  | No Idempotency | Server-Side Dedup | Client Idempotency Key (chosen) |
+|---------------------------|----------------|-------------------|---------------------------------|
+| Double-charge risk        | High           | Medium (false +)  | Near-zero                       |
+| Retry semantics           | Unsafe         | Hash-based guess  | Explicit, client-controlled     |
+| Storage cost              | None           | High (all reqs)   | Bounded by retry window         |
+| Client complexity         | None           | None              | Must generate+pass key          |
+| Cross-region behavior     | Unsafe         | Requires sync     | Works with shared Redis tier    |
+
+### Metrics & Results
+
+- **Duplicate-charge rate:** 1 in 110M requests (vs industry baseline ~1 in 50k)
+- **API p50/p99 latency:** 112ms / 480ms (idempotency adds ~3ms overhead)
+- **Cache hit rate (replayed retries):** 4.2% of all requests are retries
+- **Redis memory footprint:** 38GB across 24h window
+- **False 422 rate (payload mismatch):** 0.003% (mostly buggy SDK versions)
+- **Cost of idempotency layer:** ~$2k/month Redis + ~$5k/month Postgres partition storage
+
+**What it means.** "A defect rate expressed as 'one in N requests' only becomes meaningful when you divide your traffic into it — that turns an abstract ratio into how often the incident happens, and multiplying by the incident's cost turns it into the annual budget the whole idempotency layer is justified against."
+
+The reason this framing matters is that correctness work is hard to fund on principle and easy to fund on arithmetic. The layer costs $7k/month; the arithmetic below shows what it prevents.
+
+| Symbol | What it is |
+|--------|------------|
+| `V` | Daily request volume — `1,000,000` payment requests/day |
+| `1/N` | Duplicate-charge rate: `1 in 110M` achieved, `1 in 50k` industry baseline |
+| `days_per_incident` | `N / V` — how long between duplicate charges |
+| `incidents_per_year` | `365 / days_per_incident`, equivalently `V x 365 / N` |
+| `c` | Cost per incident — `$50k` in credits, from the problem statement |
+| `annual_cost` | `incidents_per_year x c` |
+| `layer_cost` | Running cost of the idempotency layer: `$2k + $5k = $7k/month` |
+
+**Walk one example.** Both rates priced out against the stated 1M requests/day:
+
+```
+  achieved, 1 in 110M:
+    days per incident   : 110,000,000 / 1,000,000   =    110 days
+    incidents per year  : 365 / 110                 =    3.32
+    annual exposure     : 3.32 x $50,000            = $165,909
+
+  baseline, 1 in 50k:
+    incidents per day   : 1,000,000 / 50,000        =     20
+    incidents per year  : 20 x 365                  =  7,300
+    annual exposure     : 7,300 x $50,000           = $365,000,000
+
+  improvement factor    : 110,000,000 / 50,000      =  2,200x
+  layer cost            : ($2k + $5k) x 12          =  $84,000/year
+```
+
+The comparison is not close: $84k/year of Redis and Postgres removes roughly $365M/year of exposure. That ratio is the answer to "why build idempotency at all," and it is also why decision 6 chooses to fail closed — returning 503 during a Redis outage costs availability measured in minutes, while failing open costs money measured against the $50k-per-incident line.
+
+### Common Pitfalls / Lessons Learned
+
+1. **Client reused key for different payload.** A migration script reused the same idempotency key for 500 different charges, accidentally treating them as one request. Stripe returned the cached first response for all 500 — until payload-hash validation caught it.
+   - *Broken:* store only the key, no body hash.
+   - *Fix:* `if (!bodyHash.equals(existing.get("body_hash"))) return 422;` — fail fast on mismatch with explicit error code.
+
+2. **Key collision across customers.** Customer A and Customer B both chose `Idempotency-Key: 1`. A's response leaked to B (data exposure + wrong amount).
+   - *Broken:* `key = ik`
+   - *Fix:* `key = account_id + ":" + route + ":" + ik` — namespace by tenant.
+
+3. **Redis outage caused open-retry storm.** When Redis was down, the middleware initially fell open (process without dedup check) — a network blip caused 12 customers to be double-charged before the on-call rolled back.
+   - *Broken:* `try { redis.get(); } catch { proceed; }`
+   - *Fix:* `try { redis.get(); } catch { return 503; }` — fail closed; brief unavailability is preferable to silent double-charges. Combined with Redis Sentinel for < 10s failover.
+
+### Interview Discussion Points
+
+**Q: Why not let the payment processor (card network) handle dedup?**
+Card networks have their own idempotency primitives (e.g., `transaction_id`), but they only protect the network leg. If our server crashes after charging the card but before persisting the charge record, the client retry would create a new card transaction. Application-layer idempotency covers the entire request lifecycle.
+
+**Q: How do you handle a request that times out mid-flight?**
+The server-side state stays in STARTED for up to 60s (lock TTL). A retry within that window sees STARTED and returns 409 with Retry-After. After the original completes, the state transitions to SUCCEEDED/FAILED and subsequent retries get the cached response. If the original truly dies (process crash), the lock expires and the next retry re-executes.
+
+**Q: What if the cached response is stale (e.g., charge later refunded)?**
+The idempotency response is the response from the original POST — it does not change. The current state of the resource is queried separately via GET. Idempotency is about replay safety of the operation, not about reflecting current state.
+
+**Q: Why 24-hour TTL specifically?**
+Empirically, > 99.9% of retries happen within 1 hour; the long tail (mobile clients going offline) extends to ~12 hours. 24h gives a safety margin. Beyond 24h, business logic considers the operation "final" — a new request with the same key is a new operation.
+
+**Q: How would you scale this to 10x traffic?**
+Redis cluster is the bottleneck. At 10x (8000 req/sec peak), shard Redis by `hash(account_id)` across N nodes. Postgres state table is already partitioned by created_at; add more partitions per day. The middleware itself is stateless — scale by adding API server instances.
+
+**Q: How do you test this?**
+Three layers: (1) unit tests force concurrent retries through CountDownLatch and verify only one execution, (2) integration tests with TestContainers Redis kill the Redis container mid-request and verify 503, (3) chaos tests in staging inject 500ms delays and verify exactly-once semantics under retry storms.
+
+**Q: What's the difference between idempotent and safe?**
+Safe (RFC 9110 §9.2.1) means no side effects — GET, HEAD, OPTIONS. Idempotent means executing N times has the same effect as executing once — PUT, DELETE, and POST-with-idempotency-key. POST without idempotency is neither safe nor idempotent.

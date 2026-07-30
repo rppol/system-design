@@ -23,39 +23,39 @@ A comprehensive, one-stop reference for mastering **pure Java** — from languag
 
 | # | Module | Key Concepts | Difficulty |
 |---|--------|-------------|------------|
-| 1 | [Core Language](core_language/README.md) | OOP, equals/hashCode, inner classes, polymorphism, Object methods | Intermediate |
-| 2 | [Strings and Text](strings_and_text/README.md) | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concatenation, StringBuilder, text blocks, Unicode correctness | Intermediate |
-| 3 | [Generics & Type System](generics_and_type_system/README.md) | PECS, type erasure, bridge methods, wildcards, dynamic proxies — with 1 deep-dive sub-file ([type inference & bounds](generics_and_type_system/type_inference_and_bounds.md)) | Advanced |
-| 4 | [Exceptions & I/O](exceptions_and_io/README.md) | Checked/unchecked, try-with-resources, NIO.2, serialization | Intermediate |
-| 5 | [Java 8 Features](java8_features/README.md) | Lambdas, Streams overview, Optional, Collectors, Date/Time API | Intermediate |
-| 6 | [Java Streams — Deep Dive](java_streams/README.md) | All ops, lazy eval, flatMap, reduce, collect, Spliterator, parallel rules | Intermediate |
-| 7 | [Functional Programming](functional_programming/README.md) | Function composition, custom Collectors, parallel streams, immutability | Intermediate |
-| 8 | [Java 9-21 Features](java9_to_21_features/README.md) | Records, Sealed classes, Virtual threads, Pattern matching, JPMS | Intermediate |
-| 9 | [JVM Internals](jvm_internals/README.md) | GC algorithms, JIT, Memory model, Class loading, Object layout | Advanced |
-| 10 | [Concurrency](concurrency/README.md) | synchronized, volatile, locks, ThreadPool, CompletableFuture, CAS | Advanced |
-| 11 | [Collections Internals](collections_internals/README.md) | HashMap/TreeMap/ArrayList internals, fail-fast, treeification | Advanced |
-| 12 | [Design Patterns in Java](design_patterns_in_java/README.md) | GoF patterns in JDK, JDK Proxy vs CGLIB, Decorator chain, Strategy vs Template Method, concurrency patterns | Intermediate |
-| 13 | [Performance & Tuning](performance_and_tuning/README.md) | GC tuning, JMH, heap/thread dumps, false sharing, async-profiler | Advanced |
-| 14 | [Java Memory Model](java_memory_model/README.md) | Happens-before rules, memory barriers, safe publication, final fields, data race vs race condition | Advanced |
-| 15 | [Java Interview Patterns](java_interview_patterns/README.md) | Immutable class, builder, equals contract, Integer cache, enum singleton | Intermediate |
-| 16 | [Testing — JUnit 5 & Mockito](testing_junit_mockito/README.md) | JUnit 5 lifecycle, assertions, @ParameterizedTest, Mockito mocks/spies/captors, test doubles | Intermediate |
-| 17 | [Annotation Processing](annotation_processing/README.md) | JSR 269 rounds, AbstractProcessor, Filer/Messager, element model, JavaPoet codegen, Lombok AST mutation, MapStruct, compile-time vs runtime | Advanced |
-| 18 | [Structured Concurrency & Loom](structured_concurrency_and_loom/README.md) | Virtual threads, carrier threads, pinning, StructuredTaskScope, ScopedValue, Continuation internals, Java 21 GA | Advanced |
-| 19 | [Foreign Function & Memory API (Panama)](foreign_function_and_memory_api/README.md) | Arena, MemorySegment, MemoryLayout, VarHandle, Linker downcall/upcall, jextract, replacing Unsafe/JNI, Java 22 GA | Advanced |
-| 20 | [Reactive Programming](reactive_programming/README.md) | Reactor Flux/Mono, cold vs hot, flatMap/concatMap/switchMap, backpressure, Schedulers, Reactor Context, RxJava 3, StepVerifier | Advanced |
-| 21 | [Networking & HTTP Client](networking_and_http_client/README.md) | HttpClient (Java 11), NIO Selector/Reactor, HTTP/2 multiplexing, NIO2 async channels | Intermediate |
-| 22 | [JDBC & Database Access](jdbc_and_database/README.md) | PreparedStatement, HikariCP, transaction isolation levels, batch inserts, ResultSet streaming | Intermediate |
-| 23 | [gRPC & Protocol Buffers](grpc_protobuf/README.md) | Protobuf wire format + schema evolution, 4 RPC modes, generated stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport | Advanced |
-| 24 | [Microservices Patterns](microservices_patterns/README.md) | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead | Advanced |
-| 25 | [Java Date/Time (java.time)](java_time_datetime/README.md) | Instant vs LocalDateTime, ZoneId/offsets, Duration vs Period, TemporalAdjuster, Clock (testable time), DST gaps/overlaps | Intermediate |
-| 26 | [Bytecode & Class-File Format](bytecode_and_classfile/README.md) | .class structure, constant pool, opcode families, invokedynamic, javap, ASM/Byte Buddy, java agents & Instrumentation | Advanced |
-| 27 | [Security & Cryptography](security_and_cryptography/README.md) | JCA/JCE, MessageDigest/Cipher/KeyStore/SecureRandom, AES-GCM, TLS/SSLEngine handshake, password hashing, JAAS | Advanced |
-| 28 | [JSON Processing with Jackson](json_processing_jackson/README.md) | ObjectMapper thread-safety + reuse, streaming vs tree vs databind, records/@JsonCreator, TypeReference generics, polymorphic deserialization CVEs, java.time module | Intermediate |
-| 29 | [Logging](logging/README.md) | SLF4J facade, Logback/Log4j2, parameterized logging, MDC propagation across threads/virtual-threads, async appenders, structured JSON, Log4Shell | Intermediate |
-| 30 | [JPMS — Java Platform Module System](java_platform_module_system/README.md) | module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink | Advanced |
-| 31 | [Reference Types & Cleaners](reference_types_and_cleaners/README.md) | Strong/Soft/Weak/Phantom, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks | Advanced |
-| 32 | [GraalVM Native Image](graalvm_native_image/README.md) | AOT native-image, closed-world reachability, reflection/resource metadata, build-time vs runtime init, startup vs throughput | Advanced |
-| 33 | [Build Tools — Maven & Gradle](build_tools_maven_gradle/README.md) | Maven lifecycle/dependency mediation/BOM/shade, Gradle task graph/build cache/version catalogs, dependency hell | Intermediate |
+| 1 | [Core Language](core_language/core_language.md) | OOP, equals/hashCode, inner classes, polymorphism, Object methods | Intermediate |
+| 2 | [Strings and Text](strings_and_text/strings_and_text.md) | String immutability, constant pool, Compact Strings (JEP 254), invokedynamic concatenation, StringBuilder, text blocks, Unicode correctness | Intermediate |
+| 3 | [Generics & Type System](generics_and_type_system/generics_and_type_system.md) | PECS, type erasure, bridge methods, wildcards, dynamic proxies — with 1 deep-dive sub-file ([type inference & bounds](generics_and_type_system/type_inference_and_bounds.md)) | Advanced |
+| 4 | [Exceptions & I/O](exceptions_and_io/exceptions_and_io.md) | Checked/unchecked, try-with-resources, NIO.2, serialization | Intermediate |
+| 5 | [Java 8 Features](java8_features/java8_features.md) | Lambdas, Streams overview, Optional, Collectors, Date/Time API | Intermediate |
+| 6 | [Java Streams — Deep Dive](java_streams/java_streams.md) | All ops, lazy eval, flatMap, reduce, collect, Spliterator, parallel rules | Intermediate |
+| 7 | [Functional Programming](functional_programming/functional_programming.md) | Function composition, custom Collectors, parallel streams, immutability | Intermediate |
+| 8 | [Java 9-21 Features](java9_to_21_features/java9_to_21_features.md) | Records, Sealed classes, Virtual threads, Pattern matching, JPMS | Intermediate |
+| 9 | [JVM Internals](jvm_internals/jvm_internals.md) | GC algorithms, JIT, Memory model, Class loading, Object layout | Advanced |
+| 10 | [Concurrency](concurrency/concurrency.md) | synchronized, volatile, locks, ThreadPool, CompletableFuture, CAS | Advanced |
+| 11 | [Collections Internals](collections_internals/collections_internals.md) | HashMap/TreeMap/ArrayList internals, fail-fast, treeification | Advanced |
+| 12 | [Design Patterns in Java](design_patterns_in_java/design_patterns_in_java.md) | GoF patterns in JDK, JDK Proxy vs CGLIB, Decorator chain, Strategy vs Template Method, concurrency patterns | Intermediate |
+| 13 | [Performance & Tuning](performance_and_tuning/performance_and_tuning.md) | GC tuning, JMH, heap/thread dumps, false sharing, async-profiler | Advanced |
+| 14 | [Java Memory Model](java_memory_model/java_memory_model.md) | Happens-before rules, memory barriers, safe publication, final fields, data race vs race condition | Advanced |
+| 15 | [Java Interview Patterns](java_interview_patterns/java_interview_patterns.md) | Immutable class, builder, equals contract, Integer cache, enum singleton | Intermediate |
+| 16 | [Testing — JUnit 5 & Mockito](testing_junit_mockito/testing_junit_mockito.md) | JUnit 5 lifecycle, assertions, @ParameterizedTest, Mockito mocks/spies/captors, test doubles | Intermediate |
+| 17 | [Annotation Processing](annotation_processing/annotation_processing.md) | JSR 269 rounds, AbstractProcessor, Filer/Messager, element model, JavaPoet codegen, Lombok AST mutation, MapStruct, compile-time vs runtime | Advanced |
+| 18 | [Structured Concurrency & Loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | Virtual threads, carrier threads, pinning, StructuredTaskScope, ScopedValue, Continuation internals, Java 21 GA | Advanced |
+| 19 | [Foreign Function & Memory API (Panama)](foreign_function_and_memory_api/foreign_function_and_memory_api.md) | Arena, MemorySegment, MemoryLayout, VarHandle, Linker downcall/upcall, jextract, replacing Unsafe/JNI, Java 22 GA | Advanced |
+| 20 | [Reactive Programming](reactive_programming/reactive_programming.md) | Reactor Flux/Mono, cold vs hot, flatMap/concatMap/switchMap, backpressure, Schedulers, Reactor Context, RxJava 3, StepVerifier | Advanced |
+| 21 | [Networking & HTTP Client](networking_and_http_client/networking_and_http_client.md) | HttpClient (Java 11), NIO Selector/Reactor, HTTP/2 multiplexing, NIO2 async channels | Intermediate |
+| 22 | [JDBC & Database Access](jdbc_and_database/jdbc_and_database.md) | PreparedStatement, HikariCP, transaction isolation levels, batch inserts, ResultSet streaming | Intermediate |
+| 23 | [gRPC & Protocol Buffers](grpc_protobuf/grpc_protobuf.md) | Protobuf wire format + schema evolution, 4 RPC modes, generated stubs, interceptors, deadlines/cancellation, Status error model, HTTP/2 transport | Advanced |
+| 24 | [Microservices Patterns](microservices_patterns/microservices_patterns.md) | Saga (choreography + orchestration), transactional outbox, idempotency keys, distributed tracing context propagation, strangler fig, bulkhead | Advanced |
+| 25 | [Java Date/Time (java.time)](java_time_datetime/java_time_datetime.md) | Instant vs LocalDateTime, ZoneId/offsets, Duration vs Period, TemporalAdjuster, Clock (testable time), DST gaps/overlaps | Intermediate |
+| 26 | [Bytecode & Class-File Format](bytecode_and_classfile/bytecode_and_classfile.md) | .class structure, constant pool, opcode families, invokedynamic, javap, ASM/Byte Buddy, java agents & Instrumentation | Advanced |
+| 27 | [Security & Cryptography](security_and_cryptography/security_and_cryptography.md) | JCA/JCE, MessageDigest/Cipher/KeyStore/SecureRandom, AES-GCM, TLS/SSLEngine handshake, password hashing, JAAS | Advanced |
+| 28 | [JSON Processing with Jackson](json_processing_jackson/json_processing_jackson.md) | ObjectMapper thread-safety + reuse, streaming vs tree vs databind, records/@JsonCreator, TypeReference generics, polymorphic deserialization CVEs, java.time module | Intermediate |
+| 29 | [Logging](logging/logging.md) | SLF4J facade, Logback/Log4j2, parameterized logging, MDC propagation across threads/virtual-threads, async appenders, structured JSON, Log4Shell | Intermediate |
+| 30 | [JPMS — Java Platform Module System](java_platform_module_system/java_platform_module_system.md) | module-info, requires/exports/opens, requires transitive, automatic modules, split packages, services (ServiceLoader), jlink | Advanced |
+| 31 | [Reference Types & Cleaners](reference_types_and_cleaners/reference_types_and_cleaners.md) | Strong/Soft/Weak/Phantom, ReferenceQueue, WeakHashMap, Cleaner vs finalize, ThreadLocal/ClassLoader leaks | Advanced |
+| 32 | [GraalVM Native Image](graalvm_native_image/graalvm_native_image.md) | AOT native-image, closed-world reachability, reflection/resource metadata, build-time vs runtime init, startup vs throughput | Advanced |
+| 33 | [Build Tools — Maven & Gradle](build_tools_maven_gradle/build_tools_maven_gradle.md) | Maven lifecycle/dependency mediation/BOM/shade, Gradle task graph/build cache/version catalogs, dependency hell | Intermediate |
 
 > **Note**: `java8_features` covers Streams as part of the full Java 8 overview. `java_streams` is the dedicated deep dive — all 20+ operations, `Spliterator` internals, parallel rules, `reduce` vs `collect`, and the full `Collectors` catalogue.
 
@@ -127,25 +127,25 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#8-ph
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [core_language](core_language/) | README only |
-| 2 | [strings_and_text](strings_and_text/) | 2 files |
-| 3 | [generics_and_type_system](generics_and_type_system/) | 2 files |
-| 4 | [exceptions_and_io](exceptions_and_io/) | README only |
-| 5 | [json_processing_jackson](json_processing_jackson/) | README only |
-| 6 | [java8_features](java8_features/) | README only |
-| 8 | [java_streams](java_streams/) | README only |
-| 10 | [java9_to_21_features](java9_to_21_features/) | README only |
-| 12 | [jvm_internals](jvm_internals/) | README only |
-| 14 | [reference_types_and_cleaners](reference_types_and_cleaners/) | README only |
-| 16 | [concurrency](concurrency/) | README only |
-| 17 | [collections_internals](collections_internals/) | README only |
-| 18 | [design_patterns_in_java](design_patterns_in_java/) | README only |
-| 19 | [performance_and_tuning](performance_and_tuning/) | 2 files |
-| 20 | [java_memory_model](java_memory_model/) | README only |
-| 21 | [java_interview_patterns](java_interview_patterns/) | README only |
-| 22 | [testing_junit_mockito](testing_junit_mockito/) | README only |
-| 26 | [structured_concurrency_and_loom](structured_concurrency_and_loom/) | README only |
-| 30 | [jdbc_and_database](jdbc_and_database/) | README only |
+| 1 | [core_language](core_language/core_language.md) | module page only |
+| 2 | [strings_and_text](strings_and_text/strings_and_text.md) | 2 files |
+| 3 | [generics_and_type_system](generics_and_type_system/generics_and_type_system.md) | 2 files |
+| 4 | [exceptions_and_io](exceptions_and_io/exceptions_and_io.md) | module page only |
+| 5 | [json_processing_jackson](json_processing_jackson/json_processing_jackson.md) | module page only |
+| 6 | [java8_features](java8_features/java8_features.md) | module page only |
+| 8 | [java_streams](java_streams/java_streams.md) | module page only |
+| 10 | [java9_to_21_features](java9_to_21_features/java9_to_21_features.md) | module page only |
+| 12 | [jvm_internals](jvm_internals/jvm_internals.md) | module page only |
+| 14 | [reference_types_and_cleaners](reference_types_and_cleaners/reference_types_and_cleaners.md) | module page only |
+| 16 | [concurrency](concurrency/concurrency.md) | module page only |
+| 17 | [collections_internals](collections_internals/collections_internals.md) | module page only |
+| 18 | [design_patterns_in_java](design_patterns_in_java/design_patterns_in_java.md) | module page only |
+| 19 | [performance_and_tuning](performance_and_tuning/performance_and_tuning.md) | 2 files |
+| 20 | [java_memory_model](java_memory_model/java_memory_model.md) | module page only |
+| 21 | [java_interview_patterns](java_interview_patterns/java_interview_patterns.md) | module page only |
+| 22 | [testing_junit_mockito](testing_junit_mockito/testing_junit_mockito.md) | module page only |
+| 26 | [structured_concurrency_and_loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | module page only |
+| 30 | [jdbc_and_database](jdbc_and_database/jdbc_and_database.md) | module page only |
 
 **Not in this path** (14 of 33, Full Path only): `java_time_datetime`, `functional_programming`, `java_platform_module_system`, `bytecode_and_classfile`, `graalvm_native_image`, `logging`, `annotation_processing`, `build_tools_maven_gradle`, `foreign_function_and_memory_api`, `reactive_programming`, `networking_and_http_client`, `security_and_cryptography`, `grpc_protobuf`, `microservices_patterns`
 <!-- /study-path-table -->
@@ -167,21 +167,21 @@ A ruthless cut to what a **senior Java interview** actually probes — the langu
 
 | # | Module | Files |
 |---|--------|-------|
-| 10 | [java9_to_21_features](java9_to_21_features/) | README only |
-| 11 | [java_platform_module_system](java_platform_module_system/) | README only |
-| 12 | [jvm_internals](jvm_internals/) | README only |
-| 15 | [graalvm_native_image](graalvm_native_image/) | README only |
-| 18 | [design_patterns_in_java](design_patterns_in_java/) | README only |
-| 19 | [performance_and_tuning](performance_and_tuning/) | README only |
-| 22 | [testing_junit_mockito](testing_junit_mockito/) | README only |
-| 23 | [logging](logging/) | README only |
-| 24 | [annotation_processing](annotation_processing/) | README only |
-| 25 | [build_tools_maven_gradle](build_tools_maven_gradle/) | README only |
-| 26 | [structured_concurrency_and_loom](structured_concurrency_and_loom/) | README only |
-| 28 | [reactive_programming](reactive_programming/) | README only |
-| 31 | [security_and_cryptography](security_and_cryptography/) | README only |
-| 32 | [grpc_protobuf](grpc_protobuf/) | README only |
-| 33 | [microservices_patterns](microservices_patterns/) | README only |
+| 10 | [java9_to_21_features](java9_to_21_features/java9_to_21_features.md) | module page only |
+| 11 | [java_platform_module_system](java_platform_module_system/java_platform_module_system.md) | module page only |
+| 12 | [jvm_internals](jvm_internals/jvm_internals.md) | module page only |
+| 15 | [graalvm_native_image](graalvm_native_image/graalvm_native_image.md) | module page only |
+| 18 | [design_patterns_in_java](design_patterns_in_java/design_patterns_in_java.md) | module page only |
+| 19 | [performance_and_tuning](performance_and_tuning/performance_and_tuning.md) | module page only |
+| 22 | [testing_junit_mockito](testing_junit_mockito/testing_junit_mockito.md) | module page only |
+| 23 | [logging](logging/logging.md) | module page only |
+| 24 | [annotation_processing](annotation_processing/annotation_processing.md) | module page only |
+| 25 | [build_tools_maven_gradle](build_tools_maven_gradle/build_tools_maven_gradle.md) | module page only |
+| 26 | [structured_concurrency_and_loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) | module page only |
+| 28 | [reactive_programming](reactive_programming/reactive_programming.md) | module page only |
+| 31 | [security_and_cryptography](security_and_cryptography/security_and_cryptography.md) | module page only |
+| 32 | [grpc_protobuf](grpc_protobuf/grpc_protobuf.md) | module page only |
+| 33 | [microservices_patterns](microservices_patterns/microservices_patterns.md) | module page only |
 
 **Not in this path** (18 of 33, Full Path only): `core_language`, `strings_and_text`, `generics_and_type_system`, `exceptions_and_io`, `json_processing_jackson`, `java8_features`, `java_time_datetime`, `java_streams`, `functional_programming`, `bytecode_and_classfile`, `reference_types_and_cleaners`, `concurrency`, `collections_internals`, `java_memory_model`, `java_interview_patterns`, `foreign_function_and_memory_api`, `networking_and_http_client`, `jdbc_and_database`
 <!-- /study-path-table -->
@@ -196,33 +196,33 @@ The highest-frequency Java *knowledge* questions mapped to the file that answers
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
-| The equals/hashCode contract — what breaks if you override one but not the other? | [Core Language](core_language/README.md), [Java Interview Patterns](java_interview_patterns/README.md) |
-| Why are Strings immutable? Explain the string pool and interning. | [Strings & Text](strings_and_text/README.md) |
-| HashMap internals — resize, load factor 0.75, treeification at 8. | [Collections Internals](collections_internals/README.md) |
-| ConcurrentHashMap vs synchronizedMap — how does CHM scale? | [Concurrency](concurrency/README.md), [Collections Internals](collections_internals/README.md) |
-| volatile vs synchronized — what does volatile NOT give you? | [Concurrency](concurrency/README.md), [Java Memory Model](java_memory_model/README.md) |
-| Explain the Java Memory Model and happens-before. | [Java Memory Model](java_memory_model/README.md) |
-| How does ThreadPoolExecutor work (core/max/queue/rejection)? | [Concurrency](concurrency/README.md) |
-| CompletableFuture — thenApply vs thenCompose, exception handling. | [Concurrency](concurrency/README.md) |
-| Virtual threads — how they work, carrier-thread pinning, vs platform threads. | [Structured Concurrency & Loom](structured_concurrency_and_loom/README.md) |
-| Generics — type erasure, PECS, why you can't do `new T[]`. | [Generics & Type System](generics_and_type_system/README.md) |
-| Stream laziness — when does a pipeline run, and when is parallel a trap? | [Java Streams](java_streams/README.md) |
-| Records, sealed classes, and pattern matching — what and why. | [Java 9-21 Features](java9_to_21_features/README.md) |
-| G1 vs ZGC — pause targets and when to choose which. | [JVM Internals](jvm_internals/README.md) |
-| JIT compilation — C1/C2, tiered compilation, inlining. | [JVM Internals](jvm_internals/README.md) |
-| try-with-resources, suppressed exceptions, checked vs unchecked. | [Exceptions & I/O](exceptions_and_io/README.md) |
-| Is ObjectMapper thread-safe? Streaming vs tree vs databind. | [JSON Processing (Jackson)](json_processing_jackson/README.md) |
-| How did polymorphic deserialization (default typing) cause RCEs? | [JSON Processing (Jackson)](json_processing_jackson/README.md) |
-| Design an immutable class — defensive copies, final fields. | [Java Interview Patterns](java_interview_patterns/README.md) |
-| GoF patterns in the JDK — Decorator in I/O, Strategy in Comparator. | [Design Patterns in Java](design_patterns_in_java/README.md) |
-| Mockito — mocks vs spies, verify, argument captors. | [Testing (JUnit 5 & Mockito)](testing_junit_mockito/README.md) |
-| Transaction isolation levels and HikariCP pool sizing. | [JDBC & Database Access](jdbc_and_database/README.md) |
+| The equals/hashCode contract — what breaks if you override one but not the other? | [Core Language](core_language/core_language.md), [Java Interview Patterns](java_interview_patterns/java_interview_patterns.md) |
+| Why are Strings immutable? Explain the string pool and interning. | [Strings & Text](strings_and_text/strings_and_text.md) |
+| HashMap internals — resize, load factor 0.75, treeification at 8. | [Collections Internals](collections_internals/collections_internals.md) |
+| ConcurrentHashMap vs synchronizedMap — how does CHM scale? | [Concurrency](concurrency/concurrency.md), [Collections Internals](collections_internals/collections_internals.md) |
+| volatile vs synchronized — what does volatile NOT give you? | [Concurrency](concurrency/concurrency.md), [Java Memory Model](java_memory_model/java_memory_model.md) |
+| Explain the Java Memory Model and happens-before. | [Java Memory Model](java_memory_model/java_memory_model.md) |
+| How does ThreadPoolExecutor work (core/max/queue/rejection)? | [Concurrency](concurrency/concurrency.md) |
+| CompletableFuture — thenApply vs thenCompose, exception handling. | [Concurrency](concurrency/concurrency.md) |
+| Virtual threads — how they work, carrier-thread pinning, vs platform threads. | [Structured Concurrency & Loom](structured_concurrency_and_loom/structured_concurrency_and_loom.md) |
+| Generics — type erasure, PECS, why you can't do `new T[]`. | [Generics & Type System](generics_and_type_system/generics_and_type_system.md) |
+| Stream laziness — when does a pipeline run, and when is parallel a trap? | [Java Streams](java_streams/java_streams.md) |
+| Records, sealed classes, and pattern matching — what and why. | [Java 9-21 Features](java9_to_21_features/java9_to_21_features.md) |
+| G1 vs ZGC — pause targets and when to choose which. | [JVM Internals](jvm_internals/jvm_internals.md) |
+| JIT compilation — C1/C2, tiered compilation, inlining. | [JVM Internals](jvm_internals/jvm_internals.md) |
+| try-with-resources, suppressed exceptions, checked vs unchecked. | [Exceptions & I/O](exceptions_and_io/exceptions_and_io.md) |
+| Is ObjectMapper thread-safe? Streaming vs tree vs databind. | [JSON Processing (Jackson)](json_processing_jackson/json_processing_jackson.md) |
+| How did polymorphic deserialization (default typing) cause RCEs? | [JSON Processing (Jackson)](json_processing_jackson/json_processing_jackson.md) |
+| Design an immutable class — defensive copies, final fields. | [Java Interview Patterns](java_interview_patterns/java_interview_patterns.md) |
+| GoF patterns in the JDK — Decorator in I/O, Strategy in Comparator. | [Design Patterns in Java](design_patterns_in_java/design_patterns_in_java.md) |
+| Mockito — mocks vs spies, verify, argument captors. | [Testing (JUnit 5 & Mockito)](testing_junit_mockito/testing_junit_mockito.md) |
+| Transaction isolation levels and HikariCP pool sizing. | [JDBC & Database Access](jdbc_and_database/jdbc_and_database.md) |
 
 ---
 
 ## Study Plan
 
-A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_studies/README.md) and rehearse the "implement X" format.
+A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_studies/case_studies.md) and rehearse the "implement X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|
@@ -311,7 +311,7 @@ A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_st
 
 ## Case Studies
 
-For a guided learning path through all 8 case studies, see [case_studies/README.md](case_studies/README.md).
+For a guided learning path through all 8 case studies, see [case_studies/README.md](case_studies/case_studies.md).
 
 | Case Study | Core Java Concepts | Difficulty |
 |------------|-------------------|------------|

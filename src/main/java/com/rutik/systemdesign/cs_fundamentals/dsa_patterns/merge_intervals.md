@@ -403,10 +403,10 @@ def merge_intervals_fixed(intervals: list[list[int]]) -> list[list[int]]:
 
 ## 10. Cross-links
 
-- Concept module: [sorting_and_searching](../sorting_and_searching/) — sort-then-sweep is the foundational technique; comparator/key functions
-- [arrays_strings_and_hashing](../arrays_strings_and_hashing/) — list/array manipulation basics
-- Applied: [`../../devops/kubernetes_scheduling_and_autoscaling/README.md`](../../devops/kubernetes_scheduling_and_autoscaling/README.md) — resource scheduling and bin-packing share the "overlap/conflict detection" mental model with meeting-room problems
-- Master index: [dsa_patterns/README.md](README.md)
+- Concept module: [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — sort-then-sweep is the foundational technique; comparator/key functions
+- [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — list/array manipulation basics
+- Applied: [`../../devops/kubernetes_scheduling_and_autoscaling/README.md`](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) — resource scheduling and bin-packing share the "overlap/conflict detection" mental model with meeting-room problems
+- Master index: [dsa_patterns/README.md](dsa_patterns.md)
 
 ---
 

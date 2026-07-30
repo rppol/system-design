@@ -100,7 +100,7 @@ description from the docstring — the same auto-schema pattern as
 [PydanticAI](pydantic_ai.md)); (2) **built-in tools** — `google_search`,
 `built_in_code_execution`, `VertexAiSearchTool`, provided by the framework; (3) **`OpenAPIToolset`**
 — given an OpenAPI spec, auto-generates one tool per endpoint; (4) **`MCPToolset`** — wraps an
-[MCP server](../mcp_model_context_protocol/README.md)'s tools as ADK tools, so any MCP-compliant
+[MCP server](../mcp_model_context_protocol/mcp_model_context_protocol.md)'s tools as ADK tools, so any MCP-compliant
 tool server becomes usable without per-tool integration code.
 
 ### 3.4 Runner and the Event Loop
@@ -577,7 +577,7 @@ the weighted sum with a measured `p` rather than assuming the midpoint.
   ecosystem, though `spring_ai` is planned-not-built per repo conventions).
 - The system needs **bidirectional audio/video streaming** (voice agents, live assistants) — ADK's
   integration with the Gemini **Live API** is a first-class supported path, relevant alongside
-  [Voice Agents](../voice_agents/README.md).
+  [Voice Agents](../voice_agents/voice_agents.md).
 
 **Do NOT use ADK (or reconsider) when:**
 
@@ -658,7 +658,7 @@ application startup and reuse across requests.
 | **Vertex AI Agent Engine** | Managed runtime — sessions, memory, autoscaling, `adk eval` |
 | **`adk eval`** | Regression-testing CLI — runs an "evalset" of test conversations against trajectory + response-match criteria |
 | **`LiteLlm` wrapper** | Routes `LlmAgent.model` to non-Gemini providers via [LiteLLM](litellm_routing.md) |
-| **`MCPToolset`** | Bridges [MCP servers](../mcp_model_context_protocol/README.md) into ADK tools |
+| **`MCPToolset`** | Bridges [MCP servers](../mcp_model_context_protocol/mcp_model_context_protocol.md) into ADK tools |
 | **`to_a2a()` / `RemoteA2aAgent`** | Expose ADK agents as [A2A](../multi_agent_systems/agent_to_agent_protocols.md) servers / consume remote A2A agents |
 | **Gemini Live API** | Bidirectional audio/video streaming backend for voice/live agents |
 
@@ -696,7 +696,7 @@ Cloud Run can run multiple instances of a service concurrently and can scale ins
 
 **Q8: How does ADK's `MCPToolset` relate to the broader MCP ecosystem — does using ADK require MCP, or vice versa?**
 **Short:** They're independent -- ADK is just one MCP client, and `MCPToolset` skips writing per-tool integration code for any MCP server's tools.
-Neither requires the other — they're independent. [MCP](../mcp_model_context_protocol/README.md) is a protocol for exposing tools/resources/prompts from a server to *any* compliant client; ADK is one such client (via `MCPToolset`), alongside Claude Desktop, other agent frameworks' MCP integrations, etc. An ADK application can use zero MCP servers (pure `FunctionTool`s), and an MCP server can be consumed by clients that have never heard of ADK. `MCPToolset`'s value is **avoiding per-tool integration code** — any tool exposed by an MCP server (filesystem access, a database connector, a SaaS API wrapper) becomes usable by an ADK `LlmAgent` with one `MCPToolset` declaration, rather than writing a `FunctionTool` per operation.
+Neither requires the other — they're independent. [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) is a protocol for exposing tools/resources/prompts from a server to *any* compliant client; ADK is one such client (via `MCPToolset`), alongside Claude Desktop, other agent frameworks' MCP integrations, etc. An ADK application can use zero MCP servers (pure `FunctionTool`s), and an MCP server can be consumed by clients that have never heard of ADK. `MCPToolset`'s value is **avoiding per-tool integration code** — any tool exposed by an MCP server (filesystem access, a database connector, a SaaS API wrapper) becomes usable by an ADK `LlmAgent` with one `MCPToolset` declaration, rather than writing a `FunctionTool` per operation.
 
 **Q9: What's the practical difference between ADK's A2A support and its native multi-agent hierarchy (`sub_agents` + delegation)?**
 **Short:** Native delegation requires agents in the same process and codebase, while A2A calls a remote agent over HTTP+JSON-RPC in any framework.
@@ -709,7 +709,7 @@ First, check whether the exit-condition sub-agent (the "critic") is actually **s
 **Q11: What does `adk eval` test, and how does it fit into a CI/CD pipeline for agents?**
 **Short:** It replays an evalset of conversations against expected tool-call trajectories and responses, acting as a golden-dataset regression suite.
 `adk eval` runs a predefined "evalset" — a set of test conversations, each specifying expected **tool-call trajectories** (which tools should be called, with roughly what arguments) and/or expected **final response content** (matched via similarity or an LLM judge) — against the live agent, and reports pass/fail per test case with configurable tolerance thresholds. This fits the same role as
-[LLM Testing Strategies](../llm_testing_strategies/README.md)'s golden-dataset regression suites: run on every PR/deploy to catch regressions where a prompt or tool change causes the agent to stop calling an expected tool, call tools in a different order, or produce substantively different final responses — without requiring a human to manually re-run every conversation.
+[LLM Testing Strategies](../llm_testing_strategies/llm_testing_strategies.md)'s golden-dataset regression suites: run on every PR/deploy to catch regressions where a prompt or tool change causes the agent to stop calling an expected tool, call tools in a different order, or produce substantively different final responses — without requiring a human to manually re-run every conversation.
 
 **Q12: How does ADK's "code-first" positioning differ from low-code/no-code agent builders, and what's the tradeoff?**
 **Short:** Code gets version control, unit testing, and composability, trading away the accessibility and speed of a low-code visual builder.
@@ -778,10 +778,10 @@ medical-intake checklists, content-moderation escalation paths — and ADK's wor
 
 ## Related
 
-- [Agentic Frameworks README](README.md) — parent module: framework landscape and comparison table
+- [Agentic Frameworks README](agentic_frameworks.md) — parent module: framework landscape and comparison table
 - [Strands (AWS)](strands_aws.md) — closest sibling: cloud-provider-native agent SDK, `agent_as_tool` vs ADK's `AgentTool`/delegation (§8, §Q13)
 - [Claude Agent SDK](claude_agent_sdk.md) — subagent composition pattern comparison (§2)
 - [OpenAI Agents SDK](openai_agents_sdk.md) — handoffs vs. tools-as-agents comparison (§Q6)
 - [Agent-to-Agent Protocols](../multi_agent_systems/agent_to_agent_protocols.md) — the A2A protocol ADK agents speak for cross-process/cross-org delegation (§3.6, §Q9)
-- [MCP (Model Context Protocol)](../mcp_model_context_protocol/README.md) — tool-server protocol consumed via `MCPToolset` (§Q8)
-- [LLM Testing Strategies](../llm_testing_strategies/README.md) — golden-dataset regression testing, the same role `adk eval` plays for ADK agents (§Q11)
+- [MCP (Model Context Protocol)](../mcp_model_context_protocol/mcp_model_context_protocol.md) — tool-server protocol consumed via `MCPToolset` (§Q8)
+- [LLM Testing Strategies](../llm_testing_strategies/llm_testing_strategies.md) — golden-dataset regression testing, the same role `adk eval` plays for ADK agents (§Q11)

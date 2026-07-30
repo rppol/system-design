@@ -770,7 +770,7 @@ class ImmutableAuditLogger:
 
 **Sierra** (2024, enterprise customer operations): the instructive contrast — Sierra deliberately does *not* build on screenshot-driven computer use. Its agents act on warranty claims, returns, and account changes through API and system integrations, orchestrated by a workflow-and-guardrails layer that constrains what the agent may do per task type rather than allowing free-form UI exploration. It bills on outcomes (a fee per resolved case) rather than per token or per task, which only works because the integration path is far more reliable than pixel-level UI automation. The lesson for this design: where a first-class API exists, use it — computer use is the fallback for the long tail of systems that expose no API, and should be scoped to exactly that.
 
-See also: [Computer Use & Browser Agents](../agents_and_tool_use/computer_use_and_browser_agents.md) for the module-level treatment of screenshot grounding and action loops, and [Browser Agents Deep Dive](../browser_agents_deep_dive/README.md) for WebArena mechanics and DOM-vs-vision extraction tradeoffs.
+See also: [Computer Use & Browser Agents](../agents_and_tool_use/computer_use_and_browser_agents.md) for the module-level treatment of screenshot grounding and action loops, and [Browser Agents Deep Dive](../browser_agents_deep_dive/browser_agents_deep_dive.md) for WebArena mechanics and DOM-vs-vision extraction tradeoffs.
 
 ---
 

@@ -1,0 +1,1058 @@
+# Browser Agents — Deep Dive
+
+## 1. Concept Overview
+
+Browser agents are LLM agents that navigate and interact with web pages — clicking, typing, scrolling, filling forms, extracting data — to accomplish tasks on sites without official APIs. They complement the more general "computer use" pattern by specializing on web interfaces, where DOM structure provides richer context than raw pixels and where browser automation tools (Playwright, Puppeteer) provide reliable primitives.
+
+The 2024-2025 browser-agent ecosystem includes Browser Use (Python, LLM-controlled Playwright with hybrid DOM+vision extraction), Stagehand (TypeScript, Browserbase-backed, vision+DOM), Playwright MCP (Anthropic's official MCP server for Playwright control), Browserbase (cloud browser infrastructure), and Skyvern (form-heavy automation). On the WebArena benchmark of real-world web tasks, leading agents achieve ~58% success (Browser Use with Claude Sonnet 4 + DOM extraction); pure-screenshot approaches hover around 30%.
+
+The fundamental design choice — DOM extraction vs vision vs hybrid — drives reliability, latency, and cost.
+
+---
+
+## 2. Intuition
+
+**One-line analogy**: A browser agent is like a Selenium test suite where the test cases are written by the LLM at runtime — flexible enough to handle never-seen sites, but as fragile as any DOM-based automation.
+
+**Mental model**: Three extraction strategies in a spectrum. **DOM-based** (accessibility tree, semantic selectors): fast (~50-200ms per page), 95%+ accuracy on well-built sites, fails on Canvas/PDF/dynamic visuals. **Vision-based** (screenshot + multimodal LLM): slow (~1-3s), handles any visual UI, expensive, error-prone on small text. **Hybrid** (DOM first, screenshot for ambiguity): best of both, current state of the art.
+
+**Why it matters**: Many tasks have no API: research a competitor's pricing page, fill an expense report in a legacy system, monitor a job listing site, complete a vendor portal workflow. Browser agents unlock automation for the 95% of web that lacks programmatic access.
+
+**Key insight**: The accessibility tree is dramatically better than raw HTML for LLM consumption. It's smaller (10-100× fewer tokens), structured for assistive technology (labels, roles, states), and gives the LLM a cleaner mental model of the page. The shift from HTML scraping to accessibility tree extraction is what made browser agents practical.
+
+---
+
+## 3. Core Principles
+
+- **Accessibility tree first**: cleaner, smaller than HTML; designed for semantic interpretation.
+- **Vision as fallback**: when DOM is opaque (Canvas, custom widgets), screenshot + multimodal LLM.
+- **Semantic selectors**: locate by role+name, not CSS/XPath — survives DOM changes.
+- **Action verification**: after click/type, verify the page changed as expected.
+- **Auth via session persistence**: save browser state (cookies, localStorage) to JSON, reuse.
+- **Captcha as escalation**: detect → solve via 2captcha/CapSolver OR escalate to human.
+- **Site-specific tuning**: hard-to-automate sites get custom recipes (DOM hints, wait conditions).
+
+---
+
+## 4. Types / Architectures / Strategies
+
+### 4.1 Browser Use (Python)
+
+Open-source library. Wraps Playwright. Default flow: extract accessibility tree → LLM picks action → execute → re-extract. Strong with Claude Sonnet 4 (~58% WebArena). Modular: swap models, customize extraction.
+
+### 4.2 Stagehand (TypeScript)
+
+Browserbase team. Three primitives: `page.act("click sign up")`, `page.extract({schema, instruction})`, `page.observe()`. Vision+DOM hybrid. Tight Browserbase integration for cloud browser infrastructure.
+
+### 4.3 Playwright MCP (Anthropic)
+
+Official [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) server exposing Playwright operations as tools. Standard tool interface; works with Claude, Claude Code, any MCP client. Lowest-friction integration for agent systems already on MCP.
+
+### 4.4 Browserbase (Cloud Infrastructure)
+
+Managed browser-as-a-service: stealth-mode browsers running in cloud, session persistence, captcha solving, debugging UI. Used as the runtime by Stagehand and others.
+
+### 4.5 Skyvern
+
+Form-filling specialist. Combines vision + LLM for complex multi-step web workflows (insurance claims, government forms).
+
+### 4.6 Anthropic Computer Use
+
+Generic computer control (screenshot + click/type/key) — works on browsers but not browser-specialized. Lower accuracy on web tasks than DOM-aware approaches. See [Computer Use & Browser Agents](../agents_and_tool_use/computer_use_and_browser_agents.md) for the generic computer-use loop.
+
+---
+
+## 5. Architecture Diagrams
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    task(["User task:<br/>Find a flight NYC to SF<br/>next Friday under $300"])
+    open["Open browser,<br/>navigate to search site"]
+    extract["Extract DOM /<br/>accessibility tree"]
+    sees["LLM sees:<br/>Heading: Search Flights<br/>Input role=textbox label=From<br/>Input role=textbox label=To<br/>Input role=textbox label=Date<br/>Button role=button text=Search"]
+    decide{"LLM decides next action:<br/>type NYC in From input"}
+    execute["Execute action<br/>via Playwright"]
+    verify["Verify<br/>new DOM state"]
+    continue_(["Continue until<br/>task complete"])
+
+    task --> open --> extract --> sees --> decide --> execute --> verify
+    verify -->|"not done, loop"| decide
+    verify -->|"done"| continue_
+
+    class task req
+    class open,execute base
+    class extract,sees io
+    class decide mathOp
+    class verify train
+    class continue_ req
+```
+
+The browser agent loop extracts the accessibility tree, hands it to the LLM to pick the next action, executes it via Playwright, and verifies the result before looping back — the same cycle every step of a task repeats until the terminal state is reached.
+
+```
+DOM Extraction Strategies
+==========================
+
+  Raw HTML:
+    <div class="x-3kj"><button class="btn-prim _f8" data-id="..">Sign Up</button></div>
+    (200KB; meaningless class names; useless to LLM)
+
+  Accessibility Tree:
+    button "Sign Up" [role=button, focusable=true]
+    (5-50KB; semantic; LLM-friendly)
+
+  Vision-only (screenshot):
+    PNG image
+    (10-100KB image, ~500-2000 tokens for analysis; slower)
+
+  Hybrid (typical):
+    Accessibility tree
+    + screenshot ONLY if action target ambiguous
+
+
+Semantic Selector Robustness
+=============================
+
+  DOM:
+    <button id="btn-1234" class="x-shr-7"></button>  <-- changes every deploy
+    role: button
+    accessible name: "Submit Order"               <-- stable
+
+  CSS selector:  "#btn-1234"                       BREAKS on next deploy
+  XPath:         "//button[contains(@class,'x-shr-7')]"  BREAKS
+  Semantic:      "button with text 'Submit Order'"  STABLE
+```
+
+### Decoding the extraction cost
+
+The three strategies above are usually compared with adjectives ("smaller", "expensive"). The actual arithmetic is two lines: `tokens ≈ bytes / 4` for text payloads, and `cost = tokens × price_per_token`, with Claude Sonnet at `$3 per 1M` input tokens.
+
+**What this actually says.** "Every page you hand the model is billed by size, so the extraction strategy is a token-budget decision before it is an accuracy decision — and the accessibility tree wins by roughly 30x on the same page."
+
+That framing matters because the 10-100x figure quoted in Section 2 is a *token* ratio, not a vague quality claim. It converts directly into dollars and into how many steps fit inside a context window.
+
+| Symbol | What it is |
+|--------|------------|
+| `bytes / 4` | Rough English-text tokenizer rate — 4 characters per token. Markup-heavy HTML runs worse than this, so the HTML column below is optimistic |
+| `10-100×` | The accessibility-tree shrink factor from Section 2. The realistic middle of that range is ~30x |
+| `$3 / 1M` | Sonnet input price. Multiply tokens by `3e-6` to get dollars |
+| `500-2000 tok` | What a screenshot costs the model to *analyze*, from Section 5. Independent of the PNG's byte size |
+| `50KB cap` | The DOM-truncation limit named in Section 12 — a ceiling on the worst case, not the typical page |
+
+**Walk one example.** One page, priced three ways:
+
+```
+  Page payload             bytes      tokens (bytes/4)   input cost @ $3/1M
+  raw HTML (200 KB)       204800           51,200             $0.1536
+  raw HTML (150 KB)       153600           38,400             $0.1152
+  a11y tree (5 KB)          5120            1,280             $0.0038
+  a11y tree (50 KB cap)    51200           12,800             $0.0384
+  screenshot (analysis)       --      500 -  2,000      $0.0015 - $0.0060
+
+  Same page, one step:
+    raw HTML     38,400 tok  ->  $0.1152
+    a11y tree     1,280 tok  ->  $0.0038     30x cheaper, same page
+    screenshot    1,500 tok  ->  $0.0045     ~1.2x the a11y tree
+
+  Over a 15-step task:
+    raw HTML    576,000 tok  ->  $1.7280
+    a11y tree    19,200 tok  ->  $0.0576
+    a11y + shot  41,700 tok  ->  $0.1251
+```
+
+**The surprise is that vision is not the expensive part.** A screenshot costs about the same per step as the accessibility tree it supplements — `$0.0045` vs `$0.0038`. What vision actually costs is *latency* (1-3s vs 50-200ms, from Section 8) and *accuracy* (70-80% vs 95%+). The real budget disaster is raw HTML: at `$1.73` per task it is 30x the hybrid approach and will exhaust a context window long before the agent finishes. This is why the shift to accessibility-tree extraction, not the choice between DOM and vision, is what made browser agents practical.
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Browser Use Example
+
+```python
+import asyncio
+from browser_use import Agent
+from browser_use.llm import ChatAnthropic
+
+async def main():
+    agent = Agent(
+        task="Find the cheapest flight from JFK to SFO on December 15, 2025 on Google Flights and report the airline and price",
+        llm=ChatAnthropic(model="claude-sonnet-4-6"),
+        max_actions_per_step=3,  # Allow chained actions
+        max_failures=5,
+        use_vision=True,  # Fall back to vision when DOM ambiguous
+    )
+    
+    result = await agent.run()
+    print(result.final_result())
+
+asyncio.run(main())
+```
+
+### Stagehand (TypeScript) Example
+
+```typescript
+import { Stagehand } from "@browserbasehq/stagehand";
+import { z } from "zod";
+
+const stagehand = new Stagehand({
+  env: "BROWSERBASE",  // or "LOCAL"
+  apiKey: process.env.BROWSERBASE_API_KEY!,
+  projectId: process.env.BROWSERBASE_PROJECT_ID!,
+  modelName: "claude-sonnet-4-6",
+  modelClientOptions: { apiKey: process.env.ANTHROPIC_API_KEY! },
+});
+
+await stagehand.init();
+await stagehand.page.goto("https://news.ycombinator.com");
+
+// Natural-language action
+await stagehand.page.act("Click on the first story link");
+
+// Structured extraction
+const result = await stagehand.page.extract({
+  instruction: "extract the article title and first paragraph",
+  schema: z.object({
+    title: z.string(),
+    firstParagraph: z.string(),
+  }),
+});
+
+console.log(result);
+await stagehand.close();
+```
+
+### Playwright MCP via Claude
+
+```bash
+# Run the Playwright MCP server
+npx @anthropic/mcp-server-playwright
+```
+
+```python
+# Claude (any MCP client) connects; Playwright tools available:
+# - browser_navigate(url)
+# - browser_click(selector)
+# - browser_type(selector, text)
+# - browser_screenshot()
+# - browser_evaluate(js)
+# Agent calls these like any other MCP tool
+```
+
+### Session Persistence for Auth
+
+```python
+# Save authenticated session
+context = await browser.new_context()
+page = await context.new_page()
+await page.goto("https://internal-portal.company.com/login")
+await page.fill("#username", "user@example.com")
+await page.fill("#password", PASSWORD)
+await page.click("button[type=submit]")
+await context.storage_state(path="auth.json")  # Save cookies + localStorage
+
+# Reuse in agent
+context = await browser.new_context(storage_state="auth.json")
+# Now logged in; agent starts at authenticated state
+```
+
+---
+
+## 7. Real-World Examples
+
+**Devin** uses browser automation for web research, form filling, and integration testing during coding tasks.
+
+**Claude Computer Use demos** include browser navigation for shopping, booking, research.
+
+**Skyvern** automates insurance enrollment forms; widely used by health-tech companies.
+
+**Browser Use community** has built agents for: job application automation, e-commerce price monitoring, real estate listing aggregation, university course enrollment, vendor portal data entry.
+
+**Stagehand customers** include LangChain's web research backend, AI sales tools, BrowserOS, etc.
+
+---
+
+## 8. Tradeoffs
+
+| Approach | Speed | Accuracy | Cost | Site Compatibility |
+|---|---|---|---|---|
+| DOM-only | Fastest (50-200ms/page) | 95%+ on standard sites | Cheapest | Poor on Canvas/PDF/custom widgets |
+| Vision-only (screenshot) | Slowest (1-3s) | ~70-80% on standard sites | Most expensive (image tokens) | Universal (any visual UI) |
+| Hybrid DOM+Vision | Medium (~500ms) | 95% standard + ~80% on hard sites | Mid | Best overall |
+| Computer Use (generic) | Slow (multi-second per action) | ~60-70% on web | High | Universal |
+| Stagehand semantic actions | Fast (DOM-first) | 90%+ | Mid | Excellent for natural language |
+
+WebArena benchmark scores (approximate, 2024-2025):
+- Browser Use + Claude Sonnet 4 + DOM: **~58%**
+- Stagehand + Claude Sonnet 4: ~50%
+- GPT-4 + Computer Use: ~30-40%
+- SeeAct + GPT-4V (screenshot): ~30%
+
+### Why 95% per-step accuracy is not a 95% agent
+
+The accuracy column above is *per action*. A WebArena task is a chain of them, and a browser agent only succeeds if every link holds:
+
+```
+P(task succeeds) = p ^ n
+```
+
+**What the formula is telling you.** "Per-step accuracy is multiplied, not averaged — so a number that sounds excellent in isolation decays into a number that sounds broken once you chain fifteen of them."
+
+This single exponent explains the whole benchmark table. Nobody's agent is 30% accurate at clicking buttons; the vision-only agents scoring ~30% on WebArena are individually right well over 90% of the time. Compounding does the rest.
+
+| Symbol | What it is |
+|--------|------------|
+| `p` | Per-step reliability. One click, one type, one extraction landing correctly |
+| `n` | Actions in the task. The Section 14 agent averages 15 and caps at `max_steps=25` |
+| `p ^ n` | End-to-end task success. What a benchmark like WebArena actually reports |
+| `p = S^(1/n)` | The inverse. Given an observed task success `S`, the per-step reliability it implies |
+| `S` | Observed end-to-end success rate — the ~58% / ~30% figures above |
+
+**Walk one example.** Per-step reliability across realistic task lengths:
+
+```
+  Per-step p         n=5      n=10     n=15     n=25
+    0.99           0.9510   0.9044   0.8601   0.7778
+    0.98           0.9039   0.8171   0.7386   0.6035
+    0.97           0.8587   0.7374   0.6333   0.4670
+    0.95           0.7738   0.5987   0.4633   0.2774
+    0.90           0.5905   0.3487   0.2059   0.0718
+    0.80           0.3277   0.1074   0.0352   0.0038
+
+  Read the 0.95 row -- the "95%+ on standard sites" claim in the table above.
+  At 15 steps it delivers 0.4633: the agent fails more than half its tasks
+  while every individual action is 95% correct.
+
+  Now invert the benchmark scores, assuming n = 15 actions per task:
+    WebArena 58%  ->  p = 0.58 ^ (1/15) = 0.9643    (DOM, Browser Use)
+    WebArena 30%  ->  p = 0.30 ^ (1/15) = 0.9229    (screenshot-only)
+
+  4.15 points of per-step reliability  ->  28 points of task success.
+```
+
+**Why this reframes the DOM-vs-vision argument.** The gap between the best and worst rows of the benchmark table looks like a chasm — 58% vs 30%. Run it back through the exponent and the two approaches differ by just 4.15 percentage points per action. Compounding is an amplifier: it makes small per-step edges look like architectural revolutions, which is exactly why marginal-seeming techniques (semantic selectors over CSS, waiting for explicit state, verifying after each action) pay off so disproportionately. It also sets the engineering target — chasing `p` from 0.96 to 0.99 is worth far more than any prompt-level cleverness, and shortening `n` is the other lever, which is what `max_actions_per_step` chaining buys you.
+
+---
+
+## 9. When to Use / When NOT to Use
+
+**Use browser agents when:**
+- Target site has no API
+- Workflow spans multi-step UI (login → search → fill form → submit)
+- Site is mostly text-based or accessible (DOM-rich)
+- One-off or low-frequency automation
+- Research/scraping tasks at human-scale (not industrial scraping)
+
+**Don't use when:**
+- API available (use it — orders of magnitude faster, cheaper, more reliable)
+- High-frequency automation (DOM brittleness causes pain; investigate official integration)
+- Sites with aggressive bot protection (Cloudflare BOT-management, captchas every request)
+- Heavy-Canvas applications (Google Sheets, Figma) where DOM is opaque
+
+---
+
+## 10. Common Pitfalls
+
+### Pitfall 1: CSS selectors that break on next deploy
+
+```python
+# BROKEN: brittle CSS selector
+await page.click(".btn-primary._x-7f3kj")
+# Next deploy changes class hash; agent fails silently
+```
+
+```python
+# FIXED: semantic locator
+await page.get_by_role("button", name="Sign Up").click()
+# Or via accessible name — survives CSS refactors
+```
+
+### Pitfall 2: No wait for dynamic content
+
+```python
+# BROKEN: agent clicks then reads page before async load completes
+await page.click("Search")
+title = await page.locator("h1").text_content()  # Returns old page's title
+```
+
+```python
+# FIXED: wait for specific state
+await page.click("Search")
+await page.wait_for_selector("h1:has-text('Results')")  # Wait for new state
+title = await page.locator("h1").text_content()
+```
+
+### Pitfall 3: Storing credentials in agent context
+
+```python
+# BROKEN: password leaks into LLM context (and logs)
+await page.fill("#password", "SuperSecret123!")  # In code, LLM sees it
+```
+
+```python
+# FIXED: special protected actions; LLM sees placeholder
+await secure_input_tool.fill("#password", credential_ref="user_pwd")
+# Tool retrieves from secret manager; never goes through LLM context
+```
+
+**War story**: A team built a job-application agent. Worked great in dev. In production, the agent's actions started failing on a popular jobs site. Investigation: the site was A/B-testing new layouts; class names changed every 30 minutes. Migration from CSS selectors to accessibility-tree-based semantic selectors fixed reliability — 90%+ success across A/B variants.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Purpose |
+|---|---|
+| Browser Use | Python LLM-controlled Playwright |
+| Stagehand | TypeScript browser agent SDK |
+| Playwright MCP | Official Anthropic MCP for Playwright |
+| Browserbase | Cloud browser infrastructure |
+| Playwright | Browser automation library |
+| Puppeteer | Chrome-only browser automation |
+| Selenium | Older browser automation |
+| Skyvern | Form-filling specialist |
+| 2captcha / CapSolver | Captcha solving APIs |
+| Krisp / Stealth plugin | Bot detection evasion |
+| Browser MCP (Smithery) | Community MCP servers |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q: Why is accessibility tree extraction better than HTML for browser agents?**
+**Short:** Accessibility trees carry semantic labels and roles at 10-100x fewer tokens than raw HTML, so LLMs reason over them far more accurately.
+Accessibility tree is built for assistive technology — it surfaces semantic info (labels, roles, states) and filters out presentational noise. Smaller (10-100× fewer tokens than raw HTML), structured for interpretation, more stable across CSS refactors. LLMs reason over it more accurately than over raw HTML.
+
+**Q: What's the difference between Browser Use, Stagehand, and Playwright MCP?**
+**Short:** Browser Use is a Python DOM+vision library, Stagehand is a TypeScript act/extract/observe SDK, and Playwright MCP is Anthropic's protocol-based server.
+Browser Use: Python library, Playwright-based, DOM+vision hybrid, default to Claude. Stagehand: TypeScript SDK from Browserbase team, three high-level primitives (act/extract/observe), tightly integrated with Browserbase cloud. Playwright MCP: Anthropic's official MCP server — protocol-based, works with any MCP client.
+
+**Q: Why are semantic selectors more reliable than CSS/XPath?**
+**Short:** Semantic selectors like get_by_role reference stable user-visible text and ARIA roles instead of brittle CSS IDs or XPath that change every deploy.
+CSS selectors (`#btn-1234`) and XPath (`//button[@data-test='5']`) reference implementation details that change between deploys. Semantic selectors (`get_by_role("button", name="Submit")`) reference the user-visible semantics — text, role, ARIA labels — which are far more stable.
+
+**Q: How do browser agents handle authentication?**
+**Short:** Browser agents authenticate via saved session cookies from Playwright's storage_state, or a dedicated non-LLM-visible tool that injects credentials.
+Two patterns: (1) Session persistence — manually log in once, save cookies+localStorage to JSON via Playwright's `context.storage_state()`, reuse in agent runs. (2) Credential injection — agent navigates to login page, dedicated "fill credential" tool (not LLM-visible) retrieves password from secret manager.
+
+**Q: How do you handle captchas?**
+**Short:** Captchas are handled by avoiding triggers with stealth proxies, solving via a service like 2captcha, or escalating to a human to solve live.
+Three options: (1) Avoid by using residential proxies / stealth browsers (Browserbase has this) to reduce captcha triggering. (2) Solve via 2captcha or CapSolver API — agent detects captcha, sends image, gets solution back. (3) Escalate to human — pause agent, request user to solve in real browser, resume.
+
+**Q: What's WebArena and how do agents perform on it?**
+**Short:** WebArena is CMU's realistic multi-step benchmark across six live sites, where leading agents like Browser Use with Claude reach roughly 58%.
+WebArena (CMU 2024) is a benchmark of real web tasks across 6 sites (Shopping, GitLab, Reddit, OpenStreetMap, etc). Tests are realistic multi-step tasks. Leading agents: Browser Use + Claude Sonnet 4 ~58%, Stagehand ~50%, vision-only approaches ~30%. Benchmark drives architectural progress.
+
+**Q: When should you use vision vs DOM extraction?**
+**Short:** Use DOM extraction for standard HTML sites and fall back to vision only for canvas UIs, PDFs, or when DOM extraction returns ambiguous results.
+Use DOM when site is standard (HTML/React/Vue with semantic markup). Use vision as fallback when: Canvas-based UI (Figma, Google Sheets), PDF viewers, custom-rendered widgets, or when DOM extraction returns ambiguous results. Hybrid agents try DOM first, fall back to screenshot only when needed.
+
+**Q: How do browser agents handle pagination and infinite scroll?**
+**Short:** Agents detect page end via a DOM signal or missing next button, and for infinite scroll repeat scroll-wait cycles until a max-scroll cap is hit.
+Detect end-of-page via DOM signal (specific selector) or absence of "next" button. For infinite scroll: scroll down, wait for new content, repeat until task complete OR new content stops appearing OR max-scroll cap reached. Cost grows linearly with scroll depth.
+
+**Q: What's Browserbase and why is it popular?**
+**Short:** Browserbase is a cloud browser-hosting service with built-in stealth patches, session persistence, captcha solving, and live session replay.
+Browserbase provides cloud-hosted browsers (Chromium with stealth-mode patches) as a service. Benefits: don't run browsers in your infra (memory-heavy), session persistence built in, captcha solving integrated, live debugging UI (watch agent work in real-time). Pay-per-session model.
+
+**Q: How do you debug a failing browser agent?**
+**Short:** Debugging captures the screenshot, DOM snapshot, action taken, and LLM reasoning at each step, since stale elements are the most common failure.
+Capture: (1) screenshot at each step, (2) DOM snapshot, (3) action taken, (4) LLM reasoning. Browser Use and Stagehand have built-in debuggers; Browserbase has session replay UI. Common failures: stale element, missed wait condition, semantic locator that should have worked but didn't.
+
+**Q: What about anti-bot defenses (Cloudflare, etc)?**
+**Short:** Anti-bot systems like Cloudflare fingerprint browser signals such as WebGL renderer and mouse timing, countered with stealth plugins and residential proxies.
+Modern bot detection (Cloudflare, DataDome, PerimeterX) profiles browser fingerprints — User-Agent, screen resolution, WebGL renderer, JavaScript timing patterns, mouse movement. Vanilla Playwright is fingerprintable. Counter: stealth plugins (puppeteer-stealth, Playwright-stealth), residential proxies, human-like mouse paths. Cat-and-mouse game.
+
+**Q: How do you cap cost on browser agents?**
+**Short:** Cost is capped with per-task dollar budgets, per-domain rate limits, max navigation depth, and truncating the accessibility tree to about 50KB.
+Per-task budget (terminate if cost exceeds $X), per-domain rate limits (don't hammer one site), max-pages-per-task limit (cap navigation depth), DOM truncation (cap accessibility tree to 50KB), screenshot size limits (low-res screenshots are cheaper).
+
+**Q: How are browser agents different from Computer Use?**
+**Short:** Browser agents specialize on the DOM and accessibility tree instead of raw screenshots, making them 2-3x more accurate on web tasks than Computer Use.
+Computer Use is generic — screenshot + click/type/key, works on any GUI. Browser agents specialize on web pages — leverage DOM/accessibility tree for cleaner extraction, use semantic selectors, handle browser-specific lifecycle (page loads, navigation). Browser agents are typically 2-3× more accurate on web tasks at lower cost.
+
+**Q: What's the role of MCP in the browser agent ecosystem?**
+**Short:** Playwright MCP exposes browser actions as standardized tools so any MCP client can drive a browser without a proprietary SDK integration.
+Playwright MCP (and community variants like Browser MCP) expose browser operations as standardized tools. Any MCP client (Claude Code, custom agents, etc) can use them without proprietary SDK integration. Standardizing on MCP enables interoperability.
+
+**Q: Can browser agents run unattended at scale?**
+**Short:** Running unattended at scale requires a managed browser fleet like Browserbase rather than hundreds of local headless Chrome instances, which exhausts memory.
+Yes but with constraints. For 100s of concurrent browser sessions, use Browserbase or similar (don't try to run 100 headless Chrome on one host — memory dies). Implement rate limiting per target site (politeness), captcha handling, session refresh on auth expiry, retry/failure handling.
+
+---
+
+## 13. Best Practices
+
+1. Always use accessibility tree extraction first; vision as fallback only.
+2. Use semantic locators (get_by_role, get_by_text) — avoid CSS/XPath where possible.
+3. Wait for explicit state changes (specific selector visible) before reading page content.
+4. Persist authenticated sessions via storage_state for repeated automation against same site.
+5. Never put credentials into LLM context — use protected tools that pull from secret managers.
+6. Cap per-task cost AND per-task navigation depth — prevent runaway agents.
+7. Use Browserbase or similar cloud infra for production scale — don't self-host headless Chrome at scale.
+8. Implement site-specific recipes for hard-to-automate sites (custom waits, custom DOM hints).
+9. Test on multiple browser versions / A/B variants — sites change frequently.
+10. Respect robots.txt and rate-limit politely; treat browser agents as web citizens.
+
+---
+
+
+## 14. Case Study
+
+**Scenario:** An e-commerce operations team (50-person company, 200 orders/day) needs to automate checkout flows across 12 supplier portals. Each portal requires login, product search by SKU, quantity entry, and order confirmation. Current state: 4 full-time ops staff spend 60% of their time on manual portal entry. Goal: automate 90%+ of orders with <2% error rate, p99 task completion under 90 seconds per order, monthly LLM + infrastructure cost under $800.
+
+**Architecture:**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    oms["Order Management System<br/>OMS"]
+    pg@{ icon: "logos:postgresql", form: "square", label: "PostgreSQL<br/>pending_orders, portal_credentials", pos: "b", h: 44 }
+    orch["Browser Agent Orchestrator<br/>Python<br/>dequeue - load recipe - dispatch<br/>collect: success / retry / escalate"]
+    w0["Worker 0<br/>Portal A<br/>Browserbase session"]
+    w1["Worker 1<br/>Portal B<br/>Browserbase session"]
+    w5["Worker 5<br/>Portal C<br/>Browserbase session"]
+    claude["Claude Sonnet 4<br/>Anthropic API<br/>in: accessibility tree + recipe hints<br/>out: action sequence"]
+    s3@{ icon: "logos:aws-s3", form: "square", label: "Audit Log +<br/>Screenshot Archive (S3)", pos: "b", h: 44 }
+
+    oms --> pg
+    oms -->|"poll every 60s"| orch
+    orch -->|"parallel, max 6 concurrent"| w0
+    orch -->|"parallel, max 6 concurrent"| w1
+    orch -->|"parallel, max 6 concurrent"| w5
+    w0 --> claude
+    w1 --> claude
+    w5 --> claude
+    claude -->|"verification: confirmation<br/>screenshot re-checked"| s3
+
+    class oms req
+    class orch base
+    class w0,w1,w5 train
+    class claude io
+```
+
+Portal recipe, one JSON config per supplier:
+
+```json
+{
+  "portal_id": "supplier_acme",
+  "login_url": "https://portal.acme-supply.com/login",
+  "username_selector": "input[label='Username']",
+  "password_vault_key": "acme/portal_password",
+  "search_flow": "type SKU in search bar, click first result",
+  "quantity_selector": "input[role='spinbutton', name='Quantity']",
+  "submit_hint": "button named 'Place Order' or 'Confirm'",
+  "success_signal": "text containing 'Order #' OR 'Confirmation'",
+  "known_quirks": ["wait 3s after login for SSO redirect",
+                   "quantity field resets on blur — tab away last"]
+}
+```
+
+**Key implementation — 3 Python code blocks:**
+
+Block 1 — Portal agent worker with accessibility-tree extraction:
+
+```python
+from __future__ import annotations
+import asyncio
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from browser_use import Agent, BrowserConfig
+from browser_use.llm import ChatAnthropic
+from playwright.async_api import async_playwright, Page
+
+
+@dataclass
+class PortalRecipe:
+    portal_id: str
+    login_url: str
+    username_selector: str
+    password_vault_key: str
+    search_flow: str
+    quantity_selector: str
+    submit_hint: str
+    success_signal: str
+    known_quirks: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_json(cls, path: Path) -> "PortalRecipe":
+        data = json.loads(path.read_text())
+        return cls(**data)
+
+
+@dataclass
+class OrderEntry:
+    order_id: str
+    sku: str
+    quantity: int
+    portal_id: str
+
+
+async def run_portal_agent(
+    order: OrderEntry,
+    recipe: PortalRecipe,
+    session_state_path: Path,
+    llm_model: str = "claude-sonnet-4-6",
+) -> dict[str, Any]:
+    """
+    Execute a single order entry on a supplier portal.
+    Returns result dict with status, confirmation_number, cost_usd.
+    """
+    quirks_block = "\n".join(f"- {q}" for q in recipe.known_quirks)
+    task = f"""
+You are placing a purchase order on a supplier portal.
+
+Steps:
+1. Navigate to {recipe.login_url} if not already there.
+2. Log in using the stored session (credentials already loaded).
+3. Search for SKU "{order.sku}" using: {recipe.search_flow}
+4. Enter quantity {order.quantity} in: {recipe.quantity_selector}
+5. Submit order using: {recipe.submit_hint}
+6. Verify success — look for: {recipe.success_signal}
+7. Extract and report the order/confirmation number.
+
+Known quirks to handle:
+{quirks_block}
+
+IMPORTANT: If you see a CAPTCHA, report "CAPTCHA_REQUIRED" immediately.
+If you cannot find the SKU after 2 searches, report "SKU_NOT_FOUND".
+    """.strip()
+
+    agent = Agent(
+        task=task,
+        llm=ChatAnthropic(model=llm_model),
+        browser_config=BrowserConfig(
+            headless=True,
+            storage_state=str(session_state_path),  # pre-authenticated session
+        ),
+        use_vision=False,          # DOM extraction preferred; vision only on fallback
+        max_actions_per_step=4,
+        max_failures=3,
+        save_conversation_path=f"/tmp/agent_runs/{order.order_id}",
+    )
+
+    result = await agent.run(max_steps=25)
+    final = result.final_result() or ""
+
+    if "CAPTCHA_REQUIRED" in final:
+        return {"status": "captcha_escalation", "order_id": order.order_id}
+    if "SKU_NOT_FOUND" in final:
+        return {"status": "sku_not_found", "order_id": order.order_id}
+
+    # Extract confirmation number via structured extraction
+    conf_num = _extract_confirmation(final)
+    return {
+        "status": "success",
+        "order_id": order.order_id,
+        "confirmation_number": conf_num,
+        "llm_cost_usd": _estimate_cost(result),
+    }
+
+
+def _extract_confirmation(text: str) -> str:
+    import re
+    match = re.search(r"(?:Order|Confirmation|Ref)[\s#:]+([A-Z0-9\-]{6,20})", text, re.I)
+    return match.group(1) if match else "UNKNOWN"
+
+
+def _estimate_cost(result: Any) -> float:
+    # ~800 input tokens + 200 output tokens per step, 15 steps avg
+    # claude-sonnet-4-6: $3/$15 per 1M in/out
+    avg_steps = 15
+    # Prices are per 1M tokens, so divide by 1e6 (not 1e9).
+    return round((800 * avg_steps * 3 + 200 * avg_steps * 15) / 1e6, 4)
+```
+
+**Read it like this.** "Each step of the agent buys one LLM turn — a page of accessibility tree in, a short action out — and the per-order bill is just that turn's price multiplied by how many steps the task takes."
+
+The whole cost model of a browser agent collapses into `steps × price_per_step`. That is why every cost control in Section 13 targets one of those two factors: DOM truncation and low-res screenshots shrink the price per step, while max-pages and max-steps caps bound the count.
+
+| Symbol | What it is |
+|--------|------------|
+| `800` | Input tokens per step — the truncated accessibility tree plus recipe hints |
+| `200` | Output tokens per step — a short action sequence like "type SKU in search box" |
+| `3` / `15` | Sonnet pricing, dollars per 1M input / output tokens. Output is 5x the input rate |
+| `avg_steps = 15` | Actions per order, from login through confirmation. The `max_steps=25` cap is the ceiling, not the average |
+| `/ 1e9` | The scaling divisor in the code. Note the units below — dollars-per-1M-tokens requires `1e6` |
+
+**Walk one example.** One step, then one order, then one month:
+
+```
+  One step:
+    input    800 tok  x  $3  / 1M  =  $0.00240
+    output   200 tok  x  $15 / 1M  =  $0.00300   <- costs more from 4x fewer tokens
+    step total                     =  $0.00540
+
+  One order (15 steps):
+    input   12,000 tok  ->  $0.0360
+    output   3,000 tok  ->  $0.0450
+    order total         ->  $0.0810
+
+  One month, at 200 orders/day x 30 days = 6,000 orders:
+    LLM spend         6,000 x $0.0810  =  $486
+    remainder of the $640 reported     =  $154   (Browserbase sessions)
+    against the $800 budget ceiling    =  $160 headroom
+```
+
+**Output tokens dominate despite being 4x scarcer.** `$0.0450` of output against `$0.0360` of input, because the 5x price multiplier beats the 4x volume difference. This is the practical argument for terse action formats: a verbose reasoning trace on every step is billed at the expensive rate, and trimming 100 output tokens per step saves more than trimming 400 input tokens.
+
+**What turning on vision does to the budget.** The worker above sets `use_vision=False` deliberately. Adding a screenshot to every step costs 1,500 extra input tokens:
+
+```
+  DOM only          $0.00540/step  ->  $0.0810/order  ->  $486/month
+  vision @ 20%      $0.00630/step  ->  $0.0945/order  ->  $567/month
+  vision every step $0.00990/step  ->  $0.1485/order  ->  $891/month   <- over budget
+```
+
+The hybrid discipline from Section 8 — vision on only 10-20% of steps — is what keeps the design inside the `$800` ceiling. Vision on every step blows it by `$91` before a single Browserbase session is billed.
+
+**A units note on the code.** The divisor has to be `1e6`, not `1e9`: prices are quoted per 1M tokens, so `(800 * 15 * 3 + 200 * 15 * 15) / 1e6 = 81000 / 1e6 = $0.081`, matching the figure derived above. Using `1e9` returns `$0.000081`, which `round(..., 4)` flattens to `$0.0001` — a 1000x under-report. This is the classic per-1M-vs-per-token units slip, and it is worth checking before wiring any cost estimator to a budget alarm, since a per-task kill switch fed by the wrong number would never fire.
+
+Block 2 — Session refresh and orchestrator (production concern):
+
+```python
+from __future__ import annotations
+import asyncio
+import time
+from pathlib import Path
+from typing import Any
+
+import boto3
+from playwright.async_api import async_playwright
+
+
+class SessionManager:
+    """
+    Manages per-portal browser sessions. Sessions expire after 8 hours
+    (portal SSO timeout). Refresh automatically before expiry.
+    Credentials pulled from AWS Secrets Manager — never from LLM context.
+    """
+
+    SESSION_TTL_SECONDS = 7 * 3600  # refresh 1h before 8h portal timeout
+
+    def __init__(self, session_dir: Path) -> None:
+        self._session_dir = session_dir
+        self._session_dir.mkdir(parents=True, exist_ok=True)
+        self._timestamps: dict[str, float] = {}
+        self._sm = boto3.client("secretsmanager", region_name="us-east-1")
+
+    def session_path(self, portal_id: str) -> Path:
+        return self._session_dir / f"{portal_id}.json"
+
+    def needs_refresh(self, portal_id: str) -> bool:
+        ts = self._timestamps.get(portal_id, 0.0)
+        return (time.monotonic() - ts) > self.SESSION_TTL_SECONDS
+
+    async def refresh(self, portal_id: str, recipe: Any) -> None:
+        creds = self._get_creds(recipe.password_vault_key)
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=True)
+            ctx = await browser.new_context()
+            page = await ctx.new_page()
+
+            await page.goto(recipe.login_url)
+            await page.wait_for_load_state("networkidle")
+
+            # quirk: SSO redirect takes up to 3s
+            await asyncio.sleep(3)
+
+            await page.fill(recipe.username_selector, creds["username"])
+            await page.fill("input[type='password']", creds["password"])
+            await page.keyboard.press("Enter")
+            await page.wait_for_load_state("networkidle")
+
+            # Verify login succeeded
+            if "login" in page.url.lower():
+                raise RuntimeError(f"Login failed for portal {portal_id}")
+
+            await ctx.storage_state(path=str(self.session_path(portal_id)))
+            await browser.close()
+
+        self._timestamps[portal_id] = time.monotonic()
+
+    def _get_creds(self, secret_key: str) -> dict[str, str]:
+        resp = self._sm.get_secret_value(SecretId=secret_key)
+        import json
+        return json.loads(resp["SecretString"])
+
+
+async def orchestrate_orders(
+    orders: list[Any],
+    recipes: dict[str, Any],
+    session_mgr: SessionManager,
+    max_concurrent: int = 6,
+) -> list[dict[str, Any]]:
+    sem = asyncio.Semaphore(max_concurrent)
+    results: list[dict[str, Any]] = []
+
+    async def process(order: Any) -> None:
+        recipe = recipes[order.portal_id]
+        if session_mgr.needs_refresh(order.portal_id):
+            await session_mgr.refresh(order.portal_id, recipe)
+        async with sem:
+            result = await run_portal_agent(
+                order=order,
+                recipe=recipe,
+                session_state_path=session_mgr.session_path(order.portal_id),
+            )
+            results.append(result)
+
+    await asyncio.gather(*[process(o) for o in orders])
+    return results
+```
+
+Block 3 — BROKEN -> FIX: flaky DOM selection and verification gap:
+
+```python
+from __future__ import annotations
+from playwright.async_api import Page
+
+
+# BROKEN: Hard-coded CSS selector for quantity field.
+# Works on day 1; breaks when portal redeploys with new class names.
+# No verification after fill — agent proceeds even if quantity was rejected.
+async def broken_fill_quantity(page: Page, quantity: int) -> None:
+    await page.fill("#qty-input-1234", str(quantity))
+    # No wait, no verification — silent failure if input rejected
+
+
+# FIX 1: Use accessible name selector (stable across deploys).
+# FIX 2: Verify quantity was accepted by reading the field value back.
+# FIX 3: Handle the known quirk where blur resets the field — use Tab, not click-away.
+async def fixed_fill_quantity(page: Page, quantity: int, selector_hint: str) -> bool:
+    """
+    Fill quantity field and verify acceptance.
+    selector_hint from recipe: "input[role='spinbutton', name='Quantity']"
+    Returns True if quantity was accepted, False if field rejected input.
+    """
+    # Locate by accessible role + name — survives CSS refactors
+    qty_input = page.get_by_role("spinbutton", name="Quantity").first
+
+    await qty_input.click()
+    await qty_input.triple_click()          # select all existing content
+    await qty_input.type(str(quantity))     # type character by character
+
+    # Tab away to trigger validation (known quirk: click-away resets some portals)
+    await qty_input.press("Tab")
+    await page.wait_for_timeout(500)       # allow field validation JS to run
+
+    # Verify accepted
+    actual = await qty_input.input_value()
+    if actual.strip() != str(quantity):
+        # Retry once with keyboard shortcut Ctrl+A then overtype
+        await qty_input.focus()
+        await page.keyboard.press("Control+A")
+        await page.keyboard.type(str(quantity))
+        await qty_input.press("Tab")
+        await page.wait_for_timeout(300)
+        actual = await qty_input.input_value()
+
+    return actual.strip() == str(quantity)
+
+
+# BROKEN: No post-order verification — assume submit click = success.
+# Silent failures: button click acknowledged but order not placed
+# (session expired, form validation failed server-side, JS error).
+async def broken_submit(page: Page) -> str:
+    await page.click("button:has-text('Place Order')")
+    return "assumed_success"
+
+
+# FIX: After submit, wait for and verify the success signal explicitly.
+# Screenshot the confirmation page and send to Claude for OCR verification.
+async def fixed_submit_and_verify(
+    page: Page,
+    success_signal: str,
+    timeout_ms: int = 30_000,
+) -> dict[str, str]:
+    await page.click("button:has-text('Place Order')")
+
+    try:
+        # Wait for success indicator
+        await page.wait_for_selector(
+            f"text={success_signal.split(' OR ')[0]}",
+            timeout=timeout_ms,
+        )
+    except Exception:
+        # Take screenshot for debugging even on failure
+        screenshot = await page.screenshot(full_page=True)
+        return {"status": "timeout", "screenshot_bytes": screenshot.hex()}
+
+    confirmation_text = await page.text_content("body") or ""
+    import re
+    match = re.search(r"(?:Order|Confirmation)[\s#:]+([A-Z0-9\-]{6,20})", confirmation_text, re.I)
+    return {
+        "status": "success",
+        "confirmation_number": match.group(1) if match else "PARSE_ERROR",
+    }
+```
+
+**Pitfall 1 — Session expiry mid-task causing silent re-login loop:**
+
+```python
+# BROKEN: Agent navigates to portal, session expired, portal silently redirects
+# to login page. Agent tries to "place order" but is on login page.
+# No error raised — agent eventually times out after 25 steps.
+async def broken_no_session_check(agent: Any) -> None:
+    result = await agent.run(max_steps=25)
+    # May have spent 25 steps fighting login page
+
+# FIX: Before dispatching agent, verify session is valid by checking
+# that the portal home page loads (not redirected to /login).
+async def fixed_verify_session(page: Page, expected_path_fragment: str) -> bool:
+    await page.goto(expected_path_fragment)
+    await page.wait_for_load_state("networkidle")
+    # If redirected to login, session is expired
+    return "login" not in page.url.lower() and "signin" not in page.url.lower()
+```
+
+**Pitfall 2 — LLM hallucinates confirmation number when page is ambiguous:**
+
+```python
+# BROKEN: rely solely on LLM text output to extract confirmation number.
+# LLM may hallucinate "Order #789123" when confirmation page shows
+# a generic "Thank you" without a clear order number.
+def broken_extract(llm_output: str) -> str:
+    return llm_output  # trust everything the LLM says
+
+# FIX: Always regex-extract from actual DOM text, not LLM summary.
+# If pattern not found, mark as PARSE_ERROR and escalate for human review.
+import re
+def fixed_extract(dom_text: str) -> str:
+    match = re.search(r"(?:Order|PO|Ref|Confirmation)[\s#:]+([A-Z0-9\-]{5,20})", dom_text, re.I)
+    return match.group(1) if match else "PARSE_ERROR"
+```
+
+**Pitfall 3 — Parallel agents hammering same portal, triggering rate limiting:**
+
+```python
+# BROKEN: dispatch all 200 orders against Portal A simultaneously.
+# Portal A rate-limits at 10 req/min, returns 429, all agents fail.
+async def broken_parallel_all(orders: list[Any]) -> list[Any]:
+    return await asyncio.gather(*[run_portal_agent(o, ...) for o in orders])
+
+# FIX: per-portal semaphore + inter-request delay.
+import asyncio
+async def fixed_rate_limited(orders: list[Any], per_portal_limit: int = 3) -> list[Any]:
+    portal_sems: dict[str, asyncio.Semaphore] = {}
+    results = []
+    async def run(order: Any) -> None:
+        pid = order.portal_id
+        if pid not in portal_sems:
+            portal_sems[pid] = asyncio.Semaphore(per_portal_limit)
+        async with portal_sems[pid]:
+            r = await run_portal_agent(order, ...)
+            results.append(r)
+            await asyncio.sleep(2)  # 2s between requests per portal
+    await asyncio.gather(*[run(o) for o in orders])
+    return results
+```
+
+**Metrics:**
+
+| Metric | Before (manual) | After (browser agent) |
+|--------|-----------------|----------------------|
+| Orders processed/day | 200 (4 FTE × 50 orders) | 200 fully automated |
+| Avg time per order | 4 min manual | 38 sec (p50) / 82 sec (p99) |
+| First-try success rate | 99% (human catches errors) | 93.1% |
+| Retry success rate | — | 5.2% (1 retry) |
+| Human escalation rate | 1% (edge cases) | 1.7% (CAPTCHA + SKU issues) |
+| Monthly labor cost | $18,400 (4 FTE × 60% time) | $640 (LLM API + Browserbase) |
+| Errors causing incorrect orders | ~0.3%/month | 0.05%/month (verification catches) |
+| WebArena benchmark (12-portal subset) | N/A | 61% zero-shot success |
+
+### Reading the metrics table as arithmetic
+
+Three of those rows are a single outcome funnel, and two more are a throughput budget. Both are worth pushing through explicitly.
+
+**Stated plainly.** "Every order lands in exactly one of three buckets — worked first time, worked on retry, or needs a human — and those three percentages must sum to 100, which is what makes the retry layer's contribution measurable rather than decorative."
+
+Reading the rows as a partition rather than as independent statistics is what turns them into a design argument for the retry layer.
+
+| Symbol | What it is |
+|--------|------------|
+| `93.1%` | First-try success. The agent completed the order in one dispatch |
+| `5.2%` | Recovered by the single retry. Carved out of the 6.9% that failed first |
+| `1.7%` | Human escalation — CAPTCHA plus SKU-not-found, the two explicit bail-outs in the worker prompt |
+| `1 - 0.931` | The residual the retry layer gets to work on |
+| `p = S^(1/n)` | Same inversion as Section 8, applied to this deployment's own numbers |
+
+**Walk one example.** The funnel, per 1,000 orders:
+
+```
+  first try succeeds     93.1%   ->   931 orders
+  fails first try         6.9%   ->    69 orders
+    of those 69, retry recovers  ->    52 orders   (5.2% of 1,000)
+    remainder escalates          ->    17 orders   (1.7% of 1,000)
+
+  93.1 + 5.2 + 1.7 = 100.0   <- a partition, not three loose stats
+
+  Retry effectiveness  =  52 / 69  =  75.4% of first-try failures rescued.
+
+  Implied per-step reliability at 15 actions per order:
+    p = 0.931 ^ (1/15) = 0.99524
+
+  What that same 99.524% per-step delivers at other task lengths:
+    n =  5  ->  0.9764
+    n = 10  ->  0.9534
+    n = 15  ->  0.9304     <- matches the observed 93.1%
+    n = 25  ->  0.8876     <- the max_steps cap, well under target
+
+  Per-step reliability required to hold 90% end-to-end:
+    n = 10  ->  p >= 0.98952
+    n = 15  ->  p >= 0.99300
+    n = 25  ->  p >= 0.99579
+```
+
+**This is why the retry is worth more than tuning the agent.** Going from 93.1% to 98.3% end-to-end via one retry would otherwise demand pushing per-step reliability from 0.99524 to about 0.99885 — chasing the last thousandth of a percent on every click. Re-running a cheap 15-step task is `$0.081`; engineering that reliability gain is not. The escalation path matters for the same reason: the residual 1.7% is dominated by CAPTCHAs, which no amount of per-step accuracy fixes.
+
+**The throughput budget.** The concurrency numbers are also multiplicative, and they disagree with each other:
+
+```
+  Per-order wall time  =  38 s (p50)  +  2 s inter-request delay  =  40 s
+
+  Per-portal view -- 12 portals x 3 concurrent = 36 slots:
+    200 orders / 36 slots  =  5.6 rounds  ->  5.6 x 40 s  =   222 s  =  3.7 min
+
+  Global orchestrator cap -- max_concurrent = 6:
+    200 orders /  6 slots  = 33.3 rounds  -> 33.3 x 40 s  = 1,333 s  = 22.2 min
+```
+
+The per-portal semaphores are not the binding constraint — the orchestrator's global `max_concurrent=6` is, and it is nearly 6x slower than the per-portal capacity suggests. Note also that the p99 of 82 s sits only 8 s under the 90 s SLA, so the `2 s` politeness delay is already consuming a tenth of the error budget. Raising the global cap toward 36 is the cheap win here, bounded by how many concurrent Browserbase sessions the plan allows.
+
+**Interview Q&As:**
+
+**Q: Why use accessibility tree extraction rather than raw HTML for browser agents?**
+Accessibility trees are 10-100x smaller than raw HTML, containing only semantic information (roles, labels, states) that assistive technologies and LLMs need. Raw HTML includes thousands of lines of CSS classes, data attributes, and framework artifacts that add noise without meaning. A typical React page's raw HTML might be 150KB; its accessibility tree is 5-10KB of structured, interpretable content. The LLM reasons more accurately and uses fewer tokens when given accessibility tree input.
+
+**Q: How do you handle CAPTCHA in a production browser agent pipeline?**
+Three-tier strategy: (1) Prevention — use Browserbase's stealth-mode browsers and residential proxy rotation to reduce CAPTCHA triggering by 70-80%; (2) Automated solving — integrate 2captcha or CapSolver APIs when CAPTCHAs do appear; the agent pauses, sends the CAPTCHA image, gets the solution token, injects it; (3) Human escalation — if automated solving fails or the CAPTCHA type is unsupported, surface to a human operator via a notification queue; the human solves it in a live session, the agent resumes. Costs: 2captcha charges ~$2/1000 CAPTCHAs; human escalation costs ~$1-2 per incident.
+
+**Q: What is the trade-off between DOM extraction and vision-based navigation?**
+DOM extraction is faster (50-200ms per page vs 1-3s for vision), uses fewer tokens (5KB text vs 500-2000 tokens for screenshot analysis), and achieves higher accuracy on standard HTML/React sites (90-95% vs 70-80%). Vision handles opaque UIs — Canvas-based apps, PDF viewers, custom-rendered widgets — where DOM extraction returns empty or meaningless content. Hybrid agents use DOM first and fall back to vision only when DOM content is insufficient, achieving the best of both while minimizing vision usage to 10-20% of steps.
+
+**Q: How do you make browser agents resilient to portal UI changes between deploys?**
+Three techniques: (1) Semantic selectors — use `get_by_role("button", name="Place Order")` instead of `#btn-1234`; accessible names are far more stable than CSS IDs. (2) Recipe hints — store site-specific wait conditions and selector hints in JSON recipes, update when the portal changes. (3) Verification after every action — if the page state after an action does not match expectations, the agent retries with a different approach rather than silently proceeding. Monitoring the agent run logs and reviewing screenshots for failing sessions catches UI drift within hours.
+
+**Q: Why cap concurrent browser sessions per portal rather than maximizing parallelism?**
+Supplier portals implement rate limiting (typically 5-20 requests per minute per IP or session). Exceeding these limits triggers 429 responses, IP blocks, or CAPTCHA walls that affect all concurrent sessions for that portal simultaneously. Per-portal semaphores (2-4 concurrent sessions) with inter-request delays (1-3 seconds) stay within portal rate limits while still achieving meaningful throughput — 200 orders across 12 portals at 3 concurrent each processes all orders in under 20 minutes.
+
+**Q: How do you verify that an order was actually placed versus the agent mistakenly thinking it succeeded?**
+Two verification layers: (1) DOM verification — regex-search the actual page DOM text for the confirmation pattern (order number, PO number) rather than trusting the LLM's text summary; if no match found, status is PARSE_ERROR requiring human review. (2) Screenshot verification — take a full-page screenshot of the confirmation page and store in S3 with the order record; a daily reconciliation job cross-references confirmed orders in the portal's email confirmations against the screenshot archive, catching any cases where the agent misread the page.

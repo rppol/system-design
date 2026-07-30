@@ -1,0 +1,919 @@
+# Multimodal Models
+
+## 1. Concept Overview
+
+Multimodal models process and generate multiple types of data — text, images, audio, video, and code — within a single unified model. The most commercially important modality combination is vision + language (Vision Language Models, or VLMs), which enables applications like medical image analysis, document understanding, visual Q&A, and chart interpretation.
+
+The trend from 2023-2025: all frontier LLMs have become multimodal. GPT-4o, Claude 3.5, Gemini 1.5 Pro, and LLaMA 3.2 all support image input natively. The question is no longer "can LLMs see?" but "how well do they reason about visual information?"
+
+---
+
+## 2. Intuition
+
+> **One-line analogy**: Multimodal models are like a person who can look at an image and discuss it — they bridge the gap between the visual world and language by learning to represent both in the same "mental" space.
+
+**Mental model**: A Vision Language Model (VLM) has two main components: a vision encoder (like CLIP or SigLIP) that converts images into token-like vectors, and a language model that processes those vectors alongside text tokens. The key trick: train the system so that an image of a cat produces vectors that live near the word "cat" in the embedding space. Once visual and text representations are aligned, the language model can reason about them together.
+
+**Why it matters**: Multimodality unlocks applications impossible with text-only models — medical imaging (read X-rays), document understanding (read invoices with tables), code from screenshots, visual Q&A, chart interpretation. All frontier models are now multimodal because vision dramatically expands the input modalities a model can handle.
+
+**Key insight**: The key challenge is "modality alignment" — images and text live in very different spaces. CLIP-style contrastive training (match image embeddings to text embeddings for the same concept) was the breakthrough that made practical VLMs possible.
+
+---
+
+## 3. Core Principles
+
+- **Shared representation space**: Multimodal models work by projecting different modalities into the same embedding space, where a text token and an image patch can "attend to each other" via the transformer's attention mechanism.
+- **Vision encoder + LLM**: The dominant architecture pairs a pre-trained vision encoder (CLIP, SigLIP) with a pre-trained LLM, connected by a learnable projection layer.
+- **Instruction tuning for vision**: Like text-only models, multimodal models need instruction fine-tuning to follow image-related instructions.
+- **Trade-offs between modality depth**: Unified models understand all modalities but may be shallower than specialized models.
+
+---
+
+## 4. Types / Architectures
+
+### 4.1 Vision Language Models (VLMs)
+
+**Architecture (LLaVA / LLaMA-Vision style):**
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Image(["Image"]) --> VisionEnc["Vision Encoder<br/>CLIP ViT-L/14 or SigLIP<br/>Patches -> N visual tokens<br/>v1, v2, ..., vN"]
+    VisionEnc --> Proj["Projection Layer<br/>Linear or MLP<br/>vision dim -> LLM dim<br/>v1 -> word-like token"]
+    Proj --> LLMNode["LLM<br/>LLaMA, Mistral, Qwen, etc.<br/>Concatenate visual + text tokens<br/>Standard autoregressive generation"]
+
+    class Image io
+    class VisionEnc frozen
+    class Proj train
+    class LLMNode base
+```
+
+**Read it like this.** "The vision encoder speaks one vector language and the LLM speaks another; the projection layer is a dictionary that rewrites each visual token into a word-shaped vector the LLM can read."
+
+The projection is the only piece trained in Stage 1, and it is astonishingly small — which is why a lab can build a working VLM on a single GPU-day by bolting an off-the-shelf encoder onto an off-the-shelf LLM.
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Number of visual tokens the encoder emits — one per image patch |
+| `d_vis` | Vision encoder's output width. CLIP ViT-L/14 emits 1024 |
+| `d_llm` | LLM's embedding width. LLaMA 7B expects 4096 |
+| `Linear(d_vis -> d_llm)` | One weight matrix, `d_vis x d_llm` numbers, applied to every visual token |
+| `[v1..vN, t1..tM]` | The concatenated sequence. After projection the LLM cannot tell which came from pixels |
+
+**Walk one example.** LLaVA-style: CLIP ViT-L/14 at 224x224 feeding LLaMA 7B.
+
+```
+  encoder output   :  N = 256 visual tokens, each 1024-dim
+  LLM expects      :  4096-dim token embeddings
+
+  projection shape :  1024 x 4096
+  parameters       :  1024 x 4096 = 4,194,304   ~= 4.19 M
+
+  as a share of the 7B backbone:
+      4,194,304 / 6,700,000,000 = 0.063 %      <- the ONLY thing Stage 1 trains
+
+  a 2-layer MLP projector instead (LLaVA-1.5):
+      1024 x 4096 + 4096 x 4096 = 20,971,520   ~= 20.97 M   (still 0.3 % of 7B)
+```
+
+The whole VLM recipe hinges on that `0.063 %`. Both large models stay frozen, so alignment pretraining is a tiny optimization problem over 4 million weights — cheap enough that the 595K LAION-CC-SBU caption pairs in Stage 1 are plenty of data. Unfreeze the LLM in Stage 1 instead and you get catastrophic forgetting of text ability, which is exactly why the stages are split.
+
+**Training stages:**
+```
+Stage 1: Alignment pretraining
+  Freeze LLM and vision encoder
+  Train only the projection layer
+  Data: image-caption pairs (595K LAION-CC-SBU)
+  Goal: align visual and text representations
+
+Stage 2: Instruction fine-tuning
+  Unfreeze LLM (or use LoRA)
+  Data: visual instruction following (158K LLaVA-Instruct)
+  Goal: follow visual instructions ("Describe the image", "What is wrong?")
+```
+
+**Key VLMs:**
+| Model | Vision Encoder | LLM | Context | Strengths |
+|-------|---------------|-----|---------|-----------|
+| LLaVA-1.6 | CLIP ViT-L | LLaMA 7B | 4K | Open; baseline |
+| LLaMA 3.2 Vision | Custom | LLaMA 3.2 | 128K | Open; 11B/90B |
+| InternVL2 | InternViT | InternLM2 | 8K | Best open-source quality |
+| GPT-4o | Unknown | GPT-4o | 128K | Best overall; closed |
+| Gemini 1.5 Pro | Proprietary | Gemini | 1M | Long context; multimodal |
+| Claude 3.5 Sonnet | Unknown | Claude 3.5 | 200K | Best OCR; document understanding |
+| Qwen-VL | ViT | Qwen | 32K | Multilingual; open |
+
+### 4.2 Diffusion Models (Text-to-Image)
+
+Not LLMs but closely related in the AI landscape:
+
+```
+Latent Diffusion:
+  1. Encode image → latent space (VAE encoder)
+  2. Add Gaussian noise iteratively → pure noise
+  3. Train model to denoise → predict noise at each step
+  4. At inference: start from noise, denoise conditioned on text
+  5. Decode latent → image (VAE decoder)
+
+Text conditioning:
+  Text prompt → CLIP/T5 text encoder → text embeddings
+  Cross-attention: each denoising step attends to text embeddings
+
+Key models:
+  Stable Diffusion (Stability AI): open weights; community ecosystem
+  DALL-E 3 (OpenAI): integrated with ChatGPT; high quality
+  Midjourney: subscription; best artistic quality
+  Flux (Black Forest Labs): best open-source quality (2024)
+  Imagen (Google): large T5 text encoder; photorealistic
+```
+
+```
+self_attention_pairs  = L x L
+cross_attention_pairs = L x T
+
+  L = (image_side / 8)^2   <- VAE encoder shrinks the image 8x before denoising
+  T = 77                    <- CLIP's text encoder token budget, fixed regardless of prompt length
+```
+
+**The idea behind it.** "Every denoising step lets each patch of the noisy latent image look at every word of the prompt — and because there are only ~77 words but thousands of patches, that lookup is nearly free compared to the patches looking at each other."
+
+Cross-attention is where the text actually steers the picture, yet it is the cheap part of the U-Net. The expensive part is spatial self-attention, which is why resolution — not prompt length — is what makes image generation slow.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Latent tokens — the noisy image, after the VAE shrinks it 8x. `(512/8)^2 = 4096` at 512px |
+| `T` | Text tokens from the CLIP/T5 encoder. CLIP's text branch is fixed at 77 slots |
+| self-attention | Every latent token attends to every latent token: `L x L` pairs |
+| cross-attention | Every latent token attends to every text token: `L x T` pairs |
+| denoising steps | How many times the whole thing runs. Typically 20-50 for Stable Diffusion |
+
+**Walk one example.** Stable Diffusion at 512x512, one attention block, one step:
+
+```
+  latent tokens  L = (512 / 8)^2 = 64^2 = 4096
+  text tokens    T = 77
+
+  self-attention  pairs :  4096 x 4096 = 16,777,216
+  cross-attention pairs :  4096 x   77 =    315,392
+
+  ratio  16,777,216 / 315,392 = 53.2x        <- self-attn is 53x the work
+  cross-attn share of the two : 1.8 %        <- conditioning is almost free
+
+  over a 50-step sample: 50 x 315,392 = 15,769,600 cross-attention pairs
+```
+
+Two consequences interviewers like. First, **doubling the prompt length barely changes cost** — `T` is a rounding error in the total. Second, **doubling the image side quadruples `L`, which sixteen-times the self-attention term** — latency scales with pixels squared, so 1024x1024 is roughly 16x the attention work of 512x512, not 4x. That is the entire reason latent diffusion encodes to an 8x-smaller latent before denoising instead of working on raw pixels.
+
+### 4.3 Speech Models
+
+**Speech-to-Text (ASR):**
+```
+Whisper (OpenAI):
+  Input: raw audio → mel spectrogram → transformer encoder
+  Output: transcribed text (multilingual, with timestamps)
+  Architecture: encoder-decoder transformer
+  Models: tiny(39M) → small → base → large-v3(1.5B)
+  Quality: near human-level on English; excellent multilingual
+
+Wav2Vec 2.0 (Meta):
+  Self-supervised pre-training on unlabeled audio
+  Fine-tuned for ASR with CTC loss
+  Excellent low-resource language performance
+```
+
+**Stated plainly.** "Audio becomes tokens the same way images do — chop the waveform into fixed time slices, turn each slice into a vector, and hand the transformer a sequence whose length is set by *duration*, not by how much was said."
+
+That is the audio budget rule in one sentence: a minute of silence costs exactly as many tokens as a minute of dense speech. Text tokenizers charge by content; audio encoders charge by the clock.
+
+| Symbol | What it is |
+|--------|------------|
+| mel spectrogram | The waveform redrawn as an image of frequency-over-time — that is what the encoder actually sees |
+| hop length | How far the analysis window slides per frame. Whisper uses 10 ms, so 100 frames per second |
+| conv stride | Whisper's two front-end convolutions halve the frame count before the transformer |
+| window | Whisper's fixed 30-second input. Shorter clips are zero-padded to the full 30 s |
+| encoder tokens | What the decoder cross-attends to — the real cost driver |
+
+**Walk one example.** One Whisper window, and then an hour of audio:
+
+```
+  30 s of audio at a 10 ms hop  ->  30 x 100 = 3,000 mel frames
+  conv front-end stride 2       ->  3,000 / 2 = 1,500 encoder tokens per window
+
+  1 hour of audio               ->  3,600 / 30 = 120 windows
+                                ->  120 x 1,500 = 180,000 encoder tokens
+
+  Same 1,500 tokens whether the 30 s holds 90 spoken words or pure silence.
+```
+
+**Why the fixed 30-second window exists.** It makes the encoder shape constant, so batching is trivial and the positional embedding table has exactly one size. The cost is padding waste: transcribing a 2-second voice command still pays for a full 3,000-frame spectrogram. Production ASR pipelines therefore run voice-activity detection first and pack several short utterances into one window rather than burning a window per clip.
+
+**Text-to-Speech (TTS):**
+```
+Bark (Suno AI): realistic speech with emotion, laughter, music
+ElevenLabs: voice cloning with very little data
+OpenAI TTS: gpt-4-voice; natural, consistent voices
+XTTS (Coqui): open source; voice cloning
+```
+
+**Native multimodal audio:**
+```
+GPT-4o (realtime API):
+  Audio input → audio output directly (no text intermediate)
+  Captures tone, emotion, non-verbal cues
+  Very low latency (sub-second response)
+  Enables true voice assistants
+
+Gemini 1.5 Pro:
+  Audio + video + text in single context
+  Can analyze hour-long audio recordings
+```
+
+### 4.4 Video Models
+
+```
+Video understanding:
+  Video-LLaMA: video frames sampled → encoded → LLM
+  InternVideo2: 1B video clips pre-training
+  Gemini 1.5 Pro: can process 1-hour video in context
+
+Video generation:
+  Sora (OpenAI): world model; 1-min realistic video
+  Runway Gen-3: commercial video generation
+  CogVideoX: open-source video generation
+  Kling, HailuoAI: commercial Asian competitors
+
+Architecture: DiT (Diffusion Transformer) replacing UNet for video
+  Apply attention across spatial + temporal dimensions
+```
+
+**Put simply.** "A video is just a stack of images, so its token cost is `sampled frames x tokens per frame` — and the sampling rate you pick is the only knob standing between a one-hour clip and a blown context window."
+
+This is why "can it process a 1-hour video?" is really a question about frame sampling, not about model capability. Gemini 1.5 Pro's 1M-token context is what buys the headroom.
+
+| Symbol | What it is |
+|--------|------------|
+| `fps_sample` | Frames actually encoded per second — usually far below the video's native 24-30 fps |
+| `frames` | `duration_seconds x fps_sample` |
+| `tokens_per_frame` | Whatever the vision encoder emits for one image. 256 at 224x224 with 14x14 patches |
+| `total = frames x tokens_per_frame` | The full video's context bill |
+| context window | The hard ceiling. 1M for Gemini 1.5 Pro; 128K for GPT-4o |
+
+**Walk one example.** One hour of video at 256 tokens per frame:
+
+```
+  duration = 3600 s,  tokens_per_frame = 256
+
+  at 2   fps :  7,200 frames  x 256 = 1,843,200 tokens   -> overflows a 1M window
+  at 1   fps :  3,600 frames  x 256 =   921,600 tokens   -> fits 1M, barely
+  at 0.5 fps :  1,800 frames  x 256 =   460,800 tokens   -> comfortable
+
+  Inverting it: 1,000,000 / 256 = 3,906 frames max
+                at 1 fps that is 3,906 s = 65.1 minutes of video.
+```
+
+**Why sampling rate is the whole design decision.** Drop to 0.5 fps and an hour fits with room to spare — but any event shorter than two seconds can fall between frames, which is exactly how needle-in-a-haystack video retrieval fails. Raise it to 2 fps for fine motion and you cannot fit the hour at all. Real systems make this adaptive: sample sparsely by default, then re-encode a dense window around whatever the first pass flagged as interesting.
+
+---
+
+## 5. Architecture Diagrams
+
+### VLM Complete Flow
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Img([Image]) --> VisionEnc["Vision Encoder\n(ViT-L/14)"]
+    Text([Text Question]) --> Tokenizer["Text Tokenizer\n(BPE tokens)"]
+    VisionEnc --> Projection["Projection\n(Linear MLP)"]
+    Tokenizer --> Embedding["Embedding\n(Lookup table)"]
+    Projection & Embedding --> Interleaved["Interleaved Tokens\nimg_1…img_N + question_tokens"]
+    Interleaved --> LLM["LLM Decoder\nAttention across all tokens\n(visual tokens + text tokens)"]
+    LLM --> Response([Text Response])
+
+    class Img,Text,Response io
+    class VisionEnc frozen
+    class Projection train
+    class Tokenizer,Embedding,Interleaved mathOp
+    class LLM base
+```
+
+The projection layer bridges the vision encoder's output dimension to the LLM's embedding dimension; the LLM then attends over the combined visual and text token sequence uniformly.
+
+### CLIP Pre-training (Foundation for VLMs)
+```
+400M image-text pairs from internet:
+  Image: "A photo of a dog playing fetch"
+  Text: "A photo of a dog playing fetch"
+
+  [Image Encoder] → image_embedding
+  [Text Encoder]  → text_embedding
+
+  Contrastive loss:
+    Maximize cosine_sim(image_emb, paired_text_emb)
+    Minimize cosine_sim(image_emb, other_text_emb)
+
+Result: shared embedding space where
+  matching image and text have high similarity
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Vision Encoding Details
+
+```
+Image preprocessing:
+  Resize to 224×224 or 336×336 pixels
+  Normalize: (pixel - mean) / std
+  Divide into patches: 14×14 or 16×16 pixels per patch
+  Image 224×224 with 14×14 patches = (224/14)² = 256 patch tokens
+
+High-resolution handling:
+  Problem: 1024×1024 image → 5329 patches → very long sequence
+  Solution 1: Resize down (loses detail)
+  Solution 2: AnyRes (LLaVA-NeXT): divide into sub-images
+    Encode each sub-image separately → concatenate tokens
+  Solution 3: Dynamic resolution (InternVL): variable tile count
+
+OCR capability:
+  High resolution is critical for text in images
+  Claude 3.5 Sonnet excels at document OCR
+  GPT-4o excels at mathematical expressions in images
+```
+
+**What this actually says.** "Tile the image with square patches and call each tile a token — so the token count is `(image side / patch side)` squared, and it grows with the *area* of the image, not its width."
+
+The squaring is the entire story of VLM cost. Every complaint about high-resolution images being expensive traces back to this one exponent.
+
+| Symbol | What it is |
+|--------|------------|
+| `S` | Image side length in pixels after resizing. 224 or 336 for most encoders |
+| `P` | Patch side length. `14` for ViT-L/14, `16` for ViT-B/16 — the number after the slash in the name |
+| `S / P` | Patches along one edge — how many tiles fit across |
+| `(S / P)^2` | Total patch tokens, because the grid is two-dimensional |
+| ViT-L/14 | Reads as "Large vision transformer, 14-pixel patches" |
+
+**Walk one example.** The same formula across the resolutions in this module:
+
+```
+  S = 224, P = 14   ->  224 / 14 = 16   ->  16^2  =   256 tokens
+  S = 336, P = 14   ->  336 / 14 = 24   ->  24^2  =   576 tokens
+  S = 224, P = 16   ->  224 / 16 = 14   ->  14^2  =   196 tokens
+  S = 1024, P = 14  -> 1024 / 14 = 73   ->  73^2  = 5,329 tokens
+
+  224 -> 1024 is 4.6x wider, but:
+      5,329 / 256 = 20.8x the tokens        <- area, not width
+```
+
+**In plain terms.** "Those visual tokens then sit in the LLM's sequence like words, and attention costs pairs — so 20x the tokens is 400x the attention work, which is why nobody feeds a raw 1024x1024 image to a ViT."
+
+| Symbol | What it is |
+|--------|------------|
+| `N` | Visual tokens entering the LLM, from `(S/P)^2` above |
+| `N^2` | Attention pairs — every token attends to every other token |
+| AnyRes | LLaVA-NeXT's fix: split into 336x336 tiles, encode each, concatenate the tokens |
+| thumbnail | The extra downsized whole-image tile AnyRes prepends so global context survives tiling |
+
+**Walk one example.** Why tiling beats one giant encode:
+
+```
+  one 1024x1024 encode :  N = 5,329
+                          attention pairs = 5,329^2   = 28,398,241
+
+  one 224x224 encode   :  N =   256
+                          attention pairs =   256^2   =     65,536
+
+  ratio = 28,398,241 / 65,536 = 433x the attention work for 20.8x the tokens
+
+  AnyRes instead: 1024 / 336 = 3 tiles per edge -> up to 4 tiles + 1 thumbnail
+                  5 x 576 = 2,880 tokens, and each tile self-attends over
+                  only 576 tokens, not 5,329.
+```
+
+Tiling wins twice: fewer total tokens *and* each encoder pass is quadratic over a much smaller `N`. The price is that no single tile sees the whole image, so a table spanning a tile boundary can be misread — which is precisely the failure mode behind the OCR caveat in Section 10. The thumbnail tile is the patch for that: it gives the LLM one low-resolution view of the full layout to anchor the detailed tiles against.
+
+### Multimodal Training Data
+
+```
+Pre-alignment data (image-caption pairs):
+  LAION-5B: 5 billion image-text pairs from internet (noisy but large)
+  CC12M: 12M conceptual captions (higher quality, smaller)
+  COYO: 700M curated pairs
+
+Instruction fine-tuning data:
+  LLaVA-Instruct: GPT-4 generated (question, image, answer) tuples
+  ShareGPT4V: GPT-4V generated descriptions + QA
+  DocVQA: document understanding QA
+  ChartQA: chart/graph understanding
+  ScienceQA: science diagrams
+
+Medical multimodal:
+  PathVQA: pathology image QA
+  VQA-RAD: radiology QA
+  SLAKE: medical visual QA
+```
+
+---
+
+## 7. Real-World Examples
+
+### GPT-4o Vision
+- Processes images up to 20MB
+- "High detail" mode: 4x more tokens, better for dense text/diagrams
+- Used for: document processing, accessibility (describe images for visually impaired), medical image analysis, code screenshot debugging
+- Demonstrated: solve math problems from photo of whiteboard
+
+### Claude 3.5 Sonnet (Vision)
+- Best-in-class OCR for documents, forms, tables
+- Accurately extracts text from complex PDFs with mixed layouts
+- Used for: legal document review, financial statement analysis, form processing
+- Can describe complex charts and technical diagrams
+
+### Gemini 1.5 Pro
+- 1M token context = process entire movies
+- Needle-in-a-haystack: find a specific frame in a 1-hour video
+- Used for: long video analysis, multi-document processing with images
+
+### Medical Imaging: Med-PaLM M
+- Google's multimodal medical model
+- Radiology: chest X-ray analysis, skin condition classification
+- Performance: surpasses radiologists on some classification tasks
+- Not deployed clinically — regulatory and liability issues remain
+
+---
+
+## 8. Tradeoffs
+
+| Model | Image Quality | Video | Audio | Context | Open? |
+|-------|-------------|-------|-------|---------|-------|
+| GPT-4o | Excellent | No | Yes | 128K | No |
+| Claude 3.5 | Excellent (OCR) | No | No | 200K | No |
+| Gemini 1.5 Pro | Very good | Yes | Yes | 1M | No |
+| LLaMA 3.2 Vision | Good | No | No | 128K | Yes |
+| InternVL2 | Very good | No | No | 8K | Yes |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+### Use VLMs When:
+- Input contains images, charts, diagrams, or screenshots
+- Document processing with mixed text and images
+- Visual Q&A, visual reasoning
+- OCR for complex document layouts
+
+### Use Specialized Models When:
+- Pure computer vision (detection, segmentation) → YOLO, SAM
+- Pure OCR on clean documents → Tesseract, AWS Textract
+- Face recognition → specialized face models
+- Video analysis at scale → VideoLLaMA, specialized video models
+
+---
+
+## 10. Common Pitfalls
+
+1. **Image resolution too low**: Shrinking high-res images to 336×336 loses text and fine details. Use high-detail mode.
+2. **Overestimating OCR capability**: VLMs are better at understanding than exact transcription. For legal/financial, use specialized OCR.
+3. **Not testing on domain images**: General VLMs may struggle with medical, industrial, or satellite imagery.
+4. **Ignoring image token cost**: 1 high-res image = 1000-4000 tokens. Cost and latency add up quickly.
+5. **Assuming spatial reasoning is reliable**: VLMs struggle with precise spatial/geometric reasoning. Verify on your specific task.
+
+```
+image_tokens = n_images x tokens_per_image
+
+  headroom = context_window - image_tokens - other_tokens   <- system prompt, question, history, answer
+```
+
+**What the formula is telling you.** "Budget images the way you budget text: `images x tokens per image` is a line item in your context window, and at high detail a handful of pages can eat most of it before the user has typed a word."
+
+Pitfall 4 above is the one that surprises teams in production, because an image is a single line in the API request but a four-figure number in the token count.
+
+| Symbol | What it is |
+|--------|------------|
+| `tokens_per_image` | 1,000-4,000 depending on detail mode and resolution (Pitfall 4) |
+| high detail | GPT-4o's mode that tiles the image for fine text — "4x more tokens" per Section 7 |
+| `n_images` | How many images ride along in one request |
+| context window | 128K for GPT-4o, 200K for Claude 3.5 Sonnet, 1M for Gemini 1.5 Pro |
+| headroom | What is left for the system prompt, the question, history, and the answer |
+
+**Walk one example.** A 20-page scanned contract, one image per page, into a 128K window:
+
+```
+  low detail  : 20 x 1,000 =  20,000 tokens  ->  15 % of 128K   plenty of headroom
+  high detail : 20 x 4,000 =  80,000 tokens  ->  61 % of 128K   only 39 % left
+
+  Add conversation history and a long system prompt to the high-detail case and
+  the request overflows -- on page 20, after 19 pages were already paid for.
+```
+
+**Why this decides your architecture.** The fix is not a bigger model but retrieval over pages: OCR or caption each page once, index the text, and send only the 2-3 pages the question actually needs as images. That converts a fixed 80,000-token floor into roughly 12,000 tokens per query, and it is the standard answer when an interviewer asks how you would build document Q&A over a 500-page filing.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| **GPT-4o API** | Vision + text | Best quality; image input |
+| **Claude 3.5 API** | Vision + text | Best OCR; document understanding |
+| **LLaMA 3.2 Vision** | Open VLM | 11B/90B; self-hostable |
+| **InternVL2** | Open VLM | Best open-source quality |
+| **Whisper** | ASR | OpenAI; multilingual; state of art |
+| **ElevenLabs** | TTS + voice clone | Commercial; highest quality |
+| **Stable Diffusion** | Text-to-image | Open; massive ecosystem |
+| **DALL-E 3** | Text-to-image | Best prompt following |
+| **Flux** | Text-to-image | Best open-source (2024) |
+| **LLaVA** | Open VLM | Research; widely used baseline |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q: How do Vision Language Models work architecturally?**
+**Short:** Most VLMs combine a vision encoder, a projection layer mapping visual embeddings into the LLM's text embedding space, and the LLM processing interleaved visual and text tokens.
+A: Most VLMs use a three-component architecture: (1) a vision encoder (usually CLIP or SigLIP ViT) that divides an image into patches and encodes each patch as an embedding; (2) a projection layer (MLP) that maps vision embeddings into the same dimension as the LLM's text embeddings; (3) the LLM itself, which processes the interleaved sequence of visual and text tokens using standard self-attention. Training happens in two stages: alignment pre-training (trains only the projection layer on image-caption pairs) and instruction fine-tuning (trains the LLM + projection layer on visual instruction data).
+
+**Q: What is CLIP and why is it important for multimodal AI?**
+**Short:** CLIP is trained on 400M image-text pairs with contrastive learning to build a shared embedding space, and serves as the standard vision encoder behind most VLMs.
+A: CLIP (Contrastive Language-Image Pre-training) is a model trained on 400M internet image-text pairs using contrastive learning — matching image embeddings to their text descriptions. It creates a shared embedding space where semantically similar images and text are close together. CLIP is important because: (1) it's the standard vision encoder used by most VLMs (LLaVA, LLaMA Vision); (2) it enables zero-shot image classification (compare image embedding to text descriptions of categories); (3) CLIP embeddings enable multimodal search.
+
+**Q: What are the main challenges in evaluating vision language models?**
+**Short:** VLM evaluation is hard because of object hallucination, weak spatial reasoning, imprecise OCR, domain gap on medical or satellite images, and benchmark contamination.
+A: (1) Hallucination — models describe objects/text not present in images; (2) Spatial reasoning — "which object is to the left of X" is harder than simple identification; (3) OCR accuracy — precise text extraction requires specialized evaluation (exact character accuracy); (4) Domain gap — models trained on natural images may underperform on medical/satellite/industrial images; (5) Benchmark contamination — popular benchmarks (VQAv2, MMBench) appear in training data. Use domain-specific evaluation sets.
+
+**Q: Why do VLMs hallucinate objects that are not in the image, and how do you mitigate it?**
+**Short:** VLMs hallucinate objects when a dominant text prior like refrigerators co-occurring with kitchens overrides weak or ambiguous visual evidence in the projection bottleneck.
+A: Object hallucination happens because the LLM's language prior dominates weak visual evidence — if an image shows a kitchen, the model may report a "refrigerator" because refrigerators co-occur with kitchens in training text, even when none is visible. The visual signal passes through a projection bottleneck and competes with billions of parameters of text priors, so plausible-but-absent objects win when the visual evidence is ambiguous or low-resolution. Mitigations: prompt for grounded answers ("describe only what is visible; say 'not visible' if unsure"), lower temperature for factual extraction, fine-tune with negative examples (questions about absent objects with "no" answers), and evaluate with hallucination-specific benchmarks like POPE rather than general VQA accuracy. For high-stakes pipelines, add a verification pass that asks the model to point to the region supporting each claimed object.
+
+**Q: Why does downscaling an image to 336×336 silently break text-in-image tasks, and how do AnyRes-style approaches fix it?**
+**Short:** Resizing every image to a fixed low resolution destroys small text silently, which AnyRes-style tiling fixes by encoding high-resolution sub-tiles at native resolution.
+A: Standard VLM preprocessing resizes every image to a fixed encoder resolution (224×224 or 336×336), which destroys small text — a 12px-high invoice line shrunk from a 2000px-wide scan becomes 2px of blur, so the model confabulates the contents instead of reading them. The failure is silent: the model still produces a fluent, confident answer. AnyRes (LLaVA-NeXT) and dynamic tiling (InternVL) split the high-resolution image into sub-tiles, encode each tile separately at native encoder resolution, and concatenate the resulting visual tokens — preserving detail at the cost of 4-10× more visual tokens (a 4-tile image plus a global thumbnail produces ~1,280 tokens instead of 256). Always use high-detail/tiled mode for documents, charts, and screenshots, and budget the extra token cost.
+
+**Q: What is the "modality gap" problem and how do modern VLMs address it?**
+**Short:** The modality gap is a persistent offset between image and text embeddings even after contrastive training, addressed by learnable projection layers and losses like SigLIP's.
+The modality gap is the systematic offset between image and text embeddings in the shared representation space, even after contrastive training. Despite CLIP training aligning semantically similar images and text, image embeddings and text embeddings tend to cluster in separate regions of the embedding space. Modern VLMs address this through: (1) learnable projection layers (MLP) that explicitly transform vision embeddings into the LLM's text embedding space; (2) multi-stage training where alignment pre-training specifically minimizes this gap; (3) newer architectures like SigLIP that use sigmoid loss instead of softmax, reducing the gap. The modality gap matters because it directly affects cross-modal retrieval accuracy and VLM reasoning quality.
+
+**Q: What is SigLIP and why do newer VLMs prefer it over CLIP as the vision encoder?**
+**Short:** SigLIP's pairwise sigmoid loss removes CLIP's dependence on huge batch sizes for good negatives, giving better zero-shot classification and simpler distributed training.
+SigLIP (Zhai et al., 2023) replaces CLIP's softmax-based contrastive loss with a pairwise sigmoid loss: each image-text pair is scored independently as match/non-match, rather than normalized against every other pair in the batch. This removes the dependence on very large global batch sizes that CLIP's InfoNCE loss requires for good negatives — SigLIP trains effectively at moderate batch sizes and simplifies distributed training (no all-gather of the full similarity matrix). Empirically SigLIP encoders yield better zero-shot classification and stronger downstream VLM performance at the same scale, which is why recent open VLMs (PaliGemma, Idefics2 and successors) ship with SigLIP rather than the original CLIP ViT. When building a new VLM, default to a SigLIP-family encoder; reserve original CLIP for compatibility with existing embedding indexes.
+
+**Q: How do you manage the token budget for high-resolution images in production?**
+**Short:** High-resolution image token budgets are managed with dynamic resolution selection, region-of-interest cropping, and tiered low-then-high-res processing.
+High-resolution image processing requires careful token budget management because a single 1024x1024 image can consume 1,000-4,000 tokens. Strategies: (1) dynamic resolution — assess each image and choose the minimum resolution that preserves needed detail (e.g., a simple diagram vs. dense text); (2) region of interest cropping — crop to the relevant portion before encoding; (3) tiered processing — use low-res for initial classification, high-res only for images flagged as needing detail; (4) token cost monitoring — track image token consumption separately from text tokens. At GPT-4o pricing, 1,000 high-res images per day at 2,000 tokens each = 2M tokens = $10/day input cost.
+
+**Q: What are the tradeoffs between two-tower (modular) and native multimodal architectures?**
+**Short:** Two-tower architectures like LLaVA bridge a separate vision encoder and LLM cheaply, while native models like Gemini train all modalities jointly for deeper cross-modal reasoning.
+Two-tower architectures (like LLaVA) use a separate pre-trained vision encoder plus a separate pre-trained LLM connected by a projection layer, while native multimodal models (like Gemini, GPT-4o) train a single model on all modalities from scratch. Two-tower advantages: can leverage best-in-class vision encoder (CLIP) and LLM independently, cheaper to train (train only the bridge), can swap components. Native advantages: deeper cross-modal understanding (modalities attend to each other at all layers, not just through a bottleneck), better at tasks requiring tight vision-language integration (spatial reasoning, OCR), can handle more modalities naturally. In practice, native models (Gemini, GPT-4o) outperform modular ones on complex visual reasoning, but modular open-source models (LLaVA, InternVL) are more accessible and customizable.
+
+**Q: How does Gemini's native multimodal approach differ from LLaVA's modular approach?**
+**Short:** Gemini attends across image, text, audio, and video tokens throughout the network, while LLaVA's visual information passes through a single projection bottleneck first.
+Gemini processes all modalities through a single transformer trained end-to-end on interleaved multimodal data, meaning image, text, audio, and video tokens all attend to each other throughout the network. LLaVA uses a frozen CLIP ViT encoder, a trainable MLP projection layer, and a separate LLM — visual information passes through a bottleneck (the projection layer) before the LLM sees it. Gemini's approach enables: processing of 1-hour videos natively, tighter audio-visual reasoning, and generation across modalities. LLaVA's approach is modular and cheaper to train (only the projection + LLM fine-tuning), but visual reasoning is limited by the quality of the projection. For most document understanding and simple visual QA, both approaches perform well; for complex temporal reasoning (video) or multi-modal generation, native architectures have a clear advantage.
+
+**Q: What are common VLM failure modes in medical imaging applications?**
+**Short:** Medical VLMs commonly hallucinate findings, misplace anatomical location, suffer domain shift from natural-image training, and lose subtle pathology to low-resolution encoding.
+VLMs fail in medical imaging in predictable ways: (1) hallucinated findings — reporting pathology not present in the image, which is more dangerous than missing findings; (2) location errors — identifying a condition but placing it in the wrong anatomical location; (3) domain shift — models trained on natural images struggle with grayscale radiographs, microscopy, or specialized imaging modalities (MRI, CT, ultrasound); (4) resolution sensitivity — pathological findings in chest X-rays can be a few pixels; standard 224x224 encoding destroys this detail; (5) over-confidence — models report "normal" with high confidence when findings are subtle. Mitigations: fine-tune on domain-specific medical image datasets (PathVQA, VQA-RAD), use high-resolution encoding (AnyRes), always require radiologist review, and implement calibrated confidence scoring.
+
+**Q: What is the architectural difference between UNet and DiT (Diffusion Transformer) for image generation?**
+**Short:** DiT treats denoising as a transformer sequence task on image patches instead of UNet's convolutional skip connections, scaling better with compute like LLMs do.
+UNet uses a convolutional architecture with skip connections between encoder and decoder layers, processing images at multiple spatial resolutions. DiT replaces the UNet with a standard transformer that operates on patches of the latent image, treating denoising as a sequence-to-sequence task. DiT advantages: scales better with compute (follows transformer scaling laws), easier to integrate text conditioning via cross-attention, naturally extends to video (add temporal attention), used by Sora and Stable Diffusion 3. UNet advantages: more efficient at lower compute budgets, well-understood architecturally, established training recipes. The industry is moving toward DiT because it benefits from the same scaling laws that made LLMs successful — more compute and data consistently improves quality.
+
+**Q: How does Whisper achieve near-human ASR performance?**
+**Short:** Whisper trains an encoder-decoder transformer on 680,000 hours of weakly supervised internet audio-text pairs across several tasks, reaching 3-5% English word error rate.
+Whisper uses an encoder-decoder transformer trained on 680,000 hours of weakly supervised audio-text pairs from the internet. The key design decisions: (1) scale — 680K hours is 10-100x more than previous ASR datasets; (2) weak supervision — rather than expensive human transcription, it uses internet audio with existing captions/subtitles; (3) multitask training — trained on transcription, translation, language identification, and timestamp prediction simultaneously; (4) mel spectrogram input — raw audio is converted to 80-channel mel spectrograms, chunked into 30-second segments. The largest model (large-v3, 1.5B params) achieves 3-5% word error rate on English, competitive with commercial ASR systems. Limitations: struggles with heavily accented speech, low-resource languages, and noisy environments.
+
+**Q: How do you evaluate a VLM for a production document understanding pipeline?**
+**Short:** Document-understanding VLMs are evaluated on character-level OCR accuracy, layout association, multi-part reasoning, and robustness to rotated or low-quality scans.
+Evaluate on four dimensions specific to document understanding: (1) OCR accuracy — character-level exact match on representative document types (invoices, contracts, forms), not just general benchmarks; (2) layout understanding — can it correctly associate labels with values in tables, multi-column layouts, and forms with complex structure; (3) reasoning — can it answer questions that require combining information from multiple parts of the document; (4) robustness — test with rotated, skewed, low-quality scans, and mixed-language documents. Key metrics: field extraction F1 (per field type), table extraction accuracy, end-to-end task accuracy. Compare against specialized tools (AWS Textract, Google Document AI) which may outperform general VLMs on structured extraction. For production, measure latency per page and cost per document alongside accuracy.
+
+**Q: How does a native speech-to-speech model (GPT-4o realtime) differ from an ASR → LLM → TTS cascade?**
+**Short:** A native speech-to-speech model processes audio tokens directly and responds sub-second, while a cascade strips paralinguistic tone through a text intermediate and stacks latency.
+A native audio model consumes and produces audio tokens directly, with no text intermediate, while a cascade transcribes speech with an ASR model (e.g., Whisper), feeds text to an LLM, then synthesizes the response with TTS. The cascade loses paralinguistic information — tone, emotion, hesitation, emphasis are stripped at the transcription step and cannot inform the response — and stacks three model latencies (often 1.5-3 s total), whereas native models respond sub-second and can react to how something was said. The cascade's advantages: each stage is independently swappable and debuggable, transcripts are available for logging/compliance, and it works with any text-only LLM. Choose native audio for conversational voice assistants where naturalness matters; choose the cascade when you need auditable transcripts, custom domain LLMs, or fine-grained control over each stage.
+
+---
+
+## 13. Best Practices
+
+1. **Use high-detail mode for dense images** — charts, documents, screenshots need maximum resolution.
+2. **Preprocess images** — crop to relevant region, adjust contrast for poor-quality images.
+3. **Test on representative domain images** — VLM quality varies dramatically by image type.
+4. **For OCR-critical applications** — validate against specialized OCR tools (AWS Textract, Google Document AI).
+5. **Track image token costs** — high-resolution images cost 4-10× more than text.
+6. **Combine with structured extraction** — use VLM to understand layout, then extract fields programmatically.
+
+---
+
+
+## 14. Case Study
+
+### Multimodal Visual-Language Search at E-Commerce Scale
+
+**Problem Statement and Scale**
+
+An e-commerce platform serving 80 million active users needs multimodal product search: users upload a photo of a product they own and ask "find me similar items under $50 in blue." The system must handle:
+- 12,000 visual search queries per second at peak (Black Friday)
+- Product catalog: 400 million items with images and text descriptions
+- p99 latency SLA: < 300ms end-to-end (image upload → ranked results)
+- Cold-start: new products indexed within 60 seconds of listing
+- Revenue requirement: visual search must achieve CTR within 15% of text search
+
+**Architecture Overview**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    UserUpload(["User Upload<br/>jpg/png/webp"]) --> ImgValid["Image Validation<br/>reject if greater than 5MB<br/>or non-image MIME"]
+    ImgValid --> CLIPVision["CLIP Vision Encoder<br/>ViT-L/14, 224x224, fp16"]
+    ImgValid --> CLIPText["CLIP Text Encoder<br/>same embedding space, 768-d"]
+    CLIPVision --> QueryFusion["Query Fusion Layer<br/>concat img_emb, text_emb<br/>-&gt; MLP -&gt; 768-d"]
+    CLIPText --> QueryFusion
+    QueryFusion --> FAISSIdx["FAISS HNSW Index<br/>400M product vectors, fp16<br/>768-d, ef_search=128"]
+    QueryFusion --> BM25Idx["BM25 Text Index<br/>title+description tokens<br/>field-boosted, title x3"]
+    FAISSIdx --> RRF["RRF Score Fusion<br/>alpha=0.65 dense, 0.35 sparse"]
+    BM25Idx --> RRF
+    RRF --> Filter["Price + Category Filter<br/>post-FAISS metadata filter"]
+    Filter --> Rerank["Cross-Encoder Reranker<br/>MiniLM-L12, top-50 -&gt; top-10"]
+    Rerank --> Personalize["Personalization Layer<br/>user embedding x0.2 blend"]
+    Personalize --> Results(["Ranked Results, 10"])
+
+    class UserUpload,Results io
+    class ImgValid,Filter req
+    class CLIPVision,CLIPText,FAISSIdx,BM25Idx,Rerank base
+    class QueryFusion,RRF,Personalize mathOp
+```
+
+**Key Design Decisions**
+
+1. **CLIP over domain-specific VLM**: CLIP ViT-L/14 (307M params) gives zero-shot generalization across product categories without per-category fine-tuning. Alternative rejected: BLIP-2 (15B params) — 50× larger, requires 8×A100 GPU per replica, latency > 800ms.
+
+2. **768-d shared embedding space**: CLIP's shared image-text embedding space allows direct cosine similarity between query photo and text-described products without a cross-modal bridge. Dimension choice: 768-d (not 512-d) — empirically +4% recall@10 on internal eval.
+
+3. **HNSW over flat FAISS**: HNSW gives O(log N) approximate nearest-neighbor at 400M scale. ef_search=128 gives 97% recall vs exact search at 8ms latency (flat index: 2,100ms). Trade-off: 3.2 GB HNSW graph overhead per 400M vectors.
+
+4. **Quantization: fp16 for embeddings, INT8 for CLIP inference**: fp16 embeddings halve memory (400M × 768 × 2 bytes = 614 GB) vs fp32 (1.2 TB). INT8 inference on CLIP encoder adds 1.2% recall loss but 2.4× throughput gain. Quantization applied post-normalization — cosine similarity is invariant to scale.
+
+5. **Cross-encoder reranker only on top-50**: Full cross-encoder on 400M items is infeasible (2.4M ms). Reranking top-50 from first-stage retrieval costs 18ms. MiniLM-L12 chosen over BERT-large — 87% of quality at 6× speed.
+
+6. **Incremental FAISS index updates**: New product listings use FAISS `IndexIDMap` with `add_with_ids` — no full rebuild needed. Rebuild triggered only when fragmentation > 15% (monitored via `index.ntotal` vs expected count).
+
+**Implementation**
+
+```python
+from __future__ import annotations
+
+import numpy as np
+import faiss
+import open_clip
+import torch
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class SearchResult:
+    product_id: str
+    score: float
+    image_url: str
+    title: str
+    price: float
+
+class MultimodalSearchEngine:
+    def __init__(
+        self,
+        index_path: str,
+        clip_model: str = "ViT-L-14",
+        pretrained: str = "openai",
+        device: str = "cuda",
+    ) -> None:
+        self.device = device
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            clip_model, pretrained=pretrained
+        )
+        self.model = self.model.to(device).half()  # fp16 inference
+        self.model.eval()
+        self.tokenizer = open_clip.get_tokenizer(clip_model)
+
+        # HNSW index: ef_search tuned for 97% recall @ 8ms
+        self.index = faiss.read_index(index_path)
+        if hasattr(self.index, "hnsw"):
+            self.index.hnsw.efSearch = 128
+
+        # Move index to GPU for batch queries
+        if device == "cuda":
+            res = faiss.StandardGpuResources()
+            self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
+
+    @torch.inference_mode()
+    def encode_image(self, image_tensor: torch.Tensor) -> np.ndarray:
+        features = self.model.encode_image(image_tensor.to(self.device).half())
+        features = features / features.norm(dim=-1, keepdim=True)
+        return features.cpu().float().numpy()
+
+    @torch.inference_mode()
+    def encode_text(self, text: str) -> np.ndarray:
+        tokens = self.tokenizer([text]).to(self.device)
+        features = self.model.encode_text(tokens)
+        features = features / features.norm(dim=-1, keepdim=True)
+        return features.cpu().float().numpy()
+
+    def fuse_query(
+        self,
+        image_emb: np.ndarray,
+        text_emb: Optional[np.ndarray],
+        image_weight: float = 0.7,
+    ) -> np.ndarray:
+        if text_emb is None:
+            return image_emb
+        fused = image_weight * image_emb + (1 - image_weight) * text_emb
+        # Re-normalize after weighted combination
+        fused = fused / np.linalg.norm(fused, axis=-1, keepdim=True)
+        return fused
+
+    def search(
+        self,
+        query_emb: np.ndarray,
+        k: int = 50,
+        price_max: Optional[float] = None,
+        category: Optional[str] = None,
+    ) -> list[SearchResult]:
+        distances, ids = self.index.search(query_emb.astype(np.float32), k * 2)
+        results = []
+        for dist, pid in zip(distances[0], ids[0]):
+            if pid == -1:
+                continue
+            product = self._fetch_metadata(pid)
+            if price_max and product.price > price_max:
+                continue
+            if category and product.category != category:
+                continue
+            results.append(SearchResult(
+                product_id=str(pid),
+                score=float(dist),
+                image_url=product.image_url,
+                title=product.title,
+                price=product.price,
+            ))
+            if len(results) >= k:
+                break
+        return results
+```
+
+**BROKEN: Stale embeddings cause recall regression after catalog updates**
+
+```python
+# BROKEN: in-memory index never updated after product edits
+class SearchEngine:
+    def __init__(self):
+        self.index = faiss.read_index("products.index")  # loaded once at startup
+        # Problem: product title/image changes never reflected
+        # New products not indexed until server restart
+        # Stale embeddings → wrong results for updated items
+```
+
+**FIX: Incremental index update pipeline**
+
+```python
+import threading
+from collections import deque
+
+class IncrementalSearchEngine(MultimodalSearchEngine):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pending: deque = deque()
+        self._lock = threading.Lock()
+        self._update_thread = threading.Thread(target=self._flush_loop, daemon=True)
+        self._update_thread.start()
+
+    def enqueue_update(self, product_id: int, new_embedding: np.ndarray) -> None:
+        with self._lock:
+            self._pending.append((product_id, new_embedding))
+
+    def _flush_loop(self) -> None:
+        import time
+        while True:
+            time.sleep(5)  # batch every 5 seconds
+            self._flush_pending()
+
+    def _flush_pending(self) -> None:
+        with self._lock:
+            if not self._pending:
+                return
+            batch = list(self._pending)
+            self._pending.clear()
+
+        ids = np.array([b[0] for b in batch], dtype=np.int64)
+        vecs = np.stack([b[1] for b in batch]).astype(np.float32)
+
+        # Remove stale vectors then re-add with updated embeddings
+        # IndexIDMap supports id-based removal
+        self.index.remove_ids(faiss.IDSelectorArray(ids))
+        self.index.add_with_ids(vecs, ids)
+```
+
+**BROKEN: CLIP text encoder not normalized — cosine similarity inflated for short queries**
+
+```python
+# BROKEN: missing L2 normalization on text side
+text_features = model.encode_text(tokens)  # raw logits, not unit vector
+# Dot product ≠ cosine similarity without normalization
+# Short 1-word queries have lower norm → artificially low similarity scores
+scores = (image_features @ text_features.T)  # wrong: mixing normalized + unnormalized
+```
+
+**FIX: Normalize both modalities before dot product**
+
+```python
+image_features = model.encode_image(images)
+image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+
+text_features = model.encode_text(tokens)
+text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+# Now dot product == cosine similarity (both on unit sphere)
+scores = (image_features @ text_features.T)
+```
+
+**Components Covered**
+
+| Module Section | Where It Appears in Case Study |
+|---|---|
+| VLMs / CLIP architecture | CLIP ViT-L/14 as the dual encoder for image+text queries |
+| Vision encoders (ViT) | ViT-L/14 patch-based image encoding at 224×224 |
+| Embedding similarity search | FAISS HNSW index, cosine similarity, ef_search=128 |
+| Multimodal fusion | Weighted combination of image + text embeddings |
+| Quantization (INT8/fp16) | fp16 embeddings, INT8 inference on CLIP encoder |
+| Reranking | MiniLM-L12 cross-encoder on top-50 candidates |
+| Diffusion models | Used offline for product image augmentation during indexing |
+
+**Tradeoffs and Alternatives**
+
+| Approach | Pros | Cons | When to Choose |
+|---|---|---|---|
+| CLIP ViT-L/14 (chosen) | Zero-shot, 307M params, 8ms | Less domain-specific accuracy | Large diverse catalog |
+| BLIP-2 (15B) | Higher accuracy for complex queries | 50× larger, 800ms latency | Small catalog, high-value items |
+| ResNet-50 + BERT separate | Simple to deploy | No shared embedding space — needs bridge | Baseline only |
+| Fine-tuned domain CLIP | +8% recall on in-domain | Needs 10M labeled pairs, monthly retrain | Single-category shops |
+
+**Metrics and Results**
+
+| Metric | Before (Text Only) | After (Multimodal) |
+|---|---|---|
+| Search CTR | 4.2% | 6.1% (+45%) |
+| p50 visual search latency | — | 89ms |
+| p99 visual search latency | — | 267ms |
+| Catalog recall@10 | 61% text-only | 83% multimodal |
+| GPU cost per 1M queries | — | $1.40 (A10G) |
+| Index size (400M products) | 2.1 GB (text BM25) | 614 GB (fp16 HNSW) |
+| New product indexing lag | < 5 min (text) | < 60 sec (incremental) |
+
+**Common Pitfalls**
+
+1. **Forgetting to normalize embeddings before dot product.** CLIP returns raw feature vectors, not unit vectors. Raw dot product is NOT cosine similarity and is heavily influenced by vector magnitude. Fix: always divide by L2 norm on both image and text sides before any similarity computation.
+
+2. **Using full FAISS flat index in production.** `IndexFlatL2` on 400M vectors requires exhaustive scan: 2,100ms per query. Switch to `IndexHNSWFlat` (8ms at 97% recall) or `IndexIVFFlat` (15ms at 94% recall) for any catalog > 1M items.
+
+3. **Image preprocessing mismatch between training and serving.** CLIP was trained with specific normalization (mean=[0.481, 0.457, 0.408], std=[0.268, 0.261, 0.275]). Using torchvision default normalization causes ~12% recall drop. Always use `open_clip.create_model_and_transforms` to get the exact preprocessing pipeline.
+
+4. **Serving both image and text encoders on the same GPU without batching.** Single-item CLIP inference wastes GPU bandwidth (82% underutilized). Implement dynamic batching: collect queries for 5ms, run as batch of 32–64. Throughput goes from 140 to 2,800 queries/sec on A10G.
+
+5. **Not accounting for HNSW memory in container sizing.** 400M × 768 × 2 bytes (fp16) = 614 GB for vectors alone. HNSW graph adds another ~3.2 GB. Containers must have 650+ GB RAM or use memory-mapped index files with sufficient swap.
+
+**Interview Discussion Points**
+
+**Q: How does CLIP's contrastive training enable zero-shot product classification?**
+CLIP is trained to maximize cosine similarity between matching image-text pairs and minimize similarity between non-matching pairs across 400M internet image-caption pairs. This forces the image and text encoders to learn a shared semantic embedding space where "a red running shoe" and a photo of a red running shoe map to nearby vectors. Zero-shot classification works by encoding candidate class labels as text, encoding the query image, and returning the label with highest cosine similarity — no labeled product data needed.
+
+**Q: How would you handle a user uploading a non-product image (e.g., a selfie) that still retrieves results?**
+CLIP will retrieve the closest products to whatever the user uploads — there is no "no match" threshold by default. Mitigation: (1) Train an out-of-distribution detector on product vs non-product images (binary classifier, AUC > 0.95 achievable with 10k labeled examples); (2) Add a minimum similarity threshold (cosine > 0.25 empirically); (3) Return an explicit "no matching products found" UX rather than low-confidence results. Threshold is tuned by plotting similarity score distribution for valid product queries vs non-product uploads.
+
+**Q: What happens to FAISS HNSW recall as the catalog grows beyond 1 billion products?**
+HNSW recall degrades gracefully with scale — at 1B vectors, recall@10 typically drops from 97% to 93% at ef_search=128. To compensate: (1) Increase ef_search to 256 (12ms vs 8ms — 50% latency trade-off for +3% recall); (2) Use product quantization (PQ) to compress vectors: PQ64 gives 12× compression (614 GB → 51 GB) at the cost of 5% recall. (3) Shard the index: partition products by category into separate FAISS indexes, then merge results. Sharding is the most scalable approach — 8 shards × 125M products each is more manageable than one 1B index.
+
+**Q: How would you evaluate whether the multimodal search improvement is causing real business value vs just gaming recall@10?**
+Recall@10 is a proxy metric — you care about revenue and engagement. Measure: (1) A/B test: 50% users get text-only, 50% get multimodal. Primary metric: 30-day purchase conversion rate from visual search sessions. (2) Guard rails: basket size (multimodal should not reduce average order value), return rate (better relevance → fewer returns). (3) Leading indicator: session depth (users viewing more products per session suggests better discovery). Recall@10 is only valid as a deployment gate — once in production, business metrics take precedence.
+
+**Q: How do you prevent the reranker from reordering results based on spurious features (e.g., product image background color)?**
+Cross-encoders can overfit to low-level visual features that correlate with engagement in training data. Mitigations: (1) Debias training data by stratifying on visual attributes (color, background) to ensure the cross-encoder sees examples where product similarity is driven by shape/function, not color; (2) Use multi-objective training loss that includes semantic similarity, not just click-through prediction; (3) Monitor per-attribute CTR — if CTR for "blue background products" spikes, investigate model attribution with SHAP or attention visualization.
+
+---
+
+## See Also
+- [Vision-Language Models](../vision_language_models/vision_language_models.md) — deeper dive into VLM architectures, training recipes, and deployment
+- [Voice Agents](../voice_agents/voice_agents.md) — ASR/TTS/native-audio stacks for production conversational systems
+- [Computer Vision (ML)](../../ml/computer_vision/computer_vision.md) — vision encoders, ViT, CLIP, object detection — the CV foundation of multimodal LLMs
+- [Generative Models (ML)](../../ml/generative_models/generative_models.md) — VAEs, GANs, Diffusion (DDPM) — generative foundation for image/video generation

@@ -532,17 +532,17 @@ arrays — reach for two heaps only after each narrower question answers "no."
 
 ## 10. Cross-links
 
-- Concept module: [heaps_and_priority_queues](../heaps_and_priority_queues/)
+- Concept module: [heaps_and_priority_queues](../heaps_and_priority_queues/heaps_and_priority_queues.md)
   — heap invariants, why root access is O(1) but pop/push is O(log n).
-- Applied: [java/collections_internals](../../java/collections_internals/) —
+- Applied: [java/collections_internals](../../java/collections_internals/collections_internals.md) —
   `PriorityQueue` (min-heap by default, reverse `Comparator` for a max-heap);
   `TreeMap`/`TreeSet` as an alternative order-statistics structure for sliding
   window median (supports `O(log n)` removal of arbitrary elements, avoiding
   lazy deletion).
-- Applied: [hld/caching](../../hld/caching/) — frequency- and recency-based
+- Applied: [hld/caching](../../hld/caching/caching.md) — frequency- and recency-based
   eviction policies (LFU) share the "two ordered structures, one frontier"
   shape with the IPO/simulation variants in §6.
-- Master recognition engine: [dsa_patterns/README.md](README.md).
+- Master recognition engine: [dsa_patterns/README.md](dsa_patterns.md).
 - Sibling patterns: [top_k_elements.md](top_k_elements.md),
   [k_way_merge.md](k_way_merge.md).
 

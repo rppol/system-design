@@ -1,0 +1,845 @@
+# Fine-Tuning
+
+<!-- study-paths
+senior: fine_tuning.md, lora.md, qlora.md, peft_methods.md, instruction_tuning.md
+principal: fine_tuning.md, lora.md, domain_adaptation.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+Fine-tuning is the process of taking a pre-trained LLM and continuing its training on a smaller, more targeted dataset to make it better at specific tasks, domains, or behaviors. Rather than training from scratch (weeks and millions of dollars), fine-tuning adapts an existing model in hours or days at a fraction of the cost.
+
+Fine-tuning exploits the fact that pre-training has already done the heavy lifting: the model has learned language, reasoning, and world knowledge. Fine-tuning teaches the model new skills, behaviors, or domain knowledge on top of this foundation — like teaching a well-educated person a specialized skill rather than educating them from birth.
+
+The key innovation of the 2023-2024 era is **parameter-efficient fine-tuning (PEFT)**: instead of updating all billions of parameters, update only a tiny fraction (0.01-1%) via adapter layers or low-rank decompositions. This makes fine-tuning accessible on consumer GPUs.
+
+---
+
+## 2. Intuition
+
+> **One-line analogy**: Fine-tuning is like teaching a well-educated person a specialized skill — you don't start from scratch, you build on existing knowledge.
+
+**Mental model**: A pre-trained model has learned language and world knowledge. Fine-tuning shows it examples of the specific behavior you want — medical Q&A, code completion in a specific style, JSON output format — and adjusts its weights slightly toward that behavior. LoRA (Low-Rank Adaptation) makes this cheap: instead of updating all 7B parameters, you add small adapter matrices that capture the behavior change, updating ~0.1% of parameters.
+
+**Why it matters**: Fine-tuning is what makes general-purpose LLMs into specialized tools. It's the primary technique for domain adaptation (legal, medical, finance), style alignment, and language-specific tuning. QLoRA made fine-tuning possible on a single consumer GPU, democratizing model customization.
+
+**Key insight**: LoRA works because the weight updates during fine-tuning have low intrinsic rank — the change in behavior can be captured by a small low-rank matrix, not the full parameter space.
+
+---
+
+## 3. Core Principles
+
+- **Catastrophic forgetting**: Fine-tuning on new data can cause the model to forget previously learned capabilities. Mitigate with low learning rates, mixing original data, and PEFT.
+- **Learning rate**: Fine-tuning requires much lower LR than pre-training (1e-5 to 1e-4 vs 1e-3 to 3e-4). Overly high LR destroys pre-trained representations.
+- **Few epochs**: 1-3 epochs is usually enough; more causes overfitting or forgetting.
+- **Data quality dominates**: 1000 high-quality examples > 100K low-quality ones.
+- **Format alignment**: Training data format must exactly match inference-time prompt format.
+
+---
+
+## 4. Types / Strategies
+
+### 4.1 Full Fine-Tuning
+
+Update all parameters in the model. Most flexible but requires significant memory (same as pre-training) and risks catastrophic forgetting.
+
+**When to use**: Fundamental domain shift (e.g., pre-training a base model on new language); when you have access to large GPU clusters; when adapting every aspect of model behavior.
+
+**Memory requirements**: Same as pre-training (weights + gradients + optimizer states).
+
+### 4.2 LoRA (Low-Rank Adaptation)
+
+The most popular PEFT method. Instead of updating weight matrix W (d × k), add a low-rank adapter:
+
+```
+W_adapted = W_frozen + ΔW = W_frozen + B × A
+
+Where:
+  W: original frozen weight matrix (d × k)
+  A: trainable matrix (r × k) initialized randomly
+  B: trainable matrix (d × r) initialized to zeros
+  r: rank (hyperparameter, typically 4-64)
+  ΔW = B × A has rank ≤ r
+
+Forward pass: h = W_frozen × x + (B × A) × x × scaling_factor
+  scaling_factor = alpha / r  (alpha is a hyperparameter)
+```
+
+**The idea behind it.** "Don't edit the giant weight matrix. Leave it frozen and bolt a skinny detour beside it — squeeze the input down to `r` numbers, expand it back out, and add the result on top."
+
+The whole saving comes from the squeeze. A `d × k` matrix has `d × k` knobs; a squeeze-then-expand pair has only `r × (d + k)`. When `r` is tiny next to `d` and `k`, that is a rounding error's worth of parameters — and it is still a full-shape `d × k` update by the time it reaches the output.
+
+| Symbol | What it is |
+|--------|------------|
+| `W` | The pre-trained `d × k` projection. Never receives a gradient |
+| `ΔW` | The change fine-tuning wants to make to `W`. LoRA never stores this — it stores its two factors |
+| `A` | `r × k`. Squeezes a `k`-dim input into `r` numbers. Random-init, so gradients can flow on step 1 |
+| `B` | `d × r`. Expands those `r` numbers back to `d`. Zero-init, so `BA = 0` and training starts exactly at the base model |
+| `r` | How many numbers survive the squeeze. Typically 4–64 |
+| `d`, `k` | Output rows, input columns of the layer being adapted |
+| `α` | Scaling numerator. Sets how loud the detour is relative to the frozen path |
+| `α/r` | The volume knob actually applied to `BA` before it is added |
+| `BA` | The reconstructed update. Shape `d × k`, but rank at most `r` |
+
+**Walk one example.** One `q_proj` layer of a Llama-shaped 7B model, `d = k = 4096`:
+
+```
+  Full fine-tune of this one matrix
+    trainable params = d x k        = 4096 x 4096   = 16,777,216
+
+  LoRA at r = 8
+    A: r x k = 8 x 4096                             =     32,768
+    B: d x r = 4096 x 8                             =     32,768
+    trainable params = r x (d + k) = 8 x 8192       =     65,536
+    ratio  = 65,536 / 16,777,216   = 1/256          =      0.39%
+
+  LoRA at r = 64
+    trainable params = 64 x 8192                    =    524,288
+    ratio  = 524,288 / 16,777,216  = 1/32           =      3.13%
+
+  Optimizer memory for this one matrix (12 B/param: fp32 grad + Adam m + Adam v)
+    full   16,777,216 x 12 B  = 201 MB
+    r = 8      65,536 x 12 B  = 0.79 MB    <- 256x less
+    r = 64    524,288 x 12 B  = 6.3 MB     <-  32x less
+
+  Note what did NOT shrink: BA is still 4096 x 4096 when it lands on W.
+  You store 65,536 numbers and spend 16,777,216 numbers' worth of update.
+```
+
+**Why low rank is enough.** `BA` can only ever produce an update whose columns live in an 8-dimensional subspace — 8 directions of change out of 4096 available. That sounds crippling, and it would be for pre-training. It is fine for fine-tuning because the thing you are learning is small: "answer in JSON", "use radiology vocabulary", "prefer this SQL dialect". Empirically those adaptations have low *intrinsic dimension* — the update matrix a full fine-tune would have produced is itself nearly low-rank, so factoring it is lossy in directions the task never used. When the task genuinely needs new capability rather than new behavior, this assumption breaks and rank has to climb (see the r=4 underfitting pitfall in §14).
+
+**Why `α/r` exists, and what it physically does.** It is a volume knob on the detour. `BA` is added as `BA · x · (α/r)`, so with `α = 32, r = 8` the adapter output is multiplied by `4.0`; with `α = 32, r = 64` by `0.5`.
+
+```
+  alpha / r, at fixed alpha = 32
+    r =  4  ->  32/4  = 8.0    adapter shouts
+    r =  8  ->  32/8  = 4.0
+    r = 16  ->  32/16 = 2.0
+    r = 32  ->  32/32 = 1.0
+    r = 64  ->  32/64 = 0.5    adapter whispers
+
+  Under the alpha = 2r convention the knob is pinned at 2.0 for every rank:
+    r =  8, alpha =  16  ->  2.0
+    r = 16, alpha =  32  ->  2.0
+    r = 64, alpha = 128  ->  2.0
+```
+
+Remove the `1/r` and raising the rank would silently raise the effective step size too — every rank change would demand a fresh learning-rate sweep. Dividing by `r` decouples the two knobs: `r` sets *capacity*, `α/r` sets *loudness*, and the `α = 2r` default is just "hold loudness fixed while I tune capacity."
+
+**Memory savings**: For a 7B model, LoRA with r=16 adds ~8M trainable parameters vs. 7B total — 0.1% of parameters trained.
+
+**Key insight**: Weight updates during fine-tuning have low intrinsic rank. LoRA explicitly captures this structure.
+
+**When to use**: Task-specific fine-tuning, style/format adaptation, adding new capabilities to existing model.
+
+### 4.3 QLoRA (Quantized LoRA)
+
+LoRA + quantize the base model to 4-bit NF4:
+
+```
+Base model weights: float16 (2 bytes/param) → NF4 quantization (0.5 bytes/param)
+Memory saving: 4x for base model weights
+LoRA adapters: still trained in BF16
+
+7B model memory:
+  Full fine-tune:  ~56GB (weights 14GB + grads 14GB + Adam states 28GB)
+  LoRA:            ~16GB (frozen 14GB + adapters ~0.03GB + adapter grads/optimizer
+                          ~0.2GB + activations with gradient checkpointing)
+  QLoRA:           ~6GB  (frozen 3.5GB in 4-bit + LoRA adapters ~0.1GB)
+```
+
+**Stated plainly.** "The frozen base model is only ever read, never updated — so store it in a crushed 4-bit format and decompress each block on the fly. Only the tiny trainable detour keeps full precision."
+
+The asymmetry is the point. Quantization error is fatal for weights you are *optimizing* (gradients get rounded into nothing), and cheap for weights you are only *multiplying by*. LoRA already made the trainable set tiny, which is exactly what makes it safe to crush everything else.
+
+| Symbol | What it is |
+|--------|------------|
+| NF4 | 16 code points spaced so they are equally likely under a normal distribution — matched to how pre-trained weights are actually distributed |
+| block size 64 | Weights are quantized in runs of 64, each with its own scale. Small blocks keep one outlier from wrecking a whole tensor |
+| absmax scale | The largest magnitude in a block. Divide by it to map the block onto NF4's range; multiply back to dequantize |
+| double quantization | Quantizing the *scales* themselves — a second pass over the `c` values |
+| paged optimizer | Adam states spill to CPU RAM on a memory spike instead of OOM-ing |
+
+**Walk one example.** A 7B base model, then the same arithmetic on 65B:
+
+```
+  Bits per weight, before double quantization
+    NF4 payload                                        4      bits
+    one fp32 absmax per 64 weights   = 32 / 64      =  0.5    bits
+                                                     -------
+                                                       4.5    bits/param
+
+  Bits per weight, with double quantization
+    NF4 payload                                        4      bits
+    absmax requantized to fp8, blocks of 256:
+        first-level scales  = 8 / 64                =  0.125  bits
+        second-level fp32   = 32 / (64 x 256)       =  0.002  bits
+                                                     -------
+                                                       4.127  bits/param
+    saving  = 4.5 - 4.127                           =  0.373  bits/param
+
+  7B base model weights
+    BF16   7.0e9 x 16   bits / 8 = 14.0  GB
+    NF4    7.0e9 x  4.5 bits / 8 =  3.94 GB   <- 3.6x smaller
+    +DQ    7.0e9 x  4.127        =  3.61 GB   <- 0.33 GB reclaimed
+
+  65B base model (the paper's headline case)
+    saving 0.373 bits x 65e9 / 8 =  3.0  GB reclaimed by double quant alone
+```
+
+That reclaimed 0.33 GB on a 7B looks like noise until you read the budget line: the whole QLoRA run fits in ~6 GB, so double quantization is worth roughly one extra GB of activations — a doubled sequence length or batch size, for free.
+
+QLoRA enables fine-tuning a 7B model on a single 16GB consumer GPU (RTX 4080 has 16GB; RTX 4090 has 24GB). This democratized fine-tuning dramatically.
+
+Tradeoff: the QLoRA paper reports no quality loss — 4-bit NF4 matched both 16-bit full fine-tuning and 16-bit LoRA on its academic benchmarks (Dettmers et al. 2023). The real cost is throughput: every forward pass dequantizes NF4 blocks on the fly.
+
+### 4.4 Instruction Tuning
+
+Teach the model to follow natural language instructions by fine-tuning on (instruction, response) pairs.
+
+```
+Training format example:
+  Input:  "### Instruction: Summarize this article in 3 bullet points.
+           ### Article: <article text>
+           ### Response:"
+  Output: "• Main point 1\n• Main point 2\n• Main point 3"
+```
+
+Instruction tuning is what transforms a base model (predicts next tokens) into a chat model (follows instructions and answers questions). Fine-tuning on ~1K-100K diverse instruction pairs achieves this.
+
+### 4.5 Domain Adaptation
+
+Fine-tune on domain-specific text to improve performance in a specialized area:
+
+```
+Strategies:
+1. Continued pre-training on domain text (CLM objective, large corpus)
+   Good for: adding domain vocabulary and knowledge
+   Example: train on 10B tokens of medical literature
+
+2. Instruction fine-tuning on domain Q&A
+   Good for: domain-specific task behavior
+   Example: 50K medical Q&A pairs
+
+3. Combination: first continued pre-training, then instruction fine-tuning
+   Best results; most data required
+```
+
+### 4.6 PEFT Taxonomy
+
+```
+PEFT Methods:
+  Additive:
+    - Adapter layers (Houlsby et al.): small bottleneck FFN inserted after attention
+    - Prompt tuning: learn soft prompts prepended to input
+    - Prefix tuning: learn prefix tokens for K,V in each attention layer
+
+  Reparameterized:
+    - LoRA: low-rank decomposition of weight updates
+    - DoRA: weight decomposition into magnitude + direction
+    - LoftQ: LoRA with quantization
+
+  Selective:
+    - BitFit: only train bias terms (extremely parameter-efficient)
+    - Sparse fine-tuning: select top-k most important parameters
+```
+
+---
+
+## 5. Architecture Diagrams
+
+### LoRA Applied to a Transformer
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    X["Input x\n(d_model)"]
+    W["Frozen W\ngradient = 0\npre-trained weights"]
+    A["Adapter A\nr×d  down-project\n(initialised ~ N(0,σ))"]
+    B["Adapter B\nd×r  up-project\n(initialised = 0)"]
+    SCALE["Scale by α / r"]
+    SUM["Σ  merge\nWx + BA·x·(α/r)"]
+    OUT["Projection output"]
+
+    X --> W --> SUM
+    X --> A --> B --> SCALE --> SUM
+    SUM --> OUT
+
+    class X,OUT io
+    class W frozen
+    class A,B train
+    class SCALE,SUM mathOp
+```
+
+Two parallel paths per projection: the frozen base weight (no gradient) plus the low-rank adapter pair BA (α/r). At inference, W + B·A·(α/r) is pre-merged back into a single matrix — zero additional latency.
+
+### QLoRA Memory Layout
+```
+GPU Memory:
+  +--------------------------------+
+  | Base Model Weights (NF4 4-bit) |  3.5GB for 7B model
+  +--------------------------------+
+  | LoRA Adapter A (BF16)          |  ~50MB per layer set
+  | LoRA Adapter B (BF16)          |  ~50MB per layer set
+  +--------------------------------+
+  | Gradients (only LoRA)          |  ~100MB total
+  +--------------------------------+
+  | Optimizer States (LoRA only)   |  ~400MB total
+  +--------------------------------+
+  | Activations + batch            |  1-2GB (gradient checkpointing)
+  +--------------------------------+
+  Total: ~5-6GB for 7B model QLoRA
+```
+
+### Memory Footprint by Method
+```mermaid
+xychart-beta
+    title "Fine-tuning a 7B model — GPU memory by method"
+    x-axis ["Full fine-tune", "LoRA r=16", "QLoRA r=16"]
+    y-axis "GPU memory (GB)" 0 --> 60
+    bar [56, 16, 6]
+```
+Full fine-tune = weights + grads + Adam states (needs 2× A100 40GB); LoRA = frozen base + adapter grads; QLoRA = 4-bit base + BF16 adapters.
+QLoRA's 4-bit base model collapses the footprint ~9× (56 GB → 6 GB) — turning a
+two-GPU job into one that runs on a single consumer card. Plain LoRA already removes
+the gradient and optimizer rows (56 GB → ~16 GB); quantizing the frozen base is what
+removes the last 14 GB. This is the whole reason fine-tuning became accessible outside
+research labs.
+
+### Fine-Tuning Pipeline
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    BASEM(["Pre-trained<br/>Base Model"])
+    DATA["Dataset Prep<br/>Format prompt template<br/>Tokenize + pack sequences"]
+    PEFT["PEFT Config<br/>target_modules=q_proj,v_proj<br/>r=16, alpha=32, dropout=0.05"]
+    TRAIN["Training Loop<br/>LR 2e-4, epochs 2-3<br/>batch 4-16 + grad accum, 3% warmup"]
+    EVAL["Evaluation<br/>Held-out test set<br/>Task-specific metrics"]
+    MERGE(["Merge + Export<br/>GGUF / SafeTensors"])
+
+    BASEM --> DATA --> PEFT --> TRAIN --> EVAL --> MERGE
+
+    class BASEM,MERGE io
+    class DATA,PEFT req
+    class TRAIN train
+    class EVAL base
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### LoRA Rank Selection
+
+```
+r=4:   ~0.05% trainable params; style/format changes; fastest
+r=8:   ~0.1% trainable params; good for most instruction tuning
+r=16:  ~0.2% trainable params; better for domain adaptation
+r=32:  ~0.4% trainable params; complex task learning
+r=64:  ~0.8% trainable params; approaching full fine-tune quality; diminishing returns
+r=128: ~1.6% trainable params; rarely necessary
+
+Rule of thumb: start with r=16, alpha=32 (alpha = 2×r is common)
+```
+
+### Trainable vs Frozen Parameter Ratio
+
+**What the formula is telling you.** "Count how many LoRA numbers you actually created, divide by the model size, and that fraction is the only thing your optimizer has to carry."
+
+The percentages in the table above are not a property of `r` alone — they depend just as much on *how many modules* you attach adapters to. Doubling the target-module list doubles the trainable count at fixed rank.
+
+| Symbol | What it is |
+|--------|------------|
+| `L` | Transformer blocks. 32 for a 7B Llama-shaped model |
+| `m` | How many projections you attached LoRA to (2 for q+v, 7 for full PEFT) |
+| `d_model` | Hidden width. 4096 for 7B |
+| `d_ff` | FFN intermediate width. 11008 for 7B — note it is *not* 4096, so MLP adapters cost more |
+| `r x (d + k)` | Params for one adapter pair. The per-module unit of cost |
+
+**Walk one example.** 7B model (`L = 32`, `d_model = 4096`, `d_ff = 11008`, 6.74B total), all at `r = 16`:
+
+```
+  Cost of one adapter pair
+    attention proj  4096 x 4096  -> 16 x (4096 + 4096)  =   131,072
+    gate / up proj  4096 x 11008 -> 16 x (4096 + 11008) =   241,664
+    down proj      11008 x 4096  -> 16 x (11008 + 4096) =   241,664
+
+  Target-module set            per layer      x 32 layers      % of 6.74B
+    q,v                          262,144        8,388,608        0.124%
+    q,k,v,o                      524,288       16,777,216        0.249%
+    q,k,v,o,gate,up,down       1,249,280       39,976,960        0.593%
+
+  Frozen : trainable at the q,v setting
+    6,738,415,616 : 8,388,608   ~=   803 : 1
+    for every number you train, 803 sit still
+```
+
+The MLP rows are the surprise: `gate/up/down` cost 1.84x an attention adapter each, because `d_ff` is 2.7x `d_model`. Going from "standard" to "full PEFT" is a 2.4x jump in trainable params, not the 1.75x the module count suggests.
+
+### Effective Batch Size and Gradient Accumulation
+
+**What this actually says.** "Your GPU can only hold 4 examples at once, so accumulate the gradients from 8 micro-batches before stepping the optimizer — the update is then statistically identical to a batch of 32 you could never fit."
+
+Gradient accumulation trades wall-clock for memory. Activations are freed after each micro-batch's backward pass; only the gradient buffer persists, and its size depends on parameter count, not batch size.
+
+| Symbol | What it is |
+|--------|------------|
+| `b` | Sequences per forward pass. Bounded by activation memory |
+| `G` | Backward passes performed before one `optimizer.step()` |
+| `N` | Data-parallel replicas; each contributes its own micro-batches |
+| `B_eff` | `b x G x N`. The number the learning rate should actually be tuned against |
+| `T` | `B_eff x seq_len`. The unit training curves are really measured in |
+
+**Walk one example.** The §14 SQL config — `batch_size: 4`, `gradient_accumulation: 8`, 1x A100, 5400 train examples, 3 epochs, 1024-token sequences:
+
+```
+  B_eff = b x G x N
+        = 4 x 8 x 1                        =     32 sequences
+
+  T     = B_eff x seq_len
+        = 32 x 1024                        = 32,768 tokens per optimizer step
+
+  optimizer steps per epoch
+        = ceil(5400 / 32)                  =    169 steps
+  total steps = 169 x 3 epochs             =    507 steps
+
+  warmup_ratio 0.03 -> 0.03 x 507          =     15 warmup steps
+
+  Same B_eff, two ways to reach it:
+    b=4,  G=8, N=1   ->  32   fits 40 GB, 8 sequential backwards per step
+    b=32, G=1, N=1   ->  32   needs ~8x the activation memory, 1 backward
+    b=4,  G=1, N=8   ->  32   8 GPUs, fastest wall-clock, 8x the hardware bill
+```
+
+**Why `G` exists.** Without it, `B_eff` is capped by whatever activations fit on the card, and at long sequence lengths that cap can be 1. A batch of 1 gives a gradient estimate so noisy that the loss curve is unreadable and the LR must be dropped far enough to make convergence glacial. `G` buys back statistical stability at the price of throughput — and note that `507` total steps is a small number, which is why warmup and the cosine schedule matter so much here: there is no time to recover from a bad early step.
+
+### Target Modules Selection
+
+Not all modules benefit equally from LoRA. Common choices:
+
+```
+Minimal (style tuning):   q_proj, v_proj
+Standard (task tuning):   q_proj, k_proj, v_proj, o_proj
+Full PEFT:                q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj
+Embedding:                embed_tokens (for new vocabulary tokens)
+```
+
+### Data Formatting
+
+The training data format must match inference exactly:
+
+```python
+# LLaMA 3 chat format (must match exactly)
+def format_example(instruction, response):
+    return f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+You are a helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
+{instruction}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+{response}<|eot_id|>"""
+
+# Only compute loss on the response part (not the instruction)
+# This is "instruction masking" — critical for good fine-tuning
+```
+
+### Merging LoRA Weights
+
+After fine-tuning, LoRA adapters can be merged back into the base model:
+
+```
+W_merged = W_frozen + (B × A) × (alpha / r)
+
+Benefits of merging:
+  - No inference overhead from adapter
+  - Can quantize merged model independently
+  - Easier deployment (single model file)
+
+Benefits of keeping separate:
+  - Multiple adapters can be swapped at runtime
+  - Original weights preserved for future adapters
+```
+
+---
+
+## 7. Real-World Examples
+
+### LLaMA → Vicuna (2023)
+- Fine-tuned LLaMA 13B on 70K ChatGPT conversations (user-shared, via ShareGPT)
+- Training cost: ~$300 (LMSYS blog, March 2023)
+- Claimed ">90% ChatGPT quality" from a preliminary GPT-4-as-judge comparison that the
+  authors themselves labelled non-scientific — not MT-Bench, which came later
+- Proved that instruction fine-tuning with high-quality data is the key ingredient
+
+### Mistral → Mistral-7B-Instruct
+- Mistral took their base 7B model + supervised fine-tuning on instruction data
+- Training largely on internal data + public instruction datasets
+- Released alongside base model; showed 7B can match or exceed LLaMA 13B
+
+### CodeLLaMA (Meta, 2023)
+- Fine-tuned LLaMA 2 on 500B code tokens (continued pre-training)
+- Then instruction fine-tuned on code Q&A pairs
+- Added the FIM (infilling) objective for the 7B/13B/70B variants — the 34B was trained
+  without it
+- Result: HumanEval pass@1 — Code Llama 34B 48.8%, Code Llama - Python 34B 53.7%,
+  versus 48.1% for GPT-3.5 (ChatGPT) as reported in the paper
+
+### Domain Fine-Tuning: BloombergGPT
+- 50B model trained from scratch on 363B financial tokens (FinPile) + 345B public tokens
+  (~709B total; 512× A100 40GB, 53 days)
+- Custom tokenizer with financial vocabulary
+- Showed domain-specific pre-training beats general model fine-tuning for finance
+
+---
+
+## 8. Tradeoffs
+
+| Method | VRAM (7B) | Speed | Quality | Forgetting Risk |
+|--------|-----------|-------|---------|----------------|
+| Full fine-tune | ~56 GB | Slow | Best | High |
+| LoRA (r=16) | ~16 GB | Fast | Very good | Low |
+| QLoRA (r=16) | ~6 GB | Medium | Good | Low |
+| Prefix tuning | ~15 GB | Fast | Moderate | Very low |
+| Prompt tuning | ~14 GB | Fastest | Lower | None |
+
+Every non-full-FT row is dominated by the same frozen 14 GB of BF16 base weights; the
+differences between them are adapter gradients, optimizer state and activations.
+
+---
+
+## 9. When to Use / When NOT to Use
+
+### Use Fine-Tuning When:
+- You need consistent output format (JSON, specific templates)
+- Task-specific behavior not achievable with prompting
+- Latency-sensitive: fine-tuned smaller model beats larger model + long prompt
+- Privacy: can't send data to external API
+- Cost: 1000s of similar calls daily make fine-tuning economical
+
+### Use Prompting Instead When:
+- Task is well-covered by the base model's instruction following
+- Rapid iteration needed (no training cycle)
+- Task variety is high (can't fine-tune for every task)
+- Dataset is too small (<200 examples of consistent pattern)
+
+### Never Fine-Tune When:
+- You don't have high-quality training data
+- You haven't first tried prompting (simpler, faster to iterate)
+- You want to add knowledge the base model doesn't have (pre-training or RAG is better)
+- Budget doesn't support even QLoRA (~$50-200 for 7B)
+
+---
+
+## 10. Common Pitfalls
+
+1. **Wrong prompt format**: Training with Alpaca format then inferring with ChatML format → garbage output. Match exactly.
+2. **Learning rate too high**: LoRA with LR=1e-3 destroys base model representations. Use 1e-4 to 3e-4 for LoRA.
+3. **Masking labels incorrectly**: Including instruction tokens in loss calculation teaches model to recite prompts.
+4. **Too many epochs**: 5+ epochs on small dataset → severe overfitting and memorization.
+5. **Forgetting gradient accumulation**: Effective batch size = physical batch × accumulation steps. Small effective batch size → noisy gradients.
+6. **Not evaluating against base model**: Fine-tuned model might regress on general tasks. Always compare to base on a diverse benchmark.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| **HuggingFace PEFT** | LoRA, QLoRA, adapters | Standard PEFT library |
+| **Axolotl** | Training framework | Flexible YAML config; most popular for community fine-tuning |
+| **Unsloth** | Fast LoRA training | 2x faster than standard PEFT; low VRAM |
+| **LLaMA-Factory** | All-in-one fine-tuning | Web UI, many models, easy data format |
+| **torchtune** | PyTorch-native fine-tuning | Meta's official tool |
+| **TRL (HuggingFace)** | RLHF, DPO, SFT | SFTTrainer, DPOTrainer |
+| **BitsAndBytes** | 4/8-bit quantization | Required for QLoRA |
+| **DeepSpeed ZeRO** | Memory-efficient training | Works with PEFT |
+| **Modal / RunPod** | GPU cloud for fine-tuning | Cheap A100/H100 access |
+
+```python
+# QLoRA fine-tuning with PEFT (simplified)
+import torch
+from peft import LoraConfig, get_peft_model
+from transformers import BitsAndBytesConfig
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+)
+lora_config = LoraConfig(
+    r=16, lora_alpha=32, target_modules=["q_proj", "v_proj"],
+    lora_dropout=0.05, bias="none", task_type="CAUSAL_LM"
+)
+model = get_peft_model(base_model, lora_config)
+```
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q: When should you fine-tune vs. just use prompting?**
+**Short:** Fine-tune when output must be consistent, the task runs at scale, latency matters, or data can't leave your infra; otherwise prompt first.
+A: Fine-tune when: you need consistent output format, the task is highly repetitive at scale (cost justifies training), latency matters (fine-tuned 7B beats prompted 70B), or privacy requires not sending data to external APIs. Use prompting when: rapid iteration needed, task variety is high, dataset is too small, or the base model already handles the task adequately.
+
+**Q: What are the key differences between full fine-tuning and PEFT methods?**
+**Short:** PEFT trains only 0.1-1% of parameters and can match full fine-tuning quality while cutting 7B training memory from ~56GB to 6-16GB.
+A: Full fine-tuning updates all model parameters — provides maximum quality but requires the same memory as pre-training (~56GB for 7B). PEFT trains 0.1-1% of parameters while freezing the rest — reduces training memory to 6-16GB for 7B models, and the LoRA paper reports matching or exceeding full fine-tuning on GPT-3 175B (WikiSQL, MNLI-m, SAMSum) with 4.7M trainable parameters. PEFT also reduces catastrophic forgetting risk (frozen weights preserve general knowledge) and enables modular multi-task adapters. For most production fine-tuning, LoRA r=16 is the right default.
+
+**Q: How does fine-tuning differ from RAG for adding domain knowledge?**
+**Short:** Fine-tuning bakes static knowledge into weights for fast inference, while RAG injects current knowledge at query time with retrieval latency and cost.
+A: Fine-tuning bakes knowledge into model weights at training time — static, but fast at inference. RAG injects knowledge dynamically at query time — always current, but adds retrieval latency and cost per query. Fine-tuning is better when: knowledge is stable, the same information is queried millions of times (amortize training cost), or latency prohibits context injection. RAG is better when: knowledge changes frequently, private documents are added continuously, or source attribution is required. Fine-tuning cannot access documents it hasn't seen; RAG can answer about documents added yesterday.
+
+**Q: What is the PEFT landscape — what methods exist and when do you choose each?**
+**Short:** LoRA is the default PEFT method for clean merging, QLoRA adds 4-bit quantization for memory-constrained training, and DoRA improves quality at equal rank.
+A: Main PEFT methods: LoRA (low-rank decomposition, merges cleanly, default choice), QLoRA (LoRA + 4-bit quantization for memory-constrained training), adapter layers (insert bottleneck modules, always-on inference overhead), prefix tuning (learn soft key/value prefixes, works well at large scale), prompt tuning (learn soft input tokens, only viable above 10B parameters), BitFit (train only biases, very limited quality), DoRA (magnitude+direction decomposition, better quality at same rank as LoRA). See peft_methods.md for the full comparison table.
+
+**Q: Why is the LoRA learning rate (1e-4 to 3e-4) about 10× higher than the full fine-tuning rate, and what happens if you mix them up?**
+**Short:** LoRA's from-scratch adapters need a roughly 10x higher learning rate than full fine-tuning's converged pre-trained weights, or they stay undertrained.
+A: LoRA adapters are trained from scratch (B starts at zero), so they tolerate — and need — a higher learning rate than pre-trained weights, which sit in a converged region where large steps destroy representations. Using the full-FT rate (1e-5) for LoRA leaves adapters undertrained after the usual 1-3 epochs; using the LoRA rate (2e-4) for full fine-tuning degrades the base model within a few hundred steps. Rule of thumb: LoRA 1e-4 to 3e-4, full fine-tuning 1e-5 to 5e-5, continued pre-training ~1e-5. Always sanity-check early validation loss against the unmodified base model to catch a mismatched rate before wasting the run.
+
+**Q: What does LoRA alpha actually do, and why does sweeping rank without adjusting alpha give misleading results?**
+**Short:** Sweeping LoRA rank without fixing alpha shrinks the effective adapter scale, making higher rank look worse for a scaling reason, not a capacity one.
+A: Alpha sets the scaling factor alpha/r applied to the adapter output (h = Wx + BAx × alpha/r), so it controls how strongly the adapter perturbs the frozen model. If you sweep r from 8 to 64 while holding alpha fixed, the effective adapter scale shrinks 8× — and the "higher rank is worse" result you observe is really an under-scaled adapter, not a capacity effect. The common convention alpha = 2×r keeps the effective scale constant across rank sweeps (rsLoRA proposes scaling by alpha/√r for better stability at high ranks). Fix alpha = 2r before comparing ranks, and treat alpha as a learning-rate-like knob rather than a free hyperparameter.
+
+**Q: When should you fine-tune a model vs rely on prompt engineering?**
+**Short:** A system prompt exceeding roughly 2000 tokens to get the desired behavior signals that fine-tuning will be cheaper and more reliable than prompting.
+Fine-tune when you need consistent format adherence, domain-specific behavior that prompting can't achieve, or when prompt length is eating into your context budget. Prompt engineering is better when: you have fewer than 100 examples, the task changes frequently, or you need quick iteration. Rule of thumb: if your system prompt exceeds 2000 tokens to get the desired behavior, fine-tuning will likely be cheaper and more reliable. Fine-tuning is also better when you need to reduce latency (shorter prompts = faster inference) or improve consistency on structured outputs. However, fine-tuning requires an evaluation pipeline — without proper eval, you can't tell if fine-tuning helped or hurt. Start with prompting, measure the gap, then fine-tune only if prompting falls short.
+
+**Q: How do you select the right LoRA rank for your task?**
+**Short:** LoRA rank 4-8 suits style changes, 16-32 suits domain adaptation, and 64-128 is needed for major behavior changes or new capabilities.
+LoRA rank determines the capacity of the adaptation — higher rank allows more complex behavior changes but uses more memory and risks overfitting. Rank 4-8 is sufficient for style/format adaptation (e.g., always respond in JSON). Rank 16-32 works well for domain adaptation (legal, medical terminology). Rank 64-128 is needed for significant behavior changes or learning new capabilities. Empirically, low ranks go a long way: the LoRA paper found r=1 to r=64 nearly indistinguishable on WikiSQL/MultiNLI when adapting Wq and Wv on GPT-3 175B. To select: start with rank 16, evaluate, then try rank 8 (if quality is maintained, use it for efficiency) or rank 32 (if quality is insufficient). Scale rank down when the dataset is small — a few thousand examples with a high-rank adapter overfits within 2-3 epochs. For Llama-2-7B with rank 16 on all seven linear projections: 39,976,960 trainable parameters (0.59% of 6.74B); the same config restricted to q_proj and v_proj is 8.4M.
+
+**Q: What is catastrophic forgetting in fine-tuning and how do you prevent it?**
+**Short:** Catastrophic forgetting is prevented by using LoRA, mixing 10-20% general instruction data, lowering the learning rate, and stopping training early.
+Catastrophic forgetting occurs when fine-tuning on new data causes the model to lose capabilities it had from pre-training — for example, a model fine-tuned on medical data might forget how to write code. Prevention strategies: (1) LoRA/PEFT — by only modifying a small number of parameters, the base model's knowledge is largely preserved; (2) data mixing — include 10-20% of general instruction data alongside domain-specific data during fine-tuning; (3) lower learning rate — use 1e-5 to 5e-5 instead of higher rates; (4) shorter training — monitor evaluation loss and stop when general benchmarks start degrading (typically 1-3 epochs); (5) replay buffer — periodically sample from a general knowledge dataset during training. Measure forgetting by evaluating on both domain-specific metrics AND general benchmarks (MMLU, HumanEval) after each checkpoint. A 2-3% drop in general benchmarks is acceptable if domain performance improves significantly.
+
+**Q: How do you set up proper evaluation during fine-tuning to avoid overfitting?**
+**Short:** Fine-tuning evaluation needs a held-out validation set checked every N steps plus general benchmarks like MMLU to catch capability regression.
+Proper evaluation requires held-out test sets that match your production use case, not just training loss monitoring. Setup: (1) split your data into train/validation/test (80/10/10 minimum, never contaminate the test set); (2) define task-specific metrics — for classification: accuracy/F1; for generation: ROUGE, human preference, or LLM-as-judge scoring; (3) evaluate on the validation set every N steps (e.g., every 100 steps or 0.1 epochs); (4) implement early stopping when validation metrics plateau or degrade for 3+ evaluations; (5) track general capability regression by evaluating on MMLU or similar benchmarks alongside domain metrics. Common mistake: only monitoring training loss, which always decreases but does not indicate generalization. For LoRA fine-tuning, overfitting is especially fast with small datasets — a 7B model with rank 16 LoRA on 1K examples will overfit within 2-3 epochs.
+
+**Q: What are the key differences between full fine-tuning and LoRA fine-tuning for production use?**
+**Short:** A 7B full fine-tune needs about 56GB of GPU memory versus roughly 16GB for LoRA, and LoRA adapters can share one base model across tenants.
+Full fine-tuning updates all model parameters and requires optimizer states for every parameter, consuming 4-16x the model size in GPU memory. LoRA adds small trainable matrices (0.1-1% of parameters) while freezing the base model. Key production differences: (1) memory — a 7B full fine-tune needs ~56GB (one A100 80GB, or two 40GB cards); LoRA needs ~16GB, so a single 24GB consumer card; (2) training speed — LoRA is 2-3x faster per step due to fewer gradient computations; (3) quality — full fine-tune is 1-3% better on average but the gap shrinks with higher LoRA rank; (4) serving — multiple LoRA adapters can share a single base model in memory, which is critical for multi-tenant systems; (5) merging — LoRA weights can be merged into base weights for zero-overhead inference. Choose full fine-tune only when maximum quality is critical, you have abundant GPU resources, and you do not need multi-tenant serving. For the vast majority of production cases, LoRA or QLoRA is the right choice.
+
+**Q: How do you handle training data formatting for instruction fine-tuning?**
+**Short:** Instruction fine-tuning data must exactly match the model's chat template with special tokens, since formatting mistakes are the top cause of poor results.
+Training data formatting must exactly match the model's chat template, including special tokens, role markers, and turn separators. Each model family has a specific template — LLaMA 3 uses `<|begin_of_text|><|start_header_id|>system<|end_header_id|>...`, ChatML uses `<|im_start|>system\n...<|im_end|>`. Formatting mistakes are the number one cause of poor fine-tuning results. Best practices: (1) use the tokenizer's built-in `apply_chat_template()` method; (2) verify token IDs manually for the first few examples; (3) ensure special tokens are not masked in the loss (some should be predicted, some should not); (4) include diverse conversation lengths (1-turn, 3-turn, 5-turn); (5) mask the user turns so the model only learns to predict assistant responses. Common mistake: fine-tuning on raw text without proper chat formatting, which confuses the model about when to stop generating and how to handle multi-turn conversations.
+
+**Q: Why does QLoRA use NF4 quantization instead of plain INT4?**
+**Short:** NF4 places quantization levels at the quantiles of a normal distribution to match pre-trained weight statistics, cutting error versus uniform INT4.
+NF4 (NormalFloat4) places its 16 quantization levels at the quantiles of a standard normal distribution, which matches the empirically near-Gaussian distribution of pre-trained weights — so each level is used about equally often, minimizing quantization error versus uniformly spaced INT4 levels. QLoRA adds double quantization (quantizing the per-block scaling constants themselves), saving roughly 0.37 bits/parameter, and paged optimizers that spill optimizer states to CPU RAM on memory spikes. Together these are why a 7B base fits in ~3.5GB while the paper reports no measurable quality loss versus 16-bit LoRA on its benchmark suite. Remember that gradients never flow into the 4-bit weights — they are dequantized on the fly for the forward pass while the BF16 LoRA adapters receive all the updates.
+
+**Q: How does multi-LoRA serving work, and when does it beat merging adapters?**
+**Short:** Multi-LoRA serving hot-swaps small adapters on one base model for many low-traffic tenants, while merging suits a single adapter at high volume.
+Multi-LoRA serving (S-LoRA, vLLM's LoRA support, LoRAX) keeps one copy of the base model in GPU memory and hot-swaps many small adapters — tens of MB each — per request, batching requests for different adapters through the same base forward pass. This makes per-tenant fine-tunes economical: 100 customer adapters share one GPU instead of requiring 100 merged model replicas. The cost is a small per-token overhead for the unmerged B×A computation (typically single-digit percent) versus a merged model's zero overhead. Merge when you serve one adapter at high volume; serve unmerged when many low-traffic adapters share a base.
+
+**Q: What is sequence packing and why does it matter for fine-tuning throughput?**
+**Short:** Sequence packing concatenates short examples into full-length sequences with masked cross-example attention, cutting wasted pad-token compute 2-4x.
+Packing concatenates multiple short training examples into one full-length sequence (with separators and, ideally, block-diagonal attention masks so examples cannot attend to each other) instead of padding each example to max length. Instruction datasets average a few hundred tokens; without packing, a 4096-token context padded from 400-token examples wastes ~90% of compute on pad tokens. Packing typically improves tokens-per-second throughput 2-4× on short-example datasets. Verify your framework masks cross-example attention — naive packing without masks lets unrelated examples leak into each other and subtly degrades quality.
+
+**Q: What breaks when you add new special tokens to the vocabulary during fine-tuning?**
+**Short:** New vocabulary tokens get random embeddings that stay untrained if LoRA's target modules exclude embed_tokens and lm_head, so generation quality craters.
+Newly added tokens get randomly initialized embedding rows, so unless the embedding matrix (and lm_head) is trained, the model treats your new tokens as noise. With LoRA this is easy to miss: target_modules usually covers only attention/MLP projections, leaving embed_tokens and lm_head frozen — new delimiter tokens never learn useful representations and generation quality craters. Fix: call resize_token_embeddings, train embed_tokens and lm_head via `modules_to_save` in PEFT, and initialize new rows to the mean of existing embeddings rather than leaving them random. Prefer reusing existing rare tokens as markers over growing the vocabulary when only a handful of delimiters is needed.
+
+---
+
+## Method Deep-Dives
+
+Each fine-tuning method has a comprehensive standalone reference with 10+ senior-AI-engineer-level Q&As:
+
+| Method | File | Key Topics |
+|--------|------|-----------|
+| LoRA | [lora.md](lora.md) | Low-rank decomposition math, rank selection, alpha, target modules, merge |
+| QLoRA | [qlora.md](qlora.md) | NF4 4-bit quantization, double quantization, paged Adam, memory layout |
+| Instruction Tuning | [instruction_tuning.md](instruction_tuning.md) | (instruction, response) pairs, label masking, prompt templates, data curation |
+| Domain Adaptation | [domain_adaptation.md](domain_adaptation.md) | Continued pre-training, domain-then-instruct pipeline, catastrophic forgetting |
+| PEFT Methods | [peft_methods.md](peft_methods.md) | Adapter layers, prefix tuning, prompt tuning, BitFit, DoRA, comparison table |
+
+---
+
+## 13. Best Practices
+
+1. **Match training and inference formats exactly** — including special tokens, whitespace, and template structure.
+2. **Mask loss on instruction tokens** — only compute loss on the response portion.
+3. **Start with r=16 and tune from there** — r=16 is a reliable default; increase if quality is insufficient.
+4. **Use cosine LR schedule** — warmup for 3% of steps, cosine decay to 10% of peak.
+5. **Pack sequences** — group short examples into full-length sequences to maximize GPU efficiency.
+6. **Evaluate regression continuously** — track both task-specific metrics and general capability benchmarks.
+7. **Save checkpoints** — save every 500-1000 steps; choose best checkpoint by validation loss, not final checkpoint.
+
+---
+
+## 14. Case Study: Fine-Tuning LLaMA 3 8B for SQL Generation
+
+*Illustrative worked example — the configuration is real and runnable, but the dataset, accuracy figures and costs are a composite, not a published deployment.*
+
+**Goal:** Build a model that converts natural language to SQL queries for a specific database schema. Target: 90%+ execution accuracy on a held-out test set.
+
+**Data:**
+- 5000 (question, SQL) pairs generated with GPT-4 (verified by running against test DB)
+- 1000 pairs annotated by human SQL experts
+- Split: 5400 train / 600 test
+
+**Configuration:**
+```yaml
+base_model: meta-llama/Meta-Llama-3-8B-Instruct
+training:
+  method: QLoRA
+  r: 32
+  alpha: 64
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  learning_rate: 2e-4
+  epochs: 3
+  batch_size: 4
+  gradient_accumulation: 8  # effective batch = 32
+  warmup_ratio: 0.03
+  lr_scheduler: cosine
+
+hardware:
+  gpu: 1x A100 40GB
+  training_time: ~4 hours
+  cost: ~$12
+```
+
+**Results:**
+| Model | Exec Accuracy | Speed |
+|-------|--------------|-------|
+| GPT-4 (few-shot, 5 examples) | 78% | 3s/query |
+| LLaMA 3 8B base | 45% | 0.3s/query |
+| LLaMA 3 8B fine-tuned | 91% | 0.3s/query |
+| GPT-4 fine-tuned | 94% | 2s/query |
+
+**Winner**: Fine-tuned 8B model — 91% accuracy at 10x lower latency and 100x lower cost than GPT-4.
+
+---
+
+**Additional war story (illustrative composite) — merging a LoRA adapter into an already-quantized checkpoint:**
+
+A medical Q&A product fine-tuned a 7B model with LoRA rank=16. After merging the adapter into the base weights for serving (`model.merge_and_unload()`), inference latency dropped from 220ms to 140ms as expected. However, accuracy on the held-out medical eval set dropped from 91% to 83% — the team discovered that the merge was performed on a quantized (INT8) checkpoint rather than the original BF16 checkpoint. Quantization error compounded with LoRA weight injection caused silent degradation.
+
+```python
+# BROKEN: merging LoRA adapter into a post-quantized model
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+import torch
+
+base = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Meta-Llama-3-8B",
+    quantization_config=BitsAndBytesConfig(load_in_8bit=True),  # BUG: quantized before merge
+    device_map="auto",
+)
+model = PeftModel.from_pretrained(base, "./medical_lora_adapter")
+merged = model.merge_and_unload()  # merges into INT8 weights — precision loss
+
+# FIX: always merge in BF16, quantize after merge
+base_bf16 = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Meta-Llama-3-8B",
+    dtype=torch.bfloat16,  # `torch_dtype` was renamed `dtype`; full precision for merge
+    device_map="cpu",
+)
+model_bf16 = PeftModel.from_pretrained(base_bf16, "./medical_lora_adapter")
+merged_bf16 = model_bf16.merge_and_unload()
+merged_bf16.save_pretrained("./merged_bf16")
+
+# Then quantize the merged model separately with GPTQ or bitsandbytes
+```
+
+**Additional interview Q&As:**
+
+**When should you choose LoRA rank=4 vs rank=64 for fine-tuning?** Rank=4 is sufficient for style adaptation and instruction following on a well-pretrained model; rank=16-32 is appropriate for domain vocabulary adaptation (medical, legal); rank=64 is needed for significant capability expansion (teaching a model new reasoning patterns). Higher rank uses more GPU memory (rank=64 adds ~2% of 7B model parameters) and trains faster to convergence but risks overfitting on small datasets under 10,000 examples.
+
+**What is the difference between instruction tuning and domain adaptation in fine-tuning?** Instruction tuning trains the model to follow natural language commands using instruction-response pairs (e.g., Alpaca format) and primarily improves the model's output style and safety behavior without changing domain knowledge. Domain adaptation fine-tunes on domain-specific text (medical literature, legal contracts, code) and primarily improves the model's knowledge accuracy and terminology use in that domain. Production fine-tuning pipelines often combine both: domain adaptation first, then instruction tuning on domain-specific QA pairs.
+
+**How do you prevent catastrophic forgetting when fine-tuning a general-purpose model on a narrow domain?** Use LoRA or QLoRA instead of full fine-tuning (freezes base weights); add replay examples from the original pretraining distribution mixed into the fine-tuning batch (5-10% replay ratio); monitor performance on a held-out general benchmark (MMLU or HellaSwag) alongside the domain eval set and stop training if general benchmark drops more than 3%. EWC (Elastic Weight Consolidation) is theoretically sound but rarely used in practice due to the overhead of computing Fisher information matrices for 7B+ models.
+
+**Quick-reference table:**
+
+| Approach | Best for | Trade-off |
+|---|---|---|
+| LoRA rank=8, alpha=16 | Style/instruction adaptation | Insufficient for heavy domain knowledge injection |
+| QLoRA (4-bit base + BF16 adapters) | Fine-tuning 70B models on single A100 | Slower per step than BF16 LoRA (every forward pass dequantizes NF4 blocks); merge step requires BF16 reconstruction |
+| Full fine-tuning (last 2 layers only) | Adjusting output format/tokenizer head | Risks forgetting; only practical for models under 3B parameters |
+| Adapter merging with SLERP | Combining domain adapter + chat adapter | Interpolation ratio must be tuned (0.5 is not always optimal); evaluate both endpoints first |
+
+**Pitfall — LoRA rank too low causes underfitting on complex domain tasks.**
+
+```python
+# BROKEN: rank=4 LoRA for medical Q&A fine-tuning — too few trainable params
+# to capture medical terminology patterns; validation accuracy plateaus at 61%
+from peft import LoraConfig, get_peft_model
+
+config = LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"])
+# Only 2M trainable params on a 7B model → underfits on 50k medical QA pairs
+
+# FIX: increase rank to 16-32 for complex domain; target more modules
+config = LoraConfig(
+    r=32,                    # rank 4→32 AND 2→4 modules: 16× more trainable params
+    lora_alpha=64,           # keep alpha = 2× rank for stable training
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],  # all attention
+    lora_dropout=0.1,
+)
+# Trainable params: 33.5M (0.5% of 6.74B) → validation accuracy 78% (+17pp)
+```
+
+**How do you decide between LoRA, QLoRA, and full fine-tuning?** Full fine-tuning updates all parameters — highest accuracy ceiling but requires multi-GPU (a 70B mixed-precision full fine-tune needs roughly 16 bytes/parameter once fp32 Adam moments and gradients are counted, i.e. >1TB of GPU memory). LoRA adds low-rank adapters (0.1-1% of params) — fits in 1-2 GPUs for 7B, minimal accuracy loss for knowledge tasks. QLoRA applies LoRA on a 4-bit quantized base model — enables 70B fine-tuning on a single A100 80GB, 1-3pp accuracy loss vs. LoRA. Rule of thumb: QLoRA for resource-constrained fine-tuning of large models; LoRA for medium models (7B-13B) with moderate data; full fine-tuning only when you have both data (1M+ examples) and compute, and need maximum task-specific accuracy.
+
+**What is catastrophic forgetting in fine-tuning and how do you mitigate it?** Catastrophic forgetting occurs when a model fine-tuned on a narrow task loses general capabilities — a medical LLM stops being able to write code or follow general instructions. Mitigations: (1) mix general instruction data (5-10%) with domain-specific data during fine-tuning; (2) use LoRA/PEFT — adapters preserve base model weights, so forgetting is limited to adapter behavior; (3) evaluate on a held-out general benchmark (MMLU, HellaSwag) alongside the domain task after each epoch — stop when general performance drops > 2pp.
+
+---
+
+**Quick-reference decision table:**
+
+| Scenario | Recommended approach | Key constraint |
+|---|---|---|
+| < 10k training examples | LoRA / few-shot prompting | Data scarcity |
+| Latency < 100ms required | Quantized model + ONNX Runtime | Throughput > accuracy |
+| Multi-tenant, shared model | System prompt isolation + guardrails | Security boundary |
+| Domain shift from pre-training | Fine-tune with domain data | Catastrophic forgetting risk |
+| Cost reduction (10× target) | Smaller model + prompt optimization | Quality floor |
+
+**Production checklist before shipping an LLM feature:**
+
+- [ ] Latency p99 measured under production load (not just median)
+- [ ] Fallback path tested: what happens when the LLM API is unavailable?
+- [ ] Cost per request calculated at current and 10× scale
+- [ ] Safety/guardrail evaluation on 200 adversarial prompts
+- [ ] Prompt versioned in code and tied to model version in experiment tracker
+- [ ] Human evaluation on 50 random production outputs before launch
+- [ ] Monitoring dashboard live: latency, error rate, cost, quality proxy metric
+
+**Interview Q&A supplement:**
+
+**How do you measure the real-world impact of a code generation feature beyond pass@k?** Track production metrics: (1) acceptance rate — what fraction of shown completions are accepted by developers (industry baseline: 25-35%); (2) retention rate — of accepted completions, how many survive the next commit without modification (high quality = > 70%); (3) time-to-completion — does the developer ship features faster? Measure via A/B test: feature team vs. control team, track story-point velocity over 8 weeks. These business metrics matter more than HumanEval pass@1 for evaluating real impact.
+
+**What is test-driven development integration for code generation agents?** An agentic code generation loop: (1) generate code from the spec; (2) run tests against it; (3) feed failing test output back to the model as context; (4) iterate until tests pass or N retries exceeded. SWE-agent and OpenHands introduced this pattern in 2024 at roughly 12-20% resolved on SWE-bench, versus low-single-digit percentages for single-shot generation; by mid-2026 the best submission on the official SWE-bench/experiments Verified leaderboard resolves 396 of 500 (79.2%) and Anthropic reports 76.2% for Claude Opus 4.6 (mean of 25 trials, 81.42% after a prompt change) — real headroom remains, so distrust the mid-90s figures that circulate on aggregator sites, and note that labs have started reporting harder suites (SWE-bench Pro, SWE-rebench, Frontier-Bench) instead. The key engineering challenge: sandboxing (tests must run in an isolated environment that can't damage the host), test timeout enforcement (infinite loops in generated code must be killed), and retry budget management (each iteration costs tokens + time).
+
+**Key metric targets for production LLM systems:**
+
+| Metric | Typical target | How to measure |
+|---|---|---|
+| Latency p99 | < 2s for chat, < 500ms for autocomplete | Prometheus histogram |
+| Token cost per request | < $0.01 for most applications | Track input+output tokens × price |
+| Hallucination rate | < 5% on factual tasks | LLM-as-judge on sampled outputs |
+| Context utilization | > 60% of max context used | Avg tokens / max_context |
+| Cache hit rate | > 30% with prompt caching | Cache hit counter / total requests |
+
+---
+
+## See Also
+- [Supervised Learning (ML)](../../ml/supervised_learning/supervised_learning.md) — transfer learning theory, loss functions, regularization — foundational to understanding fine-tuning
+- [Alignment & RLHF](../alignment_and_rlhf/alignment_and_rlhf.md) — what comes after SFT: reward models, PPO, DPO
+- [Optimization & Quantization](../optimization_and_quantization/optimization_and_quantization.md) — GPTQ/AWQ quantization of merged models, and the 4-bit formats QLoRA builds on
+- [Synthetic Data Generation](../synthetic_data_generation/synthetic_data_generation.md) — where the SFT pairs come from when you do not have them: Self-Instruct, Evol-Instruct, quality filtering
+- [Knowledge Distillation & Model Merging](../knowledge_distillation_and_model_merging/knowledge_distillation_and_model_merging.md) — the two alternatives to fine-tuning a single adapter: train a smaller student, or merge several tuned checkpoints (SLERP/TIES/DARE)

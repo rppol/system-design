@@ -78,7 +78,7 @@ cannot beat 20x end-to-end speedup, because the remaining 756 s of serial
 CPU work runs at CPU speed regardless of what happens to the other 95%.
 ```
 
-This one number reframes the whole project: the question is not "how much faster can we make the hot loop" (arbitrarily fast, in principle) but "how close to a 20x overall improvement can the port get, once transfer and overhead are accounted for." See [`../gpu_computing_foundations/README.md`](../gpu_computing_foundations/README.md) for the general throughput-vs-latency and Amdahl/Gustafson treatment this budget builds on.
+This one number reframes the whole project: the question is not "how much faster can we make the hot loop" (arbitrarily fast, in principle) but "how close to a 20x overall improvement can the port get, once transfer and overhead are accounted for." See [`../gpu_computing_foundations/README.md`](../gpu_computing_foundations/gpu_computing_foundations.md) for the general throughput-vs-latency and Amdahl/Gustafson treatment this budget builds on.
 
 ### Data-Movement Analysis: Transfer Time vs. Compute Time
 
@@ -234,7 +234,7 @@ AFTER (GPU-resident for the ported 95%, CPU only for the true serial 5%):
   [write to risk DB, unchanged schema]
 ```
 
-See also: [`./cross_cutting/roofline_and_arithmetic_intensity.md`](./cross_cutting/roofline_and_arithmetic_intensity.md) for why the "after" kernel sits in compute-bound territory against HBM bandwidth (3 TB/s on H100) once PCIe transfer is out of the picture, and [`../memory_management_and_data_transfer/README.md`](../memory_management_and_data_transfer/README.md) for the pinned-vs-pageable mechanics behind the 64 GB/s vs. 9 GB/s gap quantified in §2.
+See also: [`./cross_cutting/roofline_and_arithmetic_intensity.md`](./cross_cutting/roofline_and_arithmetic_intensity.md) for why the "after" kernel sits in compute-bound territory against HBM bandwidth (3 TB/s on H100) once PCIe transfer is out of the picture, and [`../memory_management_and_data_transfer/README.md`](../memory_management_and_data_transfer/memory_management_and_data_transfer.md) for the pinned-vs-pageable mechanics behind the 64 GB/s vs. 9 GB/s gap quantified in §2.
 
 ---
 
@@ -465,7 +465,7 @@ void simulate_option_fixed(const GpuOptionParams* d_options, int num_options,
 
 ### 4.4 Prototype-First: A CuPy/Numba Quick Port
 
-Before committing engineering time to hand-written CUDA C++, the team validated the algorithm and got a first speedup reading with a Numba CUDA prototype — the same kernel topology as Section 4.2, in roughly 40 lines of Python, no manual `cudaMalloc`/`cudaMemcpy` bookkeeping required. See [`../python_gpu_ecosystem/`](../python_gpu_ecosystem/) for the broader CuPy/Numba/PyTorch-extension landscape this prototype draws on.
+Before committing engineering time to hand-written CUDA C++, the team validated the algorithm and got a first speedup reading with a Numba CUDA prototype — the same kernel topology as Section 4.2, in roughly 40 lines of Python, no manual `cudaMalloc`/`cudaMemcpy` bookkeeping required. See [`../python_gpu_ecosystem/`](../python_gpu_ecosystem/python_gpu_ecosystem.md) for the broader CuPy/Numba/PyTorch-extension landscape this prototype draws on.
 
 ```python
 # gpu_prototype_numba.py -- Python prototype of the SAME kernel as gpu_kernels.cu,
@@ -532,7 +532,7 @@ def price_portfolio_gpu_prototype(s0, k, r, sigma, t, num_steps, paths_per_optio
 
 ### 4.5 Sharded Stream Pipeline — Overlap Transfer With Compute
 
-Even with the data-resident fix, the portfolio is split into 8 shards of 625 options each, for two independent reasons: (1) **resilience** — a mid-run GPU fault (driver reset, ECC error) only costs the ~2 minutes of the current shard, not the whole 12.9-minute run, satisfying the non-functional requirement in §1; and (2) **pipelining** — shard boundaries are the natural place to overlap the next shard's (now small) H2D copy and the previous shard's D2H copy with the current shard's compute, so the already-small transfer cost in §2 disappears entirely behind compute. See [`../streams_events_and_concurrency/README.md`](../streams_events_and_concurrency/README.md) for why two streams (not one) is the minimum needed for real H2D/compute/D2H overlap.
+Even with the data-resident fix, the portfolio is split into 8 shards of 625 options each, for two independent reasons: (1) **resilience** — a mid-run GPU fault (driver reset, ECC error) only costs the ~2 minutes of the current shard, not the whole 12.9-minute run, satisfying the non-functional requirement in §1; and (2) **pipelining** — shard boundaries are the natural place to overlap the next shard's (now small) H2D copy and the previous shard's D2H copy with the current shard's compute, so the already-small transfer cost in §2 disappears entirely behind compute. See [`../streams_events_and_concurrency/README.md`](../streams_events_and_concurrency/streams_events_and_concurrency.md) for why two streams (not one) is the minimum needed for real H2D/compute/D2H overlap.
 
 ```cuda
 // stream_pipeline.cu -- double-buffered, two-stream pipeline across 8 shards.
@@ -750,7 +750,7 @@ Resolution: re-run the capacity-planning projection in §10 with the new portfol
 
 **Bit-exact reproducibility was demanded, and it is the wrong test.** Risk Validation's first draft acceptance criterion compared GPU-computed prices against CPU-computed prices path-by-path using the same seed, and it failed immediately — not because the GPU pipeline was wrong, but because cuRAND's Philox counter-based generator produces a different stream than `std::mt19937_64` even from an "equivalent" seed; the two algorithms are not bit-compatible by construction. The correct test (used in §8) is a **statistical tolerance on the aggregated price**, not a bit-exact per-path comparison — see [`./cross_cutting/numerical_precision_and_determinism.md`](./cross_cutting/numerical_precision_and_determinism.md) for why floating-point non-associativity and differing RNG algorithms make bit-exact GPU/CPU parity the wrong bar for Monte Carlo methods specifically.
 
-**Register pressure from an unrolled 252-step loop caused a second, quieter regression.** An early revision of the kernel in §4.2 unrolled the entire 252-step loop (`#pragma unroll 252` instead of `#pragma unroll 4`), hoping to remove all loop-branch overhead; instead, the compiler allocated enough registers per thread that occupancy collapsed from 24 to 8 resident warps per SM, and measured throughput *dropped* by roughly 3x versus the partially-unrolled version. Full unrolling is not free — it trades loop overhead for register pressure, and past a point the trade is a net loss. See [`../gpu_computing_foundations/`](../gpu_computing_foundations/) for the occupancy-vs-register-pressure tradeoff this pitfall illustrates.
+**Register pressure from an unrolled 252-step loop caused a second, quieter regression.** An early revision of the kernel in §4.2 unrolled the entire 252-step loop (`#pragma unroll 252` instead of `#pragma unroll 4`), hoping to remove all loop-branch overhead; instead, the compiler allocated enough registers per thread that occupancy collapsed from 24 to 8 resident warps per SM, and measured throughput *dropped* by roughly 3x versus the partially-unrolled version. Full unrolling is not free — it trades loop overhead for register pressure, and past a point the trade is a net loss. See [`../gpu_computing_foundations/`](../gpu_computing_foundations/gpu_computing_foundations.md) for the occupancy-vs-register-pressure tradeoff this pitfall illustrates.
 
 **Missing `CUDA_CHECK` on the very first `cudaMalloc` masked a silent OOM for two nights.** During the sharding rework, a temporary buffer's allocation failed silently (returned `cudaErrorMemoryAllocation`, unwrapped, ignored) because a copy-pasted allocation line was missed during the `CUDA_CHECK`-wrapping pass; the subsequent kernel launch against a null pointer produced garbage payoffs for one shard, silently, for two nightly runs before the shadow-mode diff (§8) caught the divergence. See [`./cross_cutting/cuda_error_handling_and_launch_config_patterns.md`](./cross_cutting/cuda_error_handling_and_launch_config_patterns.md) — "wrap every Runtime call, no exceptions" is not a style preference, it is the difference between a crash at the fault site and a silently wrong number three stages downstream.
 

@@ -24,27 +24,27 @@ This section covers:
 
 | # | Module Directory | Phase | Difficulty | Key Topics |
 |---|-----------------|-------|-----------|-----------|
-| 1 | [data_model_and_objects](data_model_and_objects/) | 1 — Language Core | Intermediate | Dunder methods, `__slots__`, MRO/C3, operator overloading, hashing/equality contract |
-| 2 | [core_language_idioms](core_language_idioms/) | 1 — Language Core | Intermediate | Mutability vs identity, EAFP vs LBYL, comprehensions, walrus `:=` (3.8), `match` (3.10) |
-| 3 | [iterators_and_generators](iterators_and_generators/) | 1 — Language Core | Intermediate | Iterator protocol, `yield`/`yield from`, lazy pipelines, `itertools`, generator coroutines |
-| 4 | [decorators_and_closures](decorators_and_closures/) | 1 — Language Core | Intermediate | Closures, free variables, function/class/parametrized decorators, `functools.wraps/lru_cache/cached_property` |
-| 5 | [context_managers_and_exceptions](context_managers_and_exceptions/) | 1 — Language Core | Intermediate | `contextlib`, `ExitStack`, async CMs, `ExceptionGroup`/`except*` (3.11), traceback manipulation |
-| 6 | [collections_and_data_structures](collections_and_data_structures/) | 1 — Language Core | Intermediate | `list`/`dict`/`set` internals + Big-O, `collections` (deque/Counter/defaultdict), `heapq`, `bisect` |
-| 7 | [strings_bytes_encoding_and_regex](strings_bytes_encoding_and_regex/) | 1 — Language Core | Intermediate | `str` vs `bytes`, Unicode/codecs, `memoryview`, `re` engine, catastrophic backtracking |
-| 8 | [file_io_and_serialization](file_io_and_serialization/) | 1 — Language Core | Beginner | `pathlib`, text/binary I/O, `json`/`csv`, `pickle` security, `struct` |
-| 9 | [cpython_memory_model](cpython_memory_model/) | 2 — CPython Internals | Advanced | Refcounting, generational GC, cyclic GC, `PyObject` header, arenas/pools/blocks, `sys.getsizeof` |
-| 10 | [the_gil_and_free_threading](the_gil_and_free_threading/) | 2 — CPython Internals | Advanced | GIL mechanics, GIL release points, contention profiling, PEP 703 (3.13), PEP 684 sub-interpreters |
-| 11 | [metaclasses_and_metaprogramming](metaclasses_and_metaprogramming/) | 2 — CPython Internals | Advanced | `type()`, metaclasses, `__init_subclass__`, `__set_name__`, descriptors (non-data/data), `__getattr__` |
-| 12 | [the_type_system_and_typing](the_type_system_and_typing/) | 2 — CPython Internals | Advanced | Type hints, generics, `Protocol` (structural), `TypeVar`/`ParamSpec`, variance, PEP 695 (3.12), mypy/pyright |
-| 13 | [performance_and_profiling](performance_and_profiling/) | 2 — CPython Internals | Advanced | `cProfile`/`line_profiler`/`dis`, CPython 3.11+ speedups, Cython/mypyc/C extensions, slow patterns |
-| 14 | [functional_programming](functional_programming/) | 2 — CPython Internals | Intermediate | `map`/`filter`/`reduce`, `functools`/`operator`, immutability, currying/partial, comprehension vs generator perf |
-| 15 | [threading_and_multiprocessing](threading_and_multiprocessing/) | 3 — Concurrency & Quality | Advanced | `threading`, GIL impact, `multiprocessing`, `concurrent.futures`, shared memory, pickling cost |
-| 16 | [asyncio_and_event_loop](asyncio_and_event_loop/) | 3 — Concurrency & Quality | Advanced | Coroutines, event-loop internals, tasks/futures, `gather`/`wait`, `TaskGroup` (3.11), `anyio` |
-| 17 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/) | 3 — Concurrency & Quality | Advanced | Blocking-in-async detection, `run_in_executor`, async generators, `Semaphore`, backpressure, retries |
-| 18 | [design_patterns_in_python](design_patterns_in_python/) | 3 — Concurrency & Quality | Intermediate | Pythonic GoF (singleton/strategy/observer/factory), anti-patterns — cross-links `lld/` |
-| 19 | [stdlib_datetime_and_logging](stdlib_datetime_and_logging/) | 3 — Concurrency & Quality | Intermediate | `datetime`/`zoneinfo`/tz pitfalls, structured `logging`, `argparse`, `subprocess`, `os`/`sys` |
-| 20 | [testing_with_pytest](testing_with_pytest/) | 3 — Concurrency & Quality | Intermediate | pytest, fixtures/scopes, `parametrize`, `monkeypatch`, `hypothesis`, coverage, `pytest-asyncio` |
-| 21 | [packaging_and_project_tooling](packaging_and_project_tooling/) | 3 — Concurrency & Quality | Intermediate | `pyproject.toml`, `uv`/poetry/pip, venv, wheels/sdist, `ruff`/mypy, semantic versioning |
+| 1 | [data_model_and_objects](data_model_and_objects/data_model_and_objects.md) | 1 — Language Core | Intermediate | Dunder methods, `__slots__`, MRO/C3, operator overloading, hashing/equality contract |
+| 2 | [core_language_idioms](core_language_idioms/core_language_idioms.md) | 1 — Language Core | Intermediate | Mutability vs identity, EAFP vs LBYL, comprehensions, walrus `:=` (3.8), `match` (3.10) |
+| 3 | [iterators_and_generators](iterators_and_generators/iterators_and_generators.md) | 1 — Language Core | Intermediate | Iterator protocol, `yield`/`yield from`, lazy pipelines, `itertools`, generator coroutines |
+| 4 | [decorators_and_closures](decorators_and_closures/decorators_and_closures.md) | 1 — Language Core | Intermediate | Closures, free variables, function/class/parametrized decorators, `functools.wraps/lru_cache/cached_property` |
+| 5 | [context_managers_and_exceptions](context_managers_and_exceptions/context_managers_and_exceptions.md) | 1 — Language Core | Intermediate | `contextlib`, `ExitStack`, async CMs, `ExceptionGroup`/`except*` (3.11), traceback manipulation |
+| 6 | [collections_and_data_structures](collections_and_data_structures/collections_and_data_structures.md) | 1 — Language Core | Intermediate | `list`/`dict`/`set` internals + Big-O, `collections` (deque/Counter/defaultdict), `heapq`, `bisect` |
+| 7 | [strings_bytes_encoding_and_regex](strings_bytes_encoding_and_regex/strings_bytes_encoding_and_regex.md) | 1 — Language Core | Intermediate | `str` vs `bytes`, Unicode/codecs, `memoryview`, `re` engine, catastrophic backtracking |
+| 8 | [file_io_and_serialization](file_io_and_serialization/file_io_and_serialization.md) | 1 — Language Core | Beginner | `pathlib`, text/binary I/O, `json`/`csv`, `pickle` security, `struct` |
+| 9 | [cpython_memory_model](cpython_memory_model/cpython_memory_model.md) | 2 — CPython Internals | Advanced | Refcounting, generational GC, cyclic GC, `PyObject` header, arenas/pools/blocks, `sys.getsizeof` |
+| 10 | [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md) | 2 — CPython Internals | Advanced | GIL mechanics, GIL release points, contention profiling, PEP 703 (3.13), PEP 684 sub-interpreters |
+| 11 | [metaclasses_and_metaprogramming](metaclasses_and_metaprogramming/metaclasses_and_metaprogramming.md) | 2 — CPython Internals | Advanced | `type()`, metaclasses, `__init_subclass__`, `__set_name__`, descriptors (non-data/data), `__getattr__` |
+| 12 | [the_type_system_and_typing](the_type_system_and_typing/the_type_system_and_typing.md) | 2 — CPython Internals | Advanced | Type hints, generics, `Protocol` (structural), `TypeVar`/`ParamSpec`, variance, PEP 695 (3.12), mypy/pyright |
+| 13 | [performance_and_profiling](performance_and_profiling/performance_and_profiling.md) | 2 — CPython Internals | Advanced | `cProfile`/`line_profiler`/`dis`, CPython 3.11+ speedups, Cython/mypyc/C extensions, slow patterns |
+| 14 | [functional_programming](functional_programming/functional_programming.md) | 2 — CPython Internals | Intermediate | `map`/`filter`/`reduce`, `functools`/`operator`, immutability, currying/partial, comprehension vs generator perf |
+| 15 | [threading_and_multiprocessing](threading_and_multiprocessing/threading_and_multiprocessing.md) | 3 — Concurrency & Quality | Advanced | `threading`, GIL impact, `multiprocessing`, `concurrent.futures`, shared memory, pickling cost |
+| 16 | [asyncio_and_event_loop](asyncio_and_event_loop/asyncio_and_event_loop.md) | 3 — Concurrency & Quality | Advanced | Coroutines, event-loop internals, tasks/futures, `gather`/`wait`, `TaskGroup` (3.11), `anyio` |
+| 17 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/async_patterns_and_pitfalls.md) | 3 — Concurrency & Quality | Advanced | Blocking-in-async detection, `run_in_executor`, async generators, `Semaphore`, backpressure, retries |
+| 18 | [design_patterns_in_python](design_patterns_in_python/design_patterns_in_python.md) | 3 — Concurrency & Quality | Intermediate | Pythonic GoF (singleton/strategy/observer/factory), anti-patterns — cross-links `lld/` |
+| 19 | [stdlib_datetime_and_logging](stdlib_datetime_and_logging/stdlib_datetime_and_logging.md) | 3 — Concurrency & Quality | Intermediate | `datetime`/`zoneinfo`/tz pitfalls, structured `logging`, `argparse`, `subprocess`, `os`/`sys` |
+| 20 | [testing_with_pytest](testing_with_pytest/testing_with_pytest.md) | 3 — Concurrency & Quality | Intermediate | pytest, fixtures/scopes, `parametrize`, `monkeypatch`, `hypothesis`, coverage, `pytest-asyncio` |
+| 21 | [packaging_and_project_tooling](packaging_and_project_tooling/packaging_and_project_tooling.md) | 3 — Concurrency & Quality | Intermediate | `pyproject.toml`, `uv`/poetry/pip, venv, wheels/sdist, `ruff`/mypy, semantic versioning |
 
 ---
 
@@ -113,22 +113,22 @@ The complete curriculum in the order above — see [3-Phase Learning Path](#3-3-
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [data_model_and_objects](data_model_and_objects/) | README only |
-| 2 | [core_language_idioms](core_language_idioms/) | README only |
-| 3 | [iterators_and_generators](iterators_and_generators/) | README only |
-| 4 | [decorators_and_closures](decorators_and_closures/) | README only |
-| 5 | [context_managers_and_exceptions](context_managers_and_exceptions/) | README only |
-| 6 | [collections_and_data_structures](collections_and_data_structures/) | README only |
-| 7 | [strings_bytes_encoding_and_regex](strings_bytes_encoding_and_regex/) | README only |
-| 9 | [cpython_memory_model](cpython_memory_model/) | README only |
-| 10 | [the_gil_and_free_threading](the_gil_and_free_threading/) | README only |
-| 11 | [metaclasses_and_metaprogramming](metaclasses_and_metaprogramming/) | README only |
-| 12 | [the_type_system_and_typing](the_type_system_and_typing/) | 2 files |
-| 13 | [performance_and_profiling](performance_and_profiling/) | README only |
-| 15 | [threading_and_multiprocessing](threading_and_multiprocessing/) | README only |
-| 16 | [asyncio_and_event_loop](asyncio_and_event_loop/) | 3 files |
-| 17 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/) | README only |
-| 20 | [testing_with_pytest](testing_with_pytest/) | README only |
+| 1 | [data_model_and_objects](data_model_and_objects/data_model_and_objects.md) | module page only |
+| 2 | [core_language_idioms](core_language_idioms/core_language_idioms.md) | module page only |
+| 3 | [iterators_and_generators](iterators_and_generators/iterators_and_generators.md) | module page only |
+| 4 | [decorators_and_closures](decorators_and_closures/decorators_and_closures.md) | module page only |
+| 5 | [context_managers_and_exceptions](context_managers_and_exceptions/context_managers_and_exceptions.md) | module page only |
+| 6 | [collections_and_data_structures](collections_and_data_structures/collections_and_data_structures.md) | module page only |
+| 7 | [strings_bytes_encoding_and_regex](strings_bytes_encoding_and_regex/strings_bytes_encoding_and_regex.md) | module page only |
+| 9 | [cpython_memory_model](cpython_memory_model/cpython_memory_model.md) | module page only |
+| 10 | [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md) | module page only |
+| 11 | [metaclasses_and_metaprogramming](metaclasses_and_metaprogramming/metaclasses_and_metaprogramming.md) | module page only |
+| 12 | [the_type_system_and_typing](the_type_system_and_typing/the_type_system_and_typing.md) | 2 files |
+| 13 | [performance_and_profiling](performance_and_profiling/performance_and_profiling.md) | module page only |
+| 15 | [threading_and_multiprocessing](threading_and_multiprocessing/threading_and_multiprocessing.md) | module page only |
+| 16 | [asyncio_and_event_loop](asyncio_and_event_loop/asyncio_and_event_loop.md) | 3 files |
+| 17 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/async_patterns_and_pitfalls.md) | module page only |
+| 20 | [testing_with_pytest](testing_with_pytest/testing_with_pytest.md) | module page only |
 
 **Not in this path** (5 of 21, Full Path only): `file_io_and_serialization`, `functional_programming`, `design_patterns_in_python`, `stdlib_datetime_and_logging`, `packaging_and_project_tooling`
 <!-- /study-path-table -->
@@ -146,13 +146,13 @@ A ruthless cut to what a **senior Python interview** actually probes, anchored o
 
 | # | Module | Files |
 |---|--------|-------|
-| 10 | [the_gil_and_free_threading](the_gil_and_free_threading/) | README only |
-| 12 | [the_type_system_and_typing](the_type_system_and_typing/) | README only |
-| 13 | [performance_and_profiling](performance_and_profiling/) | README only |
-| 17 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/) | README only |
-| 18 | [design_patterns_in_python](design_patterns_in_python/) | README only |
-| 20 | [testing_with_pytest](testing_with_pytest/) | README only |
-| 21 | [packaging_and_project_tooling](packaging_and_project_tooling/) | README only |
+| 10 | [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md) | module page only |
+| 12 | [the_type_system_and_typing](the_type_system_and_typing/the_type_system_and_typing.md) | module page only |
+| 13 | [performance_and_profiling](performance_and_profiling/performance_and_profiling.md) | module page only |
+| 17 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/async_patterns_and_pitfalls.md) | module page only |
+| 18 | [design_patterns_in_python](design_patterns_in_python/design_patterns_in_python.md) | module page only |
+| 20 | [testing_with_pytest](testing_with_pytest/testing_with_pytest.md) | module page only |
+| 21 | [packaging_and_project_tooling](packaging_and_project_tooling/packaging_and_project_tooling.md) | module page only |
 
 **Not in this path** (14 of 21, Full Path only): `data_model_and_objects`, `core_language_idioms`, `iterators_and_generators`, `decorators_and_closures`, `context_managers_and_exceptions`, `collections_and_data_structures`, `strings_bytes_encoding_and_regex`, `file_io_and_serialization`, `cpython_memory_model`, `metaclasses_and_metaprogramming`, `functional_programming`, `threading_and_multiprocessing`, `asyncio_and_event_loop`, `stdlib_datetime_and_logging`
 <!-- /study-path-table -->
@@ -167,18 +167,18 @@ The highest-frequency Python *knowledge* questions mapped to the file that answe
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
-| How does Python's attribute lookup work (MRO, descriptors, data vs non-data), and when do you actually need `__slots__`? | [data_model_and_objects](data_model_and_objects/) |
-| EAFP vs LBYL; comprehensions vs `map`/`filter`/`reduce` — which is idiomatic, and why? | [core_language_idioms](core_language_idioms/), [functional_programming](functional_programming/) |
-| How do `yield`/`yield from` work, and what distinguishes an iterator from an iterable? | [iterators_and_generators](iterators_and_generators/) |
-| What is a closure, and how does late binding cause the classic loop-variable bug? | [decorators_and_closures](decorators_and_closures/) |
-| What changed with `ExceptionGroup`/`except*` in Python 3.11? | [context_managers_and_exceptions](context_managers_and_exceptions/) |
-| What's the time complexity of common `dict`/`list` operations, and how does a dict resize under the hood? | [collections_and_data_structures](collections_and_data_structures/) |
-| Explain CPython reference counting — when does the cyclic garbage collector have to step in? | [cpython_memory_model](cpython_memory_model/) |
-| When exactly is the GIL released, and how does PEP 703 free-threading change that model? | [the_gil_and_free_threading](the_gil_and_free_threading/) |
-| What is a `Protocol`, and how does structural typing differ from nominal typing? | [the_type_system_and_typing](the_type_system_and_typing/) |
-| Explain the async/await execution model, and what does `TaskGroup` (3.11) improve over `gather`? | [asyncio_and_event_loop](asyncio_and_event_loop/) |
-| What happens if you call a blocking call like `requests.get()` inside `async def`? | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/) |
-| How do you mock an async dependency and assert on it with pytest? | [testing_with_pytest](testing_with_pytest/) |
+| How does Python's attribute lookup work (MRO, descriptors, data vs non-data), and when do you actually need `__slots__`? | [data_model_and_objects](data_model_and_objects/data_model_and_objects.md) |
+| EAFP vs LBYL; comprehensions vs `map`/`filter`/`reduce` — which is idiomatic, and why? | [core_language_idioms](core_language_idioms/core_language_idioms.md), [functional_programming](functional_programming/functional_programming.md) |
+| How do `yield`/`yield from` work, and what distinguishes an iterator from an iterable? | [iterators_and_generators](iterators_and_generators/iterators_and_generators.md) |
+| What is a closure, and how does late binding cause the classic loop-variable bug? | [decorators_and_closures](decorators_and_closures/decorators_and_closures.md) |
+| What changed with `ExceptionGroup`/`except*` in Python 3.11? | [context_managers_and_exceptions](context_managers_and_exceptions/context_managers_and_exceptions.md) |
+| What's the time complexity of common `dict`/`list` operations, and how does a dict resize under the hood? | [collections_and_data_structures](collections_and_data_structures/collections_and_data_structures.md) |
+| Explain CPython reference counting — when does the cyclic garbage collector have to step in? | [cpython_memory_model](cpython_memory_model/cpython_memory_model.md) |
+| When exactly is the GIL released, and how does PEP 703 free-threading change that model? | [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md) |
+| What is a `Protocol`, and how does structural typing differ from nominal typing? | [the_type_system_and_typing](the_type_system_and_typing/the_type_system_and_typing.md) |
+| Explain the async/await execution model, and what does `TaskGroup` (3.11) improve over `gather`? | [asyncio_and_event_loop](asyncio_and_event_loop/asyncio_and_event_loop.md) |
+| What happens if you call a blocking call like `requests.get()` inside `async def`? | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/async_patterns_and_pitfalls.md) |
+| How do you mock an async dependency and assert on it with pytest? | [testing_with_pytest](testing_with_pytest/testing_with_pytest.md) |
 
 ---
 
@@ -188,9 +188,9 @@ A 3-week plan over the Senior Path.
 
 | Week | Focus | Modules |
 |------|-------|---------|
-| 1 | Language Core & Data Model | [data_model_and_objects](data_model_and_objects/), [core_language_idioms](core_language_idioms/), [iterators_and_generators](iterators_and_generators/), [decorators_and_closures](decorators_and_closures/), [context_managers_and_exceptions](context_managers_and_exceptions/), [collections_and_data_structures](collections_and_data_structures/) |
-| 2 | CPython Internals & Type System | [cpython_memory_model](cpython_memory_model/), [the_gil_and_free_threading](the_gil_and_free_threading/), [the_type_system_and_typing](the_type_system_and_typing/), [functional_programming](functional_programming/) |
-| 3 | Concurrency, Async & Testing + drills | [asyncio_and_event_loop](asyncio_and_event_loop/), [async_patterns_and_pitfalls](async_patterns_and_pitfalls/), [testing_with_pytest](testing_with_pytest/) |
+| 1 | Language Core & Data Model | [data_model_and_objects](data_model_and_objects/data_model_and_objects.md), [core_language_idioms](core_language_idioms/core_language_idioms.md), [iterators_and_generators](iterators_and_generators/iterators_and_generators.md), [decorators_and_closures](decorators_and_closures/decorators_and_closures.md), [context_managers_and_exceptions](context_managers_and_exceptions/context_managers_and_exceptions.md), [collections_and_data_structures](collections_and_data_structures/collections_and_data_structures.md) |
+| 2 | CPython Internals & Type System | [cpython_memory_model](cpython_memory_model/cpython_memory_model.md), [the_gil_and_free_threading](the_gil_and_free_threading/the_gil_and_free_threading.md), [the_type_system_and_typing](the_type_system_and_typing/the_type_system_and_typing.md), [functional_programming](functional_programming/functional_programming.md) |
+| 3 | Concurrency, Async & Testing + drills | [asyncio_and_event_loop](asyncio_and_event_loop/asyncio_and_event_loop.md), [async_patterns_and_pitfalls](async_patterns_and_pitfalls/async_patterns_and_pitfalls.md), [testing_with_pytest](testing_with_pytest/testing_with_pytest.md) |
 
 ---
 
@@ -246,11 +246,11 @@ A 3-week plan over the Senior Path.
 
 | Module | Also See |
 |--------|---------|
-| `data_model_and_objects` | [`lld/behavioral/`](../lld/behavioral/) — observer/strategy as Python callables |
-| `the_gil_and_free_threading` | [`java/concurrency/`](../java/concurrency/) — compare JVM threading vs CPython GIL |
-| `asyncio_and_event_loop` | [`backend/async_and_concurrency_patterns/`](../backend/async_and_concurrency_patterns/); [`llm/case_studies/cross_cutting/streaming_at_scale.md`](../llm/case_studies/cross_cutting/streaming_at_scale.md) |
-| `the_type_system_and_typing` | [`java/generics_and_type_system/`](../java/generics_and_type_system/) — erasure vs Python runtime generics |
-| `design_patterns_in_python` | [`lld/creational/`](../lld/creational/); [`lld/structural/`](../lld/structural/); [`lld/behavioral/`](../lld/behavioral/) |
+| `data_model_and_objects` | [`lld/behavioral/`](../lld/behavioral/behavioral.md) — observer/strategy as Python callables |
+| `the_gil_and_free_threading` | [`java/concurrency/`](../java/concurrency/concurrency.md) — compare JVM threading vs CPython GIL |
+| `asyncio_and_event_loop` | [`backend/async_and_concurrency_patterns/`](../backend/async_and_concurrency_patterns/async_and_concurrency_patterns.md); [`llm/case_studies/cross_cutting/streaming_at_scale.md`](../llm/case_studies/cross_cutting/streaming_at_scale.md) |
+| `the_type_system_and_typing` | [`java/generics_and_type_system/`](../java/generics_and_type_system/generics_and_type_system.md) — erasure vs Python runtime generics |
+| `design_patterns_in_python` | [`lld/creational/`](../lld/creational/creational.md); [`lld/structural/`](../lld/structural/structural.md); [`lld/behavioral/`](../lld/behavioral/behavioral.md) |
 
 ---
 

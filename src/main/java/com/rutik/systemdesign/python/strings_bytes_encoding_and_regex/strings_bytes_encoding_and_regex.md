@@ -1,0 +1,1228 @@
+# Strings, Bytes, Encoding & Regex
+
+<!-- study-paths
+senior: strings_bytes_encoding_and_regex.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+Python 3 draws a hard line between text and binary data. `str` represents a sequence of Unicode
+code points — abstract characters with no inherent byte representation. `bytes` and `bytearray`
+represent raw binary data — a sequence of integers in the range 0–255. Moving between the two
+worlds requires an explicit encoding step. Getting that step wrong is responsible for a large class
+of production bugs: `UnicodeDecodeError` in file ingestion, garbled content in HTTP responses,
+silent data corruption when the wrong codec silently accepts every byte.
+
+Key topics covered in this module:
+
+- `str` internals: PEP 393 compact representation (Latin-1 / UCS-2 / UCS-4), code points vs bytes
+- `bytes` and `bytearray`: immutable vs mutable binary sequences
+- Unicode, UTF-8, UTF-16, BOM, and common codec pitfalls
+- `encode()` / `decode()` with error handlers (`strict`, `replace`, `ignore`, `backslashreplace`)
+- `memoryview`: zero-copy slicing of buffer-protocol objects
+- String formatting: `%`, `.format()`, f-strings — performance and expressiveness
+- The `re` module: `compile`, `match`, `search`, `fullmatch`, `findall`, `finditer`, `sub`
+- Named groups, non-capturing groups, lookahead and lookbehind assertions
+- Catastrophic backtracking (ReDoS) and how to detect and fix it
+- `re.compile()` for performance; the `regex` third-party library for advanced features
+- FastAPI context: parsing headers, validating path parameters, decoding request bodies
+
+---
+
+## 2. Intuition
+
+> Python's `str` is a postcard written in a universal alphabet; `bytes` is the same postcard
+> after it has been folded into an envelope and stamped — you need to know the folding rule
+> (encoding) to unfold it correctly.
+
+**Mental model:** Think of Unicode code points as the logical meaning of a character — the abstract
+idea of the letter "A", the Chinese character "你", or the emoji snowman. An encoding (UTF-8, Latin-1,
+Shift-JIS) is a concrete recipe that maps each code point to a specific sequence of bytes. The same
+character can have completely different byte sequences in different encodings. When you read a file,
+a socket, or an HTTP body, you receive bytes; you must know the encoding to produce the correct text.
+
+**Why it matters:** Network sockets, file I/O, databases, and HTTP all operate on bytes. FastAPI
+routes receive bytes from the ASGI server and emit bytes to the client. Pydantic validators work on
+Python `str` objects after JSON decoding. Every boundary crossing — HTTP body in, JSON out, database
+read, file write — involves an encode/decode step. A missing or wrong encoding at any boundary
+produces bugs that are difficult to reproduce because they are data-dependent.
+
+**Key insight:** UTF-8 is not the only encoding in the wild. Windows systems frequently produce
+files in `cp1252` (Windows-1252). CSV exports from Excel may include a UTF-8 BOM. APIs from the
+1990s may use `latin-1`. Python's default `open()` uses the locale encoding, which varies by
+platform — meaning code that works on macOS can silently corrupt data on a Windows server.
+
+---
+
+## 3. Core Principles
+
+1. **`str` is Unicode, `bytes` is binary** — they are completely separate types. Python 3 does not
+   implicitly coerce between them. Attempting `"hello" + b"world"` raises `TypeError`.
+
+2. **Encoding is always explicit** — call `.encode(encoding)` or `.decode(encoding)` at every
+   boundary. Never rely on defaults in production code that processes external data.
+
+3. **UTF-8 is the universal default for new systems** — it is ASCII-compatible (the first 128 code
+   points map to single bytes), self-synchronizing, and supported everywhere. Use it unless you have
+   a specific reason not to.
+
+4. **`memoryview` for zero-copy** — slicing a `bytes` object allocates a new `bytes` object.
+   `memoryview` slicing creates a view into the same buffer. For large payloads (binary files,
+   network frames, audio), this matters for both performance and memory usage.
+
+5. **Compile regexes that are called repeatedly** — `re.match(pattern, text)` recompiles the
+   pattern on every call (the internal cache has a fixed size of 512 entries in CPython 3.11, but
+   cache misses still cost microseconds each). `re.compile()` makes the intent explicit and
+   eliminates repeated compilation.
+
+6. **Never apply untrusted regex patterns to untrusted input without bounds** — a crafted regex
+   against a crafted input can consume CPU exponentially (ReDoS). Even a crafted pattern alone,
+   compiled inside your service, can hang a thread.
+
+7. **f-strings are the preferred formatting style in Python 3.6+** — they are faster than `%` and
+   `.format()`, their expressions are evaluated at definition time (avoiding late-binding
+   surprises), and they support the full format spec mini-language.
+
+---
+
+## 4. Types / Architectures / Strategies
+
+### 4.1 `str` Representation — PEP 393 Compact Layout
+
+CPython 3 stores `str` internally using the minimum width needed for all characters:
+
+| Internal kind | Width | Condition |
+|--------------|-------|-----------|
+| Latin-1 (KIND=1) | 1 byte/char | All code points <= U+00FF |
+| UCS-2 (KIND=2) | 2 bytes/char | All code points <= U+FFFF (Basic Multilingual Plane) |
+| UCS-4 (KIND=4) | 4 bytes/char | Any code point > U+FFFF (supplementary planes) |
+
+`len()` always returns the number of code points, never the number of bytes.
+
+CPython makes this a one-time decision when the string is built, by scanning for the single
+widest code point in it:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s(["new str<br/>scan for widest code point"]) --> q1{"max code point<br/>over U+00FF?"}
+    q1 -->|"no"| k1["Latin-1 · KIND=1<br/>1 byte/char"]
+    q1 -->|"yes"| q2{"max code point<br/>over U+FFFF?"}
+    q2 -->|"no"| k2["UCS-2 · KIND=2<br/>2 bytes/char"]
+    q2 -->|"yes"| k3["UCS-4 · KIND=4<br/>4 bytes/char"]
+    k1 --> e1(["'a'×100 = 149 bytes"])
+    k2 --> e2(["'中'×100 = 250 bytes"])
+    k3 --> e3(["emoji×100 = 448 bytes"])
+
+    class s,e1,e2,e3 io
+    class q1,q2 mathOp
+    class k1,k2,k3 base
+```
+
+The three byte counts are the actual `sys.getsizeof()` results for a 100-character string of
+each kind (Section 6.1) — one stray emoji widens every character in the string to 4 bytes.
+
+### 4.2 `bytes`, `bytearray`, `memoryview`
+
+| Type | Mutable | Buffer protocol | Typical use |
+|------|---------|----------------|-------------|
+| `bytes` | No | Yes | Network I/O, hashing, immutable binary constants |
+| `bytearray` | Yes | Yes | In-place binary editing, building packets |
+| `memoryview` | Depends on base | Yes | Zero-copy slicing of large buffers |
+
+### 4.3 Encoding Strategies
+
+| Encoding | Width | BOM | ASCII-compatible | Common source |
+|----------|-------|-----|-----------------|---------------|
+| UTF-8 | 1–4 bytes | Optional (U+FEFF) | Yes | Web, Linux, macOS, modern APIs |
+| UTF-8-SIG | 1–4 bytes | Always prepended | Yes | Windows Notepad exports |
+| UTF-16-LE | 2–4 bytes | Optional | No | Windows COM, .NET internal strings |
+| Latin-1 (ISO-8859-1) | 1 byte | None | Yes (subset) | Legacy Western European systems |
+| cp1252 | 1 byte | None | Yes (subset) | Windows default Western |
+
+### 4.4 Regex Strategy Patterns
+
+| Strategy | Use case | Example |
+|----------|----------|---------|
+| `re.match()` | Match from string start | `re.match(r"\d+", "42abc")` |
+| `re.search()` | Find first match anywhere | `re.search(r"\d+", "abc42")` |
+| `re.fullmatch()` | Entire string must match | Input validation |
+| `re.findall()` | All non-overlapping matches as list | Extracting all tokens |
+| `re.finditer()` | All matches as iterator of `Match` objects | Large text, need spans |
+| `re.sub()` | Replace matches | Sanitizing user content |
+| `re.compile()` | Pre-compile for reuse | Hot paths, module-level |
+
+### 4.5 String Formatting Strategies
+
+| Method | Python version | Speed (relative) | Dynamic width support | Self-documenting |
+|--------|---------------|-----------------|----------------------|-----------------|
+| `%` formatting | All | 1x (baseline) | No | No |
+| `.format()` | 2.6+ / 3.0+ | ~0.8x (slower) | Yes | No |
+| f-strings | 3.6+ | ~3x faster | Yes | `=` specifier [3.8] |
+| `Template` strings | 2.4+ | slowest | No | No |
+
+---
+
+## 5. Architecture Diagrams
+
+The text/binary boundary is the single most important picture in this module: every byte
+entering or leaving the process crosses it through an explicit `decode()`/`encode()` call,
+never implicitly.
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    ext(["External world<br/>file · socket · HTTP body"]) --> raw(["bytes<br/>0x48 0x65 0x6C 0x6C 0x6F"])
+    raw -->|"decode('utf-8')"| app(["Python str<br/>'Hello'"])
+    app -->|"encode('utf-8')"| raw
+
+    class ext frozen
+    class raw req
+    class app io
+```
+
+CPython's compact `str` layout packs a header, the storage `kind` (1/2/4 bytes), the code-point
+length, and the character data contiguously. The byte alignment below is itself the information,
+so it stays a memory map rather than becoming a flowchart:
+
+```
+PEP 393 str memory layout
++-----------+----------+----------+----...----+
+| PyObject  | kind     | length   |  data     |
+| header    | (1/2/4)  |  (5)     | H e l l o |
++-----------+----------+----------+----...----+
+  Latin-1: 1 byte/char; UCS-2: 2 bytes/char; UCS-4: 4 bytes/char
+```
+
+A `memoryview` slice is a pointer-and-length pair into the same heap buffer rather than a new
+allocation — again a byte-offset picture that a graph would only obscure:
+
+```
+memoryview zero-copy
++-------------------------------------------+
+| bytes object  b"....PAYLOAD.............." |  (heap)
++------------------+---+--------------------+
+                   |   |
+  mv[offset:end]  <- new view, no data copy
+                   v   v
+               [PAYLOAD]  <- same memory
+```
+
+The `(a+)+b` pattern against a trailing-`b`-less input is the textbook catastrophic-backtracking
+shape: the engine tries every way to partition the run of `a` characters before giving up, so the
+branch count doubles with each extra character:
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Pattern (a+)+b<br/>Input 'aaaaa' (no b)"]) --> b1("branch 1: (aaaaa)+b<br/>fail")
+    start --> b2("branch 2: (aaaa)(a)+b<br/>fail")
+    start --> b3("branch 3: (aaa)(aa)+b<br/>fail")
+    start --> more(["... 2^n partitions"])
+    b1 --> boom("O(2^n) states explored<br/>every partition fails")
+    b2 --> boom
+    b3 --> boom
+    more --> boom
+
+    class start req
+    class b1,b2,b3,more mathOp
+    class boom lossN
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### 6.1 `str` Internals
+
+```python
+import sys
+
+s1 = "hello"
+s2 = "你好"
+
+print(len(s1))                      # 5  — five code points
+print(len(s2))                      # 2  — two code points (not bytes)
+print(len(s1.encode("utf-8")))      # 5  — ASCII: 1 byte/char
+print(len(s2.encode("utf-8")))      # 6  — CJK: 3 bytes/char in UTF-8
+
+# PEP 393 internal width — 1 / 2 / 4 bytes per code point
+print(sys.getsizeof("a" * 100))            # 149  — 1 byte/char + header
+print(sys.getsizeof("中" * 100))           # 250  — 2 bytes/char + header
+print(sys.getsizeof("\U0001F600" * 100))   # 448  — 4 bytes/char + header
+```
+
+**Stated plainly.** "One character in the string decides the price of every other character in it."
+PEP 393 picks a single storage width for the whole string from its single widest code point, so the
+cost is `header + width x length` — and `width` is chosen once, globally, not per character.
+
+| Symbol | What it is |
+|---|---|
+| `len(s)` | Number of code points. Never a byte count, in any encoding |
+| `width` | 1, 2, or 4 bytes per code point — set by the *maximum* code point in the string |
+| `header` | Fixed `PyUnicodeObject` overhead, roughly 40-80 B depending on kind and CPython version |
+| `U+00FF` | The Latin-1 ceiling. One code point above it doubles every character to 2 bytes |
+| `U+FFFF` | The BMP ceiling. One code point above it widens every character to 4 bytes |
+
+**Walk one example.** Take a 1,000,000-character string and change only its widest character. The
+header is a rounding error at this length, so the data term is the whole story:
+
+```
+  content                            kind      width          data bytes
+  1,000,000 x 'a'                    Latin-1   1 B/char        1,000,000    ( 1.0 MB)
+  1,000,000 x '中'  (U+4E2D)          UCS-2     2 B/char        2,000,000    ( 2.0 MB)
+  1,000,000 x emoji (U+1F600)        UCS-4     4 B/char        4,000,000    ( 4.0 MB)
+
+  now the trap -- change ONE character out of a million:
+    999,999 x 'a'  +  1 emoji        UCS-4     4 B/char        4,000,000    ( 4.0 MB)
+                                                              ---------
+    cost of that single emoji:                        +3,000,000 bytes, a 4x blow-up
+```
+
+The last row is the one that bites in production. A million-row table of ASCII product names sits in
+1 MB; let a single row carry one emoji and — if those names are ever concatenated into one string —
+the storage quadruples, because `width` is a property of the string, not of the character. This is
+also why the fix is to keep such data in separate `str` objects rather than one joined buffer: each
+string then gets its own `width`, and the emoji taxes only itself.
+
+### 6.2 `encode()` / `decode()` and Error Handlers
+
+```python
+text = "Café"
+
+utf8_bytes   = text.encode("utf-8")    # b'Caf\xc3\xa9'  — é = 2 bytes
+latin1_bytes = text.encode("latin-1")  # b'Caf\xe9'       — é = 1 byte
+
+print(utf8_bytes.decode("utf-8"))      # "Café"
+print(latin1_bytes.decode("latin-1")) # "Café"
+
+# Error handlers on bad bytes
+messy = b"Caf\xe9 is great"           # valid latin-1, invalid UTF-8
+print(messy.decode("utf-8", errors="replace"))           # "Caf? is great"
+print(messy.decode("utf-8", errors="ignore"))            # "Caf is great"
+print(messy.decode("utf-8", errors="backslashreplace"))  # "Caf\\xe9 is great"
+
+# latin-1 silently accepts all bytes — masks encoding bugs
+everything = bytes(range(256))
+everything.decode("latin-1")  # never raises; correct for latin-1, corrupts UTF-8 data
+```
+
+**What it means.** "UTF-8 charges each character by its own code point, one character at a time —
+unlike PEP 393, which charges every character the price of the most expensive one." Same string, two
+completely different sizing rules, and mixing them up is where `len()` bugs come from.
+
+| Symbol | What it is |
+|---|---|
+| `U+0000`-`U+007F` | ASCII. 1 byte. This is why UTF-8 is a drop-in replacement for ASCII files |
+| `U+0080`-`U+07FF` | Latin accents, Greek, Cyrillic, Hebrew, Arabic. 2 bytes |
+| `U+0800`-`U+FFFF` | Rest of the BMP — CJK, Devanagari, most symbols. 3 bytes |
+| `U+10000`-`U+10FFFF` | Supplementary planes — emoji, rare CJK, historic scripts. 4 bytes |
+| `len(s.encode())` | Sum of the per-character costs above. Always `>= len(s)`, never smaller |
+
+**Walk one example.** Encode the strings this section already uses, character by character:
+
+```
+  "Café"      C U+0043 -> 1     "你好"    你 U+4F60 -> 3      emoji U+1F600 -> 4
+              a U+0061 -> 1              好 U+597D -> 3
+              f U+0066 -> 1                        -----
+              é U+00E9 -> 2              total       6      len("你好") = 2, bytes = 6
+                       -----
+              total      5      len("Café") = 4, bytes = 5
+```
+
+Now scale each to 1,000,000 characters and lay the wire cost beside the RAM cost from Section 6.1:
+
+```
+  content                     in RAM (PEP 393)      on the wire (UTF-8)     ratio
+  1,000,000 x 'a'              1,000,000 B           1,000,000 B            1.0x
+  1,000,000 x '中'             2,000,000 B           3,000,000 B            1.5x   wire is BIGGER
+  1,000,000 x emoji            4,000,000 B           4,000,000 B            1.0x
+```
+
+The CJK row is the non-obvious one and it trips people up in capacity planning: a BMP character
+costs 2 bytes in CPython's memory but 3 bytes in UTF-8, so a Chinese-language payload is **50%
+larger over the network than it is in RAM**. Size your request-body limits and column widths from
+the UTF-8 number, never from `len()` — a `VARCHAR(255)` measured in bytes holds only 85 CJK
+characters.
+
+### 6.3 BOM and UTF-8-SIG
+
+```python
+# UTF-8 BOM: three bytes \xef\xbb\xbf prepended by some Windows tools
+bom_bytes = b"\xef\xbb\xbfhello"
+
+# Wrong: treating as plain UTF-8 leaves the BOM character in the string
+wrong = bom_bytes.decode("utf-8")
+print(repr(wrong))   # '﻿hello'  — BOM is U+FEFF ZERO WIDTH NO-BREAK SPACE
+
+# Correct: use utf-8-sig codec, which strips/adds BOM automatically
+correct = bom_bytes.decode("utf-8-sig")
+print(repr(correct))  # 'hello'
+
+# Writing with BOM for Windows Excel compatibility
+with open("output.csv", "w", encoding="utf-8-sig") as f:
+    f.write("name,value\n")
+```
+
+### 6.4 `memoryview` — Zero-Copy Slicing
+
+```python
+# bytes slicing creates a copy each time
+data = b"A" * (10 * 1024 * 1024)  # 10 MB
+chunk = data[0:4096]              # allocates 4096 new bytes
+
+# memoryview slicing creates a view — no allocation
+mv = memoryview(data)
+chunk_view = mv[0:4096]          # zero-copy view into the same buffer
+
+# Practical use: reading frames without copying
+def process_frames(buffer: bytes, frame_size: int = 4096) -> list[memoryview]:
+    mv = memoryview(buffer)
+    return [mv[i : i + frame_size] for i in range(0, len(mv), frame_size)]
+
+# Works with mutable bytearray too
+ba = bytearray(b"hello world")
+mv2 = memoryview(ba)
+mv2[0:5] = b"HELLO"        # writes back to ba in-place
+print(ba)                   # bytearray(b'HELLO world')
+```
+
+### 6.5 f-string Formatting
+
+```python
+from decimal import Decimal
+
+price = Decimal("19.99")
+name, width = "widget", 10
+
+print(f"Item: {name}, Price: {price:.2f}")   # "Item: widget, Price: 19.99"
+print(f"{name:<{width}}")    # "widget    " — left-aligned, dynamic width
+print(f"{name:>{width}}")    # "    widget" — right-aligned
+print(f"{'café'!r}")         # "'café'"  — repr conversion
+print(f"{'café'!a}")         # "'caf\\xe9'" — ASCII-safe repr
+
+x = 42
+print(f"{x = }")             # "x = 42"  — self-documenting [3.8+]
+
+precision = 3
+print(f"{3.14159265:{width}.{precision}f}")  # "     3.142" — nested format spec
+```
+
+### 6.6 The `re` Module in Depth
+
+```python
+import re
+from typing import Optional
+
+# Module-level compile — one-time cost, zero overhead per call
+EMAIL_RE = re.compile(
+    r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$",
+    re.IGNORECASE,
+)
+
+def validate_email(addr: str) -> bool:
+    return EMAIL_RE.fullmatch(addr) is not None  # fullmatch, not match
+
+# Named groups
+DATE_RE = re.compile(r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})")
+
+def parse_date(text: str) -> Optional[dict[str, str]]:
+    m = DATE_RE.search(text)
+    return m.groupdict() if m else None  # {"year": "2024", "month": "03", "day": "15"}
+
+# Non-capturing groups — alternation without capture overhead
+IP_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
+print(IP_RE.findall("192.168.1.1 and 10.0.0.5"))  # ['192.168.1.1', '10.0.0.5']
+
+# Lookbehind: extract amounts after '$'
+AMOUNT_RE = re.compile(r"(?<=\$)\d+(?:\.\d{2})?")
+print(AMOUNT_RE.findall("Total: $19.99 and $5.00"))  # ['19.99', '5.00']
+
+# Negative lookahead
+print(re.findall(r"foo(?!bar)", "foobar foobaz"))  # ['foo'] — only in foobaz
+
+# VERBOSE pattern — inline documentation for complex regex
+EMAIL_VERBOSE = re.compile(r"""
+    ^                       # start of string
+    (?P<user>[^@]+)         # local part
+    @                       # separator
+    (?P<domain>[^@]+)       # domain
+    $                       # end of string
+""", re.VERBOSE)
+
+# finditer — memory-efficient over large text (iterator, not full list)
+def extract_urls(text: str) -> list[str]:
+    _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+    return [m.group() for m in _URL_RE.finditer(text)]
+```
+
+### 6.7 Catastrophic Backtracking (ReDoS)
+
+```python
+import re
+
+# DANGEROUS: (a+)+b — each partition of 'a' chars is tried; O(2^n) paths
+dangerous = re.compile(r"(a+)+b")
+dangerous.match("aaab")       # fine — matches quickly
+# dangerous.match("a" * 30)  # DO NOT RUN — hangs for minutes (exponential)
+
+# SAFE: rewrite without nested quantifiers
+safe = re.compile(r"a+b")    # linear NFA — single pass
+
+# Third-party `regex` library: atomic groups prevent backtracking
+# import regex
+# safe_atomic = regex.compile(r"(?>a+)+b")  # committed match, no backtrack
+
+# Another common ReDoS structure: r"(\w+\s+)+" on long word sequences
+# Fix: r"\w+(?:\s+\w+)*" — unambiguous, linear
+```
+
+**Put simply.** "`(a+)+` gives the engine two different ways to split every single `a`, and it will
+try all of them before admitting there is no `b`." The count of ways to partition `n` identical
+characters into ordered non-empty groups is `2^(n-1)`, so each character you add doubles the work.
+
+| Symbol | What it is |
+|---|---|
+| `n` | Length of the run of `a` characters in the input |
+| `2^(n-1)` | Number of ways to split that run between the inner `a+` and the outer `+` |
+| ambiguity | The root cause: `a+` and `(...)+` can both consume the same character, so both try |
+| the missing `b` | Why it explodes. A match short-circuits; **only a failure forces every path** |
+| `a+b` | The safe rewrite — one quantifier, one way to split, `n` steps instead of `2^(n-1)` |
+
+**Walk one example.** Grow the input one character at a time. Assume a generous 10,000,000
+backtracking steps per second, which is roughly what CPython's `re` manages:
+
+```
+  input          paths explored          wall-clock at 10M steps/sec
+  "aaa"          n=3      ->        4              instant
+  "a" x 10       n=10     ->      512              0.00005 s
+  "a" x 20       n=20     ->  524,288              0.05 s     still looks fine in a unit test
+  "a" x 25       n=25     -> 16,777,216            1.7 s      one request now hurts
+  "a" x 30       n=30     -> 536,870,912           54 s       one request holds a worker
+  "a" x 35       n=35     -> 17,179,869,184        28 minutes
+  "a" x 40       n=40     -> 549,755,813,888       15 hours
+
+  the safe pattern a+b, same inputs:
+  n = 40         ->  40 steps  ->  0.000004 s
+```
+
+Two lessons live in that table. First, the dangerous zone is **absurdly small**: 20 characters is
+harmless and 40 characters is a permanently wedged worker, so no realistic input-length cap saves
+you — the file's 2,000-character limit in Section 14 is around `2^1999` paths, which is why the
+process timeout, not the length check, is the control that actually works. Second, the growth is
+why a fuzz test rarely finds these: the jump from "passes in 0.05 s" to "never returns" spans about
+twenty characters, and a test suite that stops at `n = 20` reports green.
+
+The `b` at the end is the load-bearing detail. `(a+)+b` on `"aaaab"` returns immediately, because
+the first partition the engine tries succeeds and it never explores the other 7. Remove the `b` and
+every one of the `2^(n-1)` paths must be walked to prove failure. **Catastrophic backtracking is a
+property of the non-matching input, not of the pattern alone** — which is precisely why a pattern
+that passed every test in development detonates on the first malformed request in production.
+
+---
+
+## 7. Real-World Examples
+
+### 7.1 FastAPI Route: Parsing a CSV Upload with Encoding Detection
+
+```python
+from fastapi import FastAPI, UploadFile, HTTPException
+import csv
+import io
+
+app = FastAPI()
+
+ALLOWED_ENCODINGS = ("utf-8", "utf-8-sig", "latin-1", "cp1252")
+
+@app.post("/upload/csv")
+async def upload_csv(file: UploadFile) -> dict[str, int]:
+    raw: bytes = await file.read()
+
+    # Try encodings in order of likelihood
+    text: str | None = None
+    for enc in ALLOWED_ENCODINGS:
+        try:
+            text = raw.decode(enc)
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+
+    if text is None:
+        raise HTTPException(status_code=400, detail="Could not decode file with known encodings")
+
+    reader = csv.DictReader(io.StringIO(text))
+    rows = list(reader)
+    return {"rows": len(rows)}
+```
+
+### 7.2 Header Parsing with Named Groups
+
+```python
+import re
+
+# RFC 7230 Content-Type: text/html; charset=UTF-8
+CONTENT_TYPE_RE = re.compile(
+    r"^(?P<mime>[^;]+?)(?:\s*;\s*charset=(?P<charset>[^\s;]+))?$",
+    re.IGNORECASE,
+)
+
+def parse_content_type(header: str) -> tuple[str, str]:
+    m = CONTENT_TYPE_RE.fullmatch(header.strip())
+    if not m:
+        return "application/octet-stream", "utf-8"
+    mime    = m.group("mime").strip().lower()
+    charset = (m.group("charset") or "utf-8").lower().replace("-", "_")
+    return mime, charset
+
+print(parse_content_type("text/html; charset=UTF-8"))   # ('text/html', 'utf_8')
+print(parse_content_type("application/json"))            # ('application/json', 'utf-8')
+```
+
+---
+
+## 8. Tradeoffs
+
+### 8.1 `bytes` Slicing vs `memoryview`
+
+| Concern | `bytes` slicing | `memoryview` slicing |
+|---------|-----------------|---------------------|
+| Memory allocation | New `bytes` object per slice | Zero — view into same buffer |
+| Garbage collector pressure | High for many slices | Negligible |
+| API compatibility | Accepted everywhere | Requires buffer-protocol support |
+| Code clarity | Simple `data[a:b]` | `mv = memoryview(data); mv[a:b]` |
+| Break-even point | Small buffers (<1 KB) | Large buffers (>100 KB) |
+
+### 8.2 `re` vs `regex` Third-Party Library
+
+| Feature | `re` (stdlib) | `regex` (third-party) |
+|---------|--------------|----------------------|
+| Possessive quantifiers (`a++`) | No | Yes |
+| Atomic groups (`(?>...)`) | No | Yes |
+| Unicode categories (`\p{Lu}`) | No (`\w` is Unicode-aware) | Yes |
+| Variable-length lookbehind | No | Yes |
+| ReDoS protection mechanisms | None built-in | Atomic groups help |
+| Installation | None | `pip install regex` |
+| Speed | Fast | Comparable or faster on complex patterns |
+
+### 8.3 String Formatting
+
+| Method | Readability | Runtime safety | Dynamic spec | Performance |
+|--------|-------------|---------------|-------------|------------|
+| `%` | Low | No (key errors at runtime) | No | Baseline |
+| `.format()` | Medium | No (key errors at runtime) | Yes | ~80% of baseline |
+| f-strings | High | Compile-time (syntax errors caught) | Yes | ~300% of baseline |
+| `Template` | Medium | Safe (no arbitrary expressions) | No | Slowest |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+### Use `str` when:
+- Representing human-readable text in any language
+- Logging, generating API responses, building SQL strings (via parameterization)
+- Any operation that is logically about characters: splitting on punctuation, case folding, searching for words
+
+### Use `bytes` / `bytearray` when:
+- Reading from or writing to network sockets, files opened in binary mode, or subprocess pipes
+- Hashing, encryption, serialization (struct, protobuf, msgpack)
+- Any data that is inherently binary: images, audio, compressed archives
+
+### Use `memoryview` when:
+- Slicing large binary buffers repeatedly (video frames, audio samples, large file chunks)
+- Passing sub-slices to C extensions or socket `send()` without copying
+- Implementing zero-copy parsers for binary protocols
+
+### Use `re.compile()` when:
+- The same pattern is used more than once in the lifetime of the process
+- The pattern is used inside a function called in a hot loop
+- The pattern is complex enough that the intent should be documented with `re.VERBOSE`
+
+### Do NOT use `re` when:
+- Simple prefix/suffix checks: use `str.startswith()`, `str.endswith()` (faster)
+- Fixed substring search: use `in` operator or `str.find()` (no backtracking overhead)
+- Parsing nested structures: use a proper parser (e.g., `pyparsing`, `lark`, `antlr4`)
+- Parsing HTML or XML: never parse HTML with regex; use `lxml`, `html.parser`, or `BeautifulSoup`
+
+### Do NOT use f-strings when:
+- The template comes from user input or a database — eval-safety concern; use `.format_map()` with a restricted mapping
+- Generating SQL or shell commands — use parameterized queries and `shlex.quote()` instead
+
+---
+
+## 10. Common Pitfalls
+
+### Pitfall 1: Default File Encoding on Windows
+
+BROKEN — relies on locale encoding, silently corrupts UTF-8 content on Windows (cp1252 default):
+
+```python
+# BROKEN
+def read_config(path: str) -> str:
+    with open(path) as f:       # encoding defaults to locale — cp1252 on Windows
+        return f.read()         # silently replaces multibyte UTF-8 sequences
+```
+
+FIX — always specify encoding explicitly:
+
+```python
+# FIXED
+def read_config(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+```
+
+For Python 3.10+, set `PYTHONUTF8=1` environment variable as a belt-and-suspenders measure, but
+always set encoding explicitly in `open()` — never rely on the environment alone.
+
+---
+
+### Pitfall 2: String Concatenation in a Loop (O(n²) Copies)
+
+BROKEN — each `+` creates a new `str` object, copying all previous content. For n iterations and
+average length L, total bytes copied = L + 2L + 3L + ... + nL = O(n²·L):
+
+```python
+# BROKEN — O(n²) string copies
+def build_report(records: list[dict]) -> str:
+    result = ""
+    for rec in records:
+        result += f"ID={rec['id']} NAME={rec['name']}\n"  # new str object each time
+    return result
+```
+
+FIX — collect into a list and join once. `"".join()` internally computes the total length in one
+pass, allocates once, and fills in O(n):
+
+```python
+# FIXED — O(n) single allocation
+def build_report(records: list[dict]) -> str:
+    parts: list[str] = []
+    for rec in records:
+        parts.append(f"ID={rec['id']} NAME={rec['name']}\n")
+    return "".join(parts)
+```
+
+**In plain terms.** "Every `+=` rewrites the whole string built so far, so the 9,000th append copies
+9,000 fragments to add one." The output is the same either way; what differs is that `+=` re-copies
+its own history on every iteration while `join` copies each fragment exactly once.
+
+| Symbol | What it is |
+|---|---|
+| `n` | Number of fragments appended — 10,000 records here |
+| `L` | Average fragment length in bytes — 50 characters here |
+| `i x L` | Bytes copied on iteration `i`: the whole accumulated prefix, rebuilt from scratch |
+| `L x n(n+1)/2` | Total bytes copied by the `+=` loop. The `n^2` term is the entire problem |
+| `L x n` | Total bytes copied by `"".join(parts)` — one pass, one allocation, no re-copying |
+
+**Walk one example.** Add up what each approach actually moves through memory:
+
+```
+  the += loop, iteration by iteration (L = 50 B)
+    i =      1  copies      1 x 50 =         50 B
+    i =      2  copies      2 x 50 =        100 B
+    i =      3  copies      3 x 50 =        150 B
+    ...
+    i =  9,999  copies  9,999 x 50 =    499,950 B
+    i = 10,000  copies 10,000 x 50 =    500,000 B
+                                     ------------
+    total = 50 x (10,000 x 10,001 / 2) = 2,500,250,000 B    about 2.5 GB copied
+
+  the join, in one pass
+    measure all 10,000 fragments, allocate once, fill:
+    total = 50 x 10,000            =       500,000 B    exactly 500 KB copied
+
+  ratio: 2,500,250,000 / 500,000 = 5,000.5x more bytes moved, for identical output
+```
+
+Watch how the gap widens, because this is what makes it a *production* bug rather than a slow
+function — the penalty is not a constant factor, it grows with `n`:
+
+```
+  n            += total copied        join total       ratio
+       100            252,500 B          5,000 B        50.5x
+     1,000         25,025,000 B         50,000 B       500.5x
+    10,000      2,500,250,000 B        500,000 B     5,000.5x
+   100,000    250,002,500,000 B      5,000,000 B    50,000.5x
+```
+
+The ratio is always about `n/2`, which is the practical rule to remember: **doubling the input
+doubles the penalty multiplier**, so a loop that is merely sluggish in a 1,000-row test becomes a
+timeout at 100,000 rows in production. Note also that the ~2.5 GB is copy *work*, not peak
+resident memory — CPython frees each intermediate immediately, so this shows up as burned CPU and
+allocator churn rather than an OOM, which is exactly why it survives code review.
+
+Benchmark: for 10,000 records of 50 chars each, the join approach is approximately 40x faster,
+allocating a single 500 KB string instead of accumulating ~2.5 GB of intermediate allocation work.
+
+---
+
+### Pitfall 3: `re.match()` Without `re.compile()` in a Hot Loop
+
+BROKEN — `re.match()` recompiles (or searches a bounded cache) on every call:
+
+```python
+# BROKEN — recompiles or cache-looks-up pattern on every call
+def count_valid_emails(emails: list[str]) -> int:
+    pattern = r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
+    return sum(1 for e in emails if re.match(pattern, e))
+```
+
+FIX — compile once at module level:
+
+```python
+# FIXED — compiled once, O(1) lookup on every call
+_EMAIL_RE = re.compile(
+    r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$",
+    re.IGNORECASE,
+)
+
+def count_valid_emails(emails: list[str]) -> int:
+    return sum(1 for e in emails if _EMAIL_RE.match(e))
+```
+
+For a batch of 100,000 emails, pre-compilation saves roughly 15–25 ms on CPython 3.11 (varies by
+pattern complexity and cache hit rate).
+
+---
+
+### Pitfall 4: Using `re.match()` When `re.fullmatch()` Is Needed for Validation
+
+```python
+import re
+
+# BROKEN — re.match() only anchors at the START; trailing garbage passes
+pattern = re.compile(r"\d{4}-\d{2}-\d{2}")
+print(pattern.match("2024-01-15 extra stuff"))  # Match! Should be rejected.
+
+# FIXED — re.fullmatch() requires the entire string to match
+print(pattern.fullmatch("2024-01-15 extra stuff"))  # None — correctly rejected
+print(pattern.fullmatch("2024-01-15"))              # Match object — accepted
+```
+
+---
+
+### Pitfall 5: Applying `latin-1` as a "Safe" Fallback
+
+```python
+# DANGEROUS: latin-1 decodes every byte without error, masking real encoding problems
+raw = b"\xe4\xb8\xad\xe6\x96\x87"  # "中文" in UTF-8
+wrong = raw.decode("latin-1")       # No error, but produces "ä¸­æ–‡" — garbage
+correct = raw.decode("utf-8")       # "中文"
+```
+
+Use `errors="replace"` with UTF-8 when you expect mostly UTF-8 but may have isolated bad bytes,
+and always log or alert when replacements occur.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Type | ReDoS safe | Unicode categories | Speed | Best use |
+|------|------|-----------|-------------------|-------|----------|
+| `re` | stdlib | No | Limited (`\w` is Unicode) | Fast | Standard text patterns, input validation |
+| `regex` | third-party pip | Atomic groups help | Full `\p{Lu}` etc. | Comparable | Complex Unicode, possessive quantifiers |
+| `fnmatch` | stdlib | N/A (glob only) | No | Very fast | File glob matching (`*.py`) |
+| `pyparsing` | third-party pip | N/A (PEG parser) | Via Python | Slower | Grammar-based parsing, DSLs |
+| `lark` | third-party pip | N/A (Earley/LALR) | Via Python | Fast on compiled | Complex grammars, language parsing |
+| `hypothesis` | third-party pip | N/A | N/A | N/A | Property-based testing of regex |
+
+**Python version notes:**
+- `re.fullmatch()` added in Python 3.4.
+- `re.Pattern` and `re.Match` as proper generic types for annotations: Python 3.8+.
+- `re.compile()` cache size: 512 entries (CPython 3.11+, up from 100 in earlier versions).
+- f-strings: Python 3.6; `f"{x = }"` self-doc: Python 3.8; multi-line f-string with backslash in expression: Python 3.12 (PEP 701).
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q1: What is the difference between `str` and `bytes` in Python 3, and why does the distinction matter for a FastAPI service?**
+**Short:** str holds Unicode code points while bytes holds raw octets, and ASGI delivers HTTP bodies as bytes.
+`str` is a sequence of Unicode code points; `bytes` is a sequence of raw octets. The distinction
+matters because the ASGI interface delivers HTTP bodies as `bytes`. FastAPI (via Starlette) decodes
+the body to `str` only for JSON and form data endpoints. A file upload or a streaming endpoint
+works with raw `bytes`. Confusing the two causes `TypeError` at runtime and can silently corrupt
+data if an implicit coercion somehow occurs (it never does in Python 3, which raises immediately).
+
+**Q2: What does `len("你好")` return and why?**
+**Short:** len() counts Unicode code points, not encoded bytes, so a two-character string returns 2.
+It returns 2. `len()` on a `str` counts Unicode code points, not bytes. "你" is U+4F60 and "好" is
+U+597D — two code points. Their UTF-8 encoding is 3 bytes each (6 bytes total), but `len()` does
+not know or care about the encoding. Use `len(s.encode("utf-8"))` to get the byte count.
+
+**Q3: What is PEP 393 and why does it matter for memory efficiency?**
+**Short:** PEP 393 lets CPython store each string at 1, 2, or 4 bytes per character based on its widest code point.
+PEP 393 (CPython 3.3) introduced "compact" string storage: CPython picks the narrowest width (1, 2,
+or 4 bytes per code point) based on the highest code point in the string. A pure-ASCII 1 000-char
+string uses 1 000 bytes of data; adding a single emoji widens every character to 4 bytes, costing
+4 000 bytes. A corpus of ASCII product names is 4x smaller than if stored as UCS-4.
+
+**Q4: What is the UTF-8 BOM and how do you handle it in Python?**
+**Short:** The UTF-8 BOM is U+FEFF, and utf-8-sig strips it on decode while adding it back on encode.
+The BOM is U+FEFF, encoded as `\xef\xbb\xbf` in UTF-8. Windows tools (Notepad, Excel) prepend it.
+Decoding with `"utf-8"` leaves a `﻿` character at position 0; `"utf-8-sig"` strips it on read
+and adds it on write. Use `"utf-8-sig"` when consuming Windows CSV files or producing Excel-compatible
+output.
+
+**Q5: Explain `memoryview` and when you would use it instead of slicing a `bytes` object.**
+**Short:** memoryview gives a zero-copy view into a buffer, avoiding the copy that slicing bytes performs each time.
+`memoryview` is a zero-copy view into any buffer-protocol object (`bytes`, `bytearray`,
+`array.array`, NumPy). Slicing a `memoryview` creates a new view into the same memory — no
+allocation. Slicing `bytes` allocates and copies each time. Use it when making many slices of a
+large buffer: binary protocol parsing, video frames, `socket.send()` of sub-ranges. Break-even is
+roughly 1 KB; below that, copy overhead is negligible.
+
+**Q6: What is the difference between `re.match()`, `re.search()`, and `re.fullmatch()`?**
+**Short:** re.fullmatch requires the entire string to match, unlike match or search, which allow partial matches.
+`re.match()` anchors only at the start but does not require consuming the full string. `re.search()`
+scans for the first match anywhere in the string. `re.fullmatch()` requires the pattern to span the
+entire string. For input validation always use `re.fullmatch()` — `re.match()` silently accepts
+trailing garbage after a valid prefix.
+
+**Q7: What are named groups in regex and how do you use them?**
+**Short:** Named groups, written (?P<name>...), let you read captures by name via group() or groupdict().
+Named groups use the syntax `(?P<name>...)`. After a match, `m.group("name")` and `m.groupdict()`
+return the captured text by name. Named groups make patterns self-documenting and protect code from
+breaking when groups are reordered. Example: `r"(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})"`.
+In `re.sub()`, named back-references are written as `\g<name>`.
+
+**Q8: What is catastrophic backtracking and how do you prevent it?**
+**Short:** Catastrophic backtracking is exponential-time regex matching caused by ambiguous nested quantifiers like (a+)+.
+Catastrophic backtracking occurs when an NFA regex engine explores O(2^n) paths on a non-matching
+input, caused by ambiguous nested quantifiers like `(a+)+`. Prevention: (1) rewrite the pattern —
+`(a+)+` becomes `a+`; (2) use the `regex` library's atomic groups `(?>a+)+` to prevent backtracking
+into a committed match; (3) for user-supplied patterns, run matching in a subprocess with a
+hard wall-clock timeout and kill the process if it exceeds it.
+
+**Q9: Why should `re.compile()` be called at module level, and what is the internal cache in the `re` module?**
+**Short:** Compiling patterns at module level with re.compile avoids paying the internal pattern-cache lookup on every call.
+`re.compile()` translates the pattern into a compiled `re.Pattern` object once. Without it,
+`re.match(pattern_str, text)` checks an internal LRU cache (512 entries in CPython 3.11); a cache
+hit still pays a dict-lookup cost, and a miss triggers full recompilation. Module-level
+`re.compile()` is zero overhead at call time, enables `re.VERBOSE` for inline documentation, and
+makes the intent explicit to readers.
+
+**Q10: What are non-capturing groups and why use them over capturing groups?**
+**Short:** Non-capturing groups (?:...) group sub-patterns without allocating a back-reference, making them slightly faster.
+`(?:...)` groups sub-expressions without allocating a numbered back-reference or storing the match.
+Use them for alternation or repetition when the captured text is not needed: `(?:jpg|png)+`.
+They are slightly faster (no capture bookkeeping), keep `m.groups()` uncluttered, and prevent
+consumers from accidentally depending on a specific group number.
+
+**Q11: What does the `re.DOTALL` flag do and when is it needed?**
+**Short:** re.DOTALL makes the dot metacharacter also match newline characters, which it excludes by default.
+By default `.` matches any character except `\n`. With `re.DOTALL` (alias `re.S`), `.` also
+matches newlines. Use it when the match target spans multiple lines — extracting a multi-line block
+from HTML, or capturing a JSON value that contains embedded newlines. Without it, `.+` truncates at
+the first `\n`.
+
+**Q12: How does f-string performance compare to `.format()` and `%` formatting?**
+**Short:** f-strings are the fastest of Python's string formatting methods, roughly 3x faster than .format().
+f-strings are the fastest of the three. On CPython 3.11, micro-benchmarks show f-strings are
+roughly 3x faster than `.format()` and 1.5–2x faster than `%`. f-strings compile to
+`FORMAT_VALUE` / `BUILD_STRING` bytecode opcodes; `.format()` requires a method call plus runtime
+format-string parsing; `%` scans the format string at runtime. For most web services the delta is
+negligible, but in tight loops generating thousands of log lines or CSV rows per second it adds up.
+
+**Q13: Why does decoding bytes with `latin-1` never raise `UnicodeDecodeError`, even on corrupted or wrong-encoding data?**
+**Short:** latin-1 maps every byte 0-255 to a code point, so it never raises UnicodeDecodeError even on wrong-encoding data.
+`latin-1` maps every possible byte value 0-255 directly to a Unicode code point, so no byte
+sequence is ever invalid for it. This makes it tempting to use as a universal "safe" fallback when
+the real encoding is unknown, but decoding UTF-8 bytes as `latin-1` produces a string that decodes
+successfully while containing garbage characters — UTF-8 `中文` becomes the nonsense string
+`ä¸­æ–‡` with no exception raised to signal the mismatch. Prefer `errors="replace"` with the
+correct expected encoding, which fails loudly and visibly, over silently corrupting data with
+`latin-1`.
+
+**Q14: What is the difference between the `replace`, `ignore`, and `backslashreplace` error handlers when decoding bytes?**
+**Short:** The replace handler substitutes invalid bytes with a placeholder, ignore silently drops them, and backslashreplace shows their hex value.
+All three decide what happens when a byte sequence cannot be decoded, but they produce different
+output for the invalid bytes. `errors="replace"` substitutes each invalid byte with the Unicode
+replacement character, preserving the string's length and making corruption visible without
+crashing. `errors="ignore"` silently drops the invalid bytes entirely, almost always the wrong
+choice in production because it destroys evidence that data was corrupted. `errors="backslashreplace"`
+renders invalid bytes as an escaped hex sequence like `\xe9`, the most useful choice for debugging
+because it preserves the exact original byte value in a readable form.
+
+**Q15: What do the regex lookbehind `(?<=...)` and negative lookahead `(?!...)` assertions match, and how do they differ from capturing groups?**
+**Short:** Lookaround assertions match surrounding context without consuming characters or including them in the result.
+Lookbehind and lookahead assertions check that surrounding text matches a pattern without
+consuming it or including it in the match result. `(?<=\$)\d+` matches digits only when
+immediately preceded by a literal `$`, but the `$` itself is not part of the returned match,
+useful for extracting an amount without the currency symbol. `(?!bar)` after `foo` matches `foo`
+only when not immediately followed by `bar`, excluding one alternative without a capturing-group
+workaround. Because they consume zero characters, lookaround assertions combine freely with the
+rest of the pattern without disturbing group numbering.
+
+**Q16: What does the `{x=}` self-documenting f-string specifier print, and how do the `!r` and `!a` conversion flags differ?**
+**Short:** The {x=} f-string specifier prints both the source expression and its evaluated value together.
+`{x=}` (added in Python 3.8) expands to both the literal source expression and its value,
+printing `x = 42` instead of just `42`. This is a debugging convenience that eliminates writing
+`print(f"x={x}")` by hand and keeps the printed label in sync automatically if the variable name
+changes. The `!r` conversion flag calls `repr()` on the value before formatting — `f"{name!r}"`
+prints `'café'` with quotes — while `!a` calls `ascii()`, which additionally escapes any
+non-ASCII characters, printing `'caf\xe9'` instead. Use `!r` for readable debug output and `!a`
+only when the destination cannot safely display non-ASCII bytes.
+
+---
+
+## 13. Best Practices
+
+1. **Always specify `encoding=` in `open()` calls.** Default locale encoding varies by platform.
+   Set `encoding="utf-8"` unless you have a specific reason to use another encoding. For consuming
+   Windows-generated CSV, use `encoding="utf-8-sig"`.
+
+2. **Use UTF-8 as the canonical encoding for all new files, APIs, and database columns.** Set
+   `character set utf8mb4` in MySQL; `UTF8` in PostgreSQL default. Return `Content-Type:
+   application/json; charset=utf-8` from all FastAPI endpoints.
+
+3. **Use `re.fullmatch()` for input validation, never `re.match()`.** Add the pattern to a
+   module-level compiled constant with `re.compile()` and a descriptive name.
+
+4. **Validate or sandbox user-supplied regex patterns.** At minimum: cap pattern length (e.g.,
+   200 characters), run in a thread or process with a timeout (100–500 ms), and reject patterns
+   with known dangerous constructs (`(.*)+`, `(\w+)+`, etc.) via a static pre-check.
+
+5. **Prefer `"".join(parts)` over `result += fragment` in loops.** This applies to both `str`
+   and `bytes` building. The join idiom is O(n); repeated concatenation is O(n²).
+
+6. **Use `memoryview` for binary data that is sliced repeatedly.** Wrap large byte buffers with
+   `memoryview()` before entering a parsing loop. Release the view with `mv.release()` or use a
+   `with` block when finished to return the buffer to the GC.
+
+7. **Use `errors="replace"` or `errors="backslashreplace"` when decoding untrusted bytes** and log
+   or alert when replacements occur. Never silently swallow encoding errors in data pipelines —
+   they indicate upstream data quality issues.
+
+8. **Use named groups `(?P<name>...)` in complex patterns.** Named groups make code resilient to
+   group-number changes when the pattern is modified, and they produce self-documenting
+   `groupdict()` results.
+
+9. **Apply `re.VERBOSE` for patterns longer than one line.** Inline comments and whitespace make
+   the intent clear, reducing the maintenance burden for future reviewers.
+
+10. **Test regex patterns with `hypothesis`.** Property-based testing discovers inputs that match
+    unexpectedly, inputs that should match but do not, and — critically — inputs that trigger
+    catastrophically slow matching.
+
+---
+
+## 14. Case Study
+
+### Building a Safe User-Input Regex Validator in FastAPI
+
+**Context:** A developer tooling platform lets users define text extraction rules as regex patterns.
+A malicious or careless user can submit `(.*)+$`, which takes exponential time on a moderately long
+document. The endpoint must validate syntax, check for ReDoS-prone structures, and enforce a hard
+runtime limit before returning match results.
+
+---
+
+#### BROKEN Implementation (Vulnerable to ReDoS)
+
+```python
+# BROKEN — do not deploy this
+import re
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class RuleRequest(BaseModel):
+    pattern: str
+    test_input: str
+
+@app.post("/rules/validate")
+def validate_rule(req: RuleRequest) -> dict:
+    # PROBLEM 1: no length check — user can submit a 10 MB pattern
+    # PROBLEM 2: re.compile raises re.error for bad syntax, but succeeds for ReDoS patterns
+    try:
+        compiled = re.compile(req.pattern)          # compiles; (a+)+b is valid syntax
+    except re.error as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # PROBLEM 3: applying (a+)+b to a long string of 'a' chars hangs the event loop thread
+    match = compiled.search(req.test_input)         # blocks forever on crafted input
+
+    return {"matched": match is not None, "span": match.span() if match else None}
+```
+
+Why this is dangerous: `re.compile(r"(a+)+b")` succeeds — ReDoS patterns are syntactically valid.
+`compiled.search("a" * 50)` blocks for minutes to hours. In Uvicorn's sync worker thread, one
+such request stalls all other requests handled by that thread.
+
+---
+
+#### FIX — Safe Implementation with Process Isolation and Timeout
+
+```python
+# FIXED — production-safe user-regex endpoint
+import re
+import signal
+import multiprocessing
+from typing import Any
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI()
+
+# Safety limits
+MAX_PATTERN_LEN     = 200    # characters
+MAX_INPUT_LEN       = 2_000  # characters
+MATCH_TIMEOUT_SECS  = 0.5    # 500 ms wall-clock limit
+
+# Static blocklist of structural ReDoS indicators (heuristic, not exhaustive)
+REDOS_INDICATORS = re.compile(
+    r"""
+    (\(.*?[+*]\))+  |   # nested quantifier on a group
+    (\.\*){2,}          # two or more .* in sequence
+    """,
+    re.VERBOSE,
+)
+
+class RuleRequest(BaseModel):
+    pattern: str
+    test_input: str
+
+def _apply_regex(pattern: str, text: str, result_queue: "multiprocessing.Queue[Any]") -> None:
+    """Worker function executed in a child process."""
+    try:
+        compiled = re.compile(pattern)
+        m = compiled.search(text)
+        if m:
+            result_queue.put({"matched": True, "span": list(m.span()), "group": m.group()})
+        else:
+            result_queue.put({"matched": False, "span": None, "group": None})
+    except Exception as exc:
+        result_queue.put({"error": str(exc)})
+
+def safe_regex_apply(pattern: str, text: str) -> dict:
+    """
+    Run regex matching in a child process with a hard wall-clock timeout.
+    If the child does not return within MATCH_TIMEOUT_SECS, it is killed and
+    we raise HTTPException 400.
+    """
+    ctx = multiprocessing.get_context("spawn")   # fork-safe on all platforms
+    q: multiprocessing.Queue = ctx.Queue()
+    proc = ctx.Process(target=_apply_regex, args=(pattern, text, q))
+    proc.start()
+    proc.join(timeout=MATCH_TIMEOUT_SECS)
+
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Pattern timed out after {MATCH_TIMEOUT_SECS}s. "
+                "The pattern may be vulnerable to catastrophic backtracking."
+            ),
+        )
+
+    if q.empty():
+        raise HTTPException(status_code=500, detail="Regex worker returned no result")
+
+    result = q.get_nowait()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=f"Regex error: {result['error']}")
+
+    return result
+
+@app.post("/rules/validate")
+def validate_rule(req: RuleRequest) -> dict:
+    # Step 1: length guards
+    if len(req.pattern) > MAX_PATTERN_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Pattern too long: {len(req.pattern)} chars (max {MAX_PATTERN_LEN})",
+        )
+    if len(req.test_input) > MAX_INPUT_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Input too long: {len(req.test_input)} chars (max {MAX_INPUT_LEN})",
+        )
+
+    # Step 2: static heuristic check for obvious ReDoS structures
+    if REDOS_INDICATORS.search(req.pattern):
+        raise HTTPException(
+            status_code=400,
+            detail="Pattern contains potentially unsafe nested quantifiers.",
+        )
+
+    # Step 3: syntax check
+    try:
+        re.compile(req.pattern)
+    except re.error as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid regex: {exc}")
+
+    # Step 4: apply with process isolation and timeout
+    result = safe_regex_apply(req.pattern, req.test_input)
+    return result
+```
+
+The four gates run in this exact order inside `validate_rule()`; the two cheapest checks
+(length, heuristic blocklist) reject the bulk of bad requests before the pipeline ever pays the
+process-spawn cost of the timed match:
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    reqIn(["POST /rules/validate<br/>pattern + test_input"]) --> g1{"length under<br/>200 / 2000 chars?"}
+    g1 -->|"no"| r1(["400<br/>too long"])
+    g1 -->|"yes"| g2{"heuristic ReDoS<br/>blocklist match?"}
+    g2 -->|"yes"| r2(["400<br/>unsafe pattern"])
+    g2 -->|"no"| g3{"re.compile()<br/>valid syntax?"}
+    g3 -->|"no"| r3(["400<br/>invalid regex"])
+    g3 -->|"yes"| g4{"child process<br/>under 500ms?"}
+    g4 -->|"timeout, killed"| r4(["400<br/>pattern timed out"])
+    g4 -->|"yes"| ok(["200<br/>matched + span"])
+
+    class reqIn req
+    class g1,g2,g3,g4 mathOp
+    class r1,r2,r3,r4 lossN
+    class ok train
+```
+
+#### Operational Notes
+
+| Concern | Mitigation |
+|---------|-----------|
+| Pattern length | Hard cap at 200 chars; return 400 immediately |
+| Structural ReDoS | Heuristic blocklist on nested quantifiers (first line of defense) |
+| Algorithmic ReDoS | Process isolation + 500 ms `join()` timeout (second line of defense) |
+| Worker startup cost | `multiprocessing.spawn` ~30–80 ms; acceptable for a validation endpoint |
+| Production alternative | Use the `regex` library's atomic groups in the worker to eliminate backtracking for known patterns |
+
+**Why `multiprocessing` and not `threading`?** A CPU-spinning regex in a thread holds the GIL and
+blocks all other threads in the same process. A subprocess has its own GIL and is killed cleanly
+by `proc.kill()`. The 30–80 ms spawn cost on `"spawn"` context is acceptable for a validation
+endpoint. In high-traffic services, use a pre-warmed `ProcessPoolExecutor` and
+`submit(...).result(timeout=0.5)` to reduce per-request overhead to under 5 ms.

@@ -1,5 +1,5 @@
 # Sampling & Decoding Strategies — Token Selection Internals
-Deep-dive sub-file of [Inference & Decoding](README.md). Covers the full token-selection toolbox beyond temperature and top-p — min-p, typical/eta/epsilon sampling, Mirostat, repetition/presence/frequency penalties, DRY, contrastive search and contrastive decoding, XTC, beam search, the sampler-ordering gotcha, and determinism in production LLM APIs.
+Deep-dive sub-file of [Inference & Decoding](inference_and_decoding.md). Covers the full token-selection toolbox beyond temperature and top-p — min-p, typical/eta/epsilon sampling, Mirostat, repetition/presence/frequency penalties, DRY, contrastive search and contrastive decoding, XTC, beam search, the sampler-ordering gotcha, and determinism in production LLM APIs.
 
 ---
 
@@ -871,7 +871,7 @@ The problem being solved is structural, not empirical: every `log p` term is neg
 
 **Cost**: `k×` the KV cache of a single sequence (each beam maintains its own cache) and `k×` the compute per step. For `k=5`, that's 5× the memory footprint of greedy/sampling for the same request.
 
-**Why rare in production serving**: (1) memory — incompatible with tight KV cache budgets at scale; (2) **incompatible with continuous batching** — all `k` beams for a request must be tracked and typically must finish together, holding a scheduling slot until the *longest* beam completes, defeating the iteration-level scheduling that gives continuous batching its throughput gains (see [vLLM Deep Dive](../vllm_deep_dive/README.md)); (3) quality — for *open-ended* generation, beam search empirically produces more generic, repetitive text than sampling, because maximizing joint probability favors safe, high-confidence-at-every-step phrasing over the more varied paths a human writer would take. It remains the right tool where maximizing sequence likelihood genuinely *is* the objective: machine translation, speech-to-text transcription, and some constrained/structured generation tasks.
+**Why rare in production serving**: (1) memory — incompatible with tight KV cache budgets at scale; (2) **incompatible with continuous batching** — all `k` beams for a request must be tracked and typically must finish together, holding a scheduling slot until the *longest* beam completes, defeating the iteration-level scheduling that gives continuous batching its throughput gains (see [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md)); (3) quality — for *open-ended* generation, beam search empirically produces more generic, repetitive text than sampling, because maximizing joint probability favors safe, high-confidence-at-every-step phrasing over the more varied paths a human writer would take. It remains the right tool where maximizing sequence likelihood genuinely *is* the objective: machine translation, speech-to-text transcription, and some constrained/structured generation tasks.
 
 ### 6.8 Determinism, seeds, and why "temperature=0" isn't always reproducible
 
@@ -1083,8 +1083,8 @@ Per-route defaults, not one global config: code-generation routes should default
 
 ## Related
 
-- [Inference & Decoding README](README.md) — the broader serving picture: KV cache, batching, speculative decoding
+- [Inference & Decoding README](inference_and_decoding.md) — the broader serving picture: KV cache, batching, speculative decoding
 - [Speculative Decoding](speculative_decoding.md) — why draft and target models must share sampler configuration
 - [Constrained Decoding & Structured Outputs](constrained_decoding_and_structured_outputs.md) — how grammar masks compose with the sampler pipeline
 - [LLM Eval Harness in Production](../case_studies/cross_cutting/llm_eval_harness_in_production.md) — measuring repetition rate and quality regressions from sampler changes
-- [vLLM Deep Dive](../vllm_deep_dive/README.md) — continuous batching and why beam search doesn't fit it
+- [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) — continuous batching and why beam search doesn't fit it

@@ -1,7 +1,7 @@
 # Semi-Supervised Learning — Deep Dive
 
 > Deep dive extending §4.4 of the parent module
-> [active_learning_and_weak_supervision](./README.md), which names pseudo-labeling and
+> [active_learning_and_weak_supervision](active_learning_and_weak_supervision.md), which names pseudo-labeling and
 > FixMatch but does not develop them. This file is the mechanics: the three assumptions
 > that decide whether unlabeled data helps, self-training and its confirmation-bias trap,
 > consistency regularization (Pi-model, Mean Teacher), FixMatch/MixMatch, and graph-based
@@ -781,8 +781,8 @@ loss, coverage = fixmatch_step(model, x_lab, y_lab, u_weak, u_strong, tau=0.95)
 
 ## See Also
 
-- [active_learning_and_weak_supervision](./README.md) — parent module; SSL complements active learning and weak supervision
-- [graph_neural_networks](../graph_neural_networks/README.md) — GNNs as learnable, feature-aware label propagation
+- [active_learning_and_weak_supervision](active_learning_and_weak_supervision.md) — parent module; SSL complements active learning and weak supervision
+- [graph_neural_networks](../graph_neural_networks/graph_neural_networks.md) — GNNs as learnable, feature-aware label propagation
 - [computer_vision/self_supervised_vision](../computer_vision/self_supervised_vision.md) — the pretraining alternative to joint SSL
-- [self_supervised_and_contrastive_learning](../self_supervised_and_contrastive_learning/README.md) — SimCLR/BYOL warm starts and the SSL-vs-self-supervised contrast
-- [uncertainty_quantification_and_conformal_prediction](../uncertainty_quantification_and_conformal_prediction/README.md) — calibration for reliable confidence thresholds
+- [self_supervised_and_contrastive_learning](../self_supervised_and_contrastive_learning/self_supervised_and_contrastive_learning.md) — SimCLR/BYOL warm starts and the SSL-vs-self-supervised contrast
+- [uncertainty_quantification_and_conformal_prediction](../uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md) — calibration for reliable confidence thresholds

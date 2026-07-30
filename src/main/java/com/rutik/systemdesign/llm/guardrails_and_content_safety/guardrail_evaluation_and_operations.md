@@ -3,7 +3,7 @@
 
 ## 1. Concept Overview
 
-The parent module [Guardrails & Content Safety](README.md) teaches how to **build** a guardrail: where the filters sit, which classifier to pick, how the tiers stack, what a threshold does. This file covers the part that starts the day after it ships — how you **operate** one.
+The parent module [Guardrails & Content Safety](guardrails_and_content_safety.md) teaches how to **build** a guardrail: where the filters sit, which classifier to pick, how the tiers stack, what a threshold does. This file covers the part that starts the day after it ships — how you **operate** one.
 
 That distinction is not cosmetic. A guardrail is the only component in an LLM stack whose correctness is a *policy* rather than a *behaviour*: nothing crashes when it is wrong, no test fails, and both of its failure modes are silent. A false negative ships harm and produces no log line that looks like an error. A false positive blocks a real person, who mostly just leaves. There is no exception, no 500, no p99 spike — which is why guardrail regressions are typically discovered by a journalist or a support escalation rather than by a monitor.
 

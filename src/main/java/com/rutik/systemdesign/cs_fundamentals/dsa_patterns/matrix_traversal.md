@@ -419,11 +419,11 @@ flowchart TD
 
 ## 10. Cross-links
 
-- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/) — 2D array layout, row-major storage, index arithmetic
-- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/) — why O(m·n) is optimal (you must read every cell at least once)
+- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — 2D array layout, row-major storage, index arithmetic
+- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — why O(m·n) is optimal (you must read every cell at least once)
 - Sibling patterns: [graph_traversal.md](graph_traversal.md) (grid connectivity), [prefix_sum.md](prefix_sum.md) (2D summed-area table), [modified_binary_search.md](modified_binary_search.md) (sorted-matrix search)
-- Applied: [`../../cs_fundamentals/computer_architecture_and_memory_hierarchy/`](../computer_architecture_and_memory_hierarchy/) — row-major vs column-major access and cache behavior (why iterating along rows is faster than along columns)
-- Master index: [dsa_patterns/README.md](README.md)
+- Applied: [`../../cs_fundamentals/computer_architecture_and_memory_hierarchy/`](../computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — row-major vs column-major access and cache behavior (why iterating along rows is faster than along columns)
+- Master index: [dsa_patterns/README.md](dsa_patterns.md)
 
 ---
 
@@ -463,4 +463,4 @@ For each layer `l` from `0` to `n//2 - 1`, and each offset `i` within the layer,
 Main-diagonal reflection (transpose) swaps `a[i][j]` with `a[j][i]`. Anti-diagonal reflection swaps `a[i][j]` with `a[n-1-j][n-1-i]`. They are different mirror lines, and composing each with a row/column reverse yields different rotations — main-diagonal + row-reverse gives 90° CW, while anti-diagonal + row-reverse gives 90° CCW. Naming the exact mirror prevents the classic "rotated the wrong direction" bug.
 
 **Q: When iterating a large matrix, why can row-major traversal be much faster than column-major even at the same O(m·n)?**
-Memory layout. In row-major storage (C, Python lists of lists approximately, NumPy default), consecutive elements of a row are contiguous, so iterating `for r: for c:` walks memory sequentially and is cache-friendly; iterating `for c: for r:` jumps `cols` elements each step, causing cache misses and TLB pressure. Big-O is identical, but the constant factor can differ by an order of magnitude — see [computer_architecture_and_memory_hierarchy](../computer_architecture_and_memory_hierarchy/). Mentioning this signals systems awareness beyond raw algorithmic correctness.
+Memory layout. In row-major storage (C, Python lists of lists approximately, NumPy default), consecutive elements of a row are contiguous, so iterating `for r: for c:` walks memory sequentially and is cache-friendly; iterating `for c: for r:` jumps `cols` elements each step, causing cache misses and TLB pressure. Big-O is identical, but the constant factor can differ by an order of magnitude — see [computer_architecture_and_memory_hierarchy](../computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md). Mentioning this signals systems awareness beyond raw algorithmic correctness.

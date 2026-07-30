@@ -54,7 +54,7 @@ LibSQL or Postgres pgvector; `Memory` class manages embedding + retrieval.
 
 ### 4.5 MCP Tools
 
-`MastraMCPClient({command, args})` connects to MCP server; tools auto-imported. See [MCP — Model Context Protocol](../mcp_model_context_protocol/README.md) for the protocol itself.
+`MastraMCPClient({command, args})` connects to MCP server; tools auto-imported. See [MCP — Model Context Protocol](../mcp_model_context_protocol/mcp_model_context_protocol.md) for the protocol itself.
 
 ---
 

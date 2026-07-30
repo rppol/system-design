@@ -431,8 +431,13 @@ def render_path_block(section, tier, cfg, order):
         pos = seq.index(mod) + 1 if mod in seq else "?"
         # absent from the Files map means the module has exactly one file: build_paths
         # only records an entry when `len(real) > 1`, i.e. when there was a choice
-        n = len(fmap.get(mod) or ["README.md"])
-        out.append(f"| {pos} | [{name}]({name}/) | {'README only' if n == 1 else f'{n} files'} |")
+        n = len(fmap.get(mod) or [_module_page(mod)])
+        # Link the module PAGE, not the directory. `[name](name/)` used to work only
+        # because GitHub falls back to a README.md inside a folder; with the module page
+        # renamed to <folder>.md there is no README to fall back to, so a bare directory
+        # link now renders as a file listing.
+        out.append(f"| {pos} | [{name}]({name}/{_module_page(mod)}) | "
+                   f"{'module page only' if n == 1 else f'{n} files'} |")
     # The deferred list was hand-written and went stale the same way the table did --
     # every section that GAINED a module still listed it as deferred. It is exactly
     # `full - tier`, so generate it rather than maintain it.
@@ -547,6 +552,15 @@ def _declared_paths(abs_path):
     return out
 
 
+def _module_page(module):
+    """The module's own content page. Since 2026-07-30 a module page is named for its
+    folder (llm/advanced_rag/advanced_rag.md), not README.md -- only the 16 SECTION
+    landing pages are still called README.md. The study-paths marker lives in this file
+    and every tier must list it, so this is the one filename the tier machinery resolves
+    by convention rather than by being told."""
+    return os.path.basename(module.rstrip("/")) + ".md"
+
+
 def build_paths_from_markers(order):
     """Derive {section: {senior, principal, seniorFiles, principalFiles, cases}} by walking
     the tree and reading each file's marker. Ordering is imposed by STUDY_ORDER, so the
@@ -557,7 +571,7 @@ def build_paths_from_markers(order):
         cfg.update({t + "Files": {} for t in TIERS})
         cfg["cases"] = {t: [] for t in TIERS}
         for mod in mods:                                   # STUDY_ORDER order == path order
-            decl = _declared_paths(os.path.join(BASE_DIR, mod, "README.md"))
+            decl = _declared_paths(os.path.join(BASE_DIR, mod, _module_page(mod)))
             if not decl:
                 continue
             real = _module_sourcefiles(mod) or set()
@@ -565,19 +579,20 @@ def build_paths_from_markers(order):
                 cfg[tier].append(mod)
                 for fn in keep:
                     if fn not in real:
-                        problems.append(f"{mod}/README.md study-paths[{tier}]: '{fn}' is not a file in this module")
-                if "README.md" not in keep:
-                    problems.append(f"{mod}/README.md study-paths[{tier}]: must list README.md -- the module page is never optional")
+                        problems.append(f"{mod}/{_module_page(mod)} study-paths[{tier}]: '{fn}' is not a file in this module")
+                if _module_page(mod) not in keep:
+                    problems.append(f"{mod}/{_module_page(mod)} study-paths[{tier}]: must list "
+                                    f"'{_module_page(mod)}' -- the module page is never optional")
                 if len(real) > 1:                          # only record when there is a choice
                     cfg[tier + "Files"][mod] = [f for f in keep if f in real]
-        csidx = os.path.join(BASE_DIR, sec, "case_studies", "README.md")
+        csidx = os.path.join(BASE_DIR, sec, "case_studies", "case_studies.md")
         for tier, names in _declared_paths(csidx).items():
             for name in names:
                 rel = os.path.join(sec, "case_studies", name)
                 if any(p in CS_EXCLUDE_DIRS for p in rel.split(os.sep)):
-                    problems.append(f"{sec}/case_studies/README.md study-paths[{tier}]: '{name}' is under an excluded dir")
+                    problems.append(f"{sec}/case_studies/case_studies.md study-paths[{tier}]: '{name}' is under an excluded dir")
                 elif not os.path.isfile(os.path.join(BASE_DIR, rel)):
-                    problems.append(f"{sec}/case_studies/README.md study-paths[{tier}]: no such case study '{name}'")
+                    problems.append(f"{sec}/case_studies/case_studies.md study-paths[{tier}]: no such case study '{name}'")
                 else:
                     cfg["cases"][tier].append(rel)
         if any(cfg[t] for t in TIERS):
@@ -704,8 +719,9 @@ def check_wiring(questions, strict):
                         for fn in lst:
                             if fn not in real:
                                 errors.append(f"STUDY_PATHS.{sec}.{tier}Files['{mod}']: '{fn}' not on disk")
-                        if "README.md" not in lst:
-                            errors.append(f"STUDY_PATHS.{sec}.{tier}Files['{mod}']: missing README.md -- the module page is never optional")
+                        if _module_page(mod) not in lst:
+                            errors.append(f"STUDY_PATHS.{sec}.{tier}Files['{mod}']: missing "
+                                          f"'{_module_page(mod)}' -- the module page is never optional")
                     # (5) a tiered module with sub-files and no allowlist silently
                     #     re-inflates the path the next time a deep-dive is added
                     for mod in arr:

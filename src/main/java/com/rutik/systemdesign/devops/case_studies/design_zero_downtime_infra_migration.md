@@ -78,7 +78,7 @@ flowchart LR
 - Application re-architecture (microservice splits, language rewrites) — this is a **lift-and-shift-first** migration; re-platforming happens *after* the estate is on AWS.
 - Networking primitives (cross-cluster connectivity, service mesh internals) — see [`cross_cutting/multi_cluster_networking.md`](./cross_cutting/multi_cluster_networking.md).
 - Terraform backend/state mechanics at scale — see [`cross_cutting/terraform_state_at_scale.md`](./cross_cutting/terraform_state_at_scale.md).
-- DR strategy for the *target* estate post-migration — see [`../disaster_recovery_and_resilience/README.md`](../disaster_recovery_and_resilience/README.md).
+- DR strategy for the *target* estate post-migration — see [`../disaster_recovery_and_resilience/README.md`](../disaster_recovery_and_resilience/disaster_recovery_and_resilience.md).
 - Cost optimization (Reserved Instances, Savings Plans) of the steady-state target — only the *overlap* cost is in scope.
 
 ---
@@ -524,7 +524,7 @@ spec:
       mirrorPercentage: { value: 100 }       # validate before shifting weight
 ```
 
-Mesh weighting takes effect in **< 1s** (config push) versus DNS at **TTL seconds** — hence DNS for coarse cross-estate failover, mesh for the surgical per-request shift. See [`cross_cutting/multi_cluster_networking.md`](./cross_cutting/multi_cluster_networking.md) for the cross-estate connectivity that makes mesh mirroring possible, and [`../deployment_strategies/README.md`](../deployment_strategies/README.md) for the canary mechanics this reuses.
+Mesh weighting takes effect in **< 1s** (config push) versus DNS at **TTL seconds** — hence DNS for coarse cross-estate failover, mesh for the surgical per-request shift. See [`cross_cutting/multi_cluster_networking.md`](./cross_cutting/multi_cluster_networking.md) for the cross-estate connectivity that makes mesh mirroring possible, and [`../deployment_strategies/README.md`](../deployment_strategies/deployment_strategies.md) for the canary mechanics this reuses.
 
 ### 4.4 Rollback + Reconciliation
 

@@ -29,45 +29,45 @@ This section covers:
 
 | # | Module Directory | Phase | Difficulty | Key Topics |
 |---|-----------------|-------|------------|------------|
-| 1 | [ioc_container](ioc_container/) | 1 — Core Container | Intermediate | BeanFactory vs. ApplicationContext, bean scopes, component scan, bean post-processors |
-| 2 | [bean_lifecycle](bean_lifecycle/) | 1 — Core Container | Intermediate | Instantiation, populate properties, BeanPostProcessor, init/destroy, @PostConstruct |
-| 3 | [dependency_injection](dependency_injection/) | 1 — Core Container | Beginner | Constructor vs. field vs. setter injection, circular deps, @Qualifier, @Primary |
-| 4 | [spring_configuration](spring_configuration/) | 1 — Core Container | Beginner | @Configuration, @Bean, @ComponentScan, @PropertySource, @Profile, @Conditional |
-| 5 | [spring_proxies](spring_proxies/) | 2 — Proxies & AOP | Advanced | JDK dynamic proxy, CGLIB, proxyTargetClass, self-invocation bypass, proxy order |
-| 6 | [spring_aop](spring_aop/) | 2 — Proxies & AOP | Advanced | Pointcut expressions, advice types, AspectJ weaving, @Around, proxy limitations — with 1 deep-dive sub-file ([pointcut designators](spring_aop/pointcut_designators.md)) |
-| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | 3 — Spring Boot | Intermediate | @EnableAutoConfiguration, AutoConfiguration.imports, @Conditional* |
-| 8 | [spring_boot_configuration](spring_boot_configuration/) | 3 — Spring Boot | Beginner | @ConfigurationProperties, relaxed binding, config server, secrets management |
-| 9 | [spring_boot_actuator](spring_boot_actuator/) | 3 — Spring Boot | Intermediate | Health indicators, metrics (Micrometer), custom endpoints, security, Prometheus |
-| 10 | [spring_modulith](spring_modulith/) | 3 — Spring Boot | Advanced | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, module tests, docs |
-| 11 | [spring_mvc_architecture](spring_mvc_architecture/) | 4 — Spring Web | Intermediate | DispatcherServlet, HandlerMapping, HandlerAdapter, ViewResolver, message converters |
-| 12 | [request_handling](request_handling/) | 4 — Spring Web | Intermediate | @RequestMapping, argument resolvers, @ControllerAdvice, exception handling |
-| 13 | [filters_and_interceptors](filters_and_interceptors/) | 4 — Spring Web | Intermediate | Servlet Filter vs. HandlerInterceptor, Filter order, OncePerRequestFilter |
-| 14 | [spring_webflux](spring_webflux/) | 4 — Spring Web | Advanced | Reactor, Mono/Flux, Netty, RouterFunction, backpressure, WebClient |
-| 15 | [spring_graphql](spring_graphql/) | 4 — Spring Web | Advanced | Schema-first @QueryMapping/@MutationMapping/@SchemaMapping, @BatchMapping/DataLoader (N+1), subscriptions, cursor pagination, error handling |
-| 16 | [validation_and_error_handling](validation_and_error_handling/) | 4 — Spring Web | Intermediate | Jakarta Validation 3.1, @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 9457) |
-| 17 | [spring_data_jpa](spring_data_jpa/) | 5 — Data & Transactions | Intermediate | JpaRepository, query derivation, JPQL, native queries, projections, N+1 problem |
-| 18 | [spring_transactions](spring_transactions/) | 5 — Data & Transactions | Advanced | Propagation, isolation, @Transactional internals, proxy limits, distributed TX |
-| 19 | [spring_caching](spring_caching/) | 5 — Data & Transactions | Intermediate | @Cacheable, @CacheEvict, CacheManager, Redis integration, cache stampede |
-| 20 | [spring_security_architecture](spring_security_architecture/) | 6 — Security | Advanced | SecurityFilterChain, AuthenticationManager, SecurityContext, CSRF, CORS |
-| 21 | [spring_security_jwt_oauth](spring_security_jwt_oauth/) | 6 — Security | Advanced | JWT validation, OAuth2 resource server, PKCE, Spring Authorization Server |
-| 22 | [spring_cloud_config](spring_cloud_config/) | 7 — Cloud & Messaging | Intermediate | Config server, refresh scope, Vault integration, config encryption |
-| 23 | [spring_cloud_patterns](spring_cloud_patterns/) | 7 — Cloud & Messaging | Advanced | Eureka, Resilience4j, Spring Cloud Gateway, load balancer, circuit breaker — with 1 deep-dive sub-file ([gateway server webmvc](spring_cloud_patterns/gateway_server_webmvc.md)) |
-| 24 | [spring_messaging](spring_messaging/) | 7 — Cloud & Messaging | Intermediate | @KafkaListener, @RabbitListener, message converters, DLQ, idempotency |
-| 25 | [spring_batch](spring_batch/) | 7 — Cloud & Messaging | Advanced | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope, JobRepository, partitioning, skip/retry |
-| 26 | [spring_events_and_scheduling](spring_events_and_scheduling/) | 7 — Cloud & Messaging | Intermediate | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
-| 27 | [spring_ai](spring_ai/) | 7 — Cloud & Messaging | Advanced | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans |
-| 28 | [spring_integration](spring_integration/) | 7 — Cloud & Messaging | Advanced | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
-| 29 | [spring_testing](spring_testing/) | 8 — Testing & Production | Intermediate | @SpringBootTest, @WebMvcTest, MockMvc, WebTestClient, Testcontainers, slice tests |
-| 30 | [spring_performance](spring_performance/) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads, GraalVM native, connection pools |
-| 31 | [observability_and_tracing](observability_and_tracing/) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
-| 32 | [spring_native_graalvm](spring_native_graalvm/) | 8 — Testing & Production | Advanced | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
-| 33 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/) | 4 — Spring Web | Advanced | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/Link/assemblers), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail |
-| 34 | [spring_grpc](spring_grpc/) | 4 — Spring Web | Advanced | @GrpcService beans, server/channel autoconfig, Server/ClientInterceptor, Status↔exception mapping, deadlines, streaming, security + tracing |
-| 35 | [spring_session](spring_session/) | 6 — Security | Advanced | SessionRepositoryFilter, Redis/JDBC/Hazelcast backends, session fixation, concurrent-session control, WebSession, JWT vs stateful tradeoff |
-| 36 | [spring_data_nosql](spring_data_nosql/) | 5 — Data & Transactions | Intermediate | Spring Data MongoDB (MongoTemplate, aggregation, transactions) + Redis (RedisTemplate, @RedisHash, pub/sub) + reactive repositories; NoSQL vs JPA |
-| 37 | [database_migrations](database_migrations/) | 5 — Data & Transactions | Intermediate | Flyway (versioned/repeatable, checksums) + Liquibase (changesets, rollback), expand-contract zero-downtime, Boot integration, Testcontainers |
-| 38 | [spring_websocket_stomp](spring_websocket_stomp/) | 7 — Cloud & Messaging | Advanced | WebSocket handshake, STOMP over WebSocket, simple vs external broker relay, SockJS, per-user destinations, scaling |
-| 39 | [spring_http_clients](spring_http_clients/) | 4 — Spring Web | Intermediate | RestClient vs WebClient vs @HttpExchange, `@ImportHttpServices` groups, connection pooling, timeouts, error handling, MockRestServiceServer |
+| 1 | [ioc_container](ioc_container/ioc_container.md) | 1 — Core Container | Intermediate | BeanFactory vs. ApplicationContext, bean scopes, component scan, bean post-processors |
+| 2 | [bean_lifecycle](bean_lifecycle/bean_lifecycle.md) | 1 — Core Container | Intermediate | Instantiation, populate properties, BeanPostProcessor, init/destroy, @PostConstruct |
+| 3 | [dependency_injection](dependency_injection/dependency_injection.md) | 1 — Core Container | Beginner | Constructor vs. field vs. setter injection, circular deps, @Qualifier, @Primary |
+| 4 | [spring_configuration](spring_configuration/spring_configuration.md) | 1 — Core Container | Beginner | @Configuration, @Bean, @ComponentScan, @PropertySource, @Profile, @Conditional |
+| 5 | [spring_proxies](spring_proxies/spring_proxies.md) | 2 — Proxies & AOP | Advanced | JDK dynamic proxy, CGLIB, proxyTargetClass, self-invocation bypass, proxy order |
+| 6 | [spring_aop](spring_aop/spring_aop.md) | 2 — Proxies & AOP | Advanced | Pointcut expressions, advice types, AspectJ weaving, @Around, proxy limitations — with 1 deep-dive sub-file ([pointcut designators](spring_aop/pointcut_designators.md)) |
+| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md) | 3 — Spring Boot | Intermediate | @EnableAutoConfiguration, AutoConfiguration.imports, @Conditional* |
+| 8 | [spring_boot_configuration](spring_boot_configuration/spring_boot_configuration.md) | 3 — Spring Boot | Beginner | @ConfigurationProperties, relaxed binding, config server, secrets management |
+| 9 | [spring_boot_actuator](spring_boot_actuator/spring_boot_actuator.md) | 3 — Spring Boot | Intermediate | Health indicators, metrics (Micrometer), custom endpoints, security, Prometheus |
+| 10 | [spring_modulith](spring_modulith/spring_modulith.md) | 3 — Spring Boot | Advanced | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, module tests, docs |
+| 11 | [spring_mvc_architecture](spring_mvc_architecture/spring_mvc_architecture.md) | 4 — Spring Web | Intermediate | DispatcherServlet, HandlerMapping, HandlerAdapter, ViewResolver, message converters |
+| 12 | [request_handling](request_handling/request_handling.md) | 4 — Spring Web | Intermediate | @RequestMapping, argument resolvers, @ControllerAdvice, exception handling |
+| 13 | [filters_and_interceptors](filters_and_interceptors/filters_and_interceptors.md) | 4 — Spring Web | Intermediate | Servlet Filter vs. HandlerInterceptor, Filter order, OncePerRequestFilter |
+| 14 | [spring_webflux](spring_webflux/spring_webflux.md) | 4 — Spring Web | Advanced | Reactor, Mono/Flux, Netty, RouterFunction, backpressure, WebClient |
+| 15 | [spring_graphql](spring_graphql/spring_graphql.md) | 4 — Spring Web | Advanced | Schema-first @QueryMapping/@MutationMapping/@SchemaMapping, @BatchMapping/DataLoader (N+1), subscriptions, cursor pagination, error handling |
+| 16 | [validation_and_error_handling](validation_and_error_handling/validation_and_error_handling.md) | 4 — Spring Web | Intermediate | Jakarta Validation 3.1, @Valid/@Validated, custom ConstraintValidator, ProblemDetail (RFC 9457) |
+| 17 | [spring_data_jpa](spring_data_jpa/spring_data_jpa.md) | 5 — Data & Transactions | Intermediate | JpaRepository, query derivation, JPQL, native queries, projections, N+1 problem |
+| 18 | [spring_transactions](spring_transactions/spring_transactions.md) | 5 — Data & Transactions | Advanced | Propagation, isolation, @Transactional internals, proxy limits, distributed TX |
+| 19 | [spring_caching](spring_caching/spring_caching.md) | 5 — Data & Transactions | Intermediate | @Cacheable, @CacheEvict, CacheManager, Redis integration, cache stampede |
+| 20 | [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) | 6 — Security | Advanced | SecurityFilterChain, AuthenticationManager, SecurityContext, CSRF, CORS |
+| 21 | [spring_security_jwt_oauth](spring_security_jwt_oauth/spring_security_jwt_oauth.md) | 6 — Security | Advanced | JWT validation, OAuth2 resource server, PKCE, Spring Authorization Server |
+| 22 | [spring_cloud_config](spring_cloud_config/spring_cloud_config.md) | 7 — Cloud & Messaging | Intermediate | Config server, refresh scope, Vault integration, config encryption |
+| 23 | [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) | 7 — Cloud & Messaging | Advanced | Eureka, Resilience4j, Spring Cloud Gateway, load balancer, circuit breaker — with 1 deep-dive sub-file ([gateway server webmvc](spring_cloud_patterns/gateway_server_webmvc.md)) |
+| 24 | [spring_messaging](spring_messaging/spring_messaging.md) | 7 — Cloud & Messaging | Intermediate | @KafkaListener, @RabbitListener, message converters, DLQ, idempotency |
+| 25 | [spring_batch](spring_batch/spring_batch.md) | 7 — Cloud & Messaging | Advanced | Job/Step/chunk model, ItemReader/Processor/Writer, @StepScope, JobRepository, partitioning, skip/retry |
+| 26 | [spring_events_and_scheduling](spring_events_and_scheduling/spring_events_and_scheduling.md) | 7 — Cloud & Messaging | Intermediate | ApplicationEventPublisher, @EventListener, @TransactionalEventListener, @Scheduled, ShedLock |
+| 27 | [spring_ai](spring_ai/spring_ai.md) | 7 — Cloud & Messaging | Advanced | ChatClient fluent API, prompt templates, structured output, VectorStore + RAG advisors, @Tool function calling, model routing via beans |
+| 28 | [spring_integration](spring_integration/spring_integration.md) | 7 — Cloud & Messaging | Advanced | EIP: channels, adapters/gateways, router/splitter/aggregator/transformer, Java DSL; contrast with spring_messaging |
+| 29 | [spring_testing](spring_testing/spring_testing.md) | 8 — Testing & Production | Intermediate | @SpringBootTest, @WebMvcTest, MockMvc, WebTestClient, Testcontainers, slice tests |
+| 30 | [spring_performance](spring_performance/spring_performance.md) | 8 — Testing & Production | Advanced | Startup time, lazy init, virtual threads, GraalVM native, connection pools |
+| 31 | [observability_and_tracing](observability_and_tracing/observability_and_tracing.md) | 8 — Testing & Production | Advanced | Micrometer Observation API, Micrometer Tracing + OTLP, W3C traceparent, structured logging, exemplars |
+| 32 | [spring_native_graalvm](spring_native_graalvm/spring_native_graalvm.md) | 8 — Testing & Production | Advanced | AOT processing, reachability metadata/hints, build-time vs runtime init, tracing agent, startup/memory vs peak-throughput tradeoff |
+| 33 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/spring_hateoas_rest_maturity.md) | 4 — Spring Web | Advanced | Richardson Maturity Model L0-L3, Spring HATEOAS (EntityModel/Link/assemblers), HAL/HAL-FORMS, @HttpExchange/RestClient, ProblemDetail |
+| 34 | [spring_grpc](spring_grpc/spring_grpc.md) | 4 — Spring Web | Advanced | @GrpcService beans, server/channel autoconfig, Server/ClientInterceptor, Status↔exception mapping, deadlines, streaming, security + tracing |
+| 35 | [spring_session](spring_session/spring_session.md) | 6 — Security | Advanced | SessionRepositoryFilter, Redis/JDBC/Hazelcast backends, session fixation, concurrent-session control, WebSession, JWT vs stateful tradeoff |
+| 36 | [spring_data_nosql](spring_data_nosql/spring_data_nosql.md) | 5 — Data & Transactions | Intermediate | Spring Data MongoDB (MongoTemplate, aggregation, transactions) + Redis (RedisTemplate, @RedisHash, pub/sub) + reactive repositories; NoSQL vs JPA |
+| 37 | [database_migrations](database_migrations/database_migrations.md) | 5 — Data & Transactions | Intermediate | Flyway (versioned/repeatable, checksums) + Liquibase (changesets, rollback), expand-contract zero-downtime, Boot integration, Testcontainers |
+| 38 | [spring_websocket_stomp](spring_websocket_stomp/spring_websocket_stomp.md) | 7 — Cloud & Messaging | Advanced | WebSocket handshake, STOMP over WebSocket, simple vs external broker relay, SockJS, per-user destinations, scaling |
+| 39 | [spring_http_clients](spring_http_clients/spring_http_clients.md) | 4 — Spring Web | Intermediate | RestClient vs WebClient vs @HttpExchange, `@ImportHttpServices` groups, connection pooling, timeouts, error handling, MockRestServiceServer |
 
 **Deep-dive sub-files** (group under their parent module's game topic; no separate `STUDY_ORDER` entry): [spring_webflux/rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) — RSocket 4 interaction models, protocol-level backpressure, `@MessageMapping`/`RSocketRequester`; [request_handling/i18n_and_localization.md](request_handling/i18n_and_localization.md) — `MessageSource`, `LocaleResolver`/`LocaleChangeInterceptor`, locale-aware formatting.
 
@@ -183,31 +183,31 @@ The complete curriculum in the order above — see [8-Phase Learning Path](#3-8-
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [ioc_container](ioc_container/) | README only |
-| 2 | [bean_lifecycle](bean_lifecycle/) | README only |
-| 3 | [dependency_injection](dependency_injection/) | README only |
-| 4 | [spring_configuration](spring_configuration/) | README only |
-| 5 | [spring_proxies](spring_proxies/) | README only |
-| 6 | [spring_aop](spring_aop/) | 2 files |
-| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | README only |
-| 8 | [spring_boot_configuration](spring_boot_configuration/) | README only |
-| 9 | [spring_boot_actuator](spring_boot_actuator/) | README only |
-| 11 | [spring_mvc_architecture](spring_mvc_architecture/) | README only |
-| 12 | [request_handling](request_handling/) | README only |
-| 13 | [filters_and_interceptors](filters_and_interceptors/) | README only |
-| 14 | [spring_webflux](spring_webflux/) | README only |
-| 17 | [spring_http_clients](spring_http_clients/) | README only |
-| 19 | [validation_and_error_handling](validation_and_error_handling/) | README only |
-| 20 | [spring_data_jpa](spring_data_jpa/) | README only |
-| 23 | [spring_transactions](spring_transactions/) | README only |
-| 24 | [spring_caching](spring_caching/) | README only |
-| 25 | [spring_security_architecture](spring_security_architecture/) | README only |
-| 26 | [spring_security_jwt_oauth](spring_security_jwt_oauth/) | README only |
-| 29 | [spring_cloud_patterns](spring_cloud_patterns/) | 2 files |
-| 30 | [spring_messaging](spring_messaging/) | README only |
-| 33 | [spring_events_and_scheduling](spring_events_and_scheduling/) | README only |
-| 36 | [spring_testing](spring_testing/) | README only |
-| 37 | [spring_performance](spring_performance/) | README only |
+| 1 | [ioc_container](ioc_container/ioc_container.md) | module page only |
+| 2 | [bean_lifecycle](bean_lifecycle/bean_lifecycle.md) | module page only |
+| 3 | [dependency_injection](dependency_injection/dependency_injection.md) | module page only |
+| 4 | [spring_configuration](spring_configuration/spring_configuration.md) | module page only |
+| 5 | [spring_proxies](spring_proxies/spring_proxies.md) | module page only |
+| 6 | [spring_aop](spring_aop/spring_aop.md) | 2 files |
+| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md) | module page only |
+| 8 | [spring_boot_configuration](spring_boot_configuration/spring_boot_configuration.md) | module page only |
+| 9 | [spring_boot_actuator](spring_boot_actuator/spring_boot_actuator.md) | module page only |
+| 11 | [spring_mvc_architecture](spring_mvc_architecture/spring_mvc_architecture.md) | module page only |
+| 12 | [request_handling](request_handling/request_handling.md) | module page only |
+| 13 | [filters_and_interceptors](filters_and_interceptors/filters_and_interceptors.md) | module page only |
+| 14 | [spring_webflux](spring_webflux/spring_webflux.md) | module page only |
+| 17 | [spring_http_clients](spring_http_clients/spring_http_clients.md) | module page only |
+| 19 | [validation_and_error_handling](validation_and_error_handling/validation_and_error_handling.md) | module page only |
+| 20 | [spring_data_jpa](spring_data_jpa/spring_data_jpa.md) | module page only |
+| 23 | [spring_transactions](spring_transactions/spring_transactions.md) | module page only |
+| 24 | [spring_caching](spring_caching/spring_caching.md) | module page only |
+| 25 | [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) | module page only |
+| 26 | [spring_security_jwt_oauth](spring_security_jwt_oauth/spring_security_jwt_oauth.md) | module page only |
+| 29 | [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) | 2 files |
+| 30 | [spring_messaging](spring_messaging/spring_messaging.md) | module page only |
+| 33 | [spring_events_and_scheduling](spring_events_and_scheduling/spring_events_and_scheduling.md) | module page only |
+| 36 | [spring_testing](spring_testing/spring_testing.md) | module page only |
+| 37 | [spring_performance](spring_performance/spring_performance.md) | module page only |
 
 **Not in this path** (14 of 39, Full Path only): `spring_modulith`, `spring_graphql`, `spring_hateoas_rest_maturity`, `spring_grpc`, `spring_data_nosql`, `database_migrations`, `spring_session`, `spring_cloud_config`, `spring_websocket_stomp`, `spring_batch`, `spring_ai`, `spring_integration`, `observability_and_tracing`, `spring_native_graalvm`
 <!-- /study-path-table -->
@@ -230,24 +230,24 @@ A ruthless cut to what a **senior Spring / Spring Boot interview** actually prob
 
 | # | Module | Files |
 |---|--------|-------|
-| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | README only |
-| 8 | [spring_boot_configuration](spring_boot_configuration/) | README only |
-| 9 | [spring_boot_actuator](spring_boot_actuator/) | README only |
-| 10 | [spring_modulith](spring_modulith/) | README only |
-| 16 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/) | README only |
-| 17 | [spring_http_clients](spring_http_clients/) | README only |
-| 22 | [database_migrations](database_migrations/) | README only |
-| 23 | [spring_transactions](spring_transactions/) | README only |
-| 25 | [spring_security_architecture](spring_security_architecture/) | README only |
-| 26 | [spring_security_jwt_oauth](spring_security_jwt_oauth/) | README only |
-| 27 | [spring_session](spring_session/) | README only |
-| 28 | [spring_cloud_config](spring_cloud_config/) | README only |
-| 29 | [spring_cloud_patterns](spring_cloud_patterns/) | 2 files |
-| 30 | [spring_messaging](spring_messaging/) | README only |
-| 36 | [spring_testing](spring_testing/) | README only |
-| 37 | [spring_performance](spring_performance/) | README only |
-| 38 | [observability_and_tracing](observability_and_tracing/) | README only |
-| 39 | [spring_native_graalvm](spring_native_graalvm/) | README only |
+| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md) | module page only |
+| 8 | [spring_boot_configuration](spring_boot_configuration/spring_boot_configuration.md) | module page only |
+| 9 | [spring_boot_actuator](spring_boot_actuator/spring_boot_actuator.md) | module page only |
+| 10 | [spring_modulith](spring_modulith/spring_modulith.md) | module page only |
+| 16 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/spring_hateoas_rest_maturity.md) | module page only |
+| 17 | [spring_http_clients](spring_http_clients/spring_http_clients.md) | module page only |
+| 22 | [database_migrations](database_migrations/database_migrations.md) | module page only |
+| 23 | [spring_transactions](spring_transactions/spring_transactions.md) | module page only |
+| 25 | [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) | module page only |
+| 26 | [spring_security_jwt_oauth](spring_security_jwt_oauth/spring_security_jwt_oauth.md) | module page only |
+| 27 | [spring_session](spring_session/spring_session.md) | module page only |
+| 28 | [spring_cloud_config](spring_cloud_config/spring_cloud_config.md) | module page only |
+| 29 | [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) | 2 files |
+| 30 | [spring_messaging](spring_messaging/spring_messaging.md) | module page only |
+| 36 | [spring_testing](spring_testing/spring_testing.md) | module page only |
+| 37 | [spring_performance](spring_performance/spring_performance.md) | module page only |
+| 38 | [observability_and_tracing](observability_and_tracing/observability_and_tracing.md) | module page only |
+| 39 | [spring_native_graalvm](spring_native_graalvm/spring_native_graalvm.md) | module page only |
 
 **Not in this path** (21 of 39, Full Path only): `ioc_container`, `bean_lifecycle`, `dependency_injection`, `spring_configuration`, `spring_proxies`, `spring_aop`, `spring_mvc_architecture`, `request_handling`, `filters_and_interceptors`, `spring_webflux`, `spring_graphql`, `spring_grpc`, `validation_and_error_handling`, `spring_data_jpa`, `spring_data_nosql`, `spring_caching`, `spring_websocket_stomp`, `spring_batch`, `spring_events_and_scheduling`, `spring_ai`, `spring_integration`
 <!-- /study-path-table -->
@@ -258,36 +258,36 @@ A different cut, not senior-plus-extras. The Principal Path probes platform-leve
 
 ## Knowledge-Question Map
 
-The highest-frequency Spring *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use [case_studies/README.md](case_studies/README.md).
+The highest-frequency Spring *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use [case_studies/README.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
-| Why does an internal `@Transactional`/`@Cacheable` call silently do nothing? | [Spring Proxies](spring_proxies/README.md), [Spring Transactions](spring_transactions/README.md) |
-| JDK dynamic proxy vs CGLIB — when does Spring use each? | [Spring Proxies](spring_proxies/README.md) |
-| Walk through the bean lifecycle; BeanPostProcessor vs BeanFactoryPostProcessor. | [Bean Lifecycle](bean_lifecycle/README.md) |
-| How does Spring resolve a circular dependency? When does it fail? | [Dependency Injection](dependency_injection/README.md) |
-| `@Transactional` propagation — REQUIRED vs REQUIRES_NEW vs NESTED. | [Spring Transactions](spring_transactions/README.md) |
-| Which exceptions roll back a transaction by default, and why? | [Spring Transactions](spring_transactions/README.md) |
-| Diagnose and fix N+1 in Spring Data JPA. | [Spring Data JPA](spring_data_jpa/README.md) |
-| How does `@EnableAutoConfiguration` actually work? | [Boot Autoconfiguration](spring_boot_autoconfiguration/README.md) |
-| Trace a request through the DispatcherServlet. | [Spring MVC Architecture](spring_mvc_architecture/README.md) |
-| Servlet Filter vs HandlerInterceptor — ordering and use cases. | [Filters & Interceptors](filters_and_interceptors/README.md) |
-| Centralized exception handling with `@ControllerAdvice` and ProblemDetail. | [Request Handling](request_handling/README.md), [Validation & Error Handling](validation_and_error_handling/README.md) |
-| Explain the SecurityFilterChain; authentication vs authorization. | [Security Architecture](spring_security_architecture/README.md) |
-| How do you validate a JWT? OAuth2 resource server and PKCE. | [JWT & OAuth2](spring_security_jwt_oauth/README.md) |
-| WebFlux Mono/Flux and backpressure — when reactive vs MVC + virtual threads? | [Spring WebFlux](spring_webflux/README.md) |
-| `@Cacheable` and preventing cache stampede. | [Spring Caching](spring_caching/README.md) |
-| Bean scopes — the prototype-in-singleton injection trap. | [Bean Lifecycle](bean_lifecycle/README.md), [IoC Container](ioc_container/README.md) |
-| `@Configuration` full vs lite mode — what is `@Bean` method interception? | [Spring Configuration](spring_configuration/README.md) |
-| `@SpringBootTest` vs slice tests; `@MockitoBean`; Testcontainers. | [Spring Testing](spring_testing/README.md) |
-| Resilience4j circuit breaker + retry in Spring Cloud. | [Spring Cloud Patterns](spring_cloud_patterns/README.md) |
-| `@KafkaListener` — idempotency, manual ack, and DLQ. | [Spring Messaging](spring_messaging/README.md) |
+| Why does an internal `@Transactional`/`@Cacheable` call silently do nothing? | [Spring Proxies](spring_proxies/spring_proxies.md), [Spring Transactions](spring_transactions/spring_transactions.md) |
+| JDK dynamic proxy vs CGLIB — when does Spring use each? | [Spring Proxies](spring_proxies/spring_proxies.md) |
+| Walk through the bean lifecycle; BeanPostProcessor vs BeanFactoryPostProcessor. | [Bean Lifecycle](bean_lifecycle/bean_lifecycle.md) |
+| How does Spring resolve a circular dependency? When does it fail? | [Dependency Injection](dependency_injection/dependency_injection.md) |
+| `@Transactional` propagation — REQUIRED vs REQUIRES_NEW vs NESTED. | [Spring Transactions](spring_transactions/spring_transactions.md) |
+| Which exceptions roll back a transaction by default, and why? | [Spring Transactions](spring_transactions/spring_transactions.md) |
+| Diagnose and fix N+1 in Spring Data JPA. | [Spring Data JPA](spring_data_jpa/spring_data_jpa.md) |
+| How does `@EnableAutoConfiguration` actually work? | [Boot Autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md) |
+| Trace a request through the DispatcherServlet. | [Spring MVC Architecture](spring_mvc_architecture/spring_mvc_architecture.md) |
+| Servlet Filter vs HandlerInterceptor — ordering and use cases. | [Filters & Interceptors](filters_and_interceptors/filters_and_interceptors.md) |
+| Centralized exception handling with `@ControllerAdvice` and ProblemDetail. | [Request Handling](request_handling/request_handling.md), [Validation & Error Handling](validation_and_error_handling/validation_and_error_handling.md) |
+| Explain the SecurityFilterChain; authentication vs authorization. | [Security Architecture](spring_security_architecture/spring_security_architecture.md) |
+| How do you validate a JWT? OAuth2 resource server and PKCE. | [JWT & OAuth2](spring_security_jwt_oauth/spring_security_jwt_oauth.md) |
+| WebFlux Mono/Flux and backpressure — when reactive vs MVC + virtual threads? | [Spring WebFlux](spring_webflux/spring_webflux.md) |
+| `@Cacheable` and preventing cache stampede. | [Spring Caching](spring_caching/spring_caching.md) |
+| Bean scopes — the prototype-in-singleton injection trap. | [Bean Lifecycle](bean_lifecycle/bean_lifecycle.md), [IoC Container](ioc_container/ioc_container.md) |
+| `@Configuration` full vs lite mode — what is `@Bean` method interception? | [Spring Configuration](spring_configuration/spring_configuration.md) |
+| `@SpringBootTest` vs slice tests; `@MockitoBean`; Testcontainers. | [Spring Testing](spring_testing/spring_testing.md) |
+| Resilience4j circuit breaker + retry in Spring Cloud. | [Spring Cloud Patterns](spring_cloud_patterns/spring_cloud_patterns.md) |
+| `@KafkaListener` — idempotency, manual ack, and DLQ. | [Spring Messaging](spring_messaging/spring_messaging.md) |
 
 ---
 
 ## Study Plan
 
-A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_studies/README.md) and rehearse the "design X" format.
+A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_studies/case_studies.md) and rehearse the "design X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|
@@ -368,49 +368,49 @@ The current generation is **Spring Framework 7.0 / Spring Boot 4.1** (Boot 4.1.0
 
 | Module | Also See |
 |--------|----------|
-| [ioc_container](ioc_container/) | [bean_lifecycle](bean_lifecycle/), [spring_proxies](spring_proxies/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) |
-| [bean_lifecycle](bean_lifecycle/) | [ioc_container](ioc_container/), [spring_aop](spring_aop/) |
-| [dependency_injection](dependency_injection/) | [ioc_container](ioc_container/), [spring_configuration](spring_configuration/) |
-| [spring_configuration](spring_configuration/) | [dependency_injection](dependency_injection/), [spring_boot_configuration](spring_boot_configuration/) |
-| [spring_proxies](spring_proxies/) | [spring_aop](spring_aop/), [spring_transactions](spring_transactions/), [spring_security_architecture](spring_security_architecture/) |
-| [spring_aop](spring_aop/) | [spring_proxies](spring_proxies/), [spring_transactions](spring_transactions/), [spring_caching](spring_caching/) |
-| [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | [ioc_container](ioc_container/), [spring_boot_configuration](spring_boot_configuration/), [spring_boot_actuator](spring_boot_actuator/) |
-| [spring_boot_configuration](spring_boot_configuration/) | [spring_configuration](spring_configuration/), [spring_cloud_config](spring_cloud_config/) |
-| [spring_boot_actuator](spring_boot_actuator/) | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/), [spring_performance](spring_performance/) |
-| [spring_mvc_architecture](spring_mvc_architecture/) | [request_handling](request_handling/), [filters_and_interceptors](filters_and_interceptors/) |
-| [request_handling](request_handling/) | [spring_mvc_architecture](spring_mvc_architecture/), [spring_security_architecture](spring_security_architecture/) |
-| [filters_and_interceptors](filters_and_interceptors/) | [spring_mvc_architecture](spring_mvc_architecture/), [spring_security_architecture](spring_security_architecture/) |
-| [spring_webflux](spring_webflux/) | [spring_mvc_architecture](spring_mvc_architecture/), [spring_data_jpa](spring_data_jpa/) |
-| [spring_data_jpa](spring_data_jpa/) | [spring_transactions](spring_transactions/), [spring_caching](spring_caching/) |
-| [spring_transactions](spring_transactions/) | [spring_data_jpa](spring_data_jpa/), [spring_aop](spring_aop/), [spring_proxies](spring_proxies/) |
-| [spring_caching](spring_caching/) | [spring_aop](spring_aop/), [spring_data_jpa](spring_data_jpa/), [spring_cloud_patterns](spring_cloud_patterns/) |
-| [spring_security_architecture](spring_security_architecture/) | [filters_and_interceptors](filters_and_interceptors/), [spring_security_jwt_oauth](spring_security_jwt_oauth/), [spring_proxies](spring_proxies/) |
-| [spring_security_jwt_oauth](spring_security_jwt_oauth/) | [spring_security_architecture](spring_security_architecture/), [spring_cloud_patterns](spring_cloud_patterns/) |
-| [spring_cloud_config](spring_cloud_config/) | [spring_boot_configuration](spring_boot_configuration/), [spring_cloud_patterns](spring_cloud_patterns/) |
-| [spring_cloud_patterns](spring_cloud_patterns/) | [spring_cloud_config](spring_cloud_config/), [spring_messaging](spring_messaging/) |
-| [spring_messaging](spring_messaging/) | [spring_cloud_patterns](spring_cloud_patterns/), [spring_transactions](spring_transactions/) |
-| [spring_testing](spring_testing/) | All modules — slice tests isolate specific layers |
-| [spring_performance](spring_performance/) | [spring_boot_actuator](spring_boot_actuator/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/), [spring_webflux](spring_webflux/) |
-| [spring_batch](spring_batch/) | [spring_transactions](spring_transactions/), [spring_messaging](spring_messaging/), [spring_cloud_patterns](spring_cloud_patterns/) |
-| [spring_ai](spring_ai/) | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/), [spring_webflux](spring_webflux/) (streaming), [../../llm/advanced_rag/](../llm/advanced_rag/), [../../llm/embeddings_and_similarity_search/](../llm/embeddings_and_similarity_search/) |
-| [spring_native_graalvm](spring_native_graalvm/) | [spring_performance](spring_performance/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/), [../../java/annotation_processing/](../java/annotation_processing/), [../../java/jvm_internals/](../java/jvm_internals/) |
-| [spring_integration](spring_integration/) | [spring_messaging](spring_messaging/), [spring_events_and_scheduling](spring_events_and_scheduling/), [../../backend/event_driven_fundamentals/](../backend/event_driven_fundamentals/), [../../java/microservices_patterns/](../java/microservices_patterns/) |
-| [spring_modulith](spring_modulith/) | [spring_events_and_scheduling](spring_events_and_scheduling/), [spring_integration](spring_integration/), [../../lld/solid_principles/](../lld/solid_principles/), [../../java/microservices_patterns/](../java/microservices_patterns/) |
-| [spring_graphql](spring_graphql/) | [request_handling](request_handling/), [spring_data_jpa](spring_data_jpa/) (N+1), [spring_webflux](spring_webflux/), [../../backend/graphql/](../backend/graphql/) |
-| [spring_events_and_scheduling](spring_events_and_scheduling/) | [spring_transactions](spring_transactions/), [spring_messaging](spring_messaging/), [spring_aop](spring_aop/) |
-| [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/) | [request_handling](request_handling/), [spring_mvc_architecture](spring_mvc_architecture/), [../../backend/rest_api_design/](../backend/rest_api_design/), [../../hld/api_design/](../hld/api_design/) |
-| [spring_grpc](spring_grpc/) | [../../java/grpc_protobuf/](../java/grpc_protobuf/) (wire format), [../../backend/grpc_and_protobuf/](../backend/grpc_and_protobuf/), [spring_webflux](spring_webflux/), [observability_and_tracing](observability_and_tracing/) |
-| [spring_session](spring_session/) | [spring_security_architecture](spring_security_architecture/), [spring_security_jwt_oauth](spring_security_jwt_oauth/), [../../backend/auth_and_authorization_systems/](../backend/auth_and_authorization_systems/), [../../database/key_value_stores/](../database/key_value_stores/) |
-| [spring_webflux → rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) (sub-file) | [../../java/reactive_programming/](../java/reactive_programming/), [spring_messaging](spring_messaging/), [spring_grpc](spring_grpc/) |
-| [request_handling → i18n_and_localization.md](request_handling/i18n_and_localization.md) (sub-file) | [validation_and_error_handling](validation_and_error_handling/), [ioc_container](ioc_container/), [../../java/java_time_datetime/](../java/java_time_datetime/) |
-| [validation_and_error_handling](validation_and_error_handling/) | [request_handling](request_handling/), [spring_mvc_architecture](spring_mvc_architecture/), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) |
-| [observability_and_tracing](observability_and_tracing/) | [spring_boot_actuator](spring_boot_actuator/), [spring_cloud_patterns](spring_cloud_patterns/), [spring_performance](spring_performance/) |
+| [ioc_container](ioc_container/ioc_container.md) | [bean_lifecycle](bean_lifecycle/bean_lifecycle.md), [spring_proxies](spring_proxies/spring_proxies.md), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md) |
+| [bean_lifecycle](bean_lifecycle/bean_lifecycle.md) | [ioc_container](ioc_container/ioc_container.md), [spring_aop](spring_aop/spring_aop.md) |
+| [dependency_injection](dependency_injection/dependency_injection.md) | [ioc_container](ioc_container/ioc_container.md), [spring_configuration](spring_configuration/spring_configuration.md) |
+| [spring_configuration](spring_configuration/spring_configuration.md) | [dependency_injection](dependency_injection/dependency_injection.md), [spring_boot_configuration](spring_boot_configuration/spring_boot_configuration.md) |
+| [spring_proxies](spring_proxies/spring_proxies.md) | [spring_aop](spring_aop/spring_aop.md), [spring_transactions](spring_transactions/spring_transactions.md), [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) |
+| [spring_aop](spring_aop/spring_aop.md) | [spring_proxies](spring_proxies/spring_proxies.md), [spring_transactions](spring_transactions/spring_transactions.md), [spring_caching](spring_caching/spring_caching.md) |
+| [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md) | [ioc_container](ioc_container/ioc_container.md), [spring_boot_configuration](spring_boot_configuration/spring_boot_configuration.md), [spring_boot_actuator](spring_boot_actuator/spring_boot_actuator.md) |
+| [spring_boot_configuration](spring_boot_configuration/spring_boot_configuration.md) | [spring_configuration](spring_configuration/spring_configuration.md), [spring_cloud_config](spring_cloud_config/spring_cloud_config.md) |
+| [spring_boot_actuator](spring_boot_actuator/spring_boot_actuator.md) | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md), [spring_performance](spring_performance/spring_performance.md) |
+| [spring_mvc_architecture](spring_mvc_architecture/spring_mvc_architecture.md) | [request_handling](request_handling/request_handling.md), [filters_and_interceptors](filters_and_interceptors/filters_and_interceptors.md) |
+| [request_handling](request_handling/request_handling.md) | [spring_mvc_architecture](spring_mvc_architecture/spring_mvc_architecture.md), [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) |
+| [filters_and_interceptors](filters_and_interceptors/filters_and_interceptors.md) | [spring_mvc_architecture](spring_mvc_architecture/spring_mvc_architecture.md), [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) |
+| [spring_webflux](spring_webflux/spring_webflux.md) | [spring_mvc_architecture](spring_mvc_architecture/spring_mvc_architecture.md), [spring_data_jpa](spring_data_jpa/spring_data_jpa.md) |
+| [spring_data_jpa](spring_data_jpa/spring_data_jpa.md) | [spring_transactions](spring_transactions/spring_transactions.md), [spring_caching](spring_caching/spring_caching.md) |
+| [spring_transactions](spring_transactions/spring_transactions.md) | [spring_data_jpa](spring_data_jpa/spring_data_jpa.md), [spring_aop](spring_aop/spring_aop.md), [spring_proxies](spring_proxies/spring_proxies.md) |
+| [spring_caching](spring_caching/spring_caching.md) | [spring_aop](spring_aop/spring_aop.md), [spring_data_jpa](spring_data_jpa/spring_data_jpa.md), [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) |
+| [spring_security_architecture](spring_security_architecture/spring_security_architecture.md) | [filters_and_interceptors](filters_and_interceptors/filters_and_interceptors.md), [spring_security_jwt_oauth](spring_security_jwt_oauth/spring_security_jwt_oauth.md), [spring_proxies](spring_proxies/spring_proxies.md) |
+| [spring_security_jwt_oauth](spring_security_jwt_oauth/spring_security_jwt_oauth.md) | [spring_security_architecture](spring_security_architecture/spring_security_architecture.md), [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) |
+| [spring_cloud_config](spring_cloud_config/spring_cloud_config.md) | [spring_boot_configuration](spring_boot_configuration/spring_boot_configuration.md), [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) |
+| [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) | [spring_cloud_config](spring_cloud_config/spring_cloud_config.md), [spring_messaging](spring_messaging/spring_messaging.md) |
+| [spring_messaging](spring_messaging/spring_messaging.md) | [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md), [spring_transactions](spring_transactions/spring_transactions.md) |
+| [spring_testing](spring_testing/spring_testing.md) | All modules — slice tests isolate specific layers |
+| [spring_performance](spring_performance/spring_performance.md) | [spring_boot_actuator](spring_boot_actuator/spring_boot_actuator.md), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md), [spring_webflux](spring_webflux/spring_webflux.md) |
+| [spring_batch](spring_batch/spring_batch.md) | [spring_transactions](spring_transactions/spring_transactions.md), [spring_messaging](spring_messaging/spring_messaging.md), [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md) |
+| [spring_ai](spring_ai/spring_ai.md) | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md), [spring_webflux](spring_webflux/spring_webflux.md) (streaming), [../../llm/advanced_rag/](../llm/advanced_rag/advanced_rag.md), [../../llm/embeddings_and_similarity_search/](../llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md) |
+| [spring_native_graalvm](spring_native_graalvm/spring_native_graalvm.md) | [spring_performance](spring_performance/spring_performance.md), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md), [../../java/annotation_processing/](../java/annotation_processing/annotation_processing.md), [../../java/jvm_internals/](../java/jvm_internals/jvm_internals.md) |
+| [spring_integration](spring_integration/spring_integration.md) | [spring_messaging](spring_messaging/spring_messaging.md), [spring_events_and_scheduling](spring_events_and_scheduling/spring_events_and_scheduling.md), [../../backend/event_driven_fundamentals/](../backend/event_driven_fundamentals/event_driven_fundamentals.md), [../../java/microservices_patterns/](../java/microservices_patterns/microservices_patterns.md) |
+| [spring_modulith](spring_modulith/spring_modulith.md) | [spring_events_and_scheduling](spring_events_and_scheduling/spring_events_and_scheduling.md), [spring_integration](spring_integration/spring_integration.md), [../../lld/solid_principles/](../lld/solid_principles/solid_principles.md), [../../java/microservices_patterns/](../java/microservices_patterns/microservices_patterns.md) |
+| [spring_graphql](spring_graphql/spring_graphql.md) | [request_handling](request_handling/request_handling.md), [spring_data_jpa](spring_data_jpa/spring_data_jpa.md) (N+1), [spring_webflux](spring_webflux/spring_webflux.md), [../../backend/graphql/](../backend/graphql/graphql.md) |
+| [spring_events_and_scheduling](spring_events_and_scheduling/spring_events_and_scheduling.md) | [spring_transactions](spring_transactions/spring_transactions.md), [spring_messaging](spring_messaging/spring_messaging.md), [spring_aop](spring_aop/spring_aop.md) |
+| [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/spring_hateoas_rest_maturity.md) | [request_handling](request_handling/request_handling.md), [spring_mvc_architecture](spring_mvc_architecture/spring_mvc_architecture.md), [../../backend/rest_api_design/](../backend/rest_api_design/rest_api_design.md), [../../hld/api_design/](../hld/api_design/api_design.md) |
+| [spring_grpc](spring_grpc/spring_grpc.md) | [../../java/grpc_protobuf/](../java/grpc_protobuf/grpc_protobuf.md) (wire format), [../../backend/grpc_and_protobuf/](../backend/grpc_and_protobuf/grpc_and_protobuf.md), [spring_webflux](spring_webflux/spring_webflux.md), [observability_and_tracing](observability_and_tracing/observability_and_tracing.md) |
+| [spring_session](spring_session/spring_session.md) | [spring_security_architecture](spring_security_architecture/spring_security_architecture.md), [spring_security_jwt_oauth](spring_security_jwt_oauth/spring_security_jwt_oauth.md), [../../backend/auth_and_authorization_systems/](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md), [../../database/key_value_stores/](../database/key_value_stores/key_value_stores.md) |
+| [spring_webflux → rsocket_reactive_messaging.md](spring_webflux/rsocket_reactive_messaging.md) (sub-file) | [../../java/reactive_programming/](../java/reactive_programming/reactive_programming.md), [spring_messaging](spring_messaging/spring_messaging.md), [spring_grpc](spring_grpc/spring_grpc.md) |
+| [request_handling → i18n_and_localization.md](request_handling/i18n_and_localization.md) (sub-file) | [validation_and_error_handling](validation_and_error_handling/validation_and_error_handling.md), [ioc_container](ioc_container/ioc_container.md), [../../java/java_time_datetime/](../java/java_time_datetime/java_time_datetime.md) |
+| [validation_and_error_handling](validation_and_error_handling/validation_and_error_handling.md) | [request_handling](request_handling/request_handling.md), [spring_mvc_architecture](spring_mvc_architecture/spring_mvc_architecture.md), [spring_boot_autoconfiguration](spring_boot_autoconfiguration/spring_boot_autoconfiguration.md) |
+| [observability_and_tracing](observability_and_tracing/observability_and_tracing.md) | [spring_boot_actuator](spring_boot_actuator/spring_boot_actuator.md), [spring_cloud_patterns](spring_cloud_patterns/spring_cloud_patterns.md), [spring_performance](spring_performance/spring_performance.md) |
 
 ---
 
 ## 7. Case Studies
 
-For a guided learning path through all 9 case studies, see [case_studies/README.md](case_studies/README.md).
+For a guided learning path through all 9 case studies, see [case_studies/README.md](case_studies/case_studies.md).
 
 | Case Study | Core Concepts | Difficulty |
 |------------|---------------|------------|
@@ -443,6 +443,6 @@ Recommended learning order for interview preparation:
 2. **Week 2**: Phases 3–4 (Spring Boot internals, MVC, WebFlux)
 3. **Week 3**: Phases 5–6 (Data, transactions, security)
 4. **Week 4**: Phases 7–8 (Cloud patterns, messaging, testing, performance)
-5. **Review**: Work through all 9 case studies end-to-end — see [case_studies/README.md](case_studies/README.md) for the recommended order
+5. **Review**: Work through all 9 case studies end-to-end — see [case_studies/README.md](case_studies/case_studies.md) for the recommended order
 
-Each module follows the standard 14-section template. See [llm/foundations_and_architecture/README.md](../llm/foundations_and_architecture/README.md) as the format reference.
+Each module follows the standard 14-section template. See [llm/foundations_and_architecture/README.md](../llm/foundations_and_architecture/foundations_and_architecture.md) as the format reference.

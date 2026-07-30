@@ -1,5 +1,5 @@
 # Speculative Decoding — Draft-and-Verify Inference Acceleration
-Deep-dive sub-file of [Inference & Decoding](README.md). Covers the rejection-sampling proof that speculative decoding is an *exact* sampler, the full landscape of draft strategies — independent draft models, self-speculative (LayerSkip), Medusa, EAGLE/EAGLE-2/EAGLE-3, lookahead (Jacobi) decoding, prompt-lookup/ngram decoding, and DeepSeek-V3 multi-token prediction — tree-based verification, and production tuning.
+Deep-dive sub-file of [Inference & Decoding](inference_and_decoding.md). Covers the rejection-sampling proof that speculative decoding is an *exact* sampler, the full landscape of draft strategies — independent draft models, self-speculative (LayerSkip), Medusa, EAGLE/EAGLE-2/EAGLE-3, lookahead (Jacobi) decoding, prompt-lookup/ngram decoding, and DeepSeek-V3 multi-token prediction — tree-based verification, and production tuning.
 
 ---
 
@@ -9,7 +9,7 @@ Speculative decoding accelerates autoregressive generation by separating **propo
 
 The property that makes this safe to deploy without an evals review is **exactness**: the acceptance/rejection rule (Section 6.1) guarantees the final output token distribution is *identical* to what the target model would have produced sampling alone, token by token. Speculative decoding is a throughput optimization with zero quality tradeoff — when it works. When it doesn't (low acceptance rate, see Section 6.2), it can make things *slower*, which is why production systems monitor acceptance rate live and disable speculation adaptively.
 
-This file is the decoding-algorithm half of the picture. For the serving-engine configuration (vLLM flags, batch-size thresholds, tensor-parallel layout for the draft model), see [vLLM Deep Dive §8](../vllm_deep_dive/README.md).
+This file is the decoding-algorithm half of the picture. For the serving-engine configuration (vLLM flags, batch-size thresholds, tensor-parallel layout for the draft model), see [vLLM Deep Dive §8](../vllm_deep_dive/vllm_deep_dive.md).
 
 ---
 
@@ -17,7 +17,7 @@ This file is the decoding-algorithm half of the picture. For the serving-engine 
 
 > **One-line analogy**: Speculative decoding is like a junior associate drafting an entire memo while the partner reads it once and either signs off on whole paragraphs or strikes out at the first sentence that's wrong — the partner never writes word-by-word, but every word in the final memo is one the partner approved.
 
-**Mental model**: The target model's real bottleneck during decode is *loading 140GB of weights from HBM to compute one token*. That weight-load cost is paid once per forward pass, almost independent of how many tokens are in that pass (up to a point — see the roofline discussion in the parent [README §6](README.md)). So if a forward pass can verify 5 tokens at once instead of producing 1, you get up to 5 tokens of output for the price of 1 weight-load. The draft mechanism's only job is to propose tokens the target is *likely to agree with* — the better the agreement (acceptance rate α), the closer you get to that 5×.
+**Mental model**: The target model's real bottleneck during decode is *loading 140GB of weights from HBM to compute one token*. That weight-load cost is paid once per forward pass, almost independent of how many tokens are in that pass (up to a point — see the roofline discussion in the parent [README §6](inference_and_decoding.md)). So if a forward pass can verify 5 tokens at once instead of producing 1, you get up to 5 tokens of output for the price of 1 weight-load. The draft mechanism's only job is to propose tokens the target is *likely to agree with* — the better the agreement (acceptance rate α), the closer you get to that 5×.
 
 **Why it matters**: This is one of the highest-frequency "explain a real speedup technique end-to-end" questions in senior LLM infra interviews, because it touches sampling theory (why is it exact?), systems (why is verification cheap?), and production judgment (when does it backfire?) in one topic. Interviewers also increasingly probe the *newer* draft mechanisms (EAGLE, Medusa, MTP) because they're what production systems actually run in 2025-26 — vanilla "small LLM as draft" is now the textbook baseline, not the deployed system.
 
@@ -743,7 +743,7 @@ A draft mechanism proposes K candidate tokens; the target model verifies all K i
 
 **Q2: Why is verifying K tokens almost as cheap as generating 1 token?**
 **Short:** Decode is memory-bandwidth-bound, so verifying K positions in one pass reads the same weights once, making the extra positions almost free until compute-bound.
-Decode is memory-bandwidth-bound: each step's cost is dominated by streaming the full weight matrices from HBM (e.g., 140GB for a 70B model in BF16), and that cost is roughly independent of how many token positions are processed in the same pass, up to the point where the batch becomes compute-bound (the roofline crossover, ~batch 156 on an A100 — see the parent [README §6](README.md)). A verification pass over K=5 positions reads the weights once and computes attention/FFN for 5 positions in parallel — essentially "free" extra positions riding along on a weight-load you were going to pay for anyway.
+Decode is memory-bandwidth-bound: each step's cost is dominated by streaming the full weight matrices from HBM (e.g., 140GB for a 70B model in BF16), and that cost is roughly independent of how many token positions are processed in the same pass, up to the point where the batch becomes compute-bound (the roofline crossover, ~batch 156 on an A100 — see the parent [README §6](inference_and_decoding.md)). A verification pass over K=5 positions reads the weights once and computes attention/FFN for 5 positions in parallel — essentially "free" extra positions riding along on a weight-load you were going to pay for anyway.
 
 **Q3: What is the break-even acceptance rate and why does it matter operationally?**
 **Short:** Break-even acceptance for K=4 draft tokens is roughly 0.45 measured against real wall-clock draft cost, below which speculative decoding becomes a net slowdown.
@@ -884,9 +884,9 @@ The chat route's 98%-of-ceiling number is the actionable one: adaptive K correct
 
 ## Related
 
-- [Inference & Decoding README](README.md) — sampling, KV cache, continuous batching, the broader serving picture
+- [Inference & Decoding README](inference_and_decoding.md) — sampling, KV cache, continuous batching, the broader serving picture
 - [Sampling & Decoding Strategies](sampling_and_decoding_strategies.md) — temperature/top-p/min-p, the dimension that must match between draft and target
 - [KV Cache Optimization](kv_cache_optimization.md) — capacity planning when an independent draft model adds its own KV cache
 - [Constrained Decoding & Structured Outputs](constrained_decoding_and_structured_outputs.md) — how grammar masks and speculative decoding interact (Q13 there)
-- [vLLM Deep Dive](../vllm_deep_dive/README.md) — engine configuration: `--speculative-config`, `num_speculative_tokens`, `num_speculative_tokens_per_batch_size`, KV cache sharing
+- [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) — engine configuration: `--speculative-config`, `num_speculative_tokens`, `num_speculative_tokens_per_batch_size`, KV cache sharing
 - [Design: AI Coding Assistant](../case_studies/design_copilot.md) — worked production speculative decoder for a code-completion service

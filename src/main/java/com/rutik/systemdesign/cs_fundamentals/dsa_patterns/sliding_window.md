@@ -380,11 +380,11 @@ def subarray_sum_equals_k_fixed(nums: list[int], k: int) -> int:
 
 ## 10. Cross-links
 
-- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/) — string/array fundamentals, `Counter`, frequency arrays
-- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/) — amortized analysis (why the nested while loop is still O(n))
-- Applied: [`../../hld/rate_limiting/README.md`](../../hld/rate_limiting/README.md) — the *sliding window counter* and *sliding window log* rate-limiting algorithms are this exact pattern applied to time-based windows in production systems
-- Worked example: [case_studies/](../case_studies/) — see the interval/streaming case studies for sliding window applied to system-design-flavored problems
-- Master index: [dsa_patterns/README.md](README.md)
+- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — string/array fundamentals, `Counter`, frequency arrays
+- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — amortized analysis (why the nested while loop is still O(n))
+- Applied: [`../../hld/rate_limiting/README.md`](../../hld/rate_limiting/rate_limiting.md) — the *sliding window counter* and *sliding window log* rate-limiting algorithms are this exact pattern applied to time-based windows in production systems
+- Worked example: [case_studies/](../case_studies/case_studies.md) — see the interval/streaming case studies for sliding window applied to system-design-flavored problems
+- Master index: [dsa_patterns/README.md](dsa_patterns.md)
 
 ---
 

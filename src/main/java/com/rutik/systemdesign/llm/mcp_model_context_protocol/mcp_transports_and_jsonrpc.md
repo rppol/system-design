@@ -1,5 +1,5 @@
 # MCP Transports and JSON-RPC — Deep Dive
-Deep-dive sub-file of [MCP — Model Context Protocol](README.md).
+Deep-dive sub-file of [MCP — Model Context Protocol](mcp_model_context_protocol.md).
 
 ---
 

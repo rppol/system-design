@@ -786,8 +786,8 @@ And where the erasure genuinely matters to your ABI, say so in the type. A named
 
 ## Related / See Also
 
-- [Generics & Type System](README.md) — the parent module: PECS, erasure, bridge methods, wildcards, reflection, dynamic proxies
-- [Bytecode and Classfile](../bytecode_and_classfile/README.md) — the `Signature` attribute, constant pool, and how `javap` reads a descriptor
-- [Collections Internals](../collections_internals/README.md) — the bounded signatures of `Collections`, `Comparator`, and `EnumMap` in practice
-- [Functional Programming](../functional_programming/README.md) — lambdas and method references as the arguments that inference is solving for
-- [Build Tools: Maven and Gradle](../build_tools_maven_gradle/README.md) — where japicmp or Revapi belongs in a release pipeline
+- [Generics & Type System](generics_and_type_system.md) — the parent module: PECS, erasure, bridge methods, wildcards, reflection, dynamic proxies
+- [Bytecode and Classfile](../bytecode_and_classfile/bytecode_and_classfile.md) — the `Signature` attribute, constant pool, and how `javap` reads a descriptor
+- [Collections Internals](../collections_internals/collections_internals.md) — the bounded signatures of `Collections`, `Comparator`, and `EnumMap` in practice
+- [Functional Programming](../functional_programming/functional_programming.md) — lambdas and method references as the arguments that inference is solving for
+- [Build Tools: Maven and Gradle](../build_tools_maven_gradle/build_tools_maven_gradle.md) — where japicmp or Revapi belongs in a release pipeline

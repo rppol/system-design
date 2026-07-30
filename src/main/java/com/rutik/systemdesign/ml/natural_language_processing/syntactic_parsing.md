@@ -1,6 +1,6 @@
 # Syntactic Parsing
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers recovering grammatical structure from text: constituency parsing (CFGs, PCFGs, CKY),
 > dependency parsing (heads, relations, projectivity), transition- and graph-based algorithms,
 > neural biaffine parsers, Universal Dependencies, and evaluation (UAS/LAS, bracketing F1).

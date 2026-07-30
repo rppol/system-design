@@ -1,0 +1,1207 @@
+# ML Interview Patterns and Preparation
+
+<!-- study-paths
+senior: ml_interview_patterns.md
+principal: ml_interview_patterns.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+ML interviews test three distinct skills: (1) theoretical understanding of algorithms, statistics, and optimization; (2) ML system design — architecting end-to-end production systems; and (3) coding — implementing ML algorithms from scratch. This module focuses on systematic frameworks and patterns for excelling at ML interviews at top-tier companies (FAANG, ML-first startups).
+
+A large class of interview failures is structural rather than knowledge-based. A candidate can know XGBoost and neural networks and still be unable to articulate why they chose one over the other, skip the problem formulation step, or never discuss monitoring and data drift. This module provides frameworks to avoid those failure modes.
+
+---
+
+## 2. Intuition
+
+One-line analogy: an ML interview is like a system design review — the interviewer wants to see how you think, not just what you know. They are evaluating your engineering judgment under ambiguity.
+
+Mental model: treat each ML design question as a product specification. You are the senior ML engineer presenting to a skeptical engineering manager. Lead with constraints and tradeoffs, not with model architecture.
+
+Why it matters: an interviewer can only score what you say out loud. Clear communication and a structured attack on an ambiguous problem are observable in a 45-minute conversation; knowing the latest architecture is not, unless you explain why it fits the constraints you just established.
+
+Key insight: interviewers test failure modes by design. They ask open-ended questions to see if you (a) clarify requirements, (b) propose a baseline before a complex solution, and (c) know when not to use ML. Candidates who jump to deep learning on question 1 fail the judgment test.
+
+---
+
+## 3. Core Principles
+
+**Principle 1 — Baseline first:** every answer starts with the simplest model that could work. Logistic regression or heuristic rule. Justify every step up in complexity.
+
+**Principle 2 — Metrics before models:** define success metrics before proposing any model. An interviewer who hears "I would train a neural network" before hearing "the business cares about precision over recall because false positives cost $50 each" knows you are not production-ready.
+
+**Principle 3 — State assumptions explicitly:** "I am assuming the labeling budget is 10K samples," "I am assuming latency < 100ms," "I am assuming weekly retraining is acceptable." Unstated assumptions are interviewer red flags.
+
+**Principle 4 — Discuss tradeoffs, not just solutions:** for every design choice, name the alternative you did not choose and explain why. "I chose a two-tower model over a cross-encoder because a cross-encoder needs one transformer forward pass per query-candidate pair — 10M passes per request — whereas the two-tower model precomputes item embeddings offline and retrieves by ANN, though the cross-encoder would give higher precision on a short list."
+
+**Principle 5 — Production thinking:** mention monitoring, drift detection, retraining triggers, and failure modes. Candidates who stop at model training are viewed as junior.
+
+---
+
+## 4. Types / Architectures / Strategies
+
+### The 6-Step ML Design Framework (45-minute interview)
+
+```
+Step 1 — Clarify Requirements (5 minutes)
+  Questions to always ask:
+  - What is the business objective? What does success look like?
+  - What is the scale? (users, QPS, data volume)
+  - What is the latency budget? (<10ms, <100ms, <1s, batch)
+  - How much labeled data is available?
+  - Are there fairness, privacy, or regulatory constraints?
+  - What is the acceptable error rate? (precision vs recall tradeoff)
+
+Step 2 — Problem Formulation (5 minutes)
+  - Define the ML task: classification, regression, ranking, generation, RL
+  - Define the label: what exactly are we predicting?
+  - Define the evaluation metric: offline (AUC, NDCG, RMSE) and online (CTR, conversion)
+  - Identify the train/val/test split strategy (time-based? user-based?)
+
+Step 3 — Data and Features (10 minutes)
+  - Data sources: logs, databases, 3rd party, user-generated
+  - Label collection: historical, human annotation, implicit feedback
+  - Feature categories: user, item, context, interaction
+  - Feature engineering: embeddings, aggregations, temporal features
+  - Handling missing data, cold start, class imbalance
+
+Step 4 — Model Architecture (10 minutes)
+  - Start with: logistic regression / linear model baseline
+  - Gradient boosted trees: when features are tabular, structured
+  - Neural network: when features are unstructured or interactions matter
+  - Specific architectures: two-tower, transformer, GNN — justify each
+  - Hyperparameters and training details
+
+Step 5 — Serving and Infrastructure (10 minutes)
+  - Online vs. offline scoring
+  - Latency budget breakdown: feature retrieval + inference + postprocessing
+  - Batching strategy
+  - Caching: pre-computed embeddings, pre-scored candidates
+  - A/B testing and rollout strategy (canary, shadow mode)
+  - Fallback strategy if model is unavailable
+
+Step 6 — Monitoring and Iteration (5 minutes)
+  - Input data distribution monitoring (KL divergence, PSI)
+  - Model performance monitoring (AUC on held-out labels)
+  - Prediction distribution monitoring (output drift)
+  - Retraining triggers: scheduled vs. drift-triggered
+  - Feedback loop: how new labels are collected
+```
+
+### ML System Design Problem Templates
+
+**Recommendation System Template:**
+```
+Problem formulation: ranking problem, maximize engagement (CTR, watch time)
+Two-stage architecture:
+  Stage 1 — Candidate Generation (retrieval):
+    Two-tower model (user tower + item tower, dot product)
+    ANN index (FAISS, ScaNN) — retrieve top-1000 candidates from 100M items
+    Latency: <10ms, run online per request
+
+  Stage 2 — Ranking:
+    More complex model (DCN-v2, DIN, DLRM) on top-1000 candidates
+    Rich cross-features, attention, explicit/implicit feedback
+    Latency: <50ms, run online
+
+  Post-ranking: business rules (diversity, freshness, safety filtering)
+  Training: daily retraining on last 7 days of interaction logs
+  Labels: click (positive), skip (negative), watch time (regression)
+  Cold start: content-based features for new items, popular items for new users
+```
+
+**Fraud Detection Template:**
+```
+Problem formulation: binary classification, high precision + recall required
+  False positive = customer friction; False negative = financial loss
+
+Features:
+  Transaction: amount, merchant, time, device
+  User velocity: txn_count_1h, txn_count_24h, amount_sum_24h
+  Graph features: account-device-IP relationship embeddings
+  Historical: chargeback_rate_30d, dispute_count_90d
+
+Model: gradient boosted trees (XGBoost/LightGBM) for speed + interpretability
+  + GNN layer for graph-structural fraud ring detection
+  + Calibrated probabilities (Platt scaling or isotonic regression)
+
+Serving: real-time (<100ms), online features from feature store
+Threshold: tuned for 85% precision at 65% recall (business requirement)
+Monitoring: chargeback rate, false positive rate, concept drift (new fraud patterns)
+Retraining: daily on rolling 90-day window + online learning for emerging patterns
+```
+
+**Search Ranking Template:**
+```
+Problem formulation: learning-to-rank (LTR), NDCG@10 metric
+  Stages: query understanding -> retrieval -> ranking -> serving
+
+Query understanding:
+  Query classification (navigational/informational/transactional)
+  Entity recognition, spell correction, query expansion
+
+Retrieval:
+  BM25 (sparse): fast, no training required, good for exact match
+  Bi-encoder (dense): semantic search, FAISS ANN index
+  Hybrid: RRF (Reciprocal Rank Fusion) or learned score combination
+
+Ranking:
+  Listwise LTR: LambdaMART or LambdaRank
+  Or: cross-encoder for semantic re-ranking (top-100 only, latency budget)
+  Features: query-document relevance, document quality, user context
+
+Labels: click-through data (implicit) + human relevance judgments (explicit)
+Evaluation: offline NDCG@10, online CTR, session success rate
+```
+
+**Classification Pipeline Template:**
+```
+Data: structured tabular features
+Baseline: logistic regression (interpretable, fast, debuggable)
+Step up: gradient boosted trees (handles missing, nonlinear, fast inference)
+Step up: neural network with embeddings (when high-cardinality categoricals)
+
+Training pipeline:
+  Feature store -> feature retrieval -> preprocessing -> model -> evaluation
+  Data validation: Great Expectations or custom schema checks
+  Experiment tracking: MLflow or W&B
+
+Serving:
+  Batch: Spark + model serialize (Pickle/ONNX) -> predictions to database
+  Online: FastAPI + model server (TorchServe, BentoML) -> REST API
+
+Monitoring:
+  Population Stability Index (PSI) on all features daily
+  Model AUC on held-out labels weekly
+  Prediction drift: KS test on output distribution
+```
+
+### Common Tradeoffs Framework
+
+| Tradeoff | When to choose A | When to choose B |
+|---|---|---|
+| Precision vs Recall | A: Cost of FP > Cost of FN (spam, legal) | B: Cost of FN > Cost of FP (cancer, fraud) |
+| Latency vs Accuracy | A: User-facing, real-time (<100ms) | B: Batch offline, accuracy-critical |
+| Online vs Batch training | A: Concept drift is rapid (<24h shift) | B: Stable distribution, compute cost |
+| Bias vs Variance | A: Small dataset, complex model -> regularize | B: Large dataset, underfitting -> bigger model |
+| Exploration vs Exploitation | A: New users, cold start -> explore | B: Known users, revenue-critical -> exploit |
+| Simple vs Complex model | A: Interpretability required (credit, legal) | B: Accuracy is primary metric, black box ok |
+
+---
+
+## 5. Architecture Diagrams
+
+### ML System — End-to-End Architecture
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph src["Data Sources"]
+        s1(["User logs · Item catalog · Labels"])
+    end
+    subgraph pipe["Data Pipeline"]
+        p1["Ingestion\nKafka / Kinesis"] --> p2["ETL\nSpark / dbt"] --> fs[["Feature Store"]]
+    end
+    subgraph off["Offline Training"]
+        t1["Train\nGPU cluster"] --> t2["Eval\nholdout set"] --> t3[["Model Registry\nMLflow"]]
+    end
+    subgraph on["Online Serving"]
+        o1["Feature retrieval\n<5ms"] --> o2["Inference\n<20ms"] --> o3["Response\n<50ms"]
+    end
+    subgraph mon["Monitoring"]
+        m1["Feature drift PSI · Model AUC\nPrediction drift KS · business KPIs"]
+    end
+    s1 --> p1
+    fs --> t1
+    fs --> o1
+    t3 --> o2
+    o3 --> m1
+    m1 -->|"PSI > 0.2 → retrain"| t1
+
+    class s1 io
+    class p1 base
+    class p2 base
+    class fs base
+    class t1 train
+    class t2 mathOp
+    class t3 frozen
+    class o1 req
+    class o2 req
+    class o3 req
+    class m1 lossN
+```
+
+The feature store is the seam that eliminates training-serving skew: the same feature definitions feed both offline training and online serving. Monitoring closes the loop — a PSI breach on any top feature triggers retraining.
+
+### Bias-Variance Decomposition
+
+```mermaid
+xychart-beta
+    title "Bias-variance tradeoff vs model complexity"
+    x-axis "Model complexity →" [1, 2, 3, 4, 5, 6, 7]
+    y-axis "Error" 0 --> 13
+    line [9, 6, 4, 3, 2.5, 2.2, 2]
+    line [1, 1.5, 2, 3, 4.5, 6.5, 9]
+    line [11, 8.5, 7, 7, 8, 9.7, 12]
+```
+
+Total error = Bias² + Variance + irreducible noise (the decomposition is exact for squared-error loss; for 0-1 loss it is only an analogy). The falling line is bias² (shrinks as the model grows), the rising line is variance (grows with complexity), and the U-shaped line is total error — minimized at intermediate complexity. High bias (underfit) shows high train AND val loss; high variance (overfit) shows low train loss but a large train-val gap.
+
+### Precision-Recall vs Threshold
+
+```mermaid
+xychart-beta
+    title "Precision and recall across decision thresholds"
+    x-axis "Decision threshold →" [0.2, 0.35, 0.5, 0.65, 0.8, 0.9]
+    y-axis "Rate" 0 --> 1
+    line [0.60, 0.70, 0.80, 0.88, 0.93, 0.95]
+    line [0.90, 0.80, 0.70, 0.55, 0.40, 0.30]
+```
+
+The rising line is precision, the falling line is recall: raising the threshold buys precision at the cost of recall. Pick the operating point with F_beta = (1 + beta²)·P·R / (beta²·P + R) — beta > 1 weights recall (medical diagnosis), beta < 1 weights precision (spam), beta = 1 is F1.
+
+**What this actually says.** "Blend precision and recall into one number, but let `beta` declare how many times more you care about recall than about precision."
+
+The interview-relevant fact is that `beta` has a concrete meaning, not a vibe: `beta = 2` says one unit of recall is worth twice as much as one unit of precision. Being able to state that — rather than "beta weights recall more" — is what separates a memorized formula from an understood one.
+
+| Symbol | What it is |
+|--------|------------|
+| `P` | Precision. Of the items you flagged, the fraction that were right |
+| `R` | Recall. Of the items that were actually positive, the fraction you caught |
+| `beta` | How many times more you value recall than precision. `1` = equal |
+| `beta²` | Where `beta` actually enters. Squaring is why `beta = 2` is a 4x tilt in the arithmetic, not 2x |
+| `(1 + beta²)` | Normalizer that keeps `F_beta` in `[0, 1]` and equal to `P` when `P = R` |
+| `F_beta` | The harmonic-style blend. Always closer to the *smaller* of `P` and `R` |
+
+**Walk one example.** The fraud operating point this module specifies elsewhere — 85% precision at 65% recall — scored under all three common betas:
+
+```
+   P = 0.85    R = 0.65        (fraud requirement stated in the Step-2 template)
+
+   beta = 0.5  (precision-weighted, spam)
+       (1 + 0.25) x 0.85 x 0.65 / (0.25 x 0.85 + 0.65)
+       = 0.690625 / 0.8625 = 0.8007
+
+   beta = 1.0  (F1, balanced)
+       2 x 0.85 x 0.65 / (0.85 + 0.65)
+       = 1.105 / 1.500   = 0.7367
+
+   beta = 2.0  (recall-weighted, medical)
+       5 x 0.85 x 0.65 / (4 x 0.85 + 0.65)
+       = 2.7625 / 4.050  = 0.6821
+```
+
+One fixed model, three scores spanning `0.68` to `0.80` — a 12-point swing produced entirely by the choice of `beta`, with no change to the model at all. That is the trap: a candidate who reports "F-score 0.80" without naming `beta` has reported nothing. Note the direction each beta pulls: `beta = 2` drags the score toward recall (`0.65`, the weaker rate) and lands at `0.6821`; `beta = 0.5` drags it toward precision (`0.85`) and lands at `0.8007`. F1 sits at `0.7367`, *below* the arithmetic mean of `0.75` — that harmonic pull toward the weaker rate is the point, and it is what stops a model with 99% precision and 2% recall from looking good.
+
+**How to pick `beta` in an interview.** Derive it from the cost asymmetry rather than guessing. If missing a positive costs roughly `k` times what a false alarm costs, `beta ≈ sqrt(k)` is the defensible starting point, and here is why: rewriting the metric in counts gives `F_beta = (1 + beta²)·TP / ((1 + beta²)·TP + beta²·FN + FP)`, so a false negative already carries weight `beta²` against a false positive's `1`. Setting `beta² = k` is what makes the metric's internal error weighting equal the business cost ratio. Say that out loud and then sanity-check it against the business, which is exactly the "state your assumptions explicitly" principle from §3.
+
+**Name the other convention before the interviewer does.** Two readings of `beta` coexist and they disagree. Van Rijsbergen's classical gloss — repeated in most textbook and encyclopaedia treatments — is that `beta` measures how many times as important recall is than precision, which reads as `beta = k`. The count-form identity above says the error weighting is `beta²`, which gives `beta = sqrt(k)`. No authority adjudicates between them, so a candidate who states only one can be pushed off it. State both: "the classical phrasing suggests `beta = k`; writing `F_beta` in counts shows the actual FN:FP weight is `beta²`, so I take `beta = sqrt(k)` and I'll say which convention I'm using." That answer cannot be caught out either way.
+
+### Cascade Model — Latency vs Accuracy
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    all(["All candidates · 10M items"])
+    all --> fast["Index-backed filter · BM25 / ANN\nbudget ~5ms"]
+    fast --> k1["Top-1000"]
+    k1 --> med["Medium model · GBT / two-tower\n<10ms"]
+    med --> k2["Top-100"]
+    k2 --> slow["Slow model · cross-encoder / LLM\n<50ms"]
+    slow --> k3["Top-10"]
+    k3 --> rules["Business rules / diversity filter"]
+    rules --> out(["Final ranked list"])
+
+    class all io
+    class fast train
+    class k1 base
+    class med train
+    class k2 base
+    class slow train
+    class k3 base
+    class rules mathOp
+    class out io
+```
+
+Each stage shrinks the candidate set so the expensive model only ever scores a short list. Note that the first stage never scores all 10M items — an inverted index or ANN structure returns the top-1000 in single-digit milliseconds precisely because it avoids an exhaustive pass — and the <50ms cross-encoder never sees more than 100 items. This is how retrieval-then-rank keeps p99 latency inside budget while preserving top-end accuracy.
+
+### The 6-Step ML Design Framework
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    s1["1 · Clarify Requirements\nscale, latency, metric"]
+    s2["2 · Problem Formulation\ntask, label, eval split"]
+    s3["3 · Data & Features\nsources, leakage, imbalance"]
+    s4["4 · Model Architecture\nbaseline → complex"]
+    s5["5 · Serving & Infra\nlatency budget, A/B"]
+    s6["6 · Monitoring & Iteration\ndrift, retraining"]
+    s1 --> s2 --> s3 --> s4 --> s5 --> s6
+    s6 -.->|"new labels / drift"| s3
+
+    class s1 req
+    class s2 io
+    class s3 base
+    class s4 train
+    class s5 mathOp
+    class s6 lossN
+```
+
+The order is the grading rubric: candidates who skip step 1 or step 6 fail on judgment, not knowledge. Requirements and metrics come before any model, and the dotted arrow shows production feedback flowing back into data and features.
+
+### Debugging a Degraded Production Model
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    start(["Prod AUC degraded"])
+    start --> q1{"feature PSI > 0.2\nor schema change?"}
+    q1 -->|"yes"| fixdata["Data / pipeline issue\nfix inputs, backfill feature"]
+    q1 -->|"no"| q2{"train-val gap\nlarge on refresh?"}
+    q2 -->|"yes"| overfit["High variance\nregularize, add data"]
+    q2 -->|"no"| q3{"prediction dist\nshifted (KS)?"}
+    q3 -->|"yes"| drift["Concept drift\nretrain on recent data"]
+    q3 -->|"no"| q4{"label delay or\nleakage suspected?"}
+    q4 -->|"yes"| leak["Audit features\ntemporal cutoff, remove leaks"]
+    q4 -->|"no"| rollback["Rollback to prior model\ninvestigate offline"]
+
+    class start io
+    class q1 mathOp
+    class q2 mathOp
+    class q3 mathOp
+    class q4 mathOp
+    class fixdata base
+    class overfit train
+    class drift lossN
+    class leak lossN
+    class rollback frozen
+```
+
+Diagnose before you retrain: a silently broken feature pipeline (all-zeros after a schema change) is the most common cause and is fixed at the data layer, not the model. If the cause is unclear and the regression is severe, roll back first and investigate with zero production pressure.
+
+### Model-Selection Tradeoff Space
+
+```mermaid
+quadrantChart
+    title Model choice by interpretability vs predictive power
+    x-axis "Low interpretability" --> "High interpretability"
+    y-axis "Low predictive power" --> "High predictive power"
+    quadrant-1 Ideal - rare
+    quadrant-2 Deep nets - high power low transparency
+    quadrant-3 Avoid
+    quadrant-4 Linear / rules baseline
+    Deep NN DLRM: [0.20, 0.85]
+    GBT XGBoost: [0.55, 0.80]
+    Logistic Regression: [0.85, 0.45]
+    Rule-based: [0.90, 0.25]
+```
+
+Move up the y-axis (more power) and you usually lose interpretability (leftward): GBT is the pragmatic middle, logistic regression and rules trade accuracy for transparency required in regulated domains. Start bottom-right (baseline) and only climb when the accuracy gain justifies the loss of explainability and the added serving cost.
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+```python
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.metrics import (roc_auc_score, precision_recall_curve,
+                              average_precision_score, f1_score,
+                              confusion_matrix, classification_report)
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.preprocessing import StandardScaler
+from typing import Any, Optional
+import warnings
+warnings.filterwarnings('ignore')
+
+
+# ── Debugging checklist — code patterns ──────────────────────────────────────
+
+def diagnose_model(
+    model: Any,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+) -> dict[str, float]:
+    """
+    Systematic model health check.
+    Returns diagnostic metrics for bias-variance analysis.
+    """
+    train_preds = model.predict_proba(X_train)[:, 1]
+    val_preds = model.predict_proba(X_val)[:, 1]
+
+    train_auc = roc_auc_score(y_train, train_preds)
+    val_auc = roc_auc_score(y_val, val_preds)
+    gap = train_auc - val_auc
+
+    # Class imbalance check
+    pos_rate = y_train.mean()
+
+    # Prediction distribution check (collapse detection)
+    pred_std = val_preds.std()
+
+    print("=== Model Diagnosis ===")
+    print(f"Train AUC:  {train_auc:.4f}")
+    print(f"Val AUC:    {val_auc:.4f}")
+    print(f"Gap:        {gap:.4f}  {'HIGH VARIANCE' if gap > 0.05 else 'OK'}")
+    print(f"Val AUC:    {val_auc:.4f}  {'HIGH BIAS' if val_auc < 0.70 else 'OK'}")
+    print(f"Pos rate:   {pos_rate:.4f}  {'IMBALANCED (<1%)' if pos_rate < 0.01 else 'OK'}")
+    print(f"Pred std:   {pred_std:.4f}  {'COLLAPSED (<0.01)' if pred_std < 0.01 else 'OK'}")
+
+    return {
+        'train_auc': train_auc,
+        'val_auc': val_auc,
+        'gap': gap,
+        'pos_rate': pos_rate,
+        'pred_std': pred_std,
+    }
+
+
+# ── Precision-Recall threshold tuning ────────────────────────────────────────
+
+def tune_threshold(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    beta: float = 1.0,
+    target_precision: Optional[float] = None,
+    target_recall: Optional[float] = None,
+) -> dict[str, float]:
+    """
+    Find optimal threshold for F-beta or a precision/recall constraint.
+    beta > 1: recall-weighted (medical)
+    beta < 1: precision-weighted (spam)
+    """
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
+    # thresholds has len(precisions) - 1; add sentinel
+    thresholds = np.append(thresholds, 1.0)
+
+    if target_precision is not None:
+        # Maximize recall subject to precision >= target
+        mask = precisions >= target_precision
+        if mask.sum() == 0:
+            print(f"Warning: target precision {target_precision} unreachable")
+            return {}
+        best_idx = np.argmax(recalls[mask])
+        idx = np.where(mask)[0][best_idx]
+    elif target_recall is not None:
+        # Maximize precision subject to recall >= target
+        mask = recalls >= target_recall
+        if mask.sum() == 0:
+            print(f"Warning: target recall {target_recall} unreachable")
+            return {}
+        best_idx = np.argmax(precisions[mask])
+        idx = np.where(mask)[0][best_idx]
+    else:
+        # Maximize F-beta
+        f_beta = (1 + beta**2) * (precisions * recalls) / \
+                 (beta**2 * precisions + recalls + 1e-9)
+        idx = np.argmax(f_beta)
+
+    return {
+        'threshold': float(thresholds[idx]),
+        'precision': float(precisions[idx]),
+        'recall': float(recalls[idx]),
+        'f1': 2 * precisions[idx] * recalls[idx] / (precisions[idx] + recalls[idx] + 1e-9),
+        'auprc': average_precision_score(y_true, y_prob),
+    }
+
+
+# ── Cost-optimal threshold (the version interviewers actually probe) ──────────
+#
+# When the two error types have different dollar costs, the F-beta search above
+# is a proxy; the direct object is expected cost:
+#     cost(t) = FP(t) * cost_fp + FN(t) * cost_fn
+# For a CALIBRATED model the minimizing threshold has a closed form:
+#     t* = cost_fp / (cost_fp + cost_fn)
+
+# ── Feature importance and selection ─────────────────────────────────────────
+
+def feature_importance_analysis(
+    model: GradientBoostingClassifier,
+    feature_names: list[str],
+    top_k: int = 20,
+) -> pd.DataFrame:
+    """
+    Analyze feature importances with permutation importance for validation.
+    GBT's built-in importances can overweight high-cardinality features.
+    """
+    importance_df = pd.DataFrame({
+        'feature': feature_names,
+        'importance': model.feature_importances_,
+    }).sort_values('importance', ascending=False).head(top_k)
+
+    print(importance_df.to_string(index=False))
+    return importance_df
+
+
+# ── Cross-validation — correct temporal split ────────────────────────────────
+
+def temporal_cv(
+    X: pd.DataFrame,
+    y: pd.Series,
+    date_col: str,
+    n_splits: int = 5,
+) -> list[float]:
+    """
+    Time-series aware cross-validation.
+    Always train on past, evaluate on future.
+    Never use StratifiedKFold for temporal data — causes data leakage.
+    """
+    from sklearn.model_selection import TimeSeriesSplit
+
+    X_arr = X.drop(columns=[date_col]).values
+    y_arr = y.values
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    aucs: list[float] = []
+
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X_arr)):
+        X_train, X_val = X_arr[train_idx], X_arr[val_idx]
+        y_train, y_val = y_arr[train_idx], y_arr[val_idx]
+
+        model = GradientBoostingClassifier(n_estimators=200, max_depth=4)
+        model.fit(X_train, y_train)
+
+        auc = roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
+        aucs.append(auc)
+        print(f"Fold {fold+1}: AUC = {auc:.4f}")
+
+    print(f"Mean AUC: {np.mean(aucs):.4f} +/- {np.std(aucs):.4f}")
+    return aucs
+
+
+# ── Model calibration check ───────────────────────────────────────────────────
+
+def calibration_check(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    """
+    Expected Calibration Error (ECE).
+    A model predicting 0.7 probability should be correct 70% of the time.
+    ECE > 0.05 typically indicates need for calibration (Platt or isotonic).
+    """
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        mask = (y_prob >= bin_edges[i]) & (y_prob < bin_edges[i + 1])
+        if mask.sum() == 0:
+            continue
+        bin_acc = y_true[mask].mean()
+        bin_conf = y_prob[mask].mean()
+        bin_size = mask.sum() / len(y_true)
+        ece += bin_size * abs(bin_acc - bin_conf)
+
+    print(f"ECE: {ece:.4f} {'(needs calibration)' if ece > 0.05 else '(well calibrated)'}")
+    return ece
+
+
+# ── Drift detection — Population Stability Index ──────────────────────────────
+
+def population_stability_index(
+    reference: np.ndarray,
+    current: np.ndarray,
+    n_bins: int = 10,
+) -> float:
+    """
+    PSI measures distribution shift between reference and current data.
+    PSI < 0.1: no significant change
+    0.1 <= PSI < 0.2: moderate change, monitor
+    PSI >= 0.2: major shift, investigate and retrain
+    """
+    bins = np.percentile(reference, np.linspace(0, 100, n_bins + 1))
+    bins[0] = -np.inf
+    bins[-1] = np.inf
+
+    ref_counts = np.histogram(reference, bins=bins)[0] + 1e-6   # avoid log(0)
+    cur_counts = np.histogram(current, bins=bins)[0] + 1e-6
+
+    ref_pct = ref_counts / ref_counts.sum()
+    cur_pct = cur_counts / cur_counts.sum()
+
+    psi = np.sum((cur_pct - ref_pct) * np.log(cur_pct / ref_pct))
+
+    status = "OK" if psi < 0.1 else ("MONITOR" if psi < 0.2 else "ALERT — RETRAIN")
+    print(f"PSI: {psi:.4f} [{status}]")
+    return float(psi)
+
+
+# ── A/B test — minimum detectable effect ─────────────────────────────────────
+
+def minimum_sample_size(
+    baseline_rate: float,
+    minimum_detectable_effect: float,  # relative lift, e.g., 0.05 = 5%
+    alpha: float = 0.05,
+    power: float = 0.80,
+) -> int:
+    """
+    Sample size per arm for a two-proportion z-test.
+    baseline_rate: control conversion rate (e.g., 0.10 = 10%)
+    minimum_detectable_effect: minimum lift to detect (relative)
+    """
+    from scipy import stats
+
+    p1 = baseline_rate
+    p2 = baseline_rate * (1 + minimum_detectable_effect)
+    p_bar = (p1 + p2) / 2
+
+    z_alpha = stats.norm.ppf(1 - alpha / 2)
+    z_beta = stats.norm.ppf(power)
+
+    n = (z_alpha * np.sqrt(2 * p_bar * (1 - p_bar)) +
+         z_beta * np.sqrt(p1 * (1 - p1) + p2 * (1 - p2))) ** 2 / (p2 - p1) ** 2
+
+    print(f"Required sample per arm: {int(np.ceil(n)):,}")
+    print(f"Total sample: {2*int(np.ceil(n)):,}")
+    return int(np.ceil(n))
+```
+
+### 6.1 Decoding the four numbers interviewers push on
+
+The toolkit above hides four pieces of arithmetic that get probed directly in loops. Each one has a threshold attached, and each threshold has a reason.
+
+#### Cost-optimal threshold
+
+**Read it like this.** "Do not ask where the probability crosses one half. Ask how much a miss costs relative to a false alarm, and put the threshold exactly there."
+
+`0.5` is only optimal when the two mistakes cost the same amount, which is almost never true in fraud, medical, or safety work. The closed form below is the single most useful line to have memorized for a threshold question.
+
+| Symbol | What it is |
+|--------|------------|
+| `cost_fp` | Price of a false alarm — a human reviewing something that turned out fine |
+| `cost_fn` | Price of a miss — the fraud loss, the undetected disease, the churned customer |
+| `t*` | The optimal cutoff, `cost_fp / (cost_fp + cost_fn)` |
+| Calibration prerequisite | The formula reads predicted probabilities as literal probabilities; miscalibration invalidates it |
+| `0.5` | What you get when `cost_fp == cost_fn` — the default is a special case, not a rule |
+
+**Walk one example.** The fraud economics this module cites — a `$2` manual review against a `$200` loss per missed fraud:
+
+```
+   cost_fp = $2        cost_fn = $200        ratio = 100 : 1
+
+   t* = 2 / (2 + 200) = 2 / 202 = 0.0099
+
+   at t = 0.5     : flag only near-certain fraud. Every miss costs $200.
+   at t = 0.0099  : flag anything with >= ~1% fraud probability.
+                    Justified because 100 wasted reviews ($200) cost exactly
+                    the same as one missed fraud ($200) -- so the 100th review
+                    is still break-even.
+```
+
+That last line is the whole intuition. The threshold drops to `~1%` not because recall is nice to have but because the cost ratio says one hundred false alarms and one miss are *the same amount of money*. A candidate who says "I would lower the threshold for fraud" is fine; one who derives `0.0099` from `$2` and `$200` is hired.
+
+#### Expected Calibration Error
+
+**Put simply.** "Bucket predictions by confidence, and in each bucket check whether the model was right as often as it claimed. ECE is the size-weighted average of how far off those claims were."
+
+| Symbol | What it is |
+|--------|------------|
+| `n_bins` | Confidence buckets, usually 10. Each holds predictions in one probability band |
+| `bin_conf` | Average predicted probability in the bucket — what the model *claimed* |
+| `bin_acc` | Actual fraction correct in the bucket — what the model *delivered* |
+| `bin_size` | Fraction of all predictions in this bucket. Weights the bucket's contribution |
+| `abs(bin_acc - bin_conf)` | The calibration gap for that bucket. Sign is discarded |
+| `ECE > 0.05` | The action threshold stated in the docstring: fit Platt scaling or isotonic regression |
+
+**Walk one example.** A typically over-confident boosted-tree model, three populated buckets:
+
+```
+   bucket    claimed (conf)   delivered (acc)   share   gap    contribution
+     mid          0.55            0.50          0.30    0.05      0.0150
+     high         0.75            0.62          0.40    0.13      0.0520
+     top          0.95            0.80          0.30    0.15      0.0450
+                                                shares sum to 1.00
+   ECE = 0.0150 + 0.0520 + 0.0450 = 0.1120
+```
+
+`0.1120` is more than twice the `0.05` action threshold, so this model needs calibration before its probabilities drive anything. Read the top bucket: it says `0.95` and delivers `0.80`. Under the cost formula above, a decision engine treating that `0.95` as real would be pricing a 15-point error into every high-confidence action. Note also that the largest bucket contributes most — a big gap in a rarely-populated bucket matters less than a moderate gap where most traffic lands, which is exactly what the `bin_size` weighting encodes.
+
+#### Population Stability Index
+
+**The idea behind it.** "Compare this week's feature distribution against the reference bin by bin, and add up how much probability mass moved — weighted by how far, in relative terms, it moved."
+
+| Symbol | What it is |
+|--------|------------|
+| `ref_pct`, `cur_pct` | Fraction of records in each bin, then and now. Each vector sums to `1.0` |
+| `cur_pct - ref_pct` | How much mass moved into or out of this bin. Signed |
+| `log(cur_pct / ref_pct)` | How much it moved *relatively*. A bin going 1% to 2% counts as much as 20% to 40% |
+| Product of the two | Always non-negative — the signs of the difference and the log always agree |
+| `+ 1e-6` | Guard so an empty bin does not produce `log(0)` and poison the whole sum |
+| `0.1 / 0.2` | The stated action bands: below `0.1` fine, `0.1-0.2` monitor, above `0.2` retrain |
+
+**Walk one example.** Five equal reference bins (a uniform 20% each) against a current week that has drifted toward the high end:
+
+```
+   bin   ref    cur    cur-ref    ln(cur/ref)    term
+    1    0.20   0.10    -0.10       -0.6931     0.0693
+    2    0.20   0.15    -0.05       -0.2877     0.0144
+    3    0.20   0.20     0.00        0.0000     0.0000
+    4    0.20   0.25    +0.05       +0.2231     0.0112
+    5    0.20   0.30    +0.10       +0.4055     0.0405
+                                        PSI  =  0.1354   -> MONITOR band
+
+   a milder shift (0.16 / 0.18 / 0.20 / 0.22 / 0.24):  PSI = 0.0202  -> OK
+```
+
+Two things to notice. The asymmetry: bin 1 lost `0.10` and bin 5 gained `0.10`, yet bin 1 contributes `0.0693` against bin 5's `0.0405` — because halving a bin is a bigger relative move than adding half again to it. And the sensitivity: shrinking the shift from `±0.10` to `±0.04` at the extremes drops PSI from `0.1354` to `0.0202`, nearly 7x. PSI moves fast, which is why the `0.1` and `0.2` bands are usefully far apart and why a reading of `0.2` genuinely warrants a retrain rather than a shrug.
+
+#### A/B test sample size
+
+**What it means.** "The smaller the lift you want to prove and the rarer the event you are measuring, the more traffic you need — and the relationship with effect size is quadratic, not linear."
+
+| Symbol | What it is |
+|--------|------------|
+| `p1` | Control conversion rate, the baseline |
+| `p2` | `p1 × (1 + mde)`. Treatment rate you want to be able to detect |
+| `p2 - p1` | The absolute effect. It sits **squared** in the denominator — the source of the quadratic blow-up |
+| `alpha = 0.05` | False-positive tolerance. `z_alpha = 1.96` two-sided |
+| `power = 0.80` | Probability of detecting a real effect of that size. `z_beta = 0.84` |
+| `n` | Required users **per arm**; total traffic is `2n` |
+
+**Walk one example.** A 10% baseline conversion rate at `alpha = 0.05`, `power = 0.80`, run at three ambition levels:
+
+```
+   MDE (relative)     absolute effect      n per arm      total traffic
+      10%             0.100 -> 0.110         14,751          29,502
+       5%             0.100 -> 0.105         57,763         115,526
+     2.5%             0.100 -> 0.1025       228,555         457,110
+
+   halving the MDE 5% -> 2.5%:  228,555 / 57,763 = 3.96x  (~4x, as theory says)
+```
+
+Halving the effect you want to detect very nearly *quadruples* the traffic — `3.96x`, not `2x`. That is the single fact to volunteer when asked about experiment sizing, and it is why chasing a 1% lift is often infeasible rather than merely slow. The baseline rate bites the same way: hold the MDE at 5% but drop the baseline from 10% to 1%, and the requirement jumps from `57,763` to `637,010` per arm, an 11x increase, because rare events carry proportionally more variance.
+
+**The practical move.** Compute this *before* launch and convert `2n` into days at your actual traffic. If the answer exceeds what the business will wait for, you have three levers and should name all three: accept a larger MDE, accept lower power, or switch to a lower-variance metric (continuous revenue instead of binary conversion, or CUPED variance reduction). Discovering an underpowered test after four weeks of running it is the failure this function exists to prevent.
+
+---
+
+## 7. Real-World Examples
+
+**Google — feature store architecture:** Agent Platform Feature Store (formerly Vertex AI Feature Store) provides online (low-latency key-value lookup for real-time serving) and offline (batch retrieval for training) access to features, so the same feature definitions feed both paths. Know the current shape if you name it in an interview: feature data lives in BigQuery as the source of truth, feature views define what is synced, and Bigtable backs online serving, with embeddings handled separately by Vector Search. Without a feature store, teams recreate features independently, causing training-serving skew — one of the most common production failure modes.
+
+**Meta — ranking model evolution:** Ranking progressed from linear/logistic models, through a hybrid in which gradient-boosted-tree leaf indices become the input features to a logistic regression (He et al., "Practical Lessons from Predicting Clicks on Ads at Facebook", ADKDD'14 — an ads-CTR paper, reporting the hybrid beating either component by over 3%), to deep models — DLRM, the Deep Learning Recommendation Model, was published in 2019 (arXiv 1906.00091). Each step was justified by incremental metric gain AND infrastructure readiness. The generalizable lesson is that cheap linear models survive in the first retrieval stage long after deep models take over ranking, because retrieval is latency-bound and ranking is accuracy-bound. Specific adoption years per surface are not published; do not quote them.
+
+**Spotify — Discover Weekly evaluation:** Playlist recommendation is measured on engagement rather than raw plays — Spotify counts a play as a stream at 30 seconds, and skip rate and save-to-library rate carry independent signal. A reasonable offline proxy is MRR (Mean Reciprocal Rank) of clicked tracks, validated against online stream and save rates via holdout experiments. Spotify has not published the offline-to-online correlation coefficients, so state the *practice* — always validate that your offline metric moves with the online one before trusting it — and do not quote a number.
+
+**Airbnb — price prediction:** Airbnb's published pricing work (Ye et al., "Customized Regression Model for Airbnb Dynamic Pricing", KDD 2018) pairs a booking-probability classifier with a regression model trained under a customized loss, powering Price Tips and Smart Pricing. The transferable pattern is the one to say out loud: a linear baseline on location, size and amenities, then gradient boosted trees with temporal features (seasonality, events), then market-level aggregates such as neighborhood occupancy. Early on, feature engineering usually beats architecture choice — but no public source quantifies the per-feature gain, so do not invent one.
+
+---
+
+## 8. Tradeoffs
+
+| Decision | Option A | Option B | Key Factor |
+|---|---|---|---|
+| Model selection | Gradient boosted trees | Deep neural network | Data size (rule of thumb, not a law): GBT usually wins under ~1M rows of tabular data; DNN needs >5M rows or unstructured inputs to pull ahead |
+| Evaluation metric | AUC-ROC | AUC-PR | Imbalanced classes: prefer PR-AUC |
+| Training frequency | Daily batch | Real-time online | Concept drift speed; infrastructure cost |
+| Feature engineering | Manual features | End-to-end learned | Domain expertise availability; data volume |
+| Serving | Pre-computed scores | Real-time inference | Personalization depth; latency budget |
+| Label strategy | Click = positive | Explicit rating | Click has higher volume; explicit is higher quality |
+| Retraining trigger | Scheduled (weekly) | Drift-triggered | Stable distributions: schedule; volatile: drift |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+**When ML is appropriate:**
+- Problem has clear input-output specification with measurable success metric
+- Sufficient training data (>1K examples for classification, >100K for deep learning)
+- Pattern is too complex for hand-coded rules
+- Performance benefit justifies maintenance complexity
+
+**When ML is NOT appropriate:**
+- Simple heuristic suffices (rule-based systems for deterministic logic)
+- Data is too scarce (<100 labeled examples for complex tasks)
+- Decision must be fully explainable (some regulatory environments)
+- Cost of maintaining ML system > business benefit
+- Faster iteration possible with engineering (e.g., fixing a data pipeline bug)
+
+**When to upgrade from simple to complex ML:**
+- Logistic regression AUC is close to ceiling for the problem
+- Nonlinear interactions in data that LR cannot capture
+- Raw data inputs (images, text, audio) require representation learning
+- Have infrastructure to support training, serving, and monitoring of complex models
+
+---
+
+## 10. Common Pitfalls
+
+The six war stories below are **illustrative composites** drawn from recurring production
+failure patterns, not reports of specific public incidents. The failure mechanisms and the
+fixes are real and transferable; the metric values are representative figures chosen to make
+the mechanism concrete, so use them to explain a pattern, never to cite a company.
+
+**Pitfall 1 — Training-serving skew (most common production failure):**
+A team trained a CTR model with features computed at query time (e.g., user's last 10 clicked items). At serving, they used a different code path that computed the same feature differently — bucketing timestamps differently and missing the most recent click. The offline AUC was 0.84. Online CTR lift: 0.3% (expected 3%). Debug: log feature values at serving time, compare distributions to training. Fix: shared feature computation library for training and serving, or feature store with point-in-time correct retrieval.
+
+**Pitfall 2 — Label leakage:**
+A fraud detection team included `account_blocked` as a feature — a field set after fraud is confirmed. The model achieved AUC 0.99 in offline eval. In production: AUC 0.62. Fix: strict temporal feature construction — only use features with timestamp strictly before the label timestamp. Audit every feature for post-event information. Use a "feature creation timestamp" column in the feature store.
+
+**Pitfall 3 — Metric-objective mismatch:**
+A recommendation team optimized CTR (clicks per impression). They deployed a model that recommended clickbait titles. CTR improved 8%. Session length dropped 12%. User retention declined over 3 months. Fix: define the north star metric (long-term engagement, retention) before training. Use guard metrics in A/B tests — the experiment succeeds only if CTR improves AND session length does not regress more than X%.
+
+**Pitfall 4 — Ignoring class imbalance:**
+A team built a churn prediction model with 2% positive rate. Standard cross-entropy loss. Model predicted "no churn" for all users (98% accuracy). AUC: 0.52. Fix: use stratified sampling in train/val split, class_weight='balanced' or focal loss, oversample positives (SMOTE) or undersample negatives. Report AUC-PR (area under precision-recall curve) rather than AUC-ROC — AUC-PR is more informative for imbalanced problems.
+
+**Pitfall 5 — Wrong cross-validation strategy:**
+A time-series churn model used StratifiedKFold (random split). Offline AUC: 0.87. Online AUC: 0.71. Random splitting allowed the model to "look into the future" — validation data included users whose behavior was observed before some training data. Fix: TimeSeriesSplit — train on months 1-10, validate on month 11; train on months 1-11, validate on month 12. Simulate the exact temporal deployment scenario in offline evaluation.
+
+**Pitfall 6 — Stopping at model training:**
+A team built and trained an excellent model but did not set up monitoring. Three months later, a feature pipeline schema change dropped one high-importance feature silently (it became all-zeros). The model's AUC degraded from 0.88 to 0.73 over 6 weeks before a business stakeholder noticed conversion declining. Fix: monitor feature distribution (PSI) daily, model AUC on a held-out labeled sample weekly, output distribution (KS test) daily. Alert threshold: PSI > 0.2 for any top-10 feature.
+
+---
+
+## 11. Technologies & Tools
+
+| Category | Tool | Use Case |
+|---|---|---|
+| Training framework | PyTorch, TensorFlow, JAX | Deep learning models |
+| Tabular ML | XGBoost, LightGBM, CatBoost | Structured data |
+| Feature store | Feast, Tecton, Vertex Feature Store | Training-serving consistency |
+| Experiment tracking | MLflow, Weights & Biases, Neptune | Hyperparameter and metric logging |
+| Model serving | TorchServe, BentoML, Triton | Production inference |
+| Pipeline orchestration | Airflow, Prefect, Kubeflow | Training pipelines |
+| Monitoring | Evidently AI, Arize Phoenix, Whylogs | Drift detection |
+| A/B testing | Statsig, Optimizely, Eppo | Experiment platforms |
+| Data validation | Great Expectations, Pandera | Schema and distribution checks |
+| Hyperparameter tuning | Optuna, Ray Tune, Hyperopt | Automated HPO |
+| Annotation | Label Studio, Scale AI, Prodigy | Data labeling |
+| Vector search | FAISS, Pinecone, Weaviate | ANN for retrieval |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q: Walk me through how you would design a recommendation system for a video streaming platform.**
+**Short:** A two-stage design uses a two-tower model for ANN candidate retrieval from millions of videos, then a cross-feature ranker like DCN-v2 within the latency budget.
+Start by clarifying requirements: scale (100M users, 10M videos), latency (<200ms for ranked list), success metric (30-day retention, not just CTR). Problem formulation: ranking task, label = completed watch (>80% of video watched). Two-stage architecture: (1) Candidate generation — two-tower model, user tower on watch history, video tower on content features, ANN retrieval of top-1000 videos in <10ms; (2) Ranking — DCN-v2 or attention-based model on top-1000 with cross-features (user-video interaction history, content-user affinity), 50ms budget. Training: daily on last 30 days interaction logs with negative sampling (videos shown but not clicked). Cold start: for new videos, use content-based features; for new users, use popular items by region/time. Monitoring: AUC on held-out labels, watch time distribution, feature drift weekly.
+
+**Q: What is the bias-variance tradeoff and how do you manage it in practice?**
+**Short:** Generalization error splits into bias squared, variance, and irreducible noise; a large train-val gap signals overfitting while high loss on both signals underfitting.
+Total generalization error = Bias^2 + Variance + Irreducible Noise. High bias: model too simple, underfits training data, both train and val loss are high. High variance: model too complex, overfits training data, large gap between train (low) and val (high) loss. In practice: start by checking the train-val gap. Gap > 5% AUC: overfitting — add regularization (L2, dropout), reduce model depth, increase training data. Val loss high regardless of gap: underfitting — increase model capacity, add features, reduce regularization. Manage via cross-validation (estimate true generalization), learning curves (plot val loss vs. training set size), and ensemble methods (reduce variance without increasing bias).
+
+**Q: How do you handle class imbalance in a fraud detection problem?**
+**Short:** Combine class weighting or focal loss, SMOTE or undersampling, and threshold tuning to a business operating point, evaluated with AUC-PR rather than accuracy.
+First, check whether imbalance is actually a problem — if the positive rate is 1% and the model scores all negatives correctly, business impact may be fine. If not, use a combination: (1) Algorithm level: class_weight='balanced' (reweights loss function proportional to inverse class frequency), or focal loss (down-weights easy negatives, focuses on hard examples). (2) Sampling level: oversample positives with SMOTE (synthetic minority oversampling), or undersample negatives. (3) Threshold tuning: don't use 0.5 as default — tune to the precision-recall operating point matching business constraints. (4) Evaluation: always use AUC-PR or F-beta, never accuracy, for imbalanced problems. For extreme imbalance (<0.01%), consider one-class classification (Isolation Forest, autoencoders for anomaly detection) instead of binary classification.
+
+**Q: Explain data leakage and give two examples of how it manifests.**
+**Short:** Data leakage uses information unavailable at prediction time, such as a post-disbursement feature in a loan model or a non-temporal split leaking future data.
+Data leakage occurs when information unavailable at prediction time is used during training, creating artificially inflated offline metrics that do not hold in production. Example 1 — target leakage: a loan default model includes "number of missed payments" as a feature — this is determined after loan disbursement, not before. The model learns to predict a consequence of default rather than its cause. Example 2 — temporal leakage: a churn model uses random KFold split on users sorted by ID. Users with IDs close together were often created at similar times. The model trains on future data for some folds. Fix: always use temporal splits, audit all features for causal validity (can this feature be known at prediction time?), and use a temporal cutoff that simulates the deployment scenario.
+
+**Q: What metrics would you use for an information retrieval/search system, and why?**
+**Short:** Precision@K measures top-K relevance, Recall@K measures coverage, MRR rewards a fast first hit, and NDCG@K is the best overall metric since it discounts by rank position.
+The core metric depends on whether rank matters and how many results are shown. Precision@K: what fraction of top-K results are relevant? Good when all K results are equally important. Recall@K: what fraction of all relevant documents appear in top-K? Good when coverage matters. MRR (Mean Reciprocal Rank): average of 1/rank_of_first_relevant_result. Good for navigational queries where users want the first good result. NDCG@K: normalized discounted cumulative gain, accounts for graded relevance and position discounting. Best overall metric for search — rewards relevant results at top positions more than bottom positions. In practice, also measure click-through rate and session success rate (user found what they needed without reformulating query) as online metrics.
+
+**Q: How would you detect and handle concept drift in a production ML model?**
+**Short:** Detect drift via PSI on input features, KS tests on prediction scores, and tracked AUC on delayed labels, then trigger retraining once PSI crosses about 0.2.
+Concept drift occurs when the statistical relationship between features X and label Y changes over time. Detection approaches: (1) Input drift: monitor PSI (Population Stability Index) on each feature. PSI > 0.2 indicates major shift. (2) Prediction drift: KS test on score distribution (current week vs. reference). (3) Label drift: if labels arrive with delay (e.g., chargebacks take 30 days), monitor the labeled sample's rate vs. historical. (4) Performance drift: track AUC on a held-out labeled sample weekly. Handling: schedule periodic retraining (weekly or monthly), trigger retraining when PSI exceeds threshold, use online learning or model ensembles that weight recent data more. Do not wait for business stakeholders to report the problem — by then, 2-3 months of degradation has occurred.
+
+**Q: Compare gradient boosted trees vs. neural networks. When do you choose each?**
+**Short:** Gradient boosted trees win on structured tabular data under about a million rows with interpretability needs, while neural networks suit unstructured, high-volume inputs.
+Choose gradient boosted trees for tabular data and neural networks for unstructured inputs or very large datasets. GBT (XGBoost, LightGBM) wins when data is tabular and structured, the dataset is under roughly 1M rows, features are well-engineered, training speed matters (<1 hour), interpretability is required (SHAP values are native), and missing values or categorical features need minimal preprocessing. Neural networks: prefer when inputs are unstructured (text, images, audio), high-dimensional embeddings are needed (user history, product catalog), dataset is large (>5M rows), cross-feature interactions are complex and numerous, and transfer learning from pretrained models is possible. In practice, many production systems use GBT for the ranking layer (fast, interpretable, handles tabular well) and neural networks for embedding generation (user/item towers in two-stage recommendation).
+
+**Q: How do you approach feature engineering for a new ML problem?**
+**Short:** Build features from the causal factors behind the label across raw, aggregation, ratio, temporal, embedding, and graph categories, since feature work is the highest-ROI activity early on.
+Start by understanding the data generating process — what causes the label? Build features from each causal factor. Categories: (1) Raw features: direct values (price, age, location). (2) Aggregation features: user historical behavior (purchase_count_30d, avg_order_value_90d, click_rate_7d). (3) Ratio/interaction features: cart_abandonment_rate = abandoned_carts / total_carts. (4) Temporal features: day of week, hour, time since last action, days since account creation. (5) Entity embeddings: high-cardinality categoricals (merchant_id, product_id) trained as embeddings. (6) Graph features: for network data, degree, PageRank, community membership. Feature validation: check for leakage (post-event information), check importance via permutation importance, monitor distribution drift. The single highest-ROI activity in early-stage ML is feature engineering, not model tuning.
+
+**Q: What is the difference between online and batch machine learning? When do you use each?**
+**Short:** Batch learning retrains periodically on a fixed dataset and is simple to debug, while online learning updates incrementally per data point to track rapid drift.
+Batch (offline) learning: model is trained periodically on a fixed dataset, deployed as a static artifact. Simple to implement, easy to debug, evaluation is straightforward. Drawback: cannot adapt to rapid distribution shifts. Use when concept drift is slow (days-weeks), training data volume is large, and compute for real-time training is unavailable. Online learning: model updates incrementally with each new data point or mini-batch. Adapts to drift rapidly, lower training infrastructure requirements. Drawback: harder to debug, sensitive to noisy labels, can catastrophically forget. Use when concept drift is rapid (hours), labels arrive in real-time (ad click data), and the system must personalize for individual users continuously. In practice, most production systems use batch retraining (daily/weekly) with a simpler online component for recency signals (user's most recent 10 actions as contextual features).
+
+**Q: How do you evaluate an uplift/recommendation model when true counterfactuals are unobservable?**
+**Short:** Use the Qini/AUUC curve, a held-out randomized experiment on top-decile CATE, per-decile calibration checks, and a placebo test on a pre-treatment outcome.
+Use a combination: (1) Qini/AUUC curve: sort users by predicted CATE/uplift score, compute actual lift vs. random targeting across deciles. Higher area under Qini curve = better ranking of persuadables. Does not require counterfactuals — uses observed outcomes from a historical A/B test. (2) Held-out randomized experiment: deploy the uplift model, treat top quintile of predicted CATE, compare to random treatment group. Measure actual ATE in top quintile vs. random — should be higher. (3) Calibration: compare predicted CATE to observed lift in each decile. If predicted CATE of 10% in decile 1 matches observed 10% lift in that decile, the model is calibrated. (4) Placebo test: estimate treatment effect on a pre-treatment outcome (e.g., purchases before the campaign). Should be zero — any non-zero estimate indicates model confounding.
+
+**Q: Describe the ML interview failure modes you have seen and how to avoid them.**
+**Short:** Common failures are skipping requirements clarification, proposing no baseline, omitting a monitoring plan, and optimizing a metric that doesn't match business value.
+The most common failure modes: (1) Jumping to model architecture without clarifying requirements — fix: spend the first 5 minutes asking business-context questions. (2) No baseline — fix: always propose logistic regression or rule-based system before neural networks, and explain why you would upgrade. (3) No monitoring plan — fix: always end with "and here is how I would monitor this in production." (4) Optimizing a metric that does not match business value — fix: ask what the business cares about before defining the ML objective. (5) Ignoring the data problem — fix: spend 10 minutes on data sources, labeling strategy, and class imbalance before discussing models. (6) Stating solutions without tradeoffs — fix: for every design choice, name the alternative and explain the tradeoff. Interviewers explicitly probe these gaps. Structured preparation: practice 5 end-to-end ML design problems per week using the 6-step framework, out loud, in 45 minutes.
+
+**Q: What is training-serving skew and how do you prevent it?**
+**Short:** Training-serving skew is a feature computed differently at training versus serving time, fixed with a shared feature-computation library or a point-in-time feature store.
+Training-serving skew is when a feature is computed differently at training and serving time, so offline metrics look strong but online performance collapses. A representative case, with illustrative figures: a CTR model trained on "user's last 10 clicked items" computed one way in the batch job, but the serving code bucketed timestamps differently and missed the most recent click — offline AUC 0.84, online lift 0.3% instead of the expected 3%. It is the single most common production failure because the two code paths drift independently over time. Fix it with a shared feature-computation library used by both training and serving, or a feature store with point-in-time-correct retrieval, and log serving-time feature values to compare distributions against training.
+
+**Q: Why is AUC-PR preferred over AUC-ROC for imbalanced classification?**
+**Short:** AUC-PR focuses on the rare positive class's precision, while AUC-ROC can look deceptively high on imbalanced data since its denominator is dominated by abundant negatives.
+AUC-ROC can look deceptively high on imbalanced data because it rewards ranking the abundant negatives correctly, while AUC-PR focuses on performance on the rare positive class. With a 1% positive rate, a model can achieve 0.9 ROC-AUC while being nearly useless for catching positives, because the false-positive-rate denominator is dominated by the huge negative pool and barely moves. Precision-recall curves put precision (which depends directly on how many of your positive predictions are right) on the y-axis, exposing exactly the failure that matters. Report AUC-PR or F-beta for fraud, churn, and anomaly problems, and never report plain accuracy for imbalanced tasks.
+
+**Q: What is model calibration and when does it matter more than accuracy?**
+**Short:** Calibration means a predicted 0.7 is correct about 70% of the time, and it matters whenever the raw probability drives an expected-value decision like pricing or bidding.
+Calibration means predicted probabilities match observed frequencies — a 0.7 prediction should be correct about 70% of the time — and it matters whenever the probability itself drives a decision. Ranking-only use cases tolerate miscalibration, but expected-value decisions (bidding, thresholding on cost, medical risk, insurance pricing) break if a "0.8" really means 0.5. Measure it with Expected Calibration Error; ECE above 0.05 signals a problem, and boosted trees plus imbalanced data are common offenders. Fix with Platt scaling (a logistic fit on a held-out set) or isotonic regression (nonparametric, needs more data), and re-check calibration after every retrain.
+
+**Q: How do you choose the decision threshold for a classifier in production?**
+**Short:** Tune the threshold on a business cost function or precision/recall SLA rather than defaulting to 0.5, after first calibrating the underlying probabilities.
+Do not default to 0.5; tune the threshold on a business cost function or an explicit precision/recall constraint using a validation set. The optimal cutoff maximizes expected value — for fraud, minimize cost = FP × review_cost + FN × loss_per_miss, which for a $2 review and $200 loss pushes the threshold far below 0.5 to favor recall. Alternatively, hold precision at a business SLA (say 85%) and maximize recall subject to it, or vice versa. Calibrate probabilities first, then set the threshold, and revisit it whenever the class prior or cost structure shifts — the model can stay fixed while the threshold recovers most of the value.
+
+**Q: How do you compute the sample size needed for an A/B test?**
+**Short:** Sample size depends on baseline rate, minimum detectable effect, significance level, and power, with required traffic growing roughly as the inverse square of the effect size.
+Sample size depends on the baseline conversion rate, the minimum detectable effect, the significance level alpha, and the power (1 − beta). Smaller effects, rarer baselines, and higher power all demand more traffic — a two-proportion z-test size grows roughly with the inverse square of the effect you want to detect, so halving the MDE quadruples the required users per arm. Compute it before launching, not after, so you avoid an underpowered test that cannot reach significance no matter how long it runs. In practice, plug baseline rate, MDE, alpha=0.05, power=0.80 into a standard formula or calculator and confirm the traffic and test duration are feasible for the business.
+
+**Q: When is a problem NOT a good fit for machine learning?**
+**Short:** Avoid ML when a deterministic rule already suffices, labeled data is too scarce, full explainability is legally required, or maintenance cost exceeds the benefit.
+Avoid ML when a simple deterministic rule suffices, labeled data is too scarce, the decision must be fully explainable, or the maintenance cost exceeds the business benefit. Rule-based logic beats a model for well-specified deterministic behavior and is far easier to debug and audit; with under ~100 labeled examples for a complex task, there is nothing to learn from. Some regulated decisions legally require full explainability that a black-box model cannot provide, and sometimes the faster fix is an engineering change — a data-pipeline bug — not a model. Interviewers deliberately probe this: knowing when not to use ML is a stronger signal of seniority than reaching for a transformer on question one.
+
+---
+
+## 13. Best Practices
+
+- Always start with a simple baseline (logistic regression or rule-based) — it establishes a lower bound and is often good enough.
+- Define metrics before training — if you cannot measure success, you cannot improve.
+- Use temporal splits for all time-series data. StratifiedKFold on temporal data causes leakage.
+- Monitor PSI on top features daily in production. Set automated alerts at PSI > 0.2.
+- Calibrate model probabilities before using them for threshold-based decisions. ECE > 0.05 needs calibration.
+- Use AUC-PR (not AUC-ROC) for imbalanced classification problems. AUC-ROC is insensitive to class imbalance.
+- Log feature values at serving time. Compare distributions to training data regularly (training-serving skew detection).
+- A/B test every significant model change. Do not skip the experiment because offline metrics improved.
+- Use guard metrics in A/B tests — primary metric improvement + zero statistically significant regressions in guard metrics.
+- Document all feature creation logic with temporal semantics (what timestamp the feature is computed as-of).
+- Never use accuracy as the sole metric for imbalanced datasets.
+- Track both offline (AUC, NDCG) and online (CTR, conversion) metrics and calibrate the relationship between them.
+- Compute sample size requirements before starting an A/B test to avoid underpowered experiments.
+
+---
+
+## 14. Case Study
+
+**Problem: Design an ML system for e-commerce product ranking (45-minute interview response)**
+
+Step 1 — Clarify Requirements (5 min):
+- Scale: 5M users/day, 20M product catalog, 200ms latency budget for full ranking
+- Business goal: maximize purchase conversion rate (not just clicks)
+- Labels: purchase = strong positive; add-to-cart = weak positive; click = weak positive; impression without interaction = negative
+- Data: 18 months of user interaction logs, product catalog (title, description, category, images, price)
+- Constraints: model must not discriminate by protected attributes (ECOA compliance for credit-related categories)
+
+Step 2 — Problem Formulation (5 min):
+- ML task: learning-to-rank (listwise, optimize NDCG@10)
+- Label: purchase within 24h of click = strong positive (label = 3); add-to-cart no purchase = medium (label = 2); click no add = weak (label = 1); no click = negative (label = 0)
+- Evaluation: offline NDCG@10, online conversion rate (north star), click-through rate (guardrail)
+- Split: time-based — train on months 1-16, validate on month 17, test on month 18
+
+Step 3 — Data and Features (10 min):
+```
+User features:
+  - Embedding: user_id (trained, 128d) for returning users
+  - History: category_affinity_30d (top-10 categories, visit frequency)
+  - Context: session_query, device, hour, day_of_week, location
+  - LTV tier: high/medium/low based on 90-day spend
+
+Item features:
+  - Text: title/description embedding (Sentence-BERT, 384d, precomputed)
+  - Image: ResNet-50 embedding (2048d -> PCA to 128d, precomputed)
+  - Catalog: price, brand, category, avg_rating, review_count
+  - Popularity: purchase_rate_7d, view_rate_7d, inventory_level
+
+Interaction features (cross):
+  - Query-item semantic similarity (dot product of query embedding and title embedding)
+  - User-category affinity (user's 30d category affinity * item's category)
+  - Price relative to user's historical purchase price distribution
+
+Cold start:
+  - New users: use session context only (device, location, query)
+  - New items: use content features (text, image, category), no historical signals
+```
+
+Step 4 — Model Architecture (10 min):
+```
+Stage 1 — Retrieval (top-1000 from 20M):
+  Two-tower model:
+  - User tower: MLP on [user_embedding, history_features, context] -> 128d
+  - Item tower: MLP on [title_embedding, image_embedding, catalog_features] -> 128d
+  - Score: dot product; ANN index (ScaNN): <5ms for 1000 candidates
+  - Train: sampled softmax on purchase logs; daily retraining
+
+Stage 2 — Ranking (top-10 from 1000):
+  Deep Cross Network v2 (DCN-v2):
+  - Input: user, item, interaction features concatenated
+  - Cross network: 6 layers (explicit feature interactions)
+  - Deep network: [512, 256, 128] ReLU layers
+  - Output: one relevance score per item, trained against graded labels (purchase 3 > cart 2 > click 1 > no action 0)
+  - Loss: LambdaRank — RankNet pairwise gradients scaled by |delta NDCG@10|.
+    NDCG is non-differentiable, so this is a surrogate that empirically drives NDCG,
+    not direct optimization of it (Burges 2010)
+  - Train: weekly on rolling 60-day interaction logs
+  - Inference: 150ms for 1000 candidates on CPU cluster
+
+Post-ranking:
+  Business rules: enforce inventory (no out-of-stock), diversity (no >3 items from same brand), safety filters
+```
+
+Step 5 — Serving and Infrastructure (10 min):
+```
+Feature store (Feast):
+  Online: Redis — user features, <2ms per key lookup
+  Offline: BigQuery — training data retrieval
+
+Latency budget:
+  Feature retrieval: 20ms (Redis — several key lookups at <2ms each, plus deserialization)
+  Stage 1 retrieval: 5ms (ScaNN ANN)
+  Stage 2 ranking (DCN-v2): 150ms (1000 candidates * batched inference)
+  Post-processing: 5ms
+  Total: ~180ms (under 200ms budget)
+
+A/B testing:
+  Shadow mode for 2 weeks: run new model, log scores, do not serve
+  Canary: 5% traffic for 1 week; monitor conversion rate and P95 latency
+  Gradual rollout: 5% -> 25% -> 50% -> 100% over 4 weeks
+  Holdback: keep 5% on old model for 6 months to measure long-term impact
+```
+
+**Stated plainly.** "A latency budget is a subtraction problem, not a target. Add up what every stage costs, subtract from the SLO, and whatever is left is the only room you have for anything you add later."
+
+Interviewers ask for the budget breakdown specifically because it forces you to notice which stage owns the time — and therefore which stage is the only one worth optimizing.
+
+| Symbol | What it is |
+|--------|------------|
+| Feature retrieval | `20ms` — the full online-feature fan-out, several Redis lookups at `<2ms` each plus deserialization |
+| Stage 1 retrieval | `5ms` — ScaNN ANN narrowing 20M products to 1000 candidates |
+| Stage 2 ranking | `150ms` — DCN-v2 scoring those 1000 candidates in a batched forward pass |
+| Post-processing | `5ms` — business rules, inventory filter, diversity cap |
+| Budget | `200ms`, the stated SLO for the full ranked list |
+| Headroom | Budget minus total. What survives for network, retries, and next quarter's feature |
+
+**Walk one example.** The stack above, added up:
+
+```
+   stage                        cost      share of total
+   Feature retrieval (Redis)     20ms         11.1%
+   Stage 1 retrieval (ScaNN)      5ms          2.8%
+   Stage 2 ranking (DCN-v2)     150ms         83.3%
+   Post-processing                5ms          2.8%
+   ------------------------------------------------
+   total                        180ms
+   budget                       200ms
+   headroom                      20ms         10.0% of budget
+```
+
+Ranking owns `83.3%` of the time. That single number decides the entire optimization conversation: shaving the Redis lookup from `20ms` to `10ms` buys `10ms`, while a 30% cut to the ranker buys `45ms`. Optimizing anything other than stage 2 is measurable effort for unmeasurable gain — quantization, distillation, or scoring fewer than 1000 candidates are the only levers that matter here.
+
+**Why `20ms` of headroom should make you uncomfortable.** That is 10% of budget, and these are *mean* figures while the SLO is almost certainly a p99 commitment. Tail latency is not the mean: a p99 Redis lookup can be several times its average, and one GC pause in the ranker eats the whole margin. Two moves to name in an interview: state the budget in p99 terms rather than averages, and put a hard timeout on stage 2 that degrades to the stage-1 ordering rather than blowing the SLO. Serving a slightly worse ranking on time beats serving a perfect one late.
+
+Step 6 — Monitoring and Iteration (5 min):
+```
+Daily:
+  PSI on top-20 features; alert if PSI > 0.2
+  Prediction distribution (score histogram); KS test vs. last week
+  Latency P50, P95, P99
+
+Weekly:
+  NDCG@10 on labeled holdout set (500K interactions, human-labeled relevance)
+  Conversion rate by user segment, device type
+  Feature importance drift (SHAP value changes)
+
+Retraining triggers:
+  Scheduled: weekly full retraining (DCN-v2), daily delta for two-tower
+  Drift-triggered: if NDCG degrades >5% on holdout -> immediate retraining alert
+
+Iteration roadmap:
+  Month 1: establish baselines, two-tower + LambdaMART
+  Month 3: add image features, improve cold start
+  Month 6: add user interest graph (GNN) for long-term preference modeling
+  Month 12: multimodal ranking with session context attention
+```
+
+**Expected outcomes:**
+- Offline NDCG@10: 0.72 (baseline heuristic: 0.58)
+- Online conversion rate: +8% vs. popularity-based ranking
+- P95 latency: 190ms (within 200ms budget)
+- NDCG@10 stability over 6 months: standard deviation < 0.02 (monitoring effective)
+
+---
+
+### More Mock Interview Scenarios (6-step framework applied)
+
+**Scenario 2: Search ranking for a marketplace.** Scale: 50M queries/day, 100M listings, 300ms budget. (1) Requirements: maximize purchase rate, guardrail on CTR and latency. (2) Formulation: learning-to-rank, listwise, optimize NDCG@10; labels = purchase(3) > add-to-cart(2) > click(1) > skip(0). (3) Data/features: query-listing BM25 + semantic similarity, listing freshness, seller rating, personalization embedding; time-based split. (4) Model: two-tower retrieval (top-1000) -> LambdaMART/DCN ranker. (5) Serving: ANN (ScaNN) + feature store + batched ranker, ~250ms. (6) Monitoring: NDCG on labeled holdout, PSI, online purchase rate via A/B. Key tradeoff: semantic recall vs lexical precision, hybrid retrieval resolves it.
+
+**Scenario 3: Content moderation.** Scale: 5M posts/day (text+image), <500ms, must catch 99% of policy violations. (1) Requirements: high recall on violations, low false-positive burden on reviewers, multilingual. (2) Formulation: multi-label classification per policy + a severity score; human-in-the-loop for borderline. (3) Data: heavily imbalanced (violations rare), adversarial users, label noise; use weighted loss + active learning on hard cases. (4) Model: fine-tuned multilingual transformer (text) + vision model (image) fused; ensemble per policy. (5) Serving: tiered, cheap filter first, expensive model only on uncertain cases. (6) Monitoring: recall on audited samples, appeal-overturn rate, drift on emerging slang/memes. Key tradeoff: precision vs recall, set the threshold to favor recall and route uncertain cases to humans.
+
+**Scenario 4: ETA prediction for delivery.** Scale: 10M deliveries/day, 200ms, MAE target < 3 min. (1) Requirements: accurate and well-calibrated ETA, avoid systematic underestimation (worse UX). (2) Formulation: regression on travel time, possibly quantile regression for an honest upper bound. (3) Data/features: distance, historical segment speeds, time-of-day, weather, courier features; spatial + temporal. (4) Model: gradient-boosted trees baseline, graph/sequence model for routing context; quantile loss. (5) Serving: feature store with real-time traffic, low-latency inference. (6) Monitoring: MAE/quantile coverage by region and hour, drift on traffic patterns. Key tradeoff: point accuracy vs calibrated bounds, predict a quantile (e.g. P80) so the shown ETA is rarely beaten.
+
+**Scenario 5: Dynamic pricing.** Scale: 1M price decisions/hour, must respect fairness/legal constraints. (1) Requirements: maximize revenue subject to price-fairness and inventory constraints; avoid feedback loops. (2) Formulation: demand model (price -> conversion probability) + optimization layer choosing price; or contextual bandit for exploration. (3) Data: confounded historical prices (only saw outcomes for prices charged); needs causal/counterfactual handling. (4) Model: demand curve estimation with debiasing (IPW), then constrained optimization. (5) Serving: precompute price grids, real-time lookup. (6) Monitoring: revenue lift via A/B, fairness audits, demand-model calibration. Key tradeoff: exploit known-good prices vs explore to learn the demand curve, contextual bandits balance it.
+
+**Scenario 6: Medical image diagnosis.** Scale: 100k scans/day, no hard latency limit but high accuracy/safety bar. (1) Requirements: high sensitivity (missing disease is catastrophic), interpretability, regulatory approval. (2) Formulation: classification/segmentation with an abstain option; clinician-in-the-loop. (3) Data: scarce expert labels, class imbalance, domain shift across scanners/hospitals; strong augmentation + SSL pretraining. (4) Model: CNN/ViT with uncertainty estimation (ensembles/MC-dropout); calibrated. (5) Serving: on-prem for privacy, with saliency maps for clinician review. (6) Monitoring: sensitivity/specificity by subgroup, drift across sites, calibration. Key tradeoff: sensitivity vs specificity, operate at high sensitivity and abstain on low-confidence cases for human review.
+
+---
+
+### Common Interview Mistakes
+
+**Mistake 1: Jumping to the model before clarifying requirements.** Candidates name "I'll use XGBoost" in the first minute. Correct approach: spend the first 5 minutes pinning down scale, latency budget, the business metric, label definition, and constraints. The model choice falls out of these; choosing it first means you optimize the wrong thing.
+
+**Mistake 2: Optimizing the wrong metric.** Proposing accuracy for a 1%-positive fraud or default problem, or offline AUC when the business cares about calibrated probabilities or revenue. Correct approach: derive the metric from the business goal, PR-AUC and recall-at-threshold for rare positives, calibration when probabilities feed decisions, and always name an online north-star metric distinct from the offline proxy.
+
+**Mistake 3: Ignoring data leakage and split strategy.** Using a random train/test split on temporal data, or including features unavailable at prediction time. Correct approach: use a time-based split for any temporal problem, audit each feature's availability timestamp against prediction time, and call out leakage explicitly; an interviewer who hears "I'd use a time-based split to avoid leakage" sees seniority.
+
+**Mistake 4: Designing only the offline model, not the serving system.** Stopping at "train a ranker" without addressing latency, feature stores, retrieval-then-rank decomposition, train/serve skew, or A/B rollout. Correct approach: cover the full lifecycle, feature store to eliminate skew, two-stage retrieval+ranking for latency, shadow/canary deployment, and a monitoring plan. The job is a system, not a notebook.
+
+**Mistake 5: No monitoring or retraining plan.** Treating the model as static and never mentioning drift, label lag, or retraining triggers. Correct approach: specify input-drift monitoring (PSI), performance monitoring on (possibly lagged) labels, alerting that avoids fatigue, and concrete retraining triggers with champion/challenger promotion. Production ML degrades silently; saying how you would catch it demonstrates real-world experience.
+
+**Additional interview pitfall — framing the problem incorrectly at the start.**
+
+The most common interview failure is jumping to model selection before defining success metrics and constraints. Interviewers specifically test whether you ask:
+- "What does success look like? Precision? Recall? Revenue?" before proposing XGBoost or BERT
+- "What is the label delay?" before proposing online learning
+- "What is the latency budget?" before proposing a 7B LLM
+
+**BROKEN approach (starts with model):**
+"I would use a transformer-based model fine-tuned on the dataset."
+→ No mention of data availability, latency, cost, or business metric.
+
+**FIX (starts with problem framing):**
+"Before choosing a model, I want to clarify: What is the latency SLA? What data do we have labeled? What is the cost of a false positive vs. a false negative for this business? With those constraints, I would narrow to…"
+
+**Interview anti-pattern — conflating accuracy with business value.**
+
+```
+Interviewer: "How would you improve the fraud detection model?"
+
+BROKEN answer: "Increase AUC-ROC from 0.95 to 0.97 by tuning hyperparameters."
+
+FIX answer:
+"AUC-ROC is not the primary optimization target here. The cost of a false negative
+(missed fraud: $200 average loss) is 100× the cost of a false positive (manual review: $2).
+I would optimize the decision threshold on the business cost function:
+  cost = FP × $2 + FN × $200
+Then evaluate whether better recall at a lower precision threshold is worth it.
+Feature engineering (adding velocity features, device fingerprinting) would
+likely move the AUC from 0.95 → 0.97, but the threshold optimization might
+reduce total daily cost by 50% without changing the model at all."
+```
+
+**Interview Q&A — additional common questions:**
+
+**How do you handle a case where the interviewer says "you can use any model you want"?** This is a constraint elicitation trap. Say: "I would start with the simplest model that meets the latency and accuracy constraints — likely logistic regression or LightGBM on tabular data, or a fine-tuned BERT-base for text. I'd only move to a larger model (a multi-billion-parameter open-weight LLM, or a hosted frontier model) if the simpler model demonstrably failed to meet the accuracy requirement. Complexity has costs: training time, serving infrastructure, maintenance burden, and model explainability for regulated use cases."
+
+**The interviewer asks: 'Your model is in production and accuracy has degraded — what do you do?'** Structured response: (1) Diagnose — check input PSI for feature drift, prediction distribution shift, label distribution shift; check serving logs for schema changes; check if a data pipeline job failed recently. (2) Triage — if data pipeline is broken, fix it first (model is correct, inputs are wrong). If data has drifted, determine if the model is still calibrated (retrain with recent data). (3) Rollback — if the cause is unclear and the regression is severe, roll back to the previous model version immediately; investigate with zero production pressure. (4) Fix root cause — add monitoring alerts that would have caught this earlier (PSI > 0.20 → alert).

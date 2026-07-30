@@ -1,5 +1,5 @@
 # GPU Architecture & Roofline Analysis for LLMs
-Deep-dive sub-file of [Optimization & Quantization](README.md). Covers the hardware mental model every senior AI engineer is expected to reason with: GPU memory hierarchy, the roofline model, arithmetic intensity of prefill vs decode, tensor cores and FP8/FP4, interconnect topology, and accelerator spec literacy (A100 → H100 → H200 → B200, TPUs). Economics layer: see [gpu_pool_economics.md](../case_studies/cross_cutting/gpu_pool_economics.md).
+Deep-dive sub-file of [Optimization & Quantization](optimization_and_quantization.md). Covers the hardware mental model every senior AI engineer is expected to reason with: GPU memory hierarchy, the roofline model, arithmetic intensity of prefill vs decode, tensor cores and FP8/FP4, interconnect topology, and accelerator spec literacy (A100 → H100 → H200 → B200, TPUs). Economics layer: see [gpu_pool_economics.md](../case_studies/cross_cutting/gpu_pool_economics.md).
 
 ---
 
@@ -198,7 +198,7 @@ why FP8 is a prefill/training win first and a decode win only through the bytes 
 
 ### 6.2 Prefill vs decode through the roofline
 
-Prefill processes S prompt tokens in one pass: each weight loaded once serves S tokens → GEMM intensity ≈ 2S FLOPs per weight byte. At S=2,048, intensity ~4,096 ≫ 295: firmly compute-bound; time scales with FLOPs, and FP8 (doubling FLOPS) genuinely halves it. Decode emits one token per pass: intensity ≈ 2/bytes_per_param ≈ 1 — bandwidth-bound by ~300×; time scales with *bytes*, so quantization and bandwidth (H200) help, while more FLOPS does nothing. This asymmetry is why modern serving disaggregates: prefill on compute-optimized pools, decode on bandwidth/capacity-optimized pools, KV cache shipped between them (DistServe, Mooncake; see [vLLM Deep Dive](../vllm_deep_dive/README.md) and [gpu_pool_economics.md](../case_studies/cross_cutting/gpu_pool_economics.md) for the prefill/decode disaggregation economics).
+Prefill processes S prompt tokens in one pass: each weight loaded once serves S tokens → GEMM intensity ≈ 2S FLOPs per weight byte. At S=2,048, intensity ~4,096 ≫ 295: firmly compute-bound; time scales with FLOPs, and FP8 (doubling FLOPS) genuinely halves it. Decode emits one token per pass: intensity ≈ 2/bytes_per_param ≈ 1 — bandwidth-bound by ~300×; time scales with *bytes*, so quantization and bandwidth (H200) help, while more FLOPS does nothing. This asymmetry is why modern serving disaggregates: prefill on compute-optimized pools, decode on bandwidth/capacity-optimized pools, KV cache shipped between them (DistServe, Mooncake; see [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) and [gpu_pool_economics.md](../case_studies/cross_cutting/gpu_pool_economics.md) for the prefill/decode disaggregation economics).
 
 That whole paragraph turns on one ratio, so it is worth computing rather than asserting:
 
@@ -360,7 +360,7 @@ Standard attention materializes the S×S score matrix in HBM: O(S²) bytes writt
 
 ### 6.4 Tensor cores, FP8, FP4 — what the precision ladder buys
 
-Tensor cores are matrix-multiply-accumulate units; each precision step down doubles their throughput and halves bytes moved: BF16 (989 TF on H100) → FP8 (~1,979 TF; E4M3 for forward/weights, E5M2's extra exponent range for gradients) → FP4 on Blackwell (~2× FP8, with microscaling/NVFP4 block-scaled formats making 4-bit usable). Two consequences worth stating precisely: (1) for *compute-bound* phases (prefill, training) lower precision buys FLOPS; for *decode* it buys bandwidth — both help, through different terms of the roofline; (2) tensor cores only deliver peak on well-shaped GEMMs — small, skinny decode-time matrices underutilize them, another reason batch size drives efficiency. Quantization formats and quality tradeoffs: [README](README.md).
+Tensor cores are matrix-multiply-accumulate units; each precision step down doubles their throughput and halves bytes moved: BF16 (989 TF on H100) → FP8 (~1,979 TF; E4M3 for forward/weights, E5M2's extra exponent range for gradients) → FP4 on Blackwell (~2× FP8, with microscaling/NVFP4 block-scaled formats making 4-bit usable). Two consequences worth stating precisely: (1) for *compute-bound* phases (prefill, training) lower precision buys FLOPS; for *decode* it buys bandwidth — both help, through different terms of the roofline; (2) tensor cores only deliver peak on well-shaped GEMMs — small, skinny decode-time matrices underutilize them, another reason batch size drives efficiency. Quantization formats and quality tradeoffs: [README](optimization_and_quantization.md).
 
 ### 6.5 Broken → fixed: a capacity plan
 
@@ -562,7 +562,7 @@ FIX: (1) `margin=0.9` (used throughout the code above) absorbs moderate amax gro
 5. **TP across nodes.** Tensor parallel's per-layer all-reduces over InfiniBand (50 GB/s) instead of NVLink (900 GB/s) crater throughput; war stories of 5–10× regressions from one wrong deployment flag are common. TP inside the NVLink domain; PP/DP/EP across.
 6. **Low decode MFU treated as a bug.** Teams burn weeks "optimizing" 3% MFU decode that is already at 75% MBU — i.e., near-optimal. Wrong metric, wasted sprint. Conversely, 30% MBU decode *is* a real bug (fragmentation, bad kernels, host gaps).
 7. **Ignoring power/thermals.** 700W×8 H100s per node: dense racks hit facility limits and throttle; sustained ≠ datasheet. Derate ~10–15% in plans, more in air-cooled DCs.
-8. **Assuming quantization helps everywhere equally.** INT4 weights barely move prefill (compute-bound) and can *hurt* quality-sensitive long-form tasks; the win is decode bandwidth. Eval per phase, per task — see [README](README.md) for quality methodology.
+8. **Assuming quantization helps everywhere equally.** INT4 weights barely move prefill (compute-bound) and can *hurt* quality-sensitive long-form tasks; the win is decode bandwidth. Eval per phase, per task — see [README](optimization_and_quantization.md) for quality methodology.
 9. **FP8 training with coarse, no-margin scaling on MoE models.** A single per-tensor scale recalibrated every 1024 steps with `margin=1.0` works fine until one step's routing sends an outsized fraction of tokens to one expert — that expert's activation amax spikes 50-100× above its history, the stale scale clamps a large fraction of the tensor, and the loss spikes that step (§6.7). The fix is finer-grained scaling (per-block/microscaling for MoE activations, §6.7), not abandoning FP8.
 
 ---
@@ -700,9 +700,9 @@ Run the same three numbers you would for any chip — capacity, bandwidth, and d
 
 ## Related
 
-- [Optimization & Quantization README](README.md) — GPTQ/AWQ, FlashAttention, pruning, distillation
+- [Optimization & Quantization README](optimization_and_quantization.md) — GPTQ/AWQ, FlashAttention, pruning, distillation
 - [GPU Pool Economics](../case_studies/cross_cutting/gpu_pool_economics.md) — MFU/MBU math applied to fleet cost, spot blending, disaggregation economics
-- [Inference & Decoding](../inference_and_decoding/README.md) — KV cache, speculative decoding, continuous batching
-- [vLLM Deep Dive](../vllm_deep_dive/README.md) — PagedAttention and serving-stack realization of these ideas
+- [Inference & Decoding](../inference_and_decoding/inference_and_decoding.md) — KV cache, speculative decoding, continuous batching
+- [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) — PagedAttention and serving-stack realization of these ideas
 - [Attention Mechanisms](../foundations_and_architecture/attention_mechanisms.md) — FlashAttention internals, MQA/GQA/MLA
-- [DevOps: ML Platform & GPU Infrastructure](../../devops/ml_platform_and_gpu_infrastructure/README.md) — cluster-level GPU operations
+- [DevOps: ML Platform & GPU Infrastructure](../../devops/ml_platform_and_gpu_infrastructure/ml_platform_and_gpu_infrastructure.md) — cluster-level GPU operations

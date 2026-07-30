@@ -1,5 +1,5 @@
 # GRPO & RLVR — Reasoning RL with Verifiable Rewards
-Deep-dive sub-file of [Alignment & RLHF](README.md). Covers Group Relative Policy Optimization (GRPO), Reinforcement Learning from Verifiable Rewards (RLVR), the DeepSeek-R1 training pipeline, and the 2025-era refinements (DAPO, Dr. GRPO, GSPO) that now dominate reasoning-model post-training.
+Deep-dive sub-file of [Alignment & RLHF](alignment_and_rlhf.md). Covers Group Relative Policy Optimization (GRPO), Reinforcement Learning from Verifiable Rewards (RLVR), the DeepSeek-R1 training pipeline, and the 2025-era refinements (DAPO, Dr. GRPO, GSPO) that now dominate reasoning-model post-training.
 
 ---
 
@@ -559,7 +559,7 @@ of work argues the root cause is BF16's rounding error and that training and gen
 - You can afford rollout compute: thousands of 4K–16K-token generations per step.
 
 **Do NOT use when:**
-- Quality is inherently subjective (creative writing, empathy, style) — use RLHF/DPO with preference data, or rubric-based LLM-judge rewards with heavy hack auditing (see [README — RLHF and DPO](README.md)).
+- Quality is inherently subjective (creative writing, empathy, style) — use RLHF/DPO with preference data, or rubric-based LLM-judge rewards with heavy hack auditing (see [README — RLHF and DPO](alignment_and_rlhf.md)).
 - Your verifier is weak and you cannot harden it — a gameable verifier actively trains deception.
 - The base model's pass@128 on your task is ~0 — fix this with SFT/distillation first; RL gradients will be zero (all-fail groups).
 - You need per-step supervision for safety-critical chains — outcome-only rewards let flawed-but-lucky reasoning through; consider PRM-style verification *at inference* even if you train outcome-only.
@@ -668,7 +668,7 @@ Rollout generation — typically 70–85% of wall-clock at 8K–16K-token reason
 **Q15: When would you still choose PPO or DPO over GRPO?**
 **Short:** Choose DPO for offline pairwise preference data with no verifier, PPO for dense per-token learned rewards, and GRPO when rewards are sparse, verifiable, and prompts are replayable.
 
-DPO when you have offline pairwise preference data and no verifier — it is an SFT-cost contrastive method, no rollouts at all (see [README](README.md)). PPO when you need per-token credit assignment from a dense learned reward (e.g., safety RM scoring every span) or are training in a setting where resampling the same prompt is impossible. GRPO specifically wins when rewards are sparse, verifiable, and prompts are replayable — the reasoning-model regime. A cascade many labs run: SFT → DPO (cheap broad alignment) → GRPO/RLVR (reasoning) → light all-scenario RL (R1 stage 5).
+DPO when you have offline pairwise preference data and no verifier — it is an SFT-cost contrastive method, no rollouts at all (see [README](alignment_and_rlhf.md)). PPO when you need per-token credit assignment from a dense learned reward (e.g., safety RM scoring every span) or are training in a setting where resampling the same prompt is impossible. GRPO specifically wins when rewards are sparse, verifiable, and prompts are replayable — the reasoning-model regime. A cascade many labs run: SFT → DPO (cheap broad alignment) → GRPO/RLVR (reasoning) → light all-scenario RL (R1 stage 5).
 
 **Q16: How do you monitor a GRPO/RLVR run? Name the metrics that catch failures early.**
 **Short:** Key GRPO health metrics are per-difficulty pass rate, the fraction of zero-std groups, policy entropy, response length trends, and hidden-versus-training verifier pass-rate divergence.
@@ -721,8 +721,8 @@ The transferable lesson: the recipe is verifier design + frontier-difficulty cur
 
 ## Related
 
-- [Alignment & RLHF README](README.md) — RLHF, PPO, DPO, reward models, Constitutional AI
-- [Reasoning Models](../reasoning_models/README.md) — o1/o3, test-time compute, PRM/ORM at inference
-- [Synthetic Data Generation](../synthetic_data_generation/README.md) — rejection sampling, distillation data
+- [Alignment & RLHF README](alignment_and_rlhf.md) — RLHF, PPO, DPO, reward models, Constitutional AI
+- [Reasoning Models](../reasoning_models/reasoning_models.md) — o1/o3, test-time compute, PRM/ORM at inference
+- [Synthetic Data Generation](../synthetic_data_generation/synthetic_data_generation.md) — rejection sampling, distillation data
 - [Sandboxed Code Execution](../agents_and_tool_use/sandboxed_code_execution.md) — safe code-reward infrastructure
 - [Red Team Eval Harness](../case_studies/cross_cutting/red_team_eval_harness.md) — adversarial auditing applied to verifiers

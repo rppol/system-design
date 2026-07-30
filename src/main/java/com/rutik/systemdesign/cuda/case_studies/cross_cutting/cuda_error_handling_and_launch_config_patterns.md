@@ -6,11 +6,11 @@
 > `../optimize_llm_inference_kernels.md`) — every kernel launch in this section's code
 > samples assumes the `CUDA_CHECK` macro defined below.
 >
-> Related modules: [memory_management_and_data_transfer](../../memory_management_and_data_transfer/README.md)
+> Related modules: [memory_management_and_data_transfer](../../memory_management_and_data_transfer/memory_management_and_data_transfer.md)
 > (where error checking is first introduced against `cudaMalloc`/`cudaMemcpy`),
-> [debugging_correctness_and_numerics](../../debugging_correctness_and_numerics/README.md)
+> [debugging_correctness_and_numerics](../../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md)
 > (compute-sanitizer as the tool that catches what these macros only report),
-> [occupancy_and_launch_configuration](../../occupancy_and_launch_configuration/README.md)
+> [occupancy_and_launch_configuration](../../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md)
 > (the full theory behind the launch-config numbers computed here).
 
 ---
@@ -160,7 +160,7 @@ CUDA_CHECK_KERNEL();
 In release builds this still catches every configuration error for free (it is synchronous
 and essentially zero-cost) while deferring the expensive full-sync execution check to a
 debug build or a `compute-sanitizer` run — see
-[debugging_correctness_and_numerics](../../debugging_correctness_and_numerics/README.md) for
+[debugging_correctness_and_numerics](../../debugging_correctness_and_numerics/debugging_correctness_and_numerics.md) for
 the sanitizer workflow that replaces manual sync-and-check during active debugging.
 
 ---
@@ -224,7 +224,7 @@ This is the right tool once a kernel is written and its resource footprint (regi
 thread, shared memory per block) is fixed — it removes the guesswork of hand-tuning
 `threads` against the occupancy calculator spreadsheet. Full theory (why occupancy plateaus,
 register spilling, `__launch_bounds__`) lives in
-[occupancy_and_launch_configuration](../../occupancy_and_launch_configuration/README.md);
+[occupancy_and_launch_configuration](../../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md);
 this file only covers the API call you reach for.
 
 ---

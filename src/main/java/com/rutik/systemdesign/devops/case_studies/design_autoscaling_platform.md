@@ -95,7 +95,7 @@ The two NFRs that most shape the architecture: the **90s spike-reaction SLO** fo
 - Database autoscaling (read replicas, Aurora ACU) — handled by the data platform; autoscaling stateful databases has fundamentally different constraints (durability, replication lag) than stateless pods.
 - Multi-region failover orchestration (separate DR design); this platform autoscales *within* each cluster independently.
 - GPU fractional sharing / MIG partitioning (only whole-GPU node scaling is in scope here).
-- Cost *attribution* and chargeback tooling (Kubecost/OpenCost) — consumed by this platform as a signal but owned by the FinOps function, see [`../cloud_cost_optimization_finops/README.md`](../cloud_cost_optimization_finops/README.md).
+- Cost *attribution* and chargeback tooling (Kubecost/OpenCost) — consumed by this platform as a signal but owned by the FinOps function, see [`../cloud_cost_optimization_finops/README.md`](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md).
 
 ---
 
@@ -1045,7 +1045,7 @@ Time to recycle whole fleet  = (2600 / 260) × (drain+provision ~5 min) = 50 min
 
 So a full fleet recycle for a CVE patch completes in **~50 minutes** without ever violating a PDB, provided every workload's PDB `minAvailable` leaves at least one replica evictable. A common trap: a 2-replica Deployment with `minAvailable: 2` is **un-disruptable** and will stall recycling forever — the policy gate rejects `minAvailable >= replicas`.
 
-See [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md) for warm-pool and overprovisioning (pause-pod) patterns, and [`../cloud_cost_optimization_finops/README.md`](../cloud_cost_optimization_finops/README.md) for spot strategy and RI/Savings-Plan layering.
+See [`cross_cutting/kubernetes_production_hardening.md`](cross_cutting/kubernetes_production_hardening.md) for warm-pool and overprovisioning (pause-pod) patterns, and [`../cloud_cost_optimization_finops/README.md`](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) for spot strategy and RI/Savings-Plan layering.
 
 ---
 
@@ -1085,7 +1085,7 @@ Reactive (HPA/KEDA) is self-correcting and handles novel spikes, but it always p
 Per-tenant and per-NodePool hard limits: `maxReplicas` on every HPA, `limits.cpu` on every NodePool, disruption budgets, and a policy gate in CI that rejects configs violating these. The autoscaler control plane itself is run at 99.95% but is designed so that if it dies, workloads keep running at their current scale — autoscaling failure must degrade to "no scaling," never to "mass eviction."
 
 **Q: What's the difference between cluster utilization and cost efficiency?**
-Utilization measures how packed your nodes are; cost efficiency measures whether you're using the cheapest correct capacity for that packing. You can be 90% utilized entirely on on-demand and still overspend by 60% versus a spot mix. True cost-awareness optimizes both axes — pack tightly (consolidation, VPA-accurate requests) *and* buy cheaply (spot-first, right instance family) — which is why this platform couples node packing with instance selection rather than treating them separately. See [`../kubernetes_scheduling_and_autoscaling/README.md`](../kubernetes_scheduling_and_autoscaling/README.md).
+Utilization measures how packed your nodes are; cost efficiency measures whether you're using the cheapest correct capacity for that packing. You can be 90% utilized entirely on on-demand and still overspend by 60% versus a spot mix. True cost-awareness optimizes both axes — pack tightly (consolidation, VPA-accurate requests) *and* buy cheaply (spot-first, right instance family) — which is why this platform couples node packing with instance selection rather than treating them separately. See [`../kubernetes_scheduling_and_autoscaling/README.md`](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md).
 
 **Q: Why is the Eviction API critical, and what breaks if you use raw delete?**
 The Eviction API (`POST .../pods/{name}/eviction`) checks PodDisruptionBudgets server-side and refuses to evict if it would breach `minAvailable`, whereas a raw `DELETE` bypasses the PDB entirely and removes the pod unconditionally. Any drain path — Karpenter consolidation, spot reclaim, node recycling, `kubectl drain` — must use eviction, or a "safe" scale-down silently becomes an outage. This is the single most common root cause of consolidation-induced downtime: tooling that deletes instead of evicts.

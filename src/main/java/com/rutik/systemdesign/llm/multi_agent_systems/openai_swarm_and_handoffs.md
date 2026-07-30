@@ -43,7 +43,7 @@ Key insight: Handoffs are just tool calls in disguise. The LLM produces a functi
 
 4. **Stateless turns (Swarm) vs persistent runs (Agents SDK).** Swarm requires the caller to maintain and pass message history on every call. The Agents SDK maintains a RunResult that accumulates the full conversation internally across turns.
 
-5. **Guardrails as cross-cutting concerns.** Input guardrails run before the LLM call; output guardrails run after. Either can abort the run by raising — `InputGuardrailTripwireTriggered` or `OutputGuardrailTripwireTriggered` respectively; there is no combined `GuardrailTripwireTriggered` class. This keeps safety logic out of agent instructions. Guardrail design beyond this SDK (NeMo Guardrails, Llama Guard) is covered in [Guardrails & Content Safety](../guardrails_and_content_safety/README.md).
+5. **Guardrails as cross-cutting concerns.** Input guardrails run before the LLM call; output guardrails run after. Either can abort the run by raising — `InputGuardrailTripwireTriggered` or `OutputGuardrailTripwireTriggered` respectively; there is no combined `GuardrailTripwireTriggered` class. This keeps safety logic out of agent instructions. Guardrail design beyond this SDK (NeMo Guardrails, Llama Guard) is covered in [Guardrails & Content Safety](../guardrails_and_content_safety/guardrails_and_content_safety.md).
 
 6. **Routines encode business flows.** A routine is an ordered series of steps baked into an agent's instructions (e.g., "Step 1: greet. Step 2: qualify. Step 3: pitch. Step 4: close."). The LLM follows the routine like a script.
 

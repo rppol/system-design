@@ -1,0 +1,894 @@
+# Database Performance Tuning
+
+<!-- study-paths
+senior: database_performance_tuning.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+Database performance tuning is the iterative process of measuring, diagnosing, and improving query throughput, latency, and resource utilization. The methodology is: instrument (enable slow query logging, collect metrics), diagnose (identify the limiting resource — CPU, I/O, memory, locks), then fix (indexes, query rewrites, configuration changes, hardware). Tuning without measurement is guesswork; measurement without a baseline is noise.
+
+The vast majority of performance problems are in one of four categories: missing or suboptimal indexes, slow queries (poor plans, N+1, unoptimized joins), memory misconfiguration (buffer pool too small, work_mem too large), and lock contention (long-running transactions blocking others).
+
+---
+
+## 2. Intuition
+
+A database is a race car. Configuration tuning adjusts tire pressure, fuel mix, and suspension — incremental improvements. Query and index optimization changes the route entirely — 100× improvements are possible. Change the route first (fix queries), then tune the car (adjust configuration). Never start with configuration tuning if you have unoptimized queries.
+
+---
+
+## 3. Core Principles
+
+**Measure before optimizing**: Identify the actual bottleneck (EXPLAIN ANALYZE, pg_stat_statements, slow query log). A query taking 1ms does not need optimization regardless of how it looks.
+
+**Index first, configure second**: A missing index that causes a full sequential scan of a 100M-row table is worth more attention than any configuration parameter. Fix indexes before touching memory parameters.
+
+**Production-realistic benchmarks**: Tune with production-sized data under production-realistic concurrency. A benchmark on 10K rows tells you nothing about behavior at 100M rows.
+
+**Avoid over-tuning**: Changing one parameter at a time, measuring impact, and reverting if no improvement. Changing 10 parameters simultaneously makes causality impossible to determine.
+
+**Tuning Methodology — Measure, Diagnose, Fix**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Instrument(["Instrument<br/>slow query log · pg_stat_statements"]) --> Diagnose{"Diagnose:<br/>limiting resource?"}
+    Diagnose -->|"CPU / bad plan"| Idx("Indexes &<br/>query rewrites<br/>10-100x")
+    Diagnose -->|"I/O bound"| HwIo("Hardware / I-O tuning<br/>1.5-3x")
+    Diagnose -->|"memory misconfigured"| Cfg("Configuration changes<br/>work_mem · shared_buffers<br/>2-10x")
+    Diagnose -->|"lock contention"| Lock("Lock timeouts &<br/>VACUUM tuning<br/>10-100x")
+    Idx -.->|remeasure| Instrument
+    HwIo -.->|remeasure| Instrument
+    Cfg -.->|remeasure| Instrument
+    Lock -.->|remeasure| Instrument
+
+    class Instrument io
+    class Diagnose mathOp
+    class Idx train
+    class HwIo base
+    class Cfg base
+    class Lock lossN
+```
+
+Tuning is iterative: instrument first, diagnose which resource is the actual bottleneck, then apply the matching fix and remeasure. Index and lock fixes typically return 10-100x, dwarfing the 1.5-3x and 2-10x available from hardware and configuration changes alone — the numeric reason this module says "index first, configure second."
+
+---
+
+## 4. Types / Architectures / Strategies
+
+| Tuning Category | Impact | Scope | Typical Win |
+|---|---|---|---|
+| Index optimization | 10-100× | Query | Seq scan → index scan |
+| Query rewriting | 5-100× | Query | N+1 → JOIN FETCH |
+| Configuration: memory | 2-10× | All queries | Buffer pool hit rate |
+| Configuration: I/O | 1.5-3× | Write-heavy | Checkpoint tuning |
+| Configuration: WAL | 1.5-2× | Write-heavy | WAL segment sizing |
+| Lock contention | 10-100× | Write-heavy | VACUUM, timeout tuning |
+| Hardware: SSD | 5-20× | I/O bound | HDD → NVMe SSD |
+| Hardware: RAM | 2-5× | Memory bound | Increase shared_buffers |
+
+**In plain terms.** Speedups multiply, but only until the bottleneck moves. Two fixes on the same
+query give `s1 x s2` — and then Amdahl's law caps you: if a fix only touches a fraction `p` of
+total time, the best it can ever return is `1 / (1 - p)`, no matter how large its own multiplier
+is. That ceiling is the arithmetic behind Section 2's "change the route first, then tune the car."
+
+| Symbol | What it is |
+|--------|------------|
+| `s` | Speedup of one fix, as a multiplier. `10x` means the fixed part runs 10x faster |
+| `p` | Fraction of total time the fix actually touches. The term everyone omits |
+| `1 / ((1-p) + p/s)` | Overall speedup. The real return on a fix worth `s` applied to `p` |
+| `1 / (1 - p)` | Hard ceiling as `s` goes to infinity. Reached by making that part free |
+
+**Walk one example.** Use the plan tree from Section 6 — the Seq Scan is 180.4 ms of a 234.128 ms
+query, so `p = 0.77`:
+
+```
+  INDEX THE SEQ SCAN  (s = 100x, the table's top row)
+    overall = 1 / ((1 - 0.77) + 0.77/100) = 1 / (0.23 + 0.0077) = 4.2x
+    ceiling even if the scan became instant: 1 / 0.23 = 4.3x
+
+  TUNE CONFIGURATION INSTEAD  (s = 10x, but on the same 77%)
+    overall = 1 / (0.23 + 0.077) = 3.3x
+
+  DO BOTH, index first, then config on what remains:
+    after indexing, total = 234.128 - 180.4 + 1.804 = 55.5 ms
+    the 53.7 ms of non-scan work is now 96.8% of the query
+    -> config work is now the dominant term, and worth doing
+```
+
+Two lessons fall out. First, a 100x fix returned only 4.2x — because 23% of the query was never
+in scope, and no amount of index quality touches it. Second, the *order* matters: the config fix
+was worth 3.3x before indexing and becomes the main lever after, because removing the biggest
+term promotes whatever was second. This is why the methodology diagram loops back to
+"remeasure" — the bottleneck relocates after every fix, and the `p` you measured is stale the
+moment the fix lands.
+
+---
+
+## 5. Architecture Diagrams
+
+**Query Execution Path — Where Time Is Spent**
+
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Client([Client]) --> Parser(Parser) --> Rewriter(Rewriter) --> Planner("Planner<br/>CBO") --> Executor(Executor) --> Storage(Storage)
+    Planner -.-> Stats("pg_stat_statements<br/>EXPLAIN ANALYZE")
+    Storage --> Buf("Buffer Pool<br/>shared_buffers")
+    Buf -->|miss| OSCache(OS Page Cache)
+    OSCache -->|miss| Disk[("Disk<br/>SSD / HDD")]
+
+    class Client io
+    class Parser,Rewriter,Planner,Executor mathOp
+    class Storage base
+    class Stats frozen
+    class Buf train
+    class OSCache base
+    class Disk lossN
+```
+
+A query flows through parse, rewrite, plan, and execute stages before touching storage; the planner is instrumented by pg_stat_statements and EXPLAIN ANALYZE, and a storage read cascades from the fast in-memory buffer pool down to the OS page cache and finally disk on each miss.
+
+```mermaid
+xychart-beta
+    title "Per-Page Access Latency by Tier (worst case, ms)"
+    x-axis ["Buffer hit", "OS cache hit", "SSD read", "Parse+Plan", "HDD read"]
+    y-axis "Milliseconds" 0 --> 10
+    bar [0.01, 0.1, 0.1, 1, 10]
+```
+
+A shared_buffers hit costs 0.01ms; a full miss cascading down to a spinning disk costs up to 1,000× more per page (10ms) — parsing and planning (up to 1ms) barely register next to a disk seek, which is why avoiding disk I/O dominates every other optimization.
+
+**The idea behind it.** Effective per-page latency is a weighted average:
+`latency = hit_rate x hit_cost + (1 - hit_rate) x miss_cost`. Because `miss_cost` is 10x to
+1,000x `hit_cost`, the second term dominates long before the hit rate looks bad — the number
+that governs your latency is the *miss* rate, not the hit rate, and reporting "99% hit rate"
+hides the fact that the remaining 1% is doing most of the waiting.
+
+| Symbol | What it is |
+|--------|------------|
+| `hit_rate` | Fraction of page requests served from `shared_buffers` / `innodb_buffer_pool` |
+| `1 - hit_rate` | Miss rate. The term that actually sets the average, because of its weight |
+| `hit_cost` | Cost of a buffer-pool hit. 0.01 ms — a pointer chase in RAM |
+| `miss_cost` | Cost of the fallback tier. 0.1 ms on SSD, 10 ms on HDD |
+| MySQL hit rate | `1 - (Innodb_buffer_pool_reads / Innodb_buffer_pool_read_requests)` |
+
+**Walk one example.** Same buffer pool, two different storage tiers, using the latencies from
+the chart above:
+
+```
+  ON SSD  (hit 0.01 ms, miss 0.1 ms)
+    hit_rate   effective latency                       vs 99%
+      99.9%    0.999x0.01 + 0.001x0.1  = 0.01009 ms     0.93x
+      99.0%    0.990x0.01 + 0.010x0.1  = 0.01090 ms     1.00x  (baseline)
+      95.0%    0.950x0.01 + 0.050x0.1  = 0.01450 ms     1.33x
+      90.0%    0.900x0.01 + 0.100x0.1  = 0.01900 ms     1.74x
+      50.0%    0.500x0.01 + 0.500x0.1  = 0.05500 ms     5.05x
+
+  ON HDD  (hit 0.01 ms, miss 10 ms)
+      99.9%    0.999x0.01 + 0.001x10   = 0.01999 ms
+      99.0%    0.990x0.01 + 0.010x10   = 0.10990 ms     5.5x worse than 99.9%
+      98.0%    0.980x0.01 + 0.020x10   = 0.20980 ms     10.5x worse
+      95.0%    0.950x0.01 + 0.050x10   = 0.50950 ms     25x worse
+      90.0%    0.900x0.01 + 0.100x10   = 1.00900 ms     50x worse
+```
+
+Read the HDD column carefully: dropping from 99.9% to 99.0% — a change most dashboards would
+render as a flat green line — makes every page read **5.5x slower**. On SSD the same drop costs
+8%. This is why "what is a good buffer pool hit rate" has no answer independent of storage: the
+identical hit rate is fine on NVMe and catastrophic on spinning disk.
+
+**Why `shared_buffers` is 25% and not 90%.** The formula above has three tiers, not two, and the
+middle one is free. A `shared_buffers` miss usually lands in the OS page cache (0.1 ms), not on
+disk — so RAM handed to `shared_buffers` is removed from a cache that was already helping you.
+Past roughly 25% you are shuffling pages between two RAM caches and paying double-buffering for
+it. That is also why `effective_cache_size = 24GB` on a 32GB box is not a contradiction with
+`shared_buffers = 8GB`: it is a *planner hint* describing both tiers combined, and PostgreSQL
+allocates none of it. Discourse's `shared_buffers = 256MB` in Section 7 is the same reasoning
+taken to its limit — with a sub-100GB dataset, the OS cache was already doing the job.
+
+**PostgreSQL Memory Hierarchy**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    SB("shared_buffers<br/>25% RAM · 8GB of 32GB<br/>page cache of table/index") -->|miss| OSC("OS page cache<br/>≈55% effective RAM<br/>effective_cache_size ≈ 24GB")
+    OSC -->|miss| Disk[("Disk storage<br/>SSD / NVMe")]
+
+    class SB train
+    class OSC base
+    class Disk lossN
+```
+
+Each tier is checked in order — a shared_buffers miss falls through to the OS page cache, and a page-cache miss falls through to disk; sizing shared_buffers and effective_cache_size correctly keeps most reads in the first two, faster tiers.
+
+```
+Per-Query Memory
+================
+
+work_mem = 4MB (default)
+  Used for: sort operations, hash joins, hash aggregates
+  Each parallel worker and each operation can use work_mem
+  A complex query with 5 sorts × 20 connections × 3 parallel workers
+  = 5 × 20 × 3 × 4MB = 1.2GB memory consumed simultaneously
+  → OOM kill risk if work_mem set too high
+
+maintenance_work_mem = 64MB (default)
+  Used for: VACUUM, CREATE INDEX, REINDEX, ALTER TABLE ADD FOREIGN KEY
+  Set higher during index builds: SET maintenance_work_mem = '1GB';
+```
+
+**What this actually says.** `work_mem` is not a budget, it is a *unit price*, and the quantity
+is out of your control: `peak = connections x operations_per_query x parallel_workers x
+work_mem`. PostgreSQL enforces no global cap on the product, so the setting is safe or fatal
+depending entirely on three numbers set by your workload rather than by your config file.
+
+| Symbol | What it is |
+|--------|------------|
+| `work_mem` | Memory ceiling for ONE sort, hash join, or hash aggregate node |
+| operations | Sort/hash nodes in a single plan. Read them off `EXPLAIN` — often 3-5 |
+| connections | Concurrent backends actually running queries, bounded by `max_connections` |
+| parallel workers | `max_parallel_workers_per_gather`. Each worker gets its own `work_mem` |
+| safe value | `RAM x 0.25 / (connections x operations)` — invert the product to solve for price |
+
+**Walk one example.** Solve the formula forward, then invert it, on a 32 GB server:
+
+```
+  SOLVE FOR A SAFE PRICE  (the config comment's formula)
+    32,000 MB x 0.25 / (100 connections x 2 operations) = 40 MB max safe work_mem
+
+  NOW PRICE IT WRONG  (the Section 10 OOM incident)
+    200 connections x 5 operations x 512 MB = 512,000 MB = 500 GB demanded
+    server has                                                32 GB
+    -> OOM killer terminates the postmaster
+
+  SAME SETTING, ONE SESSION  (SET LOCAL work_mem = '512MB')
+    1 session x 5 operations x 512 MB = 2,560 MB = 2.5 GB
+    -> 8% of RAM. Completely safe.
+```
+
+The same 512 MB is a 500 GB request or a 2.5 GB request depending only on how many sessions hold
+it. That is the entire argument for GitLab's pattern in Section 7 — global `work_mem = 8MB`,
+`SET LOCAL work_mem = '256MB'` inside the one transaction that needs it. The global value pays
+the multiplier; the local value does not.
+
+**Why parallel workers are the hidden third factor.** The config comment's formula uses two
+terms, but the earlier `5 x 20 x 3 x 4MB = 1.2GB` example uses three. With
+`max_parallel_workers_per_gather = 4`, one parallel sort can consume `5 x work_mem`, not
+`work_mem` — the leader plus four workers. A `work_mem` you validated on a serial plan can
+therefore quintuple the moment the planner decides the table got big enough to parallelize,
+which is why `work_mem` OOMs so often appear after data growth rather than after a config change.
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Slow Query Analysis
+
+```sql
+-- Enable pg_stat_statements extension (add to postgresql.conf):
+-- shared_preload_libraries = 'pg_stat_statements'
+-- pg_stat_statements.max = 10000
+-- pg_stat_statements.track = all
+
+-- After enabling and running workload, query top N slow queries:
+SELECT
+    round(total_exec_time::numeric, 2) AS total_ms,
+    round(mean_exec_time::numeric, 2) AS mean_ms,
+    round(stddev_exec_time::numeric, 2) AS stddev_ms,
+    calls,
+    round((100 * total_exec_time / sum(total_exec_time) OVER ())::numeric, 2) AS percentage_cpu,
+    query
+FROM pg_stat_statements
+ORDER BY total_exec_time DESC
+LIMIT 10;
+
+-- Reset statistics after tuning to measure improvement:
+SELECT pg_stat_statements_reset();
+```
+
+```sql
+-- PostgreSQL slow query logging (postgresql.conf):
+log_min_duration_statement = 1000  -- Log queries taking > 1 second
+log_statement = 'none'             -- Don't log all statements (noisy)
+log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+
+-- MySQL slow query log:
+slow_query_log = ON
+slow_query_log_file = /var/log/mysql/slow.log
+long_query_time = 1
+log_queries_not_using_indexes = ON
+```
+
+### EXPLAIN ANALYZE Deep Dive
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+SELECT u.name, COUNT(o.id) AS order_count
+FROM users u
+JOIN orders o ON o.user_id = u.id
+WHERE u.created_at > now() - interval '30 days'
+GROUP BY u.id, u.name
+ORDER BY order_count DESC
+LIMIT 10;
+
+-- Sample output and interpretation:
+-- Limit  (cost=1234.56..1234.59 rows=10 width=44) (actual time=234.123..234.128 rows=10 loops=1)
+--   -> Sort  (cost=1234.46..1236.96 rows=1000 ...) (actual time=234.120..234.121 rows=10 loops=1)
+--         Sort Key: (count(o.id)) DESC
+--         Sort Method: top-N heapsort  Memory: 25kB          ← small sort: ok
+--     -> HashAggregate  (cost=...) (actual time=233.8..233.9 rows=1000 ...)
+--           Group Key: u.id, u.name
+--           Peak Memory Usage: 2049kB
+--       -> Hash Join  (cost=...) (actual time=5.2..220.3 rows=50000 ...)
+--               Hash Cond: (o.user_id = u.id)
+--               Buffers: shared hit=4521 read=8834     ← 8834 pages from disk
+--           -> Seq Scan on orders o (cost=...) (actual time=0.03..180.4 rows=500000 ...)
+--                 Buffers: shared hit=2100 read=6000   ← full table scan
+--           -> Hash  (cost=...) (actual time=5.1..5.1 rows=1000 ...)
+--               Buckets: 1024  Batches: 1  Memory Usage: 73kB
+--               -> Index Scan on users u using idx_users_created_at ...
+
+-- Key metrics to read:
+--   actual time vs cost: if actual >> estimated, stale statistics
+--   rows (estimated) vs rows (actual): large difference = bad plan
+--   Buffers read: high disk reads → index missing or buffer pool too small
+--   Sort Method: heapsort (good for top-N), external merge (bad, spills to disk)
+--   Hash Batches > 1: hash join spilled to disk (increase work_mem)
+```
+
+**Reading the Plan Tree**
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Limit("Limit<br/>234.128ms total · rows=10") --> Sort("Sort<br/>top-N heapsort · 25kB")
+    Sort --> HashAgg("HashAggregate<br/>233.9ms · peak 2049kB")
+    HashAgg --> HashJoin("Hash Join<br/>220.3ms · read=8834 pages")
+    HashJoin --> SeqScan("Seq Scan on orders<br/>180.4ms · read=6000 pages<br/>full table scan")
+    HashJoin --> Hash("Hash<br/>5.1ms · 73kB")
+    Hash --> IdxScan("Index Scan on users<br/>idx_users_created_at")
+
+    class Limit,Sort,HashAgg,HashJoin mathOp
+    class SeqScan lossN
+    class Hash mathOp
+    class IdxScan train
+```
+
+The text output nests bottom-up but reads top-down; walking it as a tree shows the Seq Scan on orders alone costs 180.4ms of the 234.128ms total (about 77%), while the Index Scan on users off the small hash side resolves in a few milliseconds — the red node is the one worth indexing.
+
+### Memory Configuration (PostgreSQL)
+
+```
+# postgresql.conf — memory settings
+
+# shared_buffers: The primary buffer pool
+# Rule: 25% of total RAM
+# 32GB RAM → shared_buffers = 8GB
+shared_buffers = 8GB
+
+# effective_cache_size: Hint to planner about total cache available (shared_buffers + OS cache)
+# Rule: 75% of total RAM (postgres does NOT allocate this — it's a hint)
+# 32GB RAM → effective_cache_size = 24GB
+# Higher value → planner prefers index scans over seq scans for mid-size tables
+effective_cache_size = 24GB
+
+# work_mem: Sort/hash memory per operation per sort/hash in a query
+# Default: 4MB — usually too low (spills to disk on large datasets)
+# Danger: multiple concurrent queries, each with multiple operations
+# Formula: total_RAM × 0.25 / (max_connections × avg_queries_per_connection × avg_operations)
+# For 32GB RAM, 100 connections, each with 2 operations:
+#   32000MB × 0.25 / (100 × 2) = 40MB max safe work_mem
+# Start at 4MB, increase for sessions with slow sorts/hash joins:
+#   SET work_mem = '64MB';  -- per-session override for specific heavy queries
+work_mem = 16MB
+
+# maintenance_work_mem: Memory for VACUUM, CREATE INDEX, REINDEX, CLUSTER
+# Rule: 5-10% of RAM, or 1-2GB maximum
+# Higher values speed up index builds and VACUUM
+maintenance_work_mem = 1GB
+
+# max_wal_size: Maximum WAL size between checkpoints
+# Default: 1GB — too small for write-heavy workloads (causes frequent checkpoints)
+# Rule: set to 3-10× expected WAL generation between checkpoints (target: 5-min checkpoints)
+max_wal_size = 4GB
+min_wal_size = 1GB
+
+# checkpoint_completion_target: Spread checkpoint I/O over this fraction of checkpoint interval
+# Default: 0.5 (spread I/O over 50% of interval → spiky I/O)
+# Best practice: 0.9 (spread over 90% → smooth I/O)
+checkpoint_completion_target = 0.9
+```
+
+### I/O Tuning
+
+```
+# random_page_cost: Cost of random disk page access (relative to seq_page_cost=1.0)
+# Default: 4.0 (optimized for HDD with ~5ms seek)
+# SSD: set to 1.1-2.0 (random access is nearly as fast as sequential)
+# NVMe SSD: set to 1.1
+random_page_cost = 1.5  # for SSD
+
+# seq_page_cost: Cost of sequential disk page read
+seq_page_cost = 1.0  # keep at default
+
+# effective_io_concurrency: Estimated concurrent I/O operations the disk can handle
+# HDD: 1-2
+# SSD: 100-200
+# NVMe RAID: 200-500
+effective_io_concurrency = 200  # for SSD
+
+# max_worker_processes, max_parallel_workers: Parallel query workers
+# Parallel query helps for large sequential scans
+max_worker_processes = 8
+max_parallel_workers = 8
+max_parallel_workers_per_gather = 4  # max workers per query node
+```
+
+### Lock Monitoring and Tuning
+
+```sql
+-- Find blocking queries (queries waiting for locks held by other queries):
+SELECT
+    blocked.pid AS blocked_pid,
+    blocked.query AS blocked_query,
+    blocked.wait_event_type,
+    blocked.wait_event,
+    blocking.pid AS blocking_pid,
+    blocking.query AS blocking_query,
+    blocking.query_start,
+    now() - blocking.query_start AS blocking_duration
+FROM pg_stat_activity blocked
+JOIN pg_stat_activity blocking ON blocking.pid = ANY(pg_blocking_pids(blocked.pid))
+WHERE blocked.wait_event_type = 'Lock';
+
+-- Find long-running queries:
+SELECT pid, now() - query_start AS duration, state, query
+FROM pg_stat_activity
+WHERE state != 'idle'
+  AND query_start < now() - interval '5 minutes'
+ORDER BY duration DESC;
+
+-- Kill a specific query (not the connection):
+SELECT pg_cancel_backend(pid);
+
+-- Kill the connection:
+SELECT pg_terminate_backend(pid);
+```
+
+```
+# PostgreSQL lock timeout settings
+lock_timeout = '5s'              # Kill queries waiting for a lock > 5s
+statement_timeout = '30s'        # Kill statements running > 30s
+idle_in_transaction_session_timeout = '30s'  # Kill idle-in-transaction > 30s
+```
+
+### MySQL Performance Tuning
+
+```ini
+# /etc/mysql/mysql.conf.d/mysqld.cnf
+
+# Buffer pool: most important MySQL setting
+# Rule: 70-80% of RAM for dedicated MySQL server
+innodb_buffer_pool_size = 24G   # for 32GB RAM
+
+# Buffer pool instances: reduce lock contention for large buffer pools
+# Rule: 1 per GB, max 64
+innodb_buffer_pool_instances = 24
+
+# I/O capacity: disk I/O operations per second MySQL can use
+innodb_io_capacity = 2000           # SSD: 2000-10000
+innodb_io_capacity_max = 4000       # Peak I/O capacity
+
+# Redo log: too small → frequent log flushes, I/O spikes; too large → slow crash recovery
+# MySQL 8.0: automatically sized; MySQL 5.7 default: 48MB (usually too small)
+innodb_log_file_size = 1G           # MySQL 5.7 only; MySQL 8.0 auto-configures
+innodb_log_buffer_size = 64M        # Buffer before writing to redo log
+
+# Flush method: most important durability/performance knob
+# 0: commit writes to log buffer; flush to disk every second (1s data loss risk)
+# 1: flush log on every commit (default; durable; 2-3x slower than =2)
+# 2: write to OS cache on commit; flush every second (1s data loss risk; faster)
+innodb_flush_log_at_trx_commit = 1  # Production: keep at 1 for durability
+
+# Read/write threads
+innodb_read_io_threads = 4
+innodb_write_io_threads = 4
+
+# Slow query log
+slow_query_log = ON
+long_query_time = 1
+log_queries_not_using_indexes = ON
+```
+
+### Table Bloat Diagnosis (PostgreSQL)
+
+```sql
+-- Detect bloated tables (using pg_stat_user_tables approximation):
+SELECT
+    schemaname,
+    tablename,
+    n_live_tup AS live_rows,
+    n_dead_tup AS dead_rows,
+    round(n_dead_tup::numeric / NULLIF(n_live_tup + n_dead_tup, 0) * 100, 1) AS dead_pct,
+    last_vacuum,
+    last_autovacuum,
+    last_analyze
+FROM pg_stat_user_tables
+WHERE n_dead_tup > 10000
+ORDER BY dead_pct DESC;
+
+-- Accurate bloat estimate using pgstattuple extension:
+CREATE EXTENSION pgstattuple;
+SELECT * FROM pgstattuple('orders');
+-- Returns: table_len, tuple_count, tuple_len, tuple_percent, dead_tuple_count, dead_tuple_percent, free_space, free_percent
+
+-- Manual VACUUM if autovacuum isn't keeping up:
+VACUUM (ANALYZE, VERBOSE) orders;
+VACUUM (FULL, ANALYZE) orders;  -- Rewrites table, removes all bloat, but takes exclusive lock
+```
+
+### Autovacuum Tuning
+
+```sql
+-- Per-table autovacuum settings for high-write tables
+ALTER TABLE orders SET (
+    autovacuum_vacuum_scale_factor = 0.01,   -- Vacuum when 1% of rows are dead (default: 20%)
+    autovacuum_vacuum_cost_delay = 2,        -- 2ms delay between I/O bursts (less throttling)
+    autovacuum_vacuum_threshold = 1000,      -- Vacuum when > 1000 dead tuples (default: 50)
+    autovacuum_analyze_scale_factor = 0.005  -- Analyze more frequently for accurate stats
+);
+
+-- Monitor autovacuum activity:
+SELECT
+    schemaname, relname,
+    last_autovacuum,
+    autovacuum_count,
+    n_dead_tup,
+    n_mod_since_analyze
+FROM pg_stat_user_tables
+WHERE last_autovacuum > now() - interval '1 hour'
+ORDER BY last_autovacuum DESC;
+
+-- Check if autovacuum workers are running:
+SELECT pid, query, state, wait_event_type, wait_event
+FROM pg_stat_activity
+WHERE query LIKE 'autovacuum:%';
+```
+
+---
+
+## 7. Real-World Examples
+
+**GitLab**: Published their PostgreSQL tuning guide extensively. Key insight: `work_mem` set too high caused OOM kills. They run `work_mem = 8MB` globally and use `SET LOCAL work_mem = '256MB'` only for specific batch operations.
+
+**Discourse**: Runs PostgreSQL tuned for small datasets (< 100GB) on SSDs. Key parameters: `shared_buffers = 256MB` (small — dataset fits in OS cache), `random_page_cost = 1.5`, `effective_io_concurrency = 200`. Demonstrates that small shared_buffers can be right when OS page cache handles most I/O.
+
+**Percona**: Publishes the `pt-query-digest` tool for MySQL slow query analysis and `pt-online-schema-change` for zero-downtime schema changes. Their tuning checklist for MySQL 8: innodb_buffer_pool_size=80% RAM, innodb_io_capacity based on disk type, slow_query_log enabled from day one.
+
+---
+
+## 8. Tradeoffs
+
+| Tuning Action | Benefit | Risk/Cost |
+|---|---|---|
+| Increase shared_buffers | Higher hit rate | Less OS cache available |
+| Increase work_mem | Faster sort/hash joins | OOM kill at high concurrency |
+| Increase max_wal_size | Fewer checkpoints | Longer crash recovery |
+| VACUUM (FULL) | Eliminate bloat | Exclusive lock, table rewrites |
+| Create index | Faster reads | Slower writes, storage, maintenance |
+| Parallel query workers | Faster large scans | CPU-bound queries may thrash |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+**Profile before tuning**: EXPLAIN ANALYZE, pg_stat_statements, slow query log — always identify the bottleneck first.
+
+**Index optimization**: first action for any query > 100ms. A missing index on a 10M-row table can cause 10-second sequential scans.
+
+**Work_mem increase**: only for specific sessions with confirmed sort/hash spill to disk. Never increase globally without calculating OOM risk.
+
+**VACUUM FULL**: last resort for bloat (requires exclusive lock); prefer aggressive autovacuum tuning first.
+
+**Parallel workers**: useful for analytics/OLAP queries that do large sequential scans; not useful for OLTP point queries.
+
+---
+
+## 10. Common Pitfalls
+
+**work_mem OOM kill**: DBA increases work_mem from 4MB to 512MB globally to speed up sorts. At peak load: 200 connections × 5 sort operations each = 1000 operations × 512MB = 500GB memory demand. Server OOM kills PostgreSQL. Fix: raise work_mem per-session for known heavy queries only (`SET LOCAL work_mem = '256MB'` inside a transaction).
+
+**Missing statistics causing bad query plan**: A bulk load inserts 100M rows into a table. Autovacuum hasn't run ANALYZE yet — statistics still show 1000 rows. The planner estimates a tiny result set and chooses nested loop join instead of hash join. Query takes 30 minutes instead of 30 seconds. Fix: run `ANALYZE orders;` after bulk loads. Set `autovacuum_analyze_scale_factor = 0.01` for high-write tables.
+
+**Checkpoint I/O spike**: `max_wal_size = 1GB` (default) with a write workload generating 500MB/minute of WAL. Checkpoint fires every 2 minutes, flushing 1GB of dirty pages in a 1-second burst. Disk I/O saturates; all queries stall. Fix: set `max_wal_size = 4GB`, `checkpoint_completion_target = 0.9` — checkpoints spread I/O over 9 minutes, eliminating spikes.
+
+**Put simply.** Two independent numbers control checkpoints, and they do different jobs.
+`interval = min(checkpoint_timeout, max_wal_size / wal_rate)` sets *how often* a checkpoint
+fires; `checkpoint_completion_target` sets *how thin* the resulting write is spread. Raising only
+the first makes each checkpoint bigger; raising only the second smooths a burst that still
+arrives too often. The pathology is a large volume delivered over a short window, so you have to
+move both.
+
+| Symbol | What it is |
+|--------|------------|
+| `wal_rate` | WAL bytes the workload generates per minute. Measure it, do not guess |
+| `max_wal_size` | WAL accumulated before a checkpoint is forced. Default 1 GB |
+| `checkpoint_timeout` | Time-based trigger. Default 5 min. Whichever fires first, wins |
+| `checkpoint_completion_target` | Fraction of the interval used to write dirty pages. 0.5 -> 0.9 |
+| write rate | `dirty_bytes / (interval x completion_target)` — the number the disk actually feels |
+
+**Walk one example.** The incident's own 500 MB/min WAL rate:
+
+```
+  WAL-size trigger:
+    max_wal_size = 1 GB -> 1,024 / 500 = 2.05 min   <- the "checkpoint every 2 minutes"
+    max_wal_size = 4 GB -> 4,096 / 500 = 8.19 min
+
+  But checkpoint_timeout = 5 min also fires, and the earlier one wins:
+    at 1 GB : min(5.00, 2.05) = 2.05 min   -> WAL size is the trigger
+    at 4 GB : min(5.00, 8.19) = 5.00 min   -> the TIMEOUT now becomes the trigger
+
+  Sustained write rate seen by the disk, flushing ~1 GB of dirty pages:
+
+    before : 1,024 MB in 1 second                        = 1,024 MB/s   <- saturates
+    after  : 1,024 MB over 0.9 x 5 min = 270 s           =   3.8 MB/s
+
+    1,024 / 3.8 = 270x lower peak write rate
+```
+
+**Why raising `max_wal_size` alone would not have fixed it.** At 4 GB the WAL trigger moves out
+to 8.19 min, past `checkpoint_timeout`, so checkpoints now fire on the 5-minute clock instead —
+the headroom stops mattering the moment the timeout becomes the binding constraint. What
+actually flattened the disk was `checkpoint_completion_target` going 0.5 to 0.9, turning a
+1-second burst into a 270-second trickle. The `max_wal_size` bump earns its keep by making the
+timeout the trigger, which is the stable, predictable one. As Section 8 notes, the price is crash
+recovery: more WAL between checkpoints means more WAL to replay after an unclean shutdown.
+
+**Index bloat from UPDATE-heavy workload**: A table with 10M rows undergoes 1M updates/day. Each UPDATE creates a new row version (dead tuple + new tuple). Without sufficient VACUUM, dead tuples and index entries accumulate. After 6 months: table is 4× larger than data, index is 3× larger. Reads slow because pages are sparse. Fix: increase autovacuum frequency for that table, use REINDEX CONCURRENTLY to rebuild bloated indexes.
+
+**Read it like this.** Autovacuum fires when
+`n_dead_tup > autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor x n_live_tup`. Because
+the trigger is a *fraction of live rows*, it sets a ceiling on steady-state bloat all by itself:
+the table can never exceed `1 + scale_factor` times its useful size, as long as autovacuum is
+actually running. Any bloat larger than that ratio is not a tuning problem — it is evidence
+autovacuum never completed.
+
+| Symbol | What it is |
+|--------|------------|
+| `n_dead_tup` | Dead row versions awaiting reclamation. From `pg_stat_user_tables` |
+| `n_live_tup` | Live rows. The useful size the ratio is measured against |
+| scale factor | Fraction of live rows tolerated as dead. Default `0.20` |
+| threshold | Flat floor added on top, default 50 rows. Irrelevant on big tables |
+| bloat ceiling | `1 + scale_factor` — the largest the table gets if vacuum keeps up |
+
+**Walk one example.** The 10M-row table taking 1M updates/day:
+
+```
+  DEFAULT scale_factor = 0.20
+    trigger at   0.20 x 10,000,000 = 2,000,000 dead tuples
+    time to hit  2,000,000 / 1,000,000 per day = 2.0 days between vacuums
+    bloat ceiling                     12,000,000 / 10,000,000 = 1.20x
+
+  TUNED scale_factor = 0.01  (the per-table setting shown earlier)
+    trigger at   0.01 x 10,000,000 =   100,000 dead tuples
+    time to hit    100,000 / 1,000,000 per day = 0.1 day = 2.4 hours
+    bloat ceiling                     10,100,000 / 10,000,000 = 1.01x
+
+  OBSERVED after 6 months: 4x
+    implied dead tuples = 3 x 10,000,000 = 30,000,000
+    implied scale_factor = 30,000,000 / 10,000,000 = 3.0
+
+    No setting produces 3.0. Autovacuum was not completing at all.
+```
+
+That last line is the diagnostic worth carrying into an interview: compare measured bloat against
+`1 + scale_factor`, and if measured is larger, stop tuning the scale factor and go find out why
+the worker never finished — a long-running transaction holding back the xmin horizon, a vacuum
+cost delay throttling it below the dead-tuple arrival rate, or too few `autovacuum_max_workers`
+for the number of hot tables. Pinning `autovacuum_vacuum_cost_delay = 2` per-table, as the
+settings above do, addresses the throttling case specifically.
+
+**Query plan regression after PostgreSQL upgrade**: After upgrading from PG 13 to PG 15, a critical query plan changes from index scan to sequential scan. Throughput drops 10×. Root cause: PG 15 improved the cost model; now accurately estimates the table is larger and planner switches to seq scan. Fix: use `pg_hint_plan` extension to pin the old plan temporarily while investigating. Long term: add a more selective index or rewrite the query to use a covering index.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool                  | Purpose                                     |
+|-----------------------|---------------------------------------------|
+| pg_stat_statements    | Query statistics aggregation (PostgreSQL)   |
+| EXPLAIN ANALYZE       | Per-query execution plan analysis           |
+| pgBadger              | PostgreSQL log analyzer (slow query report) |
+| pgstattuple           | Table/index bloat measurement               |
+| pg_activity           | Real-time pg_stat_activity dashboard        |
+| pt-query-digest       | MySQL slow query log analyzer (Percona)     |
+| pt-online-schema-change | MySQL zero-downtime schema changes        |
+| MySQL Performance Schema | Real-time MySQL performance monitoring  |
+| Prometheus + Grafana  | Long-term metrics visualization             |
+| pganalyze             | SaaS PostgreSQL performance monitoring      |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q: How do you diagnose and fix table bloat in PostgreSQL?**
+**Short:** Table bloat is diagnosed via the dead-to-live tuple ratio in pg_stat_user_tables and fixed with VACUUM, tuned autovacuum, or pg_repack.
+
+Table bloat is excess storage from dead tuples not yet reclaimed by VACUUM. Diagnose: query `pg_stat_user_tables` for `n_dead_tup` and compare with `n_live_tup`; a dead-to-live ratio above 20% indicates bloat. For accurate measurement, use `pgstattuple`. Fix: (1) Run `VACUUM (ANALYZE, VERBOSE) table_name` to reclaim dead tuple space without a lock. (2) If autovacuum is not keeping up, tune per-table: `ALTER TABLE t SET (autovacuum_vacuum_scale_factor = 0.01, autovacuum_vacuum_cost_delay = 2)`. (3) For extreme bloat requiring full rewrite, use `VACUUM FULL` (exclusive lock) or `pg_repack` extension (concurrent rewrite, no lock). Also run `REINDEX CONCURRENTLY` to rebuild bloated indexes.
+
+**Q: What is work_mem and why can setting it too high cause OOM kills?**
+**Short:** work_mem caps memory per sort or hash operation, not per query, so many concurrent operations can multiply it into a server-wide OOM.
+
+`work_mem` is the memory limit per sort/hash operation within a query execution. It is NOT a per-query or per-session limit — a complex query can have multiple simultaneous sort and hash operations, each using up to `work_mem`. With `max_connections = 200`, `work_mem = 256MB`, and a complex query with 5 operations: 200 × 5 × 256MB = 256GB potential memory demand — far exceeding any server. PostgreSQL does not enforce a global memory cap, so this can OOM-kill the server. Best practice: keep the global `work_mem` at 8–32MB; increase per-session with `SET work_mem = '256MB'` for known heavy analytical queries.
+
+**Q: How do you find the top N slow queries in production without pg_stat_statements installed?**
+**Short:** Without pg_stat_statements, slow queries can still be found by parsing logs, polling pg_stat_activity, or enabling auto_explain.
+
+Options in degrading priority: (1) Check PostgreSQL log files: if `log_min_duration_statement` is set, slow queries are logged. Parse with `pgBadger` or `grep`. (2) Use `pg_stat_activity`: query it repeatedly and look for long-running queries (duration = `now() - query_start`). (3) Enable `pg_stat_statements` at next maintenance window — it requires a server restart (shared_preload_libraries). (4) Use `auto_explain` module with `auto_explain.log_min_duration = 1000` to log query plans for slow queries without restarting. (5) Check OS-level: high CPU process → identify PostgreSQL PID → `SELECT query FROM pg_stat_activity WHERE pid = <pid>`.
+
+**Q: What is checkpoint_completion_target and how does it affect I/O spikes?**
+**Short:** checkpoint_completion_target spreads dirty-page flushing across most of the checkpoint interval, eliminating a sudden I/O spike.
+
+When a checkpoint fires, PostgreSQL must flush all dirty shared_buffers pages to disk. Without `checkpoint_completion_target`, all dirty pages are flushed as fast as possible — causing a brief I/O spike that starves concurrent queries. `checkpoint_completion_target = 0.9` tells PostgreSQL to spread the dirty page flush over 90% of the checkpoint interval. If checkpoints occur every 5 minutes (max_wal_size limit), the background writer spreads I/O over 4.5 minutes, eliminating the spike. Set to 0.9 in all production environments. The default of 0.5 is too aggressive for write-heavy workloads.
+
+**Q: How do you read the output of EXPLAIN ANALYZE to identify the bottleneck?**
+**Short:** Reading EXPLAIN ANALYZE means checking for sequential scans, bad row estimates, heavy disk buffer reads, and sort or hash spills to disk.
+
+Key signals: (1) `Seq Scan` on a large table — check if an index could convert it to an `Index Scan`. (2) Rows estimate vs actual: if estimated=100, actual=100000, the planner was wrong — stale statistics (`ANALYZE` needed). (3) `Buffers: read` (disk reads) — high disk reads indicate the table/index is not in shared_buffers or OS cache (buffer pool too small or table too large). (4) `Sort Method: external merge` — sort spilled to disk; increase `work_mem`. (5) `Hash Batches: N > 1` — hash join spilled to disk; increase `work_mem`. (6) Loop counts: a node with `loops=10000` and 1ms per loop = 10 seconds in that node alone — often indicates N+1 pattern.
+
+**Q: How do you tune autovacuum for a high-write table?**
+**Short:** Tuning autovacuum for a high-write table means lowering its scale factor and threshold so VACUUM fires long before default settings would.
+
+Default autovacuum triggers when `autovacuum_vacuum_threshold + autovacuum_vacuum_scale_factor × reltuples` dead tuples accumulate. For a 100M-row table with default 20% scale factor: autovacuum triggers only after 20M dead tuples — by then, the table is severely bloated. Per-table tuning: `ALTER TABLE orders SET (autovacuum_vacuum_scale_factor = 0.005, autovacuum_vacuum_threshold = 1000, autovacuum_vacuum_cost_delay = 2)`. This triggers VACUUM after 500K dead tuples (0.5% of 100M), runs with less throttling (2ms delay vs 20ms default). Also increase `autovacuum_max_workers` globally if multiple tables need concurrent vacuuming.
+
+**Q: What is the effect of random_page_cost on query planning for SSD storage?**
+**Short:** The default random_page_cost of 4 overstates SSD random-access cost, so lowering it to around 1.1-1.5 lets the planner favor index scans correctly.
+
+`random_page_cost = 4.0` (default, tuned for HDD) tells the planner that random page access is 4× more expensive than sequential access. On HDD, this is accurate (disk seek = 5–10ms vs sequential read = 0.1ms/page). On SSD, random access is ~0.1ms vs sequential ~0.05ms/page — approximately 1.5–2× difference, not 4×. With `random_page_cost = 4.0` on SSD, the planner over-penalizes index scans relative to sequential scans, sometimes choosing sequential scans when index scans would be faster. Setting `random_page_cost = 1.5` for SSD or `1.1` for NVMe corrects the planner's cost model, enabling it to choose index scans more aggressively for mid-selectivity predicates.
+
+**Q: How does the innodb_buffer_pool_size affect MySQL performance?**
+**Short:** Sizing innodb_buffer_pool_size to 70-80% of RAM lets more of the working set stay in memory, cutting disk reads.
+
+The InnoDB buffer pool is the primary memory cache for table and index data. Reads first check the buffer pool; if missing (buffer pool miss), InnoDB reads from disk. For a dedicated MySQL server, 70–80% of RAM should be allocated to `innodb_buffer_pool_size`. Increasing it increases the working set that fits in memory, reducing disk reads. For a 10GB database on a 32GB server: set `innodb_buffer_pool_size = 24GB` — the entire database likely fits in RAM. Monitor `Innodb_buffer_pool_reads` (disk reads) vs `Innodb_buffer_pool_read_requests` (total reads): a hit rate below 95% indicates the buffer pool is undersized.
+
+**Q: What is the XID wraparound problem in PostgreSQL and how do you prevent it?**
+**Short:** PostgreSQL prevents XID wraparound corruption by having autovacuum freeze old transaction IDs well before the 2.1 billion limit.
+
+PostgreSQL uses 32-bit transaction IDs (XIDs). After ~2.1 billion transactions, the XID counter approaches the "frozen" XID, and older transactions could appear to be in the future — corrupting visibility. PostgreSQL prevents this with `VACUUM FREEZE`: it marks old rows with a special "frozen" XID that is always considered in the past. `autovacuum_freeze_max_age = 200M` (default): autovacuum aggressively freezes tables when their oldest XID is within 200M of the wraparound limit. Signs of approaching wraparound: PostgreSQL warns in logs ("WARNING: database X must be vacuumed within N transactions"). Emergency: PostgreSQL forces a single-user maintenance mode at 100M XIDs before wraparound. Monitor: `SELECT age(datfrozenxid) FROM pg_database ORDER BY 1 DESC`. Alert if age > 150M.
+
+**Q: How do you measure and improve database cache hit rate?**
+**Short:** A PostgreSQL cache hit rate below 95% signals frequent disk reads, fixed by growing shared_buffers or adding indexes on cold tables.
+
+For PostgreSQL: `SELECT sum(blks_hit) / (sum(blks_hit) + sum(blks_read)) AS hit_rate FROM pg_stat_database`. A hit rate below 95% indicates the database is frequently reading from disk. Improvement: (1) Increase `shared_buffers` (more pages stay in buffer pool). (2) Identify which tables are causing disk reads: `SELECT relname, heap_blks_read, heap_blks_hit FROM pg_statio_user_tables ORDER BY heap_blks_read DESC LIMIT 10`. (3) Add indexes to avoid sequential scans of cold data. (4) For read-heavy tables, consider a caching layer (Redis) to keep the database's working set focused on write-heavy tables. For MySQL: use `SHOW STATUS LIKE 'Innodb_buffer_pool%'` — `Innodb_buffer_pool_reads` vs `Innodb_buffer_pool_read_requests`.
+
+**Q: What is pgBadger and how does it help with performance tuning?**
+**Short:** pgBadger parses PostgreSQL logs into an HTML report of the slowest and most time-consuming queries, the first tool for a slow-query hunt.
+
+pgBadger is a log analyzer for PostgreSQL log files that generates HTML reports from `log_min_duration_statement` entries. It aggregates: top N slowest queries, top N most frequently executed queries, top N most time-consuming queries (total_time = count × avg_time), lock waits, connection peaks, and error rates. It also shows the number of prepared statements, temporary files created (sort spills), and autovacuum activity. pgBadger is the first tool to run when you have a slow query problem in production. It requires log rotation: `pgbadger /var/log/postgresql/postgresql-$(date +%F).log -o report.html`.
+
+**Q: How do you tune PostgreSQL for write-heavy OLTP workloads?**
+**Short:** Tuning for write-heavy OLTP combines synchronous_commit off, smoother checkpoints, group commit delay, and batched bulk loads.
+
+Key settings: (1) `synchronous_commit = off` for non-critical writes: allows OS to buffer WAL before fsync, 3× write throughput at the cost of up to 200ms data loss window on crash. (2) `max_wal_size = 4GB`, `checkpoint_completion_target = 0.9`: fewer, smoother checkpoints. (3) `commit_delay = 100`, `commit_siblings = 5`: delay individual commits briefly to batch WAL flushes when many transactions are committing concurrently (group commit). (4) Use `UNLOGGED TABLE` for scratch/temporary tables that don't need WAL (no crash recovery). (5) Use `COPY` instead of `INSERT` for bulk loads. (6) Batch commits: commit every 1000 rows rather than every row (`BEGIN; INSERT × 1000; COMMIT`).
+
+**Q: What is the difference between VACUUM and VACUUM FULL in PostgreSQL?**
+**Short:** VACUUM reclaims dead tuple space without locking or shrinking the file, while VACUUM FULL rewrites the table under an exclusive lock.
+
+`VACUUM` reclaims dead tuple space and marks it as reusable within the table file — the file does not shrink. It runs concurrently with reads and writes (does not hold an exclusive lock). It is the correct tool for routine bloat management. `VACUUM FULL` rewrites the entire table into a new file, removing all free space and returning it to the OS — the table file shrinks. It requires an exclusive lock (no reads or writes for the duration) and can take hours on large tables. Use `pg_repack` extension instead of `VACUUM FULL` when you need space reclaimed without a table lock. Never run `VACUUM FULL` in production during business hours without a maintenance window.
+
+**Q: How do you use parallel query and when does it not help?**
+**Short:** Parallel query speeds up large scans and aggregations but does not help index scans or single-row OLTP queries, and can starve them of CPU.
+
+PostgreSQL parallel query (`max_parallel_workers_per_gather = 4`) splits a sequential scan or aggregation across multiple workers, each processing a portion of the table. It speeds up: large sequential scans, hash joins on large tables, aggregations (COUNT, SUM, AVG) over many rows. It does NOT help: index scans (single-page access pattern, no parallelism benefit), single-row OLTP queries, UPDATE/DELETE (parallel DML is limited). Parallel query can hurt OLTP by consuming CPU for a single analytical query, starving concurrent OLTP queries. Use `max_parallel_workers_per_gather = 0` for OLTP-only databases; enable parallel workers only on read replicas used for analytics.
+
+**Q: How do you diagnose and resolve lock contention that's stalling production queries?**
+**Short:** Joining pg_stat_activity with pg_blocking_pids finds the blocking session, while lock_timeout and statement_timeout bound the damage automatically.
+
+Querying `pg_stat_activity` joined via `pg_blocking_pids()` reveals which sessions are blocked and which session holds the lock they are waiting on, along with how long the blocking query has been running. A blocking query running for minutes usually means either a long-running transaction that forgot to commit or an application bug holding a row lock while waiting on an external call. Two PostgreSQL timeouts bound the damage automatically: `lock_timeout = 5s` kills any statement waiting too long for a lock, and `statement_timeout = 30s` kills any statement that runs too long regardless of locks. For an already-stuck session, `pg_cancel_backend(pid)` cancels the running query without dropping the connection, while `pg_terminate_backend(pid)` drops the connection entirely when cancellation alone does not clear the lock. Set both timeouts as standing configuration rather than reacting after the fact, since runaway queries and stalled transactions are exactly the two most common lock sources this guards against.
+
+**Q: What does innodb_flush_log_at_trx_commit control, and what's the durability tradeoff between its three settings?**
+**Short:** innodb_flush_log_at_trx_commit trades durability for throughput, and only its default value of 1 survives an OS crash with zero loss.
+
+`innodb_flush_log_at_trx_commit` decides when MySQL's redo log buffer is written and fsynced to disk relative to each transaction commit, trading durability against throughput across its three values. Setting `1`, the default and only fully durable option, flushes and fsyncs the log on every commit, guaranteeing no committed transaction is lost even on an OS crash, at roughly 2-3x the write cost of the other settings. Setting `2` writes to the OS cache on commit but only fsyncs once per second, so a MySQL process crash loses nothing but an OS or power failure can lose up to one second of commits. Setting `0` buffers writes in memory and both writes and fsyncs only once per second, so even a MySQL process crash, not just an OS crash, can lose up to a second of transactions. Keep `1` for financial or otherwise durability-critical workloads and consider `2` only for workloads that can tolerate a bounded window of loss on OS-level failure, such as write-heavy analytics ingestion.
+
+---
+
+## 13. Best Practices
+
+- **Enable pg_stat_statements from day one** — you cannot diagnose query performance without it, and enabling it requires a server restart.
+- **Set log_min_duration_statement = 1000** in development and staging; 5000 in production — never run without slow query logging.
+- **Run ANALYZE after bulk loads** — autovacuum may not run fast enough; stale statistics cause bad query plans immediately after bulk inserts.
+- **Configure per-table autovacuum for high-write tables** — the global 20% scale factor is too large for tables with millions of rows.
+- **Set statement_timeout and idle_in_transaction_session_timeout** — runaway queries and stalled transactions are the two most common lock sources.
+- **Test query plans at production data scale** — a plan that uses an index on 10K rows may switch to sequential scan at 100M rows.
+- **Monitor checkpoint frequency** — if checkpoints occur more often than every 5 minutes, increase max_wal_size.
+- **Prefer pg_repack over VACUUM FULL** for large tables — same result (space reclaim) without the exclusive lock.
+
+---
+
+## 14. Case Study
+
+**Scenario**: A fintech application's transaction history query for a user's last 90 days of transactions runs at 4,500ms P99 in production. The database is PostgreSQL 15, 64GB RAM. The table has 500M rows.
+
+**Step 1: EXPLAIN ANALYZE**
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT id, amount, description, created_at
+FROM transactions
+WHERE user_id = 12345
+  AND created_at >= now() - interval '90 days'
+ORDER BY created_at DESC
+LIMIT 50;
+
+-- Output shows:
+-- Seq Scan on transactions (cost=0..8M rows=45000) (actual time=4200..4480 rows=50)
+-- Buffers: shared hit=12000 read=88000  ← 88K pages from disk
+-- Filter: ((user_id = 12345) AND (created_at >= (now() - '90 days'::interval)))
+-- Rows Removed by Filter: 499999950
+```
+
+**Step 2: Missing index — the root cause**
+
+No index on `(user_id, created_at)`. Full sequential scan of 500M rows to find 50 rows.
+
+**Step 3: Fix**
+
+```sql
+-- Create index concurrently (no table lock)
+CREATE INDEX CONCURRENTLY idx_transactions_user_date
+ON transactions (user_id, created_at DESC)
+INCLUDE (id, amount, description);  -- covering index: no heap fetch needed
+
+-- After index creation — new plan:
+-- Index Only Scan on transactions using idx_transactions_user_date
+-- Index Cond: (user_id = 12345 AND created_at >= ...)
+-- Heap Fetches: 0  ← covering index, no heap access
+-- Buffers: shared hit=4 read=0
+-- Actual time: 0.842ms
+```
+
+**Step 4: Configuration tuning (secondary)**
+
+```
+Before fix:
+  shared_buffers = 1GB (too small for 500M row table)
+  random_page_cost = 4.0 (HDD setting, using SSD)
+
+After index fix (configuration changes less critical, but applied):
+  shared_buffers = 16GB (25% of 64GB RAM)
+  effective_cache_size = 48GB
+  random_page_cost = 1.5 (SSD)
+  autovacuum_vacuum_scale_factor on transactions = 0.005
+```
+
+**Result**: 4,500ms → 0.842ms. The index was the entire fix. Configuration changes improved overall database throughput by 15% but had negligible impact on this specific query once the index was in place.

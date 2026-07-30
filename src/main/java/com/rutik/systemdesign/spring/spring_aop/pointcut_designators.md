@@ -5,7 +5,7 @@ Reference baseline for every claim on this page: **Spring Boot 4.1.x / Spring Fr
 
 ## 1. Concept Overview
 
-The parent module ([Spring AOP](README.md)) lists nine AspectJ pointcut designators and then develops four of them: `execution`, `within`, `@within`, `@annotation`. Those four cover perhaps 90% of production aspects, which is exactly why the other five — `args`, `@args`, `target`, `@target`, `this` — plus Spring's own `bean` designator are where interviews and outages live.
+The parent module ([Spring AOP](spring_aop.md)) lists nine AspectJ pointcut designators and then develops four of them: `execution`, `within`, `@within`, `@annotation`. Those four cover perhaps 90% of production aspects, which is exactly why the other five — `args`, `@args`, `target`, `@target`, `this` — plus Spring's own `bean` designator are where interviews and outages live.
 
 The reason those five behave differently is not syntax. It is *when* Spring can answer the question "does this pointcut match?". Spring's `MethodMatcher` contract is deliberately two-phase:
 
@@ -799,9 +799,9 @@ That is `execution` only — `isRuntime() == false`, a bare interceptor in the c
 
 ## Related / See Also
 
-- [Spring AOP](README.md) — the parent module: advice types, ordering, `@EnableAspectJAutoProxy`
-- [Spring Proxies](../spring_proxies/README.md) — JDK dynamic proxy vs CGLIB, `proxyTargetClass`, self-invocation
-- [Spring Transactions](../spring_transactions/README.md) — `TransactionInterceptor` as an advisor in the same chain
-- [Spring Performance](../spring_performance/README.md) — where proxy overhead does and does not matter
-- [Proxy Pattern](../../lld/structural/proxy/README.md) — the GoF pattern underneath
-- [Bytecode & Class-File Format](../../java/bytecode_and_classfile/README.md) — `MethodParameters` and what `-parameters` actually writes
+- [Spring AOP](spring_aop.md) — the parent module: advice types, ordering, `@EnableAspectJAutoProxy`
+- [Spring Proxies](../spring_proxies/spring_proxies.md) — JDK dynamic proxy vs CGLIB, `proxyTargetClass`, self-invocation
+- [Spring Transactions](../spring_transactions/spring_transactions.md) — `TransactionInterceptor` as an advisor in the same chain
+- [Spring Performance](../spring_performance/spring_performance.md) — where proxy overhead does and does not matter
+- [Proxy Pattern](../../lld/structural/proxy/proxy.md) — the GoF pattern underneath
+- [Bytecode & Class-File Format](../../java/bytecode_and_classfile/bytecode_and_classfile.md) — `MethodParameters` and what `-parameters` actually writes

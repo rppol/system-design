@@ -1,5 +1,5 @@
 # BERT and Pretrained Language Models
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers encoder-only pretrained models: BERT, RoBERTa, DeBERTa, ALBERT, DistilBERT, and ModernBERT.
 > Transformer-based generative (decoder-only) models are covered in the LLM section.
 

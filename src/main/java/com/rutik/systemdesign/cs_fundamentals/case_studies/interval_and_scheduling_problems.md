@@ -927,4 +927,4 @@ Counting maximum overlap (meeting rooms II) tells you the minimum number of colu
 
 ---
 
-*Cross-references: [Heaps and Priority Queues](../heaps_and_priority_queues/README.md) — heap invariants and heapify; [Greedy and Divide and Conquer](../greedy_and_divide_and_conquer/README.md) — exchange argument proofs; [Sorting and Searching](../sorting_and_searching/README.md) — sort stability and timsort; [Dynamic Programming Patterns](./dynamic_programming_patterns.md) — weighted interval scheduling DP.*
+*Cross-references: [Heaps and Priority Queues](../heaps_and_priority_queues/heaps_and_priority_queues.md) — heap invariants and heapify; [Greedy and Divide and Conquer](../greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) — exchange argument proofs; [Sorting and Searching](../sorting_and_searching/sorting_and_searching.md) — sort stability and timsort; [Dynamic Programming Patterns](./dynamic_programming_patterns.md) — weighted interval scheduling DP.*

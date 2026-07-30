@@ -36,59 +36,59 @@ column reflects learning sequence, not addition order.
 
 | # | Phase | Topic | Key Concepts | Difficulty |
 |---|-------|-------|-------------|------------|
-| 1 | 1 — Foundations | [Foundations & Architecture](foundations_and_architecture/README.md) | Transformers, self-attention, scaling laws, GPT vs BERT — 4 sub-files: attention derivations, positional encoding, training dynamics, state-space/linear-attention alternatives | Intermediate |
-| 2 | 1 — Foundations | [Tokenization & Embeddings](tokenization_and_embeddings/README.md) | BPE, WordPiece, SentencePiece, vocabulary design — with 1 deep-dive sub-file (byte-level & tokenizer-free) | Beginner |
-| 3 | 1 — Foundations | [Embeddings & Similarity Search](embeddings_and_similarity_search/README.md) | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | Intermediate |
-| 4 | 2 — Training | [Pre-Training](pre_training/README.md) | CLM, MLM, data curation, training dynamics, compute | Advanced |
-| 5 | 2 — Training | [Training Infrastructure](training_infrastructure/README.md) | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | Advanced |
-| 6 | 2 — Training | [Synthetic Data Generation](synthetic_data_generation/README.md) | Self-Instruct, Evol-Instruct, quality filtering, LIMA | Intermediate |
-| 7 | 2 — Training | [Fine-Tuning](fine_tuning/README.md) | LoRA, QLoRA, PEFT, instruction tuning, domain adaptation — with 5 deep-dive sub-files | Intermediate |
-| 8 | 2 — Training | [Alignment & RLHF](alignment_and_rlhf/README.md) | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models — with 1 deep-dive sub-file (GRPO & RLVR) | Advanced |
-| 9 | 2 — Training | [Constitutional AI](constitutional_ai/README.md) | SL-CAI critique-revision pipeline, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF, Llama Guard | Advanced |
-| 10 | 3 — Using LLMs | [Prompt Engineering](prompt_engineering/README.md) | CoT, few-shot, ReAct, structured outputs, system prompts | Beginner |
-| 11 | 3 — Using LLMs | [RAG Fundamentals](rag_fundamentals/README.md) | Chunking, vector DBs, retrieval, reranking, hybrid search — with 4 deep-dive sub-files | Intermediate |
-| 12 | 3 — Using LLMs | [Advanced RAG](advanced_rag/README.md) | Agentic RAG, Graph RAG, multi-modal RAG, evaluation — with 6 deep-dive sub-files | Advanced |
-| 13 | 3 — Using LLMs | [Context Engineering](context_engineering/README.md) | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | Intermediate |
-| 14 | 3 — Using LLMs | [Reasoning Models](reasoning_models/README.md) | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | Advanced |
-| 15 | 3 — Using LLMs | [Code Generation](code_generation/README.md) | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | Intermediate |
-| 16 | 4 — Agents | [Agents & Tool Use](agents_and_tool_use/README.md) | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost — with 15 deep-dive sub-files | Intermediate |
-| 17 | 4 — Agents | [Agentic Workflow Patterns](agentic_workflow_patterns/README.md) | Prompt chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer (Anthropic taxonomy) | Intermediate |
-| 18 | 4 — Agents | [Agentic Frameworks](agentic_frameworks/README.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM, Google ADK — with 18 deep-dive sub-files | Intermediate |
-| 19 | 4 — Agents | [Multi-Agent Systems](multi_agent_systems/README.md) | Orchestrator, debate, ChatDev, MetaGPT, Swarm/Agents SDK, Magentic-One, A2A protocols, agentic commerce, multi-agent security — with 8 deep-dive sub-files | Advanced |
-| 20 | 4 — Agents | [MCP (Model Context Protocol)](mcp_model_context_protocol/README.md) | MCP servers/clients, resources/tools/prompts, transports, security, registries — with 5 deep-dive sub-files | Intermediate |
-| 21 | 4 — Agents | [Coding Agents](coding_agents/README.md) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench | Advanced |
-| 22 | 4 — Agents | [Voice Agents](voice_agents/README.md) | OpenAI Realtime, Gemini Live, STT→LLM→TTS pipelines, VAD, barge-in, telephony | Advanced |
-| 23 | 4 — Agents | [Browser Agents Deep Dive](browser_agents_deep_dive/README.md) | Browser Use, Stagehand, Playwright MCP, DOM vs vision extraction, WebArena | Advanced |
-| 24 | 5a — Serve | [Inference & Decoding](inference_and_decoding/README.md) | Sampling, KV cache, speculative decoding, continuous batching — with 4 deep-dive sub-files (constrained decoding, speculative decoding, sampling & decoding strategies, KV cache optimization) | Advanced |
-| 25 | 5a — Serve | [Context Windows & Long Context](context_windows_and_long_context/README.md) | RoPE, ALiBi, YaRN, long context vs RAG, positional encoding | Advanced |
-| 26 | 5a — Serve | [Inference Engines](inference_engines/README.md) | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | Intermediate |
-| 27 | 5a — Serve | [vLLM Deep Dive](vllm_deep_dive/README.md) | PagedAttention, continuous batching, prefix caching, speculative decoding, quantization, TP/PP, LoRA, structured output | Advanced |
-| 28 | 5a — Serve | [Optimization & Quantization](optimization_and_quantization/README.md) | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation — with 1 deep-dive sub-file (GPU architecture & roofline) | Advanced |
-| 29 | 5a — Serve | [Knowledge Distillation & Model Merging](knowledge_distillation_and_model_merging/README.md) | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | Advanced |
-| 30 | 5b — Operate | [Deployment & MLOps](deployment_and_mlops/README.md) | Serving, GPU cost, monitoring, routing, edge deployment | Intermediate |
-| 31 | 5b — Operate | [LLM Caching](llm_caching/README.md) | Exact-match, semantic cache, provider prompt caching (Anthropic/OpenAI), vLLM APC, embedding cache, threshold tuning, invalidation | Advanced |
-| 32 | 5b — Operate | [LLM Observability & Monitoring](llm_observability_and_monitoring/README.md) | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | Intermediate |
-| 33 | 5b — Operate | [LLMOps Platforms](llm_ops_platforms/README.md) | MLflow, W&B, LangSmith, Langfuse, Braintrust, DeepEval, Ragas — experiment tracking, eval CI/CD | Intermediate |
-| 34 | 5b — Operate | [Token Economics & Cost Optimization](token_economics_and_cost_optimization/README.md) | Per-token pricing, prompt caching, batch APIs, self-hosting break-even, budget enforcement | Intermediate |
-| 35 | 5b — Operate | [LLM Routing & Model Selection](llm_routing_and_model_selection/README.md) | Multi-model routing, cascade patterns, confidence thresholds, cost-quality optimization | Intermediate |
-| 36 | 5b — Operate | [Prompt Management & PromptOps](prompt_management_and_promptops/README.md) | Prompt versioning, registries, aliases, eval-gated CI, A/B testing, prompt injection prevention | Intermediate |
-| 37 | 5c — Quality Gate | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md) | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAS | Intermediate |
-| 38 | 5c — Quality Gate | [Error Analysis & Eval Design](error_analysis_and_eval_design/README.md) | Trace sampling, open/axial coding, failure taxonomies, assertion-first eval design, annotator agreement, judge alignment, slice coverage | Intermediate |
-| 39 | 5c — Quality Gate | [LLM Testing Strategies](llm_testing_strategies/README.md) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | Intermediate |
-| 40 | 5c — Quality Gate | [Guardrails & Content Safety](guardrails_and_content_safety/README.md) | NeMo Guardrails, Llama Guard, input/output filters — with 1 deep-dive sub-file (guardrail evaluation & operations) | Intermediate |
-| 41 | 6 — Advanced | [Safety & Alignment](safety_and_alignment/README.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming — with 1 deep-dive sub-file (automated jailbreak algorithms) | Intermediate |
-| 42 | 6 — Advanced | [Mechanistic Interpretability](mechanistic_interpretability/README.md) | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | Advanced |
-| 43 | 6 — Advanced | [LLM Security](llm_security/README.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming — with 1 deep-dive sub-file (privacy & data governance) | Advanced |
-| 44 | 6 — Advanced | [AI Regulations & Compliance](ai_regulations_and_compliance/README.md) | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA, right to explanation | Intermediate |
-| 45 | 6 — Advanced | [Multimodal Models](multimodal_models/README.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
-| 46 | 6 — Advanced | [Vision-Language Models](vision_language_models/README.md) | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | Advanced |
-| 47 | 6 — Advanced | [VLA & Robotics Foundation Models](vla_and_robotics_foundation_models/README.md) | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, action tokenization, flow-matching action experts | Advanced |
-| 48 | 6 — Advanced | [Small Language Models & Edge AI](small_language_models_and_edge_ai/README.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
-| 49 | 6 — Advanced | [Mixture of Experts](mixture_of_experts/README.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
-| 50 | 6 — Advanced | [Diffusion Language Models](diffusion_language_models/README.md) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion, parallel decoding economics | Advanced |
-| 51 | 6 — Advanced | [AI Applications](ai_applications/README.md) | Healthcare, legal, finance, education, customer support | Beginner |
-| 52 | 6 — Advanced | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/README.md) | Model families, licensing, cost analysis, timeline | Beginner |
-| 53 | 6 — Advanced | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/README.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
+| 1 | 1 — Foundations | [Foundations & Architecture](foundations_and_architecture/foundations_and_architecture.md) | Transformers, self-attention, scaling laws, GPT vs BERT — 4 sub-files: attention derivations, positional encoding, training dynamics, state-space/linear-attention alternatives | Intermediate |
+| 2 | 1 — Foundations | [Tokenization & Embeddings](tokenization_and_embeddings/tokenization_and_embeddings.md) | BPE, WordPiece, SentencePiece, vocabulary design — with 1 deep-dive sub-file (byte-level & tokenizer-free) | Beginner |
+| 3 | 1 — Foundations | [Embeddings & Similarity Search](embeddings_and_similarity_search/embeddings_and_similarity_search.md) | Sentence embeddings, HNSW, IVF, Matryoshka, FAISS | Intermediate |
+| 4 | 2 — Training | [Pre-Training](pre_training/pre_training.md) | CLM, MLM, data curation, training dynamics, compute | Advanced |
+| 5 | 2 — Training | [Training Infrastructure](training_infrastructure/training_infrastructure.md) | Distributed training, tensor/pipeline parallelism, ZeRO, FSDP | Advanced |
+| 6 | 2 — Training | [Synthetic Data Generation](synthetic_data_generation/synthetic_data_generation.md) | Self-Instruct, Evol-Instruct, quality filtering, LIMA | Intermediate |
+| 7 | 2 — Training | [Fine-Tuning](fine_tuning/fine_tuning.md) | LoRA, QLoRA, PEFT, instruction tuning, domain adaptation — with 5 deep-dive sub-files | Intermediate |
+| 8 | 2 — Training | [Alignment & RLHF](alignment_and_rlhf/alignment_and_rlhf.md) | RLHF, DPO, Constitutional AI, ORPO, KTO, reward models — with 1 deep-dive sub-file (GRPO & RLVR) | Advanced |
+| 9 | 2 — Training | [Constitutional AI](constitutional_ai/constitutional_ai.md) | SL-CAI critique-revision pipeline, RL-CAI/RLAIF, constitution design, RLAIF vs RLHF, Llama Guard | Advanced |
+| 10 | 3 — Using LLMs | [Prompt Engineering](prompt_engineering/prompt_engineering.md) | CoT, few-shot, ReAct, structured outputs, system prompts | Beginner |
+| 11 | 3 — Using LLMs | [RAG Fundamentals](rag_fundamentals/rag_fundamentals.md) | Chunking, vector DBs, retrieval, reranking, hybrid search — with 4 deep-dive sub-files | Intermediate |
+| 12 | 3 — Using LLMs | [Advanced RAG](advanced_rag/advanced_rag.md) | Agentic RAG, Graph RAG, multi-modal RAG, evaluation — with 6 deep-dive sub-files | Advanced |
+| 13 | 3 — Using LLMs | [Context Engineering](context_engineering/context_engineering.md) | Context budget allocation, "lost in the middle", KV-cache-aware ordering, compaction, retrieval vs long-context decision matrix | Intermediate |
+| 14 | 3 — Using LLMs | [Reasoning Models](reasoning_models/reasoning_models.md) | o1/o3, test-time compute, MCTS, DeepSeek-R1, PRM/ORM | Advanced |
+| 15 | 3 — Using LLMs | [Code Generation](code_generation/code_generation.md) | FIM, CodeLLaMA, Copilot architecture, SWE-bench, code agents | Intermediate |
+| 16 | 4 — Agents | [Agents & Tool Use](agents_and_tool_use/agents_and_tool_use.md) | Function calling, ReAct, plan-and-execute, memory, sub-agents, sandboxes, cost — with 15 deep-dive sub-files | Intermediate |
+| 17 | 4 — Agents | [Agentic Workflow Patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | Prompt chaining, routing, parallelization, orchestrator-workers, evaluator-optimizer (Anthropic taxonomy) | Intermediate |
+| 18 | 4 — Agents | [Agentic Frameworks](agentic_frameworks/agentic_frameworks.md) | LangChain, LangGraph, LlamaIndex, CrewAI, AutoGen, OpenAI Agents SDK, Anthropic API, PydanticAI, Smolagents, Strands, Mastra, LiteLLM, Google ADK — with 18 deep-dive sub-files | Intermediate |
+| 19 | 4 — Agents | [Multi-Agent Systems](multi_agent_systems/multi_agent_systems.md) | Orchestrator, debate, ChatDev, MetaGPT, Swarm/Agents SDK, Magentic-One, A2A protocols, agentic commerce, multi-agent security — with 8 deep-dive sub-files | Advanced |
+| 20 | 4 — Agents | [MCP (Model Context Protocol)](mcp_model_context_protocol/mcp_model_context_protocol.md) | MCP servers/clients, resources/tools/prompts, transports, security, registries — with 5 deep-dive sub-files | Intermediate |
+| 21 | 4 — Agents | [Coding Agents](coding_agents/coding_agents.md) | SWE-agent ACI, OpenHands, Aider, Devin, Cursor Composer, Claude Code, SWE-bench | Advanced |
+| 22 | 4 — Agents | [Voice Agents](voice_agents/voice_agents.md) | OpenAI Realtime, Gemini Live, STT→LLM→TTS pipelines, VAD, barge-in, telephony | Advanced |
+| 23 | 4 — Agents | [Browser Agents Deep Dive](browser_agents_deep_dive/browser_agents_deep_dive.md) | Browser Use, Stagehand, Playwright MCP, DOM vs vision extraction, WebArena | Advanced |
+| 24 | 5a — Serve | [Inference & Decoding](inference_and_decoding/inference_and_decoding.md) | Sampling, KV cache, speculative decoding, continuous batching — with 4 deep-dive sub-files (constrained decoding, speculative decoding, sampling & decoding strategies, KV cache optimization) | Advanced |
+| 25 | 5a — Serve | [Context Windows & Long Context](context_windows_and_long_context/context_windows_and_long_context.md) | RoPE, ALiBi, YaRN, long context vs RAG, positional encoding | Advanced |
+| 26 | 5a — Serve | [Inference Engines](inference_engines/inference_engines.md) | vLLM, TensorRT-LLM, llama.cpp, SGLang, Ollama, TGI | Intermediate |
+| 27 | 5a — Serve | [vLLM Deep Dive](vllm_deep_dive/vllm_deep_dive.md) | PagedAttention, continuous batching, prefix caching, speculative decoding, quantization, TP/PP, LoRA, structured output | Advanced |
+| 28 | 5a — Serve | [Optimization & Quantization](optimization_and_quantization/optimization_and_quantization.md) | GPTQ, AWQ, Flash Attention, MoE, pruning, distillation — with 1 deep-dive sub-file (GPU architecture & roofline) | Advanced |
+| 29 | 5a — Serve | [Knowledge Distillation & Model Merging](knowledge_distillation_and_model_merging/knowledge_distillation_and_model_merging.md) | Teacher-student distillation, SLERP/TIES/DARE merging, structured pruning, SparseGPT | Advanced |
+| 30 | 5b — Operate | [Deployment & MLOps](deployment_and_mlops/deployment_and_mlops.md) | Serving, GPU cost, monitoring, routing, edge deployment | Intermediate |
+| 31 | 5b — Operate | [LLM Caching](llm_caching/llm_caching.md) | Exact-match, semantic cache, provider prompt caching (Anthropic/OpenAI), vLLM APC, embedding cache, threshold tuning, invalidation | Advanced |
+| 32 | 5b — Operate | [LLM Observability & Monitoring](llm_observability_and_monitoring/llm_observability_and_monitoring.md) | Tracing, quality monitoring, cost attribution, alerting, Langfuse, Arize Phoenix | Intermediate |
+| 33 | 5b — Operate | [LLMOps Platforms](llm_ops_platforms/llm_ops_platforms.md) | MLflow, W&B, LangSmith, Langfuse, Braintrust, DeepEval, Ragas — experiment tracking, eval CI/CD | Intermediate |
+| 34 | 5b — Operate | [Token Economics & Cost Optimization](token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) | Per-token pricing, prompt caching, batch APIs, self-hosting break-even, budget enforcement | Intermediate |
+| 35 | 5b — Operate | [LLM Routing & Model Selection](llm_routing_and_model_selection/llm_routing_and_model_selection.md) | Multi-model routing, cascade patterns, confidence thresholds, cost-quality optimization | Intermediate |
+| 36 | 5b — Operate | [Prompt Management & PromptOps](prompt_management_and_promptops/prompt_management_and_promptops.md) | Prompt versioning, registries, aliases, eval-gated CI, A/B testing, prompt injection prevention | Intermediate |
+| 37 | 5c — Quality Gate | [Evaluation & Benchmarks](evaluation_and_benchmarks/evaluation_and_benchmarks.md) | MMLU, HumanEval, LLM-as-judge, Chatbot Arena, RAGAS | Intermediate |
+| 38 | 5c — Quality Gate | [Error Analysis & Eval Design](error_analysis_and_eval_design/error_analysis_and_eval_design.md) | Trace sampling, open/axial coding, failure taxonomies, assertion-first eval design, annotator agreement, judge alignment, slice coverage | Intermediate |
+| 39 | 5c — Quality Gate | [LLM Testing Strategies](llm_testing_strategies/llm_testing_strategies.md) | Golden datasets, LLM-as-judge, regression eval, flakiness detection, CI/CD integration | Intermediate |
+| 40 | 5c — Quality Gate | [Guardrails & Content Safety](guardrails_and_content_safety/guardrails_and_content_safety.md) | NeMo Guardrails, Llama Guard, input/output filters — with 1 deep-dive sub-file (guardrail evaluation & operations) | Intermediate |
+| 41 | 6 — Advanced | [Safety & Alignment](safety_and_alignment/safety_and_alignment.md) | Jailbreaking, prompt injection, hallucination, bias, red teaming — with 1 deep-dive sub-file (automated jailbreak algorithms) | Intermediate |
+| 42 | 6 — Advanced | [Mechanistic Interpretability](mechanistic_interpretability/mechanistic_interpretability.md) | Superposition, sparse autoencoders (SAEs), activation patching, circuit analysis, activation steering, model editing (ROME/MEMIT) | Advanced |
+| 43 | 6 — Advanced | [LLM Security](llm_security/llm_security.md) | Prompt injection, data extraction, model theft, supply chain, adversarial robustness, red teaming — with 1 deep-dive sub-file (privacy & data governance) | Advanced |
+| 44 | 6 — Advanced | [AI Regulations & Compliance](ai_regulations_and_compliance/ai_regulations_and_compliance.md) | EU AI Act risk tiers, GDPR Art. 22, NIST AI RMF, model cards, bias auditing, DPIA, right to explanation | Intermediate |
+| 45 | 6 — Advanced | [Multimodal Models](multimodal_models/multimodal_models.md) | VLMs, vision encoders, diffusion, speech, video | Advanced |
+| 46 | 6 — Advanced | [Vision-Language Models](vision_language_models/vision_language_models.md) | CLIP dual encoder, LLaVA adapter architecture, BLIP-2 Q-Former, visual grounding, Grounding DINO, VQA benchmarks | Advanced |
+| 47 | 6 — Advanced | [VLA & Robotics Foundation Models](vla_and_robotics_foundation_models/vla_and_robotics_foundation_models.md) | Vision-Language-Action models — RT-1/RT-2, OpenVLA, pi-0/pi-0.5, Octo, Gemini Robotics, GR00T, action tokenization, flow-matching action experts | Advanced |
+| 48 | 6 — Advanced | [Small Language Models & Edge AI](small_language_models_and_edge_ai/small_language_models_and_edge_ai.md) | Phi-3/4, LLaMA 3.2 1B/3B, on-device inference, quantization for mobile | Intermediate |
+| 49 | 6 — Advanced | [Mixture of Experts](mixture_of_experts/mixture_of_experts.md) | MoE architecture, top-k routing, load balancing, Mixtral, DeepSeek-V3 | Advanced |
+| 50 | 6 — Advanced | [Diffusion Language Models](diffusion_language_models/diffusion_language_models.md) | Non-autoregressive text generation — LLaDA, Mercury, SEDD, D3PM, masked/discrete diffusion, block diffusion, parallel decoding economics | Advanced |
+| 51 | 6 — Advanced | [AI Applications](ai_applications/ai_applications.md) | Healthcare, legal, finance, education, customer support | Beginner |
+| 52 | 6 — Advanced | [LLM Ecosystem & Landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | Model families, licensing, cost analysis, timeline | Beginner |
+| 53 | 6 — Advanced | [Data Flywheels & Continuous Learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | Production feedback loops, active learning, drift detection, A/B testing for LLMs | Advanced |
 
 ---
 
@@ -351,37 +351,37 @@ specialized agent type. Nothing is dropped.
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [foundations_and_architecture](foundations_and_architecture/) | 4 files |
-| 2 | [tokenization_and_embeddings](tokenization_and_embeddings/) | README only |
-| 3 | [embeddings_and_similarity_search](embeddings_and_similarity_search/) | README only |
-| 4 | [pre_training](pre_training/) | README only |
-| 7 | [fine_tuning](fine_tuning/) | 5 files |
-| 8 | [alignment_and_rlhf](alignment_and_rlhf/) | 2 files |
-| 10 | [prompt_engineering](prompt_engineering/) | README only |
-| 11 | [rag_fundamentals](rag_fundamentals/) | 5 files |
-| 12 | [advanced_rag](advanced_rag/) | 5 files |
-| 13 | [context_engineering](context_engineering/) | README only |
-| 14 | [reasoning_models](reasoning_models/) | README only |
-| 16 | [agents_and_tool_use](agents_and_tool_use/) | 11 files |
-| 17 | [agentic_workflow_patterns](agentic_workflow_patterns/) | README only |
-| 19 | [multi_agent_systems](multi_agent_systems/) | 3 files |
-| 20 | [mcp_model_context_protocol](mcp_model_context_protocol/) | 4 files |
-| 24 | [inference_and_decoding](inference_and_decoding/) | 5 files |
-| 25 | [context_windows_and_long_context](context_windows_and_long_context/) | README only |
-| 26 | [inference_engines](inference_engines/) | README only |
-| 27 | [vllm_deep_dive](vllm_deep_dive/) | README only |
-| 28 | [optimization_and_quantization](optimization_and_quantization/) | 2 files |
-| 30 | [deployment_and_mlops](deployment_and_mlops/) | README only |
-| 31 | [llm_caching](llm_caching/) | README only |
-| 32 | [llm_observability_and_monitoring](llm_observability_and_monitoring/) | README only |
-| 34 | [token_economics_and_cost_optimization](token_economics_and_cost_optimization/) | README only |
-| 37 | [evaluation_and_benchmarks](evaluation_and_benchmarks/) | README only |
-| 38 | [error_analysis_and_eval_design](error_analysis_and_eval_design/) | README only |
-| 39 | [llm_testing_strategies](llm_testing_strategies/) | README only |
-| 40 | [guardrails_and_content_safety](guardrails_and_content_safety/) | 2 files |
-| 41 | [safety_and_alignment](safety_and_alignment/) | README only |
-| 43 | [llm_security](llm_security/) | 2 files |
-| 49 | [mixture_of_experts](mixture_of_experts/) | README only |
+| 1 | [foundations_and_architecture](foundations_and_architecture/foundations_and_architecture.md) | 4 files |
+| 2 | [tokenization_and_embeddings](tokenization_and_embeddings/tokenization_and_embeddings.md) | module page only |
+| 3 | [embeddings_and_similarity_search](embeddings_and_similarity_search/embeddings_and_similarity_search.md) | module page only |
+| 4 | [pre_training](pre_training/pre_training.md) | module page only |
+| 7 | [fine_tuning](fine_tuning/fine_tuning.md) | 5 files |
+| 8 | [alignment_and_rlhf](alignment_and_rlhf/alignment_and_rlhf.md) | 2 files |
+| 10 | [prompt_engineering](prompt_engineering/prompt_engineering.md) | module page only |
+| 11 | [rag_fundamentals](rag_fundamentals/rag_fundamentals.md) | 5 files |
+| 12 | [advanced_rag](advanced_rag/advanced_rag.md) | 5 files |
+| 13 | [context_engineering](context_engineering/context_engineering.md) | module page only |
+| 14 | [reasoning_models](reasoning_models/reasoning_models.md) | module page only |
+| 16 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 11 files |
+| 17 | [agentic_workflow_patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | module page only |
+| 19 | [multi_agent_systems](multi_agent_systems/multi_agent_systems.md) | 3 files |
+| 20 | [mcp_model_context_protocol](mcp_model_context_protocol/mcp_model_context_protocol.md) | 4 files |
+| 24 | [inference_and_decoding](inference_and_decoding/inference_and_decoding.md) | 5 files |
+| 25 | [context_windows_and_long_context](context_windows_and_long_context/context_windows_and_long_context.md) | module page only |
+| 26 | [inference_engines](inference_engines/inference_engines.md) | module page only |
+| 27 | [vllm_deep_dive](vllm_deep_dive/vllm_deep_dive.md) | module page only |
+| 28 | [optimization_and_quantization](optimization_and_quantization/optimization_and_quantization.md) | 2 files |
+| 30 | [deployment_and_mlops](deployment_and_mlops/deployment_and_mlops.md) | module page only |
+| 31 | [llm_caching](llm_caching/llm_caching.md) | module page only |
+| 32 | [llm_observability_and_monitoring](llm_observability_and_monitoring/llm_observability_and_monitoring.md) | module page only |
+| 34 | [token_economics_and_cost_optimization](token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) | module page only |
+| 37 | [evaluation_and_benchmarks](evaluation_and_benchmarks/evaluation_and_benchmarks.md) | module page only |
+| 38 | [error_analysis_and_eval_design](error_analysis_and_eval_design/error_analysis_and_eval_design.md) | module page only |
+| 39 | [llm_testing_strategies](llm_testing_strategies/llm_testing_strategies.md) | module page only |
+| 40 | [guardrails_and_content_safety](guardrails_and_content_safety/guardrails_and_content_safety.md) | 2 files |
+| 41 | [safety_and_alignment](safety_and_alignment/safety_and_alignment.md) | module page only |
+| 43 | [llm_security](llm_security/llm_security.md) | 2 files |
+| 49 | [mixture_of_experts](mixture_of_experts/mixture_of_experts.md) | module page only |
 
 **Not in this path** (22 of 53, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `code_generation`, `agentic_frameworks`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
 <!-- /study-path-table -->
@@ -413,36 +413,36 @@ diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A nic
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [foundations_and_architecture](foundations_and_architecture/) | README only |
-| 7 | [fine_tuning](fine_tuning/) | 3 files |
-| 8 | [alignment_and_rlhf](alignment_and_rlhf/) | README only |
-| 11 | [rag_fundamentals](rag_fundamentals/) | 4 files |
-| 12 | [advanced_rag](advanced_rag/) | 3 files |
-| 13 | [context_engineering](context_engineering/) | README only |
-| 14 | [reasoning_models](reasoning_models/) | README only |
-| 16 | [agents_and_tool_use](agents_and_tool_use/) | 7 files |
-| 17 | [agentic_workflow_patterns](agentic_workflow_patterns/) | README only |
-| 18 | [agentic_frameworks](agentic_frameworks/) | README only |
-| 19 | [multi_agent_systems](multi_agent_systems/) | 4 files |
-| 20 | [mcp_model_context_protocol](mcp_model_context_protocol/) | 3 files |
-| 24 | [inference_and_decoding](inference_and_decoding/) | 2 files |
-| 26 | [inference_engines](inference_engines/) | README only |
-| 28 | [optimization_and_quantization](optimization_and_quantization/) | 2 files |
-| 29 | [knowledge_distillation_and_model_merging](knowledge_distillation_and_model_merging/) | README only |
-| 30 | [deployment_and_mlops](deployment_and_mlops/) | README only |
-| 31 | [llm_caching](llm_caching/) | README only |
-| 32 | [llm_observability_and_monitoring](llm_observability_and_monitoring/) | README only |
-| 34 | [token_economics_and_cost_optimization](token_economics_and_cost_optimization/) | README only |
-| 35 | [llm_routing_and_model_selection](llm_routing_and_model_selection/) | README only |
-| 36 | [prompt_management_and_promptops](prompt_management_and_promptops/) | README only |
-| 37 | [evaluation_and_benchmarks](evaluation_and_benchmarks/) | README only |
-| 38 | [error_analysis_and_eval_design](error_analysis_and_eval_design/) | README only |
-| 40 | [guardrails_and_content_safety](guardrails_and_content_safety/) | 2 files |
-| 41 | [safety_and_alignment](safety_and_alignment/) | README only |
-| 43 | [llm_security](llm_security/) | 2 files |
-| 44 | [ai_regulations_and_compliance](ai_regulations_and_compliance/) | README only |
-| 52 | [llm_ecosystem_and_landscape](llm_ecosystem_and_landscape/) | README only |
-| 53 | [data_flywheels_and_continuous_learning](data_flywheels_and_continuous_learning/) | README only |
+| 1 | [foundations_and_architecture](foundations_and_architecture/foundations_and_architecture.md) | module page only |
+| 7 | [fine_tuning](fine_tuning/fine_tuning.md) | 3 files |
+| 8 | [alignment_and_rlhf](alignment_and_rlhf/alignment_and_rlhf.md) | module page only |
+| 11 | [rag_fundamentals](rag_fundamentals/rag_fundamentals.md) | 4 files |
+| 12 | [advanced_rag](advanced_rag/advanced_rag.md) | 3 files |
+| 13 | [context_engineering](context_engineering/context_engineering.md) | module page only |
+| 14 | [reasoning_models](reasoning_models/reasoning_models.md) | module page only |
+| 16 | [agents_and_tool_use](agents_and_tool_use/agents_and_tool_use.md) | 7 files |
+| 17 | [agentic_workflow_patterns](agentic_workflow_patterns/agentic_workflow_patterns.md) | module page only |
+| 18 | [agentic_frameworks](agentic_frameworks/agentic_frameworks.md) | module page only |
+| 19 | [multi_agent_systems](multi_agent_systems/multi_agent_systems.md) | 4 files |
+| 20 | [mcp_model_context_protocol](mcp_model_context_protocol/mcp_model_context_protocol.md) | 3 files |
+| 24 | [inference_and_decoding](inference_and_decoding/inference_and_decoding.md) | 2 files |
+| 26 | [inference_engines](inference_engines/inference_engines.md) | module page only |
+| 28 | [optimization_and_quantization](optimization_and_quantization/optimization_and_quantization.md) | 2 files |
+| 29 | [knowledge_distillation_and_model_merging](knowledge_distillation_and_model_merging/knowledge_distillation_and_model_merging.md) | module page only |
+| 30 | [deployment_and_mlops](deployment_and_mlops/deployment_and_mlops.md) | module page only |
+| 31 | [llm_caching](llm_caching/llm_caching.md) | module page only |
+| 32 | [llm_observability_and_monitoring](llm_observability_and_monitoring/llm_observability_and_monitoring.md) | module page only |
+| 34 | [token_economics_and_cost_optimization](token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) | module page only |
+| 35 | [llm_routing_and_model_selection](llm_routing_and_model_selection/llm_routing_and_model_selection.md) | module page only |
+| 36 | [prompt_management_and_promptops](prompt_management_and_promptops/prompt_management_and_promptops.md) | module page only |
+| 37 | [evaluation_and_benchmarks](evaluation_and_benchmarks/evaluation_and_benchmarks.md) | module page only |
+| 38 | [error_analysis_and_eval_design](error_analysis_and_eval_design/error_analysis_and_eval_design.md) | module page only |
+| 40 | [guardrails_and_content_safety](guardrails_and_content_safety/guardrails_and_content_safety.md) | 2 files |
+| 41 | [safety_and_alignment](safety_and_alignment/safety_and_alignment.md) | module page only |
+| 43 | [llm_security](llm_security/llm_security.md) | 2 files |
+| 44 | [ai_regulations_and_compliance](ai_regulations_and_compliance/ai_regulations_and_compliance.md) | module page only |
+| 52 | [llm_ecosystem_and_landscape](llm_ecosystem_and_landscape/llm_ecosystem_and_landscape.md) | module page only |
+| 53 | [data_flywheels_and_continuous_learning](data_flywheels_and_continuous_learning/data_flywheels_and_continuous_learning.md) | module page only |
 
 **Not in this path** (23 of 53, Full Path only): `tokenization_and_embeddings`, `embeddings_and_similarity_search`, `pre_training`, `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `prompt_engineering`, `code_generation`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `context_windows_and_long_context`, `vllm_deep_dive`, `llm_ops_platforms`, `llm_testing_strategies`, `mechanistic_interpretability`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `mixture_of_experts`, `diffusion_language_models`, `ai_applications`
 <!-- /study-path-table -->
@@ -487,38 +487,38 @@ Step 5: Evaluate and Iterate
 
 ## Knowledge-Question Map
 
-The highest-frequency LLM *knowledge* questions mapped to the exact file that answers them. For *system design* ("design X") questions, use the interview prep shortcuts table in [case_studies/README.md](case_studies/README.md).
+The highest-frequency LLM *knowledge* questions mapped to the exact file that answers them. For *system design* ("design X") questions, use the interview prep shortcuts table in [case_studies/README.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
-| Explain self-attention; why did transformers win? | [Foundations & Architecture](foundations_and_architecture/README.md), [attention_mechanisms.md](foundations_and_architecture/attention_mechanisms.md) |
+| Explain self-attention; why did transformers win? | [Foundations & Architecture](foundations_and_architecture/foundations_and_architecture.md), [attention_mechanisms.md](foundations_and_architecture/attention_mechanisms.md) |
 | Why is LLM decode memory-bound? Compute a throughput ceiling. | [gpu_architecture_and_roofline.md](optimization_and_quantization/gpu_architecture_and_roofline.md) |
 | How does the KV cache work and how big does it get? | [kv_cache_optimization.md](inference_and_decoding/kv_cache_optimization.md), [gpu_architecture_and_roofline.md](optimization_and_quantization/gpu_architecture_and_roofline.md) |
-| How do PagedAttention and continuous batching work? | [vLLM Deep Dive](vllm_deep_dive/README.md) |
-| RLHF vs DPO vs GRPO — when does each apply? | [Alignment & RLHF](alignment_and_rlhf/README.md), [grpo_and_rlvr.md](alignment_and_rlhf/grpo_and_rlvr.md) |
-| How was DeepSeek-R1 trained? What are verifiable rewards? | [grpo_and_rlvr.md](alignment_and_rlhf/grpo_and_rlvr.md), [Reasoning Models](reasoning_models/README.md) |
+| How do PagedAttention and continuous batching work? | [vLLM Deep Dive](vllm_deep_dive/vllm_deep_dive.md) |
+| RLHF vs DPO vs GRPO — when does each apply? | [Alignment & RLHF](alignment_and_rlhf/alignment_and_rlhf.md), [grpo_and_rlvr.md](alignment_and_rlhf/grpo_and_rlvr.md) |
+| How was DeepSeek-R1 trained? What are verifiable rewards? | [grpo_and_rlvr.md](alignment_and_rlhf/grpo_and_rlvr.md), [Reasoning Models](reasoning_models/reasoning_models.md) |
 | LoRA vs QLoRA vs full fine-tune — tradeoffs? | [lora.md](fine_tuning/lora.md), [qlora.md](fine_tuning/qlora.md) |
-| RAG vs fine-tuning vs long context — how do you decide? | [Context Engineering](context_engineering/README.md), [RAG Fundamentals](rag_fundamentals/README.md) |
+| RAG vs fine-tuning vs long context — how do you decide? | [Context Engineering](context_engineering/context_engineering.md), [RAG Fundamentals](rag_fundamentals/rag_fundamentals.md) |
 | Walk through chunking, embedding, retrieval, reranking choices | [chunking_strategies.md](rag_fundamentals/chunking_strategies.md), [retrieval_methods.md](rag_fundamentals/retrieval_methods.md), [reranking.md](rag_fundamentals/reranking.md) |
 | How do you guarantee the model emits valid JSON? | [constrained_decoding_and_structured_outputs.md](inference_and_decoding/constrained_decoding_and_structured_outputs.md) |
-| How do you evaluate an LLM system? LLM-as-judge pitfalls? | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md), [LLM Testing Strategies](llm_testing_strategies/README.md) |
-| How do you decide WHAT to evaluate? Error analysis, failure taxonomies, judge alignment? | [Error Analysis & Eval Design](error_analysis_and_eval_design/README.md) |
+| How do you evaluate an LLM system? LLM-as-judge pitfalls? | [Evaluation & Benchmarks](evaluation_and_benchmarks/evaluation_and_benchmarks.md), [LLM Testing Strategies](llm_testing_strategies/llm_testing_strategies.md) |
+| How do you decide WHAT to evaluate? Error analysis, failure taxonomies, judge alignment? | [Error Analysis & Eval Design](error_analysis_and_eval_design/error_analysis_and_eval_design.md) |
 | How do you evaluate an agent? | [agent_evaluation_and_benchmarking.md](agents_and_tool_use/agent_evaluation_and_benchmarking.md) |
 | How does function calling / ReAct actually work? | [function_calling_and_tool_design.md](agents_and_tool_use/function_calling_and_tool_design.md), [react_and_reasoning_patterns.md](agents_and_tool_use/react_and_reasoning_patterns.md) |
-| What is MCP and when is it better than native tools? | [MCP](mcp_model_context_protocol/README.md) |
-| How do you defend against prompt injection? | [LLM Security](llm_security/README.md), [Safety & Alignment](safety_and_alignment/README.md) |
+| What is MCP and when is it better than native tools? | [MCP](mcp_model_context_protocol/mcp_model_context_protocol.md) |
+| How do you defend against prompt injection? | [LLM Security](llm_security/llm_security.md), [Safety & Alignment](safety_and_alignment/safety_and_alignment.md) |
 | Can you delete a user's data from a trained model? | [privacy_and_data_governance.md](llm_security/privacy_and_data_governance.md) |
-| How would you cut LLM serving cost by 10x? | [Token Economics](token_economics_and_cost_optimization/README.md), [LLM Caching](llm_caching/README.md), [LLM Routing](llm_routing_and_model_selection/README.md) |
-| GPTQ vs AWQ vs FP8 — what does quantization actually buy? | [Optimization & Quantization](optimization_and_quantization/README.md), [gpu_architecture_and_roofline.md](optimization_and_quantization/gpu_architecture_and_roofline.md) |
-| How does Mixture of Experts change training and serving? | [Mixture of Experts](mixture_of_experts/README.md) |
+| How would you cut LLM serving cost by 10x? | [Token Economics](token_economics_and_cost_optimization/token_economics_and_cost_optimization.md), [LLM Caching](llm_caching/llm_caching.md), [LLM Routing](llm_routing_and_model_selection/llm_routing_and_model_selection.md) |
+| GPTQ vs AWQ vs FP8 — what does quantization actually buy? | [Optimization & Quantization](optimization_and_quantization/optimization_and_quantization.md), [gpu_architecture_and_roofline.md](optimization_and_quantization/gpu_architecture_and_roofline.md) |
+| How does Mixture of Experts change training and serving? | [Mixture of Experts](mixture_of_experts/mixture_of_experts.md) |
 | How does speculative decoding work and when does it not help? | [speculative_decoding.md](inference_and_decoding/speculative_decoding.md) |
 | What sampler settings should you use, and why can identical temperature/top-p values behave differently across inference engines? | [sampling_and_decoding_strategies.md](inference_and_decoding/sampling_and_decoding_strategies.md) |
-| How do you mitigate hallucination in production? | [Safety & Alignment](safety_and_alignment/README.md), [Advanced RAG](advanced_rag/README.md) |
-| What is a sparse autoencoder, and how do activation steering and model editing (ROME/MEMIT) actually work? | [Mechanistic Interpretability](mechanistic_interpretability/README.md) |
-| How would you debug a hallucination/jailbreak at the activation level, beyond prompt tweaking? | [Mechanistic Interpretability](mechanistic_interpretability/README.md), [Safety & Alignment](safety_and_alignment/README.md) |
-| What are scaling laws and why do they matter for budgets? | [Foundations & Architecture](foundations_and_architecture/README.md), [Pre-Training](pre_training/README.md) |
-| How does a diffusion language model generate text, and how does it compare to autoregressive decoding? | [Diffusion Language Models](diffusion_language_models/README.md) |
-| How do Vision-Language-Action models turn a VLM into a robot control policy? | [VLA & Robotics Foundation Models](vla_and_robotics_foundation_models/README.md) |
+| How do you mitigate hallucination in production? | [Safety & Alignment](safety_and_alignment/safety_and_alignment.md), [Advanced RAG](advanced_rag/advanced_rag.md) |
+| What is a sparse autoencoder, and how do activation steering and model editing (ROME/MEMIT) actually work? | [Mechanistic Interpretability](mechanistic_interpretability/mechanistic_interpretability.md) |
+| How would you debug a hallucination/jailbreak at the activation level, beyond prompt tweaking? | [Mechanistic Interpretability](mechanistic_interpretability/mechanistic_interpretability.md), [Safety & Alignment](safety_and_alignment/safety_and_alignment.md) |
+| What are scaling laws and why do they matter for budgets? | [Foundations & Architecture](foundations_and_architecture/foundations_and_architecture.md), [Pre-Training](pre_training/pre_training.md) |
+| How does a diffusion language model generate text, and how does it compare to autoregressive decoding? | [Diffusion Language Models](diffusion_language_models/diffusion_language_models.md) |
+| How do Vision-Language-Action models turn a VLM into a robot control policy? | [VLA & Robotics Foundation Models](vla_and_robotics_foundation_models/vla_and_robotics_foundation_models.md) |
 | What is Mamba / a state-space model, and how does it avoid the KV-cache growth problem? | [state_space_models_and_linear_attention.md](foundations_and_architecture/state_space_models_and_linear_attention.md) |
 | How do GCG and AutoDAN construct adversarial jailbreak prompts, and how do you defend against them? | [automated_jailbreak_algorithms.md](safety_and_alignment/automated_jailbreak_algorithms.md) |
 | How do AI agents pay for things autonomously — what protocols enforce spend limits? | [agentic_commerce_and_payments.md](multi_agent_systems/agentic_commerce_and_payments.md) |
@@ -539,7 +539,7 @@ An 8-week zero-to-hero plan. Each week pairs modules with must-read deep dives a
 | 5 | Serving (Phase 5a) | Inference & Decoding, Context Windows, Inference Engines, vLLM Deep Dive, Optimization & Quantization, Distillation & Merging | gpu_architecture_and_roofline, constrained_decoding_and_structured_outputs, speculative_decoding, sampling_and_decoding_strategies, kv_cache_optimization | [Design GPU Inference Platform](case_studies/design_gpu_inference_platform.md) |
 | 6 | Operating (Phases 5b + 5c) | Deployment & MLOps, LLM Caching, Observability, LLMOps Platforms, Token Economics, Routing, PromptOps, Evaluation, Testing, Guardrails | framework_observability | [Design LLM Gateway](case_studies/design_llm_gateway.md), [Design LLM Eval Platform](case_studies/design_llm_eval_platform.md) |
 | 7 | Advanced (Phase 6) | Safety, Mechanistic Interpretability, LLM Security, AI Regulations, Multimodal, VLMs, VLA & Robotics, SLMs & Edge, MoE, Diffusion Language Models, Applications, Ecosystem, Data Flywheels | privacy_and_data_governance, mcp_security, automated_jailbreak_algorithms | [Design AI Content Moderation](case_studies/design_ai_content_moderation.md) |
-| 8 | Interview drills | Re-read weak areas; all 9 [cross_cutting/](case_studies/cross_cutting/) primitives | — | 3–4 principal case studies via the [interview shortcuts](case_studies/README.md) + mock "design X" sessions using the 5-step framework above |
+| 8 | Interview drills | Re-read weak areas; all 9 [cross_cutting/](case_studies/cross_cutting/cross_cutting.md) primitives | — | 3–4 principal case studies via the [interview shortcuts](case_studies/case_studies.md) + mock "design X" sessions using the 5-step framework above |
 
 ---
 

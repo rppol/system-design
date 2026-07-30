@@ -604,7 +604,7 @@ WebSocket delivery protocol:
 ### 4.5a STT→MT→TTS WebSocket Pipeline (Voice Mode)
 
 For voice-enabled translation (video calls, voice messages), the pipeline extends to STT then
-TTS — see [Voice Agents](../voice_agents/README.md) for the full voice stack, and
+TTS — see [Voice Agents](../voice_agents/voice_agents.md) for the full voice stack, and
 [Streaming at Scale](./cross_cutting/streaming_at_scale.md) for the WebSocket infra.
 
 **BROKEN: Sequential pipeline**

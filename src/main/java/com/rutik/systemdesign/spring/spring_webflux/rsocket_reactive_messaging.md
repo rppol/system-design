@@ -8,7 +8,7 @@ WebSocket, or UDP/Aeron. This deep dive covers how Spring integrates RSocket
 mechanics (frames, keepalive, resumption, leasing), security, and how RSocket
 compares to gRPC, raw WebSocket, and SSE.
 
-This is a sub-file of [Spring WebFlux](README.md) — RSocket in Spring is built on
+This is a sub-file of [Spring WebFlux](spring_webflux.md) — RSocket in Spring is built on
 Project Reactor, so everything about `Mono`/`Flux`, schedulers, and "never block
 the event loop" from the parent applies here verbatim.
 
@@ -420,8 +420,8 @@ occasional loss is acceptable.
   streaming, transport flexibility (UDP/Aeron), or resumable sessions.
 - **gRPC** — polyglot RPC with strong Protobuf contracts and a mature ecosystem;
   backpressure needs are satisfied by HTTP/2 flow control. See
-  [Spring gRPC](../spring_grpc/README.md) for the Spring integration and
-  [gRPC and Protobuf (Java)](../../java/grpc_protobuf/README.md) for the wire format.
+  [Spring gRPC](../spring_grpc/spring_grpc.md) for the Spring integration and
+  [gRPC and Protobuf (Java)](../../java/grpc_protobuf/grpc_protobuf.md) for the wire format.
 - **WebSocket** — you need a dumb bidirectional byte pipe and will define your own
   semantics (or you are already on a WS-only stack).
 - **SSE** — trivial, one-way server→client text updates over plain HTTP with
@@ -430,7 +430,7 @@ occasional loss is acceptable.
 ### RSocket vs Spring Messaging (Kafka/RabbitMQ)
 
 RSocket is point-to-point request/stream messaging over a live connection;
-Kafka/RabbitMQ (see [Spring Messaging](../spring_messaging/README.md)) are durable,
+Kafka/RabbitMQ (see [Spring Messaging](../spring_messaging/spring_messaging.md)) are durable,
 broker-mediated, decoupled pub/sub. Use RSocket for low-latency interactive
 streaming between services; use a broker for durable, fan-out, replayable events.
 

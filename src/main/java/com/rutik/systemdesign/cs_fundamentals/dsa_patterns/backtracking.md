@@ -565,7 +565,7 @@ Final (CORRECT): result = [[], [1], [1,2], [2]]   -- exactly 2^2 = 4 subsets
 
 ## 9. Related Patterns & When to Switch
 
-- **[`recursion_and_problem_solving_patterns`](../recursion_and_problem_solving_patterns/README.md)** —
+- **[`recursion_and_problem_solving_patterns`](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md)** —
   backtracking is recursion with an explicit "undo" discipline; if you're
   comfortable with plain recursive DFS but unsure why results get corrupted,
   the missing piece is almost always the undo step (§8).
@@ -588,7 +588,7 @@ Final (CORRECT): result = [[], [1], [1,2], [2]]   -- exactly 2^2 = 4 subsets
 
 ## 10. Cross-links
 
-- Concept module: [`recursion_and_problem_solving_patterns/`](../recursion_and_problem_solving_patterns/README.md) —
+- Concept module: [`recursion_and_problem_solving_patterns/`](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md) —
   recursion fundamentals, call-stack visualization, base-case design
 
 ---

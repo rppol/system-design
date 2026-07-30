@@ -630,9 +630,9 @@ lists.
 
 ## 10. Cross-links
 
-- Concept module: [`graphs_tries_and_advanced_structures/`](../graphs_tries_and_advanced_structures/README.md) —
+- Concept module: [`graphs_tries_and_advanced_structures/`](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) —
   adjacency list/matrix representations, BFS/DFS complexity proofs
-- Concept module: [`graph_and_string_algorithms/`](../graph_and_string_algorithms/README.md) —
+- Concept module: [`graph_and_string_algorithms/`](../graph_and_string_algorithms/graph_and_string_algorithms.md) —
   formal BFS/DFS pseudocode, proof of BFS shortest-path correctness on
   unweighted graphs
 - Applied: [`../../hld/`](../../hld/README.md) — Bloom filters as a

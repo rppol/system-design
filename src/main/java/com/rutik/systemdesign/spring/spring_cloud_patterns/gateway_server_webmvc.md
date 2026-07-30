@@ -1,5 +1,5 @@
 # Gateway Server WebMVC — the Servlet Flavour of Spring Cloud Gateway
-Deep dive under [Spring Cloud Patterns](README.md), whose every code sample is the reactive
+Deep dive under [Spring Cloud Patterns](spring_cloud_patterns.md), whose every code sample is the reactive
 flavour: Netty, `Mono`, `GlobalFilter`. This file is the other half — the Servlet flavour,
 `spring-cloud-gateway-server-webmvc`, where a route is a WebMvc.fn `RouterFunction`, a filter
 is a `HandlerFilterFunction`, and **a blocking call inside a filter is legal rather than
@@ -792,8 +792,8 @@ nothing the team is paying for.
 
 ## Related / See Also
 
-- [Spring Cloud Patterns](README.md) — the parent module: gateway, Resilience4j, Feign, Eureka, tracing
-- [Spring WebFlux](../spring_webflux/README.md) — Mono/Flux, the Netty event loop, backpressure
-- [Spring MVC Architecture](../spring_mvc_architecture/README.md) — the DispatcherServlet pipeline that dispatches these routes
-- [Filters and Interceptors](../filters_and_interceptors/README.md) — servlet `Filter` ordering, `OncePerRequestFilter`
-- [Structured Concurrency and Loom](../../java/structured_concurrency_and_loom/README.md) — virtual-thread internals, pinning, carriers
+- [Spring Cloud Patterns](spring_cloud_patterns.md) — the parent module: gateway, Resilience4j, Feign, Eureka, tracing
+- [Spring WebFlux](../spring_webflux/spring_webflux.md) — Mono/Flux, the Netty event loop, backpressure
+- [Spring MVC Architecture](../spring_mvc_architecture/spring_mvc_architecture.md) — the DispatcherServlet pipeline that dispatches these routes
+- [Filters and Interceptors](../filters_and_interceptors/filters_and_interceptors.md) — servlet `Filter` ordering, `OncePerRequestFilter`
+- [Structured Concurrency and Loom](../../java/structured_concurrency_and_loom/structured_concurrency_and_loom.md) — virtual-thread internals, pinning, carriers

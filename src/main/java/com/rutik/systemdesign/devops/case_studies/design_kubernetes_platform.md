@@ -19,7 +19,7 @@ The platform answer is a **fleet**: a small number of well-run, homogeneous clus
 
 **Why the system exists:** to convert "I need to run a service" from a 3-week infra ticket into a 5-minute self-service merge, while keeping 200 tenants isolated, the bill attributable, and the upgrade treadmill (Kubernetes ships a minor every ~4 months, supports each for ~14 months) survivable by a 12-person team.
 
-This case study assumes familiarity with the control-plane internals in [../kubernetes_architecture/README.md](../kubernetes_architecture/README.md), the RBAC/PSA model in [../kubernetes_security/README.md](../kubernetes_security/README.md), and the GitOps reconciliation loop in [../gitops_argocd_flux/README.md](../gitops_argocd_flux/README.md).
+This case study assumes familiarity with the control-plane internals in [../kubernetes_architecture/README.md](../kubernetes_architecture/kubernetes_architecture.md), the RBAC/PSA model in [../kubernetes_security/README.md](../kubernetes_security/kubernetes_security.md), and the GitOps reconciliation loop in [../gitops_argocd_flux/README.md](../gitops_argocd_flux/gitops_argocd_flux.md).
 
 ---
 
@@ -326,7 +326,7 @@ spec:
 
 The version field is the upgrade knob: bump `1.30` → `1.31` in a PR, Argo CD rolls the control plane, then CAPA cycles node pools surge-style. The whole fleet upgrade is "merge 50 PRs" (automated via a renovate-style bot), gated by the eval pipeline in §8.
 
-Cluster lifecycle internals reference: [../kubernetes_architecture/README.md](../kubernetes_architecture/README.md).
+Cluster lifecycle internals reference: [../kubernetes_architecture/README.md](../kubernetes_architecture/kubernetes_architecture.md).
 
 ### 4.2 Tenant isolation — the BROKEN → FIX that defines the platform
 
@@ -447,7 +447,7 @@ spec:
         quota: { requests.cpu: "32", requests.memory: 128Gi, pods: "200" }
 ```
 
-Tradeoff: a vcluster adds ~150–300 MiB overhead and ~5–15 ms API latency per tenant, so we reserve it for the ~10% of tenants that need it. The rest stay on namespaces. RBAC and PSA details: [../kubernetes_security/README.md](../kubernetes_security/README.md).
+Tradeoff: a vcluster adds ~150–300 MiB overhead and ~5–15 ms API latency per tenant, so we reserve it for the ~10% of tenants that need it. The rest stay on namespaces. RBAC and PSA details: [../kubernetes_security/README.md](../kubernetes_security/kubernetes_security.md).
 
 ### 4.3 Multi-cluster networking
 

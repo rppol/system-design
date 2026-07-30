@@ -402,7 +402,7 @@ async def bash_tool(command: str):
     return subprocess.run(command, shell=True, ...)
 ```
 
-**War story** (anonymized, illustrative — not a verified public record): A coding agent for a mid-sized engineering team auto-executed bash commands without approval. Within a week, a prompt injection in a fetched documentation page caused the agent to run `git reset --hard HEAD~30` on a developer's branch. After approval gates on git destructive operations: zero incidents in 6 months, developer confidence in the agent significantly increased (more usage, not less). Injection defense-in-depth beyond UI gates: [LLM Security](../llm_security/README.md).
+**War story** (anonymized, illustrative — not a verified public record): A coding agent for a mid-sized engineering team auto-executed bash commands without approval. Within a week, a prompt injection in a fetched documentation page caused the agent to run `git reset --hard HEAD~30` on a developer's branch. After approval gates on git destructive operations: zero incidents in 6 months, developer confidence in the agent significantly increased (more usage, not less). Injection defense-in-depth beyond UI gates: [LLM Security](../llm_security/llm_security.md).
 
 **What this actually says.** "One incident per week became zero incidents per twenty-six weeks — a gate that catches 80% of mistakes should still have let about five through, so the observed zero is better than the headline number predicts."
 

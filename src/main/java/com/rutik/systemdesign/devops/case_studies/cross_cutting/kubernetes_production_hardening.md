@@ -15,7 +15,7 @@ Hardening spans four layers that map directly to the failure modes seen in incid
 - **Availability under disruption** — PodDisruptionBudgets, topologySpreadConstraints, and graceful shutdown so that node drains, rolling updates, and autoscaler scale-downs don't drop requests.
 - **Security posture** — securityContext, Pod Security Standards (baseline/restricted), seccomp, dropped capabilities, and multi-tenant isolation via ResourceQuota, LimitRange, and default-deny NetworkPolicy.
 
-This file is the shared reference that the DevOps case studies — `design_kubernetes_platform`, `design_autoscaling_platform`, `design_internal_developer_platform` — link to instead of re-explaining QoS, probes, and PDBs in each. For the broader RBAC, admission, and runtime threat model, cross-reference [`../../kubernetes_security/README.md`](../../kubernetes_security/README.md); for HPA/VPA/Cluster Autoscaler interactions, cross-reference [`../../kubernetes_scheduling_and_autoscaling/README.md`](../../kubernetes_scheduling_and_autoscaling/README.md).
+This file is the shared reference that the DevOps case studies — `design_kubernetes_platform`, `design_autoscaling_platform`, `design_internal_developer_platform` — link to instead of re-explaining QoS, probes, and PDBs in each. For the broader RBAC, admission, and runtime threat model, cross-reference [`../../kubernetes_security/README.md`](../../kubernetes_security/kubernetes_security.md); for HPA/VPA/Cluster Autoscaler interactions, cross-reference [`../../kubernetes_scheduling_and_autoscaling/README.md`](../../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md).
 
 ---
 
@@ -582,4 +582,4 @@ spec:
 
 **Outcome**: ledger-api became Guaranteed (survives node pressure), the PDB blocked the drain from taking the second replica until a replacement scheduled in another zone, and the analytics namespace was capped at 8Gi total so the leak self-OOMKilled inside its own quota instead of starving the node. The next quarter saw zero eviction-driven outages of regulated services.
 
-For the admission-control and RBAC layers that prevented future un-hardened deployments, see [`../../kubernetes_security/README.md`](../../kubernetes_security/README.md); for how the cluster autoscaler interacts with PDBs during scale-down, see [`../../kubernetes_scheduling_and_autoscaling/README.md`](../../kubernetes_scheduling_and_autoscaling/README.md).
+For the admission-control and RBAC layers that prevented future un-hardened deployments, see [`../../kubernetes_security/README.md`](../../kubernetes_security/kubernetes_security.md); for how the cluster autoscaler interacts with PDBs during scale-down, see [`../../kubernetes_scheduling_and_autoscaling/README.md`](../../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md).

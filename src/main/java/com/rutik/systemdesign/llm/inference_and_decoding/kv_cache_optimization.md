@@ -1,11 +1,11 @@
 # KV Cache Optimization — Memory Footprint, Eviction, and Compression
-Deep-dive sub-file of [Inference & Decoding](README.md). Covers the canonical KV cache memory formula and capacity-planning arithmetic, eviction and compression strategies (H2O, SnapKV, StreamingLLM/attention sinks, Scissorhands), and cross-layer KV sharing (YOCO, CLA). Architectural reductions to KV size (GQA/MQA/MLA) and KV quantization are covered here only as *impact summaries* — for derivations, see [attention_mechanisms.md](../foundations_and_architecture/attention_mechanisms.md) and [optimization_and_quantization](../optimization_and_quantization/README.md)/[vLLM Deep Dive](../vllm_deep_dive/README.md).
+Deep-dive sub-file of [Inference & Decoding](inference_and_decoding.md). Covers the canonical KV cache memory formula and capacity-planning arithmetic, eviction and compression strategies (H2O, SnapKV, StreamingLLM/attention sinks, Scissorhands), and cross-layer KV sharing (YOCO, CLA). Architectural reductions to KV size (GQA/MQA/MLA) and KV quantization are covered here only as *impact summaries* — for derivations, see [attention_mechanisms.md](../foundations_and_architecture/attention_mechanisms.md) and [optimization_and_quantization](../optimization_and_quantization/optimization_and_quantization.md)/[vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md).
 
 ---
 
 ## 1. Concept Overview
 
-The KV cache stores the key and value projections computed for every token, at every layer, for every attention head — so that decoding the next token never has to recompute attention over the entire prefix. This is the single optimization that makes autoregressive decoding tractable (Section 4.7 of the [parent README](README.md)). But the cache is not free: it grows **linearly with sequence length and linearly with concurrent requests**, and for large models at long context, it routinely exceeds the memory footprint of the model weights themselves.
+The KV cache stores the key and value projections computed for every token, at every layer, for every attention head — so that decoding the next token never has to recompute attention over the entire prefix. This is the single optimization that makes autoregressive decoding tractable (Section 4.7 of the [parent README](inference_and_decoding.md)). But the cache is not free: it grows **linearly with sequence length and linearly with concurrent requests**, and for large models at long context, it routinely exceeds the memory footprint of the model weights themselves.
 
 This file is about everything that follows from that fact: how to compute exactly how much memory a deployment needs (the formula every capacity-planning spreadsheet is built on), what happens when the cache doesn't fit (eviction and compression), and architectural changes that shrink the cache before it's even allocated (cross-layer sharing — GQA/MQA/MLA are covered in depth elsewhere, see the breadcrumb above).
 
@@ -32,7 +32,7 @@ Senior interviews probe this because **"how much memory does this deployment nee
 3. **Eviction strategies all rest on the same empirical observation**: attention is highly non-uniform — a small fraction of tokens (recent tokens, and a handful of "heavy hitter" / "sink" tokens) account for most of the attention mass, so most cached K/V entries can be discarded with minimal quality loss.
 4. **Static vs. dynamic eviction is the central design axis**: dynamic methods (H2O) continuously re-rank importance as generation proceeds (adaptive, but adds per-step overhead); static methods (SnapKV) decide once and fix the cache (cheap, but can't react to shifting attention later).
 5. **Architectural KV reduction (GQA/MQA/MLA, cross-layer sharing) happens at *training* time** — it changes what gets cached in the first place. **Eviction and quantization happen at *serving* time** — they operate on a cache that was already going to be the "full" size. These are complementary, not competing, levers.
-6. **Eviction is a lossy approximation; paging (PagedAttention) is a lossless memory-management technique.** Don't confuse "I don't have enough memory for the full cache" (eviction's problem) with "I'm wasting memory on fragmentation/padding within the cache I do have" (paging's problem, covered in [vLLM Deep Dive](../vllm_deep_dive/README.md)).
+6. **Eviction is a lossy approximation; paging (PagedAttention) is a lossless memory-management technique.** Don't confuse "I don't have enough memory for the full cache" (eviction's problem) with "I'm wasting memory on fragmentation/padding within the cache I do have" (paging's problem, covered in [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md)).
 7. **Cross-layer KV sharing reduces the formula's `layers` term**; GQA/MQA reduce the `kv_heads` term; quantization reduces `bytes_per_element`; eviction reduces `seq_len`. Four independent multiplicative levers on the same formula.
 
 ---
@@ -43,13 +43,13 @@ Senior interviews probe this because **"how much memory does this deployment nee
 |--------|-----------------|-----------|----------|-----------------|-----------------|
 | **GQA / MQA** (overview — see [attention_mechanisms.md](../foundations_and_architecture/attention_mechanisms.md)) | `kv_heads` term | Multiple query heads share fewer KV heads | N/A (architecture) | 4-8× (GQA), up to `num_heads`× (MQA) | Minor with retraining |
 | **MLA** (overview — see attention_mechanisms.md) | effective KV size | Low-rank joint compression of K/V into a shared latent | N/A (architecture) | ~15× (93.3% reduction vs DeepSeek 67B, arXiv 2405.04434) | Minimal, requires training |
-| **KV Quantization** (overview — see [optimization_and_quantization](../optimization_and_quantization/README.md)) | `bytes_per_element` | INT8/FP8/KIVI quantize cached K/V tensors | N/A (serving-time) | 2× (INT8), 4× (INT4/KIVI) | <1% with calibration |
+| **KV Quantization** (overview — see [optimization_and_quantization](../optimization_and_quantization/optimization_and_quantization.md)) | `bytes_per_element` | INT8/FP8/KIVI quantize cached K/V tensors | N/A (serving-time) | 2× (INT8), 4× (INT4/KIVI) | <1% with calibration |
 | **H2O (Heavy-Hitter Oracle)** | `seq_len` term | Continuously track cumulative attention per token; evict lowest-scoring | Yes | 50-75% | <1% |
 | **SnapKV** | `seq_len` term | One-time observation window, prune, then fixed cache | No (static) | 50-80% | <1% |
 | **StreamingLLM / attention sinks** | `seq_len` term | Keep first few "sink" tokens + sliding window, evict everything else | No (fixed policy) | 80-95% | 2-5% |
 | **Scissorhands** | `seq_len` term | Persistence-of-importance: tokens important once tend to stay important | Yes (cheaper than H2O) | 80% | <1% |
 | **Cross-layer KV sharing (YOCO, CLA)** | `layers` term | Groups of layers share one KV cache instead of each computing its own | N/A (architecture) | 2× (CLA-2); ~`L`× (YOCO — one global cache for the whole model) | Minimal, requires training |
-| **PagedAttention** (cross-link [vLLM Deep Dive](../vllm_deep_dive/README.md)) | fragmentation, not total size | Block-based virtual memory for KV cache | N/A (memory mgmt) | Recovers ~60-80% of memory lost to fragmentation | None (lossless) |
+| **PagedAttention** (cross-link [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md)) | fragmentation, not total size | Block-based virtual memory for KV cache | N/A (memory mgmt) | Recovers ~60-80% of memory lost to fragmentation | None (lossless) |
 | **Offloading / tiering** (Section 6.12) | nothing — moves bytes off the GPU | Completed KV blocks are DMA'd to pinned host RAM, then optionally SSD / object store / a peer instance | N/A (serving-time) | GPU-resident cache extended by however much host RAM you grant it | None (lossless — the bytes are exact) |
 
 ---
@@ -368,7 +368,7 @@ The takeaway for *this* file: when you compute the Section 6.1 formula for a mod
 
 ### 6.4 KV cache quantization — impact summary (mechanism owned elsewhere)
 
-Similarly, this file owns the `bytes_per_element` term's *effect* on the formula; the quantization *mechanism* (calibration, KIVI's per-channel/per-token asymmetric scheme, outlier handling) is covered in [optimization_and_quantization](../optimization_and_quantization/README.md) and its production serving in [vLLM Deep Dive](../vllm_deep_dive/README.md).
+Similarly, this file owns the `bytes_per_element` term's *effect* on the formula; the quantization *mechanism* (calibration, KIVI's per-channel/per-token asymmetric scheme, outlier handling) is covered in [optimization_and_quantization](../optimization_and_quantization/optimization_and_quantization.md) and its production serving in [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md).
 
 ```
 BF16 (baseline):  bytes_per_element = 2   ->  320 KB/token (Llama-3-70B)
@@ -676,7 +676,7 @@ request from 40 GiB to 10 GiB with no token ever discarded.
 
 ### 6.10 Paging and fragmentation — a different problem (cross-link)
 
-It's worth being precise about what eviction does *not* solve. Even a cache that's "small enough to fit" can waste 60-80% of its allocated memory to **fragmentation** if each request pre-allocates a contiguous block sized for `max_seq_len` but only uses a fraction of it. **PagedAttention** solves this via block-based virtual memory for the KV cache — it is a *lossless* memory-management technique, completely independent of eviction (which is *lossy* — it throws away real cached tokens). A production deployment typically uses **both**: PagedAttention to eliminate fragmentation waste on the cache you keep, and eviction/quantization to reduce how much cache you need to keep in the first place. Full mechanics: [vLLM Deep Dive](../vllm_deep_dive/README.md).
+It's worth being precise about what eviction does *not* solve. Even a cache that's "small enough to fit" can waste 60-80% of its allocated memory to **fragmentation** if each request pre-allocates a contiguous block sized for `max_seq_len` but only uses a fraction of it. **PagedAttention** solves this via block-based virtual memory for the KV cache — it is a *lossless* memory-management technique, completely independent of eviction (which is *lossy* — it throws away real cached tokens). A production deployment typically uses **both**: PagedAttention to eliminate fragmentation waste on the cache you keep, and eviction/quantization to reduce how much cache you need to keep in the first place. Full mechanics: [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md).
 
 ### 6.11 BROKEN -> FIX: evicting without sink tokens
 
@@ -852,7 +852,7 @@ Benchmark averages (LongBench, RULER) aggregate over many queries with varying a
 
 **Q12: How does KV cache eviction interact with prefix/prompt caching (cross-link)?**
 **Short:** Per-request dynamic eviction like H2O can compress a shared prefix differently per request, defeating prefix caching's reuse unless that prefix is exempted.
-They can conflict. Prefix caching ([llm_caching](../llm_caching/README.md)) relies on KV cache for a shared prefix (e.g., a system prompt) being preserved *exactly* and *identically* across requests so it can be reused without recomputation. If an eviction policy (especially dynamic, per-request policies like H2O) modifies which tokens of that shared prefix are retained differently for different requests — based on each request's own attention pattern — the "shared" cache is no longer shareable; each request effectively gets its own divergent compressed version, defeating prefix caching's reuse benefit. In practice, this means eviction policies for a multi-tenant deployment with heavy prefix-cache reliance often need to either exempt the shared prefix from eviction entirely, or apply only request-independent (static, prefix-uniform) compression — an interaction that's easy to miss when these two systems are implemented by different teams.
+They can conflict. Prefix caching ([llm_caching](../llm_caching/llm_caching.md)) relies on KV cache for a shared prefix (e.g., a system prompt) being preserved *exactly* and *identically* across requests so it can be reused without recomputation. If an eviction policy (especially dynamic, per-request policies like H2O) modifies which tokens of that shared prefix are retained differently for different requests — based on each request's own attention pattern — the "shared" cache is no longer shareable; each request effectively gets its own divergent compressed version, defeating prefix caching's reuse benefit. In practice, this means eviction policies for a multi-tenant deployment with heavy prefix-cache reliance often need to either exempt the shared prefix from eviction entirely, or apply only request-independent (static, prefix-uniform) compression — an interaction that's easy to miss when these two systems are implemented by different teams.
 
 **Q13: How does speculative decoding interact with KV cache eviction?**
 **Short:** Eviction changes what context the target model attends to during verification, shifting its probabilities from a smaller compressed context versus a full one.
@@ -868,7 +868,7 @@ If the deployment serves few enough concurrent requests that the raw memory fits
 
 **Q16: What's the relationship between the KV cache eviction techniques in this file and request-level preemption (vLLM's swap/recompute)?**
 **Short:** Preemption evicts an entire request's cache at the scheduler level under memory pressure, while H2O-style eviction picks which tokens within one sequence to keep.
-They operate on different axes and are often confused. Preemption (covered in the parent [README §4.12](README.md)) is a *scheduling* decision: when the aggregate KV cache across all active requests exceeds GPU memory, vLLM evicts an entire *request's* cache (swapping it to CPU or dropping it for recompute) to make room for higher-priority requests — the unit of eviction is "a whole sequence." H2O/SnapKV/StreamingLLM/Scissorhands operate *within* a single sequence's cache, deciding which *tokens* of that one sequence's history to keep. Both can be active in the same deployment simultaneously: within-sequence eviction reduces how much memory each individual request needs (raising the number of requests that fit before preemption triggers at all), while preemption is the backstop for when even compressed per-request caches collectively exceed capacity.
+They operate on different axes and are often confused. Preemption (covered in the parent [README §4.12](inference_and_decoding.md)) is a *scheduling* decision: when the aggregate KV cache across all active requests exceeds GPU memory, vLLM evicts an entire *request's* cache (swapping it to CPU or dropping it for recompute) to make room for higher-priority requests — the unit of eviction is "a whole sequence." H2O/SnapKV/StreamingLLM/Scissorhands operate *within* a single sequence's cache, deciding which *tokens* of that one sequence's history to keep. Both can be active in the same deployment simultaneously: within-sequence eviction reduces how much memory each individual request needs (raising the number of requests that fit before preemption triggers at all), while preemption is the backstop for when even compressed per-request caches collectively exceed capacity.
 
 **Q17: Design a back-of-envelope check: your team wants to support 50 concurrent users at 64K context on Llama-3-70B with 4×H100 80GB. Is this feasible, and what would you change if not?**
 **Short:** 50 users at 64K context on Llama-3-70B needs over 1TB of KV cache alone, more than 5x available headroom, requiring FP8 weights, FP8 KV, and eviction to fit.
@@ -956,10 +956,10 @@ exactly why the team's later SnapKV work was headroom, not necessity.
 
 ## Related
 
-- [Inference & Decoding README](README.md) — the broader serving picture: prefill/decode, continuous batching, PagedAttention overview
+- [Inference & Decoding README](inference_and_decoding.md) — the broader serving picture: prefill/decode, continuous batching, PagedAttention overview
 - [Attention Mechanisms](../foundations_and_architecture/attention_mechanisms.md) — GQA/MQA/MLA derivations and why they preserve quality
-- [Optimization & Quantization](../optimization_and_quantization/README.md) — KV cache quantization mechanisms (INT8/FP8/KIVI)
-- [vLLM Deep Dive](../vllm_deep_dive/README.md) — PagedAttention internals, FP8 KV cache serving flags, prefix caching
-- [LLM Caching](../llm_caching/README.md) — prompt/prefix caching and its interaction with per-request eviction
+- [Optimization & Quantization](../optimization_and_quantization/optimization_and_quantization.md) — KV cache quantization mechanisms (INT8/FP8/KIVI)
+- [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) — PagedAttention internals, FP8 KV cache serving flags, prefix caching
+- [LLM Caching](../llm_caching/llm_caching.md) — prompt/prefix caching and its interaction with per-request eviction
 - [Speculative Decoding](speculative_decoding.md) — how KV cache state interacts with draft/target verification
 - [Sampling & Decoding Strategies](sampling_and_decoding_strategies.md) — beam search's k× KV cost

@@ -984,12 +984,12 @@ A: Origin infrastructure cost becomes the binding constraint, and edge cache hit
 
 ## Cross-References
 
-- **Consistent hashing for the Redis cluster (§4)** -> [`../consistent_hashing/README.md`](../consistent_hashing/README.md)
-- **Distributed rate limiting (§4)** -> [`../rate_limiting/README.md`](../rate_limiting/README.md)
-- **Cassandra / wide-column storage internals (§4 Database Design)** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/README.md)
-- **Redis internals for the redirect cache** -> [`../../database/key_value_stores/README.md`](../../database/key_value_stores/README.md)
-- **Cache-aside, stampede prevention, and TTL strategy** -> [`../../backend/caching_strategies_deep_dive/README.md`](../../backend/caching_strategies_deep_dive/README.md), [`../../database/database_caching_patterns/README.md`](../../database/database_caching_patterns/README.md)
-- **Kafka internals for the analytics pipeline** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/README.md)
+- **Consistent hashing for the Redis cluster (§4)** -> [`../consistent_hashing/README.md`](../consistent_hashing/consistent_hashing.md)
+- **Distributed rate limiting (§4)** -> [`../rate_limiting/README.md`](../rate_limiting/rate_limiting.md)
+- **Cassandra / wide-column storage internals (§4 Database Design)** -> [`../../database/wide_column_databases/README.md`](../../database/wide_column_databases/wide_column_databases.md)
+- **Redis internals for the redirect cache** -> [`../../database/key_value_stores/README.md`](../../database/key_value_stores/key_value_stores.md)
+- **Cache-aside, stampede prevention, and TTL strategy** -> [`../../backend/caching_strategies_deep_dive/README.md`](../../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md), [`../../database/database_caching_patterns/README.md`](../../database/database_caching_patterns/database_caching_patterns.md)
+- **Kafka internals for the analytics pipeline** -> [`../../backend/kafka_deep_dive/README.md`](../../backend/kafka_deep_dive/kafka_deep_dive.md)
 - **Distributed ID generation (counter/Snowflake-style alternatives)** -> [`../../java/case_studies/design_snowflake_id_generator_java.md`](../../java/case_studies/design_snowflake_id_generator_java.md)
-- **CDN edge caching for 301/302 responses** -> [`../../devops/cloud_networking_and_cdn/README.md`](../../devops/cloud_networking_and_cdn/README.md)
+- **CDN edge caching for 301/302 responses** -> [`../../devops/cloud_networking_and_cdn/README.md`](../../devops/cloud_networking_and_cdn/cloud_networking_and_cdn.md)
 

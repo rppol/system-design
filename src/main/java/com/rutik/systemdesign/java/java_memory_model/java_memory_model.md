@@ -1,0 +1,797 @@
+# Java Memory Model
+
+<!-- study-paths
+senior: java_memory_model.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+The Java Memory Model (JMM) is the formal specification that defines how multithreaded Java programs behave with respect to memory visibility and instruction ordering. Without the JMM, the behavior of concurrent programs would be platform-dependent — a program could work on one processor architecture and silently produce wrong results on another.
+
+The JMM defines one concept above all others: **happens-before**. If action A happens-before action B, then all writes by A (and all writes that happened-before A) are guaranteed to be visible to B. Without a happens-before edge between two actions in different threads, those threads can observe writes in any order — including no order at all.
+
+This module covers the complete happens-before rule enumeration, memory barrier mappings, safe publication idioms, and the data race / race condition distinction. It is the theoretical foundation for everything in the Concurrency module.
+
+---
+
+## 2. Intuition
+
+> **One-line analogy**: The JMM is a contract between developer and JVM — the developer agrees to establish happens-before edges; the JVM agrees to make all writes visible across those edges. Without the contract, the JVM is free to reorder and cache as it pleases.
+
+**Mental model**: Every CPU core has private registers and L1/L2 caches. A write by Thread A on Core 1 may stay in Core 1's cache and never propagate to Core 2's cache without a memory flush. The JMM defines exactly which Java constructs cause those flushes and which enforce ordering constraints. The JMM does NOT describe specific hardware instructions — it defines a programmer-visible abstraction that all JVM implementations must satisfy.
+
+**Why it matters**: JMM violations are the most insidious bugs in Java. They are non-deterministic, appear only under specific timing conditions, are invisible in testing on x86 (which has a strong memory model), and are catastrophic on ARM and SPARC (weaker memory models). The classic double-checked locking bug is a JMM violation. Understanding the JMM turns "it sometimes fails on the production server but never in tests" from mystifying to diagnosable.
+
+**Key insight**: The JMM guarantees sequential consistency (all threads see a consistent global order of operations) ONLY for data-race-free programs. If your program has a data race, all bets are off — the program is in undefined behavior territory for that race. The guarantee: write DRF (data-race-free) code → JVM guarantees sequential consistency.
+
+---
+
+## 3. Core Principles
+
+- **Happens-before (hb)**: The transitive ordering relation that guarantees memory visibility between actions.
+- **Data race**: Two accesses to the same variable where at least one is a write, and no happens-before orders them. Programs with data races have undefined JMM behavior.
+- **Race condition**: A correctness bug dependent on timing/ordering — broader than data race; can occur even with synchronization if logic is wrong.
+- **DRF (Data-Race-Free)**: A program has no data races. DRF programs are guaranteed sequentially consistent by the JMM.
+- **Memory visibility**: Whether a read by one thread sees a write by another.
+- **Instruction reordering**: JIT compiler and CPU may reorder instructions for optimization — the JMM constrains which reorderings are observable to other threads.
+- **Safe publication**: Making an object's reference visible to other threads only after its construction is complete.
+
+---
+
+## 4. Types / Architectures / Strategies
+
+### 4.1 Complete Happens-Before Rule Enumeration
+
+| Rule | Description |
+|------|-------------|
+| Program order | Each action in a thread happens-before every subsequent action in that thread |
+| Monitor lock | An `unlock` of a monitor happens-before every subsequent `lock` of that same monitor |
+| Volatile write | A write to a `volatile` field happens-before every subsequent read of that field |
+| Thread start | `Thread.start()` happens-before any action in the started thread |
+| Thread join | Any action in a thread happens-before `Thread.join()` returning in another thread |
+| Final field freeze | The write of a `final` field in a constructor happens-before the constructor completing (freeze action) |
+| Thread interrupt | `Thread.interrupt()` on a thread happens-before the interrupted thread detecting the interrupt |
+| `LockSupport.unpark()` | A call to `unpark(t)` happens-before the park that returns in thread `t` |
+| Object initialization | Default field initialization (to 0/null/false) happens-before the constructor `<init>` |
+| Class initialization | Completion of class `<clinit>` happens-before any thread accesses static fields of that class |
+| Transitivity | If A hb B and B hb C, then A hb C |
+
+### 4.2 Memory Barrier Types
+
+| Barrier | Effect | Java Construct |
+|---------|--------|---------------|
+| `LoadLoad` | Loads before the barrier complete before loads after | Volatile read (before subsequent loads) |
+| `StoreStore` | Stores before the barrier complete before stores after | Volatile write (after preceding stores) |
+| `LoadStore` | Loads before complete before stores after | Volatile read |
+| `StoreLoad` | All stores before complete and flush before any subsequent load | Volatile write; `synchronized` exit |
+
+**Critical mapping**:
+- Volatile write = `StoreStore` + `StoreLoad` (the most expensive barrier)
+- Volatile read = `LoadLoad` + `LoadStore`
+- `synchronized` block entry = `LoadLoad` + `LoadStore` (acquire semantics)
+- `synchronized` block exit = `StoreStore` + `StoreLoad` (release semantics)
+
+**What it means.** "There are only four ways two memory operations can be reordered, so there are only four barriers — and Java's constructs are just named bundles of them, which is why a volatile write costs far more than a volatile read."
+
+The asymmetry is the point. Reads need the two cheap barriers; writes need the one expensive barrier that no CPU wants to give you. Every "is `volatile` slow?" argument resolves into which side of that line your field sits on.
+
+| Symbol | What it is |
+|--------|------------|
+| Barrier placement | JSR-133 Cookbook recipe: `StoreStore` *before* a volatile store and `StoreLoad` *after* it; `LoadLoad` and `LoadStore` *after* a volatile load |
+| `LoadLoad` | Keeps two reads in order — free on x86, which never reorders loads with loads |
+| `StoreStore` | Keeps two writes in order — free on x86 (Total Store Order) |
+| `LoadStore` | A read cannot be moved after a later write — free on x86 |
+| `StoreLoad` | A write must be globally visible before a later read — the only one x86 must enforce |
+| acquire | `LoadLoad + LoadStore` — "from here on I see everything the releaser did" |
+| release | `StoreStore + StoreLoad` — "everything I did is visible before this point" |
+
+**Walk one example.** The four Java constructs on x86-64, in terms of what the CPU actually has to emit:
+
+```
+  construct              barriers                     x86 instruction cost
+  volatile read          LoadLoad + LoadStore         none (TSO already forbids these)
+  volatile write         StoreStore + StoreLoad       MFENCE / LOCK-prefixed op
+  synchronized entry     LoadLoad + LoadStore         none beyond the lock acquisition
+  synchronized exit      StoreStore + StoreLoad       MFENCE / LOCK-prefixed op
+
+  Why StoreLoad is the expensive one:
+    every other barrier is a constraint the CPU already satisfies on x86
+    StoreLoad requires draining the store buffer, so the write reaches
+    coherent cache before the next load may issue -- the pipeline stalls
+```
+
+This table also explains the portability trap in Section 10's war stories. On x86 three of the four barriers cost nothing, so code missing a `LoadLoad` still behaves correctly; on ARM and POWER none of them are free, and the same code exposes the reordering immediately. The barriers you never paid for are exactly the ones that break when the hardware changes.
+
+### 4.3 Safe Publication Idioms (in order of preference)
+
+| Idiom | Mechanism | When to Use |
+|-------|-----------|-------------|
+| Static initializer | Class `<clinit>` hb any thread access | Eager singleton, constant-like fields |
+| `final` field in constructor | Freeze action after constructor | Immutable value objects |
+| `volatile` field | Volatile write hb volatile read | Late-initialized mutable reference |
+| Properly locked field | Monitor unlock hb monitor lock | Any synchronized state |
+| `AtomicReference` | CAS + volatile semantics | Lock-free reference publishing |
+
+---
+
+## 5. Architecture Diagrams
+
+### Happens-Before Graph — Volatile Flag Example
+
+```mermaid
+sequenceDiagram
+    participant A as Thread A
+    participant B as Thread B
+    A->>A: x = 42
+    A->>A: flag = true (volatile write)
+    Note over A,B: happens-before edge — volatile write hb subsequent volatile read
+    B->>B: read flag (volatile read, sees true)
+    B->>B: read x --> guaranteed to see 42
+```
+
+Without `volatile` on `flag`: there is no hb edge between the write and the read, so Thread B may see `flag == true` but `x == 0` (a stale cache line) — the surprising but JMM-legal outcome that `volatile` exists to prevent.
+
+### Final Field Freeze Action
+
+```mermaid
+sequenceDiagram
+    participant A as Thread A (constructor)
+    participant B as Thread B
+    A->>A: this.x = 3 (write final field x)
+    A->>A: this.y = 4 (write final field y)
+    Note over A: freeze action fires when constructor exits normally
+    A->>B: ref = new SafePoint(3, 4) — publish reference
+    B->>B: read ref.x --> guaranteed to see 3
+    B->>B: read ref.y --> guaranteed to see 4
+```
+
+KEY: if `ref` is published unsafely (via a non-final, non-volatile field with no synchronization), Thread B might see `ref != null` but `x == 0` — a partially constructed object, because the freeze action's happens-before edge only applies once the reference is published after the constructor completes.
+
+### Memory Barrier Placement
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph VW["Volatile Write"]
+        vw1["store(value)"] --> vw2["StoreStore barrier:\nall prior stores committed"]
+        vw2 --> vw3["store(volatileField, value)"]
+        vw3 --> vw4["StoreLoad barrier:\nvisible to all threads"]
+    end
+
+    subgraph VR["Volatile Read"]
+        vr3["load(volatileField)"] --> vr1["LoadLoad barrier:\nlater loads cannot move up"]
+        vr1 --> vr2["LoadStore barrier:\nlater stores cannot move up"]
+    end
+
+    subgraph SE["synchronized entry (monitorenter)"]
+        se1["LoadLoad + LoadStore:\nacquire semantics — see all writes\nfrom thread that unlocked"]
+    end
+
+    subgraph SX["synchronized exit (monitorexit)"]
+        sx1["StoreStore + StoreLoad:\nrelease semantics — flush all\nwrites before unlock"]
+    end
+
+    class vw1,vr3 io
+    class vw2,vw4,vr1,vr2 mathOp
+    class vw3 train
+    class se1,sx1 frozen
+```
+
+### This-Escape — Construction Safety Risk
+```java
+// BROKEN: this escapes before construction is complete
+class EventProcessor {
+    private final int id;
+    EventProcessor(EventBus bus) {
+        bus.register(this);  // 'this' published to bus BEFORE id is set!
+        this.id = 42;        // may not be visible to threads that got 'this' from bus
+    }
+}
+// Thread B receives 'this' from the bus, reads id -> may see 0 (default value)
+// Even though id is final, the freeze action hasn't completed when this escapes
+
+// FIX: never publish 'this' (or pass to any method that might share it)
+// inside a constructor before the constructor completes.
+class EventProcessor {
+    private final int id;
+    EventProcessor(int id) { this.id = id; }
+    public static EventProcessor create(EventBus bus, int id) {
+        EventProcessor p = new EventProcessor(id);  // fully constructed
+        bus.register(p);  // published after construction complete
+        return p;
+    }
+}
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Volatile Long on 32-bit JVM
+
+```java
+// On a 32-bit JVM, a 64-bit long/double write is NOT atomic by default.
+// The JVM may split it into two 32-bit writes:
+//   write high 32 bits, then write low 32 bits (two separate operations)
+// Thread B reading the long may see the high bits of the new value
+// and the low bits of the old value — a "word tear."
+
+// BROKEN on 32-bit JVM:
+long balance = 1_000_000_000L;   // Thread A writes new value
+// Thread B reads: may see combination of old/new 32-bit halves
+
+// FIXED: volatile long is guaranteed atomic even on 32-bit JVM
+volatile long balance = 1_000_000_000L;
+// The JMM requires volatile long/double reads and writes to be atomic.
+
+// Note: on modern 64-bit x86, non-volatile long is naturally atomic
+// (one 64-bit MOV instruction) — but this is NOT a JMM guarantee.
+// Never rely on platform-specific behavior; use volatile.
+```
+
+**Stated plainly.** "A 64-bit value written as two 32-bit halves can be read half-old and half-new, producing a number that neither thread ever wrote — and unlike most race outcomes, the corrupted value can be enormous rather than merely stale."
+
+This is worth walking numerically because it is the one JMM hazard whose damage is visible in the wrong direction: a torn read does not give you a slightly out-of-date balance, it gives you a balance off by billions.
+
+| Symbol | What it is |
+|--------|------------|
+| high word | The upper 32 bits of the `long`, bits 32-63 |
+| low word | The lower 32 bits, bits 0-31 |
+| word tear | A read that takes the high word from one write and the low word from another |
+| `volatile long` | Forces the JMM to treat the 64-bit access as one indivisible operation |
+| 64-bit `MOV` | What modern x86 emits anyway — an accident of hardware, not a JMM promise |
+
+**Walk one example.** Thread A raises a balance from 1,000,000,000 to 5,000,000,000 on a 32-bit JVM:
+
+```
+  old value  1,000,000,000  = 0x00000000_3B9ACA00
+                               high = 0x00000000   low = 0x3B9ACA00
+  new value  5,000,000,000  = 0x00000001_2A05F200
+                               high = 0x00000001   low = 0x2A05F200
+
+  Thread A writes high, gets preempted, then writes low.
+  Thread B reads in that window: new high word + old low word
+
+    0x00000001_3B9ACA00  =  5,294,967,296
+
+  Neither thread ever wrote 5,294,967,296. It is 294,967,296 above the intended
+  new balance and 4.29 billion above the old one.
+
+  The other interleaving (old high + new low) yields 705,032,704 --
+  a value BELOW the starting balance even though the operation was an increase.
+```
+
+Note the exact size of the error. Only the high word differs between the two writes, so each torn value sits exactly one `0x100000000` — that is, 4,294,967,296 — away from one of the two legitimate values: `5,294,967,296 - 1,000,000,000` and `5,000,000,000 - 705,032,704` are both precisely 2^32. That is the fingerprint to look for in a log: not small drift, but a discrepancy that is a clean multiple of 4.29 billion. `volatile` on the field removes the possibility entirely, at the cost of one barrier per access.
+
+### Broken and Fixed Safe Publication Patterns
+
+```java
+// BROKEN: unsafely published field (non-final, non-volatile, no sync)
+class Unsafe {
+    private int value;
+    private List<String> items;
+
+    void init() {
+        this.items = new ArrayList<>();  // write
+        this.items.add("hello");
+        this.value = 42;                 // write
+    }
+}
+
+Unsafe u = new Unsafe();
+new Thread(() -> u.init()).start();
+// Main thread later:
+// u.value and u.items may be null/0 — no hb between the thread's write and main thread's read
+
+// FIXED 1: Use final fields (safe publication via constructor freeze)
+class Safe1 {
+    private final int value;
+    private final List<String> items;
+
+    Safe1() {
+        this.items = new ArrayList<>();
+        this.items.add("hello");
+        this.value = 42;
+    }
+}
+// Any thread that gets the reference after constructor returns sees value=42 and items populated.
+
+// FIXED 2: Use static initializer
+class Safe2 {
+    private static final Safe2 INSTANCE = new Safe2();  // initialized in <clinit>
+    // Class <clinit> completion hb any thread accessing INSTANCE.
+}
+
+// FIXED 3: Use volatile
+class Safe3 {
+    private volatile Config config;
+
+    void publish() {
+        Config c = buildConfig();  // build locally
+        this.config = c;           // volatile write — hb all subsequent reads
+    }
+}
+
+// FIXED 4: Use synchronized
+class Safe4 {
+    private Config config;
+
+    synchronized void publish() {
+        config = buildConfig();
+    }
+
+    synchronized Config get() {
+        return config;  // monitor unlock hb monitor lock — sees published config
+    }
+}
+```
+
+### Partially Constructed Singleton (DCL Without Volatile)
+
+```java
+// BROKEN: missing volatile allows the reference to be published
+// before all fields are initialized
+class Singleton {
+    private static Singleton instance;  // NOT volatile
+    private final int[] data;
+
+    private Singleton() {
+        this.data = new int[1000];  // heap allocation
+        Arrays.fill(data, 99);      // initialization
+        // JIT may reorder: assign instance ref BEFORE fill() completes
+    }
+
+    public static Singleton getInstance() {
+        if (instance == null) {          // Thread B: sees non-null
+            synchronized (Singleton.class) {
+                if (instance == null) {
+                    instance = new Singleton();  // JIT may reorder steps
+                    // 1. allocate memory
+                    // 2. instance = <ref>  ← JIT may move this BEFORE step 3
+                    // 3. initialize data[] (fill 99s)
+                }
+            }
+        }
+        return instance;  // Thread B: gets ref but data may be partially filled
+    }
+}
+// Thread B calls instance.data[500] -> sees 0 instead of 99 -> NPE or wrong result
+
+// FIXED:
+class Singleton {
+    private static volatile Singleton instance;  // volatile prevents reordering
+    // ... same code ...
+    // volatile write on instance creates StoreStore + StoreLoad barriers,
+    // ensuring all stores (data initialization) complete before instance is written.
+}
+```
+
+### Data Race vs Race Condition
+
+```java
+// DATA RACE: two threads access same variable without hb, at least one writes
+// No synchronization, no volatile, no atomic — plain shared variable
+int balance = 100;  // shared field
+// Thread A: balance += 50;  // read-modify-write (3 steps)
+// Thread B: balance -= 30;  // read-modify-write (3 steps)
+// JMM says: any of these is legal — 120 (both applied), 150 (B's update lost),
+// 70 (A's update lost), even 100 (a racy reader that sees neither write)
+// THIS IS UNDEFINED BEHAVIOR IN THE JMM.
+
+// RACE CONDITION: timing-dependent logic bug — even with sync
+AtomicInteger balance = new AtomicInteger(1);
+// Thread A: if (balance.get() > 0) balance.decrementAndGet();
+// Thread B: if (balance.get() > 0) balance.decrementAndGet();
+// Both see balance=1, both decrement → balance = -1
+// Each individual operation is atomic, but the CHECK-THEN-ACT is not.
+// Fix: balance.updateAndGet(v -> v > 0 ? v - 1 : v);
+
+// KEY DISTINCTION:
+// Data race = JMM contract violation (can produce arbitrary results)
+// Race condition = logical concurrency bug (produces wrong results, defined behavior)
+```
+
+### Sequentially Consistent Execution
+
+```java
+// SEQUENTIAL CONSISTENCY: a global total order of all operations
+// such that each thread's operations appear in program order.
+
+// JMM guarantees sequential consistency IF AND ONLY IF the program is DRF.
+// (Data-Race-Free = no data races in any sequentially consistent execution)
+
+// Example DRF program:
+volatile int x = 0, y = 0;
+
+// Thread A:  x = 1; read y;
+// Thread B:  y = 1; read x;
+
+// Sequentially consistent executions:
+// Order 1: x=1, y=1, read y (1), read x (1)  -> both see 1
+// Order 2: x=1, read y (0), y=1, read x (1)  -> Thread A sees y=0, Thread B sees x=1
+// Order 3: y=1, x=1, read x (1), read y (1)  -> both see 1
+// etc.
+// NO execution can produce both reads seeing 0 — that would require
+// x=1 to not be visible to Thread B's read of x, which violates hb via volatile.
+
+// Without volatile (data race): JMM allows both reads to see 0.
+// This is the SURPRISING result — proves why volatile is needed.
+```
+
+---
+
+## 7. Real-World Examples
+
+- **DCL without volatile**: the pattern was so widely copied that a group of JVM and concurrency authors — David Bacon, Joshua Bloch, Cliff Click, Doug Lea, Bill Pugh and others — published "The 'Double-Checked Locking is Broken' Declaration" stating that the idiom cannot be made to work portably in Java without additional synchronization. JSR-133 (Java 5) is what fixed it, by strengthening `volatile` so that a write to a volatile field cannot be reordered with any preceding read or write; declaring the helper field `volatile` makes DCL correct from Java 5 onward.
+- **Shared `HashMap` under concurrent `put()`**: a `HashMap` used as a shared cache without synchronization could spin a CPU at 100% forever. In pre-Java-8 implementations `transfer()` re-inserted each entry at the *head* of its new bucket, reversing the list; two threads resizing simultaneously could interleave that reversal into a cycle, after which `get()` walked the loop forever. Java 8 preserves entry order during resize, so the infinite loop is gone — but `HashMap` is still not thread-safe and concurrent writes still lose entries. Use `ConcurrentHashMap`.
+- **Android's ARM architecture exposure**: Many Android apps had bugs that only appeared on ARM devices (weaker memory model than x86). The same code ran perfectly on emulators (x86) but failed on phones. Root cause: data races that x86 tolerated (strong memory model) but ARM did not.
+
+---
+
+## 8. Tradeoffs
+
+| Synchronization Tool | Establishes hb | Atomicity | Blocking | Overhead |
+|---------------------|---------------|-----------|----------|----------|
+| `volatile` | volatile write → subsequent read | No (for compound) | No | Low (memory barrier) |
+| `synchronized` | unlock → subsequent lock | Yes (critical section) | Yes (blocks waiters) | Medium |
+| `AtomicReference` | CAS (compare-and-swap) semantics | Yes (single var) | No (spin) | Low-medium |
+| `final` field | freeze action in constructor | Yes (immutability) | No | Zero at runtime |
+| `Thread.join()` | join return → any action after | N/A | Yes | N/A |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+**Use `volatile`** when: one thread writes, others read; no compound read-modify-write operations; you need a visible flag or reference.
+
+**Use `synchronized`** when: compound operations (check-then-act, read-modify-write) on shared mutable state; you need a critical section where multiple related variables must be consistent together.
+
+**Use `final` fields** for immutability: constructors that assign all fields as `final` get the freeze action guarantee — the safest publication with zero runtime overhead.
+
+**Do NOT rely on** the x86 strong memory model. x86 naturally provides most ordering guarantees that other architectures don't. Code that works on x86 without `volatile` may fail on ARM. Always write to the JMM specification, not to observed behavior on one architecture.
+
+**Do NOT mix** locked and non-locked access to the same variable. If a variable is sometimes accessed under a lock and sometimes without, the non-locked access is a data race even if the lock is acquired the other 99% of the time.
+
+---
+
+## 10. Common Pitfalls
+
+### War Story 1: Visibility failure — loop never terminates
+```java
+// BROKEN: 'running' is not volatile
+private boolean running = true;
+
+// Thread A:
+while (running) { /* work */ }
+
+// Thread B:
+running = false;  // Thread A may NEVER see this change
+                  // JIT may cache 'running' in register — infinite loop
+```
+This is the most common JMM visibility bug. The JIT is allowed to hoist the `running` read out of the loop into a register. **Fix**: `private volatile boolean running = true;`
+
+### War Story 2: `this`-escape from constructor breaks `final` guarantees
+A service published `this` to a static `List<Service>` inside its constructor before initializing its `final` configuration fields. Worker threads reading from the list saw the service with `null` configuration even though the field was `final`. The freeze action on `final` fields happens when the constructor completes — publishing `this` before then means no freeze action has occurred yet. **Fix**: Factory method pattern: construct fully, then publish.
+
+### War Story 3: `volatile` put on the wrong field
+A caching layer wrote `cachedValue = compute(); valid = true;` and read `if (valid) return cachedValue;`. Someone "made it thread-safe" by declaring `volatile String cachedValue` and leaving `boolean valid` plain. On ARM, readers saw `valid == true` and `cachedValue == null`. The reason is that the happens-before edge is created by the field you *read to make the decision*, not by the field you are trying to protect: a plain read of `valid` establishes no edge at all, so the reader is free to observe a stale `cachedValue` even though that field is `volatile`. **Fix**: make the **flag** volatile — `volatile boolean valid` with `cachedValue` written before it — because a volatile write publishes every preceding write in program order to any thread that performs the matching volatile read. Alternatively publish both as one immutable object through a single `AtomicReference<Snapshot>`, which removes the two-field ordering question entirely.
+
+### War Story 4: Partially visible `long` on 32-bit JVM
+A financial system running on a 32-bit legacy JVM had a shared `long balance` field (not volatile). Under high concurrency, balance occasionally showed bizarrely wrong values (billions) that were in fact high/low word combinations from different writes by two threads. **Fix**: `volatile long balance` — the JMM requires volatile 64-bit operations to be atomic.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Purpose |
+|------|---------|
+| `-Xlog:safepoint+stats=info` | See safepoint pauses (related to memory barrier costs) |
+| `jcstress` (OpenJDK) | JMM litmus tests — verify correctness of concurrent algorithms |
+| async-profiler | CPU profiling to detect unexpected barrier costs |
+| `-XX:+UnlockDiagnosticVMOptions -XX:+PrintAssembly` (needs hsdis) | Show the actual fences the JIT emitted (`lock addl` / `mfence` / `dmb ish`) |
+| ThreadSanitizer (via native agent) | Detect data races in native code |
+| `VarHandle` (Java 9+) | Fine-grained memory ordering: plain, opaque, acquire, release, volatile modes |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q1: List all the happens-before edges in the JMM.**
+**Short:** The JMM's happens-before edges include program order, monitor unlock/lock, and volatile write/read.
+
+(1) Program order: each action in a thread hb every subsequent action in that thread. (2) Monitor unlock hb subsequent lock of same monitor. (3) Volatile write hb subsequent volatile read of same field. (4) `Thread.start()` hb any action in started thread. (5) Any action in thread hb `Thread.join()` returning. (6) Final field freeze: write to final field in constructor hb constructor completing (freeze action). (7) `Thread.interrupt()` hb interrupted thread detecting interrupt. (8) `LockSupport.unpark(t)` hb park returning in thread t. (9) Default initialization hb constructor. (10) Class `<clinit>` completion hb any thread accessing static fields. (11) Transitivity.
+
+**Q2: Why are `final` fields safe without synchronization after the constructor completes?**
+**Short:** The freeze action publishes a constructor's final field writes to every thread without synchronization.
+
+The JMM defines a "freeze action" for `final` fields: when a constructor completes (without this-escape), all writes to `final` fields in that constructor are frozen and published. Any thread that reads the reference of the fully constructed object is guaranteed to see all final fields at their initialized values — even without any synchronization. This is why immutable objects are thread-safe: all their state is in `final` fields, established before any thread can read them. The guarantee breaks if the constructor publishes `this` before completing — the freeze action hasn't happened yet.
+
+**Q3: What is a data race vs a race condition?**
+**Short:** A data race is an unordered concurrent access to the same variable; a race condition is a logic bug.
+
+A data race is a specific JMM-level violation: two concurrent accesses to the same variable where at least one is a write, and there is no happens-before ordering between them. Data races put the program in undefined behavior territory — the JMM makes no guarantees. A race condition is a logical concurrency bug: the program produces incorrect results due to timing dependencies, even though operations may individually be atomic. Example: two threads both check `if (balance > 0)` and both decrement — each decrement is atomic, but the check-then-act as a whole is not. Race conditions can exist even in perfectly synchronized code (though they're harder to create).
+
+**Q4: What does "sequentially consistent" mean and when does the JMM guarantee it?**
+**Short:** The JMM guarantees sequential consistency only for programs that are free of data races.
+
+Sequential consistency means all threads observe every operation in one single global order that respects each thread's own program order. Concretely: there exists a total ordering of all operations across all threads such that (a) each thread's operations appear in their program order, and (b) each read sees the most recent write in that total order. It's the simplest model to reason about — the program behaves as if all operations happened one at a time in some global order. The JMM guarantees sequential consistency for all programs that are data-race-free (DRF). If a program has data races, the JMM does NOT guarantee sequential consistency — it may produce results that no sequential execution could produce.
+
+**Q5: Why is `volatile long` needed on 32-bit JVMs?**
+**Short:** On 32-bit JVMs a non-volatile long write can tear into two racing 32-bit halves.
+
+The JMM explicitly states that non-volatile reads and writes of `long` and `double` fields on 32-bit platforms can be treated as two separate 32-bit operations. This means a 64-bit write from Thread A could be split: Thread B reads the high 32 bits from the new value and the low 32 bits from the old value — producing a completely incorrect 64-bit result ("word tear"). `volatile long` is required to guarantee atomicity of 64-bit operations. On 64-bit x86, non-volatile long is atomically written by hardware (single 64-bit MOV), but this is not a JMM guarantee and should not be relied upon for portability.
+
+**Q6: Can `final` fields be observed in inconsistent state? Explain the `this`-escape caveat.**
+**Short:** Publishing this before the constructor finishes lets other threads see zeroed final fields.
+
+Yes — if the constructor publishes `this` before completing. The freeze action for `final` fields occurs when the constructor exits normally. If the constructor calls a method on another object (or registers `this` with an observer) before setting all `final` fields, that other object can see `final` fields at their default values (0 or null). This is called "this-escape from constructor." Example: `EventListener(EventBus bus) { bus.register(this); this.id = 42; }` — any listener receiving this reference before the constructor finishes sees `id == 0`. Fix: use a static factory method that constructs the object completely before publishing.
+
+**Q7: What is the freeze action?**
+**Short:** The freeze action creates a happens-before edge from a constructor's final field writes to later reads.
+
+The freeze action is the JMM mechanism for final field safety. It occurs at the end of the constructor (or just before it exits, assuming no this-escape). The freeze action creates a happens-before edge from all writes to `final` fields in the constructor to any subsequent read of those fields by any thread. This is what makes final fields safe without synchronization: after the freeze action, the initialized values of final fields are visible to all threads. Normal (non-final) fields in the same constructor are NOT covered by the freeze action.
+
+**Q8: What is the difference between memory visibility and instruction ordering?**
+**Short:** Visibility governs whether a write reaches another thread; ordering governs instruction reordering.
+
+Memory visibility: whether a write by one thread is visible to a read by another thread. Caused by CPU caches — a write may be buffered in the writer's cache and not flushed to shared memory. Instruction ordering: the order in which a thread executes its own instructions — the JIT compiler and CPU can reorder instructions for optimization. Both problems are addressed by happens-before. A happens-before edge provides both: it ensures (1) all writes up to the edge point are flushed to shared memory (visibility), and (2) all those writes appear in order relative to the synchronized read (ordering). `volatile` provides both; the x86 TSO memory model provides strong ordering but weak visibility guarantees without barriers.
+
+**Q9: What does `synchronized` guarantee beyond mutual exclusion?**
+**Short:** synchronized guarantees mutual exclusion, visibility on unlock/lock, and acquire/release ordering.
+
+`synchronized` guarantees three things: (1) Mutual exclusion — only one thread holds the monitor at a time. (2) Visibility — all writes performed before releasing the lock are visible to any thread that subsequently acquires the same lock. This is the monitor unlock → subsequent lock hb edge. (3) Ordering — actions before the monitor exit are not reordered to appear after it, and actions after monitor entry are not reordered to appear before it (acquire/release semantics). So `synchronized` also acts as a memory barrier: reading a synchronized field is guaranteed to see the most recent synchronized write, even on weakly-ordered architectures.
+
+**Q10: What is `VarHandle` and how does it provide finer-grained memory ordering than `volatile`?**
+**Short:** VarHandle exposes plain, opaque, acquire/release, and volatile modes for pay-as-you-go ordering.
+
+`VarHandle` (Java 9, `java.lang.invoke.VarHandle`) provides field access with explicit memory ordering modes, so you pay only for the barrier you need. You obtain one from `MethodHandles.lookup().findVarHandle(Owner.class, "field", Type.class)`. The modes: (1) Plain — no ordering guarantees, same as non-volatile access. (2) Opaque — no cross-variable ordering but each individual access is atomic. (3) Acquire/Release — one-way barriers: acquire (read) sees all writes by the release (write), but without the full StoreLoad barrier of volatile. (4) Volatile — full volatile semantics (most expensive). This lets lock-free algorithms pay only for the barriers they actually need — acquire/release is sufficient for a producer-consumer handoff but much cheaper than full volatile StoreLoad on most architectures.
+
+**Q11: What are the safe publication idioms in order of preference?**
+**Short:** Safe publication ranks static final fields, then final fields, then volatile, then locking, then atomics.
+
+(1) Static field initialized in declaration (`static final Foo f = new Foo()`) — class `<clinit>` provides hb for all threads, zero runtime overhead. (2) `final` fields in constructor — freeze action guarantees visibility; works for immutable objects. (3) `volatile` field — volatile write hb subsequent read; suitable for mutable references. (4) Properly locked field — monitor unlock hb subsequent lock; necessary when multiple related fields must be consistent. (5) `AtomicReference` — CAS-based, `volatile` semantics on the reference. Order reflects preference: most restrictive (static final) provides strongest guarantees and is hardest to misuse.
+
+**Q12: What is the StoreLoad barrier and why is volatile write the most expensive operation?**
+**Short:** A volatile write needs a StoreLoad barrier, the only one that blocks store-load reordering.
+
+The `StoreLoad` barrier ensures that all stores before the barrier complete and become visible to all processors before any subsequent load executes. It is the only barrier that prevents store-load reordering — the most significant optimization a processor can do. On x86, `StoreLoad` requires an `MFENCE` or a locked instruction, which forces a full memory serialization point — all store buffers are flushed. This is why volatile write is expensive: it requires `StoreStore` (flush preceding stores) + `StoreLoad` (flush this store and prevent subsequent loads from reordering before it). Volatile read requires only `LoadLoad` + `LoadStore`, which are effectively free on x86.
+
+**Q13: What is double-checked locking (DCL), what was the original bug, and how does `volatile` fix it?**
+**Short:** Without volatile, double-checked locking can publish a reference before its object finishes construction.
+
+DCL is a lazy-initialization pattern that checks a null condition twice, to avoid synchronization overhead on every access after initialization. It checks once without locking (fast path) and once with a lock held (slow path for initialization), as shown below:
+
+```java
+// BROKEN (pre-Java 5 / without volatile): partial initialization is visible
+private static Singleton instance;
+public static Singleton getInstance() {
+    if (instance == null) {          // check 1: no lock
+        synchronized (Singleton.class) {
+            if (instance == null) {  // check 2: with lock
+                instance = new Singleton(); // object may be partially constructed
+            }
+        }
+    }
+    return instance; // another thread may see non-null but uninitialized object
+}
+
+// FIXED: volatile prevents reordering of the constructor write and the reference assignment
+private static volatile Singleton instance;
+```
+
+Without `volatile`, the JIT/CPU can reorder `instance = new Singleton()` so the reference is written before the constructor finishes. Another thread sees a non-null reference to a partially constructed object and uses it. With `volatile`, the write to `instance` has a StoreLoad barrier — the constructor must fully complete before the reference is published. Modern alternative: use `static final` holder idiom or `enum` singleton — both provide correct lazy initialization without `volatile`.
+
+**Q14: How does `final` field freezing provide visibility guarantees, and how does it differ from `volatile`?**
+**Short:** Final-field freezing publishes constructor writes for free; volatile adds a runtime barrier on every access.
+
+The JMM's "freeze action" for `final` fields: when an object's constructor completes normally, a JMM freeze action fires for every `final` field written in that constructor. Any thread that obtains a reference to the fully-constructed object is guaranteed to see the `final` field values as written — this is a strong publication guarantee with **zero runtime barrier cost** after construction. Contrast with `volatile`: `volatile` guarantees visibility on every read and write (runtime barrier), suitable for fields that change after construction. `final` provides stronger guarantees but only for fields set once in the constructor. Caveat: the guarantee only holds if `this` does not escape the constructor — if the constructor passes `this` to another thread, the freeze action has not yet fired when that thread accesses the `final` fields.
+
+**Q15: What is `jcstress` and what category of JMM violations does it catch that JUnit tests cannot?**
+**Short:** jcstress stress-tests concurrent code across interleavings to catch JMM violations JUnit can't reach.
+
+`jcstress` (Java Concurrency Stress Test) is an OpenJDK harness for testing memory model outcomes. It runs tests in tight concurrent loops on many CPU cores with various thread interleavings to probe for JMM violations. Unlike JUnit tests, which run sequentially or with controlled `Thread.join()` synchronization, `jcstress` instruments the runtime to observe all possible outcomes of racy concurrent accesses — including outcomes that only manifest on weakly ordered architectures (ARM, Power) but not on x86 (which enforces strong ordering beyond what the JMM requires). It categorises outcomes as: `ACCEPTABLE` (always valid), `FORBIDDEN` (never valid under JMM), `INTERESTING` (valid but surprising). Key uses: (1) Verify that a lock-free data structure is correct under all possible execution orders. (2) Prove that a specific use of `volatile` or `VarHandle` establishes the required happens-before edge. (3) Detect torn reads of `long`/`double` on 32-bit platforms.
+
+**Q16: Why doesn't `volatile` make `count++` thread-safe, and what fixes it?**
+**Short:** volatile only guarantees visibility, not atomicity, so a racing count++ can still lose an increment.
+
+`volatile` only guarantees visibility and ordering for individual reads and writes — it does not make a compound read-modify-write operation atomic. `count++` is actually three separate steps: read `count`, add 1, write the result back; two threads can both read the same value before either writes, so one increment is silently lost even though every individual read and write of `count` was immediately visible to both threads. This is exactly why `volatile` is correct for a single-writer flag or reference but wrong for a shared counter or any check-then-act sequence. Fix: use `AtomicInteger`/`AtomicLong` (CAS-based atomicity), `LongAdder` for high-contention counters, or wrap the increment in `synchronized`.
+
+**Q17: What does "no out-of-thin-air values" mean in the JMM, and why does it matter even for racy code?**
+**Short:** The JMM bans out-of-thin-air values, so a read can only ever see a value some thread actually wrote.
+
+The JMM guarantees a read can never observe a value that no thread ever wrote — no value can be conjured from nowhere, even under a data race. This matters because without it, an aggressively optimizing JIT or CPU could justify almost any reordering or speculative result as "technically allowed" once a race exists; the out-of-thin-air rule draws a hard boundary so racy, undefined-looking executions still remain traceable to real writes somewhere in the program. A classic example: two threads race to write different constants into the same `int` field — the JMM permits the reader to see either constant, but never a third value neither thread ever assigned, and never a mix of their bits, because reads and writes of `int` (and every type narrower than 64 bits, plus references) are specified as atomic even without `volatile`. The one exception the JMM carves out is `long` and `double`, whose non-volatile accesses may be split into two 32-bit halves — which is exactly the word-tear hazard covered in Section 6. This guarantee doesn't make data races safe to write — it only stops the runtime from making the bug arbitrarily worse — so still eliminate the race with `volatile`, locks, or atomics rather than relying on this bound.
+
+**Q18: Why can code with an unsynchronized read/write "work fine" on x86 but fail on ARM?**
+**Short:** x86's strong memory model can mask data races that a weaker model like ARM's exposes.
+
+x86 uses a strong memory model (Total Store Order) that preserves most store/load ordering, so many JMM-violating data races still happen to produce the expected result on that hardware. ARM and POWER use weaker memory models that aggressively reorder independent loads and stores unless an explicit memory barrier forbids it, so the same unsynchronized code can expose stale reads or reordered writes that x86 was silently hiding. This is why concurrency bugs are notorious for passing code review, passing tests on a developer's x86 laptop, and then failing intermittently on ARM-based cloud instances or Android phones. Practical guidance: never rely on "it works on my machine" for concurrent code — write to the JMM specification (`volatile`/`synchronized`/atomics) rather than to one architecture's observed behavior, and use `jcstress` or test on ARM hardware to catch model-dependent bugs before production.
+
+---
+
+## 13. Best Practices
+
+1. **Write DRF (Data-Race-Free) programs** — it's the only way to get the JMM's sequential consistency guarantee.
+2. **Never read a shared mutable variable without a happens-before edge** — even "just a read" of a non-volatile long is a potential torn read.
+3. **Prefer immutable objects (all-final fields)** for shared state — zero synchronization overhead, strongest safety guarantee.
+4. **Use `volatile` only for simple flag/reference visibility** — not for compound operations like `i++`.
+5. **Use `synchronized` (or `ReentrantLock`) for compound operations** on shared mutable state.
+6. **Never publish `this` inside a constructor** — freeze action hasn't occurred yet.
+7. **Use `AtomicReference` for single-reference safe publication** in lock-free code.
+8. **Be explicit about ordering modes in lock-free code** — document which hb edges you're relying on.
+9. **Test on ARM or use `jcstress`** — x86's strong model can hide JMM violations that appear on ARM (most mobile/cloud hardware).
+10. **Prefer `final` fields over `volatile` for immutable data** — `volatile` has runtime barrier cost; `final` has zero runtime cost after construction.
+
+---
+
+## 14. Case Study
+
+### Safe Publication of a Configuration Cache Across Threads
+
+**Scenario.** A trading service hot-reloads its configuration without restarting. A single background **Thread A** (the reloader) builds a fresh immutable `Config` snapshot every 30 seconds from a config server; **dozens of request-handling threads (B)** read the current config on every request — roughly **40k reads/sec**. The naive first version stored the reference in a plain field; under load on ARM hardware, request threads occasionally saw a `Config` object whose reference was visible but whose **fields were still default/zero** — a half-constructed object — causing intermittent "0% margin" mispricings that vanished on retry. The root cause and the fix are pure Java Memory Model.
+
+```mermaid
+sequenceDiagram
+    participant A as Thread A (reloader, every 30s)
+    participant B as Threads B (40k reads/sec)
+    A->>A: (1) Config c = new Config(...)
+    A->>A: (2) fields written
+    A->>A: (3) configRef = c (volatile write)
+    Note over A,B: (3) volatile write happens-before (4) volatile read
+    B->>B: (4) Config snap = configRef
+    B->>B: (5) use snap.marginRate()
+```
+
+So (1)+(2) — everything before the write, in program order — are guaranteed visible at (5). SAFE.
+
+### Broken: Plain Reference Lets a Half-Constructed Object Escape
+
+```java
+// BROKEN — non-volatile reference. The JMM permits the publishing write to
+// configRef to become visible to other threads BEFORE the writes to the new
+// Config's fields. Reader sees a non-null reference but zeroed fields.
+class ConfigCache {
+    private Config configRef = Config.defaults();   // plain field
+
+    void reload(Map<String,String> raw) {
+        configRef = new Config(raw);   // construction + publication NOT ordered for readers
+    }
+    Config current() { return configRef; }           // may return a partly-built object
+}
+```
+
+The constructor writes (`this.marginRate = ...`) and the publishing write (`configRef = ...`) have no happens-before edge to the reader, so a reader thread may observe them out of order and read `marginRate == 0.0`.
+
+### Fix: `volatile` Reference Gives Safe Publication
+
+```java
+// FIX — volatile reference. A volatile WRITE happens-before every subsequent
+// volatile READ of the same field. Everything the writer did before the write
+// (the whole constructor) is therefore visible to any reader that sees the new ref.
+class ConfigCache {
+    private volatile Config configRef = Config.defaults();   // volatile
+
+    void reload(Map<String,String> raw) {
+        Config c = new Config(raw);   // (1) fully constructed first
+        configRef = c;                // (2) volatile publish: hb for all readers
+    }
+    Config current() { return configRef; }   // sees a fully-built Config, always
+}
+```
+
+### Double-Checked Locking: Broken Without `volatile`, Then Fixed (Item 83)
+
+The same hazard underlies the classic DCL singleton.
+
+```java
+// BROKEN — DCL without volatile. Another thread can see a non-null `instance`
+// whose fields are not yet written (reordered construction). Java 5+ requires volatile.
+class Lazy {
+    private static Lazy instance;                 // missing volatile
+    static Lazy get() {
+        if (instance == null) {
+            synchronized (Lazy.class) {
+                if (instance == null) instance = new Lazy(); // publish may precede init
+            }
+        }
+        return instance;
+    }
+}
+```
+
+```java
+// FIX — volatile makes the second read safe; or just use the simpler idioms below.
+class Lazy {
+    private static volatile Lazy instance;        // Java 5+ DCL is correct WITH volatile
+    static Lazy get() {
+        Lazy r = instance;                        // single volatile read
+        if (r == null) {
+            synchronized (Lazy.class) {
+                r = instance;
+                if (r == null) instance = r = new Lazy();
+            }
+        }
+        return r;
+    }
+}
+
+// SIMPLER: enum singleton needs no volatile, no locking, and is the preferred form.
+enum Cfg { INSTANCE; private final Config config = Config.defaults(); }
+```
+
+### Concrete Numbers (modern server CPU; this service's readers run on ARM)
+
+| Operation | Approx cost | Why |
+|-----------|-------------|-----|
+| non-volatile read | ~0.3 ns | L1 cache hit, no fence |
+| `volatile` read on x86-64 | ~0.3 ns | a plain `MOV` — TSO already forbids the reorderings, so no instruction is emitted |
+| `volatile` read on ARM, or any `volatile` write | ~5-10 ns | acquire load (`ldar`) on ARM; the write pays `StoreLoad` (`lock`-prefixed op on x86, `dmb ish` on ARM) |
+| uncontended `synchronized` block | ~20-50 ns | monitor enter/exit |
+
+Order-of-magnitude figures for reasoning about ratios, not a benchmark result — measure your own platform with JMH before optimising on them. At 40k reads/sec on this service's ARM hosts the `volatile` read cost is ~0.4 ms/sec total — negligible against eliminating mispricing incidents.
+
+**The idea behind it.** "Synchronisation is expensive per *operation* and almost free per *second* — the only thing that matters is how many times per second you pay it, and 40,000 is nowhere near enough to matter."
+
+People reason about `volatile` from the 30x per-operation multiplier and conclude it is costly. The correct denominator is wall-clock time, and against one second of budget the whole thing disappears.
+
+| Symbol | What it is |
+|--------|------------|
+| non-volatile read | Plain field read served from L1 with no fence — roughly 1 CPU cycle |
+| `volatile` read/write | Adds the barriers from Section 4.2; the write always pays `StoreLoad`, the read pays only on a weakly ordered CPU such as ARM |
+| uncontended `synchronized` | Monitor enter plus exit, with no other thread competing for it |
+| contended `synchronized` | Not in the table — add a context switch, thousands of times worse |
+| read rate | 40,000 config reads/sec in this service |
+| total cost/sec | `read rate x per-read cost` — the number that actually decides anything |
+
+**Walk one example.** The same three costs at 3 GHz, then multiplied out over one second:
+
+```
+  operation                  ns      CPU cycles     x 40,000 reads/sec
+  non-volatile read          0.3      ~1            0.012 ms/sec
+  volatile write / ARM read  5-10     15-30         0.2-0.4 ms/sec
+  uncontended synchronized   20-50    60-150        0.8-2.0 ms/sec
+
+  Worst case in the table:  2.0 ms of every 1,000 ms  =  0.2 percent of one core.
+
+  Ratio that misleads people:  10 ns / 0.3 ns  =  33x per operation
+  Ratio that matters:          0.4 ms / 1,000 ms = 0.04 percent of a second
+```
+
+The 33x multiplier is real and the 0.04 percent is also real; they are the same fact at two denominators. The break-even only arrives in genuinely hot loops — millions of operations per second, where 10ns each becomes tens of milliseconds — and that is the regime where `final` fields, thread confinement, or `VarHandle` acquire/release modes earn their complexity. At 40k/sec, choosing a plain field over a `volatile` one to save 0.4ms buys nothing and costs correctness.
+
+### Common Pitfalls
+
+**`volatile` on an array reference does not protect the elements.** `volatile Config[] arr` makes the *reference* visible, but a write to `arr[3].field` has no volatile semantics. Use `AtomicReferenceArray` or publish a fresh immutable array on each update.
+
+**64-bit `long`/`double` reads/writes are non-atomic on 32-bit JVMs.** Without `volatile`, a 32-bit JVM may tear a `long` into two 32-bit halves, so a reader can see a mix of old high bits and new low bits. Declaring the field `volatile` guarantees atomicity for `long`/`double` even on 32-bit.
+
+**Misunderstanding happens-before transitivity.** Developers assume "Thread A wrote X before Y, so a reader sees both" — but without a release/acquire edge (volatile write paired with volatile read, lock release/acquire, or `final` field publication) there is no ordering at all between threads. The edge must be explicit.
+
+**Forgetting that `final` fields are safely published without `volatile` (Java 5+).** A correctly constructed object whose state is all `final` is visible to other threads after the constructor finishes, even if the reference itself is published non-volatilely — provided `this` did not escape during construction. This is why immutable objects are the cheapest safe-publication mechanism.
+
+### Interview Discussion Points
+
+**What exactly does a `volatile` write guarantee for the reader?** It establishes a happens-before edge: every action the writing thread performed *before* the volatile write (in program order) is visible to any thread that *subsequently* performs a volatile read of the same field — which is why publishing a fully-constructed object through a volatile reference is safe.
+
+**Why does plain DCL break, and why does `volatile` fix it?** Object construction and the publishing assignment can be reordered so another thread sees a non-null reference before the constructor's field writes are visible; `volatile` forbids that reordering and supplies the happens-before edge, making the second null check observe a fully-initialized object.
+
+**When can you publish an object safely without `volatile`?** When all its fields are `final` and `this` does not escape during construction, the JMM's final-field semantics (Java 5+) guarantee visibility after the constructor completes; immutable objects exploit exactly this, costing nothing at read time.
+
+**Is `volatile` enough to make a counter increment thread-safe?** No. `count++` is read-modify-write, three operations; `volatile` makes each read and write visible but does not make the trio atomic, so two threads can lose an update. Use `AtomicInteger`/`AtomicLong` or a lock.
+
+---
+
+## Related / See Also
+
+- [Concurrency](../concurrency/concurrency.md) — synchronized, volatile, CAS, AQS, and CompletableFuture in practice
+- [JVM Internals](../jvm_internals/jvm_internals.md) — memory barriers, safepoints, how the JIT respects JMM ordering
+- [Structured Concurrency & Loom](../structured_concurrency_and_loom/structured_concurrency_and_loom.md) — ScopedValue vs ThreadLocal, virtual thread memory visibility
+- [Computer Architecture & Memory Hierarchy](../../cs_fundamentals/computer_architecture_and_memory_hierarchy/computer_architecture_and_memory_hierarchy.md) — CPU cache coherence and store buffers that the JMM's happens-before rules sit on top of
+
+**Why is the enum singleton preferable to a volatile DCL singleton?** Its `<clinit>` is run exactly once by the JVM, lazily on first active use of the enum type, with happens-before guarantees and no application-level synchronization, it cannot be duplicated by reflection or deserialization, and it removes the subtle volatile/reordering reasoning entirely — strictly less to get wrong.

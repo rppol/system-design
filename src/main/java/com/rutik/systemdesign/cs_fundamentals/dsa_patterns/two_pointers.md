@@ -348,11 +348,11 @@ def two_sum_sorted_fixed(nums: list[int], target: int) -> list[int]:
 
 ## 10. Cross-links
 
-- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/) — array fundamentals, in-place algorithms, two-pointer intro
-- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/) — why O(n) two-pointer beats O(n^2) brute force
-- [sorting_and_searching](../sorting_and_searching/) — sort-first-then-two-pointer is a recurring composition
-- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/README.md) — `Arrays.sort()` complexity guarantees relevant when sort-then-scan is your strategy
-- Master index: [dsa_patterns/README.md](README.md)
+- Concept module: [arrays_strings_and_hashing](../arrays_strings_and_hashing/arrays_strings_and_hashing.md) — array fundamentals, in-place algorithms, two-pointer intro
+- [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — why O(n) two-pointer beats O(n^2) brute force
+- [sorting_and_searching](../sorting_and_searching/sorting_and_searching.md) — sort-first-then-two-pointer is a recurring composition
+- Applied: [`../../java/collections_internals/README.md`](../../java/collections_internals/collections_internals.md) — `Arrays.sort()` complexity guarantees relevant when sort-then-scan is your strategy
+- Master index: [dsa_patterns/README.md](dsa_patterns.md)
 
 ---
 

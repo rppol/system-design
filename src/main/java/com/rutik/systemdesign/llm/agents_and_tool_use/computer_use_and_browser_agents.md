@@ -4,7 +4,7 @@
 
 Computer use agents interact with graphical interfaces — browsers, desktop applications, and operating systems — by observing the screen (via screenshots or accessibility trees) and issuing UI actions (clicks, typing, scrolling). Unlike API-based agents that call structured tool functions, computer use agents operate on the visual layer, enabling them to automate any software that a human could use, even without a programmatic API.
 
-Browser agents specifically navigate the web: filling forms, clicking buttons, extracting data, and completing multi-step workflows on any website. They combine vision models (to see the screen), action models (to decide what to do), and execution layers (Playwright, Selenium, or OS APIs to perform actions). For an extended treatment of production browser-agent stacks, see [Browser Agents Deep Dive](../browser_agents_deep_dive/README.md).
+Browser agents specifically navigate the web: filling forms, clicking buttons, extracting data, and completing multi-step workflows on any website. They combine vision models (to see the screen), action models (to decide what to do), and execution layers (Playwright, Selenium, or OS APIs to perform actions). For an extended treatment of production browser-agent stacks, see [Browser Agents Deep Dive](../browser_agents_deep_dive/browser_agents_deep_dive.md).
 
 ---
 
@@ -526,7 +526,7 @@ consequences or requiring affirmative consent — accepting cookies, financial t
 agreeing to terms of service.
 
 The general taxonomy of injection attacks and defenses lives in
-[LLM Security](../llm_security/README.md); the cross-agent propagation case, where one
+[LLM Security](../llm_security/llm_security.md); the cross-agent propagation case, where one
 agent's poisoned output becomes another's trusted input, is in
 [Multi-Agent Security](../multi_agent_systems/multi_agent_security.md).
 

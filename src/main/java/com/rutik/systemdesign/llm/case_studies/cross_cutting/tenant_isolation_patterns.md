@@ -8,9 +8,9 @@
 > [design_ai_code_review](../design_ai_code_review.md)
 
 Related modules:
-[Embeddings and Similarity Search](../../embeddings_and_similarity_search/README.md) |
-[LLM Security](../../llm_security/README.md) |
-[Deployment and MLOps](../../deployment_and_mlops/README.md)
+[Embeddings and Similarity Search](../../embeddings_and_similarity_search/embeddings_and_similarity_search.md) |
+[LLM Security](../../llm_security/llm_security.md) |
+[Deployment and MLOps](../../deployment_and_mlops/deployment_and_mlops.md)
 
 ---
 
@@ -753,6 +753,6 @@ An AI data analyst product allows enterprise users to upload CSV and database ex
 ---
 
 *See also:*
-- *[Embeddings and Similarity Search](../../embeddings_and_similarity_search/README.md) — HNSW internals, IVF, Matryoshka, filter recall*
-- *[LLM Security](../../llm_security/README.md) — Prompt injection, data extraction, adversarial robustness*
-- *[Deployment and MLOps](../../deployment_and_mlops/README.md) — vLLM KV cache, GPU cost, serving infrastructure*
+- *[Embeddings and Similarity Search](../../embeddings_and_similarity_search/embeddings_and_similarity_search.md) — HNSW internals, IVF, Matryoshka, filter recall*
+- *[LLM Security](../../llm_security/llm_security.md) — Prompt injection, data extraction, adversarial robustness*
+- *[Deployment and MLOps](../../deployment_and_mlops/deployment_and_mlops.md) — vLLM KV cache, GPU cost, serving infrastructure*

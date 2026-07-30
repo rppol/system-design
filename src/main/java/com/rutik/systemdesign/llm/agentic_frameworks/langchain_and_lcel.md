@@ -315,7 +315,7 @@ model_with_retry = ChatOpenAI(
 
 ### Prompt Caching with LangChain
 
-Anthropic's prompt caching cuts the cost of the cached prefix by 90% and substantially reduces time-to-first-token for long, repeated system prompts — see [LLM Caching](../llm_caching/README.md) for the full caching-layer landscape. Prompt caching is generally available (no beta header); mark the prefix with `cache_control` on the `ChatAnthropic` model:
+Anthropic's prompt caching cuts the cost of the cached prefix by 90% and substantially reduces time-to-first-token for long, repeated system prompts — see [LLM Caching](../llm_caching/llm_caching.md) for the full caching-layer landscape. Prompt caching is generally available (no beta header); mark the prefix with `cache_control` on the `ChatAnthropic` model:
 
 ```python
 from langchain_anthropic import ChatAnthropic

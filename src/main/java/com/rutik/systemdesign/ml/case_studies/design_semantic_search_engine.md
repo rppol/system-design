@@ -391,7 +391,7 @@ class IncrementalIndexUpdater:
 
 Only the index-size column is arithmetic (10M × dim × 4 bytes); the recall and latency columns are illustrative, not measured, and no published benchmark gives them for an arbitrary corpus. What is defensible is the *shape*: index size and retrieval time fall roughly linearly with dimension while recall decays slowly and sub-linearly, which is exactly why truncation is worth doing. Run a BEIR-style evaluation at each Matryoshka truncation on your own corpus before quoting a number.
 
-384-dim is the balanced default. This design picks the Matryoshka-trained 128-dim index (§1, §2) because the 5.1 GB index is what keeps the FAISS tier on two small instances; the 3pp recall@100 drop is acceptable when a cross-encoder re-ranks the candidates anyway. Use 384-dim when RAM is not the binding constraint. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+384-dim is the balanced default. This design picks the Matryoshka-trained 128-dim index (§1, §2) because the 5.1 GB index is what keeps the FAISS tier on two small instances; the 3pp recall@100 drop is acceptable when a cross-encoder re-ranks the candidates anyway. Use 384-dim when RAM is not the binding constraint. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md).
 
 **Decision 2: IVF vs HNSW for FAISS**
 

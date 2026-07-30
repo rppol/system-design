@@ -1,6 +1,6 @@
 # Gaussian Mixture Models and the EM Algorithm — Deep Dive
 
-Parent module: [../unsupervised_learning/README.md](../unsupervised_learning/README.md). That module introduces k-means, DBSCAN, and PCA with only passing mentions of GMM and EM. This sub-file is the deep dive: the latent-variable model, the full Expectation-Maximization derivation, and the production concerns (degeneracy, model selection, anomaly scoring).
+Parent module: [../unsupervised_learning/README.md](unsupervised_learning.md). That module introduces k-means, DBSCAN, and PCA with only passing mentions of GMM and EM. This sub-file is the deep dive: the latent-variable model, the full Expectation-Maximization derivation, and the production concerns (degeneracy, model selection, anomaly scoring).
 
 ---
 
@@ -1034,8 +1034,8 @@ assert np.isfinite(gmm.score(X))                        # guard: finite log-like
 
 ## See Also
 
-- [Unsupervised Learning (parent)](../unsupervised_learning/README.md) — k-means, DBSCAN, PCA; GMM sits alongside these as soft, density-based clustering.
-- [Probability and Statistics](../probability_and_statistics/README.md) — MLE, MAP, and Bayes' rule underpin the E and M steps.
-- [Information Theory](../information_theory/README.md) — KL divergence is the ELBO gap that EM's E-step drives to zero.
-- [Generative Models](../generative_models/README.md) — VAEs generalize EM to intractable posteriors via amortized variational inference.
-- [Anomaly Detection](../anomaly_detection/README.md) — GMM negative log-density as a smooth, multimodal anomaly score.
+- [Unsupervised Learning (parent)](unsupervised_learning.md) — k-means, DBSCAN, PCA; GMM sits alongside these as soft, density-based clustering.
+- [Probability and Statistics](../probability_and_statistics/probability_and_statistics.md) — MLE, MAP, and Bayes' rule underpin the E and M steps.
+- [Information Theory](../information_theory/information_theory.md) — KL divergence is the ELBO gap that EM's E-step drives to zero.
+- [Generative Models](../generative_models/generative_models.md) — VAEs generalize EM to intractable posteriors via amortized variational inference.
+- [Anomaly Detection](../anomaly_detection/anomaly_detection.md) — GMM negative log-density as a smooth, multimodal anomaly score.

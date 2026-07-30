@@ -12,7 +12,7 @@ The error budget is the mathematical complement of the SLO: `error_budget = (1 -
 
 This framing is the heart of SRE. The error budget turns reliability into an explicit tradeoff against velocity. If the budget is healthy, the team ships fast and takes risks; if the budget is exhausted, the error budget policy kicks in — typically freezing feature releases and redirecting effort to reliability work until the budget recovers. Burn rate — how fast the budget is being consumed relative to the rate that would exactly exhaust it over the window — drives alerting: instead of paging on every error spike, you page on burn rates that threaten the budget, using multi-window multi-burn-rate alerts to balance fast detection against alert noise.
 
-This file is the shared reference for SLI/SLO/SLA definitions, error budget arithmetic, burn-rate alerting math, and error budget policy. It is linked from DevOps case studies covering SRE and reliability. See also [sre_principles_and_slos](../../sre_principles_and_slos/README.md).
+This file is the shared reference for SLI/SLO/SLA definitions, error budget arithmetic, burn-rate alerting math, and error budget policy. It is linked from DevOps case studies covering SRE and reliability. See also [sre_principles_and_slos](../../sre_principles_and_slos/sre_principles_and_slos.md).
 
 ---
 
@@ -598,4 +598,4 @@ groups:
 
 After deploying the change, pages dropped from ~30/week to ~2/week, and both surviving pages corresponded to real, budget-threatening events. The 25-minute outage class now fires a fast-burn page within minutes (a 25-minute total outage is a burn far above 14.4x), and the short windows auto-resolve the alert once the burn stops, so on-call isn't held by a stale page. The team also added a Grafana panel showing remaining budget (currently 71% of 40.3 minutes) and the live 1h burn rate, plus an error budget policy: at 0% remaining, feature deploys to checkout freeze until the budget recovers above 25%.
 
-**Lesson**: The original alert paged on raw error rate, which is noise; the correct signal is burn rate tied to the error budget. Multi-window multi-burn-rate alerting converts reliability monitoring from "page on every blip" into "page only when the budget is genuinely at risk," cutting alert fatigue ~15x while catching real incidents faster. See [sre_principles_and_slos](../../sre_principles_and_slos/README.md) for the surrounding SRE practice.
+**Lesson**: The original alert paged on raw error rate, which is noise; the correct signal is burn rate tied to the error budget. Multi-window multi-burn-rate alerting converts reliability monitoring from "page on every blip" into "page only when the budget is genuinely at risk," cutting alert fatigue ~15x while catching real incidents faster. See [sre_principles_and_slos](../../sre_principles_and_slos/sre_principles_and_slos.md) for the surrounding SRE practice.

@@ -90,24 +90,24 @@ Pick 2-3 components to go deep on (interviewer often guides):
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [Scalability](scalability/README.md) | Horizontal vs vertical, stateless services, replication | Beginner |
-| [Load Balancing](load_balancing/README.md) | Round-robin, consistent hash, L4 vs L7, health checks | Beginner |
-| [Caching](caching/README.md) | Redis, Memcached, cache-aside, write-through, invalidation | Intermediate |
-| [Database Design](database_design/README.md) | ACID, CAP, SQL vs NoSQL, indexing, normalization | Intermediate |
-| [API Design](api_design/README.md) | REST, GraphQL, gRPC, versioning, rate limiting | Intermediate |
-| [CAP Theorem](cap_theorem/README.md) | Consistency, availability, partition tolerance | Intermediate |
-| [Message Queues](message_queues/README.md) | Kafka, RabbitMQ, pub/sub, delivery guarantees | Intermediate |
-| [Microservices](microservices/README.md) | Service discovery, circuit breaker, saga, CQRS | Advanced |
-| [Consistent Hashing](consistent_hashing/README.md) | Hash ring, virtual nodes, Dynamo-style | Advanced |
-| [Rate Limiting](rate_limiting/README.md) | Token bucket, sliding window, distributed | Intermediate |
-| [CDN](cdn/README.md) | Edge caching, push vs pull, TTL, geographic routing | Intermediate |
-| [Database Sharding](database_sharding/README.md) | Shard key, range vs hash sharding, resharding | Advanced |
-| [Consensus Algorithms](consensus_algorithms/README.md) | Raft leader election + log replication, Paxos variants, PBFT, etcd/ZooKeeper, fencing tokens | Advanced |
-| [Event Sourcing & CQRS](event_sourcing_cqrs/README.md) | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency | Advanced |
-| [Distributed Transactions](distributed_transactions/README.md) | 2PC, 3PC, Saga (orchestration vs choreography), TCC, outbox pattern, idempotency keys | Advanced |
-| [Observability](observability/README.md) | Three pillars (metrics, logs, traces), RED/USE methods, SLI/SLO/error budgets, cardinality, distributed tracing | Intermediate |
-| [Security and Authentication/Authorization](security_and_auth/README.md) | AuthN vs AuthZ, OAuth2/OIDC, JWT vs sessions, mTLS, RBAC vs ABAC, encryption at rest/in transit | Intermediate |
-| [Resilience Patterns](resilience_patterns/README.md) | Circuit breaker, bulkhead, retry with backoff + jitter, timeouts, graceful degradation, failover | Intermediate |
+| [Scalability](scalability/scalability.md) | Horizontal vs vertical, stateless services, replication | Beginner |
+| [Load Balancing](load_balancing/load_balancing.md) | Round-robin, consistent hash, L4 vs L7, health checks | Beginner |
+| [Caching](caching/caching.md) | Redis, Memcached, cache-aside, write-through, invalidation | Intermediate |
+| [Database Design](database_design/database_design.md) | ACID, CAP, SQL vs NoSQL, indexing, normalization | Intermediate |
+| [API Design](api_design/api_design.md) | REST, GraphQL, gRPC, versioning, rate limiting | Intermediate |
+| [CAP Theorem](cap_theorem/cap_theorem.md) | Consistency, availability, partition tolerance | Intermediate |
+| [Message Queues](message_queues/message_queues.md) | Kafka, RabbitMQ, pub/sub, delivery guarantees | Intermediate |
+| [Microservices](microservices/microservices.md) | Service discovery, circuit breaker, saga, CQRS | Advanced |
+| [Consistent Hashing](consistent_hashing/consistent_hashing.md) | Hash ring, virtual nodes, Dynamo-style | Advanced |
+| [Rate Limiting](rate_limiting/rate_limiting.md) | Token bucket, sliding window, distributed | Intermediate |
+| [CDN](cdn/cdn.md) | Edge caching, push vs pull, TTL, geographic routing | Intermediate |
+| [Database Sharding](database_sharding/database_sharding.md) | Shard key, range vs hash sharding, resharding | Advanced |
+| [Consensus Algorithms](consensus_algorithms/consensus_algorithms.md) | Raft leader election + log replication, Paxos variants, PBFT, etcd/ZooKeeper, fencing tokens | Advanced |
+| [Event Sourcing & CQRS](event_sourcing_cqrs/event_sourcing_cqrs.md) | Event sourcing (append-only log, projections, snapshots), CQRS (command/query separation), Saga pattern, eventual consistency | Advanced |
+| [Distributed Transactions](distributed_transactions/distributed_transactions.md) | 2PC, 3PC, Saga (orchestration vs choreography), TCC, outbox pattern, idempotency keys | Advanced |
+| [Observability](observability/observability.md) | Three pillars (metrics, logs, traces), RED/USE methods, SLI/SLO/error budgets, cardinality, distributed tracing | Intermediate |
+| [Security and Authentication/Authorization](security_and_auth/security_and_auth.md) | AuthN vs AuthZ, OAuth2/OIDC, JWT vs sessions, mTLS, RBAC vs ABAC, encryption at rest/in transit | Intermediate |
+| [Resilience Patterns](resilience_patterns/resilience_patterns.md) | Circuit breaker, bulkhead, retry with backoff + jitter, timeouts, graceful degradation, failover | Intermediate |
 
 ---
 
@@ -162,7 +162,7 @@ Pick 2-3 components to go deep on (interviewer often guides):
 - [Design a Metrics Monitoring System](case_studies/design_metrics_monitoring.md)
 - [Design Google Drive](case_studies/design_google_drive.md)
 
-See [case_studies/README.md](case_studies/README.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 23 case studies.
+See [case_studies/README.md](case_studies/case_studies.md) for the full learning path, cross-cutting primitives map, and "Design X" interview shortcuts across all 23 case studies.
 
 ---
 
@@ -179,20 +179,20 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [scalability](scalability/) | README only |
-| 2 | [load_balancing](load_balancing/) | README only |
-| 3 | [caching](caching/) | README only |
-| 4 | [database_design](database_design/) | README only |
-| 5 | [cap_theorem](cap_theorem/) | README only |
-| 6 | [api_design](api_design/) | README only |
-| 7 | [message_queues](message_queues/) | README only |
-| 8 | [rate_limiting](rate_limiting/) | README only |
-| 9 | [cdn](cdn/) | README only |
-| 10 | [consistent_hashing](consistent_hashing/) | README only |
-| 11 | [database_sharding](database_sharding/) | README only |
-| 12 | [microservices](microservices/) | README only |
-| 13 | [distributed_transactions](distributed_transactions/) | README only |
-| 16 | [resilience_patterns](resilience_patterns/) | README only |
+| 1 | [scalability](scalability/scalability.md) | module page only |
+| 2 | [load_balancing](load_balancing/load_balancing.md) | module page only |
+| 3 | [caching](caching/caching.md) | module page only |
+| 4 | [database_design](database_design/database_design.md) | module page only |
+| 5 | [cap_theorem](cap_theorem/cap_theorem.md) | module page only |
+| 6 | [api_design](api_design/api_design.md) | module page only |
+| 7 | [message_queues](message_queues/message_queues.md) | module page only |
+| 8 | [rate_limiting](rate_limiting/rate_limiting.md) | module page only |
+| 9 | [cdn](cdn/cdn.md) | module page only |
+| 10 | [consistent_hashing](consistent_hashing/consistent_hashing.md) | module page only |
+| 11 | [database_sharding](database_sharding/database_sharding.md) | module page only |
+| 12 | [microservices](microservices/microservices.md) | module page only |
+| 13 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
+| 16 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
 
 **Not in this path** (4 of 18, Full Path only): `observability`, `security_and_auth`, `consensus_algorithms`, `event_sourcing_cqrs`
 <!-- /study-path-table -->
@@ -213,17 +213,17 @@ A ruthless cut to what a **senior system design interview** actually probes — 
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [scalability](scalability/) | README only |
-| 5 | [cap_theorem](cap_theorem/) | README only |
-| 6 | [api_design](api_design/) | README only |
-| 11 | [database_sharding](database_sharding/) | README only |
-| 12 | [microservices](microservices/) | README only |
-| 13 | [distributed_transactions](distributed_transactions/) | README only |
-| 14 | [observability](observability/) | README only |
-| 15 | [security_and_auth](security_and_auth/) | README only |
-| 16 | [resilience_patterns](resilience_patterns/) | README only |
-| 17 | [consensus_algorithms](consensus_algorithms/) | README only |
-| 18 | [event_sourcing_cqrs](event_sourcing_cqrs/) | README only |
+| 1 | [scalability](scalability/scalability.md) | module page only |
+| 5 | [cap_theorem](cap_theorem/cap_theorem.md) | module page only |
+| 6 | [api_design](api_design/api_design.md) | module page only |
+| 11 | [database_sharding](database_sharding/database_sharding.md) | module page only |
+| 12 | [microservices](microservices/microservices.md) | module page only |
+| 13 | [distributed_transactions](distributed_transactions/distributed_transactions.md) | module page only |
+| 14 | [observability](observability/observability.md) | module page only |
+| 15 | [security_and_auth](security_and_auth/security_and_auth.md) | module page only |
+| 16 | [resilience_patterns](resilience_patterns/resilience_patterns.md) | module page only |
+| 17 | [consensus_algorithms](consensus_algorithms/consensus_algorithms.md) | module page only |
+| 18 | [event_sourcing_cqrs](event_sourcing_cqrs/event_sourcing_cqrs.md) | module page only |
 
 **Not in this path** (7 of 18, Full Path only): `load_balancing`, `caching`, `database_design`, `message_queues`, `rate_limiting`, `cdn`, `consistent_hashing`
 <!-- /study-path-table -->
@@ -234,30 +234,30 @@ A different cut, not senior-plus-extras. The Principal Path probes the tradeoff 
 
 ## Knowledge-Question Map
 
-The highest-frequency HLD interview questions mapped to the module that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+The highest-frequency HLD interview questions mapped to the module that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
-| Horizontal vs vertical scaling — why does horizontal scaling dominate at internet scale? | [Scalability](scalability/README.md) |
-| Round-robin vs least-connections vs consistent-hash balancing — when does each break down? | [Load Balancing](load_balancing/README.md) |
-| L4 vs L7 load balancing — what can an L7 balancer inspect that L4 cannot? | [Load Balancing](load_balancing/README.md) |
-| Cache-aside vs write-through vs write-behind — what are the consistency and latency tradeoffs? | [Caching](caching/README.md) |
-| How do you avoid a thundering herd on cache expiry or invalidation? | [Caching](caching/README.md) |
-| SQL vs NoSQL — what access-pattern signals push you toward each? | [Database Design](database_design/README.md) |
-| Normalization vs denormalization — when do you trade write complexity for read speed? | [Database Design](database_design/README.md) |
-| State the CAP theorem precisely — why can't a partitioned system have both consistency and availability? | [CAP Theorem](cap_theorem/README.md) |
-| What is PACELC, and how does it extend CAP to the no-partition case? | [CAP Theorem](cap_theorem/README.md) |
-| REST vs gRPC vs GraphQL — how do you choose for a given API? | [API Design](api_design/README.md) |
-| How do you version an API without breaking existing clients? | [API Design](api_design/README.md) |
-| At-least-once vs exactly-once vs at-most-once delivery — how do message queues implement each? | [Message Queues](message_queues/README.md) |
-| Token bucket vs sliding window vs leaky bucket — how do they behave under bursty traffic? | [Rate Limiting](rate_limiting/README.md) |
-| Push vs pull CDN, and how does edge cache invalidation work? | [CDN](cdn/README.md) |
-| How does consistent hashing avoid remapping every key when a node joins or leaves the ring? | [Consistent Hashing](consistent_hashing/README.md) |
-| Range vs hash sharding — what does each do to hot-shard risk and range queries? | [Database Sharding](database_sharding/README.md) |
-| How do you reshard a live system without downtime? | [Database Sharding](database_sharding/README.md) |
-| How do you decompose a monolith into microservices — what defines a bounded context? | [Microservices](microservices/README.md) |
-| 2PC vs Saga vs TCC — how do you keep data consistent across service boundaries? | [Distributed Transactions](distributed_transactions/README.md) |
-| Circuit breaker vs bulkhead vs retry-with-backoff — which failure mode does each defend against? | [Resilience Patterns](resilience_patterns/README.md) |
+| Horizontal vs vertical scaling — why does horizontal scaling dominate at internet scale? | [Scalability](scalability/scalability.md) |
+| Round-robin vs least-connections vs consistent-hash balancing — when does each break down? | [Load Balancing](load_balancing/load_balancing.md) |
+| L4 vs L7 load balancing — what can an L7 balancer inspect that L4 cannot? | [Load Balancing](load_balancing/load_balancing.md) |
+| Cache-aside vs write-through vs write-behind — what are the consistency and latency tradeoffs? | [Caching](caching/caching.md) |
+| How do you avoid a thundering herd on cache expiry or invalidation? | [Caching](caching/caching.md) |
+| SQL vs NoSQL — what access-pattern signals push you toward each? | [Database Design](database_design/database_design.md) |
+| Normalization vs denormalization — when do you trade write complexity for read speed? | [Database Design](database_design/database_design.md) |
+| State the CAP theorem precisely — why can't a partitioned system have both consistency and availability? | [CAP Theorem](cap_theorem/cap_theorem.md) |
+| What is PACELC, and how does it extend CAP to the no-partition case? | [CAP Theorem](cap_theorem/cap_theorem.md) |
+| REST vs gRPC vs GraphQL — how do you choose for a given API? | [API Design](api_design/api_design.md) |
+| How do you version an API without breaking existing clients? | [API Design](api_design/api_design.md) |
+| At-least-once vs exactly-once vs at-most-once delivery — how do message queues implement each? | [Message Queues](message_queues/message_queues.md) |
+| Token bucket vs sliding window vs leaky bucket — how do they behave under bursty traffic? | [Rate Limiting](rate_limiting/rate_limiting.md) |
+| Push vs pull CDN, and how does edge cache invalidation work? | [CDN](cdn/cdn.md) |
+| How does consistent hashing avoid remapping every key when a node joins or leaves the ring? | [Consistent Hashing](consistent_hashing/consistent_hashing.md) |
+| Range vs hash sharding — what does each do to hot-shard risk and range queries? | [Database Sharding](database_sharding/database_sharding.md) |
+| How do you reshard a live system without downtime? | [Database Sharding](database_sharding/database_sharding.md) |
+| How do you decompose a monolith into microservices — what defines a bounded context? | [Microservices](microservices/microservices.md) |
+| 2PC vs Saga vs TCC — how do you keep data consistent across service boundaries? | [Distributed Transactions](distributed_transactions/distributed_transactions.md) |
+| Circuit breaker vs bulkhead vs retry-with-backoff — which failure mode does each defend against? | [Resilience Patterns](resilience_patterns/resilience_patterns.md) |
 
 ---
 
@@ -445,18 +445,18 @@ HLD stays at architectural-overview depth. For production-grade implementation d
 
 | HLD Concept | Backend Deep-Dive | Database Deep-Dive |
 |-------------|------------------|--------------------|
-| Microservices | [Microservices Fundamentals](../backend/microservices_fundamentals/README.md), [API Gateway Patterns](../backend/api_gateway_patterns/README.md), [Service Mesh](../backend/service_mesh_and_service_discovery/README.md) | — |
-| Message Queues | [Kafka Deep Dive](../backend/kafka_deep_dive/README.md), [Event-Driven Fundamentals](../backend/event_driven_fundamentals/README.md), [Messaging Patterns](../backend/messaging_patterns/README.md) | — |
-| Caching | [Caching Strategies Deep Dive](../backend/caching_strategies_deep_dive/README.md) | [Database Caching Patterns](../database/database_caching_patterns/README.md), [Key-Value Stores](../database/key_value_stores/README.md) |
-| Database Design | [Database Internals & Indexing](../backend/database_internals_and_indexing/README.md), [Query Optimization](../backend/query_optimization/README.md) | [Database Engineering (all 29 modules)](../database/README.md) |
-| Database Sharding | — | [Sharding & Partitioning](../database/sharding_and_partitioning/README.md) |
-| CAP Theorem | — | [Consistency Models & Consensus](../database/consistency_models_and_consensus/README.md), [Database Fundamentals](../database/database_fundamentals/README.md) |
-| Consensus Algorithms | [Kafka Deep Dive](../backend/kafka_deep_dive/README.md) | [Consistency Models & Consensus](../database/consistency_models_and_consensus/README.md) |
-| Rate Limiting | [Rate Limiting In Depth](../backend/rate_limiting_in_depth/README.md) | — |
-| API Design | [REST API Design](../backend/rest_api_design/README.md), [gRPC & Protobuf](../backend/grpc_and_protobuf/README.md), [GraphQL](../backend/graphql/README.md) | — |
-| Consistent Hashing | — | [Sharding & Partitioning](../database/sharding_and_partitioning/README.md) |
-| [Distributed Transactions](distributed_transactions/README.md) | [Distributed Transactions & Consistency](../backend/distributed_transactions_and_consistency/README.md) | [Distributed Transactions](../database/distributed_transactions/README.md) |
-| Event Sourcing / CQRS | [Event Sourcing & CQRS](../backend/event_sourcing_and_cqrs/README.md) | [Polyglot Persistence Patterns](../database/polyglot_persistence_patterns/README.md) |
-| [Observability](observability/README.md) | [Observability & Monitoring](../backend/observability_and_monitoring/README.md), [Observability: Tracing & OTel](../devops/observability_tracing_and_otel/README.md), [Observability: Metrics (Prometheus)](../devops/observability_metrics_prometheus/README.md), [Observability: Logging](../devops/observability_logging/README.md) | — |
-| [Security and Authentication/Authorization](security_and_auth/README.md) | [Auth & Authorization Systems](../backend/auth_and_authorization_systems/README.md), [Backend Security & OWASP](../backend/backend_security_owasp/README.md), [Spring Security Architecture](../spring/spring_security_architecture/README.md), [Spring Security: JWT & OAuth2](../spring/spring_security_jwt_oauth/README.md) | — |
-| [Resilience Patterns](resilience_patterns/README.md) | [Fault Tolerance Patterns](../backend/fault_tolerance_patterns/README.md), [Resilience4j Patterns](../spring/case_studies/cross_cutting/resilience4j_patterns.md) | — |
+| Microservices | [Microservices Fundamentals](../backend/microservices_fundamentals/microservices_fundamentals.md), [API Gateway Patterns](../backend/api_gateway_patterns/api_gateway_patterns.md), [Service Mesh](../backend/service_mesh_and_service_discovery/service_mesh_and_service_discovery.md) | — |
+| Message Queues | [Kafka Deep Dive](../backend/kafka_deep_dive/kafka_deep_dive.md), [Event-Driven Fundamentals](../backend/event_driven_fundamentals/event_driven_fundamentals.md), [Messaging Patterns](../backend/messaging_patterns/messaging_patterns.md) | — |
+| Caching | [Caching Strategies Deep Dive](../backend/caching_strategies_deep_dive/caching_strategies_deep_dive.md) | [Database Caching Patterns](../database/database_caching_patterns/database_caching_patterns.md), [Key-Value Stores](../database/key_value_stores/key_value_stores.md) |
+| Database Design | [Database Internals & Indexing](../backend/database_internals_and_indexing/database_internals_and_indexing.md), [Query Optimization](../backend/query_optimization/query_optimization.md) | [Database Engineering (all 29 modules)](../database/README.md) |
+| Database Sharding | — | [Sharding & Partitioning](../database/sharding_and_partitioning/sharding_and_partitioning.md) |
+| CAP Theorem | — | [Consistency Models & Consensus](../database/consistency_models_and_consensus/consistency_models_and_consensus.md), [Database Fundamentals](../database/database_fundamentals/database_fundamentals.md) |
+| Consensus Algorithms | [Kafka Deep Dive](../backend/kafka_deep_dive/kafka_deep_dive.md) | [Consistency Models & Consensus](../database/consistency_models_and_consensus/consistency_models_and_consensus.md) |
+| Rate Limiting | [Rate Limiting In Depth](../backend/rate_limiting_in_depth/rate_limiting_in_depth.md) | — |
+| API Design | [REST API Design](../backend/rest_api_design/rest_api_design.md), [gRPC & Protobuf](../backend/grpc_and_protobuf/grpc_and_protobuf.md), [GraphQL](../backend/graphql/graphql.md) | — |
+| Consistent Hashing | — | [Sharding & Partitioning](../database/sharding_and_partitioning/sharding_and_partitioning.md) |
+| [Distributed Transactions](distributed_transactions/distributed_transactions.md) | [Distributed Transactions & Consistency](../backend/distributed_transactions_and_consistency/distributed_transactions_and_consistency.md) | [Distributed Transactions](../database/distributed_transactions/distributed_transactions.md) |
+| Event Sourcing / CQRS | [Event Sourcing & CQRS](../backend/event_sourcing_and_cqrs/event_sourcing_and_cqrs.md) | [Polyglot Persistence Patterns](../database/polyglot_persistence_patterns/polyglot_persistence_patterns.md) |
+| [Observability](observability/observability.md) | [Observability & Monitoring](../backend/observability_and_monitoring/observability_and_monitoring.md), [Observability: Tracing & OTel](../devops/observability_tracing_and_otel/observability_tracing_and_otel.md), [Observability: Metrics (Prometheus)](../devops/observability_metrics_prometheus/observability_metrics_prometheus.md), [Observability: Logging](../devops/observability_logging/observability_logging.md) | — |
+| [Security and Authentication/Authorization](security_and_auth/security_and_auth.md) | [Auth & Authorization Systems](../backend/auth_and_authorization_systems/auth_and_authorization_systems.md), [Backend Security & OWASP](../backend/backend_security_owasp/backend_security_owasp.md), [Spring Security Architecture](../spring/spring_security_architecture/spring_security_architecture.md), [Spring Security: JWT & OAuth2](../spring/spring_security_jwt_oauth/spring_security_jwt_oauth.md) | — |
+| [Resilience Patterns](resilience_patterns/resilience_patterns.md) | [Fault Tolerance Patterns](../backend/fault_tolerance_patterns/fault_tolerance_patterns.md), [Resilience4j Patterns](../spring/case_studies/cross_cutting/resilience4j_patterns.md) | — |

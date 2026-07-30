@@ -1,6 +1,6 @@
 # Text Representation and Information Retrieval
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers information retrieval fundamentals, sparse retrieval (BM25), dense retrieval (Sentence-BERT),
 > late interaction (ColBERT), and hybrid search. RAG-focused retrieval with vector databases is covered
 > in the LLM section (`llm/rag_fundamentals/`).

@@ -19,7 +19,7 @@ Where [LangChain](langchain_and_lcel.md) is a general-purpose orchestration fram
 
 **Mental model**: A traditional database has tables, indexes (B-tree, hash), and query engines (SQL, full-text). LlamaIndex does the same for unstructured data: data connectors load documents, node parsers chunk them, various index types (VectorStore, Summary, Knowledge Graph) structure them differently, and query engines implement retrieval strategies. The "SQL" equivalent is a natural language query.
 
-**Why it matters**: Most RAG failures come from retrieval problems, not generation problems. LlamaIndex provides more retrieval strategies than any other framework (the framework-agnostic versions of these techniques are covered in [Advanced RAG](../advanced_rag/README.md)). If your RAG quality is poor, LlamaIndex's advanced retrieval techniques often fix it without changing the LLM.
+**Why it matters**: Most RAG failures come from retrieval problems, not generation problems. LlamaIndex provides more retrieval strategies than any other framework (the framework-agnostic versions of these techniques are covered in [Advanced RAG](../advanced_rag/advanced_rag.md)). If your RAG quality is poor, LlamaIndex's advanced retrieval techniques often fix it without changing the LLM.
 
 **Key insight**: LlamaIndex separates the indexing step (offline, expensive) from the retrieval step (online, fast). This separation is critical for production — you can re-index nightly without touching the query path, and optimize the query path without re-indexing.
 

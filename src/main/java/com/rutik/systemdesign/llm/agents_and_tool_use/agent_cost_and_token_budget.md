@@ -87,7 +87,7 @@ Ten calls, but you paid for 14.5 calls' worth of a flat context. Step 10 alone c
 
 Anthropic cache-write/read multipliers are `1.25×` and `0.1×` of that model's input price, so the two cache columns above are derived, not independently quoted. OpenAI's cached-input discount is 90% (cached tokens bill at 10% of the input rate) and applies automatically to repeated prefixes; Google's context-caching price is a per-token read rate plus an hourly storage charge ($1.00/M-tokens/hour for Flash-tier, $4.50 for Pro-tier).
 
-Batch API discount (Anthropic, OpenAI, Google): 50% off input + output. 24h SLA. Full per-token pricing mechanics and self-hosting break-even analysis: [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/README.md).
+Batch API discount (Anthropic, OpenAI, Google): 50% off input + output. 24h SLA. Full per-token pricing mechanics and self-hosting break-even analysis: [Token Economics & Cost Optimization](../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md).
 
 ### 4.2 Per-Task Token Budget
 
@@ -95,7 +95,7 @@ Pre-allocate a budget; track usage after every call; terminate with partial resu
 
 ### 4.3 Model Cascade
 
-Start cheap, escalate on confidence threshold or explicit hard-step detection. Typical savings: 60-80%. Routing architectures and confidence-threshold tuning are covered in [LLM Routing & Model Selection](../llm_routing_and_model_selection/README.md).
+Start cheap, escalate on confidence threshold or explicit hard-step detection. Typical savings: 60-80%. Routing architectures and confidence-threshold tuning are covered in [LLM Routing & Model Selection](../llm_routing_and_model_selection/llm_routing_and_model_selection.md).
 
 ### 4.4 Context Compaction
 
@@ -107,7 +107,7 @@ Don't `read_file(big_file)` — instead `read_file(big_file, grep="pattern")` or
 
 ### 4.6 Prompt Caching
 
-Mark system prompt + tools + conversation prefix as cacheable. Anthropic: 5-min ephemeral cache; write 1.25×, read 0.1×. Breakeven after 2 reads. Semantic caching, exact-match caching, and vLLM prefix caching are covered in [LLM Caching](../llm_caching/README.md).
+Mark system prompt + tools + conversation prefix as cacheable. Anthropic: 5-min ephemeral cache; write 1.25×, read 0.1×. Breakeven after 2 reads. Semantic caching, exact-match caching, and vLLM prefix caching are covered in [LLM Caching](../llm_caching/llm_caching.md).
 
 ---
 

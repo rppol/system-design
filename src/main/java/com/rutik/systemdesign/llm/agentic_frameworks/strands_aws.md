@@ -352,7 +352,7 @@ Configure Bedrock Guardrails (AWS managed) for content filtering — denied topi
 
 **Q: Can Strands work with MCP tool servers?**
 **Short:** Yes, via `MCPClient` from `strands.tools.mcp`, mixing MCP-sourced tools with native `@tool` functions in the same agent.
-Yes via `MCPClient` from `strands.tools.mcp`. Connect to MCP server, get tools, pass as agent tools alongside native `@tool` functions. See [MCP](../mcp_model_context_protocol/README.md) for the protocol itself.
+Yes via `MCPClient` from `strands.tools.mcp`. Connect to MCP server, get tools, pass as agent tools alongside native `@tool` functions. See [MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md) for the protocol itself.
 
 **Q: How does the Strands agent loop decide when to stop?**
 **Short:** The loop ends when the model returns a final text response with no tool-use blocks, so a bad tool can drive many extra iterations first.

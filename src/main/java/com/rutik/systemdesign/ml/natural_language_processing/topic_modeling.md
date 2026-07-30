@@ -1,12 +1,12 @@
 # Topic Modeling
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers unsupervised discovery of latent themes: LSA/LSI, pLSA, LDA, NMF, BERTopic, and
 > neural topic models, plus evaluation (perplexity vs coherence) and choosing the number of topics.
 >
-> Related: dimensionality reduction and clustering — [../unsupervised_learning/README.md](../unsupervised_learning/README.md);
+> Related: dimensionality reduction and clustering — [../unsupervised_learning/README.md](../unsupervised_learning/unsupervised_learning.md);
 > the EM algorithm and its monotonicity — [../unsupervised_learning/gaussian_mixtures_and_em.md](../unsupervised_learning/gaussian_mixtures_and_em.md);
-> perplexity as an information-theoretic quantity — [../information_theory/README.md](../information_theory/README.md);
+> perplexity as an information-theoretic quantity — [../information_theory/README.md](../information_theory/information_theory.md);
 > TF-IDF / BM25 term weighting — [text_representation_and_retrieval.md](text_representation_and_retrieval.md).
 
 ---
@@ -34,7 +34,7 @@ The lineage is a straight line of increasing sophistication:
 Every one of these is, at its core, a **low-rank factorization** of a term-document matrix into a
 document-topic matrix and a topic-word matrix, where the shared inner dimension `K` is the number
 of topics. That framing ties topic modeling directly to the SVD/PCA machinery in
-[../unsupervised_learning/README.md](../unsupervised_learning/README.md).
+[../unsupervised_learning/README.md](../unsupervised_learning/unsupervised_learning.md).
 
 ---
 
@@ -98,7 +98,7 @@ Build a TF-IDF-weighted term-document matrix `X` (`V × D`), then take its trunc
 `X ≈ U_k Σ_k V_k^T`. The `k` retained singular dimensions are the **latent semantic** axes; documents
 and terms both project into this shared `k`-dimensional space, so synonyms (*car*, *automobile*) that
 co-occur with the same neighbors land near each other. This is exactly PCA on the term-document
-matrix (see [../unsupervised_learning/README.md](../unsupervised_learning/README.md)). Fast and
+matrix (see [../unsupervised_learning/README.md](../unsupervised_learning/unsupervised_learning.md)). Fast and
 deterministic, but components can be **negative** (uninterpretable as "topics"), it is not a
 probabilistic model, and it offers no principled way to score new documents.
 
@@ -697,7 +697,7 @@ Perplexity is an **effective branching factor**, and that is the only interpreta
 into an interview. A perplexity of 720 against a 14,200-word vocabulary means the model narrowed each
 next-word decision from 14,200 equally-likely options down to about 720 — real information, but still
 enormous uncertainty. This is the same quantity as `exp(cross-entropy)` in
-[../information_theory/README.md](../information_theory/README.md).
+[../information_theory/README.md](../information_theory/information_theory.md).
 
 | Symbol | What it is |
 |--------|------------|

@@ -1,5 +1,5 @@
 # Privacy & Data Governance for LLM Systems
-Deep-dive sub-file of [LLM Security](README.md). Covers training-data memorization and extraction, membership inference, PII engineering at every system boundary, differential privacy, machine unlearning, and the governance machinery (retention, residency, deletion requests) that production LLM systems need. Legal frame: see [AI Regulations & Compliance](../ai_regulations_and_compliance/README.md).
+Deep-dive sub-file of [LLM Security](llm_security.md). Covers training-data memorization and extraction, membership inference, PII engineering at every system boundary, differential privacy, machine unlearning, and the governance machinery (retention, residency, deletion requests) that production LLM systems need. Legal frame: see [AI Regulations & Compliance](../ai_regulations_and_compliance/ai_regulations_and_compliance.md).
 
 ---
 
@@ -600,7 +600,7 @@ They determine what you may send where. Key variables: training defaults (enterp
 
 **Q12: Is generating synthetic data a privacy solution?**
 **Short:** Synthetic data only launders distribution, not individual records, unless the seed data is pseudonymized first and the output is audited for memorized near-duplicates.
-Partially, and dangerously if treated as automatic. Synthetic data generated *by a model trained on real records* can reproduce those records — memorized rare examples pass straight through the generator, and the synthetic set inherits membership signals. It becomes a real solution when paired with controls: pseudonymize the seed data first, generate with a model that never saw raw identifiers, run extraction/canary audits and near-duplicate filtering between synthetic output and source records, and optionally train the generator with DP for a formal bound. Said crisply: synthetic data launders *distribution*, not *records*, unless you verify record-level separation. See [Synthetic Data Generation](../synthetic_data_generation/README.md).
+Partially, and dangerously if treated as automatic. Synthetic data generated *by a model trained on real records* can reproduce those records — memorized rare examples pass straight through the generator, and the synthetic set inherits membership signals. It becomes a real solution when paired with controls: pseudonymize the seed data first, generate with a model that never saw raw identifiers, run extraction/canary audits and near-duplicate filtering between synthetic output and source records, and optionally train the generator with DP for a formal bound. Said crisply: synthetic data launders *distribution*, not *records*, unless you verify record-level separation. See [Synthetic Data Generation](../synthetic_data_generation/synthetic_data_generation.md).
 
 **Q13: Walk through handling a GDPR erasure request end-to-end in an LLM product.**
 **Short:** A GDPR erasure request must fan out across raw corpora, fine-tune datasets, the vector DB's deletion index, logs, eval sets, and caches, within the statutory window.
@@ -737,8 +737,8 @@ undocumented.
 
 ## Related
 
-- [LLM Security README](README.md) — prompt injection, model theft, supply chain, red teaming
-- [AI Regulations & Compliance](../ai_regulations_and_compliance/README.md) — GDPR, EU AI Act, DPIA: the legal frame for these controls
+- [LLM Security README](llm_security.md) — prompt injection, model theft, supply chain, red teaming
+- [AI Regulations & Compliance](../ai_regulations_and_compliance/ai_regulations_and_compliance.md) — GDPR, EU AI Act, DPIA: the legal frame for these controls
 - [Tenant Isolation Patterns](../case_studies/cross_cutting/tenant_isolation_patterns.md) — ACL pushdown, per-tenant stores
 - [OpenTelemetry for LLM Apps](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md) — trace scrubbing and retention
-- [Synthetic Data Generation](../synthetic_data_generation/README.md) — synthetic data as a (partial) privacy tool
+- [Synthetic Data Generation](../synthetic_data_generation/synthetic_data_generation.md) — synthetic data as a (partial) privacy tool

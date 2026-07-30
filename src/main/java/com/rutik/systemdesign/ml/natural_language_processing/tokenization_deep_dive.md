@@ -1,6 +1,6 @@
 # Tokenization Deep Dive (BPE, WordPiece, Unigram, SentencePiece)
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers subword tokenization algorithms (BPE, WordPiece, Unigram LM), byte-level and
 > SentencePiece variants, vocabulary sizing, normalization, and train/inference parity.
 > The same tokenizers power modern LLMs — see `llm/tokenization_and_embeddings/` for how
@@ -903,7 +903,7 @@ model.resize_token_embeddings(len(tokenizer))
 
 ## See Also
 
-- [Natural Language Processing](README.md) — parent module (preprocessing, embeddings, BERT)
+- [Natural Language Processing](natural_language_processing.md) — parent module (preprocessing, embeddings, BERT)
 - [bert_and_pretrained_models.md](bert_and_pretrained_models.md) — WordPiece in BERT, fine-tuning, tokenizer/model parity
 - [text_representation_and_retrieval.md](text_representation_and_retrieval.md) — how tokenized text feeds BM25 and dense retrieval
 - `../../llm/tokenization_and_embeddings/` — tokenization at LLM scale: context windows, embeddings, inference cost

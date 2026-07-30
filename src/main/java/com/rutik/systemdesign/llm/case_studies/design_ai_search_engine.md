@@ -306,7 +306,7 @@ Progressive disclosure:
 
 ### 4.6 Caching Strategy
 
-Cache-layer fundamentals (exact vs semantic caching, TTL policy): [LLM Caching](../llm_caching/README.md).
+Cache-layer fundamentals (exact vs semantic caching, TTL policy): [LLM Caching](../llm_caching/llm_caching.md).
 
 ```
 Three cache layers:

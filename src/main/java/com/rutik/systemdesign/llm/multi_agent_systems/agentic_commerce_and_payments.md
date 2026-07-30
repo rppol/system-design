@@ -18,7 +18,7 @@ this: **x402** (Coinbase-authored, now stewarded by the Linux Foundation's x402 
 revives the long-dormant HTTP `402 Payment Required` status code for stablecoin micropayments),
 **AP2** (Agent Payments Protocol — Google-led, 60+ partners including Mastercard, PayPal, and
 Coinbase, built on [A2A](agent_to_agent_protocols.md) and
-[MCP](../mcp_model_context_protocol/README.md), using cryptographically signed **mandates** as
+[MCP](../mcp_model_context_protocol/mcp_model_context_protocol.md), using cryptographically signed **mandates** as
 verifiable proof of user authorization), the two rival commerce layers — **UCP** (Universal
 Commerce Protocol, Google + Shopify, which delegates authorization to AP2) and **ACP** (Agentic
 Commerce Protocol — OpenAI + Stripe, powering ChatGPT's "Instant Checkout") — and card-network
@@ -892,7 +892,7 @@ estimates of "typical" transaction sizes, becomes miscalibrated as usage pattern
 restrictive as legitimate use scales (every transaction escalates, defeating automation), or too
 permissive if the agent's task scope expands beyond what the original threshold anticipated.
 Thresholds should be **reviewed against actual transaction-size distributions** on a recurring
-basis, the same operational discipline [Safety & Alignment](../safety_and_alignment/README.md)'s
+basis, the same operational discipline [Safety & Alignment](../safety_and_alignment/safety_and_alignment.md)'s
 "one-time red teaming" pitfall warns against applied to financial controls.
 
 **10.5 Ignoring the Liability Question Until a Dispute Occurs**
@@ -1066,5 +1066,5 @@ doesn't trust, the agent's own computation.
 - [Multi-Agent Security](multi_agent_security.md) — prompt injection and trust-boundary failures that make unscoped payment credentials dangerous (§10.1)
 - [Agent Reliability](../agents_and_tool_use/agent_reliability.md) — the broader reliability patterns (runaway loops, hallucinated parameters) whose financial analogues this module addresses
 - [MCP Security](../mcp_model_context_protocol/mcp_security.md) — credential scoping and key-management principles applied to payment signing keys (§10.3)
-- [Safety & Alignment](../safety_and_alignment/README.md) — "one-time red teaming" pitfall, generalized to static spend-threshold calibration (§10.4)
-- [Multi-Agent Systems README](README.md) — parent module: orchestration patterns this module's agents participate in
+- [Safety & Alignment](../safety_and_alignment/safety_and_alignment.md) — "one-time red teaming" pitfall, generalized to static spend-threshold calibration (§10.4)
+- [Multi-Agent Systems README](multi_agent_systems.md) — parent module: orchestration patterns this module's agents participate in

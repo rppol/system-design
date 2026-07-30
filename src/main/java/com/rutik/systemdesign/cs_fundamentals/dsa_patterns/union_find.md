@@ -599,10 +599,10 @@ the same "are X and Y connected?" query repeats many times.*
 
 ## 10. Cross-links
 
-- Concept module: [`graphs_tries_and_advanced_structures/`](../graphs_tries_and_advanced_structures/README.md) —
+- Concept module: [`graphs_tries_and_advanced_structures/`](../graphs_tries_and_advanced_structures/graphs_tries_and_advanced_structures.md) —
   Disjoint Set Union data structure, amortized complexity proof (inverse
   Ackermann)
-- Concept module: [`graph_and_string_algorithms/`](../graph_and_string_algorithms/README.md) —
+- Concept module: [`graph_and_string_algorithms/`](../graph_and_string_algorithms/graph_and_string_algorithms.md) —
   Kruskal's MST algorithm, where Union-Find is the core supporting structure
 
 ---

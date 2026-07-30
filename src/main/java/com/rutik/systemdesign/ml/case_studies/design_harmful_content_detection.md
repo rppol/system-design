@@ -7,7 +7,7 @@ Mental model: a functional funnel with a human backstop. Volume enters at the to
 
 Why this system exists: platforms are legally and existentially required to remove illegal and policy-violating content (CSAM, terrorism, incitement, fraud, spam) at a scale no human workforce can match, while *not* over-removing lawful content (which is its own reputational, regulatory — DSA, and user-trust harm). Meta, YouTube, TikTok, and Reddit each run integrity systems processing billions of items daily; the EU Digital Services Act and similar laws make the precision/recall operating point a compliance decision, not just an ML one. This is a very common senior/staff MLE and applied-scientist interview prompt.
 
-Cross-read: this study reuses primitives from [imbalanced_data_and_leakage_traps](../imbalanced_data_and_leakage_traps/README.md), [adversarial_ml_and_robustness](../adversarial_ml_and_robustness/README.md), [active_learning_and_weak_supervision](../active_learning_and_weak_supervision/README.md), and the LLM-side [guardrails_and_content_safety](../../llm/guardrails_and_content_safety/README.md) (for generative-content moderation), but centers the *integrity system design* those pieces plug into.
+Cross-read: this study reuses primitives from [imbalanced_data_and_leakage_traps](../imbalanced_data_and_leakage_traps/imbalanced_data_and_leakage_traps.md), [adversarial_ml_and_robustness](../adversarial_ml_and_robustness/adversarial_ml_and_robustness.md), [active_learning_and_weak_supervision](../active_learning_and_weak_supervision/active_learning_and_weak_supervision.md), and the LLM-side [guardrails_and_content_safety](../../llm/guardrails_and_content_safety/guardrails_and_content_safety.md) (for generative-content moderation), but centers the *integrity system design* those pieces plug into.
 
 ---
 
@@ -350,7 +350,7 @@ def mine_hard_negatives(recent_evasions, model, k: int = 5000):
     return (missed + over)[:k]
 ```
 
-The loop is the moat: because adversaries adapt, a *static* model decays fast (see Pitfall 2). Continuous mining of confirmed evasions + appeal reversals, retrained per policy, keeps the operating point valid. See [drift_monitoring_and_retraining.md](cross_cutting/drift_monitoring_and_retraining.md) and [active_learning_and_weak_supervision](../active_learning_and_weak_supervision/README.md).
+The loop is the moat: because adversaries adapt, a *static* model decays fast (see Pitfall 2). Continuous mining of confirmed evasions + appeal reversals, retrained per policy, keeps the operating point valid. See [drift_monitoring_and_retraining.md](cross_cutting/drift_monitoring_and_retraining.md) and [active_learning_and_weak_supervision](../active_learning_and_weak_supervision/active_learning_and_weak_supervision.md).
 
 ---
 

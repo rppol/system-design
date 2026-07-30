@@ -715,7 +715,7 @@ A: You set `bnb_4bit_quant_storage=torch.bfloat16` so the 4-bit weights are stor
 4. **Evaluate Unsloth in production** — its published claim is up to 2x faster with 70% less VRAM vs. standard PEFT+BitsAndBytes; confirm on your own workload before sizing hardware to it.
 5. **Use effective batch ≥ 32** — compensate for small physical batch with gradient accumulation (gradient_accumulation_steps = 32 / batch_size).
 6. **Benchmark with Unsloth before committing to cloud hardware** — QLoRA memory requirements vary by sequence length; measure empirically on your data before choosing GPU type.
-7. **Export via merge-then-requantize** — merge QLoRA adapter to BF16 first, then re-quantize with GPTQ or AWQ for inference deployment; cleaner and more widely compatible. (GPTQ/AWQ inference quantization mechanics: [Optimization & Quantization](../optimization_and_quantization/README.md).)
+7. **Export via merge-then-requantize** — merge QLoRA adapter to BF16 first, then re-quantize with GPTQ or AWQ for inference deployment; cleaner and more widely compatible. (GPTQ/AWQ inference quantization mechanics: [Optimization & Quantization](../optimization_and_quantization/optimization_and_quantization.md).)
 
 ---
 

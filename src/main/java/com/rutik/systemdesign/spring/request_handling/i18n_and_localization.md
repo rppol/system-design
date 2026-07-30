@@ -9,7 +9,7 @@ locale), a `LocaleResolver` (decides the request's locale), `LocaleContextHolder
 numbers, dates, and currency. This deep dive wires them together, shows the WebFlux
 variant, and covers the traps.
 
-This is a sub-file of [Request Handling](README.md) — the same controllers,
+This is a sub-file of [Request Handling](request_handling.md) — the same controllers,
 `@ControllerAdvice`, and `ProblemDetail` from the parent become locale-aware here,
 so error messages and validation feedback speak the user's language.
 
@@ -35,7 +35,7 @@ A localizable Spring app never hardcodes user-facing strings. Instead:
    explicitly.
 
 Crucially, the Spring `ApplicationContext` *is itself a `MessageSource`* — the
-interface is part of the container's contract (see [IoC Container](../ioc_container/README.md)) —
+interface is part of the container's contract (see [IoC Container](../ioc_container/ioc_container.md)) —
 so any bean can inject `MessageSource` (or implement `MessageSourceAware`) and
 resolve text.
 
@@ -316,7 +316,7 @@ By default Hibernate Validator interpolates constraint messages from
 `ValidationMessages.properties` on the classpath root. To make validation use
 Spring's `MessageSource` (so messages come from `messages_xx.properties` and honor
 the resolved locale), wire a `LocalValidatorFactoryBean` — see
-[Validation & Error Handling](../validation_and_error_handling/README.md):
+[Validation & Error Handling](../validation_and_error_handling/validation_and_error_handling.md):
 
 ```java
 @Bean
@@ -363,7 +363,7 @@ public String formatPrice(BigDecimal amount) {
     return currency.format(amount);   // "1 234,56 €" (fr_FR) vs "$1,234.56" (en_US)
 }
 ```
-See [Java Date/Time](../../java/java_time_datetime/README.md) for the `java.time`
+See [Java Date/Time](../../java/java_time_datetime/java_time_datetime.md) for the `java.time`
 model that replaced `Date`/`SimpleDateFormat`.
 
 In request binding, `@DateTimeFormat` and `@NumberFormat` (backed by Spring's

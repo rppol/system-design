@@ -432,7 +432,7 @@ Multi-primary runs a full Istiod control plane in every cluster, so each cluster
 9. **Verify CIDR disjointness and mesh status** (`cilium clustermesh status`) before sending production traffic.
 10. **Use short DNS TTLs** for global LB records so DNS-based failover is timely (but not so short you hammer resolvers).
 11. **Test failover regularly** — kill a region in a game day and confirm traffic shifts within SLA.
-12. Cross-reference [Kubernetes Networking](../../kubernetes_networking/README.md) for intra-cluster CNI and policy fundamentals and [Cloud Networking & CDN](../../cloud_networking_and_cdn/README.md) for global LB, Anycast, and inter-region transit details.
+12. Cross-reference [Kubernetes Networking](../../kubernetes_networking/kubernetes_networking.md) for intra-cluster CNI and policy fundamentals and [Cloud Networking & CDN](../../cloud_networking_and_cdn/cloud_networking_and_cdn.md) for global LB, Anycast, and inter-region transit details.
 
 ---
 

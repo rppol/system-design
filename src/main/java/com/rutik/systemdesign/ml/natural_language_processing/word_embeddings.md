@@ -1,11 +1,11 @@
 # Word Embeddings (Classic / Static)
 
-> This file is a deep-dive sub-file of the [Natural Language Processing](README.md) module.
+> This file is a deep-dive sub-file of the [Natural Language Processing](natural_language_processing.md) module.
 > It covers **static** word embeddings — word2vec (skip-gram, CBOW), GloVe, and fastText — where each
 > word type gets exactly one vector regardless of context.
 > Contextual embeddings (one vector per token *occurrence*) are covered in
 > [BERT and Pretrained Models](bert_and_pretrained_models.md) and in the LLM section
-> ([tokenization_and_embeddings](../../llm/tokenization_and_embeddings/), [embeddings_and_similarity_search](../../llm/embeddings_and_similarity_search/)).
+> ([tokenization_and_embeddings](../../llm/tokenization_and_embeddings/tokenization_and_embeddings.md), [embeddings_and_similarity_search](../../llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md)).
 > Sparse/lexical representations (TF-IDF, BM25) and dense retrieval live in
 > [Text Representation and Retrieval](text_representation_and_retrieval.md).
 
@@ -785,7 +785,7 @@ internally for language identification and tagging at scale.
 of viewed listings is a "sentence", each listing a "word" — to drive similar-listing recs and search
 personalization (KDD 2018 best paper). The same skip-gram-negative-sampling core powers item2vec (co-viewed
 products), node2vec (graph walks), and Spotify track embeddings — word2vec's most durable legacy, cross-linked
-in [Recommender Systems](../recommender_systems/README.md).
+in [Recommender Systems](../recommender_systems/recommender_systems.md).
 
 ---
 
@@ -844,7 +844,7 @@ in [Recommender Systems](../recommender_systems/README.md).
   ([BERT](bert_and_pretrained_models.md), LLM embeddings).
 - The task is **semantic sentence/passage similarity or retrieval** — averaging word vectors is a weak encoder;
   use SBERT/dense retrievers ([Text Representation and Retrieval](text_representation_and_retrieval.md),
-  [embeddings_and_similarity_search](../../llm/embeddings_and_similarity_search/)).
+  [embeddings_and_similarity_search](../../llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md)).
 - You need **state-of-the-art accuracy** on classification/NER/QA and have GPU budget — fine-tune a transformer.
 - The corpus is **tiny** (<1M tokens) — vectors will be noisy; prefer pretrained GloVe/fastText.
 
@@ -1258,5 +1258,5 @@ DeBERTa. Blended Macro-F1 **0.85** at **~1/5** the average serving cost of DeBER
   the small-data analog of transformer catastrophic-forgetting guardrails.
 - **Static embeddings were not obsolete** — they delivered 93% of the transformer's F1 (0.81 vs 0.87) by
   handling the easy majority, reserving the transformer for the ambiguous tail. Cross-links:
-  [feature_engineering](../feature_engineering/README.md),
-  [embeddings_and_similarity_search](../../llm/embeddings_and_similarity_search/).
+  [feature_engineering](../feature_engineering/feature_engineering.md),
+  [embeddings_and_similarity_search](../../llm/embeddings_and_similarity_search/embeddings_and_similarity_search.md).

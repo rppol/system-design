@@ -3,9 +3,9 @@
 > Cross-cutting reference for: [design_llm_fine_tuning_platform](../design_llm_fine_tuning_platform.md),
 > [design_chatgpt](../design_chatgpt.md) (RLHF training), and domain pre-training workloads.
 >
-> Related modules: [fine_tuning](../../fine_tuning/README.md),
-> [training_infrastructure](../../training_infrastructure/README.md),
-> [alignment_and_rlhf](../../alignment_and_rlhf/README.md)
+> Related modules: [fine_tuning](../../fine_tuning/fine_tuning.md),
+> [training_infrastructure](../../training_infrastructure/training_infrastructure.md),
+> [alignment_and_rlhf](../../alignment_and_rlhf/alignment_and_rlhf.md)
 
 ---
 

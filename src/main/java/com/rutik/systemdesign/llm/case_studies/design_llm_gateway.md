@@ -126,7 +126,7 @@ flowchart LR
 
 ### 4.1 Routing Engine
 
-Routing fundamentals (capability tiers, cascade routing, cost/quality frontiers): [LLM Routing & Model Selection](../llm_routing_and_model_selection/README.md).
+Routing fundamentals (capability tiers, cascade routing, cost/quality frontiers): [LLM Routing & Model Selection](../llm_routing_and_model_selection/llm_routing_and_model_selection.md).
 
 ```
 Routing decisions are made hierarchically:
@@ -177,7 +177,7 @@ Routing example:
 
 ### 4.2 Semantic Caching
 
-Cache-layer fundamentals (exact vs semantic, invalidation, hit-rate economics): [LLM Caching](../llm_caching/README.md).
+Cache-layer fundamentals (exact vs semantic, invalidation, hit-rate economics): [LLM Caching](../llm_caching/llm_caching.md).
 
 Semantic cache enables reusing responses for similar (not identical) queries.
 

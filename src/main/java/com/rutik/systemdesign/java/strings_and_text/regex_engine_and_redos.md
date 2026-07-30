@@ -2,7 +2,7 @@
 A deep dive into `java.util.regex` — how the `Pattern`/`Matcher` pair works, why
 Java uses a *backtracking NFA* engine (and what that costs you), and how
 seemingly harmless patterns turn into a denial-of-service vector called ReDoS.
-This is a sub-file of [Strings & Text](README.md); it assumes you already know
+This is a sub-file of [Strings & Text](strings_and_text.md); it assumes you already know
 `String` immutability and the constant pool, and focuses entirely on regular
 expressions and their security-relevant failure mode.
 
@@ -60,7 +60,7 @@ the input explodes combinatorially.
 URL, an HTTP header — runs on your request thread. If the pattern is
 ReDoS-vulnerable, one crafted 30-byte string pins a CPU core for seconds to
 minutes, and a handful of them exhausts your thread pool. This is a
-denial-of-service class bug (CWE-1333); see [Backend Security / OWASP](../../backend/backend_security_owasp/README.md).
+denial-of-service class bug (CWE-1333); see [Backend Security / OWASP](../../backend/backend_security_owasp/backend_security_owasp.md).
 
 **Key insight**: The danger is not "regex is slow." It is that runtime is a
 function of the *pattern shape*, not just input length. `^[a-z]+$` is always
@@ -849,7 +849,7 @@ Two operational controls belong beside the tooling. **Cap input length before ma
 
 ## Related / See Also
 
-- [Strings & Text](README.md) — parent module: `String` immutability, constant pool, Compact Strings, text blocks
-- [Backend Security / OWASP](../../backend/backend_security_owasp/README.md) — ReDoS as a denial-of-service class (CWE-1333), input validation
-- [Performance & Tuning](../performance_and_tuning/README.md) — profiling a CPU hotspot; a hung regex shows as a wide frame in a flame graph
-- [JVM Internals](../jvm_internals/README.md) — the call stack and `StackOverflowError` mechanics behind deep recursive matching
+- [Strings & Text](strings_and_text.md) — parent module: `String` immutability, constant pool, Compact Strings, text blocks
+- [Backend Security / OWASP](../../backend/backend_security_owasp/backend_security_owasp.md) — ReDoS as a denial-of-service class (CWE-1333), input validation
+- [Performance & Tuning](../performance_and_tuning/performance_and_tuning.md) — profiling a CPU hotspot; a hung regex shows as a wide frame in a flame graph
+- [JVM Internals](../jvm_internals/jvm_internals.md) — the call stack and `StackOverflowError` mechanics behind deep recursive matching

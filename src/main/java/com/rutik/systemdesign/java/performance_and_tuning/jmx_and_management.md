@@ -3,7 +3,7 @@ A deep dive into **JMX (Java Management Extensions)** — the JVM's built-in
 instrumentation and management bus. This is how JConsole reads your heap usage,
 how `ThreadMXBean` finds a deadlock, how a custom cache exposes its hit ratio to
 ops, and how `jmx_exporter` bridges the JVM into Prometheus. It is a sub-file of
-[Performance & Tuning](README.md); it assumes you know the GC, thread-dump, and
+[Performance & Tuning](performance_and_tuning.md); it assumes you know the GC, thread-dump, and
 heap-dump diagnostics there and focuses on the management plane that exposes them.
 
 The one sentence to remember: **JMX is a three-level architecture — instrumented
@@ -436,8 +436,8 @@ stacks therefore *bridge* JMX rather than replace it:
   it can *bind* platform MXBeans (`JvmMemoryMetrics`, `JvmGcMetrics`,
   `JvmThreadMetrics`) and *also* publish an MBean registry, so the same counters
   appear in both Prometheus and JConsole. See
-  [Prometheus Metrics](../../devops/observability_metrics_prometheus/README.md)
-  and [Spring Boot Actuator](../../spring/spring_boot_actuator/README.md).
+  [Prometheus Metrics](../../devops/observability_metrics_prometheus/observability_metrics_prometheus.md)
+  and [Spring Boot Actuator](../../spring/spring_boot_actuator/spring_boot_actuator.md).
 
 Why bridge instead of scrape JMX directly: RMI is stateful, needs a TCP
 connection per client, carries the ephemeral-port and RCE baggage above, and has
@@ -609,7 +609,7 @@ Attribute getters run real code, so polling expensive ones every second — a `g
 
 ## Related / See Also
 
-- [Performance & Tuning](README.md) — parent module: GC logs, heap dumps, thread dumps, JMH, async-profiler
-- [JVM Internals](../jvm_internals/README.md) — GC algorithms and thread mechanics behind the MXBean values JMX exposes
-- [Prometheus Metrics](../../devops/observability_metrics_prometheus/README.md) — pull-based scraping and the jmx_exporter bridge
-- [Spring Boot Actuator](../../spring/spring_boot_actuator/README.md) — Micrometer binding of platform MXBeans, `/actuator` endpoints
+- [Performance & Tuning](performance_and_tuning.md) — parent module: GC logs, heap dumps, thread dumps, JMH, async-profiler
+- [JVM Internals](../jvm_internals/jvm_internals.md) — GC algorithms and thread mechanics behind the MXBean values JMX exposes
+- [Prometheus Metrics](../../devops/observability_metrics_prometheus/observability_metrics_prometheus.md) — pull-based scraping and the jmx_exporter bridge
+- [Spring Boot Actuator](../../spring/spring_boot_actuator/spring_boot_actuator.md) — Micrometer binding of platform MXBeans, `/actuator` endpoints

@@ -41,12 +41,12 @@ former.
 
 | Book | Author | Folder | Chapters | Status |
 |------|--------|--------|----------|--------|
-| Designing Data-Intensive Applications | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/README.md) | 12 (+ preface) | Complete |
-| System Design Interview — Vol 1 | Alex Xu | [system_design_interview_vol_1/](system_design_interview_vol_1/README.md) | 16 | Complete |
-| System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/README.md) | 13 | Complete |
-| Machine Learning System Design Interview | Ali Aminian & Alex Xu | [machine_learning_system_design_interview/](machine_learning_system_design_interview/README.md) | 11 | Complete |
-| Designing Machine Learning Systems | Chip Huyen | [designing_machine_learning_systems/](designing_machine_learning_systems/README.md) | 11 | Complete |
-| Understanding Distributed Systems | Roberto Vitillo | [understanding_distributed_systems/](understanding_distributed_systems/README.md) | 33 (as 5 parts) | Complete |
+| Designing Data-Intensive Applications | Martin Kleppmann | [designing_data_intensive_applications/](designing_data_intensive_applications/designing_data_intensive_applications.md) | 12 (+ preface) | Complete |
+| System Design Interview — Vol 1 | Alex Xu | [system_design_interview_vol_1/](system_design_interview_vol_1/system_design_interview_vol_1.md) | 16 | Complete |
+| System Design Interview — Vol 2 | Alex Xu & Sahn Lam | [system_design_interview_vol_2/](system_design_interview_vol_2/system_design_interview_vol_2.md) | 13 | Complete |
+| Machine Learning System Design Interview | Ali Aminian & Alex Xu | [machine_learning_system_design_interview/](machine_learning_system_design_interview/machine_learning_system_design_interview.md) | 11 | Complete |
+| Designing Machine Learning Systems | Chip Huyen | [designing_machine_learning_systems/](designing_machine_learning_systems/designing_machine_learning_systems.md) | 11 | Complete |
+| Understanding Distributed Systems | Roberto Vitillo | [understanding_distributed_systems/](understanding_distributed_systems/understanding_distributed_systems.md) | 33 (as 5 parts) | Complete |
 
 The two *System Design Interview* volumes are one series split across two folders (each
 volume numbers its chapters independently); with DDIA, MLSDI, DMLS, and UDS the section
@@ -100,11 +100,11 @@ prose priorities:
 
 | When the book discusses… | Drill deeper in… |
 |--------------------------|------------------|
-| Replication, leaders/followers, quorums | [database/replication_and_high_availability/](../database/replication_and_high_availability/README.md) |
-| Partitioning / sharding | [database/sharding_and_partitioning/](../database/sharding_and_partitioning/README.md) |
-| Transactions, isolation, MVCC | [database/concurrency_control_and_locking/](../database/concurrency_control_and_locking/README.md) |
-| Storage engines (B-tree / LSM) | [database/storage_engines_internals/](../database/storage_engines_internals/README.md) |
-| Consensus, linearizability | [database/consistency_models_and_consensus/](../database/consistency_models_and_consensus/README.md) |
+| Replication, leaders/followers, quorums | [database/replication_and_high_availability/](../database/replication_and_high_availability/replication_and_high_availability.md) |
+| Partitioning / sharding | [database/sharding_and_partitioning/](../database/sharding_and_partitioning/sharding_and_partitioning.md) |
+| Transactions, isolation, MVCC | [database/concurrency_control_and_locking/](../database/concurrency_control_and_locking/concurrency_control_and_locking.md) |
+| Storage engines (B-tree / LSM) | [database/storage_engines_internals/](../database/storage_engines_internals/storage_engines_internals.md) |
+| Consensus, linearizability | [database/consistency_models_and_consensus/](../database/consistency_models_and_consensus/consistency_models_and_consensus.md) |
 | Distributed-system theory (CAP, etc.) | [hld/](../hld/README.md) |
 | Streaming / messaging / Kafka | [backend/](../backend/CLAUDE.md), [devops/](../devops/README.md) |
 

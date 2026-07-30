@@ -904,7 +904,7 @@ not transformer-based. The key engineering advantage: Mamba carries O(1) state p
 genuine streaming synthesis with flat, predictable per-step latency at any output length, which
 is the property that matters for voice agents. Marketed on sub-100 ms model latency; treat the
 exact advertised number as a moving target. Used by voice agent platforms
-([voice agents](../voice_agents/README.md)) where latency is the product. API-only; no consumer
+([voice agents](../voice_agents/voice_agents.md)) where latency is the product. API-only; no consumer
 voice library.
 
 **PlayHT**: notable for very broad language coverage (advertised at 140+) and voice cloning from

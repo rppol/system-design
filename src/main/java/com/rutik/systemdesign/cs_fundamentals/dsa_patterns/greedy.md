@@ -639,9 +639,9 @@ flowchart TD
 
 ## 10. Cross-links
 
-- Concept module: [`greedy_and_divide_and_conquer/`](../greedy_and_divide_and_conquer/README.md) — formal treatment of the greedy-choice property, optimal substructure, and exchange-argument proofs; also covers divide-and-conquer (merge sort, quickselect) as a separate strategy
-- Complexity foundations: [`complexity_analysis_and_big_o/`](../complexity_analysis_and_big_o/README.md) — why O(n log n) is the practical ceiling for sort-then-scan greedy algorithms
-- Applied cross-link: [`../../devops/kubernetes_scheduling_and_autoscaling/README.md`](../../devops/kubernetes_scheduling_and_autoscaling/README.md) — the Kubernetes default scheduler's bin-packing and priority-based pod placement are real-world greedy heuristics (best-fit / first-fit), including their known suboptimality versus exhaustive search
+- Concept module: [`greedy_and_divide_and_conquer/`](../greedy_and_divide_and_conquer/greedy_and_divide_and_conquer.md) — formal treatment of the greedy-choice property, optimal substructure, and exchange-argument proofs; also covers divide-and-conquer (merge sort, quickselect) as a separate strategy
+- Complexity foundations: [`complexity_analysis_and_big_o/`](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — why O(n log n) is the practical ceiling for sort-then-scan greedy algorithms
+- Applied cross-link: [`../../devops/kubernetes_scheduling_and_autoscaling/README.md`](../../devops/kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) — the Kubernetes default scheduler's bin-packing and priority-based pod placement are real-world greedy heuristics (best-fit / first-fit), including their known suboptimality versus exhaustive search
 
 ---
 

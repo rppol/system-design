@@ -53,12 +53,12 @@ mental model for optimizing almost any GPU workload.
 
 ### Out of Scope
 - Multi-GPU / tensor-parallel GEMM (sharding `A`/`B` across devices) — see
-  [`multi_gpu_programming_and_nccl`](../multi_gpu_programming_and_nccl/).
+  [`multi_gpu_programming_and_nccl`](../multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md).
 - Batched/strided-batched GEMM (`cublasGemmStridedBatchedEx`) and grouped GEMM for MoE — the
   ladder here is single-GEMM; batching is an orthogonal launch-configuration concern.
 - Sparse or structured-sparse GEMM (2:4 sparsity Tensor Core mode).
 - Autotuning frameworks (CUTLASS's template-instantiation search, Triton's `@autotune`) — covered
-  at the API-surface level in [`../triton_and_kernel_dsls/`](../triton_and_kernel_dsls/); this
+  at the API-surface level in [`../triton_and_kernel_dsls/`](../triton_and_kernel_dsls/triton_and_kernel_dsls.md); this
   case study hand-derives the tile sizes instead of searching for them.
 
 ---
@@ -253,9 +253,9 @@ BK = 8 reduction depth per shared-memory slab.
    read -- versus 1 FLOP per shared-memory read with no register blocking (TM=TN=1, rung 3).
 ```
 
-See also: [`memory_coalescing_and_access_patterns`](../memory_coalescing_and_access_patterns/)
+See also: [`memory_coalescing_and_access_patterns`](../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md)
 for the 128-byte transaction mechanics behind the `LOAD` node above, and
-[`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/) for why the `Bs`
+[`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) for why the `Bs`
 layout in this grid produces zero bank conflicts (each thread column lands in a distinct one of
 the 32 shared-memory banks).
 
@@ -419,7 +419,7 @@ Speedup over rung 2: 21,600 / 675 ~= 32x -- this time entirely from increased
 arithmetic intensity (more reuse per byte), not from any change in bandwidth utilization.
 ```
 
-See also [`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/) for why the
+See also [`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md) for why the
 `Bs[k][threadIdx.x]` read pattern above is conflict-free without needing the classic
 33-column-padding trick — the fast axis of the read already lines up one-to-one with the 32
 shared-memory banks.
@@ -511,7 +511,7 @@ Note the transposed `As[BK][BM]` store: without it, the cooperative load `A[r*K+
 `As[k][threadRow*TM+i]` back out with `threadRow*TM+i` as the fast-varying index inside a warp
 (rather than `k`) avoids bank conflicts on the *register-fill* reads — the classic
 shared-memory-layout tradeoff covered in
-[`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/). Getting this backward
+[`shared_memory_and_bank_conflicts`](../shared_memory_and_bank_conflicts/shared_memory_and_bank_conflicts.md). Getting this backward
 is a common source of a "correct but mysteriously 20% slower" register-blocked kernel.
 
 ### 4.5 Rung 5 — Tensor Cores (WMMA) and cuBLAS
@@ -590,7 +590,7 @@ Speedup over rung 4: 850,000 / 48,000 ~= 17.7x  (roughly the Tensor-Core-vs-CUDA
 Cumulative speedup, naive -> Tensor Core: 850,000 / 24 ~= 35,400x
 ```
 
-See [`tensor_cores_and_mixed_precision`](../tensor_cores_and_mixed_precision/) for when Tensor
+See [`tensor_cores_and_mixed_precision`](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md) for when Tensor
 Cores engage automatically inside cuBLAS/cuDNN versus requiring explicit WMMA, and the
 FP16/BF16/TF32/FP8 precision tradeoffs.
 
@@ -697,7 +697,7 @@ if __name__ == "__main__":
 | Tile size (rung 3) | 32x32 (matches warp size, 32 shared-memory banks) | 16x16 or 64x64 | 32x32 gives conflict-free banking for free and keeps shared-memory usage per block at 2 x 32x32x4B = 8 KB, well under the ~228 KB/SM budget, allowing high occupancy alongside the tiling win |
 | Register-blocking micro-tile (rung 4) | TM=TN=8 (each thread owns 64 output elements) | TM=TN=4 (32 elements) or TM=TN=16 (256 elements) | 8x8 balances register pressure (64 accumulator floats + 16 operand floats = 80 registers/thread, within the ~255 max) against reuse; 16x16 spills registers to local memory and is *slower* despite higher theoretical AI — see §9 |
 | Transposed `As[BK][BM]` shared layout (rung 4) | Store `A`'s tile transposed in shared memory | Store it in natural `[BM][BK]` orientation | Natural orientation makes the register-fill read `As[threadRow*TM+i][k]` bank-conflicted (fixed `k`, varying row means all 32 lanes in some cases hit the same bank); transposing during the cooperative load fixes this at zero extra HBM cost |
-| Tensor Core precision (rung 5) | FP16 input / FP32 accumulate | BF16 input, or full FP32 (TF32 Tensor Core path) | FP16/FP32-accumulate is the best-supported, highest-throughput path on Volta-through-Hopper; BF16 trades FP16's 1e-1-scale rounding error for wider dynamic range at the same throughput — the right choice when values may overflow FP16's ~65504 max (see [`tensor_cores_and_mixed_precision`](../tensor_cores_and_mixed_precision/)) |
+| Tensor Core precision (rung 5) | FP16 input / FP32 accumulate | BF16 input, or full FP32 (TF32 Tensor Core path) | FP16/FP32-accumulate is the best-supported, highest-throughput path on Volta-through-Hopper; BF16 trades FP16's 1e-1-scale rounding error for wider dynamic range at the same throughput — the right choice when values may overflow FP16's ~65504 max (see [`tensor_cores_and_mixed_precision`](../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)) |
 | Boundary handling | Zero-pad shared-memory tiles for out-of-bounds `M`/`N`/`K`, guard writes with bounds checks | Require `M`/`N`/`K` to be exact multiples of tile size | Real workloads (odd batch sizes, non-power-of-2 hidden dims) are rarely tile-aligned; the small per-iteration branch cost is negligible next to the throughput gained from tiling itself |
 | Custom kernel vs. cuBLAS in production | Use cuBLAS/CUTLASS for standalone GEMM; hand-write only when *fusing* it with adjacent ops | Always hand-write for full control | cuBLAS is within a few percent of hardware peak for standalone GEMM (§4.5); hand-written kernels win only when fusion (e.g. FlashAttention folding softmax into the matmul) avoids an HBM round-trip cuBLAS cannot skip |
 
@@ -752,7 +752,7 @@ lookups directly into the matmul kernel to avoid extra HBM round-trips.
 | Hand-written CUDA C++ (this file) | Full control over tiling, register blocking, precision | Learning/interview prep; production only when fusing with adjacent ops |
 | cuBLAS / `cublasGemmEx` | NVIDIA's tuned dense-GEMM library | Any standalone GEMM in production — default choice, 90%+ of peak |
 | CUTLASS | Template-based GEMM building blocks (block/warp/MMA tiles as C++ templates) | Custom precision (INT8, FP8), custom epilogues (fused bias/activation), or a shape cuBLAS's heuristic tunes poorly for |
-| Triton | Python-embedded kernel DSL with block-level abstraction and autotuning | Fast iteration on a fused kernel without hand-writing tiling/indexing (see [`../triton_and_kernel_dsls/`](../triton_and_kernel_dsls/)) |
+| Triton | Python-embedded kernel DSL with block-level abstraction and autotuning | Fast iteration on a fused kernel without hand-writing tiling/indexing (see [`../triton_and_kernel_dsls/`](../triton_and_kernel_dsls/triton_and_kernel_dsls.md)) |
 | Nsight Compute | Per-kernel roofline, SOL (speed-of-light) bars, achieved-occupancy metrics | Confirming which rung of this ladder a given kernel actually behaves like, on real hardware (see §8) |
 | Nsight Systems | Timeline view across kernels/streams/transfers | Confirming the GEMM kernel — not `cudaMemcpy` or launch gaps — is actually the bottleneck before optimizing it at all |
 | `torch.utils.cpp_extension` / CuPy `RawKernel` | Python-callable custom CUDA | Wiring the kernels above into a PyTorch/CuPy benchmark harness (§4.6) |
@@ -806,7 +806,7 @@ cudaOccupancyMaxPotentialBlockSize(&minGridSize, &blockSize, sgemm_regblock, 0, 
 // which prints "registers, smem bytes" per thread/block directly.
 ```
 
-See [`occupancy_and_launch_configuration`](../occupancy_and_launch_configuration/) for the full
+See [`occupancy_and_launch_configuration`](../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) for the full
 theory of why higher occupancy is not automatically better once latency is already hidden.
 
 ### Rollout Checklist for a New GEMM Shape

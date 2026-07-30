@@ -1,0 +1,822 @@
+# Java 8 Features
+
+<!-- study-paths
+senior: java8_features.md
+files this module contributes to each curated path; omit a tier to leave it out
+-->
+## 1. Concept Overview
+
+Java 8 (March 2014) was the most significant Java release since Java 5. It introduced **lambdas**, **functional interfaces**, the **Stream API**, **Optional**, **default/static interface methods**, and the **new Date/Time API**. Together, these features brought first-class functional programming to Java without breaking backward compatibility.
+
+The mental shift: Java 8 moved from imperative "how to do it" to declarative "what to do." A 20-line for-loop that filters, transforms, and aggregates a list becomes 3 lines of expressive stream pipeline. More importantly, it enabled composition — combining small functions into complex behavior without mutable accumulators.
+
+Java 8 is no longer the version most teams run — production has moved to the newer LTS releases, with Java 21 and 17 taking the bulk of deployments and Java 25 (the current LTS) climbing. But every one of those releases still compiles Java 8 source unchanged, and lambdas, streams and `Optional` are the substrate that records, virtual threads and pattern matching were layered on top of. Understanding this release deeply is table stakes for any Java engineer.
+
+---
+
+## 2. Intuition
+
+> **One-line analogy**: A lambda is a snippet of behavior you hand to a method like a note on a piece of paper — the method reads the note and follows the instructions when it needs to.
+
+**Mental model**: A lambda `x -> x * 2` is a block of code that captures the ambient environment (effectively-final variables) and can be passed around as a value. The Stream API is a lazy pipeline — you describe a sequence of transformations and only the *terminal operation* triggers actual execution. This laziness enables short-circuit optimization (e.g., `findFirst()` stops processing after finding the first match).
+
+**Why it matters**: Streams replaced the ceremonial for-loop for collection processing. Functional interfaces enabled callbacks and event handlers without anonymous class boilerplate. Optional forced explicit null-handling discipline. The Date/Time API replaced the broken, non-thread-safe `Calendar` class.
+
+**Key insight**: Lambdas are *not* compiled to anonymous inner classes (unlike Java 7 workarounds). They use `invokedynamic` bytecode instruction — the JVM defers the exact implementation to runtime via `LambdaMetafactory`, which can inline them more aggressively. This is why lambdas can be faster than anonymous classes in some benchmarks.
+
+---
+
+## 3. Core Principles
+
+- **Functional interface**: An interface with exactly one abstract method (`@FunctionalInterface`). The target type for a lambda.
+- **Lambda**: An anonymous function `(params) -> body` that can be assigned to a functional interface.
+- **Effectively final**: Local variables captured by a lambda must not be reassigned after capture — the compiler enforces this without requiring the `final` keyword.
+- **Stream laziness**: Intermediate operations (filter, map, etc.) don't execute until a terminal operation is called.
+- **Stateless operations**: Stream operations should not modify shared state or depend on outside mutation — enables parallel execution.
+- **Optional as a return type**: `Optional<T>` signals that a value may be absent. Never use it as a method parameter or field (Effective Java Item 55).
+
+---
+
+## 4. Types / Architectures / Strategies
+
+### 4.1 Core Functional Interfaces
+
+| Interface | Signature | Purpose |
+|-----------|-----------|---------|
+| `Function<T,R>` | `R apply(T t)` | Transform T to R |
+| `Predicate<T>` | `boolean test(T t)` | Filter: true/false |
+| `Supplier<T>` | `T get()` | Produce a value |
+| `Consumer<T>` | `void accept(T t)` | Consume a value |
+| `BiFunction<T,U,R>` | `R apply(T t, U u)` | Two inputs, one output |
+| `UnaryOperator<T>` | `T apply(T t)` | Function where T=R |
+| `BinaryOperator<T>` | `T apply(T a, T b)` | BiFunction where all same type |
+| `Runnable` | `void run()` | No input, no output |
+| `Callable<V>` | `V call() throws Exception` | Like Runnable but returns value |
+
+### 4.2 Method Reference Types
+
+| Syntax | Equivalent Lambda | Example |
+|--------|------------------|---------|
+| `ClassName::staticMethod` | `x -> ClassName.staticMethod(x)` | `Integer::parseInt` |
+| `instance::instanceMethod` | `x -> instance.method(x)` | `System.out::println` |
+| `ClassName::instanceMethod` | `(x, y) -> x.method(y)` | `String::toUpperCase` |
+| `ClassName::new` | `x -> new ClassName(x)` | `ArrayList::new` |
+
+### 4.3 Stream Operations
+
+| Category | Operations |
+|----------|-----------|
+| Intermediate (lazy) | `filter`, `map`, `flatMap`, `distinct`, `sorted`, `peek`, `limit`, `skip`, `mapToInt/Long/Double` |
+| Terminal (eager) | `collect`, `forEach`, `reduce`, `findFirst`, `findAny`, `anyMatch`, `allMatch`, `noneMatch`, `count`, `min`, `max`, `toArray` |
+| Short-circuit | `findFirst`, `findAny`, `anyMatch`, `allMatch`, `noneMatch`, `limit` |
+
+### 4.4 Key Collectors
+
+| Collector | Output | Example |
+|-----------|--------|---------|
+| `toList()` | `List<T>` | `stream.collect(toList())` |
+| `toSet()` | `Set<T>` | `stream.collect(toSet())` |
+| `toMap(k,v)` | `Map<K,V>` | `collect(toMap(Person::id, Person::name))` |
+| `groupingBy(f)` | `Map<K, List<V>>` | `collect(groupingBy(Person::dept))` |
+| `partitioningBy(p)` | `Map<Boolean, List<V>>` | `collect(partitioningBy(p -> p.age > 18))` |
+| `joining(delim)` | `String` | `collect(joining(", "))` |
+| `counting()` | `Long` | downstream: `groupingBy(dept, counting())` |
+| `summarizingInt(f)` | `IntSummaryStatistics` | min/max/avg/count/sum in one pass |
+
+---
+
+## 5. Architecture Diagrams
+
+### Stream Pipeline
+```mermaid
+flowchart LR
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    subgraph Pipeline["Lazy pipeline -- nothing runs until the terminal op"]
+        S(["List.stream()"]) --> F["filter(p -> p.active)\nlazy - no execution"]
+        F --> M["map(Person::getName)\nlazy - no execution"]
+        M --> SO["sorted()\nstateful - buffers all"]
+        SO --> L["limit(10)\nshort-circuit"]
+        L --> Coll(["collect(toList())\nTRIGGER: pipeline executes now"])
+    end
+
+    subgraph ShortCircuit["Short-circuit example"]
+        F2["filter(...)"] --> FF["findFirst()"]
+        FF -->|"match found"| Stop(["stop -- rest never processed"])
+    end
+
+    class S,Coll io
+    class F,M,F2 mathOp
+    class SO train
+    class L,FF lossN
+    class Stop base
+```
+Filter/map are lazy no-ops until `collect()` triggers the single fused pass; `findFirst()` short-circuits so elements after the first match are never visited.
+
+### Lambda vs Anonymous Class (Bytecode Level)
+```
+// Anonymous class (Java 7 style)
+Runnable r = new Runnable() {
+    public void run() { System.out.println("hello"); }
+};
+// Compiled to: HelloApp$1.class (separate .class file)
+// Allocates new object for each use
+
+// Lambda (Java 8)
+Runnable r = () -> System.out.println("hello");
+// Compiled to: invokedynamic + LambdaMetafactory
+// JVM can reuse same instance if no captured state (non-capturing lambda)
+// No new class file, potentially zero allocation
+```
+
+### Optional Correct Patterns
+```
+WRONG: Optional<String> opt = ...; String val = opt.get(); // NPE risk
+WRONG: Optional<String> opt = Optional.of(null);          // NPE immediately
+
+CORRECT:
+opt.isPresent() ? opt.get() : "default"   // explicit check (verbose)
+opt.orElse("default")                      // return default if absent
+opt.orElseGet(() -> computeDefault())      // lazy default (supplier)
+opt.orElseThrow(() -> new IllegalStateException("missing"))
+opt.map(String::toUpperCase)               // transform if present
+opt.filter(s -> s.startsWith("A"))        // filter if present
+opt.ifPresent(s -> process(s))            // consume if present
+```
+
+---
+
+## 6. How It Works — Detailed Mechanics
+
+### Lambda Capture and Effectively Final
+
+```java
+// Capturing effectively-final local variable
+String prefix = "Hello";  // effectively final - never reassigned
+Function<String, String> greet = name -> prefix + " " + name;  // OK
+
+// COMPILE ERROR: captured variable must be effectively final
+String greeting = "Hi";
+greeting = "Hello";  // reassignment after capture
+Function<String, String> f = name -> greeting + name;  // COMPILE ERROR
+
+// WORKAROUND: use array or AtomicReference for mutable capture
+AtomicInteger count = new AtomicInteger(0);
+list.forEach(item -> count.incrementAndGet());  // OK - count reference is final
+```
+
+### Default and Static Interface Methods
+
+Section 1 names these alongside lambdas for a reason: without them, adding `stream()` to
+`Collection` would have broken every implementation of it in existence. A `default` method
+carries a body on the interface, so the interface can grow without a source-incompatible
+change. A `static` interface method is a namespaced helper (`Comparator.comparing`,
+`Stream.of`) that no longer needs a companion `Collections`-style utility class.
+
+```java
+interface Greeter {
+    String name();                                        // abstract - the SAM
+    default String greet() { return "Hi " + name(); }     // has a body; inherited
+    static Greeter of(String n) { return () -> n; }       // NOT inherited by implementors
+}
+// Greeter stays a functional interface: default and static methods do not count
+// toward the "exactly one abstract method" rule, so the lambda above compiles.
+```
+
+Multiple inheritance of *behaviour* now exists, so the compiler needs a tie-break. Three
+rules, applied in order:
+
+```java
+interface A { default String name() { return "A"; } }
+interface B { default String name() { return "B"; } }
+interface C extends A { default String name() { return "C"; } }
+class Sup { public String name() { return "Sup"; } }
+
+class R1 extends Sup implements A { }   // 1. CLASS WINS      -> "Sup"
+class R2 implements C, A { }            // 2. MOST SPECIFIC   -> "C"
+class R3 implements A, B {              // 3. otherwise AMBIGUOUS: without this
+    @Override public String name() {    //    override, javac rejects R3 with
+        return A.super.name();          //    "inherits unrelated defaults for name()"
+    }                                   //    X.super.m() picks one explicitly
+}
+```
+
+Two consequences worth carrying: a concrete method inherited from a superclass silently
+beats a default, so adding a `default` to an interface can be a no-op on classes that
+already extend something; and static interface methods are **not** inherited — inside an
+implementor you must write `Greeter.of(...)`, never a bare `of(...)`.
+
+### flatMap vs map
+
+```java
+// map: one-to-one transformation, preserves structure
+List<String> words = List.of("hello world", "foo bar");
+List<String[]> arrays = words.stream()
+    .map(s -> s.split(" "))   // Stream<String[]>
+    .collect(toList());        // [[hello, world], [foo, bar]]
+
+// flatMap: one-to-many, flattens one level
+List<String> allWords = words.stream()
+    .flatMap(s -> Arrays.stream(s.split(" ")))  // Stream<String>
+    .collect(toList());  // [hello, world, foo, bar]
+
+// flatMap is monadic bind (M<M<T>> -> M<T>)
+// Essential for nested structures: Optional<Optional<T>> -> Optional<T>
+Optional<String> outer = Optional.of("value");
+Optional<String> result = outer.flatMap(s -> findSomething(s)); // avoids Optional<Optional>
+```
+
+### groupingBy Internal Mechanics
+
+```java
+// groupingBy(classifier) groups elements by the classifier's result
+// Internal behavior: creates HashMap, for each element:
+//   key = classifier.apply(element)
+//   value = list of matching elements (built via downstream collector)
+
+Map<String, List<Person>> byDept = people.stream()
+    .collect(Collectors.groupingBy(Person::getDepartment));
+
+// With downstream collector
+Map<String, Long> countByDept = people.stream()
+    .collect(Collectors.groupingBy(
+        Person::getDepartment,    // classifier
+        Collectors.counting()     // downstream
+    ));
+
+// Multi-level grouping
+Map<String, Map<String, List<Person>>> byDeptThenCity = people.stream()
+    .collect(groupingBy(Person::getDept, groupingBy(Person::getCity)));
+```
+
+### Lazy Evaluation and Short-Circuit
+
+```java
+// Only processes elements until condition met
+Optional<Person> firstSenior = people.stream()
+    .filter(p -> p.age > 60)     // doesn't run for all elements
+    .findFirst();                 // stops after first match
+
+// Worst case is still O(n) -- if no element matches, every element is tested.
+// The win is that it stops at the FIRST match: if matches are dense near the
+// head, the expected number of elements visited is far below n.
+// Caution: an upstream sorted() destroys this -- sorted() is a stateful
+// barrier that must consume the whole source before it can emit anything,
+// so findFirst() after sorted() always pays the full O(n log n).
+
+// peek() for debugging without changing pipeline
+long count = people.stream()
+    .peek(p -> System.out.println("Processing: " + p.name))  // for debugging
+    .filter(p -> p.active)
+    .peek(p -> System.out.println("Passed filter: " + p.name))
+    .count();
+```
+
+### Non-Interference and Stateless Behaviors
+
+The statelessness principle in Section 3 is a hard requirement of the Stream contract, not
+a style preference — the `java.util.stream` package spec states that a behavioural
+parameter must not modify the stream's data source, and that doing so "can cause
+exceptions, incorrect answers, or nonconformant behavior."
+
+```java
+List<String> names = new ArrayList<>(List.of("ann", "bob", "cy"));
+
+// INTERFERENCE: the lambda mutates the source while the pipeline is running.
+names.stream()
+     .filter(n -> n.length() < 3)
+     .forEach(names::remove);        // ConcurrentModificationException
+
+// FIX: produce a new collection; never write back into the source mid-pipeline.
+List<String> kept = names.stream()
+     .filter(n -> n.length() >= 3)
+     .collect(Collectors.toList());
+
+// LEGAL, and a useful distinction: mutating the source BEFORE the terminal op
+// is fine, because the spliterator is late-binding.
+List<String> l = new ArrayList<>(List.of("one", "two"));
+Stream<String> s = l.stream();
+l.add("three");                       // no terminal op has run yet
+String joined = s.collect(Collectors.joining(" "));   // "one two three"
+```
+
+A *stateful* behavioural parameter is the subtler failure: one whose result depends on
+state that can change while the pipeline runs. It does not throw — it silently returns
+different answers on different runs once the stream goes parallel.
+
+```java
+// STATEFUL: the result of map() depends on what other elements have been seen,
+// so the output depends on thread scheduling. Synchronizing the set does not help.
+Set<Integer> seen = Collections.synchronizedSet(new HashSet<>());
+stream.parallel().map(e -> seen.add(e) ? 0 : e);      // nondeterministic
+
+// Related rule: reduce() requires an ASSOCIATIVE accumulator, (a op b) op c ==
+// a op (b op c). Addition, min, max and string concatenation qualify; subtraction
+// does not, so a parallel reduce with (a, b) -> a - b returns a different answer
+// per run depending on how the range was split.
+
+// And: outside forEach/forEachOrdered, side-effects may be optimized away
+// entirely when the implementation can prove they do not affect the result.
+// forEach makes no encounter-order guarantee; forEachOrdered does.
+```
+
+### Function.andThen vs Function.compose
+
+```java
+// andThen: apply THIS function first, then the argument function
+// compose:  apply the argument function first, then THIS function
+// Mathematical: andThen = g ∘ f where f applied first; compose = f ∘ g where g applied first
+
+Function<Integer, Integer> times2  = x -> x * 2;
+Function<Integer, Integer> plus3   = x -> x + 3;
+
+// andThen: times2 THEN plus3
+Function<Integer, Integer> times2ThenPlus3 = times2.andThen(plus3);
+times2ThenPlus3.apply(5);  // (5 * 2) + 3 = 13
+
+// compose: plus3 FIRST, then times2 (argument applied first)
+Function<Integer, Integer> times2AfterPlus3 = times2.compose(plus3);
+times2AfterPlus3.apply(5);  // (5 + 3) * 2 = 16
+
+// Mnemonic: andThen reads left-to-right (times2 AND THEN plus3)
+//           compose reads right-to-left (math notation: f.compose(g) = f(g(x)))
+
+// Real example: input validation pipeline
+Function<String, String> trim       = String::trim;
+Function<String, String> upperCase  = String::toUpperCase;
+Function<String, String> addPrefix  = s -> "PREFIX_" + s;
+
+Function<String, String> pipeline = trim.andThen(upperCase).andThen(addPrefix);
+pipeline.apply("  hello  ");  // "PREFIX_HELLO"
+```
+
+### Primitive Streams — Performance Over Boxing
+
+```java
+// Stream<Integer> boxes every int -> Integer -> GC pressure, slower
+List<Integer> numbers = List.of(1, 2, 3, 4, 5);
+int sum1 = numbers.stream()
+    .map(x -> x * 2)          // produces Stream<Integer>, each int is boxed
+    .reduce(0, Integer::sum);  // unbox for sum -> rebox -> unbox -> ...
+
+// IntStream avoids boxing entirely — elements are primitive int
+int sum2 = numbers.stream()
+    .mapToInt(Integer::intValue)  // Stream<Integer> -> IntStream (unboxed)
+    .map(x -> x * 2)             // stays as int primitive
+    .sum();                       // IntStream.sum() - no boxing anywhere
+
+// IntStream.range for index-based iteration (replaces for loop in many cases):
+int[] squares = IntStream.range(0, 10)
+    .map(i -> i * i)
+    .toArray();  // int[] not Integer[]
+
+// Performance comparison (ILLUSTRATIVE shape, not a measurement from a published
+// run -- absolute times depend on JDK, hardware and whether escape analysis
+// removes the boxing; benchmark your own hot path with JMH).
+// 1M elements, simple map+sum:
+// Stream<Integer>.map().reduce()  ~85ms  (boxing/unboxing overhead)
+// IntStream.map().sum()           ~12ms  (7x faster — pure primitive ops)
+
+// LongStream and DoubleStream follow the same pattern.
+// Rule: whenever processing numeric data in a hot path,
+// use IntStream/LongStream/DoubleStream instead of Stream<Integer/Long/Double>.
+
+// mapToInt vs map:
+numbers.stream().map(x -> x + 1)       // returns Stream<Integer> (boxed)
+numbers.stream().mapToInt(x -> x + 1)  // returns IntStream (primitive)
+
+// Converting back to Stream<Integer> if needed:
+IntStream.of(1, 2, 3).boxed()  // IntStream -> Stream<Integer>
+```
+
+**Put simply.** "Divide both timings by the million elements that produced them and the benchmark says one thing: boxing costs about 73 nanoseconds per element, and that is the entire difference between the two pipelines."
+
+Framing it per element is what makes the rule actionable. The absolute numbers only apply to a 1M-element run; the 73 ns applies to *every* element you box, so you can price the choice for whatever size your hot path actually handles.
+
+| Symbol | What it is |
+|--------|------------|
+| `Stream<Integer>` | Each element is a heap-allocated `Integer` object; every arithmetic step unboxes and reboxes |
+| `IntStream` | Elements stay as bare 32-bit `int` values in the pipeline — no allocation, no indirection |
+| 1M elements | The benchmark's fixed workload; dividing wall time by it yields nanoseconds per element |
+| 7x | The stated ratio, which is the boxed cost divided by the primitive cost |
+
+**Walk one example.** The same map-and-sum over 1,000,000 elements:
+
+```
+                                  wall time    per element
+  Stream<Integer>.map().reduce()     85 ms        85 ns
+  IntStream.map().sum()              12 ms        12 ns
+
+  boxing tax    =  85 ns - 12 ns  =  73 ns per element
+  speedup       =  85 / 12        =  7.08x         (the stated "7x")
+
+  Price it for your own hot path:
+    10,000 elements   ->  10,000 x 73 ns  =   0.73 ms   (invisible)
+    1,000,000         ->  73 ms                          (a real p99 contributor)
+```
+
+The 73 ns is not spent on arithmetic — the `x * 2` is a single machine instruction either way. It is the allocation of a fresh `Integer`, the pointer chase to read its `value` field, and the garbage those million short-lived objects hand to the collector. That last part is why the effect shows up as GC pressure in a profiler rather than as time inside `map()`, and why the fix is a type change (`mapToInt`) rather than a faster lambda.
+
+---
+
+## 7. Real-World Examples
+
+- **Netflix**: Uses stream pipelines to process recommendation data — filter active content, map to recommendation scores, sort, and limit to top-N.
+- **Financial systems**: `groupingBy(transaction::getCurrency, summingDouble(Transaction::getAmount))` for multi-currency P&L aggregation.
+- **Spring Data**: `Optional` as the return type of `findById()` — forces callers to handle the case where an entity doesn't exist.
+- **Log processing**: `Files.lines(path).filter(l -> l.contains("ERROR")).collect(toList())` — lazy line processing.
+
+---
+
+## 8. Tradeoffs
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Stream vs for-loop | Expressive, composable, lazy | Harder to debug, overhead for small collections |
+| `Optional.orElseGet()` vs `orElse()` | `orElseGet()`: lazy (supplier) — avoids evaluating default when not needed | `orElse()` always evaluates the argument |
+| `parallelStream()` | Faster for large, CPU-bound, independent ops | Wrong for I/O, small data, non-associative ops, ordering |
+| `Stream.toList()` vs `collect(Collectors.toList())` | `Stream.toList()` (Java 16): unmodifiable, allows nulls, no collector allocation | `Collectors.toList()` gives no mutability guarantee at all (an `ArrayList` today, unspecified by contract); `Collectors.toUnmodifiableList()` (Java 10) is unmodifiable but rejects nulls |
+
+---
+
+## 9. When to Use / When NOT to Use
+
+**Use streams when**:
+- Processing collections of data with filter/map/reduce patterns
+- You want composable, readable pipelines
+- Working with `Files.lines()`, `IntStream.range()`, or other stream sources
+
+**Do NOT use streams when**:
+- The loop body has side effects or needs break/continue with complex conditions
+- Performance is critical and the collection is small (< ~100 elements, overhead noticeable in JMH)
+- You need index-based access (`IntStream.range()` helps but awkward)
+- Checked exceptions must propagate (streams don't support checked exceptions cleanly)
+
+**Use `Optional` when**:
+- A method might return no result (replace `null` returns in APIs)
+
+**Do NOT use `Optional` when**:
+- As a method parameter — use overloading instead
+- As a field in a class — not serializable, memory overhead
+- For collections — return empty collection instead
+
+---
+
+## 10. Common Pitfalls
+
+### War Story 1: Streams are consumed once
+A developer stored a `Stream<T>` in a field, used it twice. The second use threw `IllegalStateException: stream has already been operated upon or closed`. **Fix**: Streams are single-use pipelines. Store the `Collection`, not the `Stream`. Re-call `.stream()` each time.
+
+### War Story 2: `Optional.get()` without check
+Teams using `Optional` incorrectly called `opt.get()` without `isPresent()` — same NPE problem they were trying to avoid, just wrapped in `NoSuchElementException`. **Fix**: Never call `.get()` directly. Use `orElse()`, `orElseGet()`, `orElseThrow()`, or `map()`/`ifPresent()`.
+
+### War Story 3: Parallel stream on I/O
+A team wrapped a database-calling `map()` operation in `parallelStream()`, expecting speed improvement. Instead, all tasks blocked on I/O, starved the `ForkJoinPool.commonPool()` (which is shared across the JVM), and slowed every other parallel stream in the application. **Fix**: Parallel streams are for CPU-bound, non-blocking operations. Use `CompletableFuture` with a custom executor for I/O parallelism.
+
+### War Story 4: `toMap()` collision throws exception
+`Collectors.toMap(Person::getId, Person::getName)` throws `IllegalStateException: Duplicate key` if two persons have the same id. **Fix**: Always provide a merge function for production code: `toMap(Person::getId, Person::getName, (a, b) -> a)`.
+
+### War Story 5: sorted() is stateful — buffers entire stream
+`stream().sorted()` must see all elements before it can emit the first — it materializes the entire stream into memory. For large data sets this causes GC pressure. **Fix**: Sort the source collection before streaming, or use `limit()` with `sorted()` carefully.
+
+---
+
+## 11. Technologies & Tools
+
+| Tool | Purpose |
+|------|---------|
+| `java.util.stream.Stream` | Core stream API |
+| `java.util.function.*` | Functional interfaces |
+| `java.util.Optional` | Null-safe return type |
+| `java.time.*` | Date/Time API (LocalDate, ZonedDateTime, Duration, Period) |
+| `Collectors` | Built-in terminal reduction strategies |
+| IntelliJ IDEA | Stream trace debugger (shows each stage's elements) |
+
+---
+
+## 12. Interview Questions with Answers
+
+**Q1: What is a functional interface? How does `@FunctionalInterface` help?**
+**Short:** A functional interface has exactly one abstract method, and @FunctionalInterface enforces that at compile time.
+
+A functional interface has exactly one abstract method (SAM — Single Abstract Method). It is the target type for a lambda or method reference. `@FunctionalInterface` is a compile-time annotation that causes a compiler error if the interface has more than one abstract method, preventing accidental interface evolution that would break all existing lambdas. Examples: `Runnable`, `Callable`, `Comparator`, `Predicate`, `Function`.
+
+**Q2: How do lambdas differ from anonymous inner classes?**
+**Short:** Lambdas differ from anonymous classes in this binding, compilation mechanism, potential reuse, and lack of state.
+
+Four key differences: (1) `this` — inside a lambda, `this` refers to the enclosing instance; inside an anonymous class, `this` refers to the anonymous class instance. (2) No separate `.class` file — lambdas use `invokedynamic` + `LambdaMetafactory`; anonymous classes compile to separate `$N.class` files. (3) Non-capturing lambdas can be instance-reused by the JVM, reducing allocation. (4) Lambdas cannot have state (no fields); anonymous classes can.
+
+**Q3: What is the difference between `map()` and `flatMap()` in Streams?**
+**Short:** map() transforms one-to-one, while flatMap() transforms one-to-many and flattens the resulting streams.
+
+`map()` applies a one-to-one function: `Stream<T> → Stream<R>` where each element maps to exactly one result. `flatMap()` applies a one-to-many function: `Stream<T> → Stream<R>` where each element maps to a `Stream<R>`, and all streams are concatenated (flattened) into one. Think of `flatMap` as "map then flatten." It's the monadic bind operation — it removes one level of nesting: `Optional<Optional<T>>` → `Optional<T>` via `flatMap`.
+
+**Q4: What is lazy evaluation in streams, and why does it matter?**
+**Short:** Stream intermediate operations are lazy, executing only when a terminal operation triggers the pipeline.
+
+Intermediate operations (filter, map, peek) are lazy — they don't execute until a terminal operation is called. The pipeline is a description of transformations, not the execution. This matters because: (1) Short-circuit operations (`findFirst`, `anyMatch`, `limit`) can stop processing early — e.g., `findFirst()` processes only enough elements to find one, not all. (2) Stateful operations (`sorted`, `distinct`) must materialize the stream but only when forced. (3) No unnecessary computation for elements filtered out early.
+
+**Q5: Why should Optional NOT be used as a method parameter?**
+**Short:** Optional shouldn't be a method parameter because it forces callers to wrap values and obscures intent.
+
+Using `Optional` as a parameter forces the caller to wrap their value in `Optional.of()` or `Optional.empty()` — awkward and verbose. It also obscures intent (does `null` mean "not provided" or is it a bug?). The correct patterns are: use method overloading (one method with the parameter, one without), or use a null check with `Objects.requireNonNull()`. `Optional` is designed purely as a return type to signal "this method may return nothing."
+
+**Q6: What are intermediate vs terminal operations? Give examples of each.**
+**Short:** Intermediate stream operations are lazy and return a Stream; terminal operations are eager and produce a result.
+
+Intermediate operations are lazy, return a new `Stream`, and don't trigger computation: `filter`, `map`, `flatMap`, `distinct`, `sorted`, `peek`, `limit`, `skip`. Terminal operations are eager, trigger the pipeline, and produce a non-stream result or side effect: `collect`, `forEach`, `reduce`, `count`, `min`, `max`, `findFirst`, `findAny`, `anyMatch`, `allMatch`, `noneMatch`, `toArray`. A pipeline must end with exactly one terminal operation.
+
+**Q7: How does `groupingBy()` work internally?**
+**Short:** groupingBy() iterates elements, classifies each into a key, and inserts them into value lists in a HashMap.
+
+`groupingBy(classifier)` is equivalent to: iterate elements, apply classifier to get a key, insert element into the value list for that key in a `HashMap`. Internally it uses `HashMap<K, List<T>>` with a downstream collector (default: `toList()`). The combiner function is used for parallel streams to merge partial maps. For `counting()` as downstream: instead of `List`, it tracks `Long` counts, making it `Map<K, Long>`.
+
+**Q8: When should you avoid streams and prefer a regular for-loop?**
+**Short:** Prefer a for-loop over streams for hot paths with tiny collections or complex control flow like break and continue.
+
+(1) Hot paths with very small collections — stream pipeline overhead (lambda dispatch, boxing for primitives) can dominate. (2) Complex control flow requiring `break`, `continue`, or checked exception propagation. (3) Multiple side effects or mutations needed per element. (4) Code that's clearer as imperative (sometimes a for-loop is simply more readable). Rule of thumb: for collections under ~50 elements in hot paths, measure with JMH — streams are often comparable but occasionally slower.
+
+**Q9: What is the difference between `orElse()` and `orElseGet()`?**
+**Short:** orElse() always evaluates its argument, while orElseGet() only invokes its supplier when the Optional is empty.
+
+`orElse(T value)` always evaluates the argument, even if the Optional is present — if computing the default is expensive (DB call, object creation), you pay the cost every time. `orElseGet(Supplier<T> supplier)` only invokes the supplier when the Optional is empty — lazy evaluation. Rule: use `orElseGet()` whenever the default is computationally expensive or has side effects.
+
+**Q10: How do method references compile, and what are their four types?**
+**Short:** Method references compile to the same invokedynamic mechanism as lambdas, in four distinct reference forms.
+
+Method references compile to the same `invokedynamic` mechanism as lambdas. The four types: (1) `ClassName::staticMethod` → `args -> ClassName.staticMethod(args)`. (2) `instance::instanceMethod` → `args -> instance.method(args)` (captures `instance`). (3) `ClassName::instanceMethod` → `(instance, args) -> instance.method(args)` (receiver is first argument). (4) `ClassName::new` → `args -> new ClassName(args)` (constructor reference). The compiler infers which functional interface type the method reference matches.
+
+**Q11: Explain the Date/Time API and why it replaced Calendar.**
+**Short:** java.time replaced Date and Calendar because those were mutable, thread-unsafe, and had a confusing API design.
+
+`java.util.Date` and `Calendar` had three critical flaws: mutable (not thread-safe), poor API design (month is 0-indexed, confusing methods), and no separation of concepts. `java.time.*` (JSR-310): `LocalDate` (no time, no timezone), `LocalTime` (no date, no timezone), `LocalDateTime`, `ZonedDateTime` (with timezone), `Instant` (a point on the UTC timeline, stored as epoch seconds plus a nanosecond-of-second field), `Duration` (time-based), `Period` (date-based). All immutable. Parseable with `DateTimeFormatter`. Operations like `plusDays()`, `minusMonths()` return new instances. Use `Instant` for timestamps, `LocalDate` for business dates, `ZonedDateTime` for user-facing times with timezone.
+
+**Q12: What is the effectively-final requirement for lambda captures, and why does Java require it?**
+**Short:** Java requires captured lambda variables to be effectively final because a lambda can outlive its enclosing method.
+
+A variable captured by a lambda must be effectively final — either explicitly `final` or never reassigned after initialization. Java requires this because lambdas can outlive the method that created them (e.g., submitted to a thread pool). If a local variable could be mutated after capture, the lambda might see a stale value (the lambda gets a copy of the primitive/reference, not a live view). Making captured variables final ensures the semantics are clear: the lambda sees the value at capture time, forever. For mutable state, use `AtomicInteger`, `AtomicReference`, or an array of size 1.
+
+**Q13: What is the difference between `Function.andThen()` and `Function.compose()`?**
+**Short:** andThen applies the current function first then the argument; compose applies the argument function first.
+
+`andThen(g)` returns a function that applies `this` first, then `g`: result is `g(f(x))` where `f` is `this`. `compose(g)` returns a function that applies `g` first, then `this`: result is `f(g(x))`. Mnemonic: `andThen` reads left-to-right — "do f, AND THEN do g." `compose` reads right-to-left — mathematical function composition `f ∘ g`. Example: `trim.andThen(toUpperCase)` → trim first, then uppercase. `toUpperCase.compose(trim)` → same result. They differ in which function is "outer": `andThen` makes the argument the outer function; `compose` makes `this` the outer function.
+
+**Q14: Why prefer `IntStream` over `Stream<Integer>` in performance-critical paths?**
+**Short:** IntStream avoids boxing every primitive into a heap-allocated Integer, unlike Stream<Integer>.
+
+`Stream<Integer>` requires boxing every primitive `int` into a heap-allocated `Integer` object. For 1M integers: 1M `Integer` allocations, GC pressure from short-lived objects, and CPU time for boxing/unboxing at every operation. `IntStream` stores elements as bare `int` primitives — no boxing, no heap allocation, cache-friendly. The measured gap varies with JDK version, hardware, and whether escape analysis manages to scalarise the boxes, so treat any single multiplier as a benchmark of that setup rather than a constant; the direction is reliable, the magnitude is not. The standard library provides `IntStream`, `LongStream`, and `DoubleStream` for this reason. Always use `mapToInt()`/`mapToLong()`/`mapToDouble()` to convert to primitive streams when processing numbers.
+
+**Q15: What is the difference between `Optional.of()`, `Optional.ofNullable()`, and `Optional.empty()`, and what are the anti-patterns for `Optional` usage?**
+**Short:** Optional.of() throws on null while ofNullable() wraps null as empty, and calling get() unchecked is the top anti-pattern.
+
+`Optional.of(value)` throws `NullPointerException` if `value` is null — use when you know the value is non-null and want to fail-fast. `Optional.ofNullable(value)` wraps null as `Optional.empty()` — use when the value may legitimately be null. `Optional.empty()` returns the canonical empty instance (a singleton). Common anti-patterns: (1) **Using `Optional.get()` without `isPresent()` check** — throws `NoSuchElementException`, defeating the purpose; use `orElse()`, `orElseGet()`, or `orElseThrow()` instead. (2) **`Optional` as a method parameter** — forces callers to wrap values; use overloading or nullable parameters. (3) **`Optional` as a field** — `Optional` is not `Serializable`, making the class non-serializable; use nullable field with a `getX()` returning `Optional`. (4) **Unnecessary `isPresent()` + `get()`** — use `map()`/`flatMap()` for transformations. The canonical use case for `Optional` is as a return type for a method that may have no result, explicitly communicating the absence to the caller.
+
+**Q16: What do "non-interfering" and "stateless" mean for stream behavioral parameters, and what breaks when you violate them?**
+**Short:** Violating stream non-interference throws ConcurrentModificationException; violating statelessness silently breaks parallel results.
+
+Non-interfering means the lambda must not modify the stream's data source while the pipeline is running; stateless means its result must not depend on state that can change during execution. Violating non-interference on a non-concurrent source is the loud failure: `list.stream().filter(...).forEach(list::remove)` throws `ConcurrentModificationException`, because the spliterator is fail-fast. Mutating the source *before* the terminal operation is legal, since spliterators are late-binding — add to the list after calling `.stream()` but before `.collect()` and the addition is included. Violating statelessness is the quiet failure: a lambda that consults a shared `Set` of already-seen elements returns different results run to run once the stream is parallel, and synchronizing the set does not fix it because the nondeterminism is in the *split order*, not in the data structure. The same family of rules covers `reduce`, whose accumulator must be associative — `(a, b) -> a - b` gives a different answer per run in parallel because the result depends on how the range was split. Practical guidance: never write back into the source, accumulate with a `Collector` rather than a captured mutable collection, and reserve side-effects for `forEach`/`forEachOrdered`, since every other operation is allowed to optimize its behavioral parameter away when the result would not change.
+
+**Q17: Why were default methods added in Java 8, and how does the compiler resolve a class that inherits two conflicting defaults?**
+**Short:** Default methods let an interface add a method without breaking implementors, resolved by three override-precedence rules.
+
+Default methods exist so an interface can gain a method without breaking every existing implementor — `Collection.stream()` could not have shipped otherwise. A `default` method carries a body on the interface; a `static` interface method is a namespaced helper and is not inherited at all, so an implementor must call `Greeter.of(...)`, not a bare `of(...)`. Neither counts toward the single-abstract-method rule, so an interface with defaults can still be a lambda target. When a type inherits the same signature from more than one place the compiler applies three rules in order: (1) a concrete method inherited from a **superclass wins** over any interface default, which is why adding a default to an interface is silently a no-op for classes that already extend something; (2) otherwise the **most specific interface wins** — a default on a sub-interface overrides the one on its super-interface; (3) if neither rule breaks the tie the class is rejected with "inherits unrelated defaults", and you must override the method, optionally delegating with the qualified form `A.super.name()`. Note that defaults give multiple inheritance of *behaviour* only — interfaces still cannot declare instance state, which is what keeps the diamond problem tractable.
+
+---
+
+## 13. Best Practices
+
+1. **Use `Collectors.toUnmodifiableList()` or `Stream.toList()` (Java 16)** for read-only results.
+2. **Prefer `orElseGet()` over `orElse()` for expensive defaults** — avoid unnecessary computation.
+3. **Never use `parallelStream()` without benchmarking** — it uses ForkJoinPool.commonPool() shared across JVM.
+4. **Use `IntStream`/`LongStream`/`DoubleStream`** for numeric processing to avoid boxing overhead.
+5. **Add `@FunctionalInterface` annotation** to all custom single-method interfaces.
+6. **Use method references over lambdas** when the lambda is just a single method call — more readable.
+7. **Keep stream pipelines short and readable** — extract complex lambdas to named methods for testability.
+8. **Provide merge function to `toMap()`** to handle duplicate keys gracefully.
+9. **Use `Stream.of()` for small, known elements** and `list.stream()` for collections.
+10. **Replace `new Date()` / `Calendar.getInstance()` with `Instant.now()`** in all new code.
+
+---
+
+## 14. Case Study
+
+### Rewriting a User-Profile ETL from Imperative Loops to Streams + Optional
+
+**Scenario.** A user-profile service ingests **10M profile records/day** (~115 records/sec sustained, ~2,000/sec peak during nightly batch). The legacy enrichment job is a 200-line imperative ETL: nested `for` loops, manual null checks at every level (`profile -> address -> city -> zipCode`), and a hand-rolled `HashMap` grouping by country. It throws ~4,000 `NullPointerException`s/day (profiles with partial addresses) which abort whole batches, forcing reruns. The rewrite to Java 8 (LTS) Streams + Optional eliminates the NPEs and cuts the code to ~40 lines.
+
+```
+Sustained rate = 10M/day / 86,400    <- seconds in a day, converts a daily figure to a rate
+```
+
+**What this actually says.** "Ten million records a day is a small number pretending to be a big one — spread across 86,400 seconds it is 115 records/sec, so nothing here is throughput-bound; the failure rate is what makes it a problem."
+
+Converting a daily volume to a per-second rate before designing anything is the habit worth taking from this. It tells you immediately that stream overhead is irrelevant at this scale, and redirects the whole rewrite toward correctness — which is exactly where the payoff turned out to be.
+
+| Symbol | What it is |
+|--------|------------|
+| 10M/day | Daily record volume, the number the business quotes |
+| 86,400 | Seconds in a day (24 x 60 x 60) — the divisor that turns a daily figure into a rate |
+| Sustained rate | Records/sec if arrivals were perfectly even; the floor the system must always handle |
+| Peak rate | The stated 2,000/sec nightly-batch burst — what the system must actually be sized for |
+| 4,000 NPEs/day | Malformed records, expressed as a rate they can be compared against |
+
+**Walk one example.** The stated volumes, reduced to rates and a failure fraction:
+
+```
+  sustained   =  10,000,000 / 86,400        =   115.7 records/sec
+  peak        =  (stated)                       2,000 records/sec
+  burst ratio =  2,000 / 115.7              =    17.3x over sustained
+
+  failure fraction:
+    4,000 NPEs / 10,000,000 records         =  0.0004  =  0.04% of records
+
+  What that 0.04% costs before the rewrite:
+    each NPE aborts the whole batch, so 4 malformed records in 10,000
+    force a full rerun -- the blast radius is 100% of the run, not 0.04%.
+```
+
+That last line is the entire case for the rewrite. A 0.04% data-quality rate is unremarkable and will never go to zero; the defect was that the code let a per-record fault escalate to a per-batch failure. The `Optional` chain does not fix the data — it converts each of those 4,000 faults into one `"UNKNOWN"` field, so the blast radius drops from 10,000,000 records to 1.
+
+```mermaid
+flowchart TD
+    classDef io      fill:#61afef,stroke:#2e86c1,color:#1a1a1a,font-weight:bold
+    classDef frozen  fill:#c678dd,stroke:#9b59b6,color:#fff
+    classDef train   fill:#98c379,stroke:#27ae60,color:#1a1a1a
+    classDef mathOp  fill:#d19a66,stroke:#e67e22,color:#1a1a1a,font-weight:bold
+    classDef lossN   fill:#e06c75,stroke:#c0392b,color:#fff,font-weight:bold
+    classDef req     fill:#56b6c2,stroke:#0097a7,color:#1a1a1a
+    classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
+
+    Recs(["10M records/day"]) --> Read["read"] --> St(["Stream&lt;Profile&gt;"])
+    St --> MapOp["map: Optional chain\nprofile -> address -> city -> zipCode\nnever throws NPE; missing levels -> Optional.empty()"]
+    MapOp --> FilterOp["filter: keep valid, enrichable profiles"]
+    FilterOp --> CollectOp["collect: groupingBy(country)\n-> Map&lt;Country, List&lt;EnrichedProfile&gt;&gt;"]
+    CollectOp --> Sink(["downstream sink"])
+
+    class Recs req
+    class Read,MapOp,FilterOp mathOp
+    class St io
+    class CollectOp train
+    class Sink base
+```
+
+#### Null-safe nested access with chained Optional
+
+```java
+record Address(String city, String zipCode) {}
+record Profile(String userId, Address address, String country) {}
+
+// BROKEN (legacy): pyramid of null checks; one missed branch = NPE that aborts batch
+String zip;
+if (profile != null && profile.address() != null
+        && profile.address().city() != null) {
+    zip = profile.address().zipCode();      // still NPE if address present but zip null
+} else {
+    zip = "UNKNOWN";
+}
+```
+
+```java
+// FIX: flat Optional chain. Any missing link short-circuits to the default.
+String zip = Optional.ofNullable(profile)
+        .map(Profile::address)
+        .map(Address::zipCode)
+        .filter(z -> !z.isBlank())
+        .orElse("UNKNOWN");           // never throws, never returns null
+```
+
+#### Grouping 10M records by country in one pass
+
+```java
+Map<String, List<Profile>> byCountry = profiles.stream()
+        .filter(p -> p.address() != null)              // enrichable only
+        .collect(Collectors.groupingBy(
+                p -> Optional.ofNullable(p.country()).orElse("UNKNOWN"),
+                Collectors.toList()));
+
+// Or a count histogram in the same idiom. Note the classifier must still
+// normalise null: groupingBy calls Objects.requireNonNull on every key and
+// throws NullPointerException("element cannot be mapped to a null key") the
+// first time a profile has no country -- the exact batch abort this rewrite
+// exists to remove.
+Map<String, Long> countByCountry = profiles.stream()
+        .collect(Collectors.groupingBy(
+                p -> Optional.ofNullable(p.country()).orElse("UNKNOWN"),
+                Collectors.counting()));
+```
+
+The 200-line imperative ETL collapses to a single declarative pipeline. JMH on a representative 1M-record slice showed the Stream version within ~5% of the hand-tuned loop (the JIT inlines the lambdas), while eliminating the entire class of NPE batch aborts — the operational win dwarfs the micro-benchmark difference.
+
+#### The full enrichment pipeline, end to end
+
+```java
+record EnrichedProfile(String userId, String country, String zip, String tier) {}
+
+List<EnrichedProfile> enriched = profiles.stream()
+        .filter(p -> p.address() != null)                      // drop un-enrichable
+        .map(p -> new EnrichedProfile(
+                p.userId(),
+                Optional.ofNullable(p.country()).orElse("UNKNOWN"),
+                Optional.ofNullable(p.address())               // chained Optional, no NPE
+                        .map(Address::zipCode)
+                        .filter(z -> !z.isBlank())
+                        .orElse("UNKNOWN"),
+                tierFor(p)))                                   // pure function, easily testable
+        .collect(Collectors.toList());
+```
+
+Each stage is independently unit-testable, and the missing-data handling is uniform: a null at any level of the address chain collapses to `"UNKNOWN"` instead of aborting the batch. Before the rewrite, a single malformed record killed the whole 10M-record run; now it produces one `UNKNOWN`-filled row.
+
+#### Aggregating with `Collectors` downstream collectors
+
+```java
+// Average zip-completeness per country in one declarative pass.
+Map<String, Double> completenessByCountry = enriched.stream()
+        .collect(Collectors.groupingBy(
+                EnrichedProfile::country,
+                Collectors.averagingDouble(e -> e.zip().equals("UNKNOWN") ? 0.0 : 1.0)));
+```
+
+### Common Pitfalls (production war stories)
+
+**1. `Optional.get()` without a presence check.** A developer wrote `findFirst().get()` to fetch a "primary" address. For users with no address it threw `NoSuchElementException`, aborting the batch — the exact failure mode Optional was meant to remove.
+
+```java
+Address a = list.stream().filter(Address::isPrimary).findFirst().get();   // BROKEN
+Address a = list.stream().filter(Address::isPrimary).findFirst()
+                .orElse(Address.empty());                                 // FIX
+```
+
+**2. `parallel()` on an I/O-bound stage.** Someone parallelized the enrichment stage, which made a blocking REST call per record. All tasks ran on the shared common `ForkJoinPool` (size = cores - 1, ~7 threads), so the unrelated nightly report stream — also using the common pool — starved and missed its SLA. Fix: keep I/O off the common pool; use a dedicated `ExecutorService` or `CompletableFuture` with your own pool.
+
+**The idea behind it.** "The common pool is sized for CPUs, not for waiting — `cores - 1` threads is exactly enough to keep every core busy and nowhere near enough to absorb even a handful of blocking calls."
+
+The sizing rule is the whole explanation for the outage. Once you know the pool is 7 threads wide on this box and is shared by every `parallelStream()` in the JVM, "8 blocking REST calls" and "the entire application's parallel work stops" become the same sentence.
+
+| Symbol | What it is |
+|--------|------------|
+| `cores - 1` | The common pool's default parallelism; the calling thread joins in and does work too, so the total is back to one worker per core |
+| Common pool | A single JVM-wide static instance — every `parallelStream()` anywhere in the process shares these threads |
+| CPU-bound task | Holds a thread only while it computes; more threads than cores would just add context switches |
+| Blocking task | Holds a thread while it computes *nothing*, which is what the sizing rule assumes never happens |
+
+**Walk one example.** The 8-core box in this war story:
+
+```
+  cores                         8
+  common pool parallelism  =  8 - 1  =  7 worker threads
+  plus the calling thread            =  8 effective workers
+
+  CPU-bound work: 8 workers saturate 8 cores.        Sizing is correct.
+
+  Blocking work, ~7 concurrent REST calls in flight:
+    workers busy waiting            7 of 7
+    workers left for everything     0
+    cores actually doing work       ~0
+    nightly report stream           queued behind them -> missed SLA
+```
+
+Seven is not a small pool for its intended job — it is the right size for work that never waits. The rule breaks the moment a task blocks, because a blocked worker occupies a slot while contributing nothing to the core it was sized for. That is why the fix is a separate pool rather than a bigger common one: raising `java.util.concurrent.ForkJoinPool.common.parallelism` would hide this instance and leave the next blocking caller to rediscover it.
+
+**3. `Collectors.toMap()` throwing on duplicate keys.** Grouping profiles into `toMap(Profile::userId, p -> p)` threw `IllegalStateException: Duplicate key` because a few user IDs appeared twice in a day's feed.
+
+```java
+.collect(Collectors.toMap(Profile::userId, p -> p));                     // BROKEN on dup
+.collect(Collectors.toMap(Profile::userId, p -> p, (a, b) -> b));        // FIX: merge fn
+```
+
+**4. Nested stream inside a parallel stream.** An inner `inner.parallelStream()` nested within an outer `outer.parallelStream()` flooded the common pool with re-entrant tasks, causing thread-starvation deadlock-like stalls. Keep at most one level of parallelism; make the inner stream sequential.
+
+### Interview Discussion Points
+
+**When should you NOT use `parallel()`?** When the work is I/O-bound, the dataset is small (< ~10k elements), the per-element cost is tiny, or the pipeline is stateful/order-dependent. Parallel streams use the shared common ForkJoinPool, so blocking tasks there harm every other parallel stream in the JVM.
+
+**Is `Optional` meant for fields and method parameters?** No (Effective Java Item 55). It is designed for return types where "no result" is a normal outcome. As a field it adds an allocation and serialization headaches; as a parameter it just pushes null-handling to the caller.
+
+**Why does `Collectors.toMap` throw on duplicates but `groupingBy` does not?** `toMap` produces one value per key and has no defined way to combine collisions unless you supply a merge function. `groupingBy` accumulates all values for a key into a downstream collector, so duplicates are expected and handled by design.
+
+**What is the difference between `map` and `flatMap` on Optional?** `map` wraps the result: `Optional<Optional<T>>` if the mapper returns an Optional. `flatMap` flattens one level, so chaining methods that themselves return `Optional` uses `flatMap` to avoid nesting.
+
+**Why did the imperative version throw NPEs the Stream version avoids?** Each `Optional.map` step internally checks presence before invoking the next mapper and short-circuits to `empty()` on any null. The pyramid of manual `!= null` checks is easy to get partially wrong (e.g. checking `address` but not `zipCode`); the chain makes the null-propagation uniform and total.
+
+**What is the difference between `orElse` and `orElseGet`?** `orElse(x)` always evaluates `x`, even when the Optional is present, so a costly default is computed needlessly. `orElseGet(supplier)` invokes the supplier only on absence. Use `orElseGet` whenever the default is expensive or has side effects.
+
+**Why is `averagingDouble`/`summingDouble` preferable to mapping then averaging manually?** The downstream collector folds each element directly into the running aggregate in a single traversal, avoiding an intermediate collection and keeping the operation parallel-safe via the collector's combiner.
+
+**Does the Stream rewrite hurt throughput at 10M records/day?** No meaningfully — at ~115 records/sec sustained the bottleneck is I/O and downstream calls, not stream overhead, and JMH showed the in-memory transform within ~5% of a hand loop. The correctness and readability gains dominate, which is the typical real-world tradeoff for Java 8 stream adoption.
+
+---
+
+## Related / See Also
+
+- [Java Streams — Deep Dive](../java_streams/java_streams.md) — full stream internals, Spliterator, parallel splitter mechanics
+- [Functional Programming](../functional_programming/functional_programming.md) — function composition, custom Collectors, memoization
+- [Java 9–21 Features](../java9_to_21_features/java9_to_21_features.md) — records, sealed classes, virtual threads building on Java 8 foundations
+
+**When would you keep an imperative loop instead?** For tight numeric inner loops where you need fine control over allocation and early-exit, or where a stream's lambda capture and boxing would add overhead the JIT cannot remove. Profile with JMH before assuming streams are slower — they usually are not for I/O-bound ETL.

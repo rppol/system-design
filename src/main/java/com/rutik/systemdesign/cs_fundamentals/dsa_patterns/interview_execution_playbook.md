@@ -2,7 +2,7 @@
 
 ## Purpose & How to Use This Playbook
 
-[dsa_patterns/README.md](README.md) §1 and §9 give you the **compressed**
+[dsa_patterns/README.md](dsa_patterns.md) §1 and §9 give you the **compressed**
 cheat-sheet: the UMPIRE stages, the 5-minute opening ritual, and a quick
 "what to say when stuck" table. This file is the **expanded** version —
 read it once, slowly, before your first mock interview, then return to the
@@ -30,7 +30,7 @@ that difference is the entire signal an interviewer has to work with.
 
 ## 1. UMPIRE — Deep Dive
 
-Each phase below expands on [README §1](README.md#1-the-universal-problem-solving-method--umpire)
+Each phase below expands on [README §1](dsa_patterns.md#1-the-universal-problem-solving-method--umpire)
 with: the **goal**, **what strong execution sounds like**, and the **failure
 modes** that cost candidates the most signal.
 
@@ -107,7 +107,7 @@ pattern needs, and state a target complexity — **before** writing any code.
   are Y, and I need [BFS/DFS/Dijkstra] because Z."
 - **Anchoring on the first pattern that "sort of" fits** — if your stated
   complexity doesn't match what `n`'s constraint demands (see
-  [README §3](README.md#3-constraints--complexity--pattern-inference)), say
+  [README §3](dsa_patterns.md#3-constraints--complexity--pattern-inference)), say
   so out loud and re-match: "Actually, with `n <= 10^5`, O(n^2) won't pass —
   let me reconsider."
 - **Silently picking a pattern** — the interviewer cannot grade reasoning
@@ -313,7 +313,7 @@ signals you have time-management awareness.
 
 ## 4. "What to Say When Stuck" — Expanded
 
-[README §9](README.md#9-interview-execution-quick-reference) gives the
+[README §9](dsa_patterns.md#9-interview-execution-quick-reference) gives the
 compressed table. Here is the same decision tree with example phrases for
 each branch — the goal is to never sit in silence for more than ~30 seconds.
 
@@ -712,16 +712,16 @@ pattern's Problem Bank).
 
 ## 8. Cross-Links
 
-- [dsa_patterns/README.md](README.md) — §1 (UMPIRE compressed), §3
+- [dsa_patterns/README.md](dsa_patterns.md) — §1 (UMPIRE compressed), §3
   (constraints->complexity table), §4 (cue->pattern table), §9 (quick
   reference); this playbook is the expanded companion
 - [dsa_patterns/study_plans.md](study_plans.md) — once you can execute
   UMPIRE smoothly, use the study plan to drill problems in a structured
   order
-- [recursion_and_problem_solving_patterns/](../recursion_and_problem_solving_patterns/README.md)
+- [recursion_and_problem_solving_patterns/](../recursion_and_problem_solving_patterns/recursion_and_problem_solving_patterns.md)
   §8 "Pattern Selection Guide" — the original seed of the pattern-matching
   skill this playbook assumes
-- [case_studies/](../case_studies/README.md) — full single-problem
+- [case_studies/](../case_studies/case_studies.md) — full single-problem
   walkthroughs that model the depth of explanation expected in §1's Plan
   and Review phases
 

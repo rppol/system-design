@@ -1,6 +1,6 @@
 # Roofline & Arithmetic Intensity
 
-Cross-cutting reference for the `cuda/` case studies — [`case_studies/README.md`](../README.md) lists this as the file to read **before any optimization pass**: it is the lens every kernel-optimization ladder in this section is read through (naive → coalesced → tiled → register-blocked → Tensor Core). This is a focused primitive, not a 14-section module or an 11-section case study, and it carries no Q&A floor (`case_studies/` is excluded from `extract.py`).
+Cross-cutting reference for the `cuda/` case studies — [`case_studies/README.md`](../case_studies.md) lists this as the file to read **before any optimization pass**: it is the lens every kernel-optimization ladder in this section is read through (naive → coalesced → tiled → register-blocked → Tensor Core). This is a focused primitive, not a 14-section module or an 11-section case study, and it carries no Q&A floor (`case_studies/` is excluded from `extract.py`).
 
 ---
 
@@ -227,6 +227,6 @@ The loop is deliberately the same shape every time: **measure, classify, apply t
 ## Related Files
 
 - [`../../../llm/optimization_and_quantization/gpu_architecture_and_roofline.md`](../../../llm/optimization_and_quantization/gpu_architecture_and_roofline.md) — same model, different question: roofline as a lens on transformer *inference cost* (batching, quantization, prefill/decode economics), not the per-kernel optimization loop this file covers. Read that file for the "why is decode expensive" argument; read this one for "which lever do I pull on this kernel."
-- [`../../occupancy_and_launch_configuration/README.md`](../../occupancy_and_launch_configuration/README.md) — occupancy is the latency-hiding axis this file repeatedly warns is orthogonal to arithmetic intensity; that module covers how to tune it.
-- [`../../memory_coalescing_and_access_patterns/README.md`](../../memory_coalescing_and_access_patterns/README.md) — the mechanism behind the "theoretical vs. achieved AI" gap: uncoalesced access is *why* measured DRAM bytes exceed the hand count.
+- [`../../occupancy_and_launch_configuration/README.md`](../../occupancy_and_launch_configuration/occupancy_and_launch_configuration.md) — occupancy is the latency-hiding axis this file repeatedly warns is orthogonal to arithmetic intensity; that module covers how to tune it.
+- [`../../memory_coalescing_and_access_patterns/README.md`](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md) — the mechanism behind the "theoretical vs. achieved AI" gap: uncoalesced access is *why* measured DRAM bytes exceed the hand count.
 - [`nsight_profiling_workflow.md`](nsight_profiling_workflow.md) — the general profile -> fix -> re-measure loop this file's Optimization Playbook is one instance of.

@@ -1,5 +1,5 @@
 # Positional Encoding — Deep Dive
-> This file is a deep-dive sub-file of the [Foundations & Architecture](README.md) module.
+> This file is a deep-dive sub-file of the [Foundations & Architecture](foundations_and_architecture.md) module.
 > It covers positional encoding mathematical derivations, RoPE, ALiBi, YaRN, NTK-aware scaling,
 > and context extension techniques.
 > The parent README covers these at a survey level; this file provides full derivations.
@@ -443,7 +443,7 @@ attended early tokens. These are the paper's own GPT-3.5-Turbo numbers — accur
 end. The dip is model-dependent: Claude-1.3 in the same table is nearly flat (59.9 / 55.9 / 56.8
 / 57.2 / 60.1). Practical fix: place key facts at the very beginning or very end of context, and
 train with data that explicitly requires middle retrieval to flatten the curve — see
-[Context Engineering](../context_engineering/README.md) for placement strategies that exploit
+[Context Engineering](../context_engineering/context_engineering.md) for placement strategies that exploit
 this curve.
 
 ---

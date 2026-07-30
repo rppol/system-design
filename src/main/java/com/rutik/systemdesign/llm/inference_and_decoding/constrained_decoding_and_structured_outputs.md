@@ -1,5 +1,5 @@
 # Constrained Decoding & Structured Outputs — Internals
-Deep-dive sub-file of [Inference & Decoding](README.md). Covers how guided decoding actually works — logit masking, FSM/CFG compilation, XGrammar and llguidance internals, jump-forward decoding, provider "structured outputs" features — plus the quality tradeoffs and failure modes.
+Deep-dive sub-file of [Inference & Decoding](inference_and_decoding.md). Covers how guided decoding actually works — logit masking, FSM/CFG compilation, XGrammar and llguidance internals, jump-forward decoding, provider "structured outputs" features — plus the quality tradeoffs and failure modes.
 
 ---
 
@@ -563,8 +563,8 @@ The mean was off by 3.5% but the tail was off by **187×** — 4,800 documents t
 
 ## Related
 
-- [Inference & Decoding README](README.md) — sampling, KV cache, speculative decoding
+- [Inference & Decoding README](inference_and_decoding.md) — sampling, KV cache, speculative decoding
 - [Structured Outputs & Instructor](../agentic_frameworks/structured_outputs_and_instructor.md) — the client-library/retry side
-- [vLLM Deep Dive](../vllm_deep_dive/README.md) — guided decoding backends in the serving stack
+- [vLLM Deep Dive](../vllm_deep_dive/vllm_deep_dive.md) — guided decoding backends in the serving stack
 - [Function Calling & Tool Design](../agents_and_tool_use/function_calling_and_tool_design.md) — schemas as the agent/tool contract
 - [LLM Eval Harness in Production](../case_studies/cross_cutting/llm_eval_harness_in_production.md) — golden-set evaluation for extraction pipelines

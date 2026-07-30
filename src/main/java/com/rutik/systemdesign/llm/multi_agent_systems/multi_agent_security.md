@@ -3,7 +3,7 @@
 > Pitfall 5 (confused deputy) from "which credentials does an HTTP request carry" to "what should
 > an agent DO when another agent's natural-language output might itself be an attack." For the
 > single-agent foundations of prompt injection, see
-> [LLM Security §4.1](../llm_security/README.md). For the financial blast radius when a
+> [LLM Security §4.1](../llm_security/llm_security.md). For the financial blast radius when a
 > compromised agent has payment authority, see
 > [Agentic Commerce and Payments](agentic_commerce_and_payments.md).
 
@@ -11,7 +11,7 @@
 
 ## 1. Concept Overview
 
-Single-agent prompt injection (covered in [LLM Security §4.1](../llm_security/README.md)) has one
+Single-agent prompt injection (covered in [LLM Security §4.1](../llm_security/llm_security.md)) has one
 trust boundary: between the model and external content it reads (a webpage, a document, a tool
 result). **Multi-agent systems multiply this boundary** — every message one agent sends to another
 is, from the receiving agent's perspective, content that *might* contain instructions, exactly
@@ -185,7 +185,7 @@ mediating between them.
 Everything in §3.1-§3.3 describes injection travelling along a **message**, which bounds it to a
 run: the pipeline finishes, the transcript is discarded, the exposure ends. Multi-agent systems
 also share **state that outlives the run** — the blackboard of
-[Multi-Agent Systems §4.4](README.md), a shared
+[Multi-Agent Systems §4.4](multi_agent_systems.md), a shared
 [agent memory](../agents_and_tool_use/agent_memory.md) store, a team-wide RAG index that any agent
 may write findings into. An injection that reaches one of those does not propagate hop by hop; it
 **waits**. It is read by agents that never ran alongside the compromised one, in sessions that
@@ -622,7 +622,7 @@ def route_to_human_review(message: ResearchFindings) -> None: ...
   formal capability framework, now a common reference architecture for agents that must process
   untrusted content and also take privileged actions.
 - **Bing Chat / Sydney indirect prompt injection (Feb 2023, [LLM Security
-  §7](../llm_security/README.md))** — while a single-agent incident, the underlying mechanism
+  §7](../llm_security/llm_security.md))** — while a single-agent incident, the underlying mechanism
   (webpage content interpreted as instructions) is the *seed* mechanism for §3.2's cross-agent
   propagation once such an agent's output feeds another agent — the multi-agent case is this same
   root cause with an additional hop.
@@ -761,7 +761,7 @@ attacker's control) gets the *appearance* of robustness from majority voting wit
 | **Pydantic / schema validation** | Enforces structured, field-separated inter-agent messages (§6.2) — data fields vs. absent "instruction" fields |
 | **A2A JWT signing** ([Agent-to-Agent Protocols §6.2](agent_to_agent_protocols.md)) | Message authentication (§3.7) — necessary but not sufficient (§8) |
 | **OpenTelemetry for LLM Apps** ([cross_cutting](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md)) | Cross-agent tracing (§10.4) — reconstructing propagation paths after an incident |
-| **Llama Guard / Rebuff** ([Safety & Alignment §11](../safety_and_alignment/README.md)) | Pattern-based injection detection — applicable to §6.3's output-scanning layer |
+| **Llama Guard / Rebuff** ([Safety & Alignment §11](../safety_and_alignment/safety_and_alignment.md)) | Pattern-based injection detection — applicable to §6.3's output-scanning layer |
 | **Garak** ([Automated Jailbreak Algorithms §11](../safety_and_alignment/automated_jailbreak_algorithms.md)) | Vulnerability scanning, extendable to multi-agent injection-propagation probes |
 
 ---
@@ -929,8 +929,8 @@ comparisons), rather than three layers that all depend on the same underlying as
 
 - [Agent-to-Agent Protocols](agent_to_agent_protocols.md) — trust boundary model (§5.6) and confused-deputy pitfall (Pitfall 5), extended here from credentials to task-level manipulation (§3.5)
 - [Agent Debate and Consensus](agent_debate_and_consensus.md) — collusion and "when debate hurts" (§3.4), Byzantine/Sybil considerations for voting systems (§3.6)
-- [LLM Security](../llm_security/README.md) — single-agent prompt injection foundations (§4.1) this module extends to multi-hop propagation
+- [LLM Security](../llm_security/llm_security.md) — single-agent prompt injection foundations (§4.1) this module extends to multi-hop propagation
 - [Agentic Commerce and Payments](agentic_commerce_and_payments.md) — financial blast radius when a compromised agent has payment authority; capability scoping applied to spend (§3.7's principle, §10.3's calibration discipline)
 - [Automated Jailbreak Algorithms](../safety_and_alignment/automated_jailbreak_algorithms.md) — how single-model jailbreaks compose with multi-agent propagation (§Q15)
 - [OpenTelemetry for LLM Apps](../case_studies/cross_cutting/opentelemetry_for_llm_apps.md) — cross-agent tracing infrastructure (§10.4)
-- [Multi-Agent Systems README](README.md) — parent module: orchestration patterns whose communication channels this module secures
+- [Multi-Agent Systems README](multi_agent_systems.md) — parent module: orchestration patterns whose communication channels this module secures

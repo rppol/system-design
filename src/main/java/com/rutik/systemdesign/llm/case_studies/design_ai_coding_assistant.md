@@ -566,7 +566,7 @@ def extract_semantic_chunks(
 
 ## Code-Specific RAG Architecture
 
-Code RAG differs from document RAG (baseline pipeline: [RAG Fundamentals](../rag_fundamentals/README.md)) in three key ways: (1) code has structure (AST) not present in prose; (2) code has dependencies (imports, function calls) that cross file boundaries; (3) code changes frequently (every git commit may invalidate embeddings for modified files).
+Code RAG differs from document RAG (baseline pipeline: [RAG Fundamentals](../rag_fundamentals/rag_fundamentals.md)) in three key ways: (1) code has structure (AST) not present in prose; (2) code has dependencies (imports, function calls) that cross file boundaries; (3) code changes frequently (every git commit may invalidate embeddings for modified files).
 
 ```mermaid
 flowchart TD

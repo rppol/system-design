@@ -335,7 +335,7 @@ Batch optimization:
     Only real-time borderline cases use synchronous API
 ```
 
-See also: [Guardrails & Content Safety](../guardrails_and_content_safety/README.md) for the policy-prompt hardening and jailbreak-resistance patterns the Tier 2 judge builds on.
+See also: [Guardrails & Content Safety](../guardrails_and_content_safety/guardrails_and_content_safety.md) for the policy-prompt hardening and jailbreak-resistance patterns the Tier 2 judge builds on.
 
 ### 4.2.1 Classifier Cascade — Python Implementation
 

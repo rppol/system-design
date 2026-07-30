@@ -41,13 +41,13 @@ category-level Q&As. Start with the category index before diving into individual
 
 | Category | Index File | Patterns / Topics |
 |----------|-----------|-------------------|
-| Design Principles | [design_principles/README.md](design_principles/README.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface |
-| Creational Patterns | [creational/README.md](creational/README.md) | Singleton, Factory Method, Abstract Factory, Builder, Prototype |
-| Structural Patterns | [structural/README.md](structural/README.md) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
-| Behavioral Patterns | [behavioral/README.md](behavioral/README.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
-| Concurrency Patterns | [concurrency_patterns/README.md](concurrency_patterns/README.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
-| System Design Problems | [system_design_problems/README.md](system_design_problems/README.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
-| LLD Case Studies | [case_studies/README.md](case_studies/README.md) | Learning path, pattern matrix, interview shortcuts for 12 problems |
+| Design Principles | [design_principles/README.md](design_principles/design_principles.md) | DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface |
+| Creational Patterns | [creational/README.md](creational/creational.md) | Singleton, Factory Method, Abstract Factory, Builder, Prototype |
+| Structural Patterns | [structural/README.md](structural/structural.md) | Adapter, Bridge, Composite, Decorator, Facade, Flyweight, Proxy |
+| Behavioral Patterns | [behavioral/README.md](behavioral/behavioral.md) | Chain of Responsibility, Command, Interpreter, Iterator, Mediator, Memento, Observer, State, Strategy, Template Method, Visitor |
+| Concurrency Patterns | [concurrency_patterns/README.md](concurrency_patterns/concurrency_patterns.md) | Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool |
+| System Design Problems | [system_design_problems/README.md](system_design_problems/system_design_problems.md) | Parking Lot, Elevator, Library, Chess, Vending Machine, ATM, Online Booking, Ride Sharing, LRU Cache, Rate Limiter, Tic-Tac-Toe, Splitwise |
+| LLD Case Studies | [case_studies/README.md](case_studies/case_studies.md) | Learning path, pattern matrix, interview shortcuts for 12 problems |
 
 ---
 
@@ -57,7 +57,7 @@ category-level Q&As. Start with the category index before diving into individual
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [SOLID Principles](solid_principles/README.md) | SRP, OCP, LSP, ISP, DIP | Beginner |
+| [SOLID Principles](solid_principles/solid_principles.md) | SRP, OCP, LSP, ISP, DIP | Beginner |
 | [DRY](design_principles/DRY.md) | Don't Repeat Yourself, abstraction, deduplication | Beginner |
 | [KISS](design_principles/KISS.md) | Keep It Simple Stupid, simplicity over cleverness | Beginner |
 | [YAGNI](design_principles/YAGNI.md) | You Aren't Gonna Need It, avoid speculation | Beginner |
@@ -69,45 +69,45 @@ category-level Q&As. Start with the category index before diving into individual
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [Singleton](creational/singleton/README.md) | Single instance, lazy/eager init, thread safety | Beginner |
-| [Factory Method](creational/factory_method/README.md) | Virtual constructor, defer instantiation to subclass | Intermediate |
-| [Abstract Factory](creational/abstract_factory/README.md) | Families of related objects, product families | Intermediate |
-| [Builder](creational/builder/README.md) | Step-by-step construction, fluent API, complex objects | Intermediate |
-| [Prototype](creational/prototype/README.md) | Clone objects, copying, prototype registry | Intermediate |
+| [Singleton](creational/singleton/singleton.md) | Single instance, lazy/eager init, thread safety | Beginner |
+| [Factory Method](creational/factory_method/factory_method.md) | Virtual constructor, defer instantiation to subclass | Intermediate |
+| [Abstract Factory](creational/abstract_factory/abstract_factory.md) | Families of related objects, product families | Intermediate |
+| [Builder](creational/builder/builder.md) | Step-by-step construction, fluent API, complex objects | Intermediate |
+| [Prototype](creational/prototype/prototype.md) | Clone objects, copying, prototype registry | Intermediate |
 
 ### Structural Patterns
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [Adapter](structural/adapter/README.md) | Convert interface, legacy integration, wrapper | Intermediate |
-| [Decorator](structural/decorator/README.md) | Dynamic behavior extension, wrapping, open/closed | Intermediate |
-| [Proxy](structural/proxy/README.md) | Surrogate, virtual proxy, protection proxy, lazy loading | Intermediate |
-| [Facade](structural/facade/README.md) | Simplified interface, subsystem hiding, unified API | Beginner |
-| [Composite](structural/composite/README.md) | Tree structure, part-whole hierarchy, uniform treatment | Intermediate |
-| [Bridge](structural/bridge/README.md) | Separate abstraction from implementation, decouple | Advanced |
-| [Flyweight](structural/flyweight/README.md) | Object sharing, intrinsic/extrinsic state, memory optimization | Advanced |
+| [Adapter](structural/adapter/adapter.md) | Convert interface, legacy integration, wrapper | Intermediate |
+| [Decorator](structural/decorator/decorator.md) | Dynamic behavior extension, wrapping, open/closed | Intermediate |
+| [Proxy](structural/proxy/proxy.md) | Surrogate, virtual proxy, protection proxy, lazy loading | Intermediate |
+| [Facade](structural/facade/facade.md) | Simplified interface, subsystem hiding, unified API | Beginner |
+| [Composite](structural/composite/composite.md) | Tree structure, part-whole hierarchy, uniform treatment | Intermediate |
+| [Bridge](structural/bridge/bridge.md) | Separate abstraction from implementation, decouple | Advanced |
+| [Flyweight](structural/flyweight/flyweight.md) | Object sharing, intrinsic/extrinsic state, memory optimization | Advanced |
 
 ### Behavioral Patterns
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [Strategy](behavioral/strategy/README.md) | Algorithm family, interchangeable behaviors, runtime selection | Intermediate |
-| [Observer](behavioral/observer/README.md) | Pub/sub, event notification, loose coupling | Intermediate |
-| [Command](behavioral/command/README.md) | Encapsulate requests, undo/redo, queue operations | Intermediate |
-| [State](behavioral/state/README.md) | Object behavior varies with state, finite state machine | Intermediate |
-| [Template Method](behavioral/template_method/README.md) | Algorithm skeleton, hook methods, subclass customization | Intermediate |
-| [Iterator](behavioral/iterator/README.md) | Sequential access, collection traversal, hide structure | Beginner |
-| [Chain of Responsibility](behavioral/chain_of_responsibility/README.md) | Handler chain, decoupled processing, pass along | Intermediate |
-| [Mediator](behavioral/mediator/README.md) | Centralized communication, reduce coupling, hub | Intermediate |
-| [Memento](behavioral/memento/README.md) | Capture and restore state, undo mechanism | Intermediate |
-| [Visitor](behavioral/visitor/README.md) | Separate algorithm from object structure, double dispatch | Advanced |
-| [Interpreter](behavioral/interpreter/README.md) | Grammar, language interpreter, expression trees | Advanced |
+| [Strategy](behavioral/strategy/strategy.md) | Algorithm family, interchangeable behaviors, runtime selection | Intermediate |
+| [Observer](behavioral/observer/observer.md) | Pub/sub, event notification, loose coupling | Intermediate |
+| [Command](behavioral/command/command.md) | Encapsulate requests, undo/redo, queue operations | Intermediate |
+| [State](behavioral/state/state.md) | Object behavior varies with state, finite state machine | Intermediate |
+| [Template Method](behavioral/template_method/template_method.md) | Algorithm skeleton, hook methods, subclass customization | Intermediate |
+| [Iterator](behavioral/iterator/iterator.md) | Sequential access, collection traversal, hide structure | Beginner |
+| [Chain of Responsibility](behavioral/chain_of_responsibility/chain_of_responsibility.md) | Handler chain, decoupled processing, pass along | Intermediate |
+| [Mediator](behavioral/mediator/mediator.md) | Centralized communication, reduce coupling, hub | Intermediate |
+| [Memento](behavioral/memento/memento.md) | Capture and restore state, undo mechanism | Intermediate |
+| [Visitor](behavioral/visitor/visitor.md) | Separate algorithm from object structure, double dispatch | Advanced |
+| [Interpreter](behavioral/interpreter/interpreter.md) | Grammar, language interpreter, expression trees | Advanced |
 
 ### Anti-Patterns
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [Anti-Patterns Overview](anti_patterns/README.md) | Code smells, design pitfalls, refactored solutions | Intermediate |
+| [Anti-Patterns Overview](anti_patterns/anti_patterns.md) | Code smells, design pitfalls, refactored solutions | Intermediate |
 | [God Object](anti_patterns/GodObject.md) | Bloated class, SRP violation, decomposition | Intermediate |
 | [Spaghetti Code](anti_patterns/Spaghetti_Code.md) | Tangled control flow, no structure, refactoring | Intermediate |
 | [Golden Hammer](anti_patterns/Golden_Hammer.md) | Overused tool, inappropriate pattern application | Intermediate |
@@ -132,7 +132,7 @@ category-level Q&As. Start with the category index before diving into individual
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [Pattern Comparisons Overview](pattern_comparisons/README.md) | When to use which pattern, decision guide | Intermediate |
+| [Pattern Comparisons Overview](pattern_comparisons/pattern_comparisons.md) | When to use which pattern, decision guide | Intermediate |
 | [Strategy vs State](pattern_comparisons/Strategy_vs_State.md) | External vs internal context, switching mechanism | Intermediate |
 | [Decorator vs Proxy](pattern_comparisons/Decorator_vs_Proxy.md) | Enhancement vs control, transparency | Intermediate |
 | [Adapter vs Bridge vs Facade](pattern_comparisons/Adapter_vs_Bridge_vs_Facade.md) | Interface conversion vs decoupling vs simplification | Advanced |
@@ -171,7 +171,7 @@ category-level Q&As. Start with the category index before diving into individual
 ### Phase 1 — Foundations
 Build your design vocabulary before patterns.
 
-1. [SOLID Principles](solid_principles/README.md) — the why behind every pattern
+1. [SOLID Principles](solid_principles/solid_principles.md) — the why behind every pattern
 2. [DRY](design_principles/DRY.md) — don't repeat yourself
 3. [KISS](design_principles/KISS.md) — simplicity over cleverness
 4. [YAGNI](design_principles/YAGNI.md) — avoid speculative design
@@ -182,42 +182,42 @@ Build your design vocabulary before patterns.
 ### Phase 2 — Creational Patterns
 Learn how to construct objects safely and flexibly.
 
-1. [Singleton](creational/singleton/README.md) — controlled single instance
-2. [Factory Method](creational/factory_method/README.md) — deferred creation
-3. [Abstract Factory](creational/abstract_factory/README.md) — product families
-4. [Builder](creational/builder/README.md) — complex construction
-5. [Prototype](creational/prototype/README.md) — object cloning
+1. [Singleton](creational/singleton/singleton.md) — controlled single instance
+2. [Factory Method](creational/factory_method/factory_method.md) — deferred creation
+3. [Abstract Factory](creational/abstract_factory/abstract_factory.md) — product families
+4. [Builder](creational/builder/builder.md) — complex construction
+5. [Prototype](creational/prototype/prototype.md) — object cloning
 
 ### Phase 3 — Structural Patterns
 Learn how to compose classes and objects into larger structures.
 
-1. [Adapter](structural/adapter/README.md) — interface bridging
-2. [Decorator](structural/decorator/README.md) — dynamic enhancement
-3. [Proxy](structural/proxy/README.md) — controlled access
-4. [Facade](structural/facade/README.md) — simplified interface
-5. [Composite](structural/composite/README.md) — tree structures
-6. [Bridge](structural/bridge/README.md) — implementation decoupling
-7. [Flyweight](structural/flyweight/README.md) — memory sharing
+1. [Adapter](structural/adapter/adapter.md) — interface bridging
+2. [Decorator](structural/decorator/decorator.md) — dynamic enhancement
+3. [Proxy](structural/proxy/proxy.md) — controlled access
+4. [Facade](structural/facade/facade.md) — simplified interface
+5. [Composite](structural/composite/composite.md) — tree structures
+6. [Bridge](structural/bridge/bridge.md) — implementation decoupling
+7. [Flyweight](structural/flyweight/flyweight.md) — memory sharing
 
 ### Phase 4 — Behavioral Patterns
 Learn how objects communicate and distribute responsibility.
 
-1. [Strategy](behavioral/strategy/README.md) — interchangeable algorithms
-2. [Observer](behavioral/observer/README.md) — event notification
-3. [Command](behavioral/command/README.md) — encapsulated requests
-4. [State](behavioral/state/README.md) — behavior per state
-5. [Template Method](behavioral/template_method/README.md) — algorithm skeleton
-6. [Iterator](behavioral/iterator/README.md) — collection traversal
-7. [Chain of Responsibility](behavioral/chain_of_responsibility/README.md) — handler chain
-8. [Mediator](behavioral/mediator/README.md) — centralized coordination
-9. [Memento](behavioral/memento/README.md) — state capture/restore
-10. [Visitor](behavioral/visitor/README.md) — external operations
-11. [Interpreter](behavioral/interpreter/README.md) — grammar/language
+1. [Strategy](behavioral/strategy/strategy.md) — interchangeable algorithms
+2. [Observer](behavioral/observer/observer.md) — event notification
+3. [Command](behavioral/command/command.md) — encapsulated requests
+4. [State](behavioral/state/state.md) — behavior per state
+5. [Template Method](behavioral/template_method/template_method.md) — algorithm skeleton
+6. [Iterator](behavioral/iterator/iterator.md) — collection traversal
+7. [Chain of Responsibility](behavioral/chain_of_responsibility/chain_of_responsibility.md) — handler chain
+8. [Mediator](behavioral/mediator/mediator.md) — centralized coordination
+9. [Memento](behavioral/memento/memento.md) — state capture/restore
+10. [Visitor](behavioral/visitor/visitor.md) — external operations
+11. [Interpreter](behavioral/interpreter/interpreter.md) — grammar/language
 
 ### Phase 5 — Pattern Mastery
 Understand when to use which pattern and how they combine.
 
-1. [Pattern Comparisons](pattern_comparisons/README.md)
+1. [Pattern Comparisons](pattern_comparisons/pattern_comparisons.md)
 2. [Decision Flowchart](pattern_comparisons/DecisionFlowchart.md)
 3. [Pattern Combinations](pattern_comparisons/PatternCombinations.md)
 4. [Refactoring to Patterns](Refactoring_to_Patterns.md)
@@ -226,7 +226,7 @@ Understand when to use which pattern and how they combine.
 ### Phase 6 — Anti-Patterns
 Know what to avoid and why.
 
-1. [Anti-Patterns Overview](anti_patterns/README.md)
+1. [Anti-Patterns Overview](anti_patterns/anti_patterns.md)
 2. Read all 10 individual anti-pattern files
 3. Recognize them in existing codebases
 
@@ -274,14 +274,14 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 
 | # | Module | Files |
 |---|--------|-------|
-| 2 | [solid_principles](solid_principles/) | 6 files |
-| 3 | [creational](creational/) | 5 files |
-| 4 | [structural](structural/) | 6 files |
-| 5 | [behavioral](behavioral/) | 8 files |
-| 6 | [pattern_comparisons](pattern_comparisons/) | 8 files |
-| 7 | [anti_patterns](anti_patterns/) | 3 files |
-| 8 | [concurrency_patterns](concurrency_patterns/) | 5 files |
-| 9 | [system_design_problems](system_design_problems/) | 7 files |
+| 2 | [solid_principles](solid_principles/solid_principles.md) | 6 files |
+| 3 | [creational](creational/creational.md) | 5 files |
+| 4 | [structural](structural/structural.md) | 6 files |
+| 5 | [behavioral](behavioral/behavioral.md) | 8 files |
+| 6 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
+| 7 | [anti_patterns](anti_patterns/anti_patterns.md) | 3 files |
+| 8 | [concurrency_patterns](concurrency_patterns/concurrency_patterns.md) | 5 files |
+| 9 | [system_design_problems](system_design_problems/system_design_problems.md) | 7 files |
 
 **Not in this path** (1 of 9, Full Path only): `design_principles`
 <!-- /study-path-table -->
@@ -303,14 +303,14 @@ A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocab
 
 | # | Module | Files |
 |---|--------|-------|
-| 1 | [design_principles](design_principles/) | 7 files |
-| 2 | [solid_principles](solid_principles/) | 4 files |
-| 3 | [creational](creational/) | README only |
-| 4 | [structural](structural/) | 2 files |
-| 5 | [behavioral](behavioral/) | 2 files |
-| 6 | [pattern_comparisons](pattern_comparisons/) | 8 files |
-| 7 | [anti_patterns](anti_patterns/) | 7 files |
-| 9 | [system_design_problems](system_design_problems/) | README only |
+| 1 | [design_principles](design_principles/design_principles.md) | 7 files |
+| 2 | [solid_principles](solid_principles/solid_principles.md) | 4 files |
+| 3 | [creational](creational/creational.md) | module page only |
+| 4 | [structural](structural/structural.md) | 2 files |
+| 5 | [behavioral](behavioral/behavioral.md) | 2 files |
+| 6 | [pattern_comparisons](pattern_comparisons/pattern_comparisons.md) | 8 files |
+| 7 | [anti_patterns](anti_patterns/anti_patterns.md) | 7 files |
+| 9 | [system_design_problems](system_design_problems/system_design_problems.md) | module page only |
 
 **Not in this path** (1 of 9, Full Path only): `concurrency_patterns`
 <!-- /study-path-table -->
@@ -321,16 +321,16 @@ A different cut, not senior-plus-extras. The Principal Path probes pattern judgm
 
 ## Knowledge-Question Map
 
-The highest-frequency LLD *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/README.md).
+The highest-frequency LLD *knowledge* questions mapped to the file that answers them. For *system design* ("design X") questions, use the interview-prep shortcuts in [case_studies/README.md](case_studies/case_studies.md).
 
 | Interview question | Where the answer lives |
 |--------------------|------------------------|
-| What's a real Single Responsibility Principle violation, and how do you split it? | [SOLID Principles](solid_principles/README.md) |
-| What is the Open/Closed Principle, and which pattern is its textbook embodiment? | [SOLID Principles](solid_principles/README.md) |
-| What does a Liskov Substitution Principle violation actually look like? | [SOLID Principles](solid_principles/README.md) |
-| Factory Method vs Abstract Factory vs Builder — how do you choose? | [Creational Patterns](creational/README.md), [Factory vs AbstractFactory vs Builder](pattern_comparisons/Factory_vs_AbstractFactory_vs_Builder.md) |
-| How do you make a Singleton thread-safe without synchronizing every call? | [Singleton](creational/singleton/README.md) |
-| Deep vs shallow copy in the Prototype pattern — which do you need, and when? | [Prototype](creational/prototype/README.md) |
+| What's a real Single Responsibility Principle violation, and how do you split it? | [SOLID Principles](solid_principles/solid_principles.md) |
+| What is the Open/Closed Principle, and which pattern is its textbook embodiment? | [SOLID Principles](solid_principles/solid_principles.md) |
+| What does a Liskov Substitution Principle violation actually look like? | [SOLID Principles](solid_principles/solid_principles.md) |
+| Factory Method vs Abstract Factory vs Builder — how do you choose? | [Creational Patterns](creational/creational.md), [Factory vs AbstractFactory vs Builder](pattern_comparisons/Factory_vs_AbstractFactory_vs_Builder.md) |
+| How do you make a Singleton thread-safe without synchronizing every call? | [Singleton](creational/singleton/singleton.md) |
+| Deep vs shallow copy in the Prototype pattern — which do you need, and when? | [Prototype](creational/prototype/prototype.md) |
 | Decorator vs Proxy — both wrap an object, so what's the real distinction? | [Decorator vs Proxy](pattern_comparisons/Decorator_vs_Proxy.md) |
 | Adapter vs Bridge vs Facade — when do you reach for each? | [Adapter vs Bridge vs Facade](pattern_comparisons/Adapter_vs_Bridge_vs_Facade.md) |
 | Composite vs Decorator — tree structure vs enhancement chain, how do you tell them apart? | [Composite vs Decorator](pattern_comparisons/Composite_vs_Decorator.md) |
@@ -339,7 +339,7 @@ The highest-frequency LLD *knowledge* questions mapped to the file that answers 
 | Command vs Strategy — both encapsulate "a thing to run" — what's the real distinction? | [Command vs Strategy](pattern_comparisons/Command_vs_Strategy.md) |
 | Chain of Responsibility vs Command — chained handlers vs a single request object? | [ChainOfResponsibility vs Command](pattern_comparisons/ChainOfResponsibility_vs_Command.md) |
 | Template Method vs Strategy — inheritance-based skeleton vs composition? | [Template vs Strategy](pattern_comparisons/Template_vs_Strategy.md) |
-| How does Visitor add a new operation without touching the classes it operates on? | [Visitor](behavioral/visitor/README.md) |
+| How does Visitor add a new operation without touching the classes it operates on? | [Visitor](behavioral/visitor/visitor.md) |
 | What is a God Object, and what's your refactoring plan for one? | [God Object](anti_patterns/GodObject.md) |
 | What's wrong with Service Locator versus explicit Dependency Injection? | [Service Locator](anti_patterns/ServiceLocator.md) |
 | How would you design a parking lot's spot allocation and pricing strategy? | [Parking Lot](system_design_problems/ParkingLot.md) |
@@ -350,16 +350,16 @@ The highest-frequency LLD *knowledge* questions mapped to the file that answers 
 
 ## Study Plan
 
-A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/README.md](case_studies/README.md) for the full pattern-dependency map and interview-prep shortcuts across all 12 problems.
+A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/README.md](case_studies/case_studies.md) for the full pattern-dependency map and interview-prep shortcuts across all 12 problems.
 
 | Week | Focus | Modules | Practice problem |
 |------|-------|---------|-------------------|
-| 1 | Foundations | [SOLID Principles](solid_principles/README.md) | skim [Vending Machine](system_design_problems/VendingMachine.md) — cleanest FSM, see the vocabulary applied before you've learned the individual patterns |
-| 2 | Creational Patterns | [Creational Patterns](creational/README.md) — Singleton, Factory Method, Abstract Factory, Builder, Prototype | [Parking Lot](system_design_problems/ParkingLot.md) — Factory (spot type) + Strategy (pricing); the most common LLD opener |
-| 3 | Structural Patterns | [Structural Patterns](structural/README.md) — Adapter, Decorator, Proxy, Facade, Composite, Bridge, Flyweight | [LRU Cache](system_design_problems/LRUCache.md) — Decorator as a thread-safe wrapper around the core cache |
-| 4 | Behavioral Patterns | [Behavioral Patterns](behavioral/README.md) — Strategy, Observer, Command, State, Template Method, and 6 more | [Ride Sharing](system_design_problems/RideSharing.md) — Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) |
-| 5 | Pattern Mastery + Anti-Patterns | [Pattern Comparisons](pattern_comparisons/README.md), [Anti-Patterns](anti_patterns/README.md) | [ATM](system_design_problems/ATM.md) — justify State + Command (with rollback) behind a Facade over the alternatives; spot the anti-patterns a naive transaction flow invites |
-| 6 | Apply: System Design Problems | [System Design Problems](system_design_problems/README.md) | timeboxed 30-minute runs through the remaining problems via the [interview shortcuts](case_studies/README.md) |
+| 1 | Foundations | [SOLID Principles](solid_principles/solid_principles.md) | skim [Vending Machine](system_design_problems/VendingMachine.md) — cleanest FSM, see the vocabulary applied before you've learned the individual patterns |
+| 2 | Creational Patterns | [Creational Patterns](creational/creational.md) — Singleton, Factory Method, Abstract Factory, Builder, Prototype | [Parking Lot](system_design_problems/ParkingLot.md) — Factory (spot type) + Strategy (pricing); the most common LLD opener |
+| 3 | Structural Patterns | [Structural Patterns](structural/structural.md) — Adapter, Decorator, Proxy, Facade, Composite, Bridge, Flyweight | [LRU Cache](system_design_problems/LRUCache.md) — Decorator as a thread-safe wrapper around the core cache |
+| 4 | Behavioral Patterns | [Behavioral Patterns](behavioral/behavioral.md) — Strategy, Observer, Command, State, Template Method, and 6 more | [Ride Sharing](system_design_problems/RideSharing.md) — Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) |
+| 5 | Pattern Mastery + Anti-Patterns | [Pattern Comparisons](pattern_comparisons/pattern_comparisons.md), [Anti-Patterns](anti_patterns/anti_patterns.md) | [ATM](system_design_problems/ATM.md) — justify State + Command (with rollback) behind a Facade over the alternatives; spot the anti-patterns a naive transaction flow invites |
+| 6 | Apply: System Design Problems | [System Design Problems](system_design_problems/system_design_problems.md) | timeboxed 30-minute runs through the remaining problems via the [interview shortcuts](case_studies/case_studies.md) |
 
 ---
 

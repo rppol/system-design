@@ -18,7 +18,7 @@
 - **Multipart upload**: for large objects (hundreds of MB to multiple TB), split the upload into independently-uploaded parts (5 MB - 5 GB each, up to 10,000 parts), each acknowledged with an ETag, and atomically "completed" into a single object once all parts are present
 - **Versioning**: when enabled on a bucket, every `PUT` to an existing key creates a new version rather than overwriting; all versions remain individually addressable and listable
 - **Object metadata and tags**: arbitrary user-defined key-value metadata (HTTP-header-style, e.g., `Content-Type`, `x-amz-meta-*`) and a small set of tags used for lifecycle rules and cost allocation
-- **Access control**: bucket policies (JSON documents specifying which principals can perform which actions) and object ACLs (cross-ref [`../security_and_auth/README.md`](../security_and_auth/README.md)) — every request is authorized before any data path work begins
+- **Access control**: bucket policies (JSON documents specifying which principals can perform which actions) and object ACLs (cross-ref [`../security_and_auth/README.md`](../security_and_auth/security_and_auth.md)) — every request is authorized before any data path work begins
 - **Lifecycle policies**: automatic transition of objects between storage tiers (hot -> infrequent-access -> archive) and automatic expiration, based on object age or tags (§4.5)
 
 ### Non-Functional Requirements
@@ -35,7 +35,7 @@
 
 - **POSIX filesystem semantics** — there is no concept of a directory that "contains" objects in the filesystem sense (a "folder" is purely a UI/listing convention based on key prefixes and delimiters), no file locks, no `mmap`, no partial in-place writes. An application that needs POSIX semantics mounts a separate network filesystem (EFS/NFS-style) layered *on top of* object storage, which is a distinct system not designed here.
 - **In-place object edits** — objects are immutable once written. "Overwriting" `key=foo` means writing a brand-new object (and, with versioning, a new version) that happens to share the same key; there is no `seek()`-and-modify operation, no append, no partial-write-then-read-back-the-same-object-handle.
-- **Transactional multi-object operations** — there is no cross-object ACID transaction (`PUT a AND PUT b atomically`). Applications needing that build it at the application layer (cross-ref [`../distributed_transactions/README.md`](../distributed_transactions/README.md)) using patterns like write-then-pointer-flip.
+- **Transactional multi-object operations** — there is no cross-object ACID transaction (`PUT a AND PUT b atomically`). Applications needing that build it at the application layer (cross-ref [`../distributed_transactions/README.md`](../distributed_transactions/distributed_transactions.md)) using patterns like write-then-pointer-flip.
 
 ---
 
@@ -65,7 +65,7 @@ The practical consequence: **roughly 85% of all objects are under 1 MB, and ~97%
 
 - Target ingestion: **1,000,000 PUTs/sec** sustained globally across the fleet (aggregate across all customers/buckets — a single bucket sees a tiny fraction of this)
 - Read:write ratio of roughly **10:1** (typical for content-serving and data-lake workloads — write once, read many times during the "hot" period of an object's life) -> **10,000,000 GETs/sec** sustained globally
-- At 512 KB average object size: PUT bandwidth = `1,000,000 x 512 KB` ~= **512 GB/sec** ingest; GET bandwidth = `10,000,000 x 512 KB` ~= **~5.1 TB/sec** egress (before CDN offload — in practice a CDN absorbs the majority of GET traffic for hot objects, cross-ref [`../cdn/README.md`](../cdn/README.md))
+- At 512 KB average object size: PUT bandwidth = `1,000,000 x 512 KB` ~= **512 GB/sec** ingest; GET bandwidth = `10,000,000 x 512 KB` ~= **~5.1 TB/sec** egress (before CDN offload — in practice a CDN absorbs the majority of GET traffic for hot objects, cross-ref [`../cdn/README.md`](../cdn/cdn.md))
 
 ### Multipart Upload Volume
 
@@ -152,7 +152,7 @@ sequenceDiagram
 
 ### Request Flow
 
-1. **Every request** (PUT/GET/DELETE/LIST) first passes through the **API/Gateway layer** (§4 implicit, §7), which authenticates the caller (SigV4-style request signing), evaluates the bucket policy and any object ACL (cross-ref [`../security_and_auth/README.md`](../security_and_auth/README.md)), and applies per-bucket/per-account rate limiting (cross-ref [`../rate_limiting/README.md`](../rate_limiting/README.md)).
+1. **Every request** (PUT/GET/DELETE/LIST) first passes through the **API/Gateway layer** (§4 implicit, §7), which authenticates the caller (SigV4-style request signing), evaluates the bucket policy and any object ACL (cross-ref [`../security_and_auth/README.md`](../security_and_auth/security_and_auth.md)), and applies per-bucket/per-account rate limiting (cross-ref [`../rate_limiting/README.md`](../rate_limiting/rate_limiting.md)).
 2. **PUT**: the gateway streams the object body to the **Placement/Chunking Service** (§4.2), which splits the object into fixed-size chunks (e.g., 64 MB), erasure-encodes each chunk into 9 shards (6 data + 3 parity), and writes the 9 shards to 9 distinct storage nodes selected from a **placement group** that spans 3 availability zones (3 shards/AZ). Once a write-quorum of shards is durably persisted, the **Metadata Service** (§4.1) is updated with the new object's location map — *and only then* is the client acknowledged, which is the architectural core of strong read-after-write consistency (§4.4).
 3. **GET**: the gateway looks up `(bucket, key[, version])` in the **Metadata Service** to get the chunk/shard location map, fetches any 6 of the 9 shards per chunk from storage nodes (the erasure-coding scheme tolerates up to 3 simultaneous shard losses, §4.2), reconstructs each chunk, and streams the reassembled object to the client.
 4. **DELETE**: with versioning off, the metadata record is marked with a tombstone and the underlying shards are scheduled for asynchronous garbage collection (§4.6); with versioning on, a delete marker becomes the new "current" version while prior versions remain fully intact and listable.
@@ -739,10 +739,10 @@ flowchart LR
 
 The §2 estimate of **~5.1 TB/sec** aggregate GET egress cannot be served by storage nodes alone reconstructing from erasure-coded shards on every request — most of that traffic is concentrated on a small fraction of objects (the same Zipfian skew that affects every large-scale storage system, cross-ref [`./design_key_value_store.md`](./design_key_value_store.md)'s hot-key discussion). Two caching layers absorb this:
 
-1. **CDN edge caching** (cross-ref [`../cdn/README.md`](../cdn/README.md)): for objects served to many distinct clients (public website assets, shared media, software distribution artifacts), a CDN sits in front of the gateway and caches object bytes at edge POPs close to readers. A `GET` for a CDN-cached object never reaches the metadata index or storage nodes at all — this is the single biggest lever on the §2 egress numbers, the same role the CDN plays for Google Maps' tile traffic (cross-ref [`./design_google_maps.md`](./design_google_maps.md) §4.2).
+1. **CDN edge caching** (cross-ref [`../cdn/README.md`](../cdn/cdn.md)): for objects served to many distinct clients (public website assets, shared media, software distribution artifacts), a CDN sits in front of the gateway and caches object bytes at edge POPs close to readers. A `GET` for a CDN-cached object never reaches the metadata index or storage nodes at all — this is the single biggest lever on the §2 egress numbers, the same role the CDN plays for Google Maps' tile traffic (cross-ref [`./design_google_maps.md`](./design_google_maps.md) §4.2).
 2. **Storage-node-local read cache**: even for objects that aren't CDN-eligible (private data, per-request-signed URLs), storage nodes keep a small in-memory/SSD cache of recently-reconstructed chunks. Because reconstructing a chunk from 6 shards costs real CPU (§4.2), a storage node that served chunk C five seconds ago and is asked for it again can skip reconstruction entirely if the assembled chunk is still cached — this matters most for **systematic** erasure codes, where the first `k` of `n` shards are literally the original data (no reconstruction needed if those specific shards are healthy and local), versus **non-systematic** codes where every shard is a linear combination requiring reconstruction even in the healthy case.
 
-**Cache invalidation is structurally simple** compared to most caching problems (cross-ref [`../caching/README.md`](../caching/README.md)) precisely because objects are immutable (§1): a cached copy of object version `V` is valid **forever** — it can never become stale, because `V`'s bytes never change. The only invalidation event is a new version (or deletion) producing a *new* version ID, which is a different cache key entirely. This is the same principle behind Google Maps' versioned-tile-URL scheme (cross-ref [`./design_google_maps.md`](./design_google_maps.md) War Story 3) — immutable, versioned content sidesteps cache-invalidation complexity by construction, at the cost of old versions needing their own GC path (§4.6) once no longer referenced.
+**Cache invalidation is structurally simple** compared to most caching problems (cross-ref [`../caching/README.md`](../caching/caching.md)) precisely because objects are immutable (§1): a cached copy of object version `V` is valid **forever** — it can never become stale, because `V`'s bytes never change. The only invalidation event is a new version (or deletion) producing a *new* version ID, which is a different cache key entirely. This is the same principle behind Google Maps' versioned-tile-URL scheme (cross-ref [`./design_google_maps.md`](./design_google_maps.md) War Story 3) — immutable, versioned content sidesteps cache-invalidation complexity by construction, at the cost of old versions needing their own GC path (§4.6) once no longer referenced.
 
 ---
 
@@ -818,7 +818,7 @@ A tempting optimization: hash each chunk's content and store only one physical c
 
 | Component | Representative Technologies | Notes |
 |---|---|---|
-| API/Gateway layer | S3-compatible REST API (SigV4 request signing), API gateway/load balancer fleet | §3, §7 — AuthN/AuthZ via bucket policies and ACLs (cross-ref [`../security_and_auth/README.md`](../security_and_auth/README.md)) |
+| API/Gateway layer | S3-compatible REST API (SigV4 request signing), API gateway/load balancer fleet | §3, §7 — AuthN/AuthZ via bucket policies and ACLs (cross-ref [`../security_and_auth/README.md`](../security_and_auth/security_and_auth.md)) |
 | Metadata index | Distributed sorted KV store (Bigtable/HBase-style or a custom sharded-B-tree service) | §4.1 — cross-ref [`./design_key_value_store.md`](./design_key_value_store.md) for the underlying sharding/replication/quorum mechanics |
 | Erasure coding library | Reed-Solomon implementations (e.g., ISA-L, jerasure, Galois-field GF(2^8) arithmetic) | §4.2 |
 | Storage nodes | Commodity servers with dense HDD/SSD arrays, organized into placement groups across AZs/racks | §4.2, §4.6 |
@@ -826,7 +826,7 @@ A tempting optimization: hash each chunk's content and store only one physical c
 | Lifecycle/tiering engine | Background scanning service over the metadata index, scheduled scans | §4.5 |
 | Garbage collection | Async reclaim workers, rate-limited queues | §4.6, §9 |
 | Repair/anti-entropy | Background reconstruction workers, prioritized repair queues | §4.2, §9 |
-| CDN (for hot-object GETs) | Edge caching layer in front of the gateway | cross-ref [`../cdn/README.md`](../cdn/README.md) |
+| CDN (for hot-object GETs) | Edge caching layer in front of the gateway | cross-ref [`../cdn/README.md`](../cdn/cdn.md) |
 
 ### Build vs. Buy Considerations
 
@@ -835,7 +835,7 @@ A tempting optimization: hash each chunk's content and store only one physical c
 | Metadata index | Custom sharded KV/B-tree service | Bigtable/HBase/FoundationDB-style managed or open-source KV store | Either is viable — the schema and access patterns (§4.1) are the bespoke part; the underlying replicated-KV mechanics are well-served by an existing system (cross-ref [`./design_key_value_store.md`](./design_key_value_store.md)) |
 | Erasure coding | Custom Reed-Solomon implementation tuned to placement-group topology | ISA-L (Intel), jerasure, or MinIO's/Ceph's built-in EC engines | Buy the math (Reed-Solomon libraries are mature and heavily optimized), build the placement-group integration (§4.2) — the latter is where the AZ/rack-awareness that makes the durability math hold lives |
 | API layer | Custom S3-compatible REST implementation | MinIO (full open-source S3-compatible server) as a reference or even production base for smaller deployments | Build for hyperscale (custom gateway integrates with proprietary metadata/placement); MinIO is a legitimate production choice at smaller scale (§6) |
-| CDN | Custom edge cache | Commodity CDN (cross-ref [`../cdn/README.md`](../cdn/README.md)) | Buy — CDN is a commodity layer in front of any object store's hot-object GET path |
+| CDN | Custom edge cache | Commodity CDN (cross-ref [`../cdn/README.md`](../cdn/cdn.md)) | Buy — CDN is a commodity layer in front of any object store's hot-object GET path |
 
 ---
 
@@ -941,7 +941,7 @@ stateDiagram-v2
 - 100 billion objects x ~1 KB/record (§2) = **~100 TB** of metadata
 - Metadata index uses 3x replication (§5 — small, latency-critical, cheap-repair tradeoff favors replication over erasure coding here): `100 TB x 3` = **~300 TB** raw metadata storage
 - At ~1-2 TB usable capacity per metadata-index node (favoring fast SSDs for low-latency lookups, distinct hardware profile from bulk object-storage nodes): `300 TB / 1.5 TB` ~= **~200 metadata-index nodes**
-- Sharded by `bucketId` (§4.1) across these ~200 nodes; with virtual-node-style rebalancing (cross-ref [`../consistent_hashing/README.md`](../consistent_hashing/README.md) and [`./design_key_value_store.md`](./design_key_value_store.md)) to avoid the single-huge-bucket hotspot case (War Story 2) when one bucket's data volume vastly exceeds another's
+- Sharded by `bucketId` (§4.1) across these ~200 nodes; with virtual-node-style rebalancing (cross-ref [`../consistent_hashing/README.md`](../consistent_hashing/consistent_hashing.md) and [`./design_key_value_store.md`](./design_key_value_store.md)) to avoid the single-huge-bucket hotspot case (War Story 2) when one bucket's data volume vastly exceeds another's
 
 ### Repair Bandwidth Budget
 
@@ -1018,10 +1018,10 @@ A: The single-`bucketId`-shard model (§4.1) becomes the bottleneck — one buck
 
 - **Metadata index sharding, replication, and quorum mechanics (§4.1, §4.4, §10)** -> [`./design_key_value_store.md`](./design_key_value_store.md)
 - **Sequential-key hotspotting and the hashed-prefix mitigation (§8, War Story 2, §11)** -> [`./design_distributed_unique_id.md`](./design_distributed_unique_id.md)
-- **Consistent hashing for metadata-shard placement and rebalancing (§10)** -> [`../consistent_hashing/README.md`](../consistent_hashing/README.md)
-- **LSM-tree/B-tree tradeoffs for the metadata index's per-node storage engine (§4.1)** -> [`../../database/storage_engines_internals/README.md`](../../database/storage_engines_internals/README.md)
-- **Sharding strategy generalities applied to the metadata index (§4.1, §10)** -> [`../../database/sharding_and_partitioning/README.md`](../../database/sharding_and_partitioning/README.md)
-- **Horizontal scaling and stateless API/gateway tier (§3, §7)** -> [`../scalability/README.md`](../scalability/README.md)
-- **Repair-queue depth, durability-floor, and freshness alerting (§8, War Story 1)** -> [`../observability/README.md`](../observability/README.md)
-- **Bucket policies, object ACLs, and request signing/authorization (§1, §7)** -> [`../security_and_auth/README.md`](../security_and_auth/README.md)
-- **CDN offload for hot-object GET traffic (§2, §7)** -> [`../cdn/README.md`](../cdn/README.md)
+- **Consistent hashing for metadata-shard placement and rebalancing (§10)** -> [`../consistent_hashing/README.md`](../consistent_hashing/consistent_hashing.md)
+- **LSM-tree/B-tree tradeoffs for the metadata index's per-node storage engine (§4.1)** -> [`../../database/storage_engines_internals/README.md`](../../database/storage_engines_internals/storage_engines_internals.md)
+- **Sharding strategy generalities applied to the metadata index (§4.1, §10)** -> [`../../database/sharding_and_partitioning/README.md`](../../database/sharding_and_partitioning/sharding_and_partitioning.md)
+- **Horizontal scaling and stateless API/gateway tier (§3, §7)** -> [`../scalability/README.md`](../scalability/scalability.md)
+- **Repair-queue depth, durability-floor, and freshness alerting (§8, War Story 1)** -> [`../observability/README.md`](../observability/observability.md)
+- **Bucket policies, object ACLs, and request signing/authorization (§1, §7)** -> [`../security_and_auth/README.md`](../security_and_auth/security_and_auth.md)
+- **CDN offload for hot-object GET traffic (§2, §7)** -> [`../cdn/README.md`](../cdn/cdn.md)

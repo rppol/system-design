@@ -17,7 +17,7 @@
 2. **Manifest plane** — small JSON documents (1-30 KB) that list the blob digests making up an image, stored in a metadata DB + S3. Tags (`v1.4.2`, `latest`) are mutable refs into this plane.
 3. **Control plane** — scan (Trivy), sign (cosign/Rekor), replicate, GC, rate-limit, admission-verify.
 
-**Why this system exists.** Without a registry, every node builds or sideloads images by hand — no dedup, no provenance, no CVE gate, no single source of truth. At 50 clusters and millions of pulls/day, you need: (1) one immutable, deduped store; (2) a supply-chain gate so unscanned/unsigned images never reach production; (3) geo-locality so a node in eu-west-1 doesn't pull from us-east-1. This case study designs that system end-to-end against the [OCI Distribution Spec](https://github.com/opencontainers/distribution-spec). See [`../artifact_and_registry_management/README.md`](../artifact_and_registry_management/README.md) for the foundational module and [`../devsecops_and_supply_chain_security/README.md`](../devsecops_and_supply_chain_security/README.md) for the supply-chain context.
+**Why this system exists.** Without a registry, every node builds or sideloads images by hand — no dedup, no provenance, no CVE gate, no single source of truth. At 50 clusters and millions of pulls/day, you need: (1) one immutable, deduped store; (2) a supply-chain gate so unscanned/unsigned images never reach production; (3) geo-locality so a node in eu-west-1 doesn't pull from us-east-1. This case study designs that system end-to-end against the [OCI Distribution Spec](https://github.com/opencontainers/distribution-spec). See [`../artifact_and_registry_management/README.md`](../artifact_and_registry_management/artifact_and_registry_management.md) for the foundational module and [`../devsecops_and_supply_chain_security/README.md`](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md) for the supply-chain context.
 
 ---
 
@@ -69,7 +69,7 @@ These map 1:1 to the OCI Distribution Spec; anything not in this table (web UI, 
 
 ### Out of Scope
 
-- Building images (CI/Buildkit/Kaniko handled upstream — see [`../ci_cd_fundamentals/README.md`](../ci_cd_fundamentals/README.md)).
+- Building images (CI/Buildkit/Kaniko handled upstream — see [`../ci_cd_fundamentals/README.md`](../ci_cd_fundamentals/ci_cd_fundamentals.md)).
 - Helm chart hosting beyond OCI artifacts (registry stores OCI artifacts generically; Helm-specific UX excluded).
 - A full SBOM database/query engine (we store SBOM as an OCI referrer; querying it at fleet scale is a separate system).
 - Multi-tenant billing/metering (assumed internal single-org).
@@ -763,7 +763,7 @@ flowchart LR
     class F lossN
 ```
 
-Implementation is the `promote.yml` snippet in §4.2 + the pinned `cosign verify` in §4.3. The gate runs in CI and is double-enforced by the admission controller at the cluster — defense in depth, so a bypassed CI gate still can't run an unsigned image. See [`../devsecops_and_supply_chain_security/README.md`](../devsecops_and_supply_chain_security/README.md).
+Implementation is the `promote.yml` snippet in §4.2 + the pinned `cosign verify` in §4.3. The gate runs in CI and is double-enforced by the admission controller at the cluster — defense in depth, so a bypassed CI gate still can't run an unsigned image. See [`../devsecops_and_supply_chain_security/README.md`](../devsecops_and_supply_chain_security/devsecops_and_supply_chain_security.md).
 
 ### (b) Observability
 

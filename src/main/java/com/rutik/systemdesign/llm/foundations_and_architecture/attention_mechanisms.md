@@ -1,5 +1,5 @@
 # Attention Mechanisms — Deep Dive
-> This file is a deep-dive sub-file of the [Foundations & Architecture](README.md) module.
+> This file is a deep-dive sub-file of the [Foundations & Architecture](foundations_and_architecture.md) module.
 > It covers attention math at derivation level, Flash Attention algorithm internals,
 > MQA/GQA implementation, and sparse/linear attention variants.
 > ML-perspective attention (Bahdanau, seq2seq) is covered in the ML section.

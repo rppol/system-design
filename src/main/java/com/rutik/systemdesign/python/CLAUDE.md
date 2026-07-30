@@ -89,7 +89,7 @@ Format: `[3.11]` inline or `Added in Python 3.11`.
 
 ## Q&A Minimums (Python-specific)
 
-- Standard modules: 10+ Q&As
+- Standard modules: 15+ Q&As (the hard floor in root `CLAUDE.md`)
 - Deep modules (15–18 required): `the_gil_and_free_threading`, `asyncio_and_event_loop`, `the_type_system_and_typing`
 
 ## Adding a New Python Module

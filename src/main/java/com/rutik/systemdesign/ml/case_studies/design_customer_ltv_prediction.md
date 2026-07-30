@@ -416,7 +416,7 @@ class CohortTimeSeriesSplit(BaseCrossValidator):
 | XGBoost Cox (survival:cox) | 0.82 | 38 | Medium | Yes |
 | DeepHit (deep survival) | 0.83 | 36 | Low | Yes |
 
-Use the XGBoost Cox survival model for production. The BG/NBD baseline is retained as a sanity check and as the model for new customers who lack behavioral history (day-0 LTV). DeepHit shows marginal gain (+1pp AUC) at the cost of 4× training time and no SHAP support — not worth it. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/README.md).
+Use the XGBoost Cox survival model for production. The BG/NBD baseline is retained as a sanity check and as the model for new customers who lack behavioral history (day-0 LTV). DeepHit shows marginal gain (+1pp AUC) at the cost of 4× training time and no SHAP support — not worth it. See [model_selection_and_algorithm_choice](../model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md).
 
 ```mermaid
 xychart-beta
