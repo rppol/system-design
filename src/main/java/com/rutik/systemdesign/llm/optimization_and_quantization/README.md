@@ -222,12 +222,16 @@ For each layer W:
 
 Result: Much lower error than simple rounding at INT4
 Tradeoff: Requires calibration data (~128 samples); one-time offline process
-Time: 30min for 7B, 3hrs for 70B on one GPU
+Time: the only published anchor is the paper's own (arXiv 2210.17323): it
+      quantizes a 175B model "in approximately four GPU hours" on a single
+      GPU. Scale down roughly with parameter count for a first estimate, and
+      benchmark your own stack -- modern GPTQModel on an H100 is faster than
+      the 2022 result and no vendor publishes per-size timings.
 ```
 
 **Stated plainly.** "Round the weights one column at a time, and after each one, nudge the columns you have not touched yet so they cancel out the error you just made."
 
-Round-to-nearest treats every weight as an independent problem. GPTQ treats the *layer output* as the thing to preserve — it does not care whether each individual weight is close to its original value, only that `W'X ≈ WX` on real data. That reframing is worth the whole 30 minutes of Hessian work.
+Round-to-nearest treats every weight as an independent problem. GPTQ treats the *layer output* as the thing to preserve — it does not care whether each individual weight is close to its original value, only that `W'X ≈ WX` on real data. That reframing is what the Hessian work buys, and it is why a one-off offline pass measured in GPU hours is worth it.
 
 | Symbol | What it actually is |
 |--------|---------------------|
@@ -1339,14 +1343,23 @@ Tooling: mergekit (arcee-ai) implements SLERP/TIES/DARE and is what the HuggingF
 
 ## 8. Tradeoffs
 
-| Optimization | Memory | Speed | Quality | Complexity |
+**Read the Speed column as small-batch decode, and the Quality column as an order of magnitude.**
+A weight-only scheme's speedup *is* its byte reduction, so it only exists while the GEMM is
+memory-bound — the §6 roofline gives INT4 a 4× ceiling at batch 1 (140 GB -> 35 GB per token), of
+which about 2× survives dequantization overhead, and the advantage decays toward 1× as batch size
+pushes the kernel compute-bound. A single scalar cannot be right across both regimes; size your own
+from your batch profile using the arithmetic-intensity calculation in §6, not from this table. The
+quality deltas are likewise indicative magnitudes, not measurements — they depend on model, task and
+calibration set, and the only number that binds is the one your eval produces.
+
+| Optimization | Memory | Speed (batch-1 decode) | Quality (indicative) | Complexity |
 |-------------|--------|-------|---------|------------|
-| INT8 weight quant | 2× less | 1.5× faster | -0.5% | Low |
-| INT4 GPTQ | 4× less | 2× faster | -1-2% | Medium |
-| INT4 AWQ | 4× less | 2× faster | -0.5-1% | Medium |
-| Flash Attention | Much less | 2-4× faster | 0% (exact) | None (library) |
+| INT8 weight quant | 2× less | ~1.5× faster | -0.5% | Low |
+| INT4 GPTQ | 4× less | ~2× faster (4× byte ceiling) | -1-2% | Medium |
+| INT4 AWQ | 4× less | ~2× faster (4× byte ceiling) | -0.5-1% | Medium |
+| Flash Attention | Much less | 2-4× faster (attention only) | 0% (exact) | None (library) |
 | MoE (8 experts) | Same total | Same active compute | +quality | Training change |
-| Pruning (50%) | 2× less | Depends | -3-5% | High |
+| Pruning (50%) | 2× less | 1× unless 2:4-structured | -3-5% | High |
 | Distillation | Model-dependent | Faster | Modest loss | High |
 
 ---

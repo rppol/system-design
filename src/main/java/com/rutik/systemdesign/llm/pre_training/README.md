@@ -785,8 +785,8 @@ amplifier, not a universal law.
 ### GPT-3 (OpenAI, 2020)
 - 175B parameters, 570GB of text data (~300B tokens)
 - Data mix: CommonCrawl (60%), WebText2 (22%), Books (16%), Wikipedia (3%)
-- Training: 3.14 × 10²³ FLOPs on V100 GPUs
-- ~$4-5M estimated training cost
+- Training: 3.14 × 10²³ FLOPs on V100 GPUs (the published figure, from the GPT-3 paper's compute table)
+- **No dollar figure has ever been published.** Every number in circulation is a reconstruction from that FLOP count, and the answer moves with the two assumptions you feed it: at the V100's 125 TFLOPS FP16 tensor-core peak and ~35% MFU the run is `3.14e23 / (1.25e14 x 0.35) / 3600` ≈ 2.0M GPU-hours, so at an assumed $2/GPU-hour that is roughly **$4M**. Published third-party estimates span roughly $4M-$12M purely by varying the rate and the utilization. Quote the FLOPs, state your assumptions, and never quote the dollars as OpenAI's own
 - Launched the LLM era; demonstrated few-shot learning at scale
 
 ### Llama 3 (Meta, 2024)
@@ -973,6 +973,14 @@ A: Treat emergence as a real planning constraint but not as a magic threshold, b
 
 
 ## 14. Case Study
+
+> **Read every metric in this case study as an illustrative scenario figure.** The company is
+> hypothetical, so the perplexity numbers, BioASQ / PubMedQA / MedMCQA deltas and dedup gains below
+> are worked example values chosen to be internally consistent — not measurements, and not citable
+> as published results. Only the compute identities (`6ND`, GPU-hours, bandwidth floors) and the
+> published model facts are load-bearing. The GPU rate is likewise an **assumed $2/GPU-hour**: for a
+> live anchor, Lambda's public on-demand price for an A100 80GB SXM was $3.99/GPU-hour on 30 July
+> 2026, with committed and reserved capacity landing well below it.
 
 **Scenario:** A biotech company continues pre-training Mistral-7B-v0.3 (existing open-source model) on 500B domain-specific tokens: scientific literature (PubMed, biorXiv), patent filings, clinical trial data, and internal lab reports. Goal: improve domain perplexity from 24.3 (baseline Mistral-7B on biomedical text) to < 16.0, maintain general language benchmark scores within 5% of baseline, training cost < $90,000.
 
@@ -1406,6 +1414,16 @@ Different benchmarks probe different capabilities: MMLU tests knowledge recall, 
 
 ### Case Study 2: Pre-Training a 7B Parameter Code-Specialized LLM
 
+> **Same reading rule as Case Study 1.** The company is hypothetical, so every benchmark figure
+> below — the HumanEval/MBPP progression, the FIM pass@1 delta, the dedup gain, the perplexity
+> numbers — is an illustrative scenario value, not a measurement, and the §12 Q&As that reference
+> them are pointing at this worked example rather than at published results. Three inputs are
+> *chosen*, not derived: the **assumed $2.50/GPU-hour** rate (Lambda's public on-demand A100 80GB
+> SXM price was $3.99/GPU-hour on 30 July 2026; committed capacity sits below it), the **45% MFU**,
+> and the **77% end-to-end availability** that together fix the 3.5-day wall clock. Vary any of the
+> three and a 512-GPU run at this size lands anywhere in roughly 3-5 days. What is robust is the
+> `6ND` arithmetic underneath, worked in full below.
+
 **Problem Statement and Scale**
 
 A software tooling company wants to pre-train a 7B parameter code-specialized LLM to power an internal Copilot for 4,000 engineers writing Python, Java, Go, and SQL. The model must:
@@ -1655,7 +1673,7 @@ def build_document_mask(doc_lengths: list[int], seq_len: int) -> torch.Tensor:
 | Effective tokens/sec | 1.32M | 400B / 302,400 s — 35% end-to-end MFU |
 | Total cost | $107,500 | 43,008 GPU-hours × $2.50, under the $120K budget |
 | Final HumanEval pass@1 | 61.4% | +13.3 pp over GPT-3.5 |
-| Inference (per output token) | 31 ms p50, 38 ms p99 | A10G, BF16, GQA KV cache (23 ms bandwidth floor) |
+| Inference (per output token) | ~31 ms p50, ~38 ms p99 (roofline estimate, not a benchmark) | A10G, BF16, GQA KV cache: 14 GB of weights over 600 GB/s = 23.3 ms/token floor, then 60-75% achieved bandwidth (23.3/0.75 = 31, 23.3/0.60 = 39). Real numbers move with serving engine, batch size and KV growth |
 
 **Common Pitfalls**
 

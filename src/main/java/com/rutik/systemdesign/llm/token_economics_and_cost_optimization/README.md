@@ -286,13 +286,17 @@ buy the same silicon, and reserved pricing typically drops it 30-60%.
 NVMe storage for model weights and KV cache spill, and cooling (on-premises only) add 20-30%
 on top of raw GPU costs. A $20K/month GPU bill carries $4-6K in infrastructure overhead.
 
-**Personnel:** At minimum 0.5 FTE of an ML/infrastructure engineer ($200-300K/year fully loaded)
-for monitoring, incident response, capacity planning, and optimization. For larger deployments
+**Personnel:** At minimum 0.5 FTE of an ML/infrastructure engineer for monitoring, incident
+response, capacity planning, and optimization. Compensation bands are not something any vendor or
+standards body publishes, so plug in your own fully-loaded rate rather than a figure from a page
+like this one; as a placeholder, this module's illustrative TCO books that half-FTE at
+$8,000/month, i.e. a fully-loaded $192K/year, and a band of roughly **$190-300K/year** is a
+defensible planning range for a senior ML/infra engineer in a high-cost market. For larger deployments
 (multi-model, multi-node), budget 1-2 FTEs. This is the most commonly underestimated cost
 component.
 
 **Maintenance:** NVIDIA driver updates (quarterly), CUDA/cuDNN compatibility patches, security
-patches, inference framework upgrades (vLLM, TensorRT-LLM release cadence is 2-4 weeks), and
+patches, inference framework upgrades (checked against the GitHub release histories on 30 July 2026: vLLM ships a minor roughly every two weeks — v0.20.0 on 27 Apr through v0.26.0 on 27 Jul — while TensorRT-LLM tags release candidates close to weekly with stable minors much less often, so budget for a 2-4 week upgrade cadence and re-check the tag dates rather than trusting this sentence), and
 hardware failures. GPU failure rate is 2-5% annually; an 8-GPU node has a 15-35% chance of at
 least one GPU failure per year, requiring hot-spare capacity or graceful degradation logic.
 
@@ -1596,9 +1600,9 @@ def get_cache_hit_rate_from_logs(traces: list[dict]) -> float:
 
 **Q: How do you calculate the break-even point for using the Anthropic Batch API vs real-time API for a RAG product with 1M requests/day?** Batch API pricing is 50% of real-time API pricing within a 24-hour window (most batches finish in under an hour, but requests that have not completed at 24 hours expire). For a RAG product with 1M requests/day at average 1,500 input + 200 output tokens on Claude Sonnet 5: real-time cost = 1M × (1,500 × $3/MTok + 200 × $15/MTok) = $4,500 + $3,000 = $7,500/day. Batch cost = $3,750/day, saving $3,750/day ($1.37M/year). The break-even analysis is straightforward: if ANY requests can tolerate 24-hour latency (e.g., nightly report generation, batch document analysis, training data generation), use Batch API for those. For a RAG product, 30-40% of requests are typically batch-eligible (back-office workflows, scheduled reports), yielding $1,000-1,500/day in savings.
 
-**What is the optimal chunking strategy to maximize prompt cache hit rate in a RAG system?** Maximize the static portion of the prompt (system prompt + boilerplate context) and minimize the dynamic portion (user query + retrieved chunks). Structure: static system prompt (2,000+ tokens, always cached) → optional static RAG preamble (500 tokens, cached) → dynamic retrieved chunks (varies per query, not cached) → user message. Ensure retrieved chunks are appended after the cached prefix, not interleaved within it, because any modification to the cached prefix invalidates it. With this structure, 60-70% of total input tokens are in the cached prefix, reducing effective input cost by 60-70%.
+**Q: What is the optimal chunking strategy to maximize prompt cache hit rate in a RAG system?** Maximize the static portion of the prompt (system prompt + boilerplate context) and minimize the dynamic portion (user query + retrieved chunks). Structure: static system prompt (2,000+ tokens, always cached) → optional static RAG preamble (500 tokens, cached) → dynamic retrieved chunks (varies per query, not cached) → user message. Ensure retrieved chunks are appended after the cached prefix, not interleaved within it, because any modification to the cached prefix invalidates it. With this structure, 60-70% of total input tokens are in the cached prefix, reducing effective input cost by 60-70%.
 
-**How do you implement a token budget controller for a multi-turn conversation to prevent runaway costs for heavy users?** Implement a per-user daily token budget with three enforcement tiers: (1) soft limit (80% of budget): add a reminder to the system prompt encouraging concise responses; (2) warning limit (95% of budget): notify the user via UI that they are approaching their limit; (3) hard limit (100% of budget): reduce max_tokens to 100 and inject a system instruction to summarize and end the conversation. Track token usage per user per day using a Redis counter (key: `token_budget:{user_id}:{date}`, expire at midnight). For free-tier users, set max daily budget at 50,000 tokens (approximately 200 average conversations). For paid users, set at 500,000 tokens. Monitor the distribution of budget consumption — if >5% of free users hit the hard limit daily, the budget may be set too low for the use case.
+**Q: How do you implement a token budget controller for a multi-turn conversation to prevent runaway costs for heavy users?** Implement a per-user daily token budget with three enforcement tiers: (1) soft limit (80% of budget): add a reminder to the system prompt encouraging concise responses; (2) warning limit (95% of budget): notify the user via UI that they are approaching their limit; (3) hard limit (100% of budget): reduce max_tokens to 100 and inject a system instruction to summarize and end the conversation. Track token usage per user per day using a Redis counter (key: `token_budget:{user_id}:{date}`, expire at midnight). For free-tier users, set max daily budget at 50,000 tokens (approximately 200 average conversations). For paid users, set at 500,000 tokens. Monitor the distribution of budget consumption — if >5% of free users hit the hard limit daily, the budget may be set too low for the use case.
 
 **Quick-reference table:**
 

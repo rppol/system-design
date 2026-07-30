@@ -355,7 +355,7 @@ npx @modelcontextprotocol/inspector @random/social-server
 
 **Q: What is Smithery and what role does it play in the MCP ecosystem?**
 **Short:** The leading third-party MCP server registry, like npm for MCP, sitting downstream of the official MCP Registry since September 2025.
-Smithery (smithery.ai) is the leading third-party MCP server registry — analogous to npm for Node, PyPI for Python. It indexed roughly 7,300 servers as of May 2026, and supports both stdio (auto-installed via CLI) and hosted HTTP servers. Provides search, versioning, publisher accounts. Since September 2025 it sits downstream of the official MCP Registry, which is the canonical metadata source aggregators are expected to pull from.
+Smithery (smithery.ai) is the leading third-party MCP server registry — analogous to npm for Node, PyPI for Python. Its own registry API (`registry.smithery.ai/servers`) reported `pagination.totalCount` of 7,494 indexed servers on 30 July 2026 — check it there rather than trusting a quoted figure, since it moves weekly and PulseMCP's index (`api.pulsemcp.com/v0beta/servers` -> `total_count`, 22,141 the same day) counts a much wider set. It supports both stdio (auto-installed via CLI) and hosted HTTP servers. Provides search, versioning, publisher accounts. Since September 2025 it sits downstream of the official MCP Registry, which is the canonical metadata source aggregators are expected to pull from.
 
 **Q: Where do I find the official MCP reference servers?**
 **Short:** Seven educational examples in `modelcontextprotocol/servers` maintained by the steering group, not production-ready integrations.
@@ -475,10 +475,19 @@ close to free.
 
 | Symbol | What it is |
 |--------|------------|
-| `servers_available` | 3000+ published across registries by mid-2025 |
+| `servers_available` | ~3,000 — the illustrative catalogue size this scenario assumes (see note) |
 | `servers_curated` | ~20 the company approved (12 internal + 8 community) |
 | `coverage_achieved` | 90% of developer needs met by those 20 |
 | `reviewed` | Every submission that went through security review: 20 approved + 24 rejected |
+
+**On `servers_available`.** No registry publishes a cross-registry, de-duplicated server count,
+so the 3,000 here is a scenario constant, not a measurement — it is what makes the 0.67% below a
+worked example rather than a statistic. Current per-registry counts *are* machine-readable and
+worth checking before you reuse the number: Smithery's registry API
+(`registry.smithery.ai/servers` -> `pagination.totalCount`) returned **7,494** and PulseMCP's
+(`api.pulsemcp.com/v0beta/servers` -> `total_count`) returned **22,141**, both on 30 July 2026.
+The argument is scale-free either way — re-run it against 22,141 and 20 curated servers is 0.09%
+of the catalogue, which only sharpens the conclusion.
 
 **Walk one example.** Curation ratio and coverage, side by side:
 

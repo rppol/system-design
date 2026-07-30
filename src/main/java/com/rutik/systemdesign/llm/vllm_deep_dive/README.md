@@ -656,6 +656,20 @@ llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct", enable_prefix_caching=Tru
 
 ### Performance Impact
 
+**These are workload characteristics, not engine properties — the table is illustrative.** No vLLM
+document or paper publishes these percentages, and they cannot be published, because every one of
+them is a property of *your* prompt mix rather than of APC. Compute yours instead; both quantities
+are two divisions, worked in full immediately below:
+
+```
+  prefill_saved = cached_tokens / prompt_tokens
+  TTFT_saved    = prefill_saved x (prefill's share of TTFT)
+```
+
+The second factor is why the two columns differ so much: on an idle server prefill is nearly all of
+TTFT and the two numbers converge, while on a queue-bound server the same cache hit barely moves
+TTFT at all.
+
 | Scenario | Cache hit rate | Latency reduction |
 |---|---|---|
 | Same system prompt, different users | ~60-80% tokens cached | 40-70% TTFT reduction |
@@ -667,10 +681,20 @@ llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct", enable_prefix_caching=Tru
 
 | | vLLM APC | SGLang RadixAttention |
 |---|---|---|
-| Granularity | Block-level (16 tokens) | Token-level |
+| Granularity | Block-level by default (16 tokens) — now configurable, see below | Token-level |
 | Sharing | Across requests | Across requests + within programs |
 | Eviction | LRU | LRU with reference counting |
 | API | Transparent | Transparent |
+
+**The granularity row is a default, not a hard constraint any more.** `CacheConfig.prefix_match_unit`
+(v0.26.0) is "the finest token boundary a prefix-cache hit can land on" and "can be set finer than
+the physical KV cache block sizes ... as long as every KV cache group's `block_size` is divisible
+by it". It controls matching only, not how often states are stored. Left at its default of `None`
+it resolves to the scheduler block size for an ordinary single-group model — so 16 tokens — and to
+the GCD of the group block sizes on a hybrid model (`get_kv_cache_config` in
+`vllm/v1/core/kv_cache_utils.py`). The practical read: vLLM's 16-token granularity is now a tuning
+knob you can push toward SGLang's token-level behaviour at the cost of more hashing, rather than a
+fixed architectural difference between the two engines.
 
 SGLang, TensorRT-LLM, and the rest of the engine landscape are compared in [Inference Engines](../inference_engines/README.md).
 
@@ -1052,6 +1076,27 @@ python -m vllm.entrypoints.openai.api_server \
     --pipeline-parallel-size 2 \
     --distributed-executor-backend ray
 ```
+
+**Ray is no longer the only multi-node path.** Current vLLM (checked against `main` / v0.26.0 on
+30 July 2026) ships a native launcher on the `mp` backend — `--nnodes` / `-n`, `--node-rank` / `-r`,
+`--master-addr`, `--master-port` — with no Ray cluster to stand up first:
+
+```bash
+# Node 0
+python -m vllm.entrypoints.openai.api_server \
+    --model meta-llama/Meta-Llama-3-405B-Instruct \
+    --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+    --nnodes 2 --node-rank 0 --master-addr node0_ip --master-port 29500
+
+# Node 1: identical, with --node-rank 1
+```
+
+Two rules `ParallelConfig` enforces, both worth knowing before you debug a startup failure:
+`--nnodes > 1` requires the `mp` backend and is rejected for anything else, and `--nnodes` must
+evenly divide the total world size (`TP x PP x DP`). Ray remains supported and is still what you
+want when Ray already owns your scheduling, when you need its placement groups, or on TPU — where
+vLLM's own docs note Ray is the only backend for distributed inference. Choose on which cluster
+manager you already run, not on which one is newer.
 
 ### Parallelism Strategy Guide
 
@@ -2393,6 +2438,16 @@ Sanity-check the top row against §19 before quoting it anywhere: 520 RPS × 256
 ~133K output tok/s, which at ~127 decode steps/s per pod implies batch sizes in the high hundreds
 per pod — right at the edge of what a 40 GB FP8 KV pool holds for 768-token sequences. The table
 is the *shape* of a paged-vs-static win, not a measurement you can cite.
+
+The **cost rows are the weakest two, and they are pure ratio.** `$4.20 -> $0.32` is 13.1x, which is
+exactly the 40 -> 520 RPS throughput ratio: fixed hourly hardware divided by a throughput that went
+up 13x. The ratio is the real content; the absolute figures are not tied to any rentable rate. Work
+the floor yourself and you get very different absolutes — an AWS `p4de.24xlarge` (8x A100 80GB) is
+$27.44705/hr on-demand in us-east-1 (AWS Price List API, 30 July 2026), so at 40 RPS x 256 tokens
+that is 36.9M output tokens/hour, or **$0.74 per 1M**, and at 520 RPS it is 479M/hour, or **$0.057
+per 1M**. Same 13x, an order of magnitude below the table, because the table's absolutes carry
+unstated overhead the GPU bill does not. Quote the ratio if you quote anything; derive the
+absolutes from your own instance rate and your own measured throughput.
 
 **Interview Q&As:**
 

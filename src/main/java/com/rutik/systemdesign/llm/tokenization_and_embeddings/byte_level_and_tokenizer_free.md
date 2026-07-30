@@ -1133,7 +1133,12 @@ committing a whole model family to it.
    interchangeable (Pitfall 10.4).
 6. **Budget explicitly for immature tooling**: quantization, speculative decoding, and
    serving-engine kernels are all far more mature for BPE-tokenized dense/MoE Transformers than for
-   patch-based byte architectures as of 2026.
+   patch-based byte architectures. The check behind that claim, dated so you can redo it: on
+   30 July 2026, neither BLT nor MEGABYTE appears in vLLM's model registry
+   (`vllm/model_executor/models/registry.py`, at v0.26.0), in SGLang's supported-models docs, or in
+   TensorRT-LLM's `docs/source/models/supported-models.md`. Grep those three lists again before
+   assuming the gap has closed — it is one command, and it is the difference between "no engine
+   supports this" and "no engine supported this when someone wrote a document".
 7. **Never split a multi-byte UTF-8 character's constituent bytes across an incompatible
    processing boundary** in custom patch or local-model code — validate that byte sequences remain
    valid UTF-8 at every boundary you introduce (Pitfall 10.7).

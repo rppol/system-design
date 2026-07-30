@@ -660,7 +660,12 @@ marked otherwise — quote them with their split and scaffold or they mislead.
 - GPQA Diamond (graduate science, 198 questions): o3 **87.7%** preview / **83.3%**
   as shipped, against OpenAI's own recruited PhD-expert baseline of **69.7%**
 - SWE-bench Verified (software engineering): o3 **71.7%** preview / **69.1%** as
-  shipped — an agentic scaffold score, not a single-shot one
+  shipped — an agentic scaffold score, not a single-shot one. The 69.1% is
+  OpenAI's own figure from the *Introducing o3 and o4-mini* launch page
+  (April 2025), whose chart reads "SWE-Bench Verified (n=477)" and puts o4-mini
+  at 68.1, o3-mini at 49.3 and o1 at 48.9. Note the split: OpenAI runs a fixed
+  **477-task subset**, not the full 500, and at a 256k context length — so the
+  number is not directly comparable to a leaderboard entry scored on all 500
 - FrontierMath: o3 solves **25.2%**. The "<2%" often quoted next to it is the
   ceiling of *other models* at the time, not a human score — FrontierMath is
   designed so that expert mathematicians need hours per problem

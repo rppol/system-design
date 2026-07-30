@@ -307,9 +307,16 @@ unchanged.
 
 ### Fertility and Efficiency
 
-**Token density comparison** (illustrative tokens per word — the exact ratio depends on the
-tokenizer; measured under `cl100k_base`, English runs ~1.1 and Arabic/Hindi ~4.0-4.9 tokens per
-whitespace word, and `o200k_base` cuts the non-Latin figures roughly in half):
+**Token density comparison.** Read the block below as **illustrative, modern-tokenizer figures** —
+no primary source publishes a per-language tokens-per-word table, and the ratio is a property of
+the tokenizer, the corpus and the text, not of the language. The two anchors worth holding: under
+`cl100k_base`, spot measurements on matched sentences put English near ~1.1 and Arabic/Hindi near
+~4.0-4.9 tokens per whitespace word; `o200k_base` roughly halves the non-Latin figures, which is
+the regime the numbers below sit in. **A handful of matched sentences is not a corpus measurement
+either** — to get a number you can defend, run a real parallel corpus (FLORES-200 devtest is the
+usual choice) through the exact tokenizer you deploy and compute the mean yourself. The point of
+the block is the *shape* of the gap, and the fact that it is a tokenizer artefact; the constants
+are placeholders for your own.
 ```
 English: ~1.3 tokens/word  (most efficient)
 French:  ~1.4 tokens/word
@@ -1082,4 +1089,4 @@ Four common causes: (1) Language imbalance in training data — the embedding mo
 The decision is recall vs latency/cost. Larger models (560M) typically achieve 5-15% higher NDCG@10 on multilingual benchmarks. Smaller distilled models (120M) run 3-4× faster and cost 3-4× less to serve. For a 50M product index with 200M monthly queries, embedding queries at 200M × 120M model = $180/month vs 560M model = $720/month. If the recall difference translates to measurable revenue (A/B test needed), use the larger model. In practice, the reranking stage recovers much of the top-K recall gap — a smaller bi-encoder + cross-encoder reranker often beats a larger bi-encoder alone at similar cost.
 
 **Q: Why use HNSW instead of exact nearest neighbor search for 50M product embeddings?**
-Exact nearest neighbor search means every query scans all 50M vectors: 50M × 1024 dims × 2 FLOPs ≈ 1.0e11 FLOPs and 200 GB of memory traffic per query. At 200M queries/month (~77 queries/s average) that is ~8 TFLOP/s of sustained compute and, far worse, ~15 TB/s of sustained memory bandwidth — the scan is bandwidth-bound, and no economically sane fleet supplies that. HNSW (Hierarchical Navigable Small Worlds) achieves approximate nearest neighbor search in O(log N) per query by building a navigable graph of shortcut edges at multiple granularity levels. At ef=128, HNSW achieves 97%+ recall@10 with p99 latency under 25ms for 50M vectors — 1000× faster than exact search. The 3% recall gap is recovered by reranking the top-100 approximate results with an exact cross-encoder.
+Exact nearest neighbor search means every query scans all 50M vectors: 50M × 1024 dims × 2 FLOPs ≈ 1.0e11 FLOPs and 200 GB of memory traffic per query. At 200M queries/month (~77 queries/s average) that is ~8 TFLOP/s of sustained compute and, far worse, ~15 TB/s of sustained memory bandwidth — the scan is bandwidth-bound, and no economically sane fleet supplies that. HNSW (Hierarchical Navigable Small Worlds) achieves approximate nearest neighbor search in O(log N) per query by building a navigable graph of shortcut edges at multiple granularity levels. The `ef=128` operating point in Section 14 gives recall@10 of 97.3% at a p99 under 25ms on that scenario's 50M-vector index — read those two numbers as **scenario-specific**, not as properties of HNSW: recall and latency at a given `ef` depend entirely on the dataset, dimensionality, `M`, `ef_construction` and hardware, and no benchmark is cited for them. What *is* structural is the shape of the win, and it is worth deriving rather than quoting a round number: exact search computes 50M distances per query, while a graph walk at `ef=128` touches on the order of a few thousand nodes, so HNSW does three to four orders of magnitude fewer distance computations. Realised wall-clock speedup is lower than that ratio — graph traversal is pointer-chasing with poor locality where the exact scan is a perfectly streamed, bandwidth-bound sweep — so measure it on your own index instead of carrying over a headline multiple. The ~3% recall gap is recovered by reranking the top-100 approximate results with an exact cross-encoder.

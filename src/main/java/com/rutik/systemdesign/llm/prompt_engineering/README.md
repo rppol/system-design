@@ -277,6 +277,14 @@ completion = client.chat.completions.parse(
 entity = completion.choices[0].message.parsed
 ```
 
+**Which endpoint.** OpenAI's structured-outputs guide states that "both Structured Outputs and JSON
+mode are supported in the Responses API, Chat Completions API, Assistants API, Fine-tuning API and
+Batch API", so the Chat Completions form above is current, not legacy. The guide's own examples are
+written against the **Responses API** and it recommends `gpt-5.6` for new projects — so for new code
+prefer `client.responses.parse(...)`, which takes the same Pydantic model via `text_format=` and
+returns it on `response.output_parsed`. Both paths enforce the schema identically; the choice is
+which endpoint the rest of your application already speaks.
+
 ### 4.7 System Prompts
 
 Persistent instructions that set the model's role, persona, and constraints:
@@ -471,7 +479,13 @@ For 128K context model:
   Total:             ~84,000 tokens (within 128K limit)
 
 Tip: Count tokens BEFORE sending to API
-Use tiktoken for OpenAI models
+For OpenAI models use tiktoken, but pin the encoding by name:
+    enc = tiktoken.get_encoding("o200k_base")     # works for every GPT-5.x
+    NOT tiktoken.encoding_for_model("gpt-5.6")    # raises KeyError today
+tiktoken's MODEL_PREFIX_TO_ENCODING carries "gpt-5-" and an exact "gpt-5",
+neither of which matches a dotted id such as "gpt-5.6" (checked 30 Jul 2026).
+For Claude, count with the Anthropic API's messages.count_tokens endpoint --
+tiktoken is OpenAI's tokenizer and undercounts Claude by 15-20%.
 ```
 
 **What this actually says.** "The context window is one shared bucket, and the answer the model has not written yet is already taking up space in it."

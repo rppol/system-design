@@ -581,18 +581,25 @@ trainer.train()
 | bge-m3 | 54.7 | 1024 | 8192 tok | Self | Free |
 | text-embedding-3-small | 51.1 | 1536 | 8192 tok | API | $0.02/M tok |
 | text-embedding-3-large | 55.4 | 3072 | 8192 tok | API | $0.13/M tok |
-| Cohere embed-english-v3.0 | 55.9 (BEIR) | 1024 | 512 tok | API | $0.10/M tok |
+| Cohere embed-english-v3.0 | not published as a single figure (see note) | 1024 | 512 tok | API | $0.10/M tok |
 | nomic-embed-v1.5 | 53.0 | 768 | 8192 tok | Self | Free |
 
 Note the ordering: on MTEB Retrieval nDCG@10, `text-embedding-3-small` (51.08) sits *below*
 both self-hosted BGE models — its appeal is the managed endpoint and 8k context, not raw
 retrieval quality. Cohere's current flagship is `embed-v4.0` — multimodal, 128k context, and
 MRL-truncatable to 256/512/1024/1536 dimensions — with the v3 line kept for compatibility.
-Two caveats on this table: the bge-m3 figure is not confirmed against a
-primary source, and Cohere's own materials have quoted both 55.0 and 55.9 for
-`embed-english-v3.0` on BEIR — treat both rows as indicative. The BGE and OpenAI rows come
-from the model cards and the original MTEB (English) leaderboard; MTEB has since been
-restructured, so re-check the live leaderboard before quoting a ranking.
+**Provenance of the score column — read it before quoting any of it.** The BGE, OpenAI and nomic
+rows are **MTEB v1 (English), Retrieval task mean, nDCG@10**, taken from those models' own cards
+and release posts. That is the correct-as-published historical value for each, not a reading of a
+live board: MTEB has since been restructured into MMTEB, and the models at the top today report an
+**MTEB v2 English mean** on a different task set, so a v1 number and a v2 number are not comparable
+and neither is a current ranking. To re-derive rather than trust this table, pull the static
+`mteb/results` dataset on Hugging Face or the leaderboard's CSV export — the leaderboard Space
+itself renders client-side and cannot be fetched. Two rows are weaker still: the **bge-m3** figure
+is not confirmed against any primary source, and **Cohere publishes no single headline BEIR average
+for `embed-english-v3.0`** — the 55.0 and 55.9 figures both circulating trace to Cohere-adjacent
+material rather than to a dated Cohere post, so the score is omitted here instead of guessed. That
+row still earns its place on the dimension, context, hosting and price facts, which *are* published.
 
 ---
 

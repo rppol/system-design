@@ -119,7 +119,7 @@ flowchart TD
     PASS{"Passes\nbaseline?"}
     FAIL["Fail PR\nshow diff vs. baseline"]
     MERGE["Merge to main"]
-    NIGHTLY["Full Eval Suite (nightly)\n1 000 examples · E2E + adversarial + flakiness\n30 min, ~$20"]
+    NIGHTLY["Full Eval Suite (nightly)\n1 000 examples + 5x flakiness reruns\n~2 250 runs · 30 min, ~$20"]
     DASH["Dashboard Update\nquality trends · alerts"]
 
     PR --> STATIC --> UNIT --> REG --> PASS
@@ -789,7 +789,7 @@ annotator rate and is not a published figure.
 | Synthetic data | Cheap, scalable | Distribution mismatch; may test wrong things |
 | A/B testing | Ground truth from users | Slow; requires production traffic |
 
-**LLM-as-judge limitations**: Zheng et al. (MT-Bench / Chatbot Arena, arXiv 2306.05685) found a strong GPT-4 judge reaches "over 80% agreement" with human preferences — the same level humans agree with each other — while documenting three failure modes by name: position bias (the first-listed answer wins more often), verbosity bias (longer answers win), and self-enhancement bias (a judge favours outputs from its own model family). Validate your judge by checking agreement with human labels on a sample, and use a different model family as judge than the model being evaluated (use Claude to judge GPT outputs and vice versa) to blunt the self-enhancement effect.
+**LLM-as-judge limitations**: Zheng et al. (MT-Bench / Chatbot Arena, arXiv 2306.05685) found a strong GPT-4 judge reaches "over 80% agreement" with human preferences — the same level humans agree with each other — while documenting four failure modes by name: position bias (the first-listed answer wins more often), verbosity bias (longer answers win), self-enhancement bias (a judge favours outputs from its own model family), and limited reasoning ability (the judge grades math and reasoning answers it cannot itself work out, and is easily talked into a wrong one). Validate your judge by checking agreement with human labels on a sample, and use a different model family as judge than the model being evaluated (use Claude to judge GPT outputs and vice versa) to blunt the self-enhancement effect.
 
 ---
 
@@ -862,6 +862,16 @@ These cover the *grading* only. Running the system under test — retrieval, gen
 loop — is billed on top and usually dominates, which is why the case study in Section 14 budgets
 ~$2/PR all-in against $0.80 of judge calls. Re-derive both after any repricing.
 
+**One all-in rate, used for every cost annotation in this module.** The diagrams in Sections 5
+and 14 all price an E2E run at **~$0.01 per example** for the Section 14 RAG scenario: ~$0.003
+of judge calls plus ~$0.007 to actually run retrieval and generation on that example. Every
+figure in this module is that rate times a run count, so they stay consistent: a 200-example
+regression eval is `200 x $0.01 = ~$2`; the nightly suite is 1 000 examples *plus* 5x flakiness
+reruns on a ~250-example subset, so ~2 250 model runs, `~2 250 x $0.01 = ~$20`. This is an
+illustrative rate for one RAG workload, not a universal constant — an agent loop with 20 tool
+calls per example is an order of magnitude more, and a single-shot classifier an order less.
+Re-derive the rate for your own chain before reusing any of these numbers.
+
 **Ragas metrics explained** (the metric class was renamed `AnswerRelevancy` -> `ResponseRelevancy`;
 in Ragas 0.4.x `AnswerRelevancy` still exists as a subclass alias and the importable module-level
 instance is still the snake_case `answer_relevancy` — there is no `response_relevancy` symbol):
@@ -879,8 +889,8 @@ instance is still the snake_case `answer_relevancy` — there is no `response_re
 Three fundamental differences: (1) non-determinism — the same input produces different outputs on repeated calls; conventional software is deterministic; (2) no exact ground truth — for open-ended tasks, many valid outputs exist; conventional software has a single correct output; (3) prompt sensitivity — rewording a prompt by a few words can dramatically change model behavior, while changing a function signature has no equivalent effect in conventional software. These differences require probabilistic evaluation (run N times, check distribution), rubric-based scoring (grade on quality dimensions, not exact string match), and regression testing against a golden dataset rather than unit test assertions.
 
 **Q: What is LLM-as-judge evaluation and what are its limitations?**
-**Short:** LLM-as-judge suffers verbosity, self-enhancement, and position bias, reaching about 80% agreement with humans, roughly the ceiling since humans agree at the same rate.
-LLM-as-judge uses a capable LLM to score outputs from the system under test against a rubric. The judge receives the input, the system output, optionally a reference answer, and a scoring rubric; it returns dimension-wise scores (0-5) with reasoning. Advantages: fast, cheap, scalable, handles open-ended tasks. Limitations, all three named in the MT-Bench paper (Zheng et al., arXiv 2306.05685): (1) verbosity bias — judges favor longer, more detailed responses even when concise is better; (2) self-enhancement bias — judges favor outputs from their own model family; (3) position bias in pairwise mode — the first-listed answer wins more often. That paper also gives the calibration target: a strong judge reached over 80% agreement with human preferences, which is the same rate humans agree with each other, so above roughly 80% you are at the ceiling. Mitigation: use a different model family as judge than the system under test; calibrate on labeled examples before trusting its scores.
+**Short:** LLM-as-judge suffers verbosity, self-enhancement, position bias and limited reasoning, yet reaches about 80% agreement with humans, the same rate humans agree with each other.
+LLM-as-judge uses a capable LLM to score outputs from the system under test against a rubric. The judge receives the input, the system output, optionally a reference answer, and a scoring rubric; it returns dimension-wise scores (0-5) with reasoning. Advantages: fast, cheap, scalable, handles open-ended tasks. Limitations, all four named in the MT-Bench paper (Zheng et al., arXiv 2306.05685): (1) verbosity bias — judges favor longer, more detailed responses even when concise is better; (2) self-enhancement bias — judges favor outputs from their own model family; (3) position bias in pairwise mode — the first-listed answer wins more often; (4) limited reasoning ability — a judge cannot reliably grade a math or reasoning answer it could not produce itself, which is why hard-reasoning rubrics need reference answers or a verifier rather than a bare judge. That paper also gives the calibration target: a strong judge reached over 80% agreement with human preferences, which is the same rate humans agree with each other, so above roughly 80% you are at the ceiling. Mitigation: use a different model family as judge than the system under test; calibrate on labeled examples before trusting its scores.
 
 **Q: A PR shows a 4% score drop on your 200-example eval. How do you know it is a real regression and not noise?**
 **Short:** A single aggregate score drop can be noise from run-to-run variance, so compare paired per-example deltas and re-run several times before trusting a regression gate.
@@ -976,7 +986,7 @@ flowchart TD
     INTEG("Integration Tests<br/>- RAG pipeline<br/>- retrieval quality<br/>- chain error handling<br/>Per PR")
     INTEGRES("CI pass/fail + cost<br/>(~5min, ~$0.50)")
     E2E("E2E Evaluation<br/>- 200-example golden dataset<br/>- LLM-as-judge<br/>- all intent types<br/>Weekly + on release")
-    E2ERES("Quality trend report<br/>(~30min, ~$5)")
+    E2ERES("Quality trend report<br/>(~10min, ~$2)")
 
     UNIT --> UNITRES
     INTEG --> INTEGRES
@@ -1031,7 +1041,7 @@ named deployment; only the cost lines are derived from published list pricing.
 - Average time to detect regression without CI eval: ~3 days (user complaints)
 - Judge cost per PR: ~$0.80 (200 examples × ~$0.004/example of grading)
 - All-in cost per PR: ~$2 (judge calls plus running the RAG chain itself for all 200 examples)
-- Monthly evaluation cost: ~$140 (60 PRs/month × ~$2, plus 4 weekly full evals × ~$5)
+- Monthly evaluation cost: ~$130 (60 PRs/month × ~$2 = $120, plus 4 weekly full evals × ~$2 = $8; both are the same 200 examples at the ~$0.01/example all-in rate derived in Section 11)
 
 ### Production Monitoring
 

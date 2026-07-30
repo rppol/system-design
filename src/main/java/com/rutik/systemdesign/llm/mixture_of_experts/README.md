@@ -181,8 +181,9 @@ All-to-All is the dominant communication cost in expert parallelism; it fires tw
   Capacity:                     256 tokens
   Overflow:                      56 tokens  <-- DROPPED (lost)
 
-  Capacity factor = (tokens_per_batch * k) / (N * capacity)
-  GShard/Switch-style trainers typically use 1.25 to 2.0
+  Capacity = capacity_factor * (tokens_per_batch * k) / N
+  GShard gives each group 2x its fair share of every expert (capacity factor
+  2.0); Switch Transformer sweeps 1.0-2.0 and settles on 1.0-1.25
   Higher factor = less dropping, more memory usage
 
   Note: capacity is a property of static-shape implementations. The reference
@@ -441,6 +442,18 @@ drop. Laying the levels side by side shows why production settles near 1.25-1.5:
  why 1.0 is dangerous and the safe band is 1.25-1.5.
 ```
 
+**The counter-evidence, and why the dial is about serving rather than pre-training.**
+ST-MoE (Zoph et al., arXiv 2202.08906) swept the *training* capacity factor and found the
+quality tax far smaller than the drop rate suggests: at train CF 0.75 it dropped 10.6% of
+tokens and still scored 86.5 (+/- 0.21) on SuperGLUE, against 86.7 at CF 1.25 with only 0.3%
+dropped — and 85.8 at CF 2.0, which dropped nothing at all. Their conclusion is that
+"fine-tuning quality on SuperGLUE is not impacted significantly across the values explored".
+Read the table above as a *serving* guideline, not a law of MoE: during training the router
+co-adapts to the capacity it is given and an aggressive CF buys real memory and step-time
+back, whereas at inference the router is frozen and a dropped token is pure loss with nothing
+learned in exchange. That is also why several current stacks are dropless by construction
+(see the note below the first block).
+
 ### 6.5 Expert Parallelism
 
 With EP=8 (8 GPUs, 8 experts), each GPU holds 1 expert. During a forward pass:
@@ -678,11 +691,11 @@ In vLLM this is `--enable-eplb` on top of `--enable-expert-parallel`, with `--ep
 
 **vLLM** — First-class Mixtral/MoE support. Implements fused CUDA kernels for expert dispatch. Supports tensor parallelism and pipeline parallelism for MoE. Recommended for production MoE serving. Expert parallelism is a separate opt-in flag, `--enable-expert-parallel`; without it the MoE layers follow tensor-parallel sharding. The EP size is derived, not set by hand: `EP_SIZE = TP_SIZE x DP_SIZE`.
 
-**TensorRT-LLM** — NVIDIA's inference framework. Provides optimized MoE kernels for H100/A100. Supports FP8 quantization for expert weights. Best raw throughput for NVIDIA hardware.
+**TensorRT-LLM** — NVIDIA's inference framework. Provides fused MoE kernels and wide expert parallelism, with FP8 (and on Blackwell, NVFP4) quantization for expert weights. Its published MoE optimization work now centres on Hopper and Blackwell — "MoE as Dense GEMM" low-latency MoE and the "Scaling Expert Parallelism in TensorRT LLM" series are both Blackwell-first — so treat A100 as supported-but-not-the-tuning-target. Best raw throughput for current NVIDIA datacentre hardware.
 
 **llama.cpp** — CPU and consumer GPU MoE inference. Supports Mixtral via GGUF format. `--cpu-moe` / `--n-cpu-moe N` keep the MoE expert tensors (all layers, or the first N) resident in CPU RAM while the shared attention stack stays on GPU — it is a static tensor placement, not on-demand paging of the "inactive" experts to GPU. Reduces VRAM requirement at latency cost.
 
-**SGLang** — Supports MoE with RadixAttention. Good for multi-turn workloads with prefix caching.
+**SGLang** — First-class MoE support through `FusedMoE` and its expert-parallel variant `DeepEPMoE`, with DeepEP/MoriEP communication backends and an expert-parallel load balancer (EPLB); see its `advanced_features/expert_parallelism` docs. RadixAttention is its prefix cache, orthogonal to the MoE layers, which is what makes it strong on multi-turn workloads over a shared prefix.
 
 **Ollama** — Bundles llama.cpp, supports Mixtral for local deployment. Easy setup but limited expert parallelism control.
 

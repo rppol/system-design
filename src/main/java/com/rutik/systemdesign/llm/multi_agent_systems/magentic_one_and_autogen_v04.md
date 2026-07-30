@@ -4,7 +4,7 @@
 
 ## 1. Concept Overview
 
-Magentic-One (Microsoft Research, arXiv 2411.04468, November 2024) is a generalist multi-agent system built on a hierarchical orchestrator-plus-specialists architecture. A single Orchestrator agent maintains two explicit ledgers — a task ledger and a progress ledger — and coordinates four specialized sub-agents: WebSurfer (browser automation via a Chromium browser), FileSurfer (file system navigation and file preview), Coder (write code and analyze collected information), and ComputerTerminal (execute the Coder's programs in a console shell). The paper's headline GAIA result is **38.00% overall on the GAIA test set** for its best configuration and **32.33%** for the GPT-4o-only configuration; on the GAIA validation set the best configuration scored **54.84% (Level 1), 32.7% (Level 2), 22.92% (Level 3)** — versus 46.24% / 28.3% / 18.75% with GPT-4o alone. The team runs on `gpt-4o-2024-05-13`; the best configuration swaps in o1-preview for the Orchestrator's outer planning loop and the Coder. The paper's own framing is "statistically competitive with the previous state of the art" on GAIA, AssistantBench and WebArena, not a clean sweep.
+Magentic-One (Microsoft Research, arXiv 2411.04468, November 2024) is a generalist multi-agent system built on a hierarchical orchestrator-plus-specialists architecture. A single Orchestrator agent maintains two explicit ledgers — a task ledger and a progress ledger — and coordinates four specialized sub-agents: WebSurfer (browser automation via a Chromium browser), FileSurfer (file system navigation and file preview), Coder (write code and analyze collected information), and ComputerTerminal (execute the Coder's programs in a console shell). The paper's headline GAIA result is **38.00% overall on the GAIA test set** for its best configuration and **32.33%** for the GPT-4o-only configuration (Table 1, "the test sets of GAIA, WebArena and AssistantBench"); the per-level breakdown is on the **same test set**, not the validation set — Table 2 reports **54.84% (Level 1), 32.7% (Level 2), 22.92% (Level 3)** for the best configuration versus 46.24% / 28.3% / 18.75% with GPT-4o alone. The only figures in the paper on a held-out development split are the Figure 3 agent-ablation counts. The team runs on `gpt-4o-2024-05-13`; the best configuration swaps in o1-preview for the Orchestrator's outer planning loop and the Coder. The paper's own framing is "statistically competitive with the previous state of the art" on GAIA, AssistantBench and WebArena, not a clean sweep.
 
 AutoGen v0.4 (announced January 2025) is a ground-up redesign of the AutoGen framework. The v0.2 architecture used synchronous GroupChat; v0.4 replaces this with an async-first actor model where agents receive typed messages via an event bus. The new core introduces `RoutedAgent`, `@message_handler` decorators, `RoundRobinGroupChat`, and `SelectorGroupChat` — replacing the brittle GroupChat speaker-selection loop with composable, type-safe orchestration primitives.
 
@@ -754,14 +754,16 @@ methods above are the AutoGen-specific hook you attach it to.
 
 ## 7. Real-World Examples
 
-**GAIA Benchmark (Magentic-One, arXiv 2411.04468, Nov 2024)** — validation set, per level:
+**GAIA Benchmark (Magentic-One, arXiv 2411.04468v1, Nov 2024)** — GAIA **test set**, per level (paper Table 2; overall row from Table 1). The best-baseline column is omne v0.1, the strongest GAIA leaderboard entry the paper compares against:
 
-| Level | Magentic-One (GPT-4o) | Magentic-One (GPT-4o + o1-preview) |
-|---|---|---|
-| Level 1 (1-2 steps) | 46.24% | 54.84% |
-| Level 2 (3-4 steps) | 28.3% | 32.7% |
-| Level 3 (5+ steps, multi-modal) | 18.75% | 22.92% |
-| **Test set, overall** | **32.33%** | **38.00%** |
+| Level | Magentic-One (GPT-4o) | Magentic-One (GPT-4o + o1-preview) | Best baseline (omne v0.1) |
+|---|---|---|---|
+| Level 1 (1-2 steps) | 46.24% | 54.84% | 53.76% |
+| Level 2 (3-4 steps) | 28.3% | 32.7% | 37.11% |
+| Level 3 (5+ steps, multi-modal) | 18.75% | 22.92% | 26.53% |
+| **Overall** | **32.33%** | **38.00%** | — |
+
+That baseline column is why the paper says "statistically competitive with the previous state of the art" rather than claiming a win: Magentic-One edges omne v0.1 only at Level 1 and loses at Levels 2 and 3.
 
 On the paper's other two benchmarks: AssistantBench test set 11.0% exact match / 25.3% accuracy (GPT-4o) and 13.3% / 27.7% (GPT-4o + o1); WebArena 32.8% overall against a 78.2% human reference. A typical GAIA-style task — "find the population of Oslo in 2023, multiply by Norway's 2022 GDP per capita, and save the result to a CSV" — needs WebSurfer (find data), Coder (arithmetic + CSV), and ComputerTerminal (run it and write the file).
 
@@ -1055,7 +1057,7 @@ The Orchestrator counts consecutive steps in which no new facts were added to th
 
 **Q: What GAIA benchmark scores did Magentic-One achieve and what do they mean?**
 **Short:** Magentic-One scored 38 percent overall on GAIA, dropping steeply from Level 1 to Level 3 on the hardest multi-step tasks.
-Magentic-One's best configuration scored 38.00% overall on the GAIA test set, and 32.33% with GPT-4o alone. Per level on the validation set, that best configuration reached 54.84% (Level 1), 32.7% (Level 2) and 22.92% (Level 3); GPT-4o alone reached 46.24% / 28.3% / 18.75%. The steep drop from Level 1 to Level 3 is the point: hierarchical orchestration with specialized tool agents was statistically competitive with the previous state of the art without task-specific tuning, but under a quarter of the hardest multi-step tasks were solved.
+Magentic-One's best configuration scored 38.00% overall on the GAIA test set, and 32.33% with GPT-4o alone. Per level on that same test set (paper Table 2, not the validation split), that best configuration reached 54.84% (Level 1), 32.7% (Level 2) and 22.92% (Level 3); GPT-4o alone reached 46.24% / 28.3% / 18.75%. The steep drop from Level 1 to Level 3 is the point: hierarchical orchestration with specialized tool agents was statistically competitive with the previous state of the art without task-specific tuning, but under a quarter of the hardest multi-step tasks were solved.
 
 **Q: What is the fundamental architectural difference between AutoGen v0.2 and v0.4?**
 **Short:** AutoGen v0.4 replaces v0.2's blocking GroupChat loop with an async actor model of typed, independently routable agents.

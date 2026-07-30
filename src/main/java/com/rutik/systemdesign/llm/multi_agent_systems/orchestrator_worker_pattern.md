@@ -417,7 +417,11 @@ only pays where task value justifies that spend.
 ### Worked Cost Model (ILLUSTRATIVE — not measured data)
 
 The numbers below are a self-consistent worked example built from current list prices, so you can
-see how the arithmetic behaves. They are **not** a published benchmark and must not be cited as one.
+see how the arithmetic behaves. **Only the per-token rates are sourced** — Anthropic's published
+list prices, Claude Opus 5 at $5/$25 per MTok and Claude Haiku 4.5 at $1/$5. Every *input* to the
+model is a chosen value picked to make the arithmetic legible: the 62-minute sequential time, the
+14-minute wall clock, the fan-out of 8, and the 187K/24K and 12K/3K token counts are not
+measurements of anything. They are **not** a published benchmark and must not be cited as one.
 
 ```
 Task: "Survey and summarize papers on speculative decoding published in a

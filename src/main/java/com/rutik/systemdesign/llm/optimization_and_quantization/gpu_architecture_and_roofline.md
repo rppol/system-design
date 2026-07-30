@@ -392,7 +392,7 @@ This three-gate order — capacity, bandwidth, compute — is the reusable inter
 
 ### 6.6 MFU and MBU — the honesty metrics
 
-MFU (Model FLOPS Utilization) = achieved FLOPs/s ÷ peak: healthy LLM *training* lands ~40–60% (Meta reported 38–43% BF16 MFU on Llama 3 405B); decode-heavy inference often <5% — and that is not a bug, it is the roofline. MBU (Model Bandwidth Utilization) = achieved bytes/s ÷ peak bandwidth: well-tuned decode hits 60–80%+. Reporting decode performance in MFU is a category error candidates are expected to catch — use MBU for decode, MFU for prefill/training.
+MFU (Model FLOPS Utilization) = achieved FLOPs/s ÷ peak: healthy LLM *training* lands ~40–60% (Meta reported 38–43% BF16 MFU on Llama 3 405B); decode-heavy inference often <5% — and that is not a bug, it is the roofline. MBU (Model Bandwidth Utilization) = achieved bytes/s ÷ peak bandwidth. The metric comes from Databricks' *LLM Inference Performance Engineering: Best Practices* (12 Oct 2023), which defines it as `((model parameter bytes + KV cache bytes) / TPOT) ÷ peak bandwidth` and measured ~50% for MPT-7B on A100-40GB and ~60% for Llama-2-70B on 2×H100 at batch 1, falling as batch size grows. No standards body owns MBU, so read the **60–80% band used throughout this file as a rule-of-thumb target for a well-tuned current stack, not a published norm** — Databricks' own numbers sit at the bottom of it. What is robust is the shape of the argument, not the constant: track your measured MBU as a trend, and treat ~30% as a genuine defect rather than physics. Reporting decode performance in MFU is a category error candidates are expected to catch — use MBU for decode, MFU for prefill/training.
 
 ### 6.7 FP8 training mechanics
 

@@ -313,7 +313,18 @@ Why it's more accurate than bi-encoder:
   Token-level matching captures fine-grained interaction
   "capital" in query matches "political center" in document via MaxSim
 
-Latency: ~5ms vs ~50ms for cross-encoder; quality between bi and cross-encoder
+Latency: roughly an order of magnitude below a cross-encoder on the same
+  candidate pool, because MaxSim is matrix arithmetic over pre-computed
+  vectors while the cross-encoder runs a transformer forward pass per pair.
+  There is no single portable number -- it moves with corpus size, index
+  configuration and hardware. The one published anchor is PLAID (Santhanam
+  et al., arXiv 2205.09707), which reports "latency of tens of milliseconds
+  on a GPU and tens or just few hundreds of milliseconds on a CPU at large
+  scale" over 140M passages, up to 7x faster than vanilla ColBERTv2 on GPU.
+  That is end-to-end retrieval over a huge corpus, not reranking 100
+  candidates, so treat it as an upper bound on the shape rather than a
+  figure to quote for your pipeline. Measure your own.
+Quality: between bi-encoder and cross-encoder
 Storage: large (128d per token × all document tokens stored)
 ```
 
@@ -384,7 +395,7 @@ def cohere_rerank(query: str, documents: list[str], top_k: int = 5):
 Cohere Rerank properties:
 - Multilingual: 100+ languages in a single model
 - Managed API — no GPU needed
-- ~100ms latency; `rerank-v4.0-fast` is $2.00 per 1K searches, `rerank-v4.0-pro` $2.50
+- Prices are published: `rerank-v4.0-fast` is $2.00 per 1K searches, `rerank-v4.0-pro` $2.50. The ~100ms often quoted is an **observed round trip, not a Cohere SLO** — Cohere publishes no latency guarantee for Rerank, and the figure moves with region, payload size and document length. Measure it from your own callers before putting it in a budget
 - The v3.x models carry a 4,096-token per-document context limit (query + document combined)
 
 ### Reading the Three Score Scales
@@ -457,9 +468,16 @@ Note which metric moved most. Recall@5 gained 17 points and precision@5 gained 3
 | Bi-encoder (no reranker) | 0ms (already done) | Moderate | Free | Baseline |
 | BGE-reranker-base | ~30ms GPU | Good | Self-hosted | Compact model |
 | BGE-reranker-large | ~80ms GPU | Very good | Self-hosted | Best open source |
-| ColBERT | ~5ms GPU | Good | Self-hosted | Best latency |
-| Cohere Rerank (v4.0-fast) | ~100ms API | Best | $2/1K searches | Best multilingual |
+| ColBERT | ~10x below a cross-encoder; no portable figure | Good | Self-hosted | Best latency |
+| Cohere Rerank (v4.0-fast) | ~100ms observed round trip (no published SLO) | Best | $2/1K searches | Best multilingual |
 | A small general LLM as reranker | ~500ms API | Excellent | Expensive | Not recommended for this purpose |
+
+**On the latency column.** The self-hosted GPU rows are this module's own A10G figures at ~0.8ms
+per pair (see §12) and scale linearly with the candidate count — halve the pool, halve the number.
+The two rows that are *not* model properties are called out in place: ColBERT's cost depends on
+corpus size and index configuration (§4), and the Cohere figure is a network round trip, which
+Cohere does not publish an SLO for — it will move with your region, payload size and document
+length. The **prices** on that row are published; the latency is an estimate.
 
 ---
 
@@ -551,7 +569,7 @@ A: Fine-tuning requires relevance-labeled pairs: (query, relevant_document, irre
 
 **Q: How does Cohere Rerank 3 compare to self-hosted cross-encoders?**
 **Short:** Cohere trades $2 per 1K searches and network latency for a 4,096-token context and zero GPU ops, while self-hosted BGE-reranker-large is free per query but capped at 512 tokens.
-A: Cohere Rerank advantages: best multilingual support (100+ languages), a 4,096-token per-document context window on the v3.x models (vs. 512 for BGE-reranker-large), no GPU infrastructure to manage, consistently strong performance on BEIR. Disadvantages: $2.00 per 1K searches on `rerank-v4.0-fast` (becomes significant at high volume), API latency ~100ms, data privacy concerns (sending documents to external API), offline/air-gapped deployments not possible. Self-hosted BGE-reranker-large: free inference on owned GPU (~80ms on A10G), data stays on-premise, can be fine-tuned, 512-token limit. Decision: API if multilingual, long documents, or team lacks GPU; self-hosted if cost at scale, privacy, or fine-tuning is needed.
+A: Cohere Rerank advantages: best multilingual support (100+ languages), a 4,096-token per-document context window on the v3.x models (vs. 512 for BGE-reranker-large), no GPU infrastructure to manage, consistently strong performance on BEIR. Disadvantages: $2.00 per 1K searches on `rerank-v4.0-fast` (becomes significant at high volume), an API round trip typically observed around 100ms though Cohere publishes no latency SLO, data privacy concerns (sending documents to external API), offline/air-gapped deployments not possible. Self-hosted BGE-reranker-large: free inference on owned GPU (~80ms on A10G), data stays on-premise, can be fine-tuned, 512-token limit. Decision: API if multilingual, long documents, or team lacks GPU; self-hosted if cost at scale, privacy, or fine-tuning is needed.
 
 **Q: When does adding a reranker not improve quality?**
 **Short:** It adds nothing when retrieval precision@5 already exceeds 90%, when every candidate is already highly relevant, or when the candidate pool is too small to reorder meaningfully.
@@ -571,7 +589,7 @@ A: Reranking introduces a source of improvement that's orthogonal to embedding q
 
 **Q: What is the typical latency budget for cross-encoder reranking?**
 **Short:** Budget it as candidates times per-pair cost, roughly 0.8ms per pair for BGE-reranker-large on an A10G, so 100 candidates costs about 80ms inside a multi-second SLO.
-A: Budget it as candidates x per-pair cost — this module uses BGE-reranker-large (an XLM-RoBERTa-large cross-encoder, ~560M params) at ~0.8ms/pair on an A10G, so 20 candidates is ~16ms and 100 candidates ~80ms; an older T4 is roughly 2x slower. For a system with a 2-second end-to-end SLO, a representative latency budget allocation is: embedding (10ms) + retrieval/ANN search (30ms) + reranking (100ms) + LLM generation (1.5s) + network and overhead (100ms) = ~1.74s, leaving ~260ms of margin. To reduce reranking latency without sacrificing quality: limit candidates to top-20 instead of top-100 (linear latency reduction), use a smaller reranker model (BGE-reranker-base: ~30ms on T4 at the cost of 5-8% quality), or use ColBERT (~5ms) for latency-sensitive workloads.
+A: Budget it as candidates x per-pair cost — this module uses BGE-reranker-large (an XLM-RoBERTa-large cross-encoder, ~560M params) at ~0.8ms/pair on an A10G, so 20 candidates is ~16ms and 100 candidates ~80ms; an older T4 is roughly 2x slower. For a system with a 2-second end-to-end SLO, a representative latency budget allocation is: embedding (10ms) + retrieval/ANN search (30ms) + reranking (100ms) + LLM generation (1.5s) + network and overhead (100ms) = ~1.74s, leaving ~260ms of margin. To reduce reranking latency without sacrificing quality: limit candidates to top-20 instead of top-100 (linear latency reduction), use a smaller reranker model (BGE-reranker-base: ~30ms on T4 at the cost of 5-8% quality), or use ColBERT, which is roughly an order of magnitude cheaper than a cross-encoder on the same pool because MaxSim is matrix arithmetic over pre-computed vectors rather than a transformer pass per pair (no portable figure — it depends on your index; see §4).
 
 **Q: How does RRF compare to learned score fusion for combining retriever results?**
 **Short:** RRF needs no training data and already beats classical fusion baselines untuned, while learned fusion needs 500+ labeled pairs and periodic retraining to capture non-linear weights.
