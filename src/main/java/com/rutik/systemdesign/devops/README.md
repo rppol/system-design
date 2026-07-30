@@ -196,21 +196,48 @@ This section is exhaustive by design — 41 modules from Linux/OS internals and 
 
 The complete curriculum in the order above — see [8-Phase Learning Path](#4-8-phase-learning-path). Use it for genuine mastery: Linux/OS and Git foundations, the full Kubernetes stack (storage, Helm, Operators/CRDs), every CI/CD and IaC alternative, GCP/Azure alongside AWS, FinOps, the complete DevSecOps & Reliability phase, and the Specialized Platforms electives (GPU/MLOps, event streaming, performance testing). Nothing is dropped.
 
-### Interview-Specific Path (22 modules)
+<!-- study-path-table senior -->
+### Senior Path (22 modules)
 
-A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview** actually probes, anchored on the phases this section already flags as highest-yield (the Kubernetes core, CI/CD & GitOps, and Observability & SRE). Same learning order, ~46% fewer modules. Each group below says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [linux_and_os_fundamentals](linux_and_os_fundamentals/) | README only |
+| 3 | [networking_for_devops](networking_for_devops/) | README only |
+| 5 | [containers_and_docker](containers_and_docker/) | README only |
+| 7 | [kubernetes_architecture](kubernetes_architecture/) | README only |
+| 8 | [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/) | README only |
+| 9 | [kubernetes_networking](kubernetes_networking/) | README only |
+| 11 | [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/) | README only |
+| 12 | [kubernetes_security](kubernetes_security/) | README only |
+| 15 | [ci_cd_fundamentals](ci_cd_fundamentals/) | README only |
+| 16 | [ci_cd_platforms](ci_cd_platforms/) | README only |
+| 17 | [deployment_strategies](deployment_strategies/) | README only |
+| 18 | [gitops_argocd_flux](gitops_argocd_flux/) | README only |
+| 20 | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/) | README only |
+| 23 | [secrets_management](secrets_management/) | README only |
+| 24 | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/) | README only |
+| 26 | [serverless_and_faas](serverless_and_faas/) | README only |
+| 27 | [cloud_networking_and_cdn](cloud_networking_and_cdn/) | README only |
+| 29 | [observability_metrics_prometheus](observability_metrics_prometheus/) | README only |
+| 30 | [observability_logging](observability_logging/) | README only |
+| 31 | [observability_tracing_and_otel](observability_tracing_and_otel/) | README only |
+| 33 | [sre_principles_and_slos](sre_principles_and_slos/) | README only |
+| 34 | [incident_management_and_oncall](incident_management_and_oncall/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Foundations | [linux_and_os_fundamentals](linux_and_os_fundamentals/), [networking_for_devops](networking_for_devops/) | Process/cgroup/OOM-killer mechanics and DNS/CIDR/TLS/mTLS/L4-L7 load balancing are the substrate every "why did this break" question sits on |
-| Kubernetes Core | [containers_and_docker](containers_and_docker/), [kubernetes_architecture](kubernetes_architecture/), [kubernetes_workloads_and_objects](kubernetes_workloads_and_objects/), [kubernetes_networking](kubernetes_networking/), [kubernetes_scheduling_and_autoscaling](kubernetes_scheduling_and_autoscaling/), [kubernetes_security](kubernetes_security/) | The single highest-signal DevOps interview topic — control-plane reconciliation, workload objects, CNI/NetworkPolicy, HPA/VPA/Karpenter, and RBAC/Pod Security Standards come up in nearly every senior screen |
-| CI/CD & GitOps | [ci_cd_fundamentals](ci_cd_fundamentals/), [ci_cd_platforms](ci_cd_platforms/), [deployment_strategies](deployment_strategies/), [gitops_argocd_flux](gitops_argocd_flux/) | "How does a deploy actually happen" and "how does a canary shift traffic" are near-universal; push- vs pull-based GitOps is a classic tradeoff question |
-| IaC & Secrets | [infrastructure_as_code_terraform](infrastructure_as_code_terraform/), [secrets_management](secrets_management/) | Terraform state/plan/apply semantics and dynamic-secret rotation are the two most-probed "manage infrastructure safely" questions |
-| Cloud Platforms | [cloud_fundamentals_and_aws](cloud_fundamentals_and_aws/), [serverless_and_faas](serverless_and_faas/), [cloud_networking_and_cdn](cloud_networking_and_cdn/) | IAM/VPC/EC2/S3/EKS baseline literacy, cold-start/event-driven tradeoffs, and CDN/global routing — assumed knowledge in any cloud-facing interview |
-| Observability | [observability_metrics_prometheus](observability_metrics_prometheus/), [observability_logging](observability_logging/), [observability_tracing_and_otel](observability_tracing_and_otel/) | "How do you know it's broken, and where" — PromQL/cardinality control, structured logging at scale, and span propagation across services |
-| SRE & Incident Response | [sre_principles_and_slos](sre_principles_and_slos/), [incident_management_and_oncall](incident_management_and_oncall/) | Error-budget math and incident command/blameless postmortems separate senior candidates from mid — a near-guaranteed technical-behavioral hybrid question |
+**Not in this path** (19 of 41, Full Path only): `shell_scripting_and_automation`, `version_control_and_git_workflows`, `container_runtimes_and_oci`, `kubernetes_storage_and_state`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `artifact_and_registry_management`, `terraform_advanced_and_alternatives`, `configuration_management`, `gcp_and_azure_essentials`, `cloud_cost_optimization_finops`, `visualization_and_alerting`, `devsecops_and_supply_chain_security`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `platform_engineering_and_idp`, `ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): `shell_scripting_and_automation` and `version_control_and_git_workflows` (assumed prerequisites, rarely probed directly), `container_runtimes_and_oci`, `kubernetes_storage_and_state`, `helm_and_package_management`, `kubernetes_operators_and_crds`, `artifact_and_registry_management`, `terraform_advanced_and_alternatives`, `configuration_management`, `gcp_and_azure_essentials`, `cloud_cost_optimization_finops`, `visualization_and_alerting`, and the entire DevSecOps & Reliability phase (`devsecops_and_supply_chain_security`, `policy_as_code_and_compliance`, `disaster_recovery_and_resilience`, `platform_engineering_and_idp`) plus the Specialized Platforms phase (`ml_platform_and_gpu_infrastructure`, `event_streaming_operations`, `performance_and_load_testing`). A niche flagged in an interview (e.g. "have you run Kafka in production?") is a bonus, not a gate — reach for these once the 22 above are solid.
+A ruthless cut to what a **senior DevOps / SRE / Platform engineering interview** actually probes, anchored on the phases this section already flags as highest-yield (the Kubernetes core, CI/CD & GitOps, and Observability & SRE). Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
+
+| Group | Why it's tested |
+|-------|-----------------|
+| Foundations | Process/cgroup/OOM-killer mechanics and DNS/CIDR/TLS/mTLS/L4-L7 load balancing are the substrate every "why did this break" question sits on |
+| Kubernetes Core | The single highest-signal DevOps interview topic — control-plane reconciliation, workload objects, CNI/NetworkPolicy, HPA/VPA/Karpenter, and RBAC/Pod Security Standards come up in nearly every senior screen |
+| CI/CD & GitOps | "How does a deploy actually happen" and "how does a canary shift traffic" are near-universal; push- vs pull-based GitOps is a classic tradeoff question |
+| IaC & Secrets | Terraform state/plan/apply semantics and dynamic-secret rotation are the two most-probed "manage infrastructure safely" questions |
+| Cloud Platforms | IAM/VPC/EC2/S3/EKS baseline literacy, cold-start/event-driven tradeoffs, and CDN/global routing — assumed knowledge in any cloud-facing interview |
+| Observability | "How do you know it's broken, and where" — PromQL/cardinality control, structured logging at scale, and span propagation across services |
+| SRE & Incident Response | Error-budget math and incident command/blameless postmortems separate senior candidates from mid — a near-guaranteed technical-behavioral hybrid question |
 
 ---
 
@@ -245,7 +272,7 @@ The highest-frequency DevOps *knowledge* questions mapped to the file that answe
 
 ## Study Plan
 
-A 6-week plan over the Interview-Specific Path. Each week pairs modules with one or two case studies to rehearse the "design X" format.
+A 6-week plan over the Senior Path. Each week pairs modules with one or two case studies to rehearse the "design X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

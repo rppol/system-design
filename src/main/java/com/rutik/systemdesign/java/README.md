@@ -122,21 +122,71 @@ Advanced topics for senior engineers building services that talk to other servic
 
 The complete curriculum in the order above — see [8-Phase Learning Path](#8-phase-learning-path). Use it for genuine depth: bytecode and the class-file format, Panama FFM, reactive programming, gRPC, networking internals, security/crypto, and the production/tooling modules. Nothing is dropped.
 
-### Interview-Specific Path (17 modules)
+<!-- study-path-table senior -->
+### Senior Path (19 modules)
 
-A ruthless cut to what a **senior Java interview** actually probes — the language semantics, the JVM "show depth" round, and the concurrency/collections cluster that appears in nearly every screen. Same learning order, ~40% fewer modules. Each group says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [core_language](core_language/) | README only |
+| 2 | [strings_and_text](strings_and_text/) | 2 files |
+| 3 | [generics_and_type_system](generics_and_type_system/) | 2 files |
+| 4 | [exceptions_and_io](exceptions_and_io/) | README only |
+| 5 | [json_processing_jackson](json_processing_jackson/) | README only |
+| 6 | [java8_features](java8_features/) | README only |
+| 8 | [java_streams](java_streams/) | README only |
+| 10 | [java9_to_21_features](java9_to_21_features/) | README only |
+| 12 | [jvm_internals](jvm_internals/) | README only |
+| 14 | [reference_types_and_cleaners](reference_types_and_cleaners/) | README only |
+| 16 | [concurrency](concurrency/) | README only |
+| 17 | [collections_internals](collections_internals/) | README only |
+| 18 | [design_patterns_in_java](design_patterns_in_java/) | README only |
+| 19 | [performance_and_tuning](performance_and_tuning/) | 2 files |
+| 20 | [java_memory_model](java_memory_model/) | README only |
+| 21 | [java_interview_patterns](java_interview_patterns/) | README only |
+| 22 | [testing_junit_mockito](testing_junit_mockito/) | README only |
+| 26 | [structured_concurrency_and_loom](structured_concurrency_and_loom/) | README only |
+| 30 | [jdbc_and_database](jdbc_and_database/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Language Core | [Core Language](core_language/README.md), [Strings & Text](strings_and_text/README.md), [Generics & Type System](generics_and_type_system/README.md), [Exceptions & I/O](exceptions_and_io/README.md), [JSON Processing (Jackson)](json_processing_jackson/README.md) | equals/hashCode contract, string immutability/interning, PECS/erasure, try-with-resources, and Jackson data-binding pitfalls — the guaranteed openers |
-| Modern Java | [Java 8 Features](java8_features/README.md), [Java Streams](java_streams/README.md), [Java 9-21 Features](java9_to_21_features/README.md) | lambdas/Optional, stream laziness + parallel rules, records/sealed/pattern-matching/virtual-threads |
-| JVM & Memory | [JVM Internals](jvm_internals/README.md), [Java Memory Model](java_memory_model/README.md) | GC algorithms (G1 ~200ms vs ZGC sub-ms), JIT, class loading, happens-before — the "show depth" separator |
-| Concurrency & Collections | [Concurrency](concurrency/README.md), [Collections Internals](collections_internals/README.md) | HashMap/ConcurrentHashMap internals, volatile vs synchronized, ThreadPoolExecutor, CAS/AQS — the most-tested cluster |
-| Patterns & Testing | [Design Patterns in Java](design_patterns_in_java/README.md), [Java Interview Patterns](java_interview_patterns/README.md), [Testing (JUnit 5 & Mockito)](testing_junit_mockito/README.md) | GoF-in-the-JDK, immutable/builder/singleton recipes, mocks vs spies vs captors |
-| Modern Concurrency | [Structured Concurrency & Loom](structured_concurrency_and_loom/README.md) | virtual threads vs reactive, carrier-thread pinning, StructuredTaskScope — the current hot topic |
-| Data Access | [JDBC & Database Access](jdbc_and_database/README.md) | transaction isolation levels, HikariCP pool sizing, PreparedStatement, batch inserts |
+**Not in this path** (14 of 33, Full Path only): `java_time_datetime`, `functional_programming`, `java_platform_module_system`, `bytecode_and_classfile`, `graalvm_native_image`, `logging`, `annotation_processing`, `build_tools_maven_gradle`, `foreign_function_and_memory_api`, `reactive_programming`, `networking_and_http_client`, `security_and_cryptography`, `grpc_protobuf`, `microservices_patterns`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower whiteboard yield): functional programming (folded into Java 8 + Streams for interviews), java.time, performance & tuning (staff-level depth), logging, annotation processing, bytecode & class-file format, Foreign Function & Memory API, reactive programming, networking & HTTP client, security & cryptography, gRPC & Protocol Buffers, and microservices patterns. A niche flagged in an interview (e.g. "have you used Panama?") is a bonus, not a gate — reach for these once the 17 above are solid.
+A ruthless cut to what a **senior Java interview** actually probes — the language semantics, the JVM "show depth" round, and the concurrency/collections cluster that appears in nearly every screen. Same learning order, a strict subset of the Full Path. Each group says why it earns senior time.
+
+| Group | Why it's tested |
+|-------|-----------------|
+| Language Core | equals/hashCode contract, string immutability/interning, PECS/erasure, try-with-resources, and Jackson data-binding pitfalls — the guaranteed openers |
+| Modern Java | lambdas/Optional, stream laziness + parallel rules, records/sealed/pattern-matching/virtual-threads |
+| JVM & Memory | GC algorithms (G1 ~200ms vs ZGC sub-ms), JIT, class loading, happens-before — the "show depth" separator |
+| Concurrency & Collections | HashMap/ConcurrentHashMap internals, volatile vs synchronized, ThreadPoolExecutor, CAS/AQS — the most-tested cluster |
+| Patterns & Testing | GoF-in-the-JDK, immutable/builder/singleton recipes, mocks vs spies vs captors |
+| Modern Concurrency | virtual threads vs reactive, carrier-thread pinning, StructuredTaskScope — the current hot topic |
+| Data Access | transaction isolation levels, HikariCP pool sizing, PreparedStatement, batch inserts |
+
+<!-- study-path-table principal -->
+### Principal Path (15 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 10 | [java9_to_21_features](java9_to_21_features/) | README only |
+| 11 | [java_platform_module_system](java_platform_module_system/) | README only |
+| 12 | [jvm_internals](jvm_internals/) | README only |
+| 15 | [graalvm_native_image](graalvm_native_image/) | README only |
+| 18 | [design_patterns_in_java](design_patterns_in_java/) | README only |
+| 19 | [performance_and_tuning](performance_and_tuning/) | README only |
+| 22 | [testing_junit_mockito](testing_junit_mockito/) | README only |
+| 23 | [logging](logging/) | README only |
+| 24 | [annotation_processing](annotation_processing/) | README only |
+| 25 | [build_tools_maven_gradle](build_tools_maven_gradle/) | README only |
+| 26 | [structured_concurrency_and_loom](structured_concurrency_and_loom/) | README only |
+| 28 | [reactive_programming](reactive_programming/) | README only |
+| 31 | [security_and_cryptography](security_and_cryptography/) | README only |
+| 32 | [grpc_protobuf](grpc_protobuf/) | README only |
+| 33 | [microservices_patterns](microservices_patterns/) | README only |
+
+**Not in this path** (18 of 33, Full Path only): `core_language`, `strings_and_text`, `generics_and_type_system`, `exceptions_and_io`, `json_processing_jackson`, `java8_features`, `java_time_datetime`, `java_streams`, `functional_programming`, `bytecode_and_classfile`, `reference_types_and_cleaners`, `concurrency`, `collections_internals`, `java_memory_model`, `java_interview_patterns`, `foreign_function_and_memory_api`, `networking_and_http_client`, `jdbc_and_database`
+<!-- /study-path-table -->
+
+A different cut, not senior-plus-extras. The Principal Path probes the calls that shape a codebase for years: runtime and memory-model choices, the cost of an abstraction at scale, and how a platform team keeps a large service predictable. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -172,7 +222,7 @@ The highest-frequency Java *knowledge* questions mapped to the file that answers
 
 ## Study Plan
 
-A 5-week plan over the Interview-Specific Path. Case studies live in [case_studies/](case_studies/README.md) and rehearse the "implement X" format.
+A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_studies/README.md) and rehearse the "implement X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

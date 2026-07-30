@@ -269,21 +269,53 @@ a **Full / Interview** toggle (Full is the default).
 
 The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the design vocabulary (SOLID Principles and Design Principles), every GoF family (Creational, Structural, Behavioral), pattern-selection judgment (Pattern Comparisons), what to avoid (Anti-Patterns), thread-safety idioms (Concurrency Patterns), and all 12 System Design Problems. Nothing is dropped.
 
-### Interview-Specific Path (7 modules)
+<!-- study-path-table senior -->
+### Senior Path (8 modules)
 
-A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocabulary plus the "design a parking lot / rate limiter" round every LLD interview runs on. Same learning order, 2 modules fewer. Each group below says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 2 | [solid_principles](solid_principles/) | 6 files |
+| 3 | [creational](creational/) | 5 files |
+| 4 | [structural](structural/) | 6 files |
+| 5 | [behavioral](behavioral/) | 8 files |
+| 6 | [pattern_comparisons](pattern_comparisons/) | 8 files |
+| 7 | [anti_patterns](anti_patterns/) | 3 files |
+| 8 | [concurrency_patterns](concurrency_patterns/) | 5 files |
+| 9 | [system_design_problems](system_design_problems/) | 7 files |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Foundations | [SOLID Principles](solid_principles/README.md) | SRP/OCP/LSP violations are the standard "what's wrong with this class" opener, and justify every pattern discussed afterward |
-| Creational Patterns | [Creational Patterns](creational/README.md) | Thread-safe Singleton (DCL + volatile) and Factory Method vs Abstract Factory vs Builder — the creation-strategy question nearly every interview touches |
-| Structural Patterns | [Structural Patterns](structural/README.md) | Decorator vs Proxy, Adapter vs Facade — composition-based flexibility questions test whether you reach for inheritance by default |
-| Behavioral Patterns | [Behavioral Patterns](behavioral/README.md) | Strategy, Observer, State, Command, Template Method — the core vocabulary; most "design X" problems resolve to two or three of these |
-| Pattern Mastery | [Pattern Comparisons](pattern_comparisons/README.md) | Strategy vs State, Decorator vs Proxy — interviewers probe judgment ("why this pattern, not that one"), not memorization |
-| Anti-Patterns | [Anti-Patterns](anti_patterns/README.md) | "How would you refactor this?" rounds test recognition of God Object, Service Locator, and Circular Dependencies before you can propose a fix |
-| Apply: System Design Problems | [System Design Problems](system_design_problems/README.md) | The actual 30-45 minute round — Parking Lot, Rate Limiter, LRU Cache — where every principle above gets combined under time pressure |
+**Not in this path** (1 of 9, Full Path only): `design_principles`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path**: Design Principles (DRY, KISS, YAGNI, Law of Demeter, Composition over Inheritance, Program to Interface — folded into SOLID above, since interviewers rarely test these by name even though their instincts run through every pattern discussion) and Concurrency Patterns (Thread-Safe Singleton, Producer-Consumer, Read-Write Lock, Thread Pool — the deep mechanics live in [java/concurrency](../java/concurrency/README.md); LLD rounds rarely dedicate time to raw concurrency primitives). A niche flagged in an interview (e.g. "how would you make this thread-safe?") is a bonus, not a gate — reach for these once the 7 above are solid.
+A ruthless cut to what a **senior LLD interview** actually probes: the GoF vocabulary plus the "design a parking lot / rate limiter" round every LLD interview runs on. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
+
+| Group | Why it's tested |
+|-------|-----------------|
+| Foundations | SRP/OCP/LSP violations are the standard "what's wrong with this class" opener, and justify every pattern discussed afterward |
+| Creational Patterns | Thread-safe Singleton (DCL + volatile) and Factory Method vs Abstract Factory vs Builder — the creation-strategy question nearly every interview touches |
+| Structural Patterns | Decorator vs Proxy, Adapter vs Facade — composition-based flexibility questions test whether you reach for inheritance by default |
+| Behavioral Patterns | Strategy, Observer, State, Command, Template Method — the core vocabulary; most "design X" problems resolve to two or three of these |
+| Pattern Mastery | Strategy vs State, Decorator vs Proxy — interviewers probe judgment ("why this pattern, not that one"), not memorization |
+| Anti-Patterns | "How would you refactor this?" rounds test recognition of God Object, Service Locator, and Circular Dependencies before you can propose a fix |
+| Apply: System Design Problems | The actual 30-45 minute round — Parking Lot, Rate Limiter, LRU Cache — where every principle above gets combined under time pressure |
+
+<!-- study-path-table principal -->
+### Principal Path (8 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [design_principles](design_principles/) | 7 files |
+| 2 | [solid_principles](solid_principles/) | 4 files |
+| 3 | [creational](creational/) | README only |
+| 4 | [structural](structural/) | 2 files |
+| 5 | [behavioral](behavioral/) | 2 files |
+| 6 | [pattern_comparisons](pattern_comparisons/) | 8 files |
+| 7 | [anti_patterns](anti_patterns/) | 7 files |
+| 9 | [system_design_problems](system_design_problems/) | README only |
+
+**Not in this path** (1 of 9, Full Path only): `concurrency_patterns`
+<!-- /study-path-table -->
+
+A different cut, not senior-plus-extras. The Principal Path probes pattern judgment over pattern recall: when a pattern is the wrong answer, what it costs to unwind one, and how a design survives being handed to a team. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -318,7 +350,7 @@ The highest-frequency LLD *knowledge* questions mapped to the file that answers 
 
 ## Study Plan
 
-A 6-week plan over the Interview-Specific Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/README.md](case_studies/README.md) for the full pattern-dependency map and interview-prep shortcuts across all 12 problems.
+A 6-week plan over the Senior Path. Each week pairs the pattern theory with one problem from `system_design_problems/` to rehearse the "design X" format — see [case_studies/README.md](case_studies/README.md) for the full pattern-dependency map and interview-prep shortcuts across all 12 problems.
 
 | Week | Focus | Modules | Practice problem |
 |------|-------|---------|-------------------|

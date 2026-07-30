@@ -141,21 +141,43 @@ This section is exhaustive by design — 24 modules from asymptotic foundations 
 
 The complete curriculum in the order above — see [5-Phase Learning Path](#4-5-phase-learning-path). Use it for genuine mastery: every data-structure and algorithm family, the full operating-systems core, and the systems/security/theory foundations (computer architecture, networking, database storage, cryptography, character encoding). Nothing is dropped. In the game's Study path the DSA pattern playbooks topic (`dsa_patterns`) follows Phase 3 (right after Graph & String Algorithms), where the recognition engine over Phases 1–3 becomes useful.
 
-### Interview-Specific Path (17 modules)
+<!-- study-path-table senior -->
+### Senior Path (17 modules)
 
-A ruthless cut to what a **senior software engineering interview** actually probes: the coding-round spine plus the OS core that comes up in systems questions. Same learning order, 17 of the 25 modules. Each group below says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [complexity_analysis_and_big_o](complexity_analysis_and_big_o/) | README only |
+| 3 | [number_systems_and_bit_manipulation](number_systems_and_bit_manipulation/) | README only |
+| 5 | [recursion_and_problem_solving_patterns](recursion_and_problem_solving_patterns/) | README only |
+| 6 | [arrays_strings_and_hashing](arrays_strings_and_hashing/) | README only |
+| 7 | [linked_lists_stacks_and_queues](linked_lists_stacks_and_queues/) | README only |
+| 8 | [trees_and_binary_search_trees](trees_and_binary_search_trees/) | README only |
+| 9 | [heaps_and_priority_queues](heaps_and_priority_queues/) | README only |
+| 10 | [graphs_tries_and_advanced_structures](graphs_tries_and_advanced_structures/) | README only |
+| 11 | [sorting_and_searching](sorting_and_searching/) | README only |
+| 12 | [dynamic_programming](dynamic_programming/) | README only |
+| 13 | [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/) | README only |
+| 14 | [graph_and_string_algorithms](graph_and_string_algorithms/) | README only |
+| 15 | [dsa_patterns](dsa_patterns/) | 28 files |
+| 16 | [processes_threads_and_context_switching](processes_threads_and_context_switching/) | README only |
+| 17 | [cpu_scheduling_algorithms](cpu_scheduling_algorithms/) | README only |
+| 18 | [memory_management_and_virtual_memory](memory_management_and_virtual_memory/) | README only |
+| 19 | [deadlocks_and_synchronization](deadlocks_and_synchronization/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Complexity & Computation Foundations | [complexity_analysis_and_big_o](complexity_analysis_and_big_o/), [number_systems_and_bit_manipulation](number_systems_and_bit_manipulation/), [recursion_and_problem_solving_patterns](recursion_and_problem_solving_patterns/) | Every answer starts with a complexity claim — Big-O/amortized analysis is the shared vocabulary a grader anchors to; bit tricks and two's complement are fast, memorable wins; recursion patterns (two-pointer, sliding window, backtracking) are the first branch point in problem recognition |
-| Core Data Structures | [arrays_strings_and_hashing](arrays_strings_and_hashing/), [linked_lists_stacks_and_queues](linked_lists_stacks_and_queues/) | Hash-map lookups, in-place array tricks, and linked-list reversal/cycle detection are the substrate of the majority of coding-round questions |
-| Trees, Heaps & Graph Structures | [trees_and_binary_search_trees](trees_and_binary_search_trees/), [heaps_and_priority_queues](heaps_and_priority_queues/), [graphs_tries_and_advanced_structures](graphs_tries_and_advanced_structures/) | BST invariants, heap extract-min/max, and graph representation tradeoffs are the second-most-probed structure family; trie and union-find variants separate senior from mid candidates |
-| Core Algorithms | [sorting_and_searching](sorting_and_searching/), [dynamic_programming](dynamic_programming/), [greedy_and_divide_and_conquer](greedy_and_divide_and_conquer/) | Sorting/searching complexity and the DP-vs-greedy fork are asked directly ("why quicksort over merge sort", "DP or greedy here") more than almost any other algorithmic decision |
-| Graph & String Algorithms | [graph_and_string_algorithms](graph_and_string_algorithms/) | BFS/Dijkstra/topological sort anchor "design a route or dependency system" prompts; KMP/Rabin-Karp separate candidates who can only brute-force string matching from those who know the O(n+m) trick |
-| DSA Pattern Recognition | [dsa_patterns](dsa_patterns/) | The recognition engine over Phases 1–3: cue→pattern tables and 25 playbooks are the coding-round strategy layer |
-| Operating Systems Core | [processes_threads_and_context_switching](processes_threads_and_context_switching/), [cpu_scheduling_algorithms](cpu_scheduling_algorithms/), [memory_management_and_virtual_memory](memory_management_and_virtual_memory/), [deadlocks_and_synchronization](deadlocks_and_synchronization/) | Context-switch cost, scheduling starvation, virtual-memory paging, and the four Coffman conditions are the standard OS-fundamentals gate at senior-level onsite loops |
+**Not in this path** (8 of 25, Full Path only): `discrete_math_for_engineers`, `character_encoding_deep_dive`, `computer_architecture_and_memory_hierarchy`, `networking_fundamentals`, `database_and_storage_fundamentals`, `cryptography_fundamentals`, `theory_of_computation`, `how_code_runs_compilers_and_interpreters`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): the systems/theory depth that rounds out mastery — computer architecture & memory hierarchy, networking fundamentals, database & storage fundamentals, cryptography fundamentals, and character encoding deep dive — plus the foundational theory modules still being written (theory of computation, how code runs: compilers & interpreters, discrete math for engineers). A niche flagged in an interview (e.g. "how does TLS actually work?") is a bonus, not a gate — reach for these once the 16 above are solid.
+A ruthless cut to what a **senior software engineering interview** actually probes: the coding-round spine plus the OS core that comes up in systems questions. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
+
+| Group | Why it's tested |
+|-------|-----------------|
+| Complexity & Computation Foundations | Every answer starts with a complexity claim — Big-O/amortized analysis is the shared vocabulary a grader anchors to; bit tricks and two's complement are fast, memorable wins; recursion patterns (two-pointer, sliding window, backtracking) are the first branch point in problem recognition |
+| Core Data Structures | Hash-map lookups, in-place array tricks, and linked-list reversal/cycle detection are the substrate of the majority of coding-round questions |
+| Trees, Heaps & Graph Structures | BST invariants, heap extract-min/max, and graph representation tradeoffs are the second-most-probed structure family; trie and union-find variants separate senior from mid candidates |
+| Core Algorithms | Sorting/searching complexity and the DP-vs-greedy fork are asked directly ("why quicksort over merge sort", "DP or greedy here") more than almost any other algorithmic decision |
+| Graph & String Algorithms | BFS/Dijkstra/topological sort anchor "design a route or dependency system" prompts; KMP/Rabin-Karp separate candidates who can only brute-force string matching from those who know the O(n+m) trick |
+| DSA Pattern Recognition | The recognition engine over Phases 1–3: cue→pattern tables and 25 playbooks are the coding-round strategy layer |
+| Operating Systems Core | Context-switch cost, scheduling starvation, virtual-memory paging, and the four Coffman conditions are the standard OS-fundamentals gate at senior-level onsite loops |
 
 ---
 
@@ -190,7 +212,7 @@ The highest-frequency CS-fundamentals *knowledge* questions mapped to the file t
 
 ## Study Plan
 
-A 6-week plan over the Interview-Specific Path. cs_fundamentals has no per-topic `case_studies/` written for every week, so each week pairs its modules with the closest `dsa_patterns/` recognition-engine playbooks and, where a genuine fit exists, one of the six `case_studies/` interview-problem walkthroughs.
+A 6-week plan over the Senior Path. cs_fundamentals has no per-topic `case_studies/` written for every week, so each week pairs its modules with the closest `dsa_patterns/` recognition-engine playbooks and, where a genuine fit exists, one of the six `case_studies/` interview-problem walkthroughs.
 
 | Week | Focus | Modules | Practice Companion |
 |------|-------|---------|---------------------|

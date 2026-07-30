@@ -199,20 +199,41 @@ This section is exhaustive by design — 24 modules from the SIMT model and GPU 
 
 The complete curriculum in the order above — see [6-Phase Learning Path](#4-6-phase-learning-path). Use it for genuine mastery: foundations, core CUDA, the full performance-engineering phase, advanced execution (graphs, multi-GPU, dynamic parallelism), the complete library and Python/Triton ecosystem, and the portability survey. Nothing is dropped.
 
-### Interview-Specific Path (16 modules)
+<!-- study-path-table senior -->
+### Senior Path (16 modules)
 
-A ruthless cut to what a **senior GPU / CUDA / ML-infra interview** actually probes, anchored on the performance-engineering core. Same learning order, ~33% fewer modules. Each group below says why it earns interview time. This subset is kept in sync with `game/app.js` (`STUDY_PATHS.cuda.interview`) — same modules, same order.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [gpu_computing_foundations](gpu_computing_foundations/) | README only |
+| 2 | [gpu_hardware_architecture](gpu_hardware_architecture/) | README only |
+| 4 | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/) | README only |
+| 5 | [warps_and_simt_execution](warps_and_simt_execution/) | README only |
+| 6 | [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/) | README only |
+| 7 | [memory_management_and_data_transfer](memory_management_and_data_transfer/) | README only |
+| 8 | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/) | README only |
+| 9 | [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/) | README only |
+| 10 | [occupancy_and_launch_configuration](occupancy_and_launch_configuration/) | README only |
+| 11 | [synchronization_and_atomics](synchronization_and_atomics/) | README only |
+| 12 | [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/) | README only |
+| 13 | [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/) | README only |
+| 14 | [streams_events_and_concurrency](streams_events_and_concurrency/) | README only |
+| 18 | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/) | README only |
+| 22 | [profiling_and_performance_analysis](profiling_and_performance_analysis/) | README only |
+| 23 | [debugging_correctness_and_numerics](debugging_correctness_and_numerics/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Foundations | [gpu_computing_foundations](gpu_computing_foundations/), [gpu_hardware_architecture](gpu_hardware_architecture/) | Throughput-vs-latency, SIMT, and the SM/warp/memory hierarchy are the substrate every "why is this kernel slow" question sits on |
-| Core CUDA | [cuda_programming_model_and_kernels](cuda_programming_model_and_kernels/), [warps_and_simt_execution](warps_and_simt_execution/), [cuda_memory_model_and_hierarchy](cuda_memory_model_and_hierarchy/), [memory_management_and_data_transfer](memory_management_and_data_transfer/) | Thread indexing, warp divergence, the memory spaces, and host/device transfer are table-stakes — you must be able to write a correct kernel before optimizing one |
-| Performance Engineering | [memory_coalescing_and_access_patterns](memory_coalescing_and_access_patterns/), [shared_memory_and_bank_conflicts](shared_memory_and_bank_conflicts/), [occupancy_and_launch_configuration](occupancy_and_launch_configuration/), [synchronization_and_atomics](synchronization_and_atomics/), [parallel_patterns_reduction_scan_histogram](parallel_patterns_reduction_scan_histogram/), [warp_level_primitives_and_cooperative_groups](warp_level_primitives_and_cooperative_groups/) | The single highest-signal CUDA topic — coalescing, bank conflicts, occupancy, atomics, reduction/scan, and warp shuffle come up in nearly every senior GPU screen |
-| Concurrency | [streams_events_and_concurrency](streams_events_and_concurrency/) | Overlapping compute with transfer, and stream semantics, are the classic "hide the PCIe cost" question |
-| Tensor Cores | [tensor_cores_and_mixed_precision](tensor_cores_and_mixed_precision/) | Mixed precision and when Tensor Cores actually engage is near-universal for any DL-infra role |
-| Profiling & Correctness | [profiling_and_performance_analysis](profiling_and_performance_analysis/), [debugging_correctness_and_numerics](debugging_correctness_and_numerics/) | "How would you find the bottleneck" (Nsight, roofline, warp-stall reasons) and "how would you catch a race" (compute-sanitizer) separate senior from mid |
+**Not in this path** (8 of 24, Full Path only): `cuda_toolkit_and_compilation`, `cuda_graphs`, `multi_gpu_programming_and_nccl`, `dynamic_parallelism_and_advanced_kernels`, `cuda_math_and_dnn_libraries`, `python_gpu_ecosystem`, `triton_and_kernel_dsls`, `gpu_portability_hip_sycl_and_beyond`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): `cuda_toolkit_and_compilation` (PTX/SASS depth — assumed, rarely probed directly), `cuda_graphs`, `multi_gpu_programming_and_nccl`, `dynamic_parallelism_and_advanced_kernels`, `cuda_math_and_dnn_libraries`, `python_gpu_ecosystem`, `triton_and_kernel_dsls`, and `gpu_portability_hip_sycl_and_beyond`. A niche flagged in an interview (e.g. "have you written a Triton kernel?" or "how do you shard across 8 GPUs?") is a bonus, not a gate — reach for these once the 16 above are solid.
+A ruthless cut to what a **senior GPU / CUDA / ML-infra interview** actually probes, anchored on the performance-engineering core. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time. This subset is kept in sync with `game/app.js` (`STUDY_PATHS.cuda.interview`) — same modules, same order.
+
+| Group | Why it's tested |
+|-------|-----------------|
+| Foundations | Throughput-vs-latency, SIMT, and the SM/warp/memory hierarchy are the substrate every "why is this kernel slow" question sits on |
+| Core CUDA | Thread indexing, warp divergence, the memory spaces, and host/device transfer are table-stakes — you must be able to write a correct kernel before optimizing one |
+| Performance Engineering | The single highest-signal CUDA topic — coalescing, bank conflicts, occupancy, atomics, reduction/scan, and warp shuffle come up in nearly every senior GPU screen |
+| Concurrency | Overlapping compute with transfer, and stream semantics, are the classic "hide the PCIe cost" question |
+| Tensor Cores | Mixed precision and when Tensor Cores actually engage is near-universal for any DL-infra role |
+| Profiling & Correctness | "How would you find the bottleneck" (Nsight, roofline, warp-stall reasons) and "how would you catch a race" (compute-sanitizer) separate senior from mid |
 
 ---
 
@@ -248,7 +269,7 @@ The highest-frequency CUDA *knowledge* questions mapped to the file that answers
 
 ## Study Plan
 
-A 5-week plan over the Interview-Specific Path. Each week pairs modules with one or two case studies to rehearse the "optimize X" format.
+A 5-week plan over the Senior Path. Each week pairs modules with one or two case studies to rehearse the "optimize X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

@@ -73,21 +73,76 @@ This section is exhaustive by design — 34 modules across 9 phases, from OSI-la
 
 The complete curriculum in the order above — see [9-Phase Learning Path](#9-phase-learning-path). Use it for genuine mastery: every networking layer (OSI, TCP/IP, UDP/QUIC), the full API surface (GraphQL, WebSockets/SSE), performance profiling, database migrations and the full database-types survey, the testing trio, event sourcing/CQRS and messaging patterns, service mesh, and container/deployment patterns. Nothing is dropped.
 
-### Interview-Specific Path (18 modules)
+<!-- study-path-table senior -->
+### Senior Path (21 modules)
 
-A ruthless cut to what a **senior backend engineering interview** actually probes — the protocols, performance levers, database internals, resilience patterns, security, and distributed-systems building blocks that come up in nearly every loop. Same learning order, ~47% fewer modules. Each group below says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 2 | [tcp_ip_deep_dive](tcp_ip_deep_dive/) | README only |
+| 4 | [http_protocols](http_protocols/) | README only |
+| 5 | [rest_api_design](rest_api_design/) | README only |
+| 6 | [grpc_and_protobuf](grpc_and_protobuf/) | README only |
+| 8 | [websockets_and_sse](websockets_and_sse/) | README only |
+| 9 | [performance_profiling](performance_profiling/) | README only |
+| 10 | [connection_pooling_deep_dive](connection_pooling_deep_dive/) | README only |
+| 11 | [caching_strategies_deep_dive](caching_strategies_deep_dive/) | README only |
+| 12 | [async_and_concurrency_patterns](async_and_concurrency_patterns/) | README only |
+| 13 | [database_internals_and_indexing](database_internals_and_indexing/) | README only |
+| 14 | [query_optimization](query_optimization/) | README only |
+| 15 | [database_migrations](database_migrations/) | README only |
+| 16 | [distributed_transactions_and_consistency](distributed_transactions_and_consistency/) | README only |
+| 18 | [fault_tolerance_patterns](fault_tolerance_patterns/) | README only |
+| 19 | [rate_limiting_in_depth](rate_limiting_in_depth/) | README only |
+| 20 | [observability_and_monitoring](observability_and_monitoring/) | README only |
+| 21 | [backend_security_owasp](backend_security_owasp/) | README only |
+| 22 | [auth_and_authorization_systems](auth_and_authorization_systems/) | README only |
+| 24 | [load_and_performance_testing](load_and_performance_testing/) | README only |
+| 27 | [kafka_deep_dive](kafka_deep_dive/) | README only |
+| 34 | [container_and_deployment_patterns](container_and_deployment_patterns/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Protocols & API Design | [HTTP Protocols](http_protocols/), [REST API Design](rest_api_design/), [gRPC & Protobuf](grpc_and_protobuf/) | HTTP/2 vs /3, TLS handshakes, idempotency, versioning, and REST-vs-RPC tradeoffs open almost every backend screen |
-| Performance Engineering | [Connection Pooling Deep Dive](connection_pooling_deep_dive/), [Caching Strategies Deep Dive](caching_strategies_deep_dive/), [Async & Concurrency Patterns](async_and_concurrency_patterns/) | Pool sizing formulas, cache stampede, and thread-pool sizing are the "why is prod slow at 3 AM" questions every senior candidate must answer |
-| Database Engineering | [Database Internals & Indexing](database_internals_and_indexing/), [Query Optimization](query_optimization/), [Distributed Transactions & Consistency](distributed_transactions_and_consistency/) | B+tree/MVCC internals, N+1 detection, and 2PC-vs-Saga are the deepest, highest-frequency backend-specific probes |
-| Resilience & Observability | [Fault Tolerance Patterns](fault_tolerance_patterns/), [Rate Limiting In Depth](rate_limiting_in_depth/), [Observability & Monitoring](observability_and_monitoring/) | Circuit breaker states, token bucket vs sliding window, and metrics/logs/traces separate "writes code" from "operates a system" |
-| Security | [Backend Security & OWASP](backend_security_owasp/), [Auth & Authorization Systems](auth_and_authorization_systems/) | OWASP Top 10, JWT/OAuth2 internals, and RBAC vs ABAC are near-universal, regardless of company or stack |
-| Event-Driven Architecture | [Event-Driven Fundamentals](event_driven_fundamentals/), [Kafka Deep Dive](kafka_deep_dive/) | Choreography vs orchestration and Kafka's EOS/rebalancing internals anchor most "design an async pipeline" prompts |
-| Microservices Architecture | [Microservices Fundamentals](microservices_fundamentals/), [API Gateway Patterns](api_gateway_patterns/) | Bounded contexts, the strangler fig pattern, and gateway/BFF responsibilities are the default frame for "design X at scale" |
+**Not in this path** (13 of 34, Full Path only): `osi_model_and_networking`, `udp_and_quic`, `graphql`, `database_types_deep_dive`, `backend_testing_strategies`, `chaos_engineering`, `event_driven_fundamentals`, `event_sourcing_and_cqrs`, `messaging_patterns`, `microservices_fundamentals`, `api_gateway_patterns`, `service_mesh_and_service_discovery`, `distributed_system_operational_patterns`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): the networking deep-dives (OSI Model & Networking, TCP/IP Deep Dive, UDP & QUIC), GraphQL, WebSockets & SSE, Performance Profiling, Database Migrations, Database Types Deep Dive, the testing trio (Backend Testing Strategies, Load & Performance Testing, Chaos Engineering), Event Sourcing & CQRS, Messaging Patterns, Service Mesh & Service Discovery, Distributed System Operational Patterns, and Container & Deployment Patterns. A niche flagged in an interview (e.g. "have you worked with a service mesh?") is a bonus, not a gate — reach for these once the 18 above are solid.
+A ruthless cut to what a **senior backend engineering interview** actually probes — the protocols, performance levers, database internals, resilience patterns, security, and distributed-systems building blocks that come up in nearly every loop. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
+
+| Group | Why it's tested |
+|-------|-----------------|
+| Protocols & API Design | HTTP/2 vs /3, TLS handshakes, idempotency, versioning, and REST-vs-RPC tradeoffs open almost every backend screen |
+| Performance Engineering | Pool sizing formulas, cache stampede, and thread-pool sizing are the "why is prod slow at 3 AM" questions every senior candidate must answer |
+| Database Engineering | B+tree/MVCC internals, N+1 detection, and 2PC-vs-Saga are the deepest, highest-frequency backend-specific probes |
+| Resilience & Observability | Circuit breaker states, token bucket vs sliding window, and metrics/logs/traces separate "writes code" from "operates a system" |
+| Security | OWASP Top 10, JWT/OAuth2 internals, and RBAC vs ABAC are near-universal, regardless of company or stack |
+| Event-Driven Architecture | Choreography vs orchestration and Kafka's EOS/rebalancing internals anchor most "design an async pipeline" prompts |
+| Microservices Architecture | Bounded contexts, the strangler fig pattern, and gateway/BFF responsibilities are the default frame for "design X at scale" |
+
+<!-- study-path-table principal -->
+### Principal Path (18 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 5 | [rest_api_design](rest_api_design/) | README only |
+| 11 | [caching_strategies_deep_dive](caching_strategies_deep_dive/) | README only |
+| 15 | [database_migrations](database_migrations/) | README only |
+| 16 | [distributed_transactions_and_consistency](distributed_transactions_and_consistency/) | README only |
+| 17 | [database_types_deep_dive](database_types_deep_dive/) | README only |
+| 18 | [fault_tolerance_patterns](fault_tolerance_patterns/) | README only |
+| 20 | [observability_and_monitoring](observability_and_monitoring/) | README only |
+| 21 | [backend_security_owasp](backend_security_owasp/) | README only |
+| 22 | [auth_and_authorization_systems](auth_and_authorization_systems/) | README only |
+| 23 | [backend_testing_strategies](backend_testing_strategies/) | README only |
+| 25 | [chaos_engineering](chaos_engineering/) | README only |
+| 26 | [event_driven_fundamentals](event_driven_fundamentals/) | README only |
+| 28 | [event_sourcing_and_cqrs](event_sourcing_and_cqrs/) | README only |
+| 29 | [messaging_patterns](messaging_patterns/) | README only |
+| 30 | [microservices_fundamentals](microservices_fundamentals/) | README only |
+| 31 | [api_gateway_patterns](api_gateway_patterns/) | README only |
+| 32 | [service_mesh_and_service_discovery](service_mesh_and_service_discovery/) | README only |
+| 33 | [distributed_system_operational_patterns](distributed_system_operational_patterns/) | README only |
+
+**Not in this path** (16 of 34, Full Path only): `osi_model_and_networking`, `tcp_ip_deep_dive`, `udp_and_quic`, `http_protocols`, `grpc_and_protobuf`, `graphql`, `websockets_and_sse`, `performance_profiling`, `connection_pooling_deep_dive`, `async_and_concurrency_patterns`, `database_internals_and_indexing`, `query_optimization`, `rate_limiting_in_depth`, `load_and_performance_testing`, `kafka_deep_dive`, `container_and_deployment_patterns`
+<!-- /study-path-table -->
+
+A different cut, not senior-plus-extras. The Principal Path probes the judgment calls a staff backend engineer owns: which protocol and consistency model a system can afford, how it degrades under partial failure, and what you tell a team **not** to build. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -120,7 +175,7 @@ The highest-frequency backend *knowledge* questions mapped to the module that an
 
 ## Study Plan
 
-A 5-week plan over the Interview-Specific Path. Each week pairs modules with one case study to rehearse the "design X" format.
+A 5-week plan over the Senior Path. Each week pairs modules with one case study to rehearse the "design X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

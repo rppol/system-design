@@ -108,61 +108,56 @@ This section is exhaustive by design — 21 modules spanning pure Python interna
 
 The complete curriculum in the order above — see [3-Phase Learning Path](#3-3-phase-learning-path). Use it for genuine mastery: deep CPython internals (metaclasses, descriptors, packaging/tooling, `dis`/profiling), the full concurrency toolkit (`threading`/`multiprocessing` alongside `asyncio`), stdlib depth (strings/bytes/regex, file I/O, datetime/logging), and Pythonic design patterns. Nothing is dropped.
 
-### Interview-Specific Path (13 modules)
+<!-- study-path-table senior -->
+### Senior Path (16 modules)
 
-A ruthless cut to what a **senior Python interview** actually probes, anchored on the modules this section already flags as highest-yield (language core, the GIL, and asyncio). Same learning order, ~38% fewer modules. Each group below says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [data_model_and_objects](data_model_and_objects/) | README only |
+| 2 | [core_language_idioms](core_language_idioms/) | README only |
+| 3 | [iterators_and_generators](iterators_and_generators/) | README only |
+| 4 | [decorators_and_closures](decorators_and_closures/) | README only |
+| 5 | [context_managers_and_exceptions](context_managers_and_exceptions/) | README only |
+| 6 | [collections_and_data_structures](collections_and_data_structures/) | README only |
+| 7 | [strings_bytes_encoding_and_regex](strings_bytes_encoding_and_regex/) | README only |
+| 9 | [cpython_memory_model](cpython_memory_model/) | README only |
+| 10 | [the_gil_and_free_threading](the_gil_and_free_threading/) | README only |
+| 11 | [metaclasses_and_metaprogramming](metaclasses_and_metaprogramming/) | README only |
+| 12 | [the_type_system_and_typing](the_type_system_and_typing/) | 2 files |
+| 13 | [performance_and_profiling](performance_and_profiling/) | README only |
+| 15 | [threading_and_multiprocessing](threading_and_multiprocessing/) | README only |
+| 16 | [asyncio_and_event_loop](asyncio_and_event_loop/) | 3 files |
+| 17 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/) | README only |
+| 20 | [testing_with_pytest](testing_with_pytest/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Language Core & Data Model | [data_model_and_objects](data_model_and_objects/), [core_language_idioms](core_language_idioms/), [iterators_and_generators](iterators_and_generators/), [decorators_and_closures](decorators_and_closures/), [context_managers_and_exceptions](context_managers_and_exceptions/), [collections_and_data_structures](collections_and_data_structures/) | Dunder methods, `__slots__`, MRO/C3, EAFP vs LBYL, the iterator protocol, closures, `ExceptionGroup`/`except*`, and dict/list Big-O — the fundamentals nearly every Python interview opens with, screen or onsite |
-| CPython Internals & Type System | [cpython_memory_model](cpython_memory_model/), [the_gil_and_free_threading](the_gil_and_free_threading/), [the_type_system_and_typing](the_type_system_and_typing/), [functional_programming](functional_programming/) | Reference counting vs generational GC, the GIL's release points and PEP 703 free-threading, `Protocol`/`TypeVar`/variance, and functional idioms — the internals that separate mid from senior |
-| Concurrency, Async & Testing | [asyncio_and_event_loop](asyncio_and_event_loop/), [async_patterns_and_pitfalls](async_patterns_and_pitfalls/), [testing_with_pytest](testing_with_pytest/) | Event-loop internals, `TaskGroup` structured concurrency, blocking-in-async detection, and pytest fixtures/mocking — proof you can write and verify correct async code, not just describe it |
+**Not in this path** (5 of 21, Full Path only): `file_io_and_serialization`, `functional_programming`, `design_patterns_in_python`, `stdlib_datetime_and_logging`, `packaging_and_project_tooling`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): deep CPython/tooling internals (metaclasses & descriptors, packaging & project tooling, performance profiling), string/bytes/regex internals, file I/O & serialization, `threading`/`multiprocessing` (asyncio dominates the async story above), Pythonic design patterns, and stdlib datetime & logging. A niche flagged in an interview is a bonus, not a gate — reach for these once the 13 above are solid.
+A ruthless cut to what a **senior Python interview** actually probes, anchored on the modules this section already flags as highest-yield (language core, the GIL, and asyncio). Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
 
-### Decoding the path arithmetic
+| Group | Why it's tested |
+|-------|-----------------|
+| Language Core & Data Model | Dunder methods, `__slots__`, MRO/C3, EAFP vs LBYL, the iterator protocol, closures, `ExceptionGroup`/`except*`, and dict/list Big-O — the fundamentals nearly every Python interview opens with, screen or onsite |
+| CPython Internals & Type System | Reference counting vs generational GC, the GIL's release points and PEP 703 free-threading, `Protocol`/`TypeVar`/variance, and functional idioms — the internals that separate mid from senior |
+| Concurrency, Async & Testing | Event-loop internals, `TaskGroup` structured concurrency, blocking-in-async detection, and pytest fixtures/mocking — proof you can write and verify correct async code, not just describe it |
 
-```
-Deferred        = Full Path - Interview Path        <- 21 - 13 = 8 modules
-reduction       = Deferred / Full Path              <- 8 / 21 = 38.1%
-coverage        = Interview Path / Full Path        <- 13 / 21 = 61.9%
-```
+<!-- study-path-table principal -->
+### Principal Path (7 modules)
 
-**What it means.** "The interview path is not a different curriculum — it is the same ordered list with 8 of its 21 entries removed, which is why the subset must stay in the full path's order."
+| # | Module | Files |
+|---|--------|-------|
+| 10 | [the_gil_and_free_threading](the_gil_and_free_threading/) | README only |
+| 12 | [the_type_system_and_typing](the_type_system_and_typing/) | README only |
+| 13 | [performance_and_profiling](performance_and_profiling/) | README only |
+| 17 | [async_patterns_and_pitfalls](async_patterns_and_pitfalls/) | README only |
+| 18 | [design_patterns_in_python](design_patterns_in_python/) | README only |
+| 20 | [testing_with_pytest](testing_with_pytest/) | README only |
+| 21 | [packaging_and_project_tooling](packaging_and_project_tooling/) | README only |
 
-This section has no formulas to speak of; the only arithmetic worth stating explicitly is how the two paths relate, because that relationship is a maintenance constraint, not just a description.
+**Not in this path** (14 of 21, Full Path only): `data_model_and_objects`, `core_language_idioms`, `iterators_and_generators`, `decorators_and_closures`, `context_managers_and_exceptions`, `collections_and_data_structures`, `strings_bytes_encoding_and_regex`, `file_io_and_serialization`, `cpython_memory_model`, `metaclasses_and_metaprogramming`, `functional_programming`, `threading_and_multiprocessing`, `asyncio_and_event_loop`, `stdlib_datetime_and_logging`
+<!-- /study-path-table -->
 
-| Symbol | What it is |
-|--------|------------|
-| Full Path | All **21** modules, in the 3-Phase order above |
-| Interview Path | An ordered **subset** of 13 of those same modules — never a re-ordering |
-| Deferred | `21 - 13 = 8` modules that stay in the Full Path only |
-| `STUDY_ORDER["python"]` | The game's canonical module order; the Full Path must match it |
-| `STUDY_PATHS.python.interview` | The game's 13-module subset; this README's table is its twin |
-
-**Walk one example.** Reconcile every count stated on this page:
-
-```
-  Full Path, by phase
-    Phase 1  Language Core & Data Model        8 modules
-    Phase 2  CPython Internals & Type System   6 modules
-    Phase 3  Concurrency, Async & Quality      7 modules
-                                              -- total 21   matches the module table
-
-  Interview Path, by group
-    Language Core & Data Model                 6 modules
-    CPython Internals & Type System            4 modules
-    Concurrency, Async & Testing               3 modules
-                                              -- total 13   matches the 3-week plan
-                                                            (weeks of 6, 4, 3)
-
-  reduction
-    deferred     = 21 - 13 = 8 modules
-    "~38% fewer" =  8 / 21 = 38.1 %           the page's stated figure checks out
-    coverage     = 13 / 21 = 61.9 % of the section
-```
-
-Both stated totals and the `~38%` figure are internally consistent. The number that matters operationally is the `8`: those modules are dropped, never reordered, which is what keeps the interview list a valid *ordered subset*. If a future edit reorders the interview table to group topics differently, the game's Study toggle breaks its subset invariant even though all 13 modules are still present — the count would still read 13 while the ordering check fails.
+A different cut, not senior-plus-extras. The Principal Path probes the judgment behind a Python codebase at scale: where the runtime's guarantees actually bind, which concurrency model the workload demands, and what you standardise across teams. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -189,7 +184,7 @@ The highest-frequency Python *knowledge* questions mapped to the file that answe
 
 ## Study Plan
 
-A 3-week plan over the Interview-Specific Path.
+A 3-week plan over the Senior Path.
 
 | Week | Focus | Modules |
 |------|-------|---------|

@@ -174,20 +174,61 @@ This section is exhaustive by design — 18 modules spanning the full architectu
 
 The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: all four phases, including the advanced-topics row (consensus algorithms, event sourcing/CQRS, observability, security and auth) and the full run of 23 case studies. Nothing is dropped.
 
-### Interview-Specific Path (14 modules)
+<!-- study-path-table senior -->
+### Senior Path (14 modules)
 
-A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 4 modules dropped. Each group below says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [scalability](scalability/) | README only |
+| 2 | [load_balancing](load_balancing/) | README only |
+| 3 | [caching](caching/) | README only |
+| 4 | [database_design](database_design/) | README only |
+| 5 | [cap_theorem](cap_theorem/) | README only |
+| 6 | [api_design](api_design/) | README only |
+| 7 | [message_queues](message_queues/) | README only |
+| 8 | [rate_limiting](rate_limiting/) | README only |
+| 9 | [cdn](cdn/) | README only |
+| 10 | [consistent_hashing](consistent_hashing/) | README only |
+| 11 | [database_sharding](database_sharding/) | README only |
+| 12 | [microservices](microservices/) | README only |
+| 13 | [distributed_transactions](distributed_transactions/) | README only |
+| 16 | [resilience_patterns](resilience_patterns/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Foundations | [Scalability](scalability/README.md), [Load Balancing](load_balancing/README.md), [Caching](caching/README.md), [Database Design](database_design/README.md) | The vocabulary every interview opens with — horizontal vs vertical scaling, traffic distribution, cache-aside/write-through, and SQL vs NoSQL schema tradeoffs |
-| Core Tradeoffs & Communication | [CAP Theorem](cap_theorem/README.md), [API Design](api_design/README.md), [Message Queues](message_queues/README.md) | The theorem you must state correctly (CP vs AP, PACELC), how services talk synchronously (REST/gRPC/GraphQL, versioning), and asynchronously (delivery guarantees, DLQ, backpressure) |
-| Protecting the System | [Rate Limiting](rate_limiting/README.md), [CDN](cdn/README.md) | The two standard "how do you protect and scale reads at the edge" follow-ups — token bucket vs sliding window, push vs pull edge caching |
-| Distributed Data Placement | [Consistent Hashing](consistent_hashing/README.md), [Database Sharding](database_sharding/README.md) | The standard answer to "how do you scale writes past one machine" — hash ring + virtual nodes, shard-key selection, resharding cost |
-| Large-Scale Architecture | [Microservices](microservices/README.md) | Service decomposition, bounded contexts, and data ownership — the senior-level "monolith vs microservices, and why" discussion |
-| Cross-Service Consistency & Failure Handling | [Distributed Transactions](distributed_transactions/README.md), [Resilience Patterns](resilience_patterns/README.md) | 2PC/Saga/TCC/outbox for consistency across service boundaries, plus circuit breakers/bulkheads/retries for the "what if this call fails" probe every interviewer asks |
+**Not in this path** (4 of 18, Full Path only): `observability`, `security_and_auth`, `consensus_algorithms`, `event_sourcing_cqrs`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): [Observability](observability/README.md), [Security and Authentication/Authorization](security_and_auth/README.md), [Consensus Algorithms](consensus_algorithms/README.md), and [Event Sourcing & CQRS](event_sourcing_cqrs/README.md). These matter a great deal in production, and do surface in senior/staff loops or infra-focused teams, but they are depth beyond the baseline gate. A niche flagged in an interview (e.g. "have you worked with Raft, or event sourcing?") is a bonus, not a gate — reach for these once the 14 above are solid.
+A ruthless cut to what a **senior system design interview** actually probes — the building blocks that assemble into nearly every "design X at scale" question. Same relative order as the Full Path, 4 modules dropped. Each group below says why it earns senior time.
+
+| Group | Why it's tested |
+|-------|-----------------|
+| Foundations | The vocabulary every interview opens with — horizontal vs vertical scaling, traffic distribution, cache-aside/write-through, and SQL vs NoSQL schema tradeoffs |
+| Core Tradeoffs & Communication | The theorem you must state correctly (CP vs AP, PACELC), how services talk synchronously (REST/gRPC/GraphQL, versioning), and asynchronously (delivery guarantees, DLQ, backpressure) |
+| Protecting the System | The two standard "how do you protect and scale reads at the edge" follow-ups — token bucket vs sliding window, push vs pull edge caching |
+| Distributed Data Placement | The standard answer to "how do you scale writes past one machine" — hash ring + virtual nodes, shard-key selection, resharding cost |
+| Large-Scale Architecture | Service decomposition, bounded contexts, and data ownership — the senior-level "monolith vs microservices, and why" discussion |
+| Cross-Service Consistency & Failure Handling | 2PC/Saga/TCC/outbox for consistency across service boundaries, plus circuit breakers/bulkheads/retries for the "what if this call fails" probe every interviewer asks |
+
+<!-- study-path-table principal -->
+### Principal Path (11 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [scalability](scalability/) | README only |
+| 5 | [cap_theorem](cap_theorem/) | README only |
+| 6 | [api_design](api_design/) | README only |
+| 11 | [database_sharding](database_sharding/) | README only |
+| 12 | [microservices](microservices/) | README only |
+| 13 | [distributed_transactions](distributed_transactions/) | README only |
+| 14 | [observability](observability/) | README only |
+| 15 | [security_and_auth](security_and_auth/) | README only |
+| 16 | [resilience_patterns](resilience_patterns/) | README only |
+| 17 | [consensus_algorithms](consensus_algorithms/) | README only |
+| 18 | [event_sourcing_cqrs](event_sourcing_cqrs/) | README only |
+
+**Not in this path** (7 of 18, Full Path only): `load_balancing`, `caching`, `database_design`, `message_queues`, `rate_limiting`, `cdn`, `consistent_hashing`
+<!-- /study-path-table -->
+
+A different cut, not senior-plus-extras. The Principal Path probes the tradeoff frame itself: choosing a consistency and partitioning model, sizing the blast radius of each dependency, and defending the design you rejected. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -222,7 +263,7 @@ The highest-frequency HLD interview questions mapped to the module that answers 
 
 ## Study Plan
 
-A 6-week plan over the Interview-Specific Path. Each week pairs modules with one case study to rehearse the "design X" format.
+A 6-week plan over the Senior Path. Each week pairs modules with one case study to rehearse the "design X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

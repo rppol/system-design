@@ -178,22 +178,81 @@ Dependencies to note:
 
 The complete curriculum in the order above — see [8-Phase Learning Path](#3-8-phase-learning-path). Use it for genuine breadth: Modulith, GraphQL, gRPC, HATEOAS, Batch, Integration (EIP), Spring AI, Session, Cloud Config, native/GraalVM, and the full observability stack. Nothing is dropped.
 
-### Interview-Specific Path (21 modules)
+<!-- study-path-table senior -->
+### Senior Path (25 modules)
 
-A ruthless cut to what a **senior Spring / Spring Boot interview** actually probes — the container internals, the proxy mechanics behind `@Transactional`/`@Cacheable`, the MVC request pipeline, and the data/security stack. Same learning order, ~40% fewer modules. Each group says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [ioc_container](ioc_container/) | README only |
+| 2 | [bean_lifecycle](bean_lifecycle/) | README only |
+| 3 | [dependency_injection](dependency_injection/) | README only |
+| 4 | [spring_configuration](spring_configuration/) | README only |
+| 5 | [spring_proxies](spring_proxies/) | README only |
+| 6 | [spring_aop](spring_aop/) | 2 files |
+| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | README only |
+| 8 | [spring_boot_configuration](spring_boot_configuration/) | README only |
+| 9 | [spring_boot_actuator](spring_boot_actuator/) | README only |
+| 11 | [spring_mvc_architecture](spring_mvc_architecture/) | README only |
+| 12 | [request_handling](request_handling/) | README only |
+| 13 | [filters_and_interceptors](filters_and_interceptors/) | README only |
+| 14 | [spring_webflux](spring_webflux/) | README only |
+| 17 | [spring_http_clients](spring_http_clients/) | README only |
+| 19 | [validation_and_error_handling](validation_and_error_handling/) | README only |
+| 20 | [spring_data_jpa](spring_data_jpa/) | README only |
+| 23 | [spring_transactions](spring_transactions/) | README only |
+| 24 | [spring_caching](spring_caching/) | README only |
+| 25 | [spring_security_architecture](spring_security_architecture/) | README only |
+| 26 | [spring_security_jwt_oauth](spring_security_jwt_oauth/) | README only |
+| 29 | [spring_cloud_patterns](spring_cloud_patterns/) | 2 files |
+| 30 | [spring_messaging](spring_messaging/) | README only |
+| 33 | [spring_events_and_scheduling](spring_events_and_scheduling/) | README only |
+| 36 | [spring_testing](spring_testing/) | README only |
+| 37 | [spring_performance](spring_performance/) | README only |
 
-| Phase | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Core Container | [IoC Container](ioc_container/README.md), [Bean Lifecycle](bean_lifecycle/README.md), [Dependency Injection](dependency_injection/README.md), [Spring Configuration](spring_configuration/README.md) | ApplicationContext refresh, bean scopes, circular deps + the three-level cache, `@Configuration` full-vs-lite — the guaranteed openers |
-| Proxies & AOP | [Spring Proxies](spring_proxies/README.md), [Spring AOP](spring_aop/README.md) | JDK vs CGLIB and the self-invocation trap that silently disables `@Transactional`/`@Cacheable` — a near-universal gotcha |
-| Spring Boot | [Boot Autoconfiguration](spring_boot_autoconfiguration/README.md), [Boot Actuator](spring_boot_actuator/README.md) | `@EnableAutoConfiguration`/`AutoConfiguration.imports`/`@Conditional`, health probes and Micrometer metrics |
-| Spring Web | [Spring MVC Architecture](spring_mvc_architecture/README.md), [Request Handling](request_handling/README.md), [Filters & Interceptors](filters_and_interceptors/README.md), [Spring WebFlux](spring_webflux/README.md), [Validation & Error Handling](validation_and_error_handling/README.md) | DispatcherServlet pipeline, Filter vs Interceptor, Mono/Flux + backpressure, `@ControllerAdvice`/ProblemDetail |
-| Data & Transactions | [Spring Data JPA](spring_data_jpa/README.md), [Spring Transactions](spring_transactions/README.md), [Spring Caching](spring_caching/README.md) | N+1 and fetch strategies, propagation/isolation/rollback rules, cache stampede — the highest-value data round |
-| Security | [Security Architecture](spring_security_architecture/README.md), [JWT & OAuth2](spring_security_jwt_oauth/README.md) | SecurityFilterChain, authN vs authZ, JWT validation, OAuth2 resource server, PKCE |
-| Cloud & Messaging | [Spring Cloud Patterns](spring_cloud_patterns/README.md), [Spring Messaging](spring_messaging/README.md) | Gateway + Resilience4j circuit breakers, Kafka `@KafkaListener` with idempotency and DLQ |
-| Testing | [Spring Testing](spring_testing/README.md) | `@SpringBootTest` vs slice tests, `@MockitoBean`, MockMvc, Testcontainers |
+**Not in this path** (14 of 39, Full Path only): `spring_modulith`, `spring_graphql`, `spring_hateoas_rest_maturity`, `spring_grpc`, `spring_data_nosql`, `database_migrations`, `spring_session`, `spring_cloud_config`, `spring_websocket_stomp`, `spring_batch`, `spring_ai`, `spring_integration`, `observability_and_tracing`, `spring_native_graalvm`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): Boot configuration properties, Modulith, GraphQL, HATEOAS/REST maturity, gRPC, Session, Cloud Config, Batch, Events & Scheduling, Spring AI, Integration (EIP), performance tuning, observability/tracing, and native/GraalVM. A niche flagged in an interview (e.g. "have you used Spring Batch?") is a bonus, not a gate — reach for these once the 21 above are solid.
+A ruthless cut to what a **senior Spring / Spring Boot interview** actually probes — the container internals, the proxy mechanics behind `@Transactional`/`@Cacheable`, the MVC request pipeline, and the data/security stack. Same learning order, a strict subset of the Full Path. Each group says why it earns senior time.
+
+| Phase | Why it's tested |
+|-------|-----------------|
+| Core Container | ApplicationContext refresh, bean scopes, circular deps + the three-level cache, `@Configuration` full-vs-lite — the guaranteed openers |
+| Proxies & AOP | JDK vs CGLIB and the self-invocation trap that silently disables `@Transactional`/`@Cacheable` — a near-universal gotcha |
+| Spring Boot | `@EnableAutoConfiguration`/`AutoConfiguration.imports`/`@Conditional`, health probes and Micrometer metrics |
+| Spring Web | DispatcherServlet pipeline, Filter vs Interceptor, Mono/Flux + backpressure, `@ControllerAdvice`/ProblemDetail |
+| Data & Transactions | N+1 and fetch strategies, propagation/isolation/rollback rules, cache stampede — the highest-value data round |
+| Security | SecurityFilterChain, authN vs authZ, JWT validation, OAuth2 resource server, PKCE |
+| Cloud & Messaging | Gateway + Resilience4j circuit breakers, Kafka `@KafkaListener` with idempotency and DLQ |
+| Testing | `@SpringBootTest` vs slice tests, `@MockitoBean`, MockMvc, Testcontainers |
+
+<!-- study-path-table principal -->
+### Principal Path (18 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | README only |
+| 8 | [spring_boot_configuration](spring_boot_configuration/) | README only |
+| 9 | [spring_boot_actuator](spring_boot_actuator/) | README only |
+| 10 | [spring_modulith](spring_modulith/) | README only |
+| 16 | [spring_hateoas_rest_maturity](spring_hateoas_rest_maturity/) | README only |
+| 17 | [spring_http_clients](spring_http_clients/) | README only |
+| 22 | [database_migrations](database_migrations/) | README only |
+| 23 | [spring_transactions](spring_transactions/) | README only |
+| 25 | [spring_security_architecture](spring_security_architecture/) | README only |
+| 26 | [spring_security_jwt_oauth](spring_security_jwt_oauth/) | README only |
+| 27 | [spring_session](spring_session/) | README only |
+| 28 | [spring_cloud_config](spring_cloud_config/) | README only |
+| 29 | [spring_cloud_patterns](spring_cloud_patterns/) | 2 files |
+| 30 | [spring_messaging](spring_messaging/) | README only |
+| 36 | [spring_testing](spring_testing/) | README only |
+| 37 | [spring_performance](spring_performance/) | README only |
+| 38 | [observability_and_tracing](observability_and_tracing/) | README only |
+| 39 | [spring_native_graalvm](spring_native_graalvm/) | README only |
+
+**Not in this path** (21 of 39, Full Path only): `ioc_container`, `bean_lifecycle`, `dependency_injection`, `spring_configuration`, `spring_proxies`, `spring_aop`, `spring_mvc_architecture`, `request_handling`, `filters_and_interceptors`, `spring_webflux`, `spring_graphql`, `spring_grpc`, `validation_and_error_handling`, `spring_data_jpa`, `spring_data_nosql`, `spring_caching`, `spring_websocket_stomp`, `spring_batch`, `spring_events_and_scheduling`, `spring_ai`, `spring_integration`
+<!-- /study-path-table -->
+
+A different cut, not senior-plus-extras. The Principal Path probes platform-level Spring judgment: transaction and boundary design, how a service is deployed and rolled back safely, and which framework magic a team should be forbidden from using. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -228,7 +287,7 @@ The highest-frequency Spring *knowledge* questions mapped to the file that answe
 
 ## Study Plan
 
-A 5-week plan over the Interview-Specific Path. Case studies live in [case_studies/](case_studies/README.md) and rehearse the "design X" format.
+A 5-week plan over the Senior Path. Case studies live in [case_studies/](case_studies/README.md) and rehearse the "design X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

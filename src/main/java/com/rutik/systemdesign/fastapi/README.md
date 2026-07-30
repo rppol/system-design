@@ -102,56 +102,54 @@ This section is exhaustive by design — 19 modules spanning the full FastAPI re
 
 The complete curriculum in the order above — see [3-Phase Learning Path](#3-3-phase-learning-path). Use it for genuine mastery: every layer of the FastAPI request lifecycle (routing, middleware, configuration, WebSockets/SSE), and the complete production-hardening set (FastAPI-specific testing, external HTTP clients, message-queue consumers, background job queues, API versioning, OWASP hardening). Nothing is dropped.
 
-### Interview-Specific Path (9 modules)
+<!-- study-path-table senior -->
+### Senior Path (13 modules)
 
-A ruthless cut to what a **senior FastAPI / backend interview** actually probes, anchored on the framework core and the production spine. Same learning order, ~53% fewer modules. Each group below says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [fastapi_fundamentals_asgi](fastapi_fundamentals_asgi/) | README only |
+| 2 | [pydantic_v2_deep_dive](pydantic_v2_deep_dive/) | 2 files |
+| 4 | [dependency_injection_in_fastapi](dependency_injection_in_fastapi/) | 2 files |
+| 5 | [middleware_and_lifecycle](middleware_and_lifecycle/) | README only |
+| 7 | [async_database_sqlalchemy](async_database_sqlalchemy/) | README only |
+| 8 | [authentication_and_security](authentication_and_security/) | README only |
+| 9 | [error_handling_and_validation](error_handling_and_validation/) | README only |
+| 11 | [background_jobs_and_task_queues](background_jobs_and_task_queues/) | README only |
+| 12 | [testing_fastapi](testing_fastapi/) | README only |
+| 13 | [http_clients_and_external_apis](http_clients_and_external_apis/) | README only |
+| 15 | [production_deployment_and_scaling](production_deployment_and_scaling/) | README only |
+| 16 | [observability_and_monitoring](observability_and_monitoring/) | README only |
+| 17 | [caching_and_performance](caching_and_performance/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| FastAPI Core & ASGI | [fastapi_fundamentals_asgi](fastapi_fundamentals_asgi/), [pydantic_v2_deep_dive](pydantic_v2_deep_dive/), [dependency_injection_in_fastapi](dependency_injection_in_fastapi/) | ASGI scope/receive/send, Pydantic v2's Rust core and the v1->v2 migration, and the `Depends` dependency graph — the framework internals every FastAPI-focused interview opens with |
-| Production Concerns | [async_database_sqlalchemy](async_database_sqlalchemy/), [authentication_and_security](authentication_and_security/), [error_handling_and_validation](error_handling_and_validation/) | Async SQLAlchemy session-per-request and N+1 avoidance, OAuth2/JWT flows, and RFC 9457 error contracts — what shows up the moment a toy API becomes a real service |
-| Deployment, Observability & Scale | [production_deployment_and_scaling](production_deployment_and_scaling/), [observability_and_monitoring](observability_and_monitoring/), [caching_and_performance](caching_and_performance/) | Uvicorn/Gunicorn worker sizing, graceful shutdown and K8s probes, OpenTelemetry/Prometheus, and Redis caching — the "how does this run at 100k RPS" half of a senior loop |
+**Not in this path** (6 of 19, Full Path only): `routing_and_request_handling`, `configuration_and_settings_management`, `websockets_sse_and_streaming`, `message_queues_and_event_driven`, `api_design_and_versioning`, `security_hardening_and_owasp`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): routing & request handling, middleware & lifecycle, configuration & settings management, WebSockets/SSE, background job queues, FastAPI-specific testing, HTTP clients for external APIs, message-queue-driven consumers, API design & versioning, and OWASP security hardening. A niche flagged in an interview (e.g. "have you used Celery?" or "how do you version a REST API?") is a bonus, not a gate — reach for these once the 9 above are solid.
+A ruthless cut to what a **senior FastAPI / backend interview** actually probes, anchored on the framework core and the production spine. Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
 
-#### Decoding the "~53% fewer" cut
+| Group | Why it's tested |
+|-------|-----------------|
+| FastAPI Core & ASGI | ASGI scope/receive/send, Pydantic v2's Rust core and the v1->v2 migration, and the `Depends` dependency graph — the framework internals every FastAPI-focused interview opens with |
+| Production Concerns | Async SQLAlchemy session-per-request and N+1 avoidance, OAuth2/JWT flows, and RFC 9457 error contracts — what shows up the moment a toy API becomes a real service |
+| Deployment, Observability & Scale | Uvicorn/Gunicorn worker sizing, graceful shutdown and K8s probes, OpenTelemetry/Prometheus, and Redis caching — the "how does this run at 100k RPS" half of a senior loop |
 
-This section index is narrative, not technical content, so it carries exactly one calculation —
-the size of the interview cut:
+<!-- study-path-table principal -->
+### Principal Path (8 modules)
 
-```
-reduction = (full_modules - interview_modules) / full_modules
+| # | Module | Files |
+|---|--------|-------|
+| 7 | [async_database_sqlalchemy](async_database_sqlalchemy/) | README only |
+| 8 | [authentication_and_security](authentication_and_security/) | README only |
+| 9 | [error_handling_and_validation](error_handling_and_validation/) | README only |
+| 11 | [background_jobs_and_task_queues](background_jobs_and_task_queues/) | README only |
+| 15 | [production_deployment_and_scaling](production_deployment_and_scaling/) | README only |
+| 16 | [observability_and_monitoring](observability_and_monitoring/) | README only |
+| 18 | [api_design_and_versioning](api_design_and_versioning/) | README only |
+| 19 | [security_hardening_and_owasp](security_hardening_and_owasp/) | README only |
 
-modules_per_week = interview_modules / weeks
-```
+**Not in this path** (11 of 19, Full Path only): `fastapi_fundamentals_asgi`, `pydantic_v2_deep_dive`, `routing_and_request_handling`, `dependency_injection_in_fastapi`, `middleware_and_lifecycle`, `configuration_and_settings_management`, `websockets_sse_and_streaming`, `testing_fastapi`, `http_clients_and_external_apis`, `message_queues_and_event_driven`, `caching_and_performance`
+<!-- /study-path-table -->
 
-**Put simply.** "The interview path drops just over half the section, and what remains divides
-evenly across the three-week plan below." The two numbers are chosen together: the cut is sized
-to what fits the Study Plan, not the other way round.
-
-| Symbol | What it is |
-|--------|------------|
-| `full_modules` | `19` — every module in the Module Table above |
-| `interview_modules` | `9` — the three groups in the table above, three modules each |
-| `reduction` | Share of the section skipped. The "~53%" figure |
-| `weeks` | `3` — the Study Plan's horizon |
-| `modules_per_week` | Study load per week, and why each group holds exactly three |
-
-**Walk one example.**
-
-```
-  reduction = (19 - 9) / 19 = 10 / 19 = 0.5263 = 52.63%  ->  "~53% fewer"
-
-  modules_per_week = 9 / 3 = 3 modules per week
-
-  group breakdown, 3 modules each:
-    FastAPI Core & ASGI                  3  ->  week 1
-    Production Concerns                  3  ->  week 2
-    Deployment, Observability & Scale    3  ->  week 3
-                                        ---
-                                          9
-  Deferred to the Full Path: 19 - 9 = 10 modules.
-```
+A different cut, not senior-plus-extras. The Principal Path probes service-shape judgment rather than framework mechanics: where async actually pays, how a deployment survives a bad release, and which boundaries you refuse to blur. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -174,7 +172,7 @@ The highest-frequency FastAPI *knowledge* questions mapped to the file that answ
 
 ## Study Plan
 
-A 3-week plan over the Interview-Specific Path. Each week pairs modules with case studies to rehearse the "design X" format.
+A 3-week plan over the Senior Path. Each week pairs modules with case studies to rehearse the "design X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

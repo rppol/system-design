@@ -134,19 +134,67 @@ This section is exhaustive by design — 29 modules spanning storage internals, 
 
 The complete curriculum in the order above — see [Phase Diagram (ASCII)](#phase-diagram-ascii). Use it for genuine mastery: every phase from storage internals through full NoSQL breadth (document, wide-column, search, graph, time-series), the emerging-database frontier (NewSQL, in-memory), and the complete production-operations depth (connection pooling, performance tuning, backup/DR, security/compliance, polyglot persistence). Nothing is dropped.
 
-### Interview-Specific Path (16 modules)
+<!-- study-path-table senior -->
+### Senior Path (19 modules)
 
-A ruthless cut to what a **senior backend / database-heavy interview** actually probes: the storage-and-concurrency vocabulary everything else depends on, PostgreSQL as the default RDBMS, the two NoSQL stores and the vector-search topic that come up most, and the distributed-systems and selection-framework questions that close almost every round. Same learning order, roughly half the modules.
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [database_fundamentals](database_fundamentals/) | README only |
+| 2 | [storage_engines_internals](storage_engines_internals/) | README only |
+| 3 | [indexing_deep_dive](indexing_deep_dive/) | README only |
+| 4 | [concurrency_control_and_locking](concurrency_control_and_locking/) | README only |
+| 5 | [postgresql_internals](postgresql_internals/) | README only |
+| 7 | [sql_query_optimization](sql_query_optimization/) | README only |
+| 8 | [schema_design_and_normalization](schema_design_and_normalization/) | 2 files |
+| 9 | [database_migrations_zero_downtime](database_migrations_zero_downtime/) | README only |
+| 10 | [document_databases](document_databases/) | README only |
+| 11 | [key_value_stores](key_value_stores/) | README only |
+| 12 | [wide_column_databases](wide_column_databases/) | README only |
+| 16 | [vector_databases](vector_databases/) | README only |
+| 19 | [replication_and_high_availability](replication_and_high_availability/) | README only |
+| 20 | [sharding_and_partitioning](sharding_and_partitioning/) | README only |
+| 21 | [distributed_transactions](distributed_transactions/) | README only |
+| 22 | [consistency_models_and_consensus](consistency_models_and_consensus/) | README only |
+| 24 | [connection_pool_management](connection_pool_management/) | README only |
+| 25 | [database_performance_tuning](database_performance_tuning/) | README only |
+| 26 | [backup_recovery_and_disaster_recovery](backup_recovery_and_disaster_recovery/) | README only |
 
-| Group | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Storage & Concurrency Foundations | [Database Fundamentals](database_fundamentals/README.md), [Storage Engines Internals](storage_engines_internals/README.md), [Indexing Deep Dive](indexing_deep_dive/README.md), [Concurrency Control & Locking](concurrency_control_and_locking/README.md) | ACID/BASE/CAP vocabulary, B+tree vs LSM-tree tradeoffs, how an index actually narrows a scan, and MVCC/deadlock/gap-lock mechanics — the foundation every later answer builds on |
-| Relational Depth | [PostgreSQL Internals](postgresql_internals/README.md), [SQL Query Optimization](sql_query_optimization/README.md), [Schema Design & Normalization](schema_design_and_normalization/README.md) | PostgreSQL is the default RDBMS in almost every interview; EXPLAIN plan reading, join-algorithm choice, and normalize-vs-denormalize tradeoffs drive nearly every schema-design prompt |
-| NoSQL & Vector Stores | [Document Databases](document_databases/README.md), [Key-Value Stores](key_value_stores/README.md), [Vector Databases](vector_databases/README.md) | Embedding-vs-referencing and Redis data-structure choice are the two most common non-relational deep dives; HNSW/pgvector now appears in any RAG-adjacent design round |
-| Distributed Systems Core | [Replication & High Availability](replication_and_high_availability/README.md), [Sharding & Partitioning](sharding_and_partitioning/README.md), [Distributed Transactions](distributed_transactions/README.md), [Consistency Models & Consensus](consistency_models_and_consensus/README.md) | Replication topology, shard-key selection, 2PC/Saga, and Raft/linearizability are the spine of every "design a globally available database" question |
-| Caching & Selection | [Database Caching Patterns](database_caching_patterns/README.md), [Database Selection Framework](database_selection_framework/README.md) | Cache-aside vs write-through, and the "which database, and why" decision framework, are what close almost every database interview |
+**Not in this path** (10 of 29, Full Path only): `mysql_innodb_internals`, `search_engines`, `graph_databases`, `time_series_databases`, `newsql_and_distributed_sql`, `in_memory_databases`, `database_caching_patterns`, `database_security_and_compliance`, `database_selection_framework`, `polyglot_persistence_patterns`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): a second RDBMS internals deep-dive (MySQL/InnoDB — PostgreSQL alone already covers the internals vocabulary an interview probes), zero-downtime migrations, the niche NoSQL stores (wide-column, search engines, graph databases, time-series databases, NewSQL/distributed SQL, in-memory databases), and the deep production-ops modules (connection pool internals, performance tuning, backup/DR, security & compliance, polyglot persistence patterns). A niche flagged in an interview (e.g. "have you used Cassandra?" or "how would you run a zero-downtime migration?") is a bonus, not a gate — reach for these once the 16 above are solid.
+A ruthless cut to what a **senior backend / database-heavy interview** actually probes: the storage-and-concurrency vocabulary everything else depends on, PostgreSQL as the default RDBMS, the two NoSQL stores and the vector-search topic that come up most, and the distributed-systems and selection-framework questions that close almost every round. Same learning order, a strict subset of the Full Path.
+
+| Group | Why it's tested |
+|-------|-----------------|
+| Storage & Concurrency Foundations | ACID/BASE/CAP vocabulary, B+tree vs LSM-tree tradeoffs, how an index actually narrows a scan, and MVCC/deadlock/gap-lock mechanics — the foundation every later answer builds on |
+| Relational Depth | PostgreSQL is the default RDBMS in almost every interview; EXPLAIN plan reading, join-algorithm choice, and normalize-vs-denormalize tradeoffs drive nearly every schema-design prompt |
+| NoSQL & Vector Stores | Embedding-vs-referencing and Redis data-structure choice are the two most common non-relational deep dives; HNSW/pgvector now appears in any RAG-adjacent design round |
+| Distributed Systems Core | Replication topology, shard-key selection, 2PC/Saga, and Raft/linearizability are the spine of every "design a globally available database" question |
+| Caching & Selection | Cache-aside vs write-through, and the "which database, and why" decision framework, are what close almost every database interview |
+
+<!-- study-path-table principal -->
+### Principal Path (13 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 2 | [storage_engines_internals](storage_engines_internals/) | README only |
+| 8 | [schema_design_and_normalization](schema_design_and_normalization/) | 2 files |
+| 9 | [database_migrations_zero_downtime](database_migrations_zero_downtime/) | README only |
+| 12 | [wide_column_databases](wide_column_databases/) | README only |
+| 17 | [newsql_and_distributed_sql](newsql_and_distributed_sql/) | README only |
+| 19 | [replication_and_high_availability](replication_and_high_availability/) | README only |
+| 20 | [sharding_and_partitioning](sharding_and_partitioning/) | README only |
+| 21 | [distributed_transactions](distributed_transactions/) | README only |
+| 22 | [consistency_models_and_consensus](consistency_models_and_consensus/) | README only |
+| 26 | [backup_recovery_and_disaster_recovery](backup_recovery_and_disaster_recovery/) | README only |
+| 27 | [database_security_and_compliance](database_security_and_compliance/) | README only |
+| 28 | [database_selection_framework](database_selection_framework/) | README only |
+| 29 | [polyglot_persistence_patterns](polyglot_persistence_patterns/) | README only |
+
+**Not in this path** (16 of 29, Full Path only): `database_fundamentals`, `indexing_deep_dive`, `concurrency_control_and_locking`, `postgresql_internals`, `mysql_innodb_internals`, `sql_query_optimization`, `document_databases`, `key_value_stores`, `search_engines`, `graph_databases`, `time_series_databases`, `vector_databases`, `in_memory_databases`, `database_caching_patterns`, `connection_pool_management`, `database_performance_tuning`
+<!-- /study-path-table -->
+
+A different cut, not senior-plus-extras. The Principal Path probes the decisions that outlive a schema: engine and topology selection, the migration path off a wrong choice, and the failure modes that only appear at production scale. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -181,7 +229,7 @@ The highest-frequency database *knowledge* questions mapped to the file that ans
 
 ## Study Plan
 
-A 6-week plan over the Interview-Specific Path. Each week pairs modules with one case study to rehearse the "design X" format.
+A 6-week plan over the Senior Path. Each week pairs modules with one case study to rehearse the "design X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

@@ -395,6 +395,80 @@ README_TIER_RE = {
 README_LEGACY_RE = re.compile(r"^###\s+Interview-Specific Path\s*\((\d+)\s+modules?\)\s*$", re.M)
 README_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)#]+)\)")
 
+# ---- generated tier tables -------------------------------------------------
+# The section README's tier table used to be hand-maintained, which made it a THIRD
+# source of path membership after the per-module `<!-- study-paths -->` markers and
+# app.js. It drifted in 9 of 13 sections the first time the markers were re-curated
+# -- including llm and ml, where the count stayed right and only the MEMBERS moved,
+# which a count-only check waves through. It is generated now: `--write-paths`
+# rewrites each block from the markers, and --strict fails when a block is stale.
+# Rationale prose stays hand-written, but lives OUTSIDE the block and names no
+# modules, so there is nothing left that can drift.
+TIER_TITLE = {"senior": "Senior", "principal": "Principal"}
+PATH_BLOCK_RE = {
+    t: re.compile(r"^<!-- study-path-table " + t + r" -->\n.*?^<!-- /study-path-table -->",
+                  re.M | re.S)
+    for t in TIERS
+}
+
+
+def render_path_block(section, tier, cfg, order):
+    """The exact generated block for one section+tier: marker, heading, table, marker.
+
+    The `#` column is the module's position in the FULL path, not a re-numbering --
+    so the gaps show at a glance which of the section's modules this tier skips.
+    """
+    arr = cfg.get(tier) or []
+    fmap = cfg.get(tier + "Files") or {}
+    seq = order.get(section, [])
+    out = [f"<!-- study-path-table {tier} -->",
+           f"### {TIER_TITLE[tier]} Path ({len(arr)} modules)",
+           "",
+           "| # | Module | Files |",
+           "|---|--------|-------|"]
+    for mod in arr:
+        name = mod.split("/", 1)[1]
+        pos = seq.index(mod) + 1 if mod in seq else "?"
+        # absent from the Files map means the module has exactly one file: build_paths
+        # only records an entry when `len(real) > 1`, i.e. when there was a choice
+        n = len(fmap.get(mod) or ["README.md"])
+        out.append(f"| {pos} | [{name}]({name}/) | {'README only' if n == 1 else f'{n} files'} |")
+    # The deferred list was hand-written and went stale the same way the table did --
+    # every section that GAINED a module still listed it as deferred. It is exactly
+    # `full - tier`, so generate it rather than maintain it.
+    skipped = [m for m in seq if m not in set(arr)]
+    if skipped:
+        names = ", ".join(f"`{m.split('/', 1)[1]}`" for m in skipped)
+        out += ["", f"**Not in this path** ({len(skipped)} of {len(seq)}, Full Path only): {names}"]
+    out.append("<!-- /study-path-table -->")
+    return "\n".join(out)
+
+
+def write_path_tables(derived, order):
+    """Fill every `<!-- study-path-table <tier> -->` block found in a section README.
+
+    Only UPDATES blocks that already exist -- placement is an editorial decision, so
+    adding a tier to a section means pasting the empty marker pair by hand once.
+    Returns (files_changed, [complaint, ...])."""
+    changed, problems = [], []
+    for sec, cfg in sorted(derived.items()):
+        rp = os.path.join(BASE_DIR, sec, "README.md")
+        if not os.path.exists(rp):
+            continue
+        text = orig = open(rp, encoding="utf-8").read()
+        for tier in TIERS:
+            if not cfg.get(tier):
+                continue
+            m = PATH_BLOCK_RE[tier].search(text)
+            if not m:
+                problems.append(f"{sec}/README.md: no '<!-- study-path-table {tier} -->' block to fill")
+                continue
+            text = text[:m.start()] + render_path_block(sec, tier, cfg, order) + text[m.end():]
+        if text != orig:
+            open(rp, "w", encoding="utf-8").write(text)
+            changed.append(f"{sec}/README.md")
+    return changed, problems
+
 
 def _readme_tier_path(section, tier):
     """(declared_count, [slug, ...]) from a section README's `### <Tier> Path (N modules)`
@@ -601,7 +675,11 @@ def check_wiring(questions, strict):
                 o = order.get(sec, [])
                 for tier in TIERS:
                     arr = tier_arrays[tier].get(sec)
-                    if arr is None:
+                    # `[]` (not None) for a section whose markers declare no module at
+                    # this tier -- cs_fundamentals, cuda and devops each have zero
+                    # principal modules. There is no principal path to document, so
+                    # demanding a Principal heading there was a false alarm.
+                    if not arr:
                         continue
                     # (1) each tier is an ordered subset of STUDY_ORDER, independently
                     bad = [x for x in arr if len(x.split("/")) != 2]
@@ -635,43 +713,28 @@ def check_wiring(questions, strict):
                         if len(real) > 1 and mod not in fmap:
                             warns.append(f"STUDY_PATHS.{sec}.{tier}: '{mod}' has {len(real)-1} sub-file(s) but no {tier}Files entry -- all of them are in the path")
 
-                    # dual-source reconciliation against the README's tier table.
+                    # The README tier table is GENERATED from the same markers this
+                    # tier came from, so "reconciliation" is now a freshness check:
+                    # regenerate in memory and demand a byte match. Membership, order
+                    # and the heading's (N modules) are all covered at once, because
+                    # all three are inside the block.
                     #
-                    # MIGRATION GRACE: a section still carrying the legacy
-                    # "### Interview-Specific Path" heading is mid-migration -- its table
-                    # holds hand-written per-group rationale prose that must be rewritten by
-                    # hand, not regenerated. While that heading is present, every
-                    # reconciliation finding for that section is a WARNING. It becomes fatal
-                    # the moment the section adopts "### Senior Path" / "### Principal Path",
-                    # so a migrated section can never silently drift.
+                    # Checked here rather than written here on purpose: CI would
+                    # otherwise mutate content files it never commits, so Pages would
+                    # serve a table GitHub does not show -- drift again, but invisible.
                     rp = os.path.join(BASE_DIR, sec, "README.md")
-                    legacy = bool(README_LEGACY_RE.search(open(rp, encoding="utf-8").read())) \
-                        if os.path.exists(rp) else False
-                    sink = warns if legacy else errors
-
-                    doc = _readme_tier_path(sec, tier)
-                    if doc is None:
-                        sink.append(
-                            f"{sec}/README.md has no '### {tier.title()} Path (N modules)' heading"
-                            + (" (still on the legacy Interview-Specific Path heading)" if legacy
-                               else f" but STUDY_PATHS.{sec}.{tier} exists"))
-                        continue
-                    declared, doc_slugs = doc
-                    only_doc = [x for x in doc_slugs if x not in arr]
-                    only_app = [x for x in arr if x not in doc_slugs]
-                    if only_doc or only_app:
-                        sink.append(
-                            f"{tier} path drift in {sec}: README table and STUDY_PATHS.{sec}.{tier} "
-                            f"disagree -- only in README: {only_doc or 'none'}; only in app.js: {only_app or 'none'}")
-                    elif declared != len(doc_slugs):
-                        sink.append(
-                            f"{tier} path count wrong in {sec}/README.md: heading says "
-                            f"({declared} modules) but the table lists {len(doc_slugs)}")
-                    elif doc_slugs != arr:
-                        warns.append(
-                            f"{tier} path order differs in {sec}: README sequences "
-                            f"{[x.split('/')[-1] for x in doc_slugs]} but STUDY_PATHS.{sec}.{tier} "
-                            f"(which follows STUDY_ORDER) sequences {[x.split('/')[-1] for x in arr]}")
+                    text = open(rp, encoding="utf-8").read() if os.path.exists(rp) else ""
+                    m = PATH_BLOCK_RE[tier].search(text)
+                    if not m:
+                        errors.append(
+                            f"{sec}/README.md has no '<!-- study-path-table {tier} -->' block "
+                            f"but the markers declare {len(arr)} {tier} modules"
+                            + (" (still on the legacy Interview-Specific Path heading)"
+                               if README_LEGACY_RE.search(text) else ""))
+                    elif m.group(0) != render_path_block(sec, tier, derived[sec], order):
+                        errors.append(
+                            f"{sec}/README.md {tier} table is STALE -- regenerate with "
+                            f"`python3 extract.py --write-paths`")
 
                 # case-study tiering: paths must resolve, and cross_cutting/ is excluded
                 # from index.caseStudies so it can never be addressed here
@@ -1042,6 +1105,13 @@ def main():
               f"({len(_paths)} sections, "
               f"{sum(len(v['senior']) for v in _paths.values())} senior + "
               f"{sum(len(v['principal']) for v in _paths.values())} principal modules)")
+        if "--write-paths" in sys.argv[1:]:
+            _changed, _probs = write_path_tables(_paths, _order)
+            for c in _changed:
+                print(f"  regenerated tier table(s) -> {c}")
+            for p in _probs:
+                print(f"  WRITE-PATHS: {p}", file=sys.stderr)
+            print(f"--write-paths: {len(_changed)} README(s) updated, {len(_probs)} unplaced block(s)")
     except Exception as exc:                                   # never block the bank build
         print(f"WARNING: could not derive tier paths: {exc}", file=sys.stderr)
 

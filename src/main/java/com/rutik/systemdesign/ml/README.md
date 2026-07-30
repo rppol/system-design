@@ -297,22 +297,78 @@ This section is exhaustive by design — 45 modules from the math spine to produ
 
 The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the math foundations, every domain (CV, time series, RL, GNNs), the advanced-research row (causal, SSL, privacy, adversarial, conformal), and every infrastructure deep-dive. Nothing is dropped.
 
-### Interview-Specific Path (25 modules)
+<!-- study-path-table senior -->
+### Senior Path (25 modules)
 
-A ruthless cut to what a **senior ML / MLE interview** actually probes, anchored on the phases this section already flags as highest-yield (classical ML, ML system design, production ML, interview consolidation). Same learning order, ~40% fewer modules. Each group below says why it earns interview time.
+| # | Module | Files |
+|---|--------|-------|
+| 2 | [probability_and_statistics](probability_and_statistics/) | README only |
+| 3 | [optimization_theory](optimization_theory/) | README only |
+| 4 | [information_theory](information_theory/) | README only |
+| 5 | [supervised_learning](supervised_learning/) | 3 files |
+| 6 | [ensemble_methods](ensemble_methods/) | 4 files |
+| 7 | [unsupervised_learning](unsupervised_learning/) | README only |
+| 8 | [feature_engineering](feature_engineering/) | README only |
+| 9 | [model_evaluation_and_selection](model_evaluation_and_selection/) | README only |
+| 10 | [imbalanced_data_and_leakage_traps](imbalanced_data_and_leakage_traps/) | README only |
+| 11 | [neural_network_fundamentals](neural_network_fundamentals/) | README only |
+| 12 | [convolutional_neural_networks](convolutional_neural_networks/) | README only |
+| 14 | [training_deep_networks](training_deep_networks/) | README only |
+| 17 | [natural_language_processing](natural_language_processing/) | 3 files |
+| 18 | [recommender_systems](recommender_systems/) | 4 files |
+| 19 | [information_retrieval_and_search](information_retrieval_and_search/) | README only |
+| 25 | [ml_system_design](ml_system_design/) | 6 files |
+| 26 | [data_pipelines_and_processing](data_pipelines_and_processing/) | README only |
+| 27 | [distributed_training](distributed_training/) | README only |
+| 28 | [experiment_tracking_and_versioning](experiment_tracking_and_versioning/) | README only |
+| 31 | [model_serving_and_inference](model_serving_and_inference/) | README only |
+| 32 | [model_compression_and_efficiency](model_compression_and_efficiency/) | README only |
+| 33 | [monitoring_and_drift_detection](monitoring_and_drift_detection/) | README only |
+| 34 | [mlops_and_ci_cd](mlops_and_ci_cd/) | README only |
+| 41 | [interpretability_and_explainability](interpretability_and_explainability/) | README only |
+| 44 | [ml_interview_patterns](ml_interview_patterns/) | README only |
 
-| Phase | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Foundations | [Probability & Statistics](probability_and_statistics/README.md), [Optimization Theory](optimization_theory/README.md), [Information Theory](information_theory/README.md) | Bias-variance, MLE/MAP, "derive gradient descent", cross-entropy/KL — the math you actually reason about aloud |
-| Classical ML | [Supervised Learning](supervised_learning/README.md), [Ensemble Methods](ensemble_methods/README.md), [Unsupervised Learning](unsupervised_learning/README.md), [Feature Engineering](feature_engineering/README.md), [Model Evaluation & Selection](model_evaluation_and_selection/README.md), [Imbalanced Data & Leakage Traps](imbalanced_data_and_leakage_traps/README.md) | XGBoost, regularization, PCA/k-means, ROC-vs-PR, and the leakage/imbalance gotchas in almost every screen |
-| Deep Learning | [Neural Network Fundamentals](neural_network_fundamentals/README.md), [Convolutional Neural Networks](convolutional_neural_networks/README.md), [Recurrent Neural Networks](recurrent_neural_networks/README.md), [Training Deep Networks](training_deep_networks/README.md) | Backprop by hand, conv arithmetic, LSTM gating, dropout/batch-norm/vanishing-gradient fixes |
-| Applied | [Natural Language Processing](natural_language_processing/README.md), [Recommender Systems](recommender_systems/README.md) | Classical NLP + embeddings and recsys/ranking — the two most common "design an ML feature" prompts |
-| ML Systems | [ML System Design](ml_system_design/README.md), [Data Pipelines & Processing](data_pipelines_and_processing/README.md), [Experiment Tracking & Versioning](experiment_tracking_and_versioning/README.md) | The dominant senior format: the 6-step design framework, feature/training pipelines, reproducibility |
-| Production | [Model Serving & Inference](model_serving_and_inference/README.md), [Model Compression & Efficiency](model_compression_and_efficiency/README.md), [Monitoring & Drift Detection](monitoring_and_drift_detection/README.md), [MLOps & CI/CD](mlops_and_ci_cd/README.md) | Latency/batching, quantization/distillation, drift + retraining triggers — what separates senior from mid |
-| Explainability | [Interpretability & Explainability](interpretability_and_explainability/README.md) | SHAP/LIME and "why did the model predict this" — near-universal at senior and in regulated domains |
-| Consolidation | [ML Interview Patterns](ml_interview_patterns/README.md), [Model Selection & Algorithm Choice](model_selection_and_algorithm_choice/README.md) | The design framework, anti-patterns, and the "which algorithm, when & why" matrix — final review |
+**Not in this path** (20 of 45, Full Path only): `linear_algebra_and_calculus`, `recurrent_neural_networks`, `generative_models`, `computer_vision`, `speech_and_audio_ml`, `multi_task_and_multi_objective_learning`, `time_series_forecasting`, `anomaly_detection`, `reinforcement_learning`, `gpu_and_hardware_optimization`, `active_learning_and_weak_supervision`, `graph_neural_networks`, `self_supervised_and_contrastive_learning`, `meta_learning_and_few_shot`, `causal_inference_and_ml`, `adversarial_ml_and_robustness`, `privacy_preserving_ml`, `fairness_and_responsible_ai`, `uncertainty_quantification_and_conformal_prediction`, `model_selection_and_algorithm_choice`
+<!-- /study-path-table -->
 
-**Deliberately deferred to the Full Path** (valuable, lower interview yield): linear algebra & calculus (a prerequisite, rarely probed directly), generative models, computer vision, multi-task learning, time series forecasting, anomaly detection, reinforcement learning, distributed training, GPU/hardware optimization, active learning, graph neural networks, self-supervised/contrastive learning, causal inference, adversarial robustness, privacy-preserving ML, and uncertainty/conformal prediction. A niche flagged in an interview (e.g. "have you worked with GNNs?") is a bonus, not a gate — reach for these once the 25 above are solid.
+A ruthless cut to what a **senior ML / MLE interview** actually probes, anchored on the phases this section already flags as highest-yield (classical ML, ML system design, production ML, interview consolidation). Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
+
+| Phase | Why it's tested |
+|-------|-----------------|
+| Foundations | Bias-variance, MLE/MAP, "derive gradient descent", cross-entropy/KL — the math you actually reason about aloud |
+| Classical ML | XGBoost, regularization, PCA/k-means, ROC-vs-PR, and the leakage/imbalance gotchas in almost every screen |
+| Deep Learning | Backprop by hand, conv arithmetic, LSTM gating, dropout/batch-norm/vanishing-gradient fixes |
+| Applied | Classical NLP + embeddings and recsys/ranking — the two most common "design an ML feature" prompts |
+| ML Systems | The dominant senior format: the 6-step design framework, feature/training pipelines, reproducibility |
+| Production | Latency/batching, quantization/distillation, drift + retraining triggers — what separates senior from mid |
+| Explainability | SHAP/LIME and "why did the model predict this" — near-universal at senior and in regulated domains |
+| Consolidation | The design framework, anti-patterns, and the "which algorithm, when & why" matrix — final review |
+
+<!-- study-path-table principal -->
+### Principal Path (15 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 10 | [imbalanced_data_and_leakage_traps](imbalanced_data_and_leakage_traps/) | README only |
+| 18 | [recommender_systems](recommender_systems/) | 3 files |
+| 21 | [multi_task_and_multi_objective_learning](multi_task_and_multi_objective_learning/) | README only |
+| 25 | [ml_system_design](ml_system_design/) | 5 files |
+| 30 | [active_learning_and_weak_supervision](active_learning_and_weak_supervision/) | README only |
+| 33 | [monitoring_and_drift_detection](monitoring_and_drift_detection/) | README only |
+| 34 | [mlops_and_ci_cd](mlops_and_ci_cd/) | README only |
+| 38 | [causal_inference_and_ml](causal_inference_and_ml/) | README only |
+| 39 | [adversarial_ml_and_robustness](adversarial_ml_and_robustness/) | README only |
+| 40 | [privacy_preserving_ml](privacy_preserving_ml/) | README only |
+| 41 | [interpretability_and_explainability](interpretability_and_explainability/) | README only |
+| 42 | [fairness_and_responsible_ai](fairness_and_responsible_ai/) | README only |
+| 43 | [uncertainty_quantification_and_conformal_prediction](uncertainty_quantification_and_conformal_prediction/) | README only |
+| 44 | [ml_interview_patterns](ml_interview_patterns/) | README only |
+| 45 | [model_selection_and_algorithm_choice](model_selection_and_algorithm_choice/) | README only |
+
+**Not in this path** (30 of 45, Full Path only): `linear_algebra_and_calculus`, `probability_and_statistics`, `optimization_theory`, `information_theory`, `supervised_learning`, `ensemble_methods`, `unsupervised_learning`, `feature_engineering`, `model_evaluation_and_selection`, `neural_network_fundamentals`, `convolutional_neural_networks`, `recurrent_neural_networks`, `training_deep_networks`, `generative_models`, `computer_vision`, `natural_language_processing`, `information_retrieval_and_search`, `speech_and_audio_ml`, `time_series_forecasting`, `anomaly_detection`, `reinforcement_learning`, `data_pipelines_and_processing`, `distributed_training`, `experiment_tracking_and_versioning`, `gpu_and_hardware_optimization`, `model_serving_and_inference`, `model_compression_and_efficiency`, `graph_neural_networks`, `self_supervised_and_contrastive_learning`, `meta_learning_and_few_shot`
+<!-- /study-path-table -->
+
+A different cut, not senior-plus-extras. The Principal Path probes what a staff ML engineer is accountable for beyond a model: problem framing, measurement that survives contact with a business, and the consequences of shipping a wrong prediction. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
@@ -349,7 +405,7 @@ The highest-frequency ML *knowledge* questions mapped to the file that answers t
 
 ## Study Plan
 
-A 6-week plan over the Interview-Specific Path. Each week pairs modules with one case study to rehearse the "design X" format.
+A 6-week plan over the Senior Path. Each week pairs modules with one case study to rehearse the "design X" format.
 
 | Week | Focus | Modules | Case study |
 |------|-------|---------|------------|

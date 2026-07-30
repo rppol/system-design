@@ -76,7 +76,7 @@ engineer needs to operate the technology in production. There is **no Full/Inter
 toggle yet**: the browser learning game's Study view only shows that toggle for
 sections with a `STUDY_PATHS` entry, and a meaningful interview-vs-full cut doesn't
 exist at 3 modules. See [`CLAUDE.md`](CLAUDE.md) "Learning Paths (Full-only for now)"
-for the threshold (≥4 modules) at which an Interview-Specific Path gets added.
+for the threshold (≥4 modules) at which a Senior Path gets added.
 
 ### Full Path (3 modules)
 

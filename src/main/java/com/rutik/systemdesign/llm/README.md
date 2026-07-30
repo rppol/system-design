@@ -346,30 +346,108 @@ Use this when you want genuine mastery of the whole field: research frontier (di
 mechanistic interpretability), breadth (multimodal, edge SLMs, ecosystem, regulations), and every
 specialized agent type. Nothing is dropped.
 
-### Interview-Specific Path (31 modules)
+<!-- study-path-table senior -->
+### Senior Path (31 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [foundations_and_architecture](foundations_and_architecture/) | 4 files |
+| 2 | [tokenization_and_embeddings](tokenization_and_embeddings/) | README only |
+| 3 | [embeddings_and_similarity_search](embeddings_and_similarity_search/) | README only |
+| 4 | [pre_training](pre_training/) | README only |
+| 7 | [fine_tuning](fine_tuning/) | 5 files |
+| 8 | [alignment_and_rlhf](alignment_and_rlhf/) | 2 files |
+| 10 | [prompt_engineering](prompt_engineering/) | README only |
+| 11 | [rag_fundamentals](rag_fundamentals/) | 5 files |
+| 12 | [advanced_rag](advanced_rag/) | 5 files |
+| 13 | [context_engineering](context_engineering/) | README only |
+| 14 | [reasoning_models](reasoning_models/) | README only |
+| 16 | [agents_and_tool_use](agents_and_tool_use/) | 11 files |
+| 17 | [agentic_workflow_patterns](agentic_workflow_patterns/) | README only |
+| 19 | [multi_agent_systems](multi_agent_systems/) | 3 files |
+| 20 | [mcp_model_context_protocol](mcp_model_context_protocol/) | 4 files |
+| 24 | [inference_and_decoding](inference_and_decoding/) | 5 files |
+| 25 | [context_windows_and_long_context](context_windows_and_long_context/) | README only |
+| 26 | [inference_engines](inference_engines/) | README only |
+| 27 | [vllm_deep_dive](vllm_deep_dive/) | README only |
+| 28 | [optimization_and_quantization](optimization_and_quantization/) | 2 files |
+| 30 | [deployment_and_mlops](deployment_and_mlops/) | README only |
+| 31 | [llm_caching](llm_caching/) | README only |
+| 32 | [llm_observability_and_monitoring](llm_observability_and_monitoring/) | README only |
+| 34 | [token_economics_and_cost_optimization](token_economics_and_cost_optimization/) | README only |
+| 37 | [evaluation_and_benchmarks](evaluation_and_benchmarks/) | README only |
+| 38 | [error_analysis_and_eval_design](error_analysis_and_eval_design/) | README only |
+| 39 | [llm_testing_strategies](llm_testing_strategies/) | README only |
+| 40 | [guardrails_and_content_safety](guardrails_and_content_safety/) | 2 files |
+| 41 | [safety_and_alignment](safety_and_alignment/) | README only |
+| 43 | [llm_security](llm_security/) | 2 files |
+| 49 | [mixture_of_experts](mixture_of_experts/) | README only |
+
+**Not in this path** (22 of 53, Full Path only): `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `code_generation`, `agentic_frameworks`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `knowledge_distillation_and_model_merging`, `llm_ops_platforms`, `llm_routing_and_model_selection`, `prompt_management_and_promptops`, `mechanistic_interpretability`, `ai_regulations_and_compliance`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `diffusion_language_models`, `ai_applications`, `llm_ecosystem_and_landscape`, `data_flywheels_and_continuous_learning`
+<!-- /study-path-table -->
 
 A ruthless cut to what a **senior AI engineer interview** actually probes, curated from this section's own
 [Knowledge-Question Map](#knowledge-question-map) and [Study Plan](#study-plan)
-(both already encode interview priority). Same learning order, ~40% fewer modules. Each group below says
-why it earns interview time.
+(both already encode interview priority). Same learning order, a strict subset of the Full Path. Each group below says
+why it earns senior time.
 
-| Phase | Modules | Why it's tested |
-|-------|---------|-----------------|
-| Foundations | [Foundations & Architecture](foundations_and_architecture/README.md), [Tokenization & Embeddings](tokenization_and_embeddings/README.md), [Embeddings & Similarity Search](embeddings_and_similarity_search/README.md), [Pre-Training](pre_training/README.md) | "Explain self-attention", scaling laws, BPE, HNSW — the guaranteed openers |
-| Training | [Fine-Tuning](fine_tuning/README.md), [Alignment & RLHF](alignment_and_rlhf/README.md) | LoRA/QLoRA and RLHF-vs-DPO-vs-GRPO are the two most-asked training topics |
-| Using LLMs | [Prompt Engineering](prompt_engineering/README.md), [RAG Fundamentals](rag_fundamentals/README.md), [Advanced RAG](advanced_rag/README.md), [Context Engineering](context_engineering/README.md), [Reasoning Models](reasoning_models/README.md) | RAG design and "RAG vs fine-tune vs long context" are near-universal; o1/R1 test-time compute is current |
-| Agents | [Agents & Tool Use](agents_and_tool_use/README.md), [Agentic Workflow Patterns](agentic_workflow_patterns/README.md), [Multi-Agent Systems](multi_agent_systems/README.md), [MCP](mcp_model_context_protocol/README.md) | Function calling / ReAct mechanics, the Anthropic workflow taxonomy, and MCP are hot |
-| Serving | [Inference & Decoding](inference_and_decoding/README.md), [Context Windows & Long Context](context_windows_and_long_context/README.md), [Inference Engines](inference_engines/README.md), [vLLM Deep Dive](vllm_deep_dive/README.md), [Optimization & Quantization](optimization_and_quantization/README.md) | KV cache, speculative decoding, RoPE/YaRN, PagedAttention, GPTQ/AWQ/FP8 — the systems core |
-| Operate | [Deployment & MLOps](deployment_and_mlops/README.md), [LLM Caching](llm_caching/README.md), [Token Economics & Cost Optimization](token_economics_and_cost_optimization/README.md), [LLM Routing & Model Selection](llm_routing_and_model_selection/README.md) | "Cut serving cost 10x" is a staple system-design ask |
-| Quality & Safety | [Evaluation & Benchmarks](evaluation_and_benchmarks/README.md), [Error Analysis & Eval Design](error_analysis_and_eval_design/README.md), [LLM Testing Strategies](llm_testing_strategies/README.md), [Guardrails & Content Safety](guardrails_and_content_safety/README.md), [Safety & Alignment](safety_and_alignment/README.md), [LLM Security](llm_security/README.md) | LLM-as-judge pitfalls, error analysis and failure taxonomies, prompt injection defense, hallucination mitigation |
-| Architecture | [Mixture of Experts](mixture_of_experts/README.md) | MoE training/serving tradeoffs come up whenever frontier models are discussed |
+| Phase | Why it's tested |
+|-------|-----------------|
+| Foundations | "Explain self-attention", scaling laws, BPE, HNSW — the guaranteed openers |
+| Training | LoRA/QLoRA and RLHF-vs-DPO-vs-GRPO are the two most-asked training topics |
+| Using LLMs | RAG design and "RAG vs fine-tune vs long context" are near-universal; o1/R1 test-time compute is current |
+| Agents | Function calling / ReAct mechanics, the Anthropic workflow taxonomy, and MCP are hot |
+| Serving | KV cache, speculative decoding, RoPE/YaRN, PagedAttention, GPTQ/AWQ/FP8 — the systems core |
+| Operate | "Cut serving cost 10x" is a staple system-design ask |
+| Quality & Safety | LLM-as-judge pitfalls, error analysis and failure taxonomies, prompt injection defense, hallucination mitigation |
+| Architecture | MoE training/serving tradeoffs come up whenever frontier models are discussed |
 
-**Deliberately deferred to the Full Path** (still valuable, just lower interview yield): training
 infrastructure, synthetic data, Constitutional AI, code generation, agentic frameworks, coding/voice/
 browser agents, distillation & merging, observability, LLMOps platforms, PromptOps, mechanistic
 interpretability, AI regulations, multimodal & vision-language models, VLA & robotics, small/edge models,
 diffusion LMs, AI applications, ecosystem & landscape, and data flywheels. A niche flagged in an interview
 (e.g. "have you looked at Mamba/SSMs?") is a bonus, not a gate — reach for these once the 30 above are solid.
+
+<!-- study-path-table principal -->
+### Principal Path (30 modules)
+
+| # | Module | Files |
+|---|--------|-------|
+| 1 | [foundations_and_architecture](foundations_and_architecture/) | README only |
+| 7 | [fine_tuning](fine_tuning/) | 3 files |
+| 8 | [alignment_and_rlhf](alignment_and_rlhf/) | README only |
+| 11 | [rag_fundamentals](rag_fundamentals/) | 4 files |
+| 12 | [advanced_rag](advanced_rag/) | 3 files |
+| 13 | [context_engineering](context_engineering/) | README only |
+| 14 | [reasoning_models](reasoning_models/) | README only |
+| 16 | [agents_and_tool_use](agents_and_tool_use/) | 7 files |
+| 17 | [agentic_workflow_patterns](agentic_workflow_patterns/) | README only |
+| 18 | [agentic_frameworks](agentic_frameworks/) | README only |
+| 19 | [multi_agent_systems](multi_agent_systems/) | 4 files |
+| 20 | [mcp_model_context_protocol](mcp_model_context_protocol/) | 3 files |
+| 24 | [inference_and_decoding](inference_and_decoding/) | 2 files |
+| 26 | [inference_engines](inference_engines/) | README only |
+| 28 | [optimization_and_quantization](optimization_and_quantization/) | 2 files |
+| 29 | [knowledge_distillation_and_model_merging](knowledge_distillation_and_model_merging/) | README only |
+| 30 | [deployment_and_mlops](deployment_and_mlops/) | README only |
+| 31 | [llm_caching](llm_caching/) | README only |
+| 32 | [llm_observability_and_monitoring](llm_observability_and_monitoring/) | README only |
+| 34 | [token_economics_and_cost_optimization](token_economics_and_cost_optimization/) | README only |
+| 35 | [llm_routing_and_model_selection](llm_routing_and_model_selection/) | README only |
+| 36 | [prompt_management_and_promptops](prompt_management_and_promptops/) | README only |
+| 37 | [evaluation_and_benchmarks](evaluation_and_benchmarks/) | README only |
+| 38 | [error_analysis_and_eval_design](error_analysis_and_eval_design/) | README only |
+| 40 | [guardrails_and_content_safety](guardrails_and_content_safety/) | 2 files |
+| 41 | [safety_and_alignment](safety_and_alignment/) | README only |
+| 43 | [llm_security](llm_security/) | 2 files |
+| 44 | [ai_regulations_and_compliance](ai_regulations_and_compliance/) | README only |
+| 52 | [llm_ecosystem_and_landscape](llm_ecosystem_and_landscape/) | README only |
+| 53 | [data_flywheels_and_continuous_learning](data_flywheels_and_continuous_learning/) | README only |
+
+**Not in this path** (23 of 53, Full Path only): `tokenization_and_embeddings`, `embeddings_and_similarity_search`, `pre_training`, `training_infrastructure`, `synthetic_data_generation`, `constitutional_ai`, `prompt_engineering`, `code_generation`, `coding_agents`, `voice_agents`, `browser_agents_deep_dive`, `context_windows_and_long_context`, `vllm_deep_dive`, `llm_ops_platforms`, `llm_testing_strategies`, `mechanistic_interpretability`, `multimodal_models`, `vision_language_models`, `vla_and_robotics_foundation_models`, `small_language_models_and_edge_ai`, `mixture_of_experts`, `diffusion_language_models`, `ai_applications`
+<!-- /study-path-table -->
+
+A different cut, not senior-plus-extras. The Principal Path probes system-level ownership of an LLM product: evaluation you can trust, the cost and latency envelope, and the failure and safety modes you design for before launch. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.
 
 ---
 
