@@ -104,7 +104,7 @@ with the same prefix skip the attention computation for the cached portion.
 |----------|---------|------------------|---------------------|
 | Anthropic | `cache_control: {"type": "ephemeral"}` | 0.1x base input (90% off); writes 1.25x at the 5-min TTL, 2.0x at the 1-hour TTL | **Per model, and non-monotonic**: 512 (Opus 5, Fable 5, Mythos 5), 1,024 (Sonnet 5, Sonnet 4.6, Sonnet 4.5, Opus 4.8), 2,048 (Opus 4.7, Haiku 3.5), 4,096 (Opus 4.6, Opus 4.5, Haiku 4.5) |
 | OpenAI | Automatic (no API change needed) | 0.1x base input on current models (`gpt-5.6-terra`: $2.50 in / $0.25 cached). Legacy `gpt-4o`-era models are 0.5x. On `gpt-5.6` and later, cache *writes* bill at 1.25x | 1,024 |
-| Google Gemini | Implicit caching (on by default) plus explicit cache objects | Reduced rate; see the Gemini pricing page | 2,048 (Gemini 2.5 Flash/Pro), 4,096 (Gemini 3.x) |
+| Google Gemini | Implicit caching (on by default) plus explicit cache objects | 0.1x base input (Gemini 3.5/3.6 Flash: $1.50 in / $0.15 cached; 2.5 Pro: $1.25 / $0.125 under 200k, $2.50 / $0.25 above), **plus a storage rent no other provider charges** — $1.00 per 1M cached tokens per hour, $4.50 on 2.5 Pro. Flash-Lite on 3.5 has no caching at all | 2,048 (Gemini 2.5 Flash/Pro), 4,096 (Gemini 3.x) |
 
 Two traps live in that last column. First, Anthropic's minimum is **per model and not monotonic in
 model size** — Opus 5 caches from 512 tokens while the older Opus 4.5 and Haiku 4.5 need 4,096, so
@@ -112,6 +112,13 @@ model size** — Opus 5 caches from 512 tokens while the older Opus 4.5 and Haik
 prefix **fails silently**: no error, the request is simply processed uncached. The only way to know
 is to read `cache_creation_input_tokens` and `cache_read_input_tokens` back off the response — if
 both are 0, your `cache_control` did nothing.
+
+A third trap lives in the price column, and only on Gemini: an explicit cache object is **rented
+by the hour**, at $1.00 per 1M cached tokens per hour ($4.50 on 2.5 Pro), on top of the per-read
+discount. Anthropic and OpenAI bill a one-off write premium and nothing thereafter, so a
+cost model ported across providers silently drops a term. A 200k-token system prefix parked on
+Gemini 2.5 Pro for a day costs `0.2 x 4.50 x 24 = $21.60` in rent before a single request reads
+it — fine at high hit rates, ruinous for a cache that sits idle overnight.
 
 **The formula hiding behind that cache-read price.** The discount is a ceiling, not a bill. What
 you actually pay is a blend of the cached price and the full price, weighted by how often you hit:
@@ -339,7 +346,7 @@ The "from the very beginning" clause is the entire reason Pitfall 4 exists. A pr
 | Symbol | What it actually is |
 |--------|---------------------|
 | `L` | Tokens that match from position 0 until the first difference |
-| `B` | Cache granularity. vLLM PagedAttention uses 16 tokens per block |
+| `B` | Cache granularity. 16 tokens per block in vLLM (`DEFAULT_BLOCK_SIZE = 16` in `vllm/config/cache.py`); `--block-size` is unset by default and some backends pick 32/64/128 |
 | `M` | Provider floor below which nothing is cached. 1,024 on OpenAI; **per-model** on Anthropic (512 to 4,096 — see the §4.3 table); 2,048-4,096 on Gemini |
 | `floor(L/B) x B` | L rounded down to a whole number of blocks. The partial trailing block is recomputed |
 | `cached` | What you get billed at `p_read`. Reported as `cache_read_input_tokens` |

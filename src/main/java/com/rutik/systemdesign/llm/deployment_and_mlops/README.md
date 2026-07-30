@@ -1264,7 +1264,11 @@ async def semantic_cache_lookup(
 ) -> str | None:
     emb = _embed_model.encode([prompt])[0].astype(np.float32)
     keys = await redis.lrange("cache:idx", 0, max_scan - 1)
-    for key in keys:
+    for raw_key in keys:
+        # redis-py returns bytes unless the client was built with decode_responses=True
+        # (the resp.decode() below assumes it was not). Interpolating the raw bytes
+        # would build "cache:emb:b'abc'" and every lookup would miss.
+        key = raw_key.decode() if isinstance(raw_key, bytes) else raw_key
         raw = await redis.get(f"cache:emb:{key}")
         if raw is None:
             continue

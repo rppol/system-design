@@ -64,7 +64,13 @@ response = client.chat.completions.create(
 )
 ```
 
-**Performance (8B model, A100 80GB):**
+**Performance envelope (8B model, A100 80GB) — a planning envelope, not a benchmark.** These
+three figures are *derived* from the memory-bandwidth ceiling in Section 6 (2.0 TB/s of HBM
+divided by 16 GB of FP16 weights = 125 tokens/sec per batch slot, times the batch of roughly 32
+that vLLM typically reaches on this shape), not read off a published vLLM run. They are the
+right numbers to start a capacity plan with and the wrong numbers to sign an SLA against —
+reproduce them with `vllm bench serve` on your own model and input/output length distribution
+before sizing a fleet:
 - Throughput: ~3000-4000 tokens/sec
 - Concurrent users: 50-200 depending on context length
 - TTFT: 100-500ms for typical inputs
@@ -157,8 +163,14 @@ def multi_turn_chat(s, messages):
 ```
 
 **Performance vs vLLM:**
-- For multi-turn conversations with shared prefixes: 2-5× faster
+- The SGLang paper's own headline is **up to 6.4x higher throughput** vs state-of-the-art
+  inference systems, across agent control, logical reasoning, few-shot benchmarks, JSON
+  decoding, RAG pipelines and multi-turn chat (arXiv 2312.07104). "Up to", across a mixed
+  suite — there is no published band for multi-turn shared-prefix chat on its own
 - For single-turn with no shared context: roughly equivalent
+- Treat the headline as an upper bound rather than a forecast: your gain is a function of your
+  own prefix-share rate, and vLLM has shipped automatic prefix caching since the paper. Measure
+  the share of tokens your traffic actually reuses before choosing an engine on this basis
 
 **Best for:** Multi-turn chat systems, constrained generation (JSON mode), multi-modal.
 
@@ -1012,7 +1024,7 @@ def route_request(prompt: str) -> str:
 
 **How do you benchmark and choose between vLLM, TGI, and llama.cpp for a specific workload?** Run the same workload (1000 requests, matching your production QPS and input/output length distribution) against each engine. Measure: throughput (tokens/sec), p50/p99 latency, GPU utilization, and peak memory. That measurement is the whole answer — do not carry a remembered percentage gap between vLLM and TGI into the decision, because it is a version-specific artifact that flips with releases. TGI wins on ease of deployment and broad model support. llama.cpp wins on CPU/edge serving and quantized models (GGUF format). For A100 GPU serving at 50+ RPS: vLLM is the default choice; for < 10 RPS or CPU-only: llama.cpp with Q4_K_M quantization.
 
-**What is speculative decoding and which engine implements it most effectively?** Speculative decoding uses a small draft model (e.g., Llama-68M) to propose K tokens speculatively, then verifies all K with the large model in a single forward pass — accepting correct tokens and regenerating from the first mismatch. Throughput gain: 2-3× for short-output, repetitive tasks (code completion, structured extraction). vLLM supports speculative decoding natively, configured through a single JSON blob — `--speculative-config '{"method": "draft_model", "model": "<draft>", "num_speculative_tokens": 5}'` — or via the shorthand flags `--spec-method` / `--spec-model` / `--spec-tokens`, which are mutually exclusive with the corresponding keys inside `--speculative-config`. The gain is highest when the draft model acceptance rate is > 75% — measure this by logging `speculative_tokens_accepted / speculative_tokens_proposed` in production and tune the draft model if acceptance falls below 60%.
+**What is speculative decoding and which engine implements it most effectively?** Speculative decoding uses a small draft model (e.g., Llama-68M) to propose K tokens speculatively, then verifies all K with the large model in a single forward pass — accepting correct tokens and regenerating from the first mismatch. Throughput gain: 2-3× for short-output, repetitive tasks (code completion, structured extraction). vLLM supports speculative decoding natively, configured through a single JSON blob — `--speculative-config '{"method": "draft_model", "model": "<draft>", "num_speculative_tokens": 5}'` — or via the shorthand flags `--spec-method` / `--spec-model` / `--spec-tokens`, which are mutually exclusive with the corresponding keys inside `--speculative-config`. There is no published acceptance-rate threshold to memorize — the operating point is a function of your measured draft cost, not a constant. Log `speculative_tokens_accepted / speculative_tokens_proposed`, then derive your own break-even from `E[accepted] = (1 - a^(K+1)) / (1 - a)` against a draft tax of `1 + K x c`: at K=4 with a *measured* wall-clock draft cost of c ≈ 0.2 target passes per draft token, speculation only starts paying above a ≈ 0.45, and the net speedup peaks at K=4 before falling off. Tune against measured end-to-end TPOT, never against a remembered percentage.
 
 ---
 

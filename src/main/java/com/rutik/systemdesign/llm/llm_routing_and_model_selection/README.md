@@ -1107,11 +1107,31 @@ Provider fallback chain per tier:
 
 ```
 Tier 1: Claude Haiku 4.5 (primary) -> GPT-5.6-luna (secondary) -> Gemini 3.5 Flash (tertiary)
-Tier 2: Claude Sonnet 5 (primary) -> GPT-5.6-terra (secondary) -> Gemini 3.1 Pro (tertiary)
+        $1 / $5                       $1 / $6                     $1.50 / $9.00
+Tier 2: Claude Sonnet 5 (primary) -> GPT-5.6-terra (secondary) -> Gemini 3.1 Pro Preview
+        $3 / $15                      $2.50 in                    $2 / $12  (<=200k)
+                                                                  $4 / $18  (>200k)
 Tier 3: Claude Opus 5 (primary) -> GPT-5.6-sol (secondary)
+        $5 / $25                     $5 / $30
 ```
 
 Circuit breaker: trip when error rate > 5% over 30 seconds. Half-open after 60 seconds. Log provider-level availability metrics to SRE dashboard.
+
+**Price the fallback legs, not just the primaries.** Two things in that chain are deliberate and
+worth arguing about in an interview:
+
+- **The Tier 1 tertiary costs more than the tier it backs up.** Gemini 3.5 Flash at $1.50/$9.00 is
+  1.5x the input and 1.5-1.8x the output of the Haiku 4.5 and luna legs above it, so a Tier 1
+  outage does not just degrade availability, it inflates the bill on the exact traffic you chose
+  the cheap tier for. Google's genuinely price-matched option is a Flash-Lite (3.5 Flash-Lite at
+  $0.30/$2.50, or 2.5 Flash-Lite at $0.10/$0.40) — pick it if the fallback must hold the cost
+  envelope, and keep 3.5 Flash only if you would rather hold quality and eat the step. State
+  which one you chose; a fallback chain that silently changes the unit economics is a defect.
+- **The Tier 2 tertiary is a Preview model with a length cliff.** Gemini 3.1 Pro Preview is
+  cheaper than Sonnet 5 up to 200k tokens and then doubles on input and jumps 50% on output —
+  and a fallback chain is exactly where oversized prompts land, because the requests that fail
+  over are disproportionately the long, slow ones. Budget the >200k rate, not the headline, and
+  re-check the model name at GA since the `Preview` suffix will drop.
 
 **Interview Discussion Points**
 

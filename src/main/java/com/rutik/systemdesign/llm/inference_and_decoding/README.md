@@ -589,13 +589,16 @@ RadixAttention is especially effective for **tree-structured programs** (e.g., L
 
 When the KV cache fills GPU memory, older or less-important entries must be evicted. **LRU** (evict the request used longest ago, vLLM's default for preemption) is simple but request-grained — it can evict an entire long, expensive-to-recompute prefix. Within a single request's cache, attention-aware methods exploit the fact that a small fraction of tokens ("heavy hitters") and the first few tokens ("attention sinks") receive most of the attention mass:
 
-Production numbers (LLaMA 3 70B, 128K context, full KV cache ~40 GB/request):
+Representative shapes at one configuration (LLaMA 3 70B, 128K context, full KV cache ~40
+GB/request). **The `memory kept`, `quality loss` and `overhead` cells are a cross-paper
+composite at a configuration nobody actually published — read them as the relative ordering,
+not as measurements.** The final column is each paper's own headline, which is what you cite:
 
-| Method | Memory kept | Quality loss | Overhead | Adaptive? |
-|---|---|---|---|---|
-| H2O | ~20-25% (~8-10GB) | <1% | 5-10% per step | Yes (dynamic) |
-| SnapKV | ~20% (~8GB) | <1% | 2-5% one-time | No (static) |
-| StreamingLLM | ~5-20% | 2-5% | ~0% | No (fixed sink+window) |
+| Method | Memory kept | Quality loss | Overhead | Adaptive? | The paper's own claim |
+|---|---|---|---|---|---|
+| H2O | ~20-25% (~8-10GB) | <1% | 5-10% per step | Yes (dynamic) | 20% KV budget; up to 29x throughput vs DeepSpeed Zero-Inference / HF Accelerate, 3x vs FlexGen, 1.9x lower latency at equal batch (arXiv 2306.14048) |
+| SnapKV | ~20% (~8GB) | <1% | 2-5% one-time | No (static) | 3.6x generation speed, 8.2x memory efficiency, 380K context on one A100 80GB, comparable accuracy on 16 long-sequence datasets (arXiv 2404.14469) |
+| StreamingLLM | ~5-20% | 2-5% | ~0% | No (fixed sink+window) | Stable LM over 4M+ tokens; up to 22.2x vs sliding-window-with-recomputation (arXiv 2309.17453) |
 
 → **Deep dive**: [KV Cache Optimization](kv_cache_optimization.md) covers H2O, SnapKV, StreamingLLM/attention sinks, and Scissorhands mechanics in full, the static-vs-dynamic tradeoff, why naive sliding windows without sink tokens cause a perplexity cliff, cross-layer KV sharing (YOCO/CLA), and a worked case study of serving 128K context under KV-OOM pressure.
 

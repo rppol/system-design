@@ -43,7 +43,7 @@ Senior interviews probe this because **"how much memory does this deployment nee
 | Method | What it reduces | Mechanism | Dynamic? | Typical savings | Quality impact |
 |--------|-----------------|-----------|----------|-----------------|-----------------|
 | **GQA / MQA** (overview — see [attention_mechanisms.md](../foundations_and_architecture/attention_mechanisms.md)) | `kv_heads` term | Multiple query heads share fewer KV heads | N/A (architecture) | 4-8× (GQA), up to `num_heads`× (MQA) | Minor with retraining |
-| **MLA** (overview — see attention_mechanisms.md) | effective KV size | Low-rank joint compression of K/V into a shared latent | N/A (architecture) | ~10× vs. MHA (DeepSeek-V2/V3) | Minimal, requires training |
+| **MLA** (overview — see attention_mechanisms.md) | effective KV size | Low-rank joint compression of K/V into a shared latent | N/A (architecture) | ~15× (93.3% reduction vs DeepSeek 67B, arXiv 2405.04434) | Minimal, requires training |
 | **KV Quantization** (overview — see [optimization_and_quantization](../optimization_and_quantization/README.md)) | `bytes_per_element` | INT8/FP8/KIVI quantize cached K/V tensors | N/A (serving-time) | 2× (INT8), 4× (INT4/KIVI) | <1% with calibration |
 | **H2O (Heavy-Hitter Oracle)** | `seq_len` term | Continuously track cumulative attention per token; evict lowest-scoring | Yes | 50-75% | <1% |
 | **SnapKV** | `seq_len` term | One-time observation window, prune, then fixed cache | No (static) | 50-80% | <1% |
@@ -328,8 +328,9 @@ MHA  (Multi-Head Attention):  num_kv_heads = num_query_heads        -> baseline
 GQA  (Grouped-Query Attention): num_kv_heads = num_query_heads / G  -> /G reduction
                                  (Llama-3-70B: 64 query heads, 8 KV heads, G=8 -> 8x)
 MQA  (Multi-Query Attention):   num_kv_heads = 1                    -> /num_query_heads
-MLA  (Multi-head Latent Attn):  K/V replaced by a low-rank latent    -> ~10x vs MHA
-                                 (DeepSeek-V2: 93% KV cache reduction vs MHA)
+MLA  (Multi-head Latent Attn):  K/V replaced by a low-rank latent    -> ~15x
+                                 (DeepSeek-V2: 93.3% KV reduction vs DeepSeek 67B,
+                                  arXiv 2405.04434 -- 1/0.067 = ~14.9x)
 ```
 
 **Stated plainly.** "Query heads are free — they read from the cache. KV heads are expensive — they *are* the cache. So let many readers share one entry, and your memory bill divides by however many share it."
@@ -736,7 +737,7 @@ Two things to hold onto. First, this is the technique that makes prefix caching 
 ## 7. Real-World Examples
 
 - **vLLM** — supports FP8 KV cache quantization (`--kv-cache-dtype fp8`), PagedAttention block management, and prefix caching; H2O/SnapKV-style eviction available via research integrations rather than core defaults.
-- **DeepSeek-V2/V3** — Multi-head Latent Attention (MLA) reduces KV cache by ~93% vs. standard MHA, reported as a primary enabler of DeepSeek's aggressive context-length and cost economics.
+- **DeepSeek-V2/V3** — Multi-head Latent Attention (MLA) reduces KV cache by 93.3% vs. DeepSeek 67B (arXiv 2405.04434), roughly 15x, alongside 42.5% lower training cost and 5.76x maximum generation throughput; reported as a primary enabler of DeepSeek's aggressive context-length and cost economics.
 - **StreamingLLM (MIT, 2023)** — demonstrated stable perplexity over 4M+ token streams in constant memory using the sink + sliding window approach (Section 6.7).
 - **H2O (Heavy-Hitter Oracle, 2023)** — with a 20% KV budget on OPT-6.7B/OPT-30B, the paper reports throughput gains of up to 29× over DeepSpeed Zero-Inference and HuggingFace Accelerate and up to 3× over FlexGen, and up to 1.9× lower latency at the same batch size, via dynamic heavy-hitter retention.
 - **SnapKV (2024)** — reported 3.6× decode speedup and >8× memory reduction in long-context settings (e.g., 380K context on a single A100) while preserving near-baseline accuracy on LongBench.
@@ -799,7 +800,7 @@ Two things to hold onto. First, this is the technique that makes prefix caching 
 | TensorRT-LLM | INT8/FP8 KV cache, paged KV cache management, optimized for H100/H200 |
 | StreamingLLM (reference impl.) | Attention-sink + sliding-window cache, MIT |
 | H2O / SnapKV / Scissorhands (research repos) | Reference implementations of dynamic and static eviction |
-| DeepSeek-V2/V3 (MLA) | Production model demonstrating ~93% KV reduction via architectural low-rank compression |
+| DeepSeek-V2/V3 (MLA) | Production model demonstrating 93.3% KV reduction via architectural low-rank compression |
 | HuggingFace `transformers` config (`num_key_value_heads`) | Where to find the real KV head count for the Section 6.1 formula |
 
 ---

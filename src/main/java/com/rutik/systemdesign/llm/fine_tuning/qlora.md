@@ -157,7 +157,7 @@ No BF16 weight copy is stored permanently — 4-bit storage, BF16 compute, best 
 
 **Why this is a bandwidth win and not a FLOPs win.** The FLOPs column above never changes — quantization does not remove a single multiply-add, and it *adds* the dequantization work on top. NF4 wins because at intensity `1.00 FLOP/byte` the A100 is running its math units at roughly `1/153` of peak, waiting on HBM. Cutting weight traffic 4× cuts the wait 4×, and the extra dequant FLOPs are absorbed for free in compute the GPU was going to spend idling anyway. Storing weights in 4 bits does not make the GPU compute faster; it makes the GPU wait less.
 
-Which is exactly why the sign of the effect flips during training. Training runs large batches, so the same weight tile is reused across many tokens: weight traffic is amortized, intensity climbs toward the ridge, and the kernel becomes compute-bound. In that regime there is no idle time left to hide the dequantization in, so it shows up directly as wall-clock — the `~15-30%` training slowdown Pitfall 1 warns about. Same technique, same hardware, opposite verdict: **NF4 is a speedup for memory-bound single-stream decode and a tax for compute-bound batched training.** You accept the tax because you are not buying speed, you are buying the ability to run at all.
+Which is exactly why the sign of the effect flips during training. Training runs large batches, so the same weight tile is reused across many tokens: weight traffic is amortized, intensity climbs toward the ridge, and the kernel becomes compute-bound. In that regime there is no idle time left to hide the dequantization in, so it shows up directly as wall-clock — the training slowdown Pitfall 1 warns about. Same technique, same hardware, opposite verdict: **NF4 is a speedup for memory-bound single-stream decode and a tax for compute-bound batched training.** You accept the tax because you are not buying speed, you are buying the ability to run at all.
 
 ---
 
@@ -396,7 +396,7 @@ Paging is worth understanding as an *insurance policy*, not an optimization. It 
                                                             -> +33% compute
 ```
 
-So the trade is roughly **6x less activation memory for 33% more compute**, and under QLoRA you take it every time. The reason is asymmetry: the 4-bit weights already bought the memory headroom, and if activations then blow past what is left, the run does not get slower — it dies. Compute overruns are survivable; memory overruns are not. That asymmetry is why Pitfall 3 makes checkpointing mandatory rather than optional, and it stacks with the `~15-30%` dequantization overhead from Pitfall 1 — a QLoRA step is meaningfully slower than a LoRA step on both counts, which is the real price of the memory savings.
+So the trade is roughly **6x less activation memory for 33% more compute**, and under QLoRA you take it every time. The reason is asymmetry: the 4-bit weights already bought the memory headroom, and if activations then blow past what is left, the run does not get slower — it dies. Compute overruns are survivable; memory overruns are not. That asymmetry is why Pitfall 3 makes checkpointing mandatory rather than optional, and it stacks with the dequantization overhead from Pitfall 1 — a QLoRA step is meaningfully slower than a LoRA step on both counts, which is the real price of the memory savings.
 
 ### 6.4 Full QLoRA Memory Layout
 
@@ -560,13 +560,24 @@ longer automatically an argument for full fine-tuning.
 | Dimension | LoRA (BF16) | QLoRA (NF4 4-bit) |
 |-----------|-------------|-------------------|
 | VRAM (7B) | ~15-16GB | ~5-6GB |
-| VRAM (13B) | ~28GB | ~10-11GB |
+| VRAM (13B) | ~28GB | ~8-9GB |
 | VRAM (70B) | ~140GB | ~36-40GB |
 | Quality vs. full FT | ~parity on the QLoRA paper's GLUE / Super-NaturalInstructions comparison | ~parity on the same comparison |
 | Quality vs. LoRA | baseline | ~parity where measured; assume a small task-dependent loss until you eval |
 | Training speed | Fast | Moderate (dequant overhead) |
 | Hardware needed (7B) | RTX 4090 (24GB) | RTX 4080 (16GB) |
 | Inference: can merge | Yes | After dequantize or separate |
+
+**How the VRAM rows are built, so you can rebuild them for your own shape.** Every QLoRA
+figure above is the Section 6 component stack summed at `r=16` over all attention and FFN
+projections, with gradient checkpointing on and an activation budget of **1-2 GB at 7B and 13B,
+2-3 GB at 70B** — roughly batch 2 at sequence length 512-1024. Activations are the one term
+quantization does not shrink, so they are also the one term that makes these rows wrong when
+your batch or sequence length is larger. Worked for 13B: `6.5` GB of NF4 weights (13B x 0.5 B)
++ `0.21` GB of scales (13B x 0.127 bits) + `~0.31` GB of adapters, gradients and 8-bit
+optimizer state (~62M trainable at `r=16`, d=5120, 40 layers) = `~7.0` GB fixed, and everything
+above that is activation budget. These are arithmetic, not benchmarks — measure before you buy
+a card that only just fits.
 
 ---
 
@@ -594,7 +605,7 @@ longer automatically an argument for full fine-tuning.
 ## 10. Common Pitfalls
 
 **1. Dequantization overhead underestimated**
-QLoRA requires dequantization from NF4 to BF16 on every forward pass. This adds ~15-30% training time compared to standard LoRA. At scale (multiple epochs, large datasets), this is meaningful.
+QLoRA requires dequantization from NF4 to BF16 on every forward pass, and that is a real per-step tax against a BF16 LoRA run on the same model. Do not budget a percentage for it: no published benchmark pins it down, and it moves with batch size, sequence length, and how good your kernel is (Unsloth's whole pitch is replacing the BitsAndBytes dequantization path). Note also that the QLoRA paper's "without degrading the runtime" claim is measured against a 16-bit *full* finetuning baseline, not against 16-bit LoRA, so it does not license you to assume parity here. Measure step time on your own setup; at scale (multiple epochs, large datasets), whatever the tax turns out to be compounds.
 Fix: Profile training throughput with and without QLoRA; if latency is not the bottleneck, use standard LoRA on a larger GPU.
 
 **2. Leaving `bnb_4bit_quant_type` at its default**

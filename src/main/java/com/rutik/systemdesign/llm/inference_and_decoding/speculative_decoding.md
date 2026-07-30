@@ -333,13 +333,12 @@ For K draft tokens with a constant per-token acceptance probability α (geometri
 E[accepted] = (1 - α^(K+1)) / (1 - α)        (includes the K+1'th "bonus" token
                                                 if all K are accepted)
 
-K=4 draft tokens (ILLUSTRATIVE end-to-end figures, discounted below the
-closed form because real acceptance decays with draft depth -- the raw
-formula gives 4.10 / 3.05 / 2.31 / 1.94 for these same alphas):
-  α = 0.90 -> E[accepted] ~ 3.5  -> ~3.5x speedup per target pass
-  α = 0.75 -> E[accepted] ~ 2.6  -> ~2.6x speedup
-  α = 0.60 -> E[accepted] ~ 2.1  -> ~2.1x speedup
-  α = 0.50 -> E[accepted] ~ 1.7  -> ~1.7x speedup
+K=4 draft tokens, straight from the closed form (an UPPER BOUND -- see the
+depth-decay note below the tables):
+  α = 0.90 -> E[accepted] = 4.10  -> up to 4.10x per target pass, before draft cost
+  α = 0.75 -> E[accepted] = 3.05  -> up to 3.05x
+  α = 0.60 -> E[accepted] = 2.31  -> up to 2.31x
+  α = 0.50 -> E[accepted] = 1.94  -> up to 1.94x
 
 Overhead: a 1B draft against a 70B target is only ~1.4% of the target's
 FLOPs per token, but the MEASURED wall-clock cost per draft token runs
@@ -432,7 +431,7 @@ The right-hand column is the one that matches production: net speedup **peaks at
 
 **Why the measured cost ratio is so much larger than the parameter ratio.** A 1B draft is ~1.4% of a 70B model's FLOPs, but decode is memory-bandwidth-bound and latency-floored: kernel launches, sampling, and Python-side scheduling do not shrink with the model. Invert the file's own break-even to see the implied number — solving `E[accepted] = 1 + 4c` at the stated break-even of α≈0.45 gives `E(0.45, 4) = 1.7846`, so `c = (1.7846 - 1) / 4 = 0.196`. The real draft tax is ~20% of a target pass per token, roughly 14× the FLOPs ratio. Budget with measured wall-clock, never with parameter counts.
 
-**A note on the K=4 table above.** Plugging the stated α values straight into `(1 - α^(K+1)) / (1 - α)` gives `4.10 / 3.05 / 2.31 / 1.94` for α = 0.90 / 0.75 / 0.60 / 0.50, so the listed `~3.5 / ~2.6 / ~2.1 / ~1.7` are illustrative, more conservative end-to-end figures rather than the raw geometric idealization. The gap is the point: the geometric model assumes a *constant* per-token α, but real acceptance decays with depth — the 4th draft token is conditioned on three prior guesses and is empirically harder to accept than the 1st. Treat the closed form as an upper bound on a real system, not a forecast.
+**Why every `E[accepted]` in this file is an upper bound.** The geometric model assumes a *constant* per-token α, and real acceptance decays with draft depth — the 4th draft token is conditioned on three prior guesses and is empirically harder to accept than the 1st. So the closed form systematically over-predicts, by an amount nobody has published as a general constant because it depends on the draft/target pair and the workload. Do not apply a fixed discount factor to it; measure `accepted_tokens / proposed_tokens` per depth on your own traffic and rebuild the table from your own α. What survives regardless of the discount is the *shape*: the ceiling `1/(1-α)`, the diminishing returns in K, and the fact that the draft tax is linear while the gain saturates.
 
 When α < 0.45 for K=4, the draft model's sequential overhead exceeds the savings from accepted tokens — speculative decoding becomes a net *slowdown*. This is the number production monitors alarm on (Section 6.9).
 

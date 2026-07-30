@@ -76,7 +76,7 @@ The PEFT family is usually presented as a flat list of method names. It is more 
 | Family | Mechanism | Members | Merges into base? | Inference cost |
 |--------|-----------|---------|-------------------|----------------|
 | Reparameterization | Add a low-rank update to an existing weight matrix | LoRA, QLoRA, DoRA | Yes (QLoRA needs a dequantize first) | 0% once merged |
-| Additive module | Insert new bottleneck layers into the block | Adapter layers (Houlsby) | No | +5-10% forward pass, always on |
+| Additive module | Insert new bottleneck layers into the block | Adapter layers (Houlsby) | No | +4-6% forward pass, always on |
 | Additive context | Prepend learned vectors to the attention KVs or the input embeddings | Prefix tuning, prompt tuning | No | Consumes context window / extra KV cache |
 | Selective | Unfreeze a tiny existing subset of the real weights | BitFit | Yes (nothing to merge — they *are* base weights) | 0% |
 | Rescaling | Learn per-channel multiplicative vectors | IA3 | Yes | ~0% |
@@ -181,7 +181,8 @@ For 7B model (d=4096), 32 layers, 2 adapters per layer, r=8:
 
 Inference overhead: ALWAYS present — adapter cannot be merged into base model
   Additional forward pass through down-project and up-project per layer
-  Adds ~5-10% inference latency per adapter insertion
+  Measured at 4-6% slower inference than full fine-tuning
+  (AdapterDrop, arXiv 2010.11918, Table 1: relative speed 0.94-0.96)
 ```
 
 **Read it like this.** "Squeeze the layer's output down to a tiny width, learn the correction there, then blow it back up — the correction costs two skinny matrices instead of one fat one."
@@ -525,7 +526,7 @@ That 6.25% surcharge is what "negligible vs. LoRA" means numerically, and it is 
 ```
 Method           Trainable %  Merge   Inference  Best For
 -----------      -----------  ------  ---------  --------
-Adapter (r=8)    0.06%        No      +5-10%     NLP classification
+Adapter (r=8)    0.06%        No      +4-6%      NLP classification
 Prefix (l=10)    0.03%        No      +ctx window Pre-generation conditioning
 Prompt tuning    ~0.001%      No      +ctx window Very large models only (>10B)
 LoRA (r=16)      0.2-0.6%     Yes     0% merged   Most tasks; gold standard
@@ -653,7 +654,7 @@ one config field rather than a new method.
 |-----------|---------|--------|--------|------|--------|------|
 | Trainable % | 0.06% | 0.03% | 0.001% | 0.2-0.6% | <0.1% | ~0.12% |
 | Quality | Good | Moderate | Good (large) | Best | Low | Very good |
-| Inference overhead | +5-10% | Context | Minimal | 0% (merged) | 0% | 0% (merged) |
+| Inference overhead | +4-6% | Context | Minimal | 0% (merged) | 0% | 0% (merged) |
 | Mergeability | No | No | No | Yes | Yes | Yes |
 | Multi-task stacking | Yes (stack) | No | No | Yes (switch) | No | Yes |
 | Memory during training | Low | Very low | Minimal | Low | Minimal | Low |
@@ -692,7 +693,7 @@ one config field rather than a new method.
 ## 10. Common Pitfalls
 
 **1. Adapter inference overhead in latency-sensitive production**
-Adapter layers add 5-10% latency on every inference call. At high QPS, this adds up.
+Adapter layers add 4-6% latency on every inference call (Rucklé et al. 2021, Table 1). At high QPS, this adds up.
 Fix: Prefer merged LoRA over adapters for production deployments where latency is measured.
 
 **2. Assuming prefix tuning has prompt tuning's scaling curve**
@@ -733,7 +734,7 @@ A: Parameter-Efficient Fine-Tuning (PEFT) trains only a small fraction of model 
 
 **Q: Compare adapter layers, prefix tuning, prompt tuning, and LoRA — when would you choose each?**
 **Short:** LoRA is the default for zero-overhead merging, adapters suit modular task stacking, and prompt tuning only works well above 10B parameters.
-A: LoRA is the correct default for most production fine-tuning: good quality, merges to zero inference overhead, works well at any model scale, supported by all major training frameworks. Choose adapters when you need modular compositionality — stacking language adapters with task adapters for cross-lingual, cross-task generalization; the inference overhead (~5-10%) is acceptable. Choose prefix tuning when you need to condition generation behavior (writing style, domain register) without changing weights — it matched full fine-tuning on table-to-text at GPT-2 scale in the original paper, so it is not gated on model size the way prompt tuning is. Choose prompt tuning only for very large models (>10B) and scenarios with minimal training capacity — soft prompts at GPT-3 scale achieve full fine-tuning quality; at smaller scales, LoRA is significantly better. Choose BitFit only for simple classification tasks as a minimal baseline.
+A: LoRA is the correct default for most production fine-tuning: good quality, merges to zero inference overhead, works well at any model scale, supported by all major training frameworks. Choose adapters when you need modular compositionality — stacking language adapters with task adapters for cross-lingual, cross-task generalization; the inference overhead (a measured 4-6%) is acceptable. Choose prefix tuning when you need to condition generation behavior (writing style, domain register) without changing weights — it matched full fine-tuning on table-to-text at GPT-2 scale in the original paper, so it is not gated on model size the way prompt tuning is. Choose prompt tuning only for very large models (>10B) and scenarios with minimal training capacity — soft prompts at GPT-3 scale achieve full fine-tuning quality; at smaller scales, LoRA is significantly better. Choose BitFit only for simple classification tasks as a minimal baseline.
 
 **Q: What is DoRA and how does it improve on LoRA?**
 **Short:** DoRA decomposes weights into magnitude and direction and adapts each separately, matching LoRA at half the trainable parameters.
@@ -748,8 +749,8 @@ A: Prompt tuning learns soft prompt tokens (free-floating embeddings in the inpu
 A: Yes, PEFT methods can be combined, with important caveats. Additive combination: multiple LoRA adapters for different tasks can be switched or merged independently — vLLM supports hot-swapping LoRA adapters at serving time. Sequential stacking: language adapter followed by task adapter (AdapterHub approach) — the language adapter is always active; the task adapter is task-specific; both contribute to the final output. Combination considerations: (1) Weight interference — two adapters trained independently may interfere when stacked; evaluate the combination, not just each adapter alone; (2) Memory at inference — multiple adapters in memory simultaneously; (3) Training independence — adapters should be trained on their respective tasks separately, not jointly. PEFT combination is a research-active area; simple use cases (task switching with LoRA) are production-ready; complex stacking is still experimental.
 
 **Q: What is the inference overhead of each PEFT method and how does it affect production deployment?**
-**Short:** Merged LoRA has zero inference overhead, adapters add 5-10% latency from extra matmuls, and prompt tuning shrinks the effective context window.
-A: Merged LoRA: zero overhead — merged weights are a single matrix, identical to running the base model. Adapters: 5-10% latency increase per forward pass — two extra matmuls per layer (down + up projection) always execute, regardless of whether the adapter is "active." Prefix tuning: memory overhead (larger KV cache) but minimal compute overhead — the KV cache must store extra prefix entries. Prompt tuning: k extra tokens in the input, propagated as full context through all layers — effectively reduces effective context window by k tokens. For production inference: LoRA (merged) is the only PEFT method with truly zero overhead. Adapters should be avoided in latency-sensitive applications unless the 5-10% overhead is acceptable.
+**Short:** Merged LoRA has zero inference overhead, adapters add a measured 4-6% latency from extra matmuls, and prompt tuning shrinks the effective context window.
+A: Merged LoRA: zero overhead — merged weights are a single matrix, identical to running the base model. Adapters: 4-6% latency increase per forward pass, measured by Rucklé et al. 2021 (arXiv 2010.11918, Table 1) across BERT-base at sequence lengths 128 and 512 — two extra matmuls per layer (down + up projection) always execute, regardless of whether the adapter is "active." Prefix tuning: memory overhead (larger KV cache) but minimal compute overhead — the KV cache must store extra prefix entries. Prompt tuning: k extra tokens in the input, propagated as full context through all layers — effectively reduces effective context window by k tokens. For production inference: LoRA (merged) is the only PEFT method with truly zero overhead. Adapters should be avoided in latency-sensitive applications unless the 4-6% overhead is acceptable.
 
 **Q: How does LoRA rank relate to full fine-tuning expressiveness?**
 **Short:** LoRA rank r caps the weight update to rank r, and while ranks up to 64 are often indistinguishable, capability-heavy tasks still favor full fine-tuning.
@@ -796,7 +797,7 @@ A: With `B = 0` the adapter is a no-op at step zero, so a QLoRA run starts from 
 ## 13. Best Practices
 
 1. **Default to LoRA** — the best balance of quality, memory efficiency, merge capability, and tooling support; only deviate with specific justification.
-2. **Avoid adapters in latency-sensitive production** — the 5-10% per-call overhead from adapter layers compounds at scale; use merged LoRA instead.
+2. **Avoid adapters in latency-sensitive production** — the measured 4-6% per-call overhead from adapter layers compounds at scale; use merged LoRA instead.
 3. **Use DoRA when memory severely constrains rank** — DoRA achieves better quality at the same rank; reduces the quality gap when r must be very low (r=4 to r=8).
 4. **Match PEFT method to task complexity** — BitFit for classification, LoRA r=8-16 for instruction tuning, LoRA r=32-64 for domain adaptation.
 5. **Use prompt tuning only for >10B models** — at smaller scales, prompt tuning significantly underperforms LoRA; never use it as a lazy alternative to LoRA for small/medium models.

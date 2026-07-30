@@ -476,11 +476,19 @@ Each descent cuts the remaining search space by a factor of `M`, which is exactl
     -> costs latency, linearly
     -> tunable live, no reindex needed
 
-  the recall dial in practice (10M vectors, M=32)
+  the recall dial in practice (10M vectors, M=32) -- illustrative shape, not a measurement
     efSearch =  50   ->  ~92% recall@10,  ~2ms
     efSearch = 100   ->  ~95% recall@10,  ~4ms
     efSearch = 200   ->  ~98% recall@10,  ~8ms
 ```
+
+**A measured anchor for that shape.** FAISS's own SIFT1M benchmark (`benchs/bench_hnsw.py`:
+`IndexHNSWFlat`, 1M x 128-d, **M=32, efConstruction=40**) reports R@1 of 0.8740 at
+`efSearch=16`, 0.9492 at 32, 0.9779 at 64, 0.9887 at 128 and 0.9920 at 256, with per-query
+time rising 0.011 -> 0.104 ms across that range. Two things transfer and one does not: the
+recall curve's steep-then-flat shape transfers, the near-linear latency-in-efSearch
+transfers, and the absolute milliseconds do not — they are 128-d vectors in-process on one
+core, so your 768-d 10M-vector index will be one to two orders of magnitude slower per query.
 
 The practical consequence: **build with efConstruction high (200-500) even though it hurts, because it is a one-time cost you cannot revisit; then tune efSearch downward at query time until you hit your latency budget.** A cheap `efConstruction` produces a permanently mediocre graph that no amount of `efSearch` fully rescues.
 
@@ -535,21 +543,34 @@ That last clause is where the recall loss lives. IVF is not approximating distan
 ```
   brute force baseline: 1,000,000 distance computations per query
 
-  nprobe   centroid scan   cluster scan        total       fraction    speedup   recall
-  ------   -------------   -----------------   ---------   --------    -------   ------
+  nprobe   centroid scan   cluster scan        total       fraction    speedup   recall*
+  ------   -------------   -----------------   ---------   --------    -------   -------
      1         1,000        1 x 1,000 = 1,000      2,000      0.20%       500x    ~70%
      5         1,000        5 x 1,000 = 5,000      6,000      0.60%       167x    ~88%
     10         1,000       10 x 1,000 = 10,000    11,000      1.10%        91x    ~95%
     50         1,000       50 x 1,000 = 50,000    51,000      5.10%        20x    ~99%
   1000         1,000     1000 x 1,000 = 1,000,000  1,001,000  100%       1.0x     100%
-  ------   -------------   -----------------   ---------   --------    -------   ------
+  ------   -------------   -----------------   ---------   --------    -------   -------
+
+  * The scan-cost columns are exact arithmetic. The recall column is an ILLUSTRATIVE
+    shape only -- IVF recall is a property of the dataset and of how balanced k-means
+    left the clusters, so no fixed recall belongs to a given nprobe. Measured anchor
+    below.
 
   At a common production setting (nprobe=10 -- FAISS's own default is nprobe=1)
   you touch 11,000 of 1,000,000 vectors
-  -- 1.1% of the corpus -- and still recover ~95% of the true neighbors.
+  -- 1.1% of the corpus -- and still recover most of the true neighbors.
 ```
 
-**Why recall climbs so steeply then flattens.** The true nearest neighbor is overwhelmingly likely to be in the single closest cluster, so `nprobe=1` already gets ~70%. Each extra cluster catches progressively rarer boundary cases: going 1 -> 10 buys 25 recall points for 5.5x the work, but 10 -> 50 buys only 4 more points for another 4.6x. That knee is why `nprobe = 1-10% of nlist` is the standard recommendation — past it you are paying linearly for diminishing returns and would be better served by HNSW.
+**The measured anchor.** FAISS's SIFT1M benchmark (`benchs/bench_hnsw.py`, `IndexIVFFlat`
+with **nlist = 16384**, so ~61 vectors per cluster rather than the 1,000 above) reports R@1
+of 0.4085 at `nprobe=1`, 0.6331 at 4, 0.8263 at 16, 0.9470 at 64 and 0.9861 at 256. Compare
+it to the table by **fraction of the corpus scanned**, not by `nprobe`, because that is
+exactly what `nlist` changes: `nprobe=16` there touches ~0.1% of the corpus for 82.6% R@1,
+and `nprobe=256` touches ~1.6% for 98.6%. Same steep-then-flat curve, different `nprobe`
+axis — which is the whole reason `nprobe` must be quoted as a fraction of `nlist`.
+
+**Why recall climbs so steeply then flattens.** The true nearest neighbor is overwhelmingly likely to be in the single closest cluster, so a single probe already recovers most queries. Each extra cluster catches progressively rarer boundary cases, and both curves above show it: in the illustrative table 1 -> 10 buys 25 recall points for 5.5x the work while 10 -> 50 buys only 4 more for another 4.6x, and in FAISS's measurement nprobe 1 -> 16 buys 42 points while 64 -> 256 buys 4. That knee is why `nprobe = 1-10% of nlist` is the standard recommendation — past it you are paying linearly for diminishing returns and would be better served by HNSW.
 
 **Why `nlist = sqrt(N)` is the sweet spot.** The two terms in the formula pull against each other. Large `nlist` means tiny clusters (cheap to scan) but a huge centroid scan on every query. Small `nlist` means a trivial centroid scan but enormous clusters. Setting `nlist = sqrt(N)` makes both terms equal to `sqrt(N)`, minimizing the total:
 
@@ -652,11 +673,19 @@ Embeddings in production can drift when:
 ## 7. Real-World Examples
 
 ### Pinecone at Scale
-- Managed vector database used by a large base of production applications
-- Graph-based (HNSW-family) index with metadata filtering
-- Marketed and documented for billion-scale indexes partitioned into namespaces
-- Latency is workload-dependent; benchmark your own corpus rather than trusting a
-  quoted per-scale number (see the followup note on vendor latency claims)
+- Managed vector database; indexes are partitioned into namespaces and queried with
+  metadata filters
+- **Not HNSW.** Pinecone's serverless architecture post explicitly rejects the graph
+  approach — an HNSW graph must sit in RAM, and their index lives in object storage.
+  They use geometric partitioning into centroid-represented regions, then a per-slab
+  index (Ananas/FJLT for small slabs, PQ Fast Scan for medium, IVF for large). Do not
+  reason about Pinecone's recall knobs as if `efSearch` existed.
+- Published hard limits, which are what actually constrain a design: `top_k` max
+  10,000, result payload max 4 MB, upsert batch max 2 MB or 1,000 records, filterable
+  metadata max 40 KB per record, and namespaces per index capped at 100 (Starter) /
+  1,000 (Builder) / 100,000 (Standard and Enterprise)
+- Pinecone publishes **no** per-scale latency figure and **no** stated maximum record
+  count per index. Benchmark your own corpus; do not design against a marketing number
 
 ### OpenAI Embeddings
 - text-embedding-3-large: 3072 dimensions, Matryoshka training
@@ -741,7 +770,7 @@ Embeddings in production can drift when:
 | Tool | Type | Notes |
 |------|------|-------|
 | **FAISS** | ANN library | Facebook; flat/IVF/HNSW/PQ; CPU + GPU |
-| **Pinecone** | Managed vector DB | Serverless + pod-based; 1B+ scale |
+| **Pinecone** | Managed vector DB | Serverless; object-storage index, not HNSW; `top_k` <= 10,000 |
 | **Weaviate** | Vector DB | Built-in hybrid search; GraphQL API; open source |
 | **Qdrant** | Vector DB | Rust-based; high performance; open source + cloud |
 | **Milvus** | Vector DB | Distributed; Kubernetes-native; large scale |
@@ -813,7 +842,7 @@ Evaluate embeddings on retrieval metrics specific to your RAG use case, not gene
 
 **Q: How does metadata filtering interact with ANN search, and what is the pre-filter vs post-filter trap?**
 **Short:** Post-filtering after ANN search can return zero results under a selective filter, while naive pre-filtering breaks HNSW graph connectivity and collapses recall.
-Post-filtering retrieves top-K by vector similarity first and then applies the metadata filter — with a selective filter (say 1% of the corpus matches), a top-100 retrieval can leave zero surviving results even though thousands of matching documents exist. Pre-filtering restricts the search to matching vectors, but naive pre-filtering breaks HNSW's graph connectivity: greedy traversal gets stranded when most of a node's neighbors are filtered out, and recall collapses. Production vector databases (Qdrant, Pinecone, Weaviate) implement filtered HNSW traversal that walks through filtered-out nodes without returning them, which preserves connectivity — but recall under your real filters still must be measured, not assumed. For highly selective filters (under ~1% selectivity), brute-force scanning the filtered subset is often better: exact search over 10K vectors takes about 1ms and returns 100% recall.
+Post-filtering retrieves top-K by vector similarity first and then applies the metadata filter — with a selective filter (say 1% of the corpus matches), a top-100 retrieval can leave zero surviving results even though thousands of matching documents exist. Pre-filtering restricts the search to matching vectors, but naive pre-filtering breaks HNSW's graph connectivity: greedy traversal gets stranded when most of a node's neighbors are filtered out, and recall collapses. Graph-based production vector databases (Qdrant, Weaviate) implement filtered HNSW traversal that walks through filtered-out nodes without returning them, which preserves connectivity — but recall under your real filters still must be measured, not assumed. For highly selective filters (under ~1% selectivity), brute-force scanning the filtered subset is often better: exact search over 10K vectors takes about 1ms and returns 100% recall.
 
 **Q: When would you use binary or int8 embedding quantization instead of Product Quantization?**
 **Short:** int8 quantization gives a safe 4x compression at about 97% of float32 quality, while binary quantization needs rescoring to recover from 92.5% to 96%.

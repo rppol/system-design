@@ -49,7 +49,10 @@ Human baselines from the MMLU paper (Hendrycks et al., arXiv 2009.03300):
 Every one depends on the prompting setup, so the setup is part of the number:
   GPT-4:       86.4%  (5-shot, GPT-4 technical report)
   LLaMA 3 70B: 82.0%  (5-shot, Meta)
-  Claude 3.5 Sonnet: 88.7% (0-shot CoT, Anthropic)
+  Claude 3.5 Sonnet: 90.4% (5-shot CoT) / 88.7% (5-shot) / 88.3% (0-shot CoT)
+    -- all three are the SAME model on the SAME benchmark, from Table 1 of
+       Anthropic's Claude 3.5 Sonnet Model Card Addendum. 2.1 points of spread
+       bought purely by changing the prompting setup.
 A 5-shot number and a 0-shot-CoT number are not comparable; frontier models
 have since moved well past all three.
 
@@ -97,8 +100,10 @@ Current SOTA: ~90%+ with CoT
 164 Python functions; docstring → implement the function
 Metric: pass@k = probability at least 1 of k samples passes all tests
 pass@1 scores (2024-era anchors, 0-shot):
-  GPT-4o:      90.2%  (OpenAI, May 2024)
-  LLaMA 3 70B: 81.7%  (Meta, Llama 3 Instruct)
+  GPT-4o:      90.2%  (OpenAI's own simple-evals table, gpt-4o-2024-08-06;
+                       the 2024-05-13 snapshot scored 91.0)
+  Claude 3.5 Sonnet: 92.0%  (Anthropic, Model Card Addendum Table 1)
+  LLaMA 3 70B: 81.7%  (Meta's Llama model card, 70B Instruct)
 
 Limitation: saturated for frontier models -- everything current clusters at the
   ceiling, so HumanEval no longer separates systems. Use it as a smoke test and
@@ -174,11 +179,22 @@ most common way this benchmark gets misreported.
 % resolved on SWE-bench Verified:
   Claude 3.5 Sonnet + 2 general tools: 49.0%  (Anthropic, Oct 2024)
   o3 + scaffolding:                    71.7%  (OpenAI, Dec 2024 preview)
-  2026 frontier models:                mid-90s -- public leaderboards now call
-                                       Verified near-saturated
+  Claude Opus 4.6:                     76.2%  (Anthropic, Feb 2026, mean of 25
+                                       trials) -- and 81.42% for the SAME weights
+                                       after only a prompt modification
+  best official leaderboard submission: 396 / 500 = 79.2%
+                                       (SWE-bench/experiments, Dec 2025)
+
+Verified is NOT saturated in the mid-90s. Treat any such figure as an
+unattributed aggregator number until you can point at the submission behind it;
+the official leaderboard's own top entry is still under 80%. What IS true in 2026
+is that labs have begun reporting other coding benchmarks instead -- Anthropic's
+Claude Opus 5 launch reports Frontier-Bench and CursorBench and no SWE-bench
+Verified score at all.
 
 Scaffold matters as much as the model: the same weights score very differently
-under different agent harnesses, so a score without its scaffold is not a result.
+under different agent harnesses -- the 76.2 -> 81.42 gap above is 5 points bought
+by editing a prompt -- so a score without its scaffold is not a result.
 ```
 
 **MBPP (Mostly Basic Python Programming)**:
@@ -1538,7 +1554,7 @@ Typically 1,000-5,000+ pairwise comparisons per variant — an order of magnitud
 
 **Q: Why has SWE-bench largely displaced HumanEval as the primary code-capability benchmark?**
 **Short:** SWE-bench displaced HumanEval because HumanEval is saturated near 90%+ pass@1, while SWE-bench's real multi-file GitHub issues still have real headroom.
-Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on its 164 self-contained docstring-to-function problems, leaving little headroom to distinguish models. SWE-bench's real GitHub issues require repo-level context, cross-file edits, and passing the project's actual test suite; almost all published figures are on SWE-bench **Verified**, the 500-issue human-validated subset rather than the 2,294-issue full set — Claude 3.5 Sonnet with two tools resolved 49.0% there in Oct 2024 and o3 with scaffolding 71.7% in Dec 2024, while 2026 frontier systems sit in the mid-90s. Always state which SWE-bench variant and which agent scaffold a number came from, keep HumanEval as a cheap smoke test, and expect Verified itself to need a harder successor.
+Because HumanEval is effectively saturated: frontier models score 90%+ pass@1 on its 164 self-contained docstring-to-function problems, leaving little headroom to distinguish models. SWE-bench's real GitHub issues require repo-level context, cross-file edits, and passing the project's actual test suite; almost all published figures are on SWE-bench **Verified**, the 500-issue human-validated subset rather than the 2,294-issue full set — Claude 3.5 Sonnet with two tools resolved 49.0% there in Oct 2024 and o3 with scaffolding 71.7% in Dec 2024, while in 2026 Anthropic reports 76.2% for Claude Opus 4.6 (mean of 25 trials, 81.42% after a prompt change) and the top submission on the official SWE-bench/experiments leaderboard is 396/500 = 79.2%. Verified therefore still has headroom — the mid-90s figures that circulate on aggregator sites do not trace to a submission. Always state which SWE-bench variant and which agent scaffold a number came from, keep HumanEval as a cheap smoke test, and expect Verified itself to need a harder successor.
 
 **Q: How do you measure a judge's position bias instead of just naming it?**
 **Short:** Run every pairwise item in both orders and report the flip rate together with its asymmetry — a balanced flip is noise, a skewed one is position bias.
