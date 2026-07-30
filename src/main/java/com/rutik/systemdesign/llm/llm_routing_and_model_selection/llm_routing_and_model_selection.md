@@ -596,10 +596,10 @@ Three consequences for the strategies above. A **cascade** is the worst case: an
 prefills the same prefix twice, once per tier, so a prefix write belongs inside the `P_esc x C_exp`
 term in Section 6.3. **Per-conversation** routing beats per-request routing for the same reason
 session affinity matters on self-hosted replicas — see the prefix-aware and cache-aware routers in
-[Inference Engines](../inference_engines/README.md). And a router that varies the *tool set* per
+[Inference Engines](../inference_engines/inference_engines.md). And a router that varies the *tool set* per
 route breaks the cache even when the model is constant: Anthropic invalidates in the order
 `tools` -> `system` -> `messages`, so a change to tool definitions discards everything behind it.
-The full cache taxonomy and its mechanics live in [LLM Caching](../llm_caching/README.md).
+The full cache taxonomy and its mechanics live in [LLM Caching](../llm_caching/llm_caching.md).
 
 ---
 

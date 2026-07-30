@@ -916,7 +916,7 @@ next_agent.run(design)
 
 **Devin (Cognition AI):** Proprietary. Uses a computer-use interface (browser, terminal, editor) as external memory. Agent sees screen state rather than file text. Not open source.
 
-**SWE-agent (Princeton NLP):** Academic open-source system that wraps a shell and editor as tools for a single agent. The 2024 paper (arXiv 2405.15793) reported **12.5% pass@1 on the full SWE-bench test set** with GPT-4 Turbo — that number predates SWE-bench Verified (the human-validated 500-task subset OpenAI released in August 2024) and must not be quoted against it. Scores on Verified with current frontier models are far higher and move every few months, so cite the leaderboard rather than a remembered figure. Now at `github.com/SWE-agent/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/README.md).
+**SWE-agent (Princeton NLP):** Academic open-source system that wraps a shell and editor as tools for a single agent. The 2024 paper (arXiv 2405.15793) reported **12.5% pass@1 on the full SWE-bench test set** with GPT-4 Turbo — that number predates SWE-bench Verified (the human-validated 500-task subset OpenAI released in August 2024) and must not be quoted against it. Scores on Verified with current frontier models are far higher and move every few months, so cite the leaderboard rather than a remembered figure. Now at `github.com/SWE-agent/SWE-agent`. Single-agent coding systems of this family are covered in [Coding Agents](../coding_agents/coding_agents.md).
 
 **Model options** (rates verified July 2026; re-check before budgeting):
 - gpt-4o: $2.50/1M input, $10/1M output — still served by the API, but no longer OpenAI's flagship

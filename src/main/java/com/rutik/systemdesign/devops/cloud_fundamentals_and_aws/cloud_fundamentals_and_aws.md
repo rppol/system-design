@@ -20,7 +20,7 @@ Public cloud replaces capital-expense data centers with on-demand, API-driven, p
 - **S3 (Simple Storage Service)** — object storage, 11 nines (99.999999999%) durability, storage classes, lifecycle policies. **EBS (Elastic Block Store)** — network-attached block volumes for EC2.
 - **ELB (Elastic Load Balancing)** — ALB (L7/HTTP), NLB (L4/TCP), GWLB (appliances). Distributes traffic across targets.
 - **Route 53** — DNS + health checks + routing policies (weighted, latency, geolocation, failover).
-- **RDS (Relational Database Service)** — managed PostgreSQL/MySQL/Aurora etc. Internals owned by [../../database/](../../database/); this module covers the cloud-operational side (Multi-AZ, read replicas, backups).
+- **RDS (Relational Database Service)** — managed PostgreSQL/MySQL/Aurora etc. Internals owned by [../../database/](../../database/README.md); this module covers the cloud-operational side (Multi-AZ, read replicas, backups).
 - **EKS (Elastic Kubernetes Service)** — managed Kubernetes control plane. See [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md).
 
 The **Well-Architected Framework** organizes design review into six pillars: Operational Excellence, Security, Reliability, Performance Efficiency, Cost Optimization, and Sustainability.
@@ -363,7 +363,7 @@ resource "aws_db_instance" "orders" {
 }
 ```
 
-Multi-AZ = **HA** (synchronous standby, automatic failover, not readable). Read replicas = **scale reads** (asynchronous, readable, can promote). For DB internals see [../../database/](../../database/).
+Multi-AZ = **HA** (synchronous standby, automatic failover, not readable). Read replicas = **scale reads** (asynchronous, readable, can promote). For DB internals see [../../database/](../../database/README.md).
 
 ```mermaid
 flowchart LR
@@ -540,7 +540,7 @@ Durability that high means media failure stops being the risk worth designing ag
 | S3 / EBS / EFS | Object / block / shared-file storage |
 | ELB (ALB/NLB/GWLB) | Load balancing ([cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md)) |
 | Route 53 | DNS, health checks, routing policies |
-| RDS / Aurora | Managed relational DB ([../../database/](../../database/)) |
+| RDS / Aurora | Managed relational DB ([../../database/](../../database/README.md)) |
 | CloudWatch / CloudTrail | Metrics/logs / API audit ([observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md)) |
 | Terraform / CloudFormation / CDK | IaC ([infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md)) |
 | AWS Well-Architected Tool | Pillar-based architecture review |
@@ -665,4 +665,4 @@ After the redesign, an AZ failure now drains traffic to the healthy AZ via the A
 
 ---
 
-**Cross-references:** [networking_for_devops](../networking_for_devops/networking_for_devops.md) (TCP/IP under VPC), [cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) (cross-VPC connectivity, CDN), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (EKS control plane), [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (provision all of this), [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) (pricing models, tagging), [gcp_and_azure_essentials](../gcp_and_azure_essentials/gcp_and_azure_essentials.md) (multi-cloud equivalents), [../../database/](../../database/) (RDS/Aurora internals), [secrets_management](../secrets_management/secrets_management.md) (KMS, secrets).
+**Cross-references:** [networking_for_devops](../networking_for_devops/networking_for_devops.md) (TCP/IP under VPC), [cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) (cross-VPC connectivity, CDN), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (EKS control plane), [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (provision all of this), [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) (pricing models, tagging), [gcp_and_azure_essentials](../gcp_and_azure_essentials/gcp_and_azure_essentials.md) (multi-cloud equivalents), [../../database/](../../database/README.md) (RDS/Aurora internals), [secrets_management](../secrets_management/secrets_management.md) (KMS, secrets).

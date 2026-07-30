@@ -2,7 +2,7 @@
 
 > Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced · Q&A target: 12
 
-Operating Apache Kafka (and Kafka-compatible streaming) as platform infrastructure: the Strimzi operator on Kubernetes, partition and disk capacity sizing, consumer-lag monitoring, rebalancing without latency spikes, rack awareness for AZ-failure survival, and tiered storage for cost. This module owns the **run-it-at-scale** angle. For the *messaging concepts* themselves (delivery semantics, partitioning theory, log compaction, the dual-write/outbox pattern) cross-reference [`../../hld/`](../../hld/) and the backend messaging material; for *application consumer/producer code patterns* see [`../../spring/spring_messaging/`](../../spring/spring_messaging/spring_messaging.md). Here we focus on keeping the cluster alive, sized, and observable.
+Operating Apache Kafka (and Kafka-compatible streaming) as platform infrastructure: the Strimzi operator on Kubernetes, partition and disk capacity sizing, consumer-lag monitoring, rebalancing without latency spikes, rack awareness for AZ-failure survival, and tiered storage for cost. This module owns the **run-it-at-scale** angle. For the *messaging concepts* themselves (delivery semantics, partitioning theory, log compaction, the dual-write/outbox pattern) cross-reference [`../../hld/`](../../hld/README.md) and the backend messaging material; for *application consumer/producer code patterns* see [`../../spring/spring_messaging/`](../../spring/spring_messaging/spring_messaging.md). Here we focus on keeping the cluster alive, sized, and observable.
 
 ---
 
@@ -795,4 +795,4 @@ kubectl annotate pod prod-kafka-0 strimzi.io/manual-rolling-update=true
 
 ---
 
-**See also:** [kubernetes_storage_and_state](../kubernetes_storage_and_state/kubernetes_storage_and_state.md) · [kubernetes_operators_and_crds](../kubernetes_operators_and_crds/kubernetes_operators_and_crds.md) · [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) · [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md) · [`../../hld/`](../../hld/) · [`../../spring/spring_messaging/`](../../spring/spring_messaging/spring_messaging.md)
+**See also:** [kubernetes_storage_and_state](../kubernetes_storage_and_state/kubernetes_storage_and_state.md) · [kubernetes_operators_and_crds](../kubernetes_operators_and_crds/kubernetes_operators_and_crds.md) · [kubernetes_scheduling_and_autoscaling](../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md) · [observability_metrics_prometheus](../observability_metrics_prometheus/observability_metrics_prometheus.md) · [`../../hld/`](../../hld/README.md) · [`../../spring/spring_messaging/`](../../spring/spring_messaging/spring_messaging.md)

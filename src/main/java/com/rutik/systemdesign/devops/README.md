@@ -55,7 +55,7 @@ This section is deliberately scoped to **not duplicate** adjacent sections. Wher
 | [`backend/container_and_deployment_patterns`](../backend/container_and_deployment_patterns/container_and_deployment_patterns.md) | App-developer view of Docker/K8s deploy basics | Cluster operation, runtime internals, multi-tenant platform concerns |
 | [`database/backup_recovery_and_disaster_recovery`](../database/backup_recovery_and_disaster_recovery/backup_recovery_and_disaster_recovery.md) | DB-specific PITR/WAL backup mechanics | Infra-wide multi-region DR architecture and failover |
 | [`database/replication_and_high_availability`](../database/replication_and_high_availability/replication_and_high_availability.md) | DB replication/HA internals | Infra HA topology, multi-AZ/region failover |
-| [`hld/`](../hld/) | Distributed-systems theory (CAP, consistent hashing, sharding) | Operating those systems in production |
+| [`hld/`](../hld/README.md) | Distributed-systems theory (CAP, consistent hashing, sharding) | Operating those systems in production |
 
 **DevOps owns**: Linux/OS internals for ops, cloud networking, container *runtime internals*, the full Kubernetes stack, CI/CD & GitOps, IaC, cloud platforms, the observability *infrastructure*, SRE practice (SLO math, incident command, on-call), DevSecOps supply chain, policy-as-code, infra DR, platform engineering, and FinOps.
 

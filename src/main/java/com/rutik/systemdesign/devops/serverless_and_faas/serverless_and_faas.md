@@ -16,7 +16,7 @@ Serverless is a spectrum: FaaS (Lambda) at one end, serverless containers (Farga
 
 - **FaaS** runs a function in response to an **event** — an HTTP request via API Gateway, an S3 upload, an SQS/Kinesis message, a cron schedule, a DynamoDB stream. The platform spins up an execution environment (a micro-VM like Firecracker for Lambda), runs your handler, and may reuse or freeze it.
 - **Cold start** is the latency when no warm environment exists: the platform must initialize a new one (download code, start runtime, run init). Typically ~100ms-1s; worse for large packages, VPC-attached functions, or heavy init.
-- **Event-driven** architecture composes functions and managed services into pipelines, decoupled by queues/streams/event buses (see [../../hld/](../../hld/) for messaging patterns).
+- **Event-driven** architecture composes functions and managed services into pipelines, decoupled by queues/streams/event buses (see [../../hld/](../../hld/README.md) for messaging patterns).
 - **API Gateway** turns HTTP requests into function invocations, handling auth, throttling, and routing.
 - **Step Functions** (AWS) / Workflows (GCP) / Durable Functions (Azure) orchestrate multi-step, stateful workflows with retries, branching, and parallelism — solving the problem that individual functions are stateless and time-limited.
 
@@ -461,8 +461,8 @@ flowchart LR
 | Knative | Kubernetes-native serverless ([kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md)) |
 | API Gateway (HTTP/REST) / Cloud Endpoints | HTTP front door, auth, throttling |
 | Step Functions / Workflows / Durable Functions | Stateful workflow orchestration |
-| SQS / Pub/Sub / EventBridge | Event/message delivery ([../../hld/](../../hld/)) |
-| DynamoDB / Firestore | Serverless state store ([../../database/](../../database/)) |
+| SQS / Pub/Sub / EventBridge | Event/message delivery ([../../hld/](../../hld/README.md)) |
+| DynamoDB / Firestore | Serverless state store ([../../database/](../../database/README.md)) |
 | AWS SAM / Serverless Framework | Serverless IaC/deploy ([infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md)) |
 | Provisioned Concurrency / SnapStart | Cold-start mitigation |
 | Lambda Powertools | Idempotency, tracing, structured logging |
@@ -586,4 +586,4 @@ The redesign split the monolith: API Gateway invokes a tiny Lambda that validate
 
 ---
 
-**Cross-references:** [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) (Lambda IAM roles, VPC), [gcp_and_azure_essentials](../gcp_and_azure_essentials/gcp_and_azure_essentials.md) (Cloud Functions/Cloud Run/Azure Functions equivalents), [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) (per-invocation vs always-on cost), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (Knative on K8s), [../../hld/](../../hld/) (event-driven/messaging patterns), [../../database/](../../database/) (DynamoDB as serverless state), [secrets_management](../secrets_management/secrets_management.md) (function secrets).
+**Cross-references:** [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) (Lambda IAM roles, VPC), [gcp_and_azure_essentials](../gcp_and_azure_essentials/gcp_and_azure_essentials.md) (Cloud Functions/Cloud Run/Azure Functions equivalents), [cloud_cost_optimization_finops](../cloud_cost_optimization_finops/cloud_cost_optimization_finops.md) (per-invocation vs always-on cost), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (Knative on K8s), [../../hld/](../../hld/README.md) (event-driven/messaging patterns), [../../database/](../../database/README.md) (DynamoDB as serverless state), [secrets_management](../secrets_management/secrets_management.md) (function secrets).

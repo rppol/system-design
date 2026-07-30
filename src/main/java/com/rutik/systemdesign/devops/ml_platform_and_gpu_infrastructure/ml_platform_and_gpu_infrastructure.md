@@ -2,7 +2,7 @@
 
 > Phase 8 — Specialized Platforms & Performance · Difficulty: Advanced · Q&A target: 15
 
-Running GPUs on Kubernetes for training and inference: the NVIDIA GPU Operator, the device plugin, MIG and time-slicing for fractional sharing, Karpenter GPU NodePools, and orchestrating Kubeflow / Ray workloads on a multi-tenant cluster. This module owns the **operate-it** angle — how the platform team keeps expensive accelerators busy, isolated, and observable. For the *modeling* side (training loops, serving frameworks, model design) cross-reference [`../../ml/`](../../ml/) and [`../../llm/inference_engines/`](../../llm/inference_engines/inference_engines.md); for the *application architecture* of an inference service see [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md).
+Running GPUs on Kubernetes for training and inference: the NVIDIA GPU Operator, the device plugin, MIG and time-slicing for fractional sharing, Karpenter GPU NodePools, and orchestrating Kubeflow / Ray workloads on a multi-tenant cluster. This module owns the **operate-it** angle — how the platform team keeps expensive accelerators busy, isolated, and observable. For the *modeling* side (training loops, serving frameworks, model design) cross-reference [`../../ml/`](../../ml/README.md) and [`../../llm/inference_engines/`](../../llm/inference_engines/inference_engines.md); for the *application architecture* of an inference service see [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md).
 
 ---
 
@@ -622,7 +622,7 @@ The headline metric is **DCGM GPU utilization** (`DCGM_FI_DEV_GPU_UTIL`) — SM-
 - **Pin driver/CUDA versions** in the GPU Operator and gate node-image upgrades on a GPU smoke test.
 - **Cap spend with NodePool `limits`** on `nvidia.com/gpu` and per-team ResourceQuotas; bill on GPU-hours.
 - **Pre-stage large model weights** on a fast shared cache (FSx for Lustre / EFS / local NVMe) to cut cold starts.
-- **Cross-reference, don't duplicate**: model/training internals live in [`../../ml/`](../../ml/) and [`../../llm/`](../../llm/); this layer owns scheduling, isolation, and cost.
+- **Cross-reference, don't duplicate**: model/training internals live in [`../../ml/`](../../ml/README.md) and [`../../llm/`](../../llm/README.md); this layer owns scheduling, isolation, and cost.
 
 ---
 

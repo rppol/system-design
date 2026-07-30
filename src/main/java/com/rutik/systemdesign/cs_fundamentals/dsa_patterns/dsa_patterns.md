@@ -6,7 +6,7 @@ files this module contributes to each curated path; omit a tier to leave it out
 -->
 The pattern-recognition and strategy-selection layer for coding interviews. This section answers the question every L5 candidate must answer in under 5 minutes: *"Given this problem, what pattern do I apply, and why?"*
 
-> **Prerequisites**: [Phase 1–3 concept modules](../) (complexity, data structures, algorithms). Those teach *what* a heap or sliding window is. This section teaches *when* to reach for which one.
+> **Prerequisites**: [Phase 1–3 concept modules](../README.md) (complexity, data structures, algorithms). Those teach *what* a heap or sliding window is. This section teaches *when* to reach for which one.
 
 > **Scope**: language-agnostic. Code examples are Python-first (type-hinted, runnable-shaped). Java notes are added where the implementation diverges meaningfully.
 

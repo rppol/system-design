@@ -859,7 +859,7 @@ Convert that to money carefully. Copilot self-hosts this model, so there is no p
 
 The system prompt (language instruction + file-type context block) is the cacheable prefix; the FIM prefix/suffix content changes per request and is never cached.
 
-See [Token Economics and Cost Optimization](../token_economics_and_cost_optimization/README.md) for the full provider prompt caching analysis.
+See [Token Economics and Cost Optimization](../token_economics_and_cost_optimization/token_economics_and_cost_optimization.md) for the full provider prompt caching analysis.
 
 ---
 

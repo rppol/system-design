@@ -45,7 +45,7 @@
 
 ### Out of scope (cross-referenced, not rebuilt)
 
-- **Model architecture, training-loop code, hyperparameter strategy** → [`../../ml/`](../../ml/), [`../../llm/`](../../llm/).
+- **Model architecture, training-loop code, hyperparameter strategy** → [`../../ml/`](../../ml/README.md), [`../../llm/`](../../llm/README.md).
 - **The GPU inference serving *application* design** (KV cache, batching, routing) → [`../../llm/case_studies/design_gpu_inference_platform.md`](../../llm/case_studies/design_gpu_inference_platform.md).
 - **Feature store internals / point-in-time correctness** → [`../../ml/case_studies/cross_cutting/feature_store_and_point_in_time_correctness.md`](../../ml/case_studies/cross_cutting/feature_store_and_point_in_time_correctness.md).
 - **Generic Kubernetes platform multi-tenancy** → [`./design_kubernetes_platform.md`](./design_kubernetes_platform.md) (we build *on* it).

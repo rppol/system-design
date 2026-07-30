@@ -1084,7 +1084,7 @@ def fixed_sort(input_path: str, output_path: str, mem_gb: int = 3) -> None:
 - [complexity_analysis_and_big_o](../complexity_analysis_and_big_o/complexity_analysis_and_big_o.md) — the Ω(n log n) lower bound derivation and Master theorem for D&C recurrences
 - [heaps_and_priority_queues](../heaps_and_priority_queues/heaps_and_priority_queues.md) — heapsort, k-way merge with min-heap
 - [dynamic_programming](../dynamic_programming/dynamic_programming.md) — DP + binary search (patience sorting / LIS in O(n log n))
-- [`database/`](../../database/) — sort-merge join, external sort in PostgreSQL
+- [`database/`](../../database/README.md) — sort-merge join, external sort in PostgreSQL
 - [`python/collections_and_data_structures`](../../python/collections_and_data_structures/collections_and_data_structures.md) — TimSort internals, `bisect` module details
 - [`java/collections_internals`](../../java/collections_internals/collections_internals.md) — dual-pivot quicksort for primitives, TimSort for objects
 - [DSA Pattern Playbooks](../dsa_patterns/dsa_patterns.md) — apply this technique: [Modified Binary Search](../dsa_patterns/modified_binary_search.md) (binary search on a sorted array, and binary search on the answer space)

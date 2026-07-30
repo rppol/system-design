@@ -12,7 +12,7 @@ tool/function calling, structured output mapping, chat memory, and Micrometer ob
 Its central goal is **portability and integration**: swap OpenAI for Anthropic Claude, Ollama,
 Azure OpenAI, Amazon Bedrock, or Google Vertex AI by changing a starter dependency and
 properties — not application code. It bridges this Java/Spring section to the
-[`llm/`](../../llm/) engineering material: the LLM section explains *how the models and RAG
+[`llm/`](../../llm/README.md) engineering material: the LLM section explains *how the models and RAG
 pipelines work*; this module explains *how to wire them into a Spring service*.
 
 Key building blocks:

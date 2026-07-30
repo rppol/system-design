@@ -1836,7 +1836,7 @@ async function openTopics(section) {
   // one file (module page + deep-dives). No extract.py change — sourceFile and the counts
   // already live in the bank and module ids are never re-keyed, so spaced-repetition
   // state is untouched. Serves BOTH quiz and flashcard mode (one shared picker).
-  const subLabel = (f) => fileLabel(f);
+  const subLabel = (f, mod) => (f === modulePage(mod) ? "Overview" : fileLabel(f));
   const subMap = new Map();                          // module -> [{ file, name, count }] (module page first)
   {
     const per = new Map();                            // module -> Map<file, count>
@@ -1852,7 +1852,7 @@ async function openTopics(section) {
       // module page's links), not alphabetically — matches the reader/Study order.
       const order = fileTree[mod] || [];
       const rank = (f) => { const i = order.indexOf(f); return i === -1 ? 9999 : i; };
-      subMap.set(mod, [...mm.entries()].map(([file, count]) => ({ file, count, name: subLabel(file) }))
+      subMap.set(mod, [...mm.entries()].map(([file, count]) => ({ file, count, name: subLabel(file, mod) }))
         .sort((a, b) => rank(a.file) - rank(b.file) || a.name.localeCompare(b.name)));
     }
   }
@@ -6875,7 +6875,9 @@ function buildModuleNav(modEl, navCtx, currentPath) {
     const subItems = mFiles.map((fn) => {
       const filePath = `${mKey}/${fn}`;
       const isFileCurrent = filePath === currentPath;
-      const label = fileLabel(fn);
+      // The module page is named for its folder, so fileLabel would repeat the folder
+      // row directly above it (where "Readme" used to sit). Same rule as the Study tree.
+      const label = fn === modulePage(mKey) ? "Overview" : fileLabel(fn);
       return `<li><a href="#" class="mod-file${isFileCurrent ? " active" : ""}${isModuleRead(filePath) ? " read" : ""}" data-path="${esc(filePath)}" title="${esc(label)}">${esc(label)}</a></li>`;
     }).join("");
 

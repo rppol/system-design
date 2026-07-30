@@ -383,7 +383,7 @@ resource "google_compute_subnetwork" "eu" { name = "eu"; region = "europe-west1"
 | Cloud Functions / Azure Functions | FaaS |
 | GCS / Blob Storage | Object storage |
 | Cloud IAM / Microsoft Entra ID + RBAC | Identity |
-| Cloud SQL / Azure SQL | Managed relational DB ([../../database/](../../database/)) |
+| Cloud SQL / Azure SQL | Managed relational DB ([../../database/](../../database/README.md)) |
 | BigQuery / Synapse | Data warehouse |
 | Cloud DNS / Azure DNS | DNS ([cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md)) |
 | Terraform | Cloud-agnostic IaC ([infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md)) |
@@ -496,4 +496,4 @@ The team kept the application portable by running it on AKS with the same Kubern
 
 ---
 
-**Cross-references:** [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) (the AWS baseline this maps from), [serverless_and_faas](../serverless_and_faas/serverless_and_faas.md) (Cloud Run/Functions cold starts), [cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) (global VPC, Private Service Connect, CDN), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (GKE/AKS control planes), [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (cloud-agnostic IaC), [secrets_management](../secrets_management/secrets_management.md) (Secret Manager/Key Vault), [../../database/](../../database/) (Cloud SQL/Azure SQL internals).
+**Cross-references:** [cloud_fundamentals_and_aws](../cloud_fundamentals_and_aws/cloud_fundamentals_and_aws.md) (the AWS baseline this maps from), [serverless_and_faas](../serverless_and_faas/serverless_and_faas.md) (Cloud Run/Functions cold starts), [cloud_networking_and_cdn](../cloud_networking_and_cdn/cloud_networking_and_cdn.md) (global VPC, Private Service Connect, CDN), [kubernetes_architecture](../kubernetes_architecture/kubernetes_architecture.md) (GKE/AKS control planes), [infrastructure_as_code_terraform](../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md) (cloud-agnostic IaC), [secrets_management](../secrets_management/secrets_management.md) (Secret Manager/Key Vault), [../../database/](../../database/README.md) (Cloud SQL/Azure SQL internals).
