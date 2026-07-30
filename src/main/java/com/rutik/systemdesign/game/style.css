@@ -3100,3 +3100,16 @@ body.interview-mode #app::before {
 }
 /* the phone WebView gets larger hit areas; presentation only, never a JS branch */
 html.is-apk .tx-chip, html.is-apk .tx-minirole, html.is-apk .tx-role { min-height: 30px; }
+
+/* [BANK] the single-module tail: chips, not rows. 2,987 tools appear in exactly one
+   module -- as rows they bury the tools you came for, and a singleton's expansion
+   would hold one entry, so the chip IS the link. */
+.tx-tail { margin: 14px 0 4px; }
+.tx-tail > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-xs); padding: 4px 0; }
+.tx-tail > summary:hover { color: var(--text); }
+.tx-chipcloud { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px 0 2px; }
+.tx-tailchip { font-size: 11px; padding: 3px 9px; }
+.tx-widen { margin-left: 8px; }
+/* the language split reads as a stronger boundary than the weight bands nested inside it */
+.tx-langband { color: var(--accent); margin-top: 18px; letter-spacing: .04em; }
+.tx-langband:first-child { margin-top: 2px; }

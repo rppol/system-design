@@ -4060,7 +4060,7 @@ function renderStudy() {
 //   * Tradeoffs    -- per module, the headline decision table digested to its first
 //                     few rows, deep-linked to §8. A digest, not a mirror.
 // Both lists share one search box and one section filter.
-const TECH_PAGE = 120;    // technology rows painted per page ("Show more" adds another)
+const TECH_PAGE = 60;     // technology rows painted per page (two-line rows since the bank) ("Show more" adds another)
 const TRADE_PAGE = 40;    // tradeoff cards painted per page
 
 const techTab = () => (localStorage.getItem("sd_tech_tab") === "trade" ? "trade" : "tech");
@@ -4098,11 +4098,27 @@ async function renderTech() {
     const secs = [...new Set(t.u.map((u) => secOf(u[0])))];
     return { n: t.n, u: t.u, secs, hay: (t.n + " " + t.u.map((u) => techName(mods[u[0]]) + " " + (u[1] || "")).join(" ")).toLowerCase() };
   });
+  const _secOrder = Object.keys(STUDY_ORDER);
+  const secOrderIdx = (sec) => (_secOrder.indexOf(sec) + 1 || 999);
+
+  // Tradeoff cards used to come out ALPHABETICAL -- not by choice, but because `modules`
+  // is path-sorted and `trade` is emitted in module-index order. Every other surface in
+  // this app orders modules by STUDY_ORDER (the learning-path sequence), so decisions now
+  // appear in the order you learn the material. book ids are 3 segments, so the lookup
+  // prefix-matches rather than assuming <section>/<module>.
+  const soIndex = (modId) => {
+    const sec = modId.split("/")[0], order = STUDY_ORDER[sec] || [];
+    let best = -1;
+    for (let i = 0; i < order.length; i++) {
+      if (modId === order[i] || modId.startsWith(order[i] + "/")) { best = i; break; }
+    }
+    return best < 0 ? 9999 : best;
+  };
   const tradeRows = idx.trade.map((t) => {
     const m = mods[t.i];
-    return { t, m, sec: m.m.split("/")[0],
+    return { t, m, sec: m.m.split("/")[0], so: soIndex(m.m),
       hay: (techName(m) + " " + t.h.join(" ") + " " + t.r.map((r) => r.join(" ")).join(" ")).toLowerCase() };
-  });
+  }).sort((a, b) => (secOrderIdx(a.sec) - secOrderIdx(b.sec)) || (a.so - b.so));
   // Sections present in the index, in the app's canonical section order.
   const secOrder = Object.keys(STUDY_ORDER);
   const secsPresent = [...new Set(mods.map((m) => m.m.split("/")[0]))]
@@ -4314,6 +4330,46 @@ async function renderTech() {
       </div>`).join("")}</div>`;
   }
 
+  // Telling "nothing exists" apart from "you over-filtered" is the whole job of an empty
+  // state here: with four facets it is easy to reach zero and impossible to guess which
+  // one did it. So count the drop per facet and name the culprit.
+  function emptyHTML(q) {
+    if (!bankOn) return `<p class="tx-empty">No tool matches &ldquo;${esc(findEl.value.trim())}&rdquo;.</p>`;
+    let byLang = 0, byKind = 0, byFacet = 0, base = 0;
+    for (const row of techRows) {
+      if (q && !row.hay.includes(q)) continue;
+      const b = bankOf(row.n); if (!b) continue;
+      base++;
+      if (!langOK(b)) { byLang++; continue; }
+      if (!q && !kindOK(b)) { byKind++; continue; }
+      if (facetWeight(b) === null) byFacet++;
+    }
+    if (!base) {
+      return `<p class="tx-empty">Nothing in the index matches &ldquo;${esc(findEl.value.trim())}&rdquo;.
+        Tools are stored exactly as their module writes them, so try a shorter fragment.</p>`;
+    }
+    const bits = [];
+    if (byFacet) bits.push(`${byFacet} by the problem area`);
+    if (byLang) bits.push(`${byLang} by language`);
+    if (byKind) bits.push(`${byKind} by kind`);
+    return `<p class="tx-empty">No match with these filters &mdash; ${bits.join(", ")} hidden.
+      <button class="ghost tx-widen" id="techWiden">Clear filters</button></p>`;
+  }
+
+  // 2,987 tools appear in exactly ONE module. As rows they bury the tools people came
+  // for; as chips they stay findable and cost one line each. The chip IS the link -- a
+  // singleton's expansion would hold exactly one entry, so the disclosure is pure overhead.
+  function tailHTML(tail) {
+    if (!tail.length) return "";
+    return `<details class="tx-tail"><summary>+ ${tail.length} mentioned once</summary>
+      <div class="tx-chipcloud">${tail.map(({ r, b, uses }) => {
+        const m = mods[uses[0][0]];
+        return `<button class="tx-chip tx-tailchip" data-p="${esc(techPath(m))}"
+          data-a="${esc(m.a[0] >= 0 ? idx.anchors[m.a[0]] : "")}"
+          title="${esc(techName(m))}${b && b.s ? " \u2014 " + b.s : ""}">${esc(r.n)}</button>`;
+      }).join("")}</div></details>`;
+  }
+
   function paint() {
     const q = findEl.value.trim().toLowerCase();
     if (tab === "tech") {
@@ -4347,13 +4403,30 @@ async function renderTech() {
       // comparator chain needed, and the unfiltered/unsearched case needs no sort at all.
       if (q) scoped.sort((a, b) => matchRank(a.r.n, q) - matchRank(b.r.n, q) || b.uses.length - a.uses.length);
       else if (secPick !== "all") scoped.sort((a, b) => b.uses.length - a.uses.length);
+      // With a language picked, 67% of the index is polyglot and matches it too, so the
+      // filter LOOKS like it did nothing. Sorting language-specific first makes the answer
+      // legible -- these N are actually Java's, the rest are infrastructure any language
+      // can call -- with the weight bands nesting inside. MUST run before the slice.
+      if (bankOn && F.l) {
+        scoped.sort((a, z) => (a.b.l.includes(F.l) ? 0 : 1) - (z.b.l.includes(F.l) ? 0 : 1)
+                           || ((a.w || 1) - (z.w || 1)) || z.uses.length - a.uses.length);
+      }
+      // Split the single-module tail out of the main list. Only when a facet is active:
+      // on the unfiltered landing there is no "main list" for it to be crowding out.
+      let tail = [];
+      if (bankOn && (F.t.length || F.r.length || q)) {
+        const core = [], rest = [];
+        for (const x of scoped) ((x.uses.length > 1 ? core : rest)).push(x);
+        // ...unless the core is thin, in which case hiding the tail is the bigger sin.
+        if (core.length >= 8) { tail = rest; scoped = core; }
+      }
       const slice = scoped.slice(0, shown.tech);
       countEl.textContent = scoped.length
         ? (q ? `${scoped.length} match${scoped.length === 1 ? "" : "es"}`
              : `${slice.length} of ${scoped.length} tool${scoped.length === 1 ? "" : "s"}`)
         : "no matches";
       const BAND = { 1: "Built for this", 2: "Also does this", 3: "Loosely related" };
-      let lastBand = null;
+      let lastBand = null, lastLangBand = null;
       listEl.innerHTML = scoped.length ? slice.map(({ r, uses, b, w }) => {
         // "Redis 5/29" vs "LangSmith 20/20" is the whole story the section filter can
         // tell: one is a general tool that turns up in LLM work, the other is an LLM tool.
@@ -4362,7 +4435,14 @@ async function renderTech() {
         // multi-membership from noise into information: under "db" Redis appears under
         // "Also does this", which reads as a fact about Redis rather than a bad result.
         let head = "";
-        if (w && w !== lastBand) { lastBand = w; head = `<h3 class="tx-band">${BAND[w]}</h3>`; }
+        if (F.l) {
+          const own = b && b.l.includes(F.l);
+          if (own !== lastLangBand) {
+            lastLangBand = own; lastBand = null;
+            head += `<h3 class="tx-band tx-langband">${own ? esc(F.l) + "-specific" : "Works with any language"}</h3>`;
+          }
+        }
+        if (w && w !== lastBand) { lastBand = w; head += `<h3 class="tx-band">${BAND[w]}</h3>`; }
         // Every role the tool carries, not just the matched ones -- the out-of-facet
         // ones are how you discover that your cache is also a message broker.
         const badges = b ? b.r.map(([rid, rw]) => {
@@ -4385,8 +4465,8 @@ async function renderTech() {
           <ul class="tx-uses">${uses.map(useRow).join("")}</ul>
         </details>`;
       }).join("") + (scoped.length > slice.length
-        ? `<button class="ghost tx-more" data-more="tech">Show ${Math.min(TECH_PAGE, scoped.length - slice.length)} more</button>` : "")
-        : `<p class="tx-empty">No tool matches &ldquo;${esc(findEl.value.trim())}&rdquo;. Try a shorter name &mdash; the index stores each tool exactly as its module writes it.</p>`;
+        ? `<button class="ghost tx-more" data-more="tech">Show ${Math.min(TECH_PAGE, scoped.length - slice.length)} more</button>` : "") + tailHTML(tail)
+        : emptyHTML(q);
     } else {
       let rows = tradeRows;
       if (secPick !== "all") rows = rows.filter((r) => r.sec === secPick);
@@ -4468,6 +4548,10 @@ async function renderTech() {
   listEl.addEventListener("click", (e) => {
     const more = e.target.closest(".tx-more");
     if (more) { shown[more.dataset.more] += more.dataset.more === "tech" ? TECH_PAGE : TRADE_PAGE; paint(); return; }
+    if (e.target.closest("#techWiden")) {
+      F = { t: [], r: [], l: "", k: defaultKind }; findEl.value = "";
+      writeFacets(); repaint(); return;
+    }
     const roleBadge = e.target.closest(".tx-role");
     if (roleBadge) { onFacetClick(e); return; }   // a badge in a row is a filter control
     const go = e.target.closest("[data-p]");
