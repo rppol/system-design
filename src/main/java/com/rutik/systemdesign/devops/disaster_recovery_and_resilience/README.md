@@ -12,7 +12,7 @@ DR is governed by two numbers. **RTO (Recovery Time Objective)** is the maximum 
 
 AWS codifies four DR strategies that trade cost against RTO/RPO: **Backup & Restore** (cheapest, RTO hours, RPO hours), **Pilot Light** (RTO 10–30 min, RPO minutes), **Warm Standby** (RTO minutes, RPO seconds), and **Multi-Site Active/Active** (RTO seconds, RPO near zero, highest cost). The engineering job is to map each workload to the cheapest tier that still meets its business-mandated RTO/RPO — not to over-build active/active for a reporting service, nor under-build backup-restore for a payments ledger.
 
-This module cross-references [`../../../database/backup_recovery_and_disaster_recovery`](../../../database/backup_recovery_and_disaster_recovery) for database-level replication and PITR detail, and [`../cloud_networking_and_cdn/README.md`](../cloud_networking_and_cdn/README.md) for the DNS and CDN failover plumbing. Chaos engineering — deliberately injecting failure to validate resilience — is covered generically here and ties into the backend chaos-engineering practices.
+This module cross-references [`../../../database/backup_recovery_and_disaster_recovery`](../../database/backup_recovery_and_disaster_recovery) for database-level replication and PITR detail, and [`../cloud_networking_and_cdn/README.md`](../cloud_networking_and_cdn/README.md) for the DNS and CDN failover plumbing. Chaos engineering — deliberately injecting failure to validate resilience — is covered generically here and ties into the backend chaos-engineering practices.
 
 ---
 
