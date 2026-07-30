@@ -50,8 +50,8 @@ one curated tier: **Senior** (22 modules). **This section has no Principal tier 
 none** — no module declares one, `check_wiring()` skips the tier when the markers declare
 zero modules for it, and adding a Principal heading with no members is a false alarm, not
 a gap to close. Membership is declared ONCE per module, in a `<!-- study-paths -->` block
-in that module's own README naming the files each tier takes; listing a tier joins it,
-omitting the tier opts out, and `README.md` must always be listed. Order is never
+in that module's own page (`<module>.md`) naming the files each tier takes; listing a tier joins it,
+omitting the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never
 declared — it comes from `STUDY_ORDER.devops` in `game/app.js`, so a tier is an ordered
 subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks
 the markers and emits the gitignored `questions/paths.json`, which the game fetches at
@@ -68,7 +68,7 @@ Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 `case_studies/` — all use the 11-section principal template.
 Reference: `../llm/case_studies/design_gpu_inference_platform.md`
-Learning-path index: `case_studies/README.md` (mandatory; update with every new case study).
+Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
 design_ci_cd_platform, design_kubernetes_platform, design_observability_platform, design_gitops_delivery_pipeline, design_secrets_management_platform, design_multi_region_dr_architecture, design_autoscaling_platform, design_log_aggregation_pipeline, design_internal_developer_platform, design_incident_response_system, design_container_registry, design_zero_downtime_infra_migration, design_ml_platform_infrastructure
 
@@ -115,16 +115,16 @@ See `README.md` §8 for the authoritative per-file `pending`/`done` status table
 On finishing a module/chunk:
 1. Flip status to `done` in `README.md` §8
 2. Advance NEXT UP pointer
-3. Update `case_studies/README.md` + root `README.md` + this CLAUDE.md if applicable
+3. Update `case_studies/case_studies.md` + root `README.md` + this CLAUDE.md if applicable
 
 ## Adding a New DevOps Module
 
-1. Create `<module_name>/README.md` — 14-section template; 15 Q&As minimum (root CLAUDE.md hard floor; 18+ for deep modules listed above)
+1. Create `<module_name>/<module_name>.md` — 14-section template; 15 Q&As minimum (root CLAUDE.md hard floor; 18+ for deep modules listed above)
 2. Follow DevOps-specific content rules above
 3. Update `README.md` module table AND flip the file's status in the §8 build manifest
 4. Add the module dir to `STUDY_ORDER.devops` in `game/app.js` at its phase position — a
    module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
-5. Write a `<!-- study-paths -->` block in the new module's README with a `senior:` line if
+5. Write a `<!-- study-paths -->` block at the top of the new module's page (`<module_name>.md`) with a `senior:` line listing `<module_name>.md` itself plus any sub-files if
    it belongs in that tier (omit the block entirely for Full-path-only; do not invent a
    `principal:` line — this section has no Principal tier), then run
    `python3 game/extract.py --write-paths` to regenerate `README.md`'s Senior table

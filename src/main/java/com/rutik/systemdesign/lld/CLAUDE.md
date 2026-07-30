@@ -128,7 +128,7 @@ pasted into a file and compiled. Two consequences follow, and **neither is a def
 
 - **Code that contradicts its own prose or diagram.** If the surrounding text or class diagram
   names `BrokenStack`/`FixedStack`, the fence must use those identifiers. (This was the one
-  real defect among the 14 — `design_principles/README.md` declared `Stack` twice while its
+  real defect among the 14 — `design_principles/design_principles.md` declared `Stack` twice while its
   Mermaid diagram and prose called them `BrokenStack` and `FixedStack`.)
 - Code that cannot work **as described** — a method that does not exist, a demo the compiler
   optimizes away, an override that is unreachable, an inverted mechanism.
@@ -147,13 +147,13 @@ plus two curated tiers: **Senior** (8 modules) and **Principal** (8). They are d
 cuts, not nested depths — senior is the craft (write the pattern, spot the misuse),
 principal is the judgment (which decomposition at what cost, what you tell a team *not*
 to do), so equal module counts here hide genuinely different *file* lists. Membership is
-declared ONCE per module, in a `<!-- study-paths -->` block in that module's own README
-naming the files each tier takes — and in `lld` that file list is the whole point: a
-category module holds dozens of nested pattern READMEs (`singleton/README.md`,
-`factory_method/README.md`, …), and before the markers existed a tiered category dragged
+declared ONCE per module, in a `<!-- study-paths -->` block in that module's own page
+(`<module>.md`) naming the files each tier takes — and in `lld` that file list is the whole point: a
+category module holds dozens of nested pattern pages, each named for its own folder
+(`singleton/singleton.md`, `factory_method/factory_method.md`, …), and before the markers existed a tiered category dragged
 in **every** one of them, so 7 modules shipped 62 sub-files, 90% of the section, in a path
-advertised as a cut. Listing a tier joins it, omitting the tier opts out, and `README.md`
-must always be listed. Order is never declared — it comes from `STUDY_ORDER.lld` in
+advertised as a cut. Listing a tier joins it, omitting the tier opts out, and the module page
+(`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.lld` in
 `game/app.js`, so a tier is an ordered subset by construction. **There is no path array in
 `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
 `questions/paths.json`, which the game fetches at boot. The tier tables in `README.md` sit
@@ -163,21 +163,23 @@ between `<!-- study-path-table <tier> -->` markers and are **generated** — reg
 below). The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose;
 no path impact). The Study Plan pairs each week with a practice problem from
 `system_design_problems/` rather than a `case_studies/` file — LLD's `case_studies/`
-holds only a learning-path index (`case_studies/README.md`: pattern-dependency map +
+holds only a learning-path index (`case_studies/case_studies.md`: pattern-dependency map +
 interview shortcuts) over the same 12 problems, not separate case-study write-ups.
 
 ## Adding a New LLD Pattern
 
-1. Create `<category>/<pattern_name>/README.md` — 14-section template
+1. Create `<category>/<pattern_name>/<pattern_name>.md` — 14-section template (the page is
+   named for its folder; keep the folder so the `RealWorldExample.java` / `Template.java`
+   companions stay with it)
 2. Include: UML class diagram (Mermaid `classDiagram` preferred per the Content Rules above; ASCII only where alignment carries the meaning), motivation, participants, Java implementation, real-world example, tradeoffs, Q&As
 3. Show the problem it solves (before-code) and the pattern applied (after-code)
-4. Update the relevant **category** `README.md` (e.g., `behavioral/README.md`) — add a row to the pattern catalogue table
+4. Update the relevant **category** page (e.g., `behavioral/behavioral.md`) — add a row to the pattern catalogue table
 5. Update the **master** `README.md` (the LLD master index) — add a row to the appropriate section table
 6. Add to the `pattern_comparisons/` file if it overlaps with other patterns
-7. **No `STUDY_ORDER` entry** — a nested `<category>/<pattern>/README.md` folds into its
+7. **No `STUDY_ORDER` entry** — a nested `<category>/<pattern>/<pattern>.md` folds into its
    parent category module (ids stay 2 segments; a 3-segment key is fatal under `--strict`).
-   If a tier should carry the pattern, add `<pattern_name>/README.md` to that tier's line
-   in the CATEGORY README's `<!-- study-paths -->` block; naming no tier leaves it
+   If a tier should carry the pattern, add `<pattern_name>/<pattern_name>.md` to that tier's line
+   in the CATEGORY page's (`<category>/<category>.md`) `<!-- study-paths -->` block; naming no tier leaves it
    Full-path only, which is the right call for most patterns. Then run
    `python3 game/extract.py --write-paths` to regenerate the master README's tier tables.
 

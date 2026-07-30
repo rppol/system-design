@@ -45,7 +45,7 @@ say so on first mention.
 
 ## Module Template
 
-Every module README follows the standard 14-section template (see root `CLAUDE.md`):
+Every module page (`<module>/<module>.md`) follows the standard 14-section template (see root `CLAUDE.md`):
 
 ```
 ## 1. Concept Overview
@@ -77,7 +77,7 @@ module:
 **No `case_studies/` directory yet.** Unlike concept sections, this section launches
 without a `case_studies/` sub-directory; §14 of each module carries a self-contained
 mini case study instead. Add a `case_studies/` directory (11-section principal
-template, `case_studies/README.md` learning-path index) only once a module family
+template, `case_studies/case_studies.md` learning-path index) only once a module family
 needs a case study too large for §14 — follow the root `CLAUDE.md` case-study rules
 when that happens.
 
@@ -117,7 +117,7 @@ from the derived paths (`book` is the other such section), so this is a delibera
 omission, not a gap. **Threshold to add one:** once this section reaches **4 or more
 modules**, decide the tiers — Senior (the craft: operate it, debug it) and Principal (the
 judgment: adopt it or not, at what cost) are different cuts, not nested depths — then
-write a `<!-- study-paths -->` block in each participating module's README naming the
+write a `<!-- study-paths -->` block at the top of each participating module's page (`<module>.md`) naming the
 files it contributes, paste an empty `<!-- study-path-table senior -->` /
 `<!-- /study-path-table -->` marker pair into `README.md` where the table should sit
 (placement is editorial; `--write-paths` only fills blocks that already exist), and run
@@ -138,7 +138,7 @@ when adding a sub-file, only when adding a new top-level module directory.
 
 ## How to Add a Technology
 
-1. Create `<vendor>_<product>/README.md` — 14 canonical sections, 16 Q&As, version
+1. Create `<vendor>_<product>/<vendor>_<product>.md` — 14 canonical sections, 16 Q&As, version
    studied stated up front.
 2. **Append the slug to `STUDY_ORDER.technologies` in `game/app.js` in the same
    commit.** `extract.py --strict` runs in Pages CI and **fails the deploy** if a

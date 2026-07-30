@@ -63,8 +63,8 @@ one curated tier: **Senior** (16 modules). **This section has no Principal tier 
 none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero
 modules, and adding a Principal heading with no members is a false alarm, not a gap.
 Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that module's
-own README naming the files each tier takes; listing a tier joins it, omitting the tier
-opts out, and `README.md` must always be listed. Order is never declared — it comes from
+own page (`<module>.md`) naming the files each tier takes; listing a tier joins it, omitting the tier
+opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from
 `STUDY_ORDER.cuda` in `game/app.js`, so a tier is an ordered subset by construction.
 **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits
 the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in
@@ -84,7 +84,7 @@ learning-path position, or it sorts to the end of the Study browser.
 
 `case_studies/` — all use the 11-section principal template.
 Reference: `../llm/case_studies/design_gpu_inference_platform.md`
-Learning-path index: `case_studies/README.md` (mandatory; update with every new case study).
+Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
 optimize_matrix_multiplication_kernel, implement_high_performance_reduction, build_a_flash_attention_kernel, accelerate_2d_convolution_and_stencil, port_a_cpu_pipeline_to_gpu, optimize_llm_inference_kernels
 
@@ -144,10 +144,10 @@ When a module would restate one of the above, link it and add only the kernel-le
 
 ## Adding a New CUDA Module
 
-1. Create `<module_name>/README.md` — 14-section template; 15 Q&As minimum (18 for the deep modules listed above), ordered by interview frequency (gotchas first). **Prefix every §12 question with `Q: ` inside the bold** (`**Q: <question>?**`) — repo-wide convention (root `CLAUDE.md` → Interview Q&A Rules); `extract.py` strips the label for the MCQ bank.
+1. Create `<module_name>/<module_name>.md` — 14-section template; 15 Q&As minimum (18 for the deep modules listed above), ordered by interview frequency (gotchas first). **Prefix every §12 question with `Q: ` inside the bold** (`**Q: <question>?**`) — repo-wide convention (root `CLAUDE.md` → Interview Q&A Rules); `extract.py` strips the label for the MCQ bank.
 2. Follow the CUDA-specific content rules above (dual-language code, concrete numbers, BROKEN→FIX, diagram policy).
 3. Update `README.md` §3 module table AND flip the file's status in the §8 build manifest.
-4. Add the module dir to `STUDY_ORDER.cuda` in `game/app.js` at its learning-path position. If it belongs in the Senior cut, write a `<!-- study-paths -->` block in its README with a `senior:` line (no `principal:` line — this section has no Principal tier), then run `python3 game/extract.py --write-paths` to regenerate `README.md`'s Senior table. Never hand-edit that table; a stale block fails `--strict`.
+4. Add the module dir to `STUDY_ORDER.cuda` in `game/app.js` at its learning-path position. If it belongs in the Senior cut, write a `<!-- study-paths -->` block at the top of its page (`<module_name>.md`) with a `senior:` line that lists `<module_name>.md` itself plus any sub-files (the module page is never optional; no `principal:` line — this section has no Principal tier), then run `python3 game/extract.py --write-paths` to regenerate `README.md`'s Senior table. Never hand-edit that table; a stale block fails `--strict`.
 5. Update root `README.md` CUDA phase table and root `CLAUDE.md` CUDA module count.
 6. Re-run `python3 game/extract.py`; confirm `questions/cuda.json` grows.
 
@@ -155,7 +155,7 @@ When a module would restate one of the above, link it and add only the kernel-le
 
 1. Write `case_studies/<verb>_<name>.md` — 11-section principal template (Intuition + §1–11); 900–1100 lines; ≥4 cross_cutting refs; real kernel code in §4 with a broken→fix; 10+ Q&As in §11.
 2. Update the section master `README.md` §8 Case Study file status.
-3. **Update `case_studies/README.md`** — add to the correct phase group, update the Dependency Map, add an Interview Prep Shortcut row (same commit).
+3. **Update `case_studies/case_studies.md`** — add to the correct phase group, update the Dependency Map, add an Interview Prep Shortcut row (same commit).
 4. Case study Q&As are NOT extracted into the game (case_studies/ is excluded) — but the file is reachable in the reader via relative links.
 
 ---

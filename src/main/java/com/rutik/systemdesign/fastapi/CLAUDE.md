@@ -51,7 +51,7 @@ fundamentals in [`../python/`](../python/README.md) — particularly `asyncio_an
 
 ## Module Template
 
-Every module README follows the standard 14-section template (see root `CLAUDE.md`):
+Every module page (`<module>/<module>.md`) follows the standard 14-section template (see root `CLAUDE.md`):
 
 ```
 ## 1. Concept Overview
@@ -70,7 +70,7 @@ Every module README follows the standard 14-section template (see root `CLAUDE.m
 ## 14. Case Study
 ```
 
-**15-Q&A floor everywhere** — every module README must carry at least 15 Q&As in
+**15-Q&A floor everywhere** — every module page must carry at least 15 Q&As in
 §12, ordered gotchas/traps first, then internals, then edge cases (see root
 `CLAUDE.md` Interview Q&A Rules). Deep modules below need 15-18.
 
@@ -84,16 +84,16 @@ cuts, not nested depths — senior is the craft (build the endpoint, fix the blo
 on the event loop), principal is the judgment (which deployment shape at what cost, what
 you tell a team *not* to do), so principal is the smaller list and much of it is material
 senior never sees. Do not enumerate the members here: membership is declared ONCE per
-module, in a `<!-- study-paths -->` block in that module's own README naming the files
-each tier takes; listing a tier joins it, omitting the tier opts out, and `README.md`
-must always be listed. Order is never declared — it comes from `STUDY_ORDER.fastapi` in
+module, in a `<!-- study-paths -->` block in that module's own page (`<module>.md`) naming the files
+each tier takes; listing a tier joins it, omitting the tier opts out, and the module page
+(`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.fastapi` in
 `game/app.js`, so a tier is an ordered subset by construction. **There is no path array
 in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
 `questions/paths.json`, which the game fetches at boot. The tier tables in `README.md`
 sit between `<!-- study-path-table <tier> -->` markers and are **generated** — regenerate
 with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails
 `extract.py --strict` and the Pages deploy. Case studies are tiered the same way from a
-block in `case_studies/README.md` (5 senior / 2 principal), driving the Level filter on
+block in `case_studies/case_studies.md` (5 senior / 2 principal), driving the Level filter on
 the game's Case Studies tab. The README also carries a Knowledge-Question Map and a
 3-week Study Plan (prose; no path impact).
 
@@ -129,7 +129,7 @@ Format: `[FastAPI 0.110+]` inline or `Added in FastAPI 0.110`.
 
 ## Adding a New FastAPI Module
 
-1. Create `<module_name>/README.md` — 14-section clean template
+1. Create `<module_name>/<module_name>.md` — 14-section clean template
 2. All code in Python 3.13/3.14 + FastAPI with type hints (3.10+ syntax: `X | None` not `Optional[X]`)
 3. Add version tags for features introduced in specific FastAPI/Pydantic/SQLAlchemy versions
 4. Meet the Q&A minimum for the module's depth level (15-Q&A floor; 15-18 for the four deep modules above)
@@ -137,8 +137,9 @@ Format: `[FastAPI 0.110+]` inline or `Added in FastAPI 0.110`.
 6. Update `README.md` §2 Module Table and §3 Phase Learning Path diagram
 7. Add the module dir to `STUDY_ORDER.fastapi` in `game/app.js` at its phase position — a
    module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
-8. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it
-   belongs to (or none, for Full-path-only), then run `python3 game/extract.py --write-paths`
+8. Write a `<!-- study-paths -->` block at the top of the new module's page (`<module_name>.md`) naming the tiers it
+   belongs to (or none, for Full-path-only). Every tier line must list `<module_name>.md`
+   itself — the module page is never optional and omitting it is fatal under `--strict`, then run `python3 game/extract.py --write-paths`
    to regenerate `README.md`'s tier tables (never hand-edit them)
 9. Update root `README.md` Phase table under the FastAPI section
 10. Update root `CLAUDE.md` FastAPI module count/table if present

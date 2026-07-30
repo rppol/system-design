@@ -57,17 +57,17 @@ cuts, not nested depths — senior is the craft (write it, profile it, debug the
 deadlock), principal is the judgment (which runtime at what cost, migration, what you
 tell a team *not* to do), so principal is usually the smaller list and much of it is
 material senior never sees. Membership is declared ONCE per module, in a
-`<!-- study-paths -->` block in that module's own README naming the files each tier takes
+`<!-- study-paths -->` block in that module's own page (`<module>.md`) naming the files each tier takes
 — which is also the only way to curate **deep-dive sub-files**, since they have no
 `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out,
-and `README.md` must always be listed. Order is never declared — it comes from
+and the module page (`<module>.md`) must always be listed. Order is never declared — it comes from
 `STUDY_ORDER.java` in `game/app.js`, so a tier is an ordered subset by construction.
 **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits
 the gitignored `questions/paths.json`, which the game fetches at boot. The tier tables in
 `README.md` sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
 regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
 fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
-from a block in `case_studies/README.md` (5 senior / 3 principal), driving the Level
+from a block in `case_studies/case_studies.md` (5 senior / 3 principal), driving the Level
 filter on the game's Case Studies tab. The README also carries a Knowledge-Question Map
 and a 5-week Study Plan (prose; no path impact).
 
@@ -103,7 +103,7 @@ gap below — the table has no pending items left; retained as a historical reco
 | `design_circuit_breaker_java.md` | State machine, half-open probing, metrics integration |
 | `design_snowflake_id_generator_java.md` | Twitter Snowflake, clock skew handling, worker ID assignment |
 
-Learning-path index: `case_studies/README.md` (mandatory; update with every new case study).
+Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
 ---
 
@@ -158,7 +158,7 @@ When covering a feature, always include the version it was introduced and LTS st
 
 ## Adding a New Java Module
 
-1. Create `<module_name>/README.md` — 14-section template
+1. Create `<module_name>/<module_name>.md` — 14-section template
 2. Minimum 15 Q&As; ordered by interview frequency (gotchas first). Author a
    `**Short:**` line under each question (15–220 chars, no fence) — that line IS the
    MCQ option. Without one `extract.py` derives the option from the answer's first
@@ -176,8 +176,9 @@ When covering a feature, always include the version it was introduced and LTS st
    module's topic and its Q&As merge into that module's bank — but if a tier should
    carry it, add its filename to that tier's line in the parent's `<!-- study-paths -->`
    block, which is the only place a sub-file is addressable.)
-9. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it
-   belongs to (or none, for Full-path-only), then run
+9. Write a `<!-- study-paths -->` block at the top of the new module's page (`<module_name>.md`) naming the tiers it
+   belongs to (or none, for Full-path-only). Every tier line must list `<module_name>.md`
+   itself — the module page is never optional and omitting it is fatal under `--strict`, then run
    `python3 game/extract.py --write-paths` to regenerate `README.md`'s tier tables.
 10. **Re-run `python3 game/extract.py`** to regenerate the question bank.
 

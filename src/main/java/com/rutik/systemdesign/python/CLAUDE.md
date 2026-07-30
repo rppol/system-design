@@ -51,9 +51,9 @@ two curated tiers: **Senior** (16 modules) and **Principal** (7). They are diffe
 cuts, not nested depths — senior is the craft, principal is the judgment (which runtime
 model at what cost, what you tell a team *not* to do), so principal is the far smaller
 list here and much of it is material senior never sees. Membership is declared ONCE per
-module, in a `<!-- study-paths -->` block in that module's own README naming the files
-each tier takes; listing a tier joins it, omitting the tier opts out, and `README.md`
-must always be listed. Order is never declared — it comes from `STUDY_ORDER.python` in
+module, in a `<!-- study-paths -->` block in that module's own page (`<module>.md`) naming the files
+each tier takes; listing a tier joins it, omitting the tier opts out, and the module page
+(`<module>.md`) must always be listed. Order is never declared — it comes from `STUDY_ORDER.python` in
 `game/app.js`, so a tier is an ordered subset by construction. **There is no path array
 in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
 `questions/paths.json`, which the game fetches at boot. The tier tables in `README.md`
@@ -94,15 +94,16 @@ Format: `[3.11]` inline or `Added in Python 3.11`.
 
 ## Adding a New Python Module
 
-1. Create `<module_name>/README.md` — 14-section clean template
+1. Create `<module_name>/<module_name>.md` — 14-section clean template
 2. All code in Python 3.13/3.14 with type hints (3.10+ syntax: `X | None` not `Optional[X]`)
 3. Add version tags for features introduced in specific Python versions
 4. Meet the Q&A minimum for the module's depth level
 5. Flip the module's Status from `pending` → `done` in `README.md` §7 tracker
 6. Add the module dir to `STUDY_ORDER.python` in `game/app.js` at its phase position — a
    module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
-7. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it
-   belongs to (or none, for Full-path-only), then run `python3 game/extract.py --write-paths`
+7. Write a `<!-- study-paths -->` block at the top of the new module's page (`<module_name>.md`) naming the tiers it
+   belongs to (or none, for Full-path-only). Every tier line must list `<module_name>.md`
+   itself — the module page is never optional and omitting it is fatal under `--strict`, then run `python3 game/extract.py --write-paths`
    to regenerate `README.md`'s tier tables
 8. Update root `README.md` Phase table under the Python section
 9. Update root `CLAUDE.md` Python module table

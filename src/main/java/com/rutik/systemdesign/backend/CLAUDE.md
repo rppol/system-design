@@ -104,15 +104,15 @@ different cuts, not nested depths — senior is the craft (build it, debug it at
 principal is the judgment (which approach at what cost, what you tell a team *not* to
 do), so principal is usually the smaller list and much of it is material senior never
 sees. Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that
-module's own README naming the files each tier takes; listing a tier joins it, omitting
-the tier opts out, and `README.md` must always be listed. Order is never declared — it
+module's own page (`<module>.md`) naming the files each tier takes; listing a tier joins it, omitting
+the tier opts out, and the module page (`<module>.md`) must always be listed. Order is never declared — it
 comes from `STUDY_ORDER.backend` in `game/app.js`, so a tier is an ordered subset by
 construction. **There is no path array in `app.js` to edit**: `extract.py` walks the
 markers and emits the gitignored `questions/paths.json`, which the game fetches at boot.
 The tier tables in `README.md` sit between `<!-- study-path-table <tier> -->` markers and
 are **generated** — regenerate with `python3 game/extract.py --write-paths`; a
 hand-edited or stale block fails `extract.py --strict` and the Pages deploy. Case studies
-are tiered the same way from a block in `case_studies/README.md` (3 senior / 3
+are tiered the same way from a block in `case_studies/case_studies.md` (3 senior / 3
 principal), driving the Level filter on the game's Case Studies tab. The README also
 carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact).
 
@@ -120,7 +120,7 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 
 ## Case Studies — 5 Total
 
-`case_studies/` directory. Learning-path index: `case_studies/README.md` (mandatory; update with every new case study).
+`case_studies/` directory. Learning-path index: `case_studies/case_studies.md` (mandatory; update with every new case study).
 
 | Case Study | Key Concepts |
 |------------|-------------|
@@ -168,16 +168,17 @@ carries a Knowledge-Question Map and a 5-week Study Plan (prose; no path impact)
 
 ## Adding a New Backend Module
 
-1. Create `<module_name>/README.md` — 14-section template
+1. Create `<module_name>/<module_name>.md` — 14-section template
 2. Code in Java 25 or relevant tech (YAML, Bash, etc.) — no pseudocode
 3. Concrete numbers everywhere; at least 1 BROKEN→FIX block in §10 and §14
 4. Update `README.md` module table
 5. Add the module dir to `STUDY_ORDER.backend` in `game/app.js` at its phase position — a
    module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
-6. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it
-   belongs to (or none, for Full-path-only), then run `python3 game/extract.py --write-paths`
+6. Write a `<!-- study-paths -->` block at the top of the new module's page (`<module_name>.md`) naming the tiers it
+   belongs to (or none, for Full-path-only). Every tier line must list `<module_name>.md`
+   itself — the module page is never optional and omitting it is fatal under `--strict`, then run `python3 game/extract.py --write-paths`
    to regenerate the section README's tier tables
-7. Update `case_studies/README.md` cross-reference map if the module is a dependency for a case study
+7. Update `case_studies/case_studies.md` cross-reference map if the module is a dependency for a case study
 8. Update root `README.md` Backend phase table
 
 ---

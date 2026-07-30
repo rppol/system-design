@@ -47,6 +47,30 @@ src/main/java/com/rutik/systemdesign/
 └── game/             ← Browser learning game (app, not study content) + README.md
 ```
 
+### File-naming rule (owner-set 2026-07-30, commit 0af2022 — 516 files renamed)
+
+**Every content page is named for the folder that contains it.** There is no `README.md`
+anywhere below a section root.
+
+| File | How many | What it is |
+|------|----------|-----------|
+| `<section>/README.md` | exactly 16, one per section | The section INDEX — module table, learning paths, study plan, build manifest. Orchestration only; never a module page, never shown as content in the game UI. |
+| `<section>/CLAUDE.md` | one per section | Agent rules for that section. Not study content; not parsed by `extract.py`. |
+| `<section>/<module>/<module>.md` | every module | The MODULE PAGE. Carries the `<!-- study-paths -->` block. |
+| `<section>/<module>/<subfile>.md` | optional | Deep-dive sub-file, free-named, groups under its parent module. |
+| `<cat>/<pattern>/<pattern>.md` | nested pattern | Same rule one level deeper (`lld/behavioral/observer/observer.md`). |
+| `<section>/case_studies/case_studies.md` | one per section with case studies | The case-study INDEX (5-section learning path + tier markers). |
+| `<section>/case_studies/<name>/<name>.md` | directory-shaped case study | Flat case studies stay `<name>.md`. |
+| `book/<book>/<NN_chapter>/<NN_chapter>.md` | book chapter | Same rule; the per-book index is `book/<book>/<book>.md` and only `book/README.md` is a README. |
+
+So: **one `README.md` per section (the index), one `CLAUDE.md` per section (agent rules),
+and every content page named for its folder.** `extract.py` resolves a module page with
+`_module_page(module)` = `basename(module) + ".md"` — it never looks for a README below a
+section root, and a module page under any other name is invisible to the bank and fails
+`--strict`. When linking a module from prose, link the PAGE
+(`../advanced_rag/advanced_rag.md`), not the directory — a bare directory link used to work
+only because GitHub falls back to a folder's README, and there is none any more.
+
 ---
 
 ## Deferred / To Be Planned — parked sections (owner-set)
@@ -100,7 +124,7 @@ rebuild it from here and from the `audit(...)` commit messages, which each name 
 
 ## The 14-Section Module Template
 
-Every module README must follow this exact structure:
+Every module page (`<module>/<module>.md`) must follow this exact structure:
 
 ```
 ## 1. Concept Overview
@@ -143,9 +167,9 @@ Every module README must follow this exact structure:
 
 ---
 
-## Case Study Learning Path (case_studies/README.md)
+## Case Study Learning Path (case_studies/case_studies.md)
 
-Every `case_studies/` directory MUST contain a `README.md` with these 5 sections:
+Every `case_studies/` directory MUST contain a `case_studies.md` index with these 5 sections:
 
 1. **Quick Start** — 3 files to read first, with one-sentence justification each
 2. **Full Learning Path** — all case studies grouped by engineering concern; file link + concern phrase + 1–2 sentence summary
@@ -153,7 +177,7 @@ Every `case_studies/` directory MUST contain a `README.md` with these 5 sections
 4. **Dependency Map** — ASCII tree showing which case studies build on others
 5. **Interview Prep Shortcuts** — table mapping "design X" questions to best case study file
 
-**Maintenance rule:** Update this README every time a new case study is added — same commit, no exceptions.
+**Maintenance rule:** Update this index every time a new case study is added — same commit, no exceptions.
 
 ---
 
@@ -176,7 +200,7 @@ Every `case_studies/` directory MUST contain a `README.md` with these 5 sections
 ### Case-study Q&As are NEVER part of the quiz (owner-set 2026-07-28)
 
 **Both forms are excluded, repo-wide:** a dedicated file under `case_studies/`, and a
-`## N. Case Study` section inside a module README or sub-file. A case study's Q&As are
+`## N. Case Study` section inside a module page or sub-file. A case study's Q&As are
 discussion prompts tied to one scenario — they do not stand alone as MCQ items, and the
 distractor pool would be drawn from an unrelated scenario.
 
@@ -244,7 +268,7 @@ rule still binds for it: the first sentence must be a self-contained direct answ
 rules below) but because it is trimmed at a clause boundary and ships as the option.
 
 **Measure migration coverage per parsed Q&A, never per file.** A file-level count read
-llm as complete at 125 of 127 files while `vllm_deep_dive/README.md`'s 18 Q&As had no
+llm as complete at 125 of 127 files while `vllm_deep_dive/vllm_deep_dive.md`'s 18 Q&As had no
 summaries at all — the per-Q&A count (2054 of 2072) was the one that saw it.
 
 **In the reader** the line is hidden by default and revealed by the Summaries row in the
@@ -265,16 +289,23 @@ appears in the quiz as anything but the option.
 
 ## How to Add a New Module
 
-1. Create `<section>/<module_name>/README.md` — 14-section template
+1. Create `<section>/<module_name>/<module_name>.md` — 14-section template. The page is
+   named for its folder; a `README.md` here is invisible to `extract.py`
 2. Meet the Q&A minimum (see section CLAUDE.md for specifics)
-3. Update the section's master `README.md`
-4. Update root `README.md` table
-5. See the section's `CLAUDE.md` for section-specific steps
+3. Write the `<!-- study-paths -->` block at the top of the new page (it must list
+   `<module_name>.md` on every tier line it declares)
+4. Add the module dir to `STUDY_ORDER["<section>"]` in `game/app.js` at its learning-path position
+5. Update the section's master `README.md` module table
+6. Update root `README.md` table
+7. Run `python3 game/extract.py --write-paths` (regenerates the section README's tier
+   tables), then `python3 game/extract.py --strict` to confirm the wiring
+8. See the section's `CLAUDE.md` for section-specific steps
 
 ### Adding a case study
-- Write the file following the section's template
+- Write the file following the section's template — flat as `case_studies/<name>.md`, or
+  directory-shaped as `case_studies/<name>/<name>.md`
 - Update the section's master `README.md` case study table
-- **Update `case_studies/README.md`** — add to correct phase, update dependency map, add interview prep row
+- **Update `case_studies/case_studies.md`** — add to correct phase, update dependency map, add interview prep row
 - Update root `README.md` and the section's `CLAUDE.md` case study list
 
 ---
@@ -283,10 +314,10 @@ appears in the quiz as anything but the option.
 
 | File | Purpose |
 |------|---------|
-| `llm/foundations_and_architecture/README.md` | Gold standard 14-section format |
+| `llm/foundations_and_architecture/foundations_and_architecture.md` | Gold standard 14-section format |
 | `llm/case_studies/design_gpu_inference_platform.md` | Gold standard 11-section principal case study |
-| `java/concurrency/README.md` | Example of 15+ Q&A deep module |
-| `spring/spring_transactions/README.md` | Example of 18+ Q&A deep Spring module |
+| `java/concurrency/concurrency.md` | Example of 15+ Q&A deep module |
+| `spring/spring_transactions/spring_transactions.md` | Example of 18+ Q&A deep Spring module |
 | `llm/agentic_frameworks/langchain_and_lcel.md` | Example deep-dive sub-file (15+ Q&As) |
 
 ---
@@ -298,7 +329,7 @@ appears in the quiz as anything but the option.
 - Code blocks use triple backticks with language tag (` ```java `, ` ```sql `, ` ```yaml `, etc.)
 - Section headers follow exact numbering: `## 1.`, `## 2.`, ... `## 14.`
 - Use `---` horizontal rules to separate major sections
-- Links between modules: use relative paths, e.g., `[Concurrency](../concurrency/README.md)`
+- Links between modules: use relative paths to the module PAGE, e.g., `[Concurrency](../concurrency/concurrency.md)` — never to the bare directory (there is no folder README to fall back to)
 
 ---
 
@@ -308,7 +339,7 @@ Section 5 of every module (Architecture Diagrams) — and any place a concept is
 hard to picture — should use a **visual intuition diagram**: ASCII art that makes
 an abstract relationship *physically visible*. The gold standard is the causal-mask
 grid and the sliding-window before/after pair in
-`llm/foundations_and_architecture/README.md`.
+`llm/foundations_and_architecture/foundations_and_architecture.md`.
 
 **Skill:** run `/visual-intuition-diagrams` (at
 `.claude/skills/visual-intuition-diagrams/`) to generate or validate these. It
@@ -352,7 +383,7 @@ side-by-side); caption every diagram with 1–2 sentences tying it to the insigh
 reuse numbers already in the surrounding text.
 
 **The no-tabs rule governs DIAGRAMS and prose, not data whose format requires a tab.**
-`database/sql_query_optimization/README.md` carries tab-delimited rows inside a
+`database/sql_query_optimization/sql_query_optimization.md` carries tab-delimited rows inside a
 `COPY ... FROM stdin` example because that is COPY's default text format — converting
 them to spaces would make the example wrong. A tab inside a code fence whose language
 genuinely uses tabs is content; the fence carries a note saying so. Check before
@@ -460,7 +491,7 @@ the RSocket diagram. Mermaid is not ASCII art — do not pad.
 
 ## Game / Reader / Q&A Compatibility (authoring contract — all files MUST comply)
 
-Every module README and deep-dive sub-file is consumed by the browser learning
+Every module page (`<module>/<module>.md`) and deep-dive sub-file is consumed by the browser learning
 game in two ways: (1) `game/extract.py` parses its interview Q&As into the MCQ
 question bank, and (2) the game's reader renders its Markdown (including Mermaid)
 for the "dive deeper" content view. Content that violates this contract is
@@ -478,9 +509,11 @@ silently dropped from the game or renders wrong. These rules are derived from
 ### What gets scanned
 
 - `extract.py` walks **every section** with no allowlist. A **new module dir +
-  `README.md`** and any **new deep-dive sub-file** (`<module>/<name>.md`) are
-  picked up automatically — sub-files are grouped under their parent directory's
-  module (so `ml/foo/README.md` and `ml/foo/bar.md` share the `ml/foo` topic).
+  its `<module>.md` page** and any **new deep-dive sub-file** (`<module>/<name>.md`)
+  are picked up automatically — sub-files are grouped under their parent directory's
+  module (so `ml/foo/foo.md` and `ml/foo/bar.md` share the `ml/foo` topic). A page
+  named `README.md` below a section root is NOT a module page and will not be found
+  where one is expected.
 - **Excluded from Q&A extraction:** any path containing `case_studies/`, and all
   `CLAUDE.md` files. Case studies are still **reachable in the reader** via
   relative `.md` links (the `/content/` route serves any file) — so linking to a
@@ -501,29 +534,31 @@ silently dropped from the game or renders wrong. These rules are derived from
   sources**. (New deep-dive **sub-files** need no `STUDY_ORDER` entry — they group
   under their parent module's existing position.)
 - **Curated study paths are declared ONCE per module, in a `<!-- study-paths -->` block in
-  that module's `README.md` — never scattered through the content.** Study files carry no
-  metadata of their own; a deep-dive sub-file is study content and stays study content.
+  that module's own page (`<module>/<module>.md`) — never scattered through the content.**
+  Study files carry no metadata of their own; a deep-dive sub-file is study content and
+  stays study content.
 
       # Creational Patterns — Master Index
 
       <!-- study-paths
-      senior: README.md, singleton/README.md, factory_method/README.md, builder/README.md
-      principal: README.md
+      senior: creational.md, singleton/singleton.md, factory_method/factory_method.md, builder/builder.md
+      principal: creational.md
       files this module contributes to each curated path; omit a tier to leave it out
       -->
 
   One line per tier, naming every file that tier takes — the module page plus whichever
   sub-files that level actually needs. **Listing a tier puts the module in it; omitting the
-  tier leaves the module out.** `README.md` must always be listed (the module page is never
-  optional), and every named file must exist — both are FATAL under `--strict`. Nested
-  pattern READMEs are named as `singleton/README.md`; module ids stay 2 segments.
+  tier leaves the module out.** The module page (`<module>.md`, resolved by
+  `_module_page()`) must always be listed — it is never optional — and every named file
+  must exist; both are FATAL under `--strict`. A nested pattern page is named for its own
+  folder (`singleton/singleton.md`); module ids stay 2 segments.
 
-  Case studies work the same way, declared once in the section's
-  `<section>/case_studies/README.md`:
+  Case studies work the same way, declared once in the section's case-study index
+  `<section>/case_studies/case_studies.md`:
 
       <!-- study-paths
-      senior: design_banking_ledger/README.md, design_ecommerce_catalog/README.md
-      principal: design_monolith_to_polyglot_migration/README.md
+      senior: design_banking_ledger/design_banking_ledger.md, design_ecommerce_catalog/design_ecommerce_catalog.md
+      principal: design_monolith_to_polyglot_migration/design_monolith_to_polyglot_migration.md
       -->
 
   That block drives the **Level filter** on the Case Studies tab (All / Senior N / Principal
@@ -550,28 +585,34 @@ silently dropped from the game or renders wrong. These rules are derived from
   each principal list is material senior never sees. Do not "promote" a module to principal
   because it is advanced.
 
-  **Adding a module:** write the block in its README. **Adding a deep-dive sub-file:** add
+  **Adding a module:** write the block at the top of its `<module>.md` page. **Adding a
+  deep-dive sub-file:** add
   its filename to whichever tier lines in the PARENT module's block should carry it — and to
   neither, if it is Full-path depth. That is the whole wiring step; there is no array to edit
   and nothing to keep in sync. A sub-file that exists but appears in no tier line is simply
   Full-path only, which is a legitimate and common choice.
 
-- **Legacy note — the interview subset used to be a DUAL-SOURCE list.** It
-  lives in `game/app.js` (`STUDY_PATHS.<section>.interview`, driving the Study
-  Full/Interview toggle) and in `<section>/README.md` under
-  `### Interview-Specific Path (N modules)` (what a human reads). `check_wiring()`
-  parses the README **table** — not the section, because the prose beneath it links
-  modules too and in `hld` those are the *excluded* ones — and fails the build when
-  membership differs, when the heading's `(N modules)` disagrees with the row count,
-  or when one source has an interview path and the other does not. Same members in a
-  different sequence is a warning, since fixing it may require resequencing
-  `STUDY_ORDER` itself. **So: add a module to the interview path in both places, and
-  update the `(N modules)` count in the heading.**
+- **HISTORY, and the trap it leaves behind.** The curated subset used to be a
+  DUAL-SOURCE list: an `interview` array in `game/app.js` plus a hand-written
+  `### Interview-Specific Path (N modules)` table in `<section>/README.md`, kept in step by
+  hand. **Both are gone.** There is no `STUDY_PATHS.<section>.interview` — `app.js` has
+  `let STUDY_PATHS = {}` filled at boot from the generated `questions/paths.json` — and the
+  README tier tables are GENERATED between `<!-- study-path-table <tier> -->` markers by
+  `python3 game/extract.py --write-paths`. Membership is declared once per module, in the
+  `<!-- study-paths -->` block on that module's page.
+
+  This is recorded because the old instruction ("add it in both places, update the
+  `(N modules)` count") is still the intuitive move and is now actively harmful: a
+  hand-edited tier table fails `--strict` with a STALE error, and the obvious remedy —
+  re-running `--write-paths` — makes the build pass again while SILENTLY DROPPING the
+  module from every tier, because `_declared_paths()` looks for the marker on
+  `_module_page(mod)` and a page named otherwise is never read. Green build, module gone
+  from Senior and Principal, questions still in the bank so nothing looks wrong.
 - **A module id is always `<section>/<module>` — exactly two segments.** `book` is the
   single exception (`book/<book>/<chapter>`). A file living in a sub-directory of a module
-  — `lld/creational/prototype/README.md` — folds into its parent module the same way a
+  — `lld/creational/prototype/prototype.md` — folds into its parent module the same way a
   deep-dive sub-file does, carrying the extra path inside `sourceFile`
-  (`prototype/README.md`). So a nested folder needs **no** `STUDY_ORDER` entry either. Do
+  (`prototype/prototype.md`). So a nested folder needs **no** `STUDY_ORDER` entry either. Do
   not "fix" this by adding 3-segment keys: they are absent from `STUDY_ORDER`,
   `check_wiring()` treats that as fatal, and `--strict` fails the Pages deploy.
 
@@ -607,7 +648,9 @@ silently dropped from the game or renders wrong. These rules are derived from
     whose question text was a bold section header (`Q: "Common Interview Questions:"`)
     with the entire list swallowed as the answer — junk that then fed the distractor
     pool for every sibling question;
-  - the three `lld/concurrency_patterns/*_README.md` files yielded **exactly zero**,
+  - three of the `lld/concurrency_patterns/` sub-files yielded **exactly zero**,
+    (they were `*_README.md` at the time; renamed to `ProducerConsumer.md`,
+    `ReadWriteLock.md`, `ThreadPool.md`, `ThreadSafeSingleton.md` in a46b3e0)
     which is how they escaped the `**Short:**` migration entirely: a file with no
     parsed questions looks like a file with nothing to migrate.
 

@@ -26,7 +26,9 @@ chapters normally is unaffected. The durable scope table is in root `CLAUDE.md` 
 `cs_fundamentals/`.
 
 This section is **organized by book**, not by topic. Each book is a folder; each chapter is
-a sub-folder containing a `README.md` that follows the book's own section order.
+a sub-folder holding a single page named for that folder
+(`book/<book_slug>/NN_<slug>/NN_<slug>.md`) that follows the book's own section order.
+Only `book/README.md` is a README — each book's own index is `book/<book_slug>/<book_slug>.md`.
 
 ---
 
@@ -50,21 +52,22 @@ alongside its `STUDY_ORDER.book` entries — an unlisted book still renders (slu
 title-cased as a fallback) but loses its author/short labels.
 
 **No curated tiers here — and do not add one.** Every other section declares Senior /
-Principal membership with a `<!-- study-paths -->` block in each module README; `book` is
-Full-path only, and `questions/paths.json` has no `book` key. A marker in a chapter README
+Principal membership with a `<!-- study-paths -->` block in each module page; `book` is
+Full-path only, and `questions/paths.json` has no `book` key. A marker in a chapter page
 would not merely be ignored, it would **fail the build**: tier membership is validated as
 a 2-segment module id, and book ids are 3 segments (`book/<book_slug>/<chapter>`), so
 `extract.py --strict` rejects it with "module id must be 2 segments". Chapters are ordered
 by `STUDY_ORDER.book` alone.
 
-Per-chapter build status lives in each book's `README.md` **Build Manifest** table.
+Per-chapter build status lives in each book's index page (`<book_slug>/<book_slug>.md`)
+**Build Manifest** table.
 
 ---
 
 ## The Book-Faithful Chapter Template
 
 This section does NOT use the standard 14-section module template. A book chapter is a
-multi-concept narrative, so each chapter `README.md` uses this structure instead. The
+multi-concept narrative, so each chapter page uses this structure instead. The
 middle block — **one `##` per the chapter's own book sections, in book order** — is the
 completeness guarantee: a missing topic is structurally visible.
 
@@ -107,19 +110,21 @@ completeness guarantee: a missing topic is structurally visible.
 
 ## Adding a New Chapter
 
-1. Create `<book_folder>/NN_<slug>/README.md` using the chapter template above.
+1. Create `<book_folder>/NN_<slug>/NN_<slug>.md` using the chapter template above — the page
+   is named for its folder, and the folder IS the 3-segment module id, so keep both.
 2. Map **every** book section to a `## NN.x` heading, in order — this is non-negotiable; it
    is how completeness is guaranteed.
 3. Add a glossary entry for every term the chapter defines.
 4. Add ≥15 Q&As.
 5. Run the diagram validator (see below) on the file.
-6. Flip the chapter's row in the book `README.md` **Build Manifest** to done.
-7. Update the chapter table + learning path in the book `README.md` if needed.
+6. Flip the chapter's row in the book's index page (`<book_folder>/<book_folder>.md`)
+   **Build Manifest** to done.
+7. Update the chapter table + learning path in that same book index page if needed.
 
 ## Adding a New Book
 
-1. Create `book/<book_slug>/README.md` (thesis, part map, chapter table, learning path,
-   build manifest).
+1. Create `book/<book_slug>/<book_slug>.md` (thesis, part map, chapter table, learning path,
+   build manifest) — the book index is named for its folder, not `README.md`.
 2. Add a row to the **Books** table in `book/README.md` and in this file.
 3. Add a row to the root `README.md` Book Summaries section and the root `CLAUDE.md` table.
 4. Wire the game (`game/app.js`): append the chapter folders to `STUDY_ORDER.book` in
