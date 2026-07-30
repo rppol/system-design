@@ -556,3 +556,19 @@ A: A bean calls `applicationEventPublisher.publishEvent(new OrderPlacedEvent(ord
 8. **Test colleagues with a mock mediator** — inject a stub mediator to verify that colleagues send the right events in the right circumstances.
 9. **Log all mediator events in development** — since the mediator is the single point of coordination, logging there provides a complete trace of system interactions.
 10. **Use event-driven architecture for distributed systems** — for distributed mediators, use a proper message broker (Kafka, RabbitMQ); the in-memory mediator pattern doesn't cross process boundaries.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| Spring `ApplicationEventPublisher` + `@EventListener` | A container-managed in-process mediator; publishers hold no reference to subscribers, and `@TransactionalEventListener` ties delivery to commit | The default in a Spring application — colleagues stay decoupled with zero extra infrastructure |
+| Guava `EventBus` / `AsyncEventBus` | A standalone mediator with `@Subscribe` handlers, type-based dispatch, and `DeadEvent` for unhandled messages | Non-Spring JVM applications; `DeadEvent` is the cheapest way to catch a silently unwired colleague |
+| Spring Integration `MessageChannel` + routers | A mediator with explicit channels, routing rules, transformers, and channel-level monitoring | Coordination logic complex enough to deserve a visible topology |
+| Vert.x event bus | Address-based mediator with point-to-point and pub/sub modes, and clustering across nodes | Event-driven services on the Vert.x runtime |
+| Apache Pekko (or Akka) actors | Message-passing colleagues with supervision hierarchies and per-actor mailboxes | Concurrency-heavy coordination where each colleague must be single-threaded |
+| `java.util.concurrent.Flow` (JDK 9+) / Reactor `Sinks.Many` | A backpressure-aware in-JVM broadcast point | The mediator must not be overrun by a fast producer |
+| Kafka / RabbitMQ | An out-of-process mediator: the broker owns routing and durability | Colleagues are separate services, or messages must survive a restart |
+
+The failure mode is always the same and it is worth stating in an interview: **the mediator becomes a God Object**. Every new interaction is one more `if` in a class that already knows all the colleagues. The countermeasure is to split by domain — several small mediators, one per interaction cluster — long before the class reaches the size where nobody wants to touch it.

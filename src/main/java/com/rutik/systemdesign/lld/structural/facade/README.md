@@ -536,3 +536,20 @@ A: A Facade becomes a God Object when it accumulates business logic, validation 
 5. **Document what the Facade hides**: Comments in the Facade methods should describe the sequence of operations being performed, so developers who need to debug can understand the orchestration.
 6. **Let advanced users bypass the Facade**: Do not use access modifiers to force all access through the Facade unless there is a strict security reason. Provide the subsystem classes as well for power users.
 7. **Version and evolve the Facade**: When the subsystem changes, update the Facade in one place rather than hunting down all clients.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| SLF4J | The name is literal — a Simple Logging Facade over whichever backend is on the classpath | Every library that needs to log without imposing a backend |
+| Spring `JdbcTemplate` / `JmsTemplate` / `RedisTemplate` | One method call instead of the acquire, execute, translate-exception, release sequence, with checked exceptions converted to a consistent unchecked hierarchy | Resource access where the boilerplate dwarfs the actual operation |
+| Spring `RestClient` (Spring Framework 6.1+) | A fluent synchronous HTTP facade over the underlying client, message converters, and error handling | Outbound HTTP from a Spring application |
+| `java.net.http.HttpClient` (JDK 11+) | HTTP/1.1, HTTP/2, TLS, redirects, and connection pooling behind a small builder-based API | HTTP without a framework dependency |
+| Micrometer / OpenTelemetry API | A single instrumentation surface over many vendor SDKs | Observability code that must not be rewritten when the vendor changes |
+| Spring Boot starters and auto-configuration | A facade over subsystem wiring: one dependency plus a handful of properties instead of a dozen bean definitions | Standing up a subsystem quickly, with `@ConditionalOnMissingBean` leaving the escape hatch open |
+| AWS SDK for Java 2.x high-level clients (for example `S3TransferManager`) | Multipart upload, retry, and checksum mechanics behind a single `upload` call | Object-storage operations where the low-level protocol detail is noise |
+| `javax.crypto.Cipher` | Provider selection, mode, and padding behind one API | Cryptographic operations, though the parameters still demand care |
+
+The discipline that keeps a facade useful is **thinness plus an escape hatch**. A facade that starts making business decisions has become a service layer, and one that hides the subsystem completely becomes a bottleneck the first time a caller needs a capability you did not expose — which is exactly why Spring Boot's auto-configuration always backs off in the presence of a user-defined bean. Prefer one facade per client archetype over a single facade that grows a method for everyone.

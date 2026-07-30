@@ -43,15 +43,24 @@ Backfill status (2026-07-16): the floor backlog is fully cleared — every modul
 
 ---
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior)
 
-`README.md` documents two routes: the **Full Path** (all 41 modules = "8-Phase Learning
-Path") and a curated **Interview-Specific Path** (22 modules). The interview subset is a
-**dual-source list** — it lives in both `README.md` ("## Learning Paths") and
-`game/app.js` (`STUDY_PATHS.devops.interview`, which drives the game's Study
-Full/Interview toggle). **Change one, change the other** — same modules, same order.
-Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
-Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+`README.md` documents the **Full Path** (all 41 modules = "8-Phase Learning Path") plus
+one curated tier: **Senior** (22 modules). **This section has no Principal tier and needs
+none** — no module declares one, `check_wiring()` skips the tier when the markers declare
+zero modules for it, and adding a Principal heading with no members is a false alarm, not
+a gap to close. Membership is declared ONCE per module, in a `<!-- study-paths -->` block
+in that module's own README naming the files each tier takes; listing a tier joins it,
+omitting the tier opts out, and `README.md` must always be listed. Order is never
+declared — it comes from `STUDY_ORDER.devops` in `game/app.js`, so a tier is an ordered
+subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks
+the markers and emits the gitignored `questions/paths.json`, which the game fetches at
+boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` /
+`<!-- /study-path-table -->` and is **generated** — regenerate with
+`python3 game/extract.py --write-paths`; a hand-edited or stale block fails
+`extract.py --strict` and the Pages deploy. The 13 case studies carry no tier markers, so
+the Case Studies tab shows all of them with no Level filter. The README also carries a
+Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
@@ -113,8 +122,14 @@ On finishing a module/chunk:
 1. Create `<module_name>/README.md` — 14-section template; 15 Q&As minimum (root CLAUDE.md hard floor; 18+ for deep modules listed above)
 2. Follow DevOps-specific content rules above
 3. Update `README.md` module table AND flip the file's status in the §8 build manifest
-4. Update root `README.md` DevOps phase table
-5. Update root `CLAUDE.md` DevOps module table
+4. Add the module dir to `STUDY_ORDER.devops` in `game/app.js` at its phase position — a
+   module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
+5. Write a `<!-- study-paths -->` block in the new module's README with a `senior:` line if
+   it belongs in that tier (omit the block entirely for Full-path-only; do not invent a
+   `principal:` line — this section has no Principal tier), then run
+   `python3 game/extract.py --write-paths` to regenerate `README.md`'s Senior table
+6. Update root `README.md` DevOps phase table
+7. Update root `CLAUDE.md` DevOps module table
 
 ---
 

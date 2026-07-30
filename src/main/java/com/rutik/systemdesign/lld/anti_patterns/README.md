@@ -107,6 +107,48 @@ For someone new to the topic, read in this order:
 
 ---
 
+## 8. Tradeoffs — Why Each Anti-Pattern Gets Adopted
+
+An anti-pattern is not a mistake anyone makes out of ignorance; it is a decision that was locally rational and globally expensive. Naming the short-term payoff is what makes the argument against it persuasive in a code review, and it is what an interviewer is listening for.
+
+| Anti-Pattern | The short-term payoff that makes it attractive | What it actually costs | The moment the cost lands |
+|--------------|-----------------------------------------------|------------------------|---------------------------|
+| God Object | One file to open; no decisions about where code belongs | Every change touches the same class, so nothing can be reviewed or deployed independently | The first sprint where three people edit it at once and every pull request conflicts |
+| Spaghetti Code | Fastest possible path to a working feature | Control flow that cannot be held in one head, so behaviour is discovered by running it | The first bug that cannot be reproduced from reading the code |
+| Copy-Paste Programming | Zero risk to the original caller; ships today | N copies of one rule, and a fix that reaches only the copy you remembered | The audit that finds the same bug still live in four of six copies |
+| Magic Numbers | No naming decision, no extra line | A value whose meaning lives only in the author's head, changed in one place out of five | A tuning change that silently applies to some call paths and not others |
+| Anemic Domain Model | Fits the ORM and the DTO shape; feels like clean layering | Invariants live in services, so any new caller can construct an invalid object | The second service that forgets one of the validation steps |
+| Singleton Abuse | Global access with no wiring to write | Hidden dependencies, order-dependent initialisation, and shared state across tests | The first flaky test that passes alone and fails in the suite |
+| Service Locator | Dependencies resolvable from anywhere; no constructor churn | Dependencies invisible in the signature, so breakage appears at runtime not compile time | A refactor that removes a registration and fails in production, not in the build |
+| Circular Dependencies | The quickest way to reach a method you already have | Neither module can be understood, tested, or extracted alone | The first attempt to split the module or reuse half of it |
+| Premature Optimization | Feels responsible; produces visible cleverness | Complexity paid for up front against a bottleneck that was never measured | Profiling shows the hot path was somewhere else entirely |
+| Golden Hammer | Reuses expertise the team already has; no learning curve | A tool bent far past its fit, with the mismatch handled by ever-growing workarounds | The workaround layer becomes larger than the problem it wraps |
+| Lava Flow | Deleting unknown code feels riskier than leaving it | Dead code that still has to be read, compiled, scanned, and reasoned about | Every subsequent change budget includes time spent on code that never runs |
+
+The counter-argument that works is always the same shape: accept that the payoff was real, then price the cost in the currency the team feels — review time, deploy coupling, flaky tests, or incident minutes. "This violates SRP" moves nobody; "any change to the email template redeploys the payment path" moves everybody.
+
+---
+
+## 11. Technologies and Tools
+
+Anti-patterns are the one design topic with genuine automated detection, because most of them have a measurable structural signature. Wire the checks into the build so the discussion happens on the pull request rather than at the retrospective.
+
+| Tool | What it detects here | How to use it |
+|------|---------------------|---------------|
+| SonarQube / SonarLint | Cognitive and cyclomatic complexity, duplicated blocks, magic numbers, god classes (too many methods or fields) | Set a quality gate on **new code** only — a gate over the whole legacy codebase gets muted on day one |
+| ArchUnit | Circular package dependencies, layer violations, and forbidden access (for example a controller reaching a repository directly) | Plain JUnit tests, so the rules run in the normal build and fail like any other test |
+| PMD | Long methods, long parameter lists, excessive coupling, unused code (Lava Flow) | Ruleset tuned per project; the default set is noisy |
+| SpotBugs (with the FindSecBugs plugin) | Bytecode-level bug patterns, including mutable static state behind Singleton Abuse | Run on the compiled artifact, not the source |
+| Checkstyle | Magic numbers, class and method length, nesting depth | The cheapest gate to add first; purely syntactic and fast |
+| Error Prone | Compile-time detection of a large catalogue of real bug patterns, with suggested fixes | Attaches to javac, so violations are compile errors rather than a separate report |
+| jQAssistant or Structure101 | Package and module dependency graphs, cycle detection, and drift from the intended architecture | Periodic architecture review rather than per-commit |
+| JaCoCo | Coverage as a proxy signal — an anemic domain model and a god object both tend to leave large untested regions | Read it as a hint about where invariants are untested, never as a target to game |
+| IntelliJ IDEA inspections and refactorings | "Replace inheritance with delegation", "Extract delegate", "Introduce constant", plus live duplicate detection | The fastest path from detection to fix while the context is still loaded |
+
+One caveat that matters more than the tool list: **these detect structure, not intent**. A class with 40 methods may be a legitimate facade, and a duplicated block may be two rules that only coincidentally look alike. Treat every finding as a question, and keep a documented suppression with a reason rather than lowering the threshold until the report is empty.
+
+---
+
 ## 12. Interview Q&As
 
 Questions are ordered by interview frequency: gotchas first, then definitions, then nuanced cases.

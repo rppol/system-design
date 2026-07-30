@@ -670,3 +670,20 @@ A: It's non-trivial because in-order traversal is naturally recursive (`inorder(
 8. **Make iterators stateful but self-contained** — each iterator instance owns its position; never share position state across iterator instances.
 9. **Favor `Stream` over custom iterators for transformation pipelines** — `stream().filter().map().collect()` is more expressive than a custom filtering iterator.
 10. **Document traversal order and thread safety** — clients need to know if the iterator is ordered, concurrent-safe, or fail-fast.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.util.Iterator` / `Iterable` | The language-level protocol: implementing `Iterable` makes a type usable in an enhanced `for` loop | Any custom collection; this is the contract to implement, not to reinvent |
+| `java.util.Spliterator` + `StreamSupport.stream(spliterator, parallel)` | A splittable iterator with size and characteristic hints (`ORDERED`, `DISTINCT`, `IMMUTABLE`), which is what makes parallel streams possible | Exposing a custom source to the Stream API, especially when it can be partitioned |
+| Guava `AbstractIterator` / `Iterators` / `Iterables` | `computeNext()` + `endOfData()` removes the classic hasNext/next state-machine boilerplate; plus `concat`, `partition`, `peekingIterator` | Writing a lazy iterator by hand without the two-field lookahead dance |
+| Apache Commons Collections 4 `IteratorUtils` | Filtering, chaining, and looping iterator decorators | Codebases already on Commons Collections |
+| `java.sql.ResultSet` | A forward-only database cursor — iteration whose backing data never lands in memory at once | Streaming large result sets; pair with `setFetchSize` |
+| Spring Data `Streamable`, `Slice`, `Page`, and `Stream<T>` query methods | Iteration over a repository, with `Slice` avoiding the `count(*)` that `Page` requires | Paging or streaming over persisted entities |
+| `java.nio.file.DirectoryStream` / `Files.walk` | Lazy, closeable iteration over a directory tree | Filesystem traversal without materializing a file list |
+| Project Reactor `Flux` / RxJava 3 `Flowable` | The push-based dual of Iterator, with backpressure | Asynchronous or unbounded sources where the consumer cannot pull |
+
+Two traps worth knowing cold. JDK collection iterators are **fail-fast**: they compare a `modCount` snapshot on each `next()` and throw `ConcurrentModificationException` on structural modification — remove through `Iterator.remove()` or `Collection.removeIf()`, or switch to `CopyOnWriteArrayList` / `ConcurrentHashMap`, whose iterators are weakly consistent instead. And anything backed by a resource — `Files.walk`, a `ResultSet`-backed stream, a Spring Data `Stream<T>` — must be closed in try-with-resources; the iterator holding a cursor open is a connection leak waiting for load.

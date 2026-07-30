@@ -1152,3 +1152,20 @@ A: Choose Prototype when the shared baseline is expensive to build; choose Build
 9. **Test clone independence explicitly** — in unit tests, always mutate a nested object in the clone and assert the original is unchanged. This is the only reliable way to catch shallow-copy bugs.
 
 10. **Consider the Memento pattern as an alternative for snapshots** — if your goal is to capture state for undo/redo rather than to produce new working objects, Memento may be more appropriate than Prototype.
+
+---
+
+## 17. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| Copy constructors and static copy factories (`new Foo(other)`, `Foo.copyOf(other)`) | Explicit, type-safe copying with no `Cloneable` contract, no unchecked cast, and full support for `final` fields (Effective Java Item 13 recommends these over `clone`) | The default answer for copying in Java |
+| Java records (16+) with explicit "wither" methods | A one-line shallow copy-with-one-change (`return new Point(x, other.y())`) on an immutable type | Small immutable values that change one field at a time |
+| Apache Commons Lang 3 `SerializationUtils.clone` | A deep copy of an entire `Serializable` object graph in one call, including cycles | Quick deep copies where the graph is already serializable and throughput is not critical |
+| Jackson `ObjectMapper` (`readValue(writeValueAsBytes(x), T.class)`) | Deep copy via JSON, which doubles as a persistable and diffable snapshot | The copy also needs to be stored, logged, or sent over the wire |
+| Kryo `Kryo.copy(object)` | Fast binary deep copy that does not require `Serializable` | Hot paths where reflective or JSON round trips are too slow |
+| MapStruct | Compile-time generated copying and mapping, with unmapped-target warnings turned into build errors | Copying between two types (entity to DTO) rather than within one |
+| Vavr / Eclipse Collections persistent collections | Structural sharing: a "copy" reuses the unchanged parts instead of duplicating them | Large structures copied often |
+| Spring `@Scope("prototype")` | A **different** concept with the same name: a new bean instance per lookup, not a clone of an existing one | Knowing the distinction — this is a standard interview trap |
+
+The trap to state before anyone asks: `Object.clone()` produces a **shallow** copy, so the original and the copy share every mutable referenced object, and `Cloneable` is a marker interface that does not even declare `clone()`. A deep copy has to be written by hand, recursively, and any cycle in the graph turns a naive recursive copy into a `StackOverflowError` — which is exactly why the serialization-based and structural-sharing options above exist.

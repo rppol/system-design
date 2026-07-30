@@ -484,3 +484,20 @@ A: The Originator sees the Memento through a "wide" interface — it can read an
 7. **Log Memento creation in debug mode** — helps diagnose memory issues and understand save frequency.
 
 8. **Test with undo-redo cycles** — ensure that save → modify → restore → modify → restore works correctly, especially with shared references.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| Java records (16+) | An immutable snapshot type in one line, with a generated `equals`, `hashCode`, and canonical constructor | The memento itself — a record is exactly a frozen state carrier |
+| `javax.swing.undo.UndoManager` + `UndoableEdit` | A complete caretaker: bounded undo/redo stack, significance flags, and edit coalescing | Desktop editors; do not write the stack yourself |
+| Apache Commons Lang 3 `SerializationUtils.clone` | Deep copy of a `Serializable` graph in one call | Quick deep snapshots where the object graph is already serializable and performance is not critical |
+| Jackson `ObjectMapper` | Snapshot as JSON (`writeValueAsBytes` / `readValue`), which is both a deep copy and a persistable, diffable artifact | Snapshots that must be stored, logged, or shipped over the wire |
+| Kryo (`Kryo.copy`) | Fast binary deep copy without requiring `Serializable` | Hot paths where the reflective/JSON round trip is too slow |
+| Vavr or Eclipse Collections persistent collections | Structural sharing — a "copy" reuses the unchanged subtree instead of duplicating it | Large states snapshotted often; turns O(n) copies into O(log n) |
+| Axon Framework / EventStoreDB | Event sourcing, where the event log is the history and snapshots are the optimization that bounds replay cost | State history is a product requirement, not just an undo button |
+| `java.util.concurrent.atomic.AtomicReference` | Atomic swap of an immutable state object, so a restore is one CAS | Concurrent originators — restore without locking |
+
+Memory is the whole tradeoff. A naive memento stack holds one full copy per edit, so a 2 MB document with a 100-step history is 200 MB of retained heap. The two standard fixes are a **bounded stack** (`UndoManager.setLimit`) and **delta mementos** — store the change plus its inverse, and keep a full snapshot only every N steps, which is precisely what event-sourced systems do.

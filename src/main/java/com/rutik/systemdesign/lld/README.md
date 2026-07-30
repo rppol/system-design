@@ -123,10 +123,10 @@ category-level Q&As. Start with the category index before diving into individual
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [Thread-Safe Singleton](concurrency_patterns/ThreadSafeSingleton_README.md) | Double-checked locking, volatile, holder idiom | Intermediate |
-| [Producer-Consumer](concurrency_patterns/ProducerConsumer_README.md) | Blocking queue, work queue, coordination | Intermediate |
-| [Read-Write Lock](concurrency_patterns/ReadWriteLock_README.md) | Concurrent reads, exclusive writes, ReentrantReadWriteLock | Intermediate |
-| [Thread Pool](concurrency_patterns/ThreadPool_README.md) | Executor service, task queue, bounded concurrency | Intermediate |
+| [Thread-Safe Singleton](concurrency_patterns/ThreadSafeSingleton.md) | Double-checked locking, volatile, holder idiom | Intermediate |
+| [Producer-Consumer](concurrency_patterns/ProducerConsumer.md) | Blocking queue, work queue, coordination | Intermediate |
+| [Read-Write Lock](concurrency_patterns/ReadWriteLock.md) | Concurrent reads, exclusive writes, ReentrantReadWriteLock | Intermediate |
+| [Thread Pool](concurrency_patterns/ThreadPool.md) | Executor service, task queue, bounded concurrency | Intermediate |
 
 ### Pattern Comparisons & Advanced
 
@@ -151,18 +151,18 @@ category-level Q&As. Start with the category index before diving into individual
 
 | Topic | Key Concepts | Difficulty |
 |-------|-------------|------------|
-| [Parking Lot](system_design_problems/ParkingLot_README.md) | OOP modeling, state machines, factory | Intermediate |
-| [ATM System](system_design_problems/ATM_README.md) | State pattern, transaction modeling, security | Intermediate |
-| [Elevator System](system_design_problems/ElevatorSystem_README.md) | Scheduling algorithm, state machine, observer | Intermediate |
-| [Vending Machine](system_design_problems/VendingMachine_README.md) | State pattern, inventory management, payments | Intermediate |
-| [Chess Game](system_design_problems/ChessGame_README.md) | Board modeling, piece polymorphism, move validation | Advanced |
-| [Library Management](system_design_problems/LibraryManagement_README.md) | Catalog, reservations, fine calculation | Intermediate |
-| [Online Booking System](system_design_problems/OnlineBookingSystem_README.md) | Concurrency, reservation, state transitions | Advanced |
-| [Ride Sharing](system_design_problems/RideSharing_README.md) | Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) | Advanced |
-| [LRU Cache](system_design_problems/LRUCache_README.md) | Doubly-linked list + HashMap, O(1) get/put, Decorator (thread safety) | Intermediate |
-| [Rate Limiter](system_design_problems/RateLimiter_README.md) | Token bucket, sliding window, Strategy + Factory | Intermediate |
-| [Tic-Tac-Toe](system_design_problems/TicTacToe_README.md) | Incremental win detection, Strategy (AI move selection) | Beginner |
-| [Splitwise](system_design_problems/Splitwise_README.md) | Expense-sharing ledger, Strategy (split types), debt-graph simplification | Advanced |
+| [Parking Lot](system_design_problems/ParkingLot.md) | OOP modeling, state machines, factory | Intermediate |
+| [ATM System](system_design_problems/ATM.md) | State pattern, transaction modeling, security | Intermediate |
+| [Elevator System](system_design_problems/ElevatorSystem.md) | Scheduling algorithm, state machine, observer | Intermediate |
+| [Vending Machine](system_design_problems/VendingMachine.md) | State pattern, inventory management, payments | Intermediate |
+| [Chess Game](system_design_problems/ChessGame.md) | Board modeling, piece polymorphism, move validation | Advanced |
+| [Library Management](system_design_problems/LibraryManagement.md) | Catalog, reservations, fine calculation | Intermediate |
+| [Online Booking System](system_design_problems/OnlineBookingSystem.md) | Concurrency, reservation, state transitions | Advanced |
+| [Ride Sharing](system_design_problems/RideSharing.md) | Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) | Advanced |
+| [LRU Cache](system_design_problems/LRUCache.md) | Doubly-linked list + HashMap, O(1) get/put, Decorator (thread safety) | Intermediate |
+| [Rate Limiter](system_design_problems/RateLimiter.md) | Token bucket, sliding window, Strategy + Factory | Intermediate |
+| [Tic-Tac-Toe](system_design_problems/TicTacToe.md) | Incremental win detection, Strategy (AI move selection) | Beginner |
+| [Splitwise](system_design_problems/Splitwise.md) | Expense-sharing ledger, Strategy (split types), debt-graph simplification | Advanced |
 
 ---
 
@@ -233,26 +233,26 @@ Know what to avoid and why.
 ### Phase 7 — Concurrency Patterns
 Thread safety and parallel design.
 
-1. [Thread-Safe Singleton](concurrency_patterns/ThreadSafeSingleton_README.md)
-2. [Producer-Consumer](concurrency_patterns/ProducerConsumer_README.md)
-3. [Read-Write Lock](concurrency_patterns/ReadWriteLock_README.md)
-4. [Thread Pool](concurrency_patterns/ThreadPool_README.md)
+1. [Thread-Safe Singleton](concurrency_patterns/ThreadSafeSingleton.md)
+2. [Producer-Consumer](concurrency_patterns/ProducerConsumer.md)
+3. [Read-Write Lock](concurrency_patterns/ReadWriteLock.md)
+4. [Thread Pool](concurrency_patterns/ThreadPool.md)
 
 ### Phase 8 — Apply: System Design Problems
 Put it all together with end-to-end LLD exercises.
 
-1. [Parking Lot](system_design_problems/ParkingLot_README.md) — start here (classic)
-2. [ATM System](system_design_problems/ATM_README.md)
-3. [Elevator System](system_design_problems/ElevatorSystem_README.md)
-4. [Vending Machine](system_design_problems/VendingMachine_README.md)
-5. [Chess Game](system_design_problems/ChessGame_README.md)
-6. [Library Management](system_design_problems/LibraryManagement_README.md)
-7. [Online Booking System](system_design_problems/OnlineBookingSystem_README.md)
-8. [Ride Sharing](system_design_problems/RideSharing_README.md)
-9. [LRU Cache](system_design_problems/LRUCache_README.md)
-10. [Rate Limiter](system_design_problems/RateLimiter_README.md)
-11. [Tic-Tac-Toe](system_design_problems/TicTacToe_README.md)
-12. [Splitwise](system_design_problems/Splitwise_README.md)
+1. [Parking Lot](system_design_problems/ParkingLot.md) — start here (classic)
+2. [ATM System](system_design_problems/ATM.md)
+3. [Elevator System](system_design_problems/ElevatorSystem.md)
+4. [Vending Machine](system_design_problems/VendingMachine.md)
+5. [Chess Game](system_design_problems/ChessGame.md)
+6. [Library Management](system_design_problems/LibraryManagement.md)
+7. [Online Booking System](system_design_problems/OnlineBookingSystem.md)
+8. [Ride Sharing](system_design_problems/RideSharing.md)
+9. [LRU Cache](system_design_problems/LRUCache.md)
+10. [Rate Limiter](system_design_problems/RateLimiter.md)
+11. [Tic-Tac-Toe](system_design_problems/TicTacToe.md)
+12. [Splitwise](system_design_problems/Splitwise.md)
 
 ---
 
@@ -342,9 +342,9 @@ The highest-frequency LLD *knowledge* questions mapped to the file that answers 
 | How does Visitor add a new operation without touching the classes it operates on? | [Visitor](behavioral/visitor/README.md) |
 | What is a God Object, and what's your refactoring plan for one? | [God Object](anti_patterns/GodObject.md) |
 | What's wrong with Service Locator versus explicit Dependency Injection? | [Service Locator](anti_patterns/ServiceLocator.md) |
-| How would you design a parking lot's spot allocation and pricing strategy? | [Parking Lot](system_design_problems/ParkingLot_README.md) |
-| How do you implement an O(1) LRU cache and make it thread-safe? | [LRU Cache](system_design_problems/LRUCache_README.md) |
-| Token bucket vs sliding window — what tradeoffs separate rate-limiting algorithms? | [Rate Limiter](system_design_problems/RateLimiter_README.md) |
+| How would you design a parking lot's spot allocation and pricing strategy? | [Parking Lot](system_design_problems/ParkingLot.md) |
+| How do you implement an O(1) LRU cache and make it thread-safe? | [LRU Cache](system_design_problems/LRUCache.md) |
+| Token bucket vs sliding window — what tradeoffs separate rate-limiting algorithms? | [Rate Limiter](system_design_problems/RateLimiter.md) |
 
 ---
 
@@ -354,11 +354,11 @@ A 6-week plan over the Senior Path. Each week pairs the pattern theory with one 
 
 | Week | Focus | Modules | Practice problem |
 |------|-------|---------|-------------------|
-| 1 | Foundations | [SOLID Principles](solid_principles/README.md) | skim [Vending Machine](system_design_problems/VendingMachine_README.md) — cleanest FSM, see the vocabulary applied before you've learned the individual patterns |
-| 2 | Creational Patterns | [Creational Patterns](creational/README.md) — Singleton, Factory Method, Abstract Factory, Builder, Prototype | [Parking Lot](system_design_problems/ParkingLot_README.md) — Factory (spot type) + Strategy (pricing); the most common LLD opener |
-| 3 | Structural Patterns | [Structural Patterns](structural/README.md) — Adapter, Decorator, Proxy, Facade, Composite, Bridge, Flyweight | [LRU Cache](system_design_problems/LRUCache_README.md) — Decorator as a thread-safe wrapper around the core cache |
-| 4 | Behavioral Patterns | [Behavioral Patterns](behavioral/README.md) — Strategy, Observer, Command, State, Template Method, and 6 more | [Ride Sharing](system_design_problems/RideSharing_README.md) — Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) |
-| 5 | Pattern Mastery + Anti-Patterns | [Pattern Comparisons](pattern_comparisons/README.md), [Anti-Patterns](anti_patterns/README.md) | [ATM](system_design_problems/ATM_README.md) — justify State + Command (with rollback) behind a Facade over the alternatives; spot the anti-patterns a naive transaction flow invites |
+| 1 | Foundations | [SOLID Principles](solid_principles/README.md) | skim [Vending Machine](system_design_problems/VendingMachine.md) — cleanest FSM, see the vocabulary applied before you've learned the individual patterns |
+| 2 | Creational Patterns | [Creational Patterns](creational/README.md) — Singleton, Factory Method, Abstract Factory, Builder, Prototype | [Parking Lot](system_design_problems/ParkingLot.md) — Factory (spot type) + Strategy (pricing); the most common LLD opener |
+| 3 | Structural Patterns | [Structural Patterns](structural/README.md) — Adapter, Decorator, Proxy, Facade, Composite, Bridge, Flyweight | [LRU Cache](system_design_problems/LRUCache.md) — Decorator as a thread-safe wrapper around the core cache |
+| 4 | Behavioral Patterns | [Behavioral Patterns](behavioral/README.md) — Strategy, Observer, Command, State, Template Method, and 6 more | [Ride Sharing](system_design_problems/RideSharing.md) — Strategy (fare), Observer (status), Factory (vehicle), State (ride lifecycle) |
+| 5 | Pattern Mastery + Anti-Patterns | [Pattern Comparisons](pattern_comparisons/README.md), [Anti-Patterns](anti_patterns/README.md) | [ATM](system_design_problems/ATM.md) — justify State + Command (with rollback) behind a Facade over the alternatives; spot the anti-patterns a naive transaction flow invites |
 | 6 | Apply: System Design Problems | [System Design Problems](system_design_problems/README.md) | timeboxed 30-minute runs through the remaining problems via the [interview shortcuts](case_studies/README.md) |
 
 ---
@@ -390,7 +390,7 @@ A 6-week plan over the Senior Path. Each week pairs the pattern theory with one 
 LLD questions are typically asked separately from HLD but complement each other. Common formats:
 
 1. **"Design a Parking Lot"** — OOP modeling, class relationships, state
-2. **"Design a Rate Limiter"** (LLD angle) — data structures, algorithm; see [RateLimiter](system_design_problems/RateLimiter_README.md)
+2. **"Design a Rate Limiter"** (LLD angle) — data structures, algorithm; see [RateLimiter](system_design_problems/RateLimiter.md)
 3. **"Apply [specific pattern] to this problem"** — pattern knowledge
 4. **"How would you refactor this code?"** — anti-pattern recognition
 

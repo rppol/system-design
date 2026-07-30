@@ -307,3 +307,67 @@ Proxy is the single entry point that intercepts every call; internally it delega
 | 21 | Strategy | Behavioral | Define interchangeable algorithms | Context, Strategy, ConcreteStrategy |
 | 22 | Template Method | Behavioral | Define algorithm skeleton; defer steps to subclasses | AbstractClass, ConcreteClass |
 | 23 | Visitor | Behavioral | Add operations to objects without changing their classes | Visitor, ConcreteVisitor, Element, ObjectStructure |
+
+---
+
+## 7. Technologies and Tools — Where the Platform Already Gives You the Pattern
+
+The last node in every decision tree above should be the same question: **does the platform already implement this?** Hand-writing a pattern that the JDK, Spring, or a mature library already provides means giving up its lifecycle management, ordering guarantees, and observability in exchange for code you now own.
+
+| Pattern | Already implemented in | Reach for your own only when |
+|---------|-----------------------|------------------------------|
+| Singleton | `enum`; Spring singleton bean scope; Guice `@Singleton`; Jakarta CDI `@ApplicationScoped` | Never in a DI application — let the container own the instance |
+| Factory Method | `List.of`, `Optional.of`, `Executors`, `ServiceLoader`; Spring `@Bean` and `FactoryBean` | The creation rule is domain logic, not wiring |
+| Abstract Factory | `DocumentBuilderFactory`, `FileSystems`, `SSLContext`, `EntityManagerFactory`; Jackson `JsonFactory` | You own several product families that must never be mixed |
+| Builder | `HttpRequest.newBuilder()`, `Stream.builder()`; Lombok `@Builder`, Immutables, AutoValue, protobuf | A record would not do, and no generator fits the validation you need |
+| Prototype | Copy constructors; records with withers; Jackson or Kryo deep copy; MapStruct | Deep copy of a graph with cycles and custom semantics |
+| Adapter | `InputStreamReader`, `Arrays.asList`; MapStruct; SLF4J bindings; Micrometer registries | Adapting two of your own types |
+| Bridge | JDBC, SLF4J, `java.security.Provider`, `FileSystemProvider`, OpenTelemetry API and SDK | Both dimensions are yours and both really vary |
+| Composite | `java.awt.Container`, Jackson `JsonNode`; Spring `Composite*` beans; Micrometer `CompositeMeterRegistry` | Your own domain tree |
+| Decorator | `java.io` streams, `Collections.unmodifiable*`; Guava `Forwarding*`; Resilience4j `Decorators` | Domain behaviour that no framework advice covers |
+| Facade | SLF4J; Spring `JdbcTemplate` and `RestClient`; `java.net.http.HttpClient`; Boot starters | Simplifying your own subsystem for one client archetype |
+| Flyweight | `Integer.valueOf` cache, compact strings; Guava `Interners`; Eclipse Collections primitives | Profiling proved duplicate domain objects dominate the heap |
+| Proxy | `java.lang.reflect.Proxy`, Byte Buddy; Spring AOP; Hibernate lazy proxies; Mockito | A domain concern the container's advice model cannot express |
+| Chain of Responsibility | `jakarta.servlet.Filter`; Spring `SecurityFilterChain` and `HandlerInterceptor`; Netty `ChannelPipeline`; OkHttp interceptors | The chain is over domain objects, not requests |
+| Command | `Runnable` and `Callable` plus `ExecutorService`; Quartz `Job`; `UndoManager`; Axon command bus | You need undo with custom state capture |
+| Interpreter | ANTLR 4; SpEL; Apache Commons JEXL; MVEL; Drools | A frozen grammar of under roughly ten rules |
+| Iterator | `Iterator`, `Spliterator`, `DirectoryStream`; Guava `AbstractIterator`; Reactor `Flux` | A custom traversal order over your own structure |
+| Mediator | Spring `ApplicationEventPublisher`; Guava `EventBus`; Spring Integration; Vert.x event bus | Coordination rules that are themselves domain logic |
+| Memento | Records; `UndoManager`; Jackson or Kryo deep copy; Axon or EventStoreDB snapshots | Delta-based history with domain-specific compaction |
+| Observer | Spring `@EventListener` and `@TransactionalEventListener`; Guava `EventBus`; `java.util.concurrent.Flow`; Reactor | A tight in-object callback where a bus would be overkill |
+| State | `enum` with per-constant bodies; sealed interfaces plus `switch` patterns; Spring Statemachine; Temporal | The FSM is small, in-memory, and needs no durability |
+| Strategy | `java.util.function`, `Comparator`, `ServiceLoader`; Spring `Map<String, Strategy>` injection | Always fine to write — this is the cheapest pattern to own |
+| Template Method | `AbstractList`, `HttpServlet`; Spring `JdbcTemplate` and Batch; JUnit 5 lifecycle | Your own algorithm skeleton, and only when a callback will not do |
+| Visitor | Sealed types plus `switch` patterns (Java 21+); `FileVisitor`; ASM; ANTLR generated visitors | A closed hierarchy predating sealed types |
+
+---
+
+## 8. Tradeoffs — What Choosing a Pattern Costs
+
+The decision tree tells you which pattern fits. This table tells you what you pay for it, which is the half of the answer interviewers actually score. Every entry below is a structural cost you can count before writing any code, not a benchmark.
+
+| Family | Structural cost of applying it | Runtime cost | What you lose |
+|--------|-------------------------------|-------------|---------------|
+| Singleton | 1 type | None | Testability and per-tenant scoping, unless the container owns the instance |
+| Factory Method | 1 creator interface + 1 concrete creator per product | One virtual call | Nothing significant — the cheapest pattern here |
+| Abstract Factory | 1 factory interface + N concrete factories + M product interfaces; every new product type edits all N factories | One virtual call | Cheap addition of product types, in exchange for cheap addition of families |
+| Builder | 1 extra nested type, roughly one method per field | One extra object per construction | Compile-time detection of a missing required field, unless the generator checks it |
+| Prototype | 1 copy method per type, recursive for a deep graph | Proportional to the graph size | Safety around cycles and mutable shared references |
+| Adapter / Facade | 1 type per adapted boundary | One delegation | Direct access to capabilities you chose not to expose |
+| Bridge | 1 abstraction hierarchy + 1 implementor hierarchy, wired at runtime | One delegation | Implementation-specific capabilities that do not fit the implementor interface |
+| Composite | 1 component interface + leaf and composite types | Traversal proportional to tree size and depth | Either type safety or uniformity — you must choose one |
+| Decorator | 1 type per behaviour, plus a factory that fixes the order | One delegation per layer | A readable stack trace, and safety against order-dependent bugs |
+| Flyweight | 1 factory + a split of state into intrinsic and extrinsic | Cache lookup per creation | Mutability of the shared state, permanently |
+| Proxy | 1 type per proxied subject, or a container that generates it | One dispatch, plus generation at startup | Correspondence between the code you read and the behaviour you get |
+| Chain of Responsibility | 1 handler per concern + explicit ordering | One call per link | Any compile-time guarantee that the request is handled |
+| Command | 1 type per operation, plus stored state if undo is required | One object per invocation | Nothing, until the class count outgrows the operations that need it |
+| Interpreter | 1 type per grammar rule | Tree-walking evaluation, slow for real grammars | Maintainability past roughly ten rules — use a parser generator |
+| Mediator | 1 mediator that knows every colleague | One indirection per interaction | Locality: the interaction rules now live away from the participants |
+| Memento | 1 snapshot type + a caretaker | A full state copy per snapshot | Bounded memory, unless you cap the history or store deltas |
+| Observer | 1 listener interface + a registry on the subject | Dispatch per listener | Deterministic ordering, and a call stack showing who reacted |
+| State | 1 type or enum constant per state | One virtual call per action | A single place to read the whole transition graph |
+| Strategy | 1 interface + 1 type per algorithm | One virtual call | Very little — prefer lambdas to keep the class count down |
+| Template Method | 1 abstract base + 1 subclass per variant | One virtual call per hook | The subclass's only inheritance slot, and independent testability of the hook |
+| Visitor | 1 visitor interface + `accept` on every element; each new element type edits every visitor | Double dispatch | Cheap addition of element types, in exchange for cheap addition of operations |
+
+Read the table for the two structural inversions, because they are the classic interview question. **Abstract Factory** makes adding a family cheap and adding a product type expensive; **Visitor** makes adding an operation cheap and adding an element type expensive. In both cases the pattern is right only if the axis it makes cheap is the axis your system actually changes along — and choosing the wrong axis leaves you with the full class-count cost and none of the benefit.

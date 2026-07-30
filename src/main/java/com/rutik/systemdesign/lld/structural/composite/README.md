@@ -568,3 +568,19 @@ A: Option one is adding a new abstract method to the `Component` interface and i
 8. **Protect the child list** — return an unmodifiable view from `getChildren()` to prevent external mutation.
 9. **Consider using the Builder pattern** — building complex composite trees via a fluent Builder is more readable than many `add()` calls.
 10. **Thread safety** — if trees are shared across threads, make modifications synchronized or use a copy-on-write strategy.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.awt.Container` / `Component` and JavaFX `Parent` / `Node` | The GUI archetype: a container is itself a component, so layout and painting recurse uniformly | Naming the classic example; also any custom UI tree |
+| Spring `CompositeCacheManager`, `CompositeHealthContributor`, `CompositePropertySource` | Framework composites that let several backends answer as one, with a defined resolution order | Layered caches, aggregated health endpoints, multi-source configuration |
+| Micrometer `CompositeMeterRegistry` | One registry that fans every metric out to several real registries | Exporting metrics to two backends during a migration |
+| Jackson `JsonNode` (`ObjectNode`, `ArrayNode`, and the `ValueNode` leaves) | A ready-made composite over JSON with uniform traversal | Structural operations on arbitrary JSON |
+| `java.nio.file.Path` + `Files.walkFileTree` | The filesystem as a composite, traversed by a visitor with pruning via `FileVisitResult` | Directory trees — composite and visitor together |
+| `java.util.Collections.unmodifiableList` on the children list | Enforcing that the tree is only mutated through the composite's own API | Preventing callers from bypassing invariants by editing the child list directly |
+| Neo4j or a recursive CTE in PostgreSQL (`WITH RECURSIVE`) | Persisting and querying deep hierarchies without N+1 round trips per level | The tree lives in a database and is traversed by query, not by object graph |
+
+Two decisions define a composite and both should be explicit. The **transparency versus safety** choice: putting `add(child)` on the shared `Component` interface gives uniform treatment but forces leaves to throw `UnsupportedOperationException`, while keeping it on `Composite` is type-safe but makes callers test the node type. And **depth**: uniform recursion is elegant until a user-supplied or cyclic structure arrives, so bound the depth and detect cycles — an unguarded recursive `render()` on a deep tree is a `StackOverflowError` in production, not a theoretical concern.

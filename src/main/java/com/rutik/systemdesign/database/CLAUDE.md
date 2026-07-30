@@ -73,17 +73,26 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents two routes: the **Full Path** (all 29 modules — the 7-phase
-order in "## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") and a curated
-**Interview-Specific Path** (16 modules). The interview subset is a **dual-source
-list** — it lives in both `README.md` ("## Learning Paths") and `game/app.js`
-(`STUDY_PATHS.database.interview`, which drives the game's Study Full/Interview
-toggle). **Change one, change the other** — same modules, same order. Non-Q&A
-narrative only; no `extract.py` re-run needed. The README also carries a
-Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no
-toggle impact).
+`README.md` documents the **Full Path** (all 29 modules — the 7-phase order in
+"## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") plus two curated tiers:
+**Senior** (19 modules) and **Principal** (13). They are different cuts, not nested
+depths — senior is the craft, principal is the judgment (which engine at what cost,
+what migration, what you tell a team *not* to do), so principal is usually the smaller
+list and much of it is material senior never sees. Membership is declared ONCE per
+module, in a `<!-- study-paths -->` block in that module's own README naming the files
+each tier takes; listing a tier joins it, omitting the tier opts out, and `README.md`
+must always be listed. Order is never declared — it comes from `STUDY_ORDER.database` in
+`game/app.js`, so a tier is an ordered subset by construction. **There is no path array
+in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
+`questions/paths.json`, which the game fetches at boot. The tier tables in `README.md`
+sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
+regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
+fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
+from a block in `case_studies/README.md` (3 senior / 3 principal), driving the Level
+filter on the game's Case Studies tab. The README also carries a Knowledge-Question Map
+and a 6-week Study Plan (prose; no path impact).
 
 ---
 
@@ -140,13 +149,20 @@ toggle impact).
 2. Concrete numbers everywhere (query times, memory, sizes)
 3. At least 1 BROKEN→FIX block in §10 (Common Pitfalls) and §14 (Case Study)
 4. Update `README.md` module table
-5. Update root `README.md` Database phase table
+5. Add the module dir to `STUDY_ORDER.database` in `game/app.js` at its phase position — a
+   module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
+6. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it
+   belongs to (or none, for Full-path-only), then run `python3 game/extract.py --write-paths`
+   to regenerate the section README's tier tables
+7. Update root `README.md` Database phase table
 
 ## Adding a New Database Case Study
 
 1. Write the case study — 11-section principal template
 2. Update `case_studies/README.md` — add to correct phase, update dependency map, add interview prep row
-3. Update `README.md` case study count
+3. If it belongs in a tier, add its `<dir>/README.md` to that tier's line in the
+   `<!-- study-paths -->` block at the top of `case_studies/README.md`
+4. Update `README.md` case study count
 
 ---
 

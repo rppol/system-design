@@ -535,3 +535,20 @@ A: When the object count is small (hundreds, not hundreds of thousands or millio
 5. **Profile before applying**: Only apply Flyweight after measuring a real memory problem. Premature optimization with Flyweight adds significant complexity.
 6. **Consider using records (Java 16+)**: Java records are immutable by design and work excellently as flyweights. Their structural equality also aids key-based caching.
 7. **Design the extrinsic state API carefully**: Passing 10 parameters as extrinsic state to every method call is unwieldy. Consider grouping extrinsic state into a context/render-context object.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `Integer.valueOf` (and `Short`, `Byte`, `Long`, `Character`, `Boolean`) | The JDK's built-in flyweight cache — autoboxing routes through it, which is why `==` compares equal for small values and not for large ones. The Integer cache upper bound is tunable with `-XX:AutoBoxCacheMax` | The example to name, and the reason `==` on boxed types is a bug |
+| `String.intern()` and the JVM string table | Canonical shared instances for repeated strings, at the cost of a native-table lookup on every call | Massive numbers of duplicate strings from parsing, when profiling has proved the duplication |
+| Compact strings (`-XX:+CompactStrings`, on by default since JDK 9) | Latin-1 strings stored one byte per character instead of two, halving the footprint with no code change | Free memory savings you should confirm are still enabled before hand-rolling anything |
+| Guava `Interners.newWeakInterner()` | Interning in your own weak-keyed pool, so entries can be collected — unlike `String.intern()` | Interning application objects without creating a permanent leak |
+| Eclipse Collections primitive collections (`IntArrayList`, `IntObjectHashMap`) | Avoiding boxed objects entirely, which usually beats sharing them | Large numeric collections — often the better answer than Flyweight |
+| Netty `PooledByteBufAllocator` | Pooled, reference-counted buffers rather than one allocation per message | High-throughput network code |
+| Java enums and records as canonical instances, with `EnumMap` / `EnumSet` | A fixed set of shared immutable instances the language guarantees are unique | Any closed set of values |
+| JOL (`org.openjdk.jol`) and `jcmd <pid> GC.class_histogram` | Actual per-object footprint and live instance counts | Proving the saving before and after; Flyweight without measurement is speculative complexity |
+
+Two rules govern every real use. **Intrinsic state must be immutable** — it is shared across contexts, so one mutation corrupts every user of it, and the extrinsic state has to be passed in per call instead. And **measure first**: Flyweight trades a factory lookup on every creation for reduced memory, so it pays only when the duplicate count is large and proven, which is why the heap histogram belongs in the workflow rather than after the incident.

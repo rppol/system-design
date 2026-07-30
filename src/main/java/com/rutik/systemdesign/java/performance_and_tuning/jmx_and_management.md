@@ -354,7 +354,7 @@ port, which a firewall or Kubernetes NetworkPolicy blocks.
 
 ---
 
-## 7. Tooling — JConsole, VisualVM, jcmd, jstack, jmap
+## 7. Technologies and Tools — JConsole, VisualVM, jcmd, jstack, jmap
 
 | Tool | Mechanism | Best for |
 |------|-----------|----------|

@@ -678,3 +678,20 @@ A: Adding `createScrollBar()` to the `AbstractFactory` interface is a breaking c
 7. **Pair with Abstract Factory in tests** — provide a `FakeFactory` or `MockFactory` that returns in-memory, fast implementations of all products.
 
 8. **Consider the Abstract Factory + Builder combination** — when individual products are complex to construct, have the Abstract Factory return a Builder for each product type.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `javax.xml.parsers.DocumentBuilderFactory` / `SAXParserFactory` / `javax.xml.transform.TransformerFactory` | The textbook JDK Abstract Factory: `newInstance()` selects an implementation, and the returned factory produces a family of matched parser objects | XML processing; also the standard example to name in an interview |
+| `java.nio.file.FileSystems` | A `FileSystem` that produces a consistent family of `Path`, `WatchService`, and `PathMatcher` objects for that provider (default, zipfs, or a third-party S3 provider) | Code that must work over more than one storage backend |
+| `javax.net.ssl.SSLContext` | One configured context produces matched `SSLSocketFactory`, `SSLServerSocketFactory`, and `SSLEngine` instances | TLS configuration that must be identical across every socket in a service |
+| `jakarta.persistence.EntityManagerFactory` | Produces `EntityManager`, and through it `Query` and `EntityTransaction` — a family bound to one persistence unit | JPA applications with more than one datasource |
+| Spring `FactoryBean<T>` and `BeanFactory` | Container-level abstract factory: the bean definition selects the concrete family at startup, and `@Profile` / `@ConditionalOnProperty` switch families per environment | The family choice is a deployment decision |
+| Jackson `JsonFactory` (and `YAMLFactory`, `CBORFactory`) | Produces matched `JsonParser` and `JsonGenerator` instances for one wire format | Supporting several serialization formats behind one API |
+| `java.util.ServiceLoader` | Discovery of concrete factories from `META-INF/services` or `provides ... with` in a module descriptor | Families shipped as independent plugins |
+| Testcontainers | A per-backend family of container, connection URL, and client for integration tests | Verifying that every concrete family actually works, not just the default one |
+
+The consistency guarantee is the whole point, and it is what to say when asked why not just use several factory methods: an Abstract Factory makes it impossible to pair a PostgreSQL connection with a MySQL dialect, because both come from the same factory instance. The cost is equally concrete — each new **product type** adds one method to the abstract factory and forces an implementation in every concrete factory, so a 3-family, 4-product design is 12 classes before any business logic exists.

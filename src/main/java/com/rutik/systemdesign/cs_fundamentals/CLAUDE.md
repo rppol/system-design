@@ -126,7 +126,7 @@ Reference for adapted template: see `../llm/case_studies/design_gpu_inference_pl
 
 Path: `dsa_patterns/` (inside this section root).
 
-This is the **pattern-recognition and strategy-selection layer** — the "fairly certain guess" engine. It sits *on top of* the 12 DSA concept modules (Phases 1–3) and does NOT re-teach data structures. It answers: given an unseen problem, what pattern do I apply? In the game it is wired as its own Study topic — STUDY_ORDER/STUDY_PATHS entry `cs_fundamentals/dsa_patterns`, placed after Phase 3.
+This is the **pattern-recognition and strategy-selection layer** — the "fairly certain guess" engine. It sits *on top of* the 12 DSA concept modules (Phases 1–3) and does NOT re-teach data structures. It answers: given an unseen problem, what pattern do I apply? In the game it is wired as its own Study topic — a `STUDY_ORDER.cs_fundamentals` entry `cs_fundamentals/dsa_patterns`, placed after Phase 3, with its Senior-tier file list declared in the `<!-- study-paths -->` block at the top of `dsa_patterns/README.md`.
 
 Files:
 - `dsa_patterns/README.md` — master recognition engine (decision tree, cue→pattern table, constraints→complexity table, complexity cheat sheet, pattern index)
@@ -180,12 +180,13 @@ This is an intentional exception to the rest of the repo's plain-text `LeetCode 
 3. Add a row to the Pattern Index table in `dsa_patterns/README.md` §6
 4. Add a row to the DSA Pattern Playbooks manifest in `README.md` §7
 5. Add a bidirectional "See Also" entry in the relevant concept module(s) pointing to the new pattern file
+6. Add the filename to the `senior:` line of the `<!-- study-paths -->` block at the top of `dsa_patterns/README.md` — that block is the only place a sub-file is addressable; leaving it out keeps the file Full-path only. Then run `python3 game/extract.py --write-paths` (the generated table counts files per module).
 
 ---
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior)
 
-`README.md` documents two routes: the **Full Path** (all 24 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) and a curated **Interview-Specific Path** (17 modules). The interview subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths") and `game/app.js` (`STUDY_PATHS.cs_fundamentals.interview`, which drives the game's Study Full/Interview toggle). **Change one, change the other** — same modules, same order. Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+`README.md` documents the **Full Path** (all 24 modules + the dsa_patterns topic = "5-Phase Learning Path", README §4) plus one curated tier: **Senior** (17 modules). **This section has no Principal tier and needs none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero modules, and adding a Principal heading with no members is a false alarm, not a gap. Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that module's own README naming the files each tier takes — which is how `dsa_patterns/` names its 25 playbook files plus the two guides individually, since sub-files have no `STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out, and `README.md` must always be listed. Order is never declared — it comes from `STUDY_ORDER.cs_fundamentals` in `game/app.js`, so a tier is an ordered subset by construction. **There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in `README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->` and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case-study walkthroughs carry no tier markers, so the Case Studies tab shows all of them with no Level filter. The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
@@ -227,8 +228,10 @@ On finishing a module/chunk:
 1. Create `<module_name>/README.md` — 14-section template (root CLAUDE.md); 15 Q&As minimum (18 for DSA/algorithm modules listed above)
 2. Follow CS Fundamentals-specific content rules above (Python-first, concrete numbers, BROKEN→FIX)
 3. Update `README.md` module table AND flip the file's status in the §7 build manifest
-4. Update root `README.md` CS Fundamentals phase table
-5. Update root `CLAUDE.md` CS Fundamentals module count
+4. Add the module dir to `STUDY_ORDER.cs_fundamentals` in `game/app.js` at its phase position — a module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
+5. If it belongs in the Senior cut, write a `<!-- study-paths -->` block in its README with a `senior:` line (no `principal:` line — this section has no Principal tier); then run `python3 game/extract.py --write-paths` to regenerate `README.md`'s Senior table. Never hand-edit that table.
+6. Update root `README.md` CS Fundamentals phase table
+7. Update root `CLAUDE.md` CS Fundamentals module count
 
 ---
 

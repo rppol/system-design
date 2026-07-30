@@ -102,16 +102,28 @@ Experts`, `7. Other Optimization Techniques`), it has no `How It Works` section,
 majority and the conforming ones; `extract.py` strips a leading `A:` either way, so this is
 cosmetic in the reader only.
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents two routes through the section: the **Full Path** (all 53 modules
-= "Recommended Learning Order") and a curated **Interview-Specific Path** (31 modules).
-The interview subset is a **dual-source list** — it lives in both `README.md`
-("## Learning Paths") and `game/app.js` (`STUDY_PATHS.llm.interview`, which drives the
-game's Study Full/Interview toggle). **If you change one, change the other** — they must
-list the same modules in the same order. Non-Q&A narrative only; no `extract.py` re-run needed.
-The README also carries a Knowledge-Question Map and an 8-week Study Plan (interview-readiness
-prose; no toggle impact).
+`README.md` documents the **Full Path** (all 53 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (31 modules) and **Principal** (30). They are
+different cuts, not nested depths — senior is the craft (ship the pipeline, debug the
+eval that lies), principal is the judgment (which architecture at what token cost, what
+failure domains, what you tell a team *not* to do), so the two lists overlap only partly
+and much of principal is material senior never sees. Membership is declared ONCE per
+module, in a `<!-- study-paths -->` block in that module's own README naming the files
+each tier takes — which is also the only way to curate the section's 75 module-level
+**deep-dive sub-files**, since a sub-file has no `STUDY_ORDER` entry of its own and would otherwise be
+dragged in wholesale by its parent. Listing a tier joins it, omitting the tier opts out,
+and `README.md` must always be listed. Order is never declared — it comes from
+`STUDY_ORDER.llm` in `game/app.js`, so a tier is an ordered subset by construction.
+**There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits
+the gitignored `questions/paths.json`, which the game fetches at boot. The tier tables in
+`README.md` sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
+regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
+fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
+from a block in `case_studies/README.md` (15 senior / 11 principal of the 29), driving the
+Level filter on the game's Case Studies tab. The README also carries a Knowledge-Question
+Map and an 8-week Study Plan (prose; no path impact).
 
 ---
 
@@ -174,23 +186,34 @@ Principal case studies must cross-reference at least 4 of these files via relati
 1. Create `<module_name>/README.md` — 14-section template; minimum 15 Q&As (root `CLAUDE.md` hard floor; 15+ for sub-files too)
 2. All code in Python with type hints (3.10+ style); no pseudocode — real executable-shaped code
 3. Update `README.md` (this section's master index): add row to module table, note sub-file count
-4. Update root `README.md` LLM phase table
-5. Update root `CLAUDE.md` LLM module table (Sub-files column)
+4. Add the module dir to `STUDY_ORDER.llm` in `game/app.js` at its learning-path position — a
+   module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
+5. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it belongs
+   to (or none, for Full-path-only), then run `python3 game/extract.py --write-paths` to
+   regenerate `README.md`'s tier tables — never hand-edit them
+6. Update root `README.md` LLM phase table
+7. Update root `CLAUDE.md` LLM module table (Sub-files column)
 
 ## Adding a New LLM Sub-File (deep-dive within an existing topic)
 
 1. Create `<topic>/<subtopic>.md` — 14-section template; minimum 15 Q&As
 2. Update the topic's own `README.md` — add "Deep Dive Files" table at top linking to the new file
-3. Update `README.md` — note sub-file count in table row; add file to Sub-Files Index section
-4. Update root `CLAUDE.md` LLM module table (Sub-files column)
+3. Add the filename to whichever tier lines in the PARENT module's `<!-- study-paths -->`
+   block should carry it — and to neither if it is Full-path depth, which is a legitimate
+   and common choice. No `STUDY_ORDER` entry; the sub-file groups under its parent.
+   Re-run `python3 game/extract.py --write-paths` (the tier tables count files per module)
+4. Update `README.md` — note sub-file count in table row; add file to Sub-Files Index section
+5. Update root `CLAUDE.md` LLM module table (Sub-files column)
 
 ## Adding a New LLM Case Study
 
 1. Write `case_studies/<name>/README.md` or `case_studies/<name>.md` — 11-section principal template
 2. Quality bar: 900–1100 lines; 4+ cross_cutting/ references; executable Python in §4; concrete numbers; broken→fix example; named companies in §6; quantified impact in §9; 10+ Q&As in §11
 3. Update `case_studies/README.md` learning path — add to correct phase, update dependency map, add interview prep row
-4. Update `README.md` case study count and list
-5. Update root `CLAUDE.md` case study list and memory/MEMORY.md if significant
+4. If it belongs in a tier, add its path to that tier's line in the `<!-- study-paths -->`
+   block at the top of `case_studies/README.md` — that block drives the Level filter
+5. Update `README.md` case study count and list
+6. Update root `CLAUDE.md` case study list and memory/MEMORY.md if significant
 
 ---
 

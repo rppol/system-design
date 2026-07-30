@@ -646,3 +646,20 @@ A: The pattern itself does not enforce a valid transition graph — it only guar
 7. **Document the state diagram** — draw a finite state machine diagram and keep it in sync with the code. It's the most important documentation for a state-based system.
 
 8. **Keep Context lean** — the Context should contain only shared data and the current state reference. Avoid putting logic in the Context that belongs in a State.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| Java `enum` with per-constant method bodies | A closed set of states, exhaustive by construction, with zero dependencies and no allocation per transition | The default for any FSM that fits in one JVM and one class |
+| `EnumMap` / `EnumSet` transition tables | The transition function as data rather than code — `EnumMap<State, EnumMap<Event, State>>` | The transition table is large enough that reading it matters more than inlining it |
+| Sealed interfaces + pattern matching for `switch` (Java 21+) | States that carry different data, with the compiler enforcing exhaustiveness | States are not uniform — each one holds its own payload |
+| Spring Statemachine | Declarative states, transitions, guards, actions, hierarchical and parallel regions, plus persistence of the current state | The machine has guards and nested regions, and you want the topology visible in configuration |
+| Apache Pekko (or Akka) FSM | Per-actor state with mailbox-serialized transitions, so no locking is needed | Highly concurrent FSMs, one instance per entity |
+| Temporal | Durable execution: the workflow's state survives process restarts and is replayed deterministically from history | State must outlive the process — multi-day approvals, sagas |
+| AWS Step Functions | A managed state machine defined in JSON/ASL, with per-transition visibility and retries | Orchestration across services, where the operator view matters as much as the code |
+| Camunda / Flowable (BPMN) | A workflow engine with a modelled process, human tasks, and timers | The state machine belongs to business analysts, not only engineers |
+
+The scaling decision is durability, not complexity. An in-memory enum FSM is right up to the moment a transition must survive a crash or be visible to an operator; at that point you are choosing between persisting the state yourself and adopting Temporal, Step Functions, or a BPMN engine that persists it for you. Whichever you pick, **make illegal transitions throw** rather than silently ignore — a state machine that quietly does nothing on an unexpected event is undebuggable.

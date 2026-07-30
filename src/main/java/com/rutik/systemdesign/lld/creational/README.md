@@ -104,7 +104,7 @@ Each decision point resolves one axis of variation — instance count, then copy
 
 ---
 
-## 7. Complexity and Flexibility Trade-offs
+## 7. Tradeoffs — Complexity vs Flexibility
 
 ```mermaid
 quadrantChart
@@ -128,13 +128,25 @@ quadrantChart
 - **Builder** adds complexity (extra class, fluent API) but not runtime variation — the type is known at compile time.
 - **Prototype** complexity scales with object graph depth; flat objects are trivial to copy, deeply nested graphs require manual recursive deep copy.
 
+The same trade stated as costs you can count before writing any code:
+
+| Pattern | What you gain | Structural cost | Runtime cost | What you give up |
+|---------|--------------|-----------------|--------------|------------------|
+| Singleton | Exactly one instance, and a single place to hold shared state | 1 type | None | Testability and per-tenant scoping, unless a DI container owns the instance rather than a static field |
+| Factory Method | The caller names an interface, never a concrete class | 1 creator interface + 1 concrete creator per product | One virtual call | Almost nothing — the cheapest of the five, which is why it is the usual starting point |
+| Abstract Factory | A whole family that cannot be mixed with another family by accident | 1 factory interface + N concrete factories + M product interfaces; a new **product type** edits all N factories | One virtual call | Cheap addition of product types, traded for cheap addition of families |
+| Builder | Readable construction of an object with many optional parts, and validation in one place | 1 nested type, roughly 1 method per field | One extra object per construction | Compile-time detection of a missing required field, unless the generator enforces it (Immutables does; Lombok does not) |
+| Prototype | A new object from an existing configured one, without knowing its concrete class | 1 copy method per type, applied recursively for a deep graph | Proportional to the object graph size | Safety around cycles and shared mutable references — `Object.clone()` is shallow, and a naive recursive deep copy overflows the stack on a cycle |
+
+Two decisions dominate in practice. **Records (Java 16+) removed the need for most small builders and much prototype code** — an immutable carrier of four fields or fewer usually needs neither. And **Singleton is the only pattern here whose modern answer is "do not implement it"**: let the container hold the instance, so it can be replaced in a test and rescoped later without touching the class.
+
 ---
 
 ## 8. Cross-References
 
 | Pattern | See Also |
 |---------|---------|
-| Singleton | `../concurrency_patterns/ThreadSafeSingleton_README.md` — thread-safe implementations |
+| Singleton | `../concurrency_patterns/ThreadSafeSingleton.md` — thread-safe implementations |
 | Builder | `../../java/core_language/` — records as immutable value objects (alternative to Builder) |
 | Factory Method | `../../spring/ioc_container/` — Spring `BeanFactory` as Factory Method at scale |
 | Abstract Factory | `../../spring/spring_boot_autoconfiguration/` — autoconfiguration selects factory implementations |
@@ -260,6 +272,20 @@ public final class QueryTemplate {
 }
 // Usage: QueryTemplate copy = new QueryTemplate(template);
 ```
+
+---
+
+## 11. Technologies and Tools
+
+| Pattern | Java Standard Library | Spring Framework | Third-Party |
+|---------|----------------------|-----------------|-------------|
+| Singleton | `enum` singleton, holder idiom, `Runtime.getRuntime()`, `ProcessHandle.current()` | Default singleton bean scope (one per `ApplicationContext`, not per JVM), `@MockitoBean` for tests | Guice `@Singleton`, Jakarta CDI `@ApplicationScoped`, Guava `Suppliers.memoize` |
+| Factory Method | `List.of`, `Optional.of`, `LocalDate.of`, `Executors.newVirtualThreadPerTaskExecutor()` (Java 21+), `ServiceLoader`, `ThreadFactory` | `@Bean` methods, `FactoryBean<T>`, `ObjectProvider<T>` | SLF4J `LoggerFactory.getLogger` |
+| Abstract Factory | `DocumentBuilderFactory`, `TransformerFactory`, `FileSystems`, `SSLContext`, `EntityManagerFactory` | `BeanFactory`, `@Profile` and `@ConditionalOnProperty` for family selection | Jackson `JsonFactory` / `YAMLFactory`, Testcontainers per-backend fixtures |
+| Builder | `StringBuilder`, `HttpRequest.newBuilder()` (JDK 11+), `Stream.builder()`, `Locale.Builder` | `UriComponentsBuilder`, `MockMvcRequestBuilders` | Lombok `@Builder`, Immutables, AutoValue, protobuf builders, Caffeine and OkHttp builders |
+| Prototype | Copy constructors and static copy factories, records with wither methods | `@Scope("prototype")` — a new bean per lookup, **not** a clone (a standard interview trap) | Commons Lang `SerializationUtils.clone`, Jackson deep copy, Kryo `copy`, MapStruct, Vavr persistent collections |
+
+Two cross-cutting notes. **Records (Java 16+) removed the need for many small builders and most prototype code** — an immutable carrier with four fields or fewer usually needs neither. And the modern Java answer for Singleton is not `getInstance()` at all: let the DI container own the instance, so it can be scoped, replaced in a test, and made per-tenant later without touching the class.
 
 ---
 

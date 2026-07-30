@@ -110,16 +110,20 @@ release.
 
 ## Learning Paths (Full-only for now)
 
-There is **no `STUDY_PATHS.technologies` entry** in `game/app.js` — with only 3
-modules there's still no meaningful interview-vs-full cut to make. The Study view's
-Full/Interview toggle **auto-hides** for any section absent from `STUDY_PATHS` (the
-`book` section is the existing precedent for this — see `game/app.js` and
-`game/CLAUDE.md`), so this is a correct, deliberate omission, not a gap. **Threshold
-to add one:** once this section reaches **4 or more modules**, add an `interview:`
-array to `STUDY_PATHS.technologies` in `game/app.js`, a matching "## Learning Paths"
-cut in `README.md`, and update the toggle-exception language in `game/CLAUDE.md` and
-`game/README.md` — all three in the same commit, per the dual-source rule other
-sections follow.
+No module here carries a `<!-- study-paths -->` block, so `questions/paths.json` has no
+`technologies` key and the section is Full-path only — with 3 modules there is still no
+meaningful cut to make. The Study view's tier tabs **auto-hide** for any section absent
+from the derived paths (`book` is the other such section), so this is a deliberate
+omission, not a gap. **Threshold to add one:** once this section reaches **4 or more
+modules**, decide the tiers — Senior (the craft: operate it, debug it) and Principal (the
+judgment: adopt it or not, at what cost) are different cuts, not nested depths — then
+write a `<!-- study-paths -->` block in each participating module's README naming the
+files it contributes, paste an empty `<!-- study-path-table senior -->` /
+`<!-- /study-path-table -->` marker pair into `README.md` where the table should sit
+(placement is editorial; `--write-paths` only fills blocks that already exist), and run
+`python3 extract.py --write-paths` to generate it. Also update the toggle-exception
+language in `game/CLAUDE.md` and `game/README.md` in the same commit. There is **no
+array in `app.js`** to add.
 
 ---
 

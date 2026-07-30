@@ -622,3 +622,21 @@ A: The idiom declares a `private static class Holder { static final Singleton IN
 7. **Reset the Singleton in tests** using a package-private or reflection-based reset method — or better, inject the instance so it can be mocked.
 
 8. **Do not use Singleton for objects with complex initialization that can fail** — failure inside a static initializer causes `ExceptionInInitializerError`, which is hard to recover from.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `enum` singleton | One instance guaranteed by the JVM, free thread safety, and immunity to both serialization and reflection attacks (Effective Java Item 3) | The single-JVM singleton you actually want, when no lazy initialisation is needed |
+| Initialization-on-demand holder idiom (a private static nested class) | Lazy initialisation with no synchronisation cost, using the JVM's class-initialisation lock | Lazy singletons — it beats double-checked locking on both correctness and simplicity |
+| Spring `@Component` / `@Bean` (default singleton scope) | One instance **per `ApplicationContext`**, injected rather than looked up, and trivially replaceable in tests | Every singleton in a Spring application; the per-context (not per-JVM) scope is a standard interview trap |
+| Jakarta CDI `@ApplicationScoped` | A container-managed single instance with proxy-based injection | Jakarta EE applications |
+| Google Guice `@Singleton` / `Scopes.SINGLETON` | Container-managed single instance outside Spring | Guice-based applications |
+| Guava `Suppliers.memoize(Supplier)` | Thread-safe lazy single computation without writing any locking | A lazily created value rather than a lazily created *class* |
+| `AtomicReference.compareAndSet` | Lock-free lazy init where a rare duplicate construction is acceptable | Cheap-to-construct values in a very hot path |
+| JDK singletons — `Runtime.getRuntime()`, `ProcessHandle.current()`, `Collections.emptyList()` | Concrete examples in the standard library, including the flyweight-style shared empty collections | Naming real instances in an interview |
+| Spring Boot `@MockitoBean` (3.4+) | Replacing a singleton bean in a slice test without static state surgery | Testing code that depends on a singleton — the standard argument for DI over `getInstance()` |
+
+The practical guidance is unchanged whichever mechanism you pick: **prefer a container-managed singleton to a static one**, because a static `getInstance()` is a hidden global dependency that cannot be substituted in a test and cannot be scoped per tenant later. If you must write one by hand, use an enum, and if it must be lazy, use the holder idiom — double-checked locking without `volatile` is broken on any JVM, and with `volatile` it is still more code than the holder for no benefit.

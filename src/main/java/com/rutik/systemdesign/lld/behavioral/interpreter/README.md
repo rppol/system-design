@@ -593,3 +593,23 @@ A: A SQL `WHERE` clause evaluator is a textbook case — `age > 25 AND (status =
 9. **Document operator precedence and associativity:** In expression languages, operators have precedence (multiplication before addition) and associativity (left or right). Document these clearly and ensure the parser constructs the AST correctly.
 
 10. **Use builder or factory methods for common expressions:** For frequently used expression types, provide static factory methods (`Expression.and(left, right)`, `Expression.not(child)`) to make AST construction in tests and application code more readable.
+
+---
+
+## 18. Technologies and Tools
+
+Interpreter is the GoF pattern most often replaced by a tool. Hand-write it only for a small, frozen grammar; past roughly ten production rules a parser generator wins on every axis.
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| ANTLR 4 | A lexer, parser, and generated parse tree from a `.g4` grammar, plus generated visitor and listener base classes | Any real grammar — DSLs, query languages, config formats. This is the default answer |
+| JavaCC / JFlex + CUP | LL(k) and LALR parser generation with grammar embedded in Java actions | Legacy grammars already written for these tools |
+| Spring Expression Language (SpEL) | A ready-made expression interpreter — property access, method invocation, collection projection — via `SpelExpressionParser` and `EvaluationContext` | Expressions inside a Spring application: `@Value`, `@PreAuthorize`, `@Cacheable(condition=...)` |
+| Jakarta Expression Language (EL) 5.0 | The standard `${...}` expression grammar with a pluggable `ELResolver` | Jakarta EE and templating contexts |
+| Apache Commons JEXL 3 | A small scripting/expression engine with a sandbox (`JexlPermissions`) | User-supplied expressions that must be constrained |
+| MVEL 2 | A fast expression language with compiled expressions | Rule conditions evaluated in a hot loop |
+| Drools | A production rule engine — a DSL plus a Rete-based evaluator, working memory, and agenda | Hundreds of business rules that change independently of the code |
+| GraalVM Polyglot (`org.graalvm.polyglot.Context`) | Embedding a full language (JavaScript, Python) with resource limits and host-access control | You genuinely need a general-purpose language, not a DSL |
+| JSONPath / JMESPath | An interpreter for path expressions over JSON documents | Extracting values from JSON with a user-supplied selector |
+
+The security note is not optional: an interpreter over untrusted input is an execution engine for that input. SpEL, JEXL, MVEL, and Graal all expose sandboxing controls (`SimpleEvaluationContext`, `JexlPermissions`, `Context.newBuilder().allowAllAccess(false)`), and every one of them is dangerous with the defaults left wide open. Cap expression length and evaluation time as well as capability.

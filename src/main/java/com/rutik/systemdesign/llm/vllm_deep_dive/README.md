@@ -39,6 +39,9 @@ files this module contributes to each curated path; omit a tier to leave it out
 18. [vLLM v0 vs v1 Architecture](#18-vllm-v0-vs-v1-architecture)
 19. [Performance Numbers](#19-performance-numbers)
 20. [Interview Questions](#20-interview-questions)
+21. [Case Study](#21-case-study)
+22. [Tradeoffs](#22-tradeoffs)
+23. [Technologies and Tools](#23-technologies-and-tools)
 
 ---
 
@@ -2472,3 +2475,59 @@ Watch four signals: (1) `vllm:kv_cache_usage_perc` sustained above 0.9 indicates
 
 **Q: How does prefix caching interact with LoRA adapters in a multi-tenant vLLM deployment?**
 Prefix cache keys fold in the LoRA adapter ID alongside the token content, so two requests using different adapters with identical prompts get separate cache entries — no cross-adapter contamination. (The block hash also folds in multimodal input hashes and an optional per-request cache salt, for the same isolation reason.) The downside is a diluted hit rate in multi-tenant setups: if 10 adapters share traffic equally, each adapter's slice of the block pool is roughly a tenth of it. `--max-loras` bounds GPU-resident adapters and `--max-cpu-loras` bounds the CPU-side cache behind it; an adapter evicted past both has to be re-read from disk or object storage before it can serve, and that cold read — not the CPU-to-GPU copy, which is single-digit milliseconds for a typical rank-16 adapter — is what shows up in tail latency. For high-concurrency multi-LoRA deployments, pre-warm each adapter's prefix cache at startup and size `--max-cpu-loras` above your active adapter count.
+
+---
+
+## 22. Tradeoffs
+
+vLLM's design is a stack of deliberate trades, and the sections above each argue one of them in isolation. This section collects them so the reasoning is visible in one place, then compares vLLM against the engines it is usually weighed against.
+
+### 22.1 The trades inside vLLM
+
+| Decision | What it buys | What it costs | When the cost dominates |
+|----------|-------------|--------------|------------------------|
+| PagedAttention block allocation over contiguous reservation | Near-zero external fragmentation; waste bounded by `block_size - 1` tokens per sequence (at most 15 with the default 16) | A block table indirection on every attention step, and a custom kernel that must be maintained per attention variant | Never in practice for serving; the fragmentation it removes is far larger than the indirection it adds |
+| Continuous batching over static batching | Each finished sequence frees its slot immediately, so GPU utilisation stays high under mixed sequence lengths | Per-request latency now depends on what else is in the batch, so tail latency is harder to reason about | Strict per-request latency SLOs — a slow neighbour is visible in your p99 |
+| Recompute on preemption over swapping KV to host memory | Nothing is held while a request waits, and the recompute usually lands on prefix-cache hits | The preempted request repeats work it already did | Very long prompts with a cold prefix cache, where the re-prefill is a full cold start |
+| Chunked prefill | A long prefill no longer blocks every ongoing decode step for its full duration | Raising `--max-num-batched-tokens` improves TTFT and hurts TPOT; lowering it does the reverse, and the budget covers prefill and decode together | Workloads with both long prompts and tight inter-token latency targets — there is no setting that satisfies both |
+| Prefix caching (APC) | Shared system prompts and multi-turn history are computed once | Cached blocks occupy the same pool the active sequences need; keys fold in the LoRA id and multimodal hashes, so hit rate dilutes across tenants | Many adapters or highly diverse prompts — the cache costs memory and returns few hits |
+| Speculative decoding | Fewer target-model forward passes per token when the drafter is accurate | Drafting cost is paid on every step, accepted or not, so a low acceptance rate makes it a net loss | Unpredictable output distributions; measure acceptance before enabling it |
+| Weight quantization (FP8, AWQ, GPTQ) | A larger model, longer context, or more concurrent sequences on the same GPU | Some quality loss, plus a checkpoint conversion step and kernel support that varies by GPU architecture | Quality-sensitive tasks, or hardware without the matching kernel path |
+| Tensor parallelism | Splits both weights and compute, reducing per-token latency | Two all-reduces per layer, so it wants NVLink or NVSwitch between the ranks | Scaling TP across nodes over Ethernet, where the collectives dominate |
+| Pipeline parallelism | Tolerates a slower interconnect between stages | Pipeline bubbles, and latency that grows with stage count | Low-concurrency serving, where there is not enough in-flight work to fill the pipeline |
+
+### 22.2 vLLM against the alternatives
+
+| Engine | Where it wins | What you give up | Reach for it when |
+|--------|--------------|------------------|-------------------|
+| **vLLM** | Broad model coverage, an OpenAI-compatible server, prefix caching, multi-LoRA, and no per-model build step | Some peak-throughput headroom against a hand-tuned NVIDIA-specific build | General-purpose self-hosted serving — the sensible default |
+| **NVIDIA TensorRT-LLM** | Aggressively optimised kernels and graph-level fusion for NVIDIA hardware | An engine build per model, GPU type, precision, and batch configuration, and NVIDIA-only portability | A fixed model on fixed hardware, where the build cost is amortised over months |
+| **SGLang** | RadixAttention prefix sharing and a programming model built around structured, multi-call generation | A smaller ecosystem and fewer deployment integrations | Agentic or heavily templated workloads with large shared prefixes |
+| **Hugging Face TGI** | Tight integration with the Hub and a simple operational surface | Fewer of the advanced scheduling and caching knobs | You are already standardised on the Hugging Face stack |
+| **llama.cpp / Ollama** | CPU and consumer-GPU inference from GGUF weights, with a trivial install | Datacenter-scale throughput and the continuous-batching scheduler | Local development, edge deployment, or a single-user machine |
+| **Managed APIs** | No GPUs to operate, capacity to absorb bursts, and no model-update work | Per-token cost, data residency constraints, and no control over the model version's lifetime | Traffic too spiky or too small to justify a reserved fleet |
+
+The honest summary for an interview: **vLLM optimises for serving many models well without a build step, and TensorRT-LLM optimises for serving one model maximally on NVIDIA hardware.** Almost every other difference on this table follows from that one.
+
+---
+
+## 23. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| PyTorch | The execution runtime vLLM builds on, including `torch.compile` in the v1 engine | Always present; the version pin matters because kernel wheels are built against it |
+| Hugging Face Transformers, `tokenizers`, and the Hub | Model definitions, weights, tokenizers, and chat templates — vLLM loads directly from a Hub id or a local path | Standard model sourcing; the chat template is what makes `/v1/chat/completions` behave correctly |
+| FlashAttention and FlashInfer | Fused, memory-efficient attention kernels; FlashInfer additionally targets paged KV layouts | Kernel selection is mostly automatic — the reason to know them is that support varies by GPU architecture and attention variant |
+| OpenAI Triton (the kernel language) | The language many of vLLM's kernels are written in, which is why they are portable across GPU generations | Reading or contributing kernels |
+| NCCL | The collective library behind tensor-parallel all-reduces | Multi-GPU deployments; interconnect topology decides your TP degree |
+| Ray | Process placement and coordination for multi-node serving | Any deployment where the model spans more than one machine |
+| llm-compressor, AutoAWQ, GPTQModel | Producing FP8, AWQ, and GPTQ checkpoints that vLLM can load | Quantizing a model before serving; the conversion is offline and one-off |
+| xgrammar, llguidance, and outlines | Constrained-decoding backends behind vLLM's JSON-schema, regex, and grammar-guided output | Structured output; the backend choice affects both grammar coverage and per-token overhead |
+| LMCache | KV-cache offloading and sharing across instances, integrated as a vLLM connector | Prefix reuse that must survive beyond one instance's GPU memory |
+| Prometheus and Grafana | Scraping the server's `/metrics` endpoint for `vllm:kv_cache_usage_perc`, `vllm:num_preemptions_total`, `vllm:num_requests_waiting`, and the TTFT and inter-token latency histograms | Production monitoring — these four are the undersizing signals |
+| Kubernetes with KServe, Ray Serve, or the vLLM production stack | Autoscaling, rollout, and routing around the engine | Anything beyond a single long-lived process |
+| Any OpenAI-compatible SDK | Client access without a bespoke protocol, since vLLM implements the `/v1/completions`, `/v1/chat/completions`, and `/v1/embeddings` shapes | Application integration; also what makes swapping between a managed API and self-hosting a config change |
+| The benchmark scripts in the vLLM repository, and GuideLLM | Throughput, TTFT, and inter-token latency measured against your own prompt-length distribution | Sizing a deployment — vendor numbers are measured on a distribution that is not yours |
+| NVIDIA Nsight Systems and the PyTorch profiler | Kernel-level timelines showing where a step actually goes | Diagnosing a regression that the server metrics show but do not explain |
+
+The tooling advice that saves the most time: **instrument before tuning**. Nearly every vLLM tuning question — chunk size, `--max-num-seqs`, TP degree, whether speculative decoding pays — is answered by the metrics above plus a benchmark on your own traffic shape, and answered wrongly by anything else.

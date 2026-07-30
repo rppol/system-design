@@ -607,3 +607,22 @@ A: CoR is essentially SRP applied to request processing — each handler owns ex
 8. **Favor composition over inheritance** — prefer interface-based handlers over deep class hierarchies.
 9. **Use immutable request objects** — prevents accidental state corruption as the request traverses handlers.
 10. **Test each handler in isolation** with a mock "next" handler to verify both the handle-and-stop and pass-through behaviors.
+
+---
+
+## 18. Technologies and Tools
+
+You almost never write the chain infrastructure yourself in a Java service — every layer already ships one. The work is choosing which chain to hook into and pinning the order.
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `jakarta.servlet.Filter` + `FilterChain` (Jakarta EE 10 / Servlet 6.0) | The canonical CoR in Java web apps: each filter may handle, transform, or call `chain.doFilter()` | Cross-cutting concerns on every HTTP request — correlation IDs, compression, CORS |
+| Spring Security `SecurityFilterChain` | An ordered, container-managed filter chain with a declarative lambda DSL and per-path `securityMatcher` | Authentication and authorization; multiple chains for API vs UI paths |
+| Spring MVC `HandlerInterceptor` | `preHandle` / `postHandle` / `afterCompletion` hooks that run inside the DispatcherServlet, after handler mapping | Concerns that need the resolved handler (method-level annotations, per-controller metrics) |
+| Netty `ChannelPipeline` + `ChannelHandler` | A doubly-linked, dynamically reconfigurable inbound/outbound handler chain per connection | Custom protocol servers where decode, framing, and business handling are separate stages |
+| OkHttp `Interceptor` | Two chains — application interceptors (once per call) and network interceptors (once per redirect/retry) | Outbound HTTP: auth headers, retry, request/response logging |
+| gRPC `ServerInterceptor` / `ClientInterceptor` | Chain around every RPC, with access to metadata and the call lifecycle | Deadline propagation, tracing, auth on gRPC services |
+| Spring Cloud Gateway `GlobalFilter` / `GatewayFilter` | Reactive filter chain with explicit `Ordered` values and a pre/post split around the proxied call | API-gateway concerns: rate limiting, header rewriting, circuit breaking |
+| Logback `Filter` / `TurboFilter` | An accept/deny/neutral chain evaluated before an event is written | Suppressing noisy log events without changing logger levels |
+
+The one rule that matters across all of them: **make the order explicit and test it**. Spring Security orders its filters internally, but any filter you add via `addFilterBefore` / `addFilterAfter` or an `@Order`-annotated `GlobalFilter` is ordered by you, and an authentication filter placed after an authorization filter fails open rather than loudly.

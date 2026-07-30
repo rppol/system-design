@@ -547,3 +547,20 @@ A: For in-process proxies (JDK dynamic proxy or CGLIB), the dispatch itself cost
 5. **Fail-fast in protection proxies**: Check permissions at the beginning of the method before any side effects. Never partially execute a privileged operation and then reject.
 6. **Keep the proxy thin**: The proxy should add one concern (caching OR logging OR access control). Stacking multiple concerns into one proxy class violates SRP — chain multiple proxies or use AOP instead.
 7. **Test the proxy and the real object independently**: Write unit tests for the RealSubject alone, and separate tests that verify the proxy's specific behavior (caching, auth) using a mock RealSubject.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.lang.reflect.Proxy` + `InvocationHandler` | JDK dynamic proxies, generated at runtime — **interfaces only**, no subclassing | The target has an interface and you control the injection point |
+| Byte Buddy | Runtime and build-time subclass generation with a typed DSL; the engine behind Mockito and many agents | Proxying concrete classes, or generating types in a Java agent |
+| CGLIB (repackaged inside `spring-core`) | Subclass-based proxies for classes without interfaces | Spring uses it by default; you rarely call it directly |
+| Spring AOP — `@Transactional`, `@Cacheable`, `@Async`, `@Retryable` | Declarative proxies applied by the container. Spring Boot defaults `spring.aop.proxy-target-class=true`, so you get CGLIB subclass proxies even for beans that implement interfaces | Cross-cutting concerns on Spring beans |
+| Hibernate lazy-loading proxies | A stand-in for an unloaded association, initialised on first access — and the source of `LazyInitializationException` outside a session | JPA associations; the classic virtual-proxy example in production |
+| Mockito and other test doubles | Proxies that record invocations and return stubbed values | Every unit test that isolates a collaborator |
+| Spring `@HttpExchange` + `HttpServiceProxyFactory`, gRPC generated stubs | Remote proxies: an interface call marshalled into a network request | Typed clients for another service |
+| Caffeine or Redis behind a caching proxy | The caching-proxy variant, with eviction and TTL handled for you | Read-heavy access to an expensive real subject |
+
+Three failure modes come up constantly and all three follow from how proxies are built. **Self-invocation**: calling another `@Transactional` method through `this` bypasses the proxy entirely, so no advice runs. **`final` methods and classes**: a CGLIB subclass proxy cannot override them, so the advice silently does nothing. And **`private` methods** are never proxied for the same reason. The fix in every case is to go through the proxy — inject the bean into itself, split the class, or move the annotated method to a collaborator — and to test through the Spring context rather than by calling `new`, which is the only way these show up before production.

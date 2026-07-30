@@ -695,3 +695,20 @@ A: JUnit's test lifecycle is a Template Method: the test runner calls `@BeforeEa
 9. **Document the algorithm contract in the base class:** The base class should clearly document what the template method does, what each step is supposed to accomplish, and what invariants must hold between steps.
 
 10. **Test abstract classes using mock subclasses:** In unit tests, create a minimal concrete subclass (anonymous or test-only) that exposes the abstract methods with spy/mock implementations.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.util.AbstractList` / `AbstractMap` / `AbstractSet` | Skeletal implementations: implement `get` and `size` and inherit everything else (Effective Java Item 20) | Writing a custom collection — never implement `List` from scratch |
+| `java.io.InputStream` / `Reader` | The whole class is a template over the single abstract primitive `read()` | Custom stream sources |
+| `jakarta.servlet.http.HttpServlet` | `service()` is the fixed algorithm that dispatches to the `doGet` / `doPost` hooks you override | Raw servlet-level handlers |
+| Spring `JdbcTemplate`, `TransactionTemplate`, `RedisTemplate`, `KafkaTemplate` | The invariant part — acquire, execute, translate exceptions, release — with your logic passed as a callback rather than a subclass | Resource-bound operations; this is Template Method inverted into a callback, and it composes better |
+| Spring Batch `ItemReader` / `ItemProcessor` / `ItemWriter` | A fixed chunk-oriented step (read n, process, write, commit, repeat) with three slots for your code | Batch jobs — the transaction and restart semantics come free |
+| Spring Security `AbstractAuthenticationProcessingFilter` | A fixed authentication flow with `attemptAuthentication` as the hook, plus success and failure handlers | Custom authentication mechanisms |
+| JUnit 5 lifecycle (`@BeforeEach`, `@AfterEach`, `@TestTemplate`) | The test-execution skeleton with your fixture and assertion steps injected | Every test class you write is already using this pattern |
+| Java 8+ default methods on interfaces | A template method without forcing a base class, so implementors keep their inheritance slot | You want the skeleton but the implementor already extends something |
+
+The decision that shows seniority: **prefer the callback form over the subclass form when the varying step is small**. `JdbcTemplate.query(sql, rowMapper)` and a `TemplateMethod` subclass solve the same problem, but the callback version can be composed, tested in isolation, and used with a lambda, while the subclass version consumes the implementor's only superclass slot and makes the hook untestable without instantiating the whole hierarchy.

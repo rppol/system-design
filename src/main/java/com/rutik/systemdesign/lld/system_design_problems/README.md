@@ -1,7 +1,7 @@
 # LLD System Design Problems
 
 <!-- study-paths
-senior: README.md, ParkingLot_README.md, ElevatorSystem_README.md, VendingMachine_README.md, LRUCache_README.md, RateLimiter_README.md, OnlineBookingSystem_README.md
+senior: README.md, ParkingLot.md, ElevatorSystem.md, VendingMachine.md, LRUCache.md, RateLimiter.md, OnlineBookingSystem.md
 principal: README.md
 files this module contributes to each curated path; omit a tier to leave it out
 -->
@@ -26,18 +26,18 @@ Method. The concurrency column describes the reference implementation, not the p
 
 | Problem | File | Primary Patterns | Has State Machine | Concurrency in the reference code |
 |---------|------|-----------------|-------------------|-------------|
-| Parking Lot | [ParkingLot_README.md](ParkingLot_README.md) | Singleton (lot), Strategy (pricing), Observer (display boards), Simple Factory (vehicle type) | No — a spot is just occupied or free | `synchronized getInstance()` only |
-| Elevator System | [ElevatorSystem_README.md](ElevatorSystem_README.md) | State (STOPPED/MOVING/MAINTENANCE), Strategy (FCFS/SCAN dispatch), Observer (arrival notifications) | Yes | None — single-threaded simulation |
-| Library Management | [LibraryManagement_README.md](LibraryManagement_README.md) | Builder (`Book.Builder`), Iterator (`BookCatalog implements Iterable`), Observer (notifications) | No | None |
-| Chess Game | [ChessGame_README.md](ChessGame_README.md) | Command (move + undo stack), Observer (game events), Singleton (board) | Yes (turn + game-over) | None |
-| Vending Machine | [VendingMachine_README.md](VendingMachine_README.md) | State (IDLE/HAS_MONEY/PRODUCT_SELECTED/DISPENSING/OUT_OF_STOCK), Flyweight (shared state objects) | Yes (primary) | None |
-| ATM | [ATM_README.md](ATM_README.md) | State (IDLE/CARD_INSERTED/PIN_VERIFIED/TRANSACTION/OUT_OF_CASH), Command (transaction + rollback log), Facade | Yes | None |
-| Online Booking System | [OnlineBookingSystem_README.md](OnlineBookingSystem_README.md) | Builder (`Movie`, `Show`), Strategy (5 pricing rules), Observer (email/SMS/loyalty) | Yes (seat status) | `synchronized` booking — single-JVM only |
-| Ride Sharing | [RideSharing_README.md](RideSharing_README.md) | Strategy (fare), Observer (ride status), Simple Factory (vehicle tier), enum transition table (ride lifecycle) | Yes | None |
-| LRU Cache | [LRUCache_README.md](LRUCache_README.md) | Decorator (thread-safe wrapper), Observer (eviction listener) | No | Yes — `ReentrantLock` decorator |
-| Rate Limiter | [RateLimiter_README.md](RateLimiter_README.md) | Strategy (4 algorithms), Simple Factory (algorithm selection) | No | Yes — `ConcurrentHashMap` + per-client monitor |
-| Tic-Tac-Toe | [TicTacToe_README.md](TicTacToe_README.md) | Strategy (AI move selection), enum `GameState` gating | Yes | None |
-| Splitwise | [Splitwise_README.md](Splitwise_README.md) | Strategy (split type), Simple Factory (split-strategy selection) | No | None |
+| Parking Lot | [ParkingLot.md](ParkingLot.md) | Singleton (lot), Strategy (pricing), Observer (display boards), Simple Factory (vehicle type) | No — a spot is just occupied or free | `synchronized getInstance()` only |
+| Elevator System | [ElevatorSystem.md](ElevatorSystem.md) | State (STOPPED/MOVING/MAINTENANCE), Strategy (FCFS/SCAN dispatch), Observer (arrival notifications) | Yes | None — single-threaded simulation |
+| Library Management | [LibraryManagement.md](LibraryManagement.md) | Builder (`Book.Builder`), Iterator (`BookCatalog implements Iterable`), Observer (notifications) | No | None |
+| Chess Game | [ChessGame.md](ChessGame.md) | Command (move + undo stack), Observer (game events), Singleton (board) | Yes (turn + game-over) | None |
+| Vending Machine | [VendingMachine.md](VendingMachine.md) | State (IDLE/HAS_MONEY/PRODUCT_SELECTED/DISPENSING/OUT_OF_STOCK), Flyweight (shared state objects) | Yes (primary) | None |
+| ATM | [ATM.md](ATM.md) | State (IDLE/CARD_INSERTED/PIN_VERIFIED/TRANSACTION/OUT_OF_CASH), Command (transaction + rollback log), Facade | Yes | None |
+| Online Booking System | [OnlineBookingSystem.md](OnlineBookingSystem.md) | Builder (`Movie`, `Show`), Strategy (5 pricing rules), Observer (email/SMS/loyalty) | Yes (seat status) | `synchronized` booking — single-JVM only |
+| Ride Sharing | [RideSharing.md](RideSharing.md) | Strategy (fare), Observer (ride status), Simple Factory (vehicle tier), enum transition table (ride lifecycle) | Yes | None |
+| LRU Cache | [LRUCache.md](LRUCache.md) | Decorator (thread-safe wrapper), Observer (eviction listener) | No | Yes — `ReentrantLock` decorator |
+| Rate Limiter | [RateLimiter.md](RateLimiter.md) | Strategy (4 algorithms), Simple Factory (algorithm selection) | No | Yes — `ConcurrentHashMap` + per-client monitor |
+| Tic-Tac-Toe | [TicTacToe.md](TicTacToe.md) | Strategy (AI move selection), enum `GameState` gating | Yes | None |
+| Splitwise | [Splitwise.md](Splitwise.md) | Strategy (split type), Simple Factory (split-strategy selection) | No | None |
 
 ---
 
@@ -547,6 +547,25 @@ classDiagram
 ```
 
 `map` gives O(1) key lookup while the `head`/`tail` sentinels keep MRU at the front and LRU at `tail.prev`, so `get()` moves a node to the front and a full `put()` evicts `tail.prev` before inserting at the front — `ThreadSafeLRUCache` wraps both operations behind a single `ReentrantLock` without touching either.
+
+---
+
+## 10. Tradeoffs — Design Decisions You Must Defend
+
+An LLD interview is scored on the tradeoffs you volunteer, not on the class diagram. These are the decisions that recur across the twelve problems, with the cost of each side stated rather than implied.
+
+| Decision | Option A | Option B | Choose A when | Choose B when |
+|----------|----------|----------|--------------|--------------|
+| Concurrency control | `synchronized` / `ReentrantLock` around the critical section | `AtomicReference` + `compareAndSet` retry loop | The critical section spans several fields or calls out to other objects | A single reference flips and contention is low enough that retries are rare |
+| Lock granularity | One lock for the whole structure | A lock per partition or per entity | The structure is small and contention is light; correctness is easier to prove | Throughput matters and the partitions are genuinely independent — at the cost of deadlock risk across locks |
+| State representation | `enum` with per-constant behaviour | Sealed interface with a class per state | States are uniform and carry no data | Each state carries different data and you want compiler-checked exhaustiveness |
+| Money | `BigDecimal` with an explicit scale and `RoundingMode` | `double` | Always, in anything that is added, split, or compared | Never in a ledger; only in a throwaway demo, and it should be called out as such |
+| Booking and reservation | Pessimistic lock on the resource row | Optimistic locking with `@Version` and retry | Conflicts are frequent, so retries would thrash | Conflicts are rare, so the happy path should not pay for a lock |
+| Extensibility | Strategy interface plus a registry | A `switch` over an enum | New variants arrive from outside the class or must be added without editing it | The set is closed and small — three cases on one screen beat three files |
+| Notification | Synchronous observer call | Queue plus asynchronous consumer | The caller needs the result and the observer is fast | The observer is slow or may fail independently of the caller |
+| Collection choice | `ConcurrentHashMap` | `HashMap` behind an external lock | Reads dominate and per-entry atomicity is sufficient | A multi-key operation must be atomic as a unit, which `ConcurrentHashMap` cannot give you |
+
+Two of these decide more interviews than the rest. `BigDecimal` versus `double` for money is a correctness question with no legitimate second side, and it is deliberately left as `double` in two of the demo files here as an example of what not to ship. And **compound atomicity** is the trap in nearly every booking or inventory problem: `ConcurrentHashMap` makes each operation atomic, but "check availability then reserve" is two operations, so it needs `compute`, `putIfAbsent`, or a real lock — not two thread-safe calls in sequence.
 
 ---
 

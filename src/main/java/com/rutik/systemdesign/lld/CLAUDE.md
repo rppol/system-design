@@ -57,22 +57,22 @@ LLD describes how individual components are implemented — class relationships,
 
 ### LLD Interview Problems
 
-12 problems, each with a `<Name>_README.md` (problem statement, ASCII class diagram, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`:
+12 problems, each with a `<Name>.md` (problem statement, ASCII class diagram, patterns, tradeoffs) and a runnable `<Name>.java` in `system_design_problems/`:
 
 | Problem | Key Patterns | File |
 |---------|-------------|------|
-| Design a parking lot | Strategy, Factory, State | [ParkingLot](system_design_problems/ParkingLot_README.md) |
-| Design an elevator | State, Observer | [ElevatorSystem](system_design_problems/ElevatorSystem_README.md) |
-| Design a library management system | Builder, Observer, Strategy | [LibraryManagement](system_design_problems/LibraryManagement_README.md) |
-| Design a chess game | Command, Observer, Singleton | [ChessGame](system_design_problems/ChessGame_README.md) |
-| Design a vending machine | State, Strategy, Factory | [VendingMachine](system_design_problems/VendingMachine_README.md) |
-| Design an ATM | State, Command, Facade | [ATM](system_design_problems/ATM_README.md) |
-| Design a movie/flight/hotel booking system | Strategy, Observer, Builder | [OnlineBookingSystem](system_design_problems/OnlineBookingSystem_README.md) |
-| Design a ride-sharing app | Strategy, Observer, Factory, State | [RideSharing](system_design_problems/RideSharing_README.md) |
-| Design an LRU cache (+ LFU variant) | Decorator (thread-safe wrapper) | [LRUCache](system_design_problems/LRUCache_README.md) |
-| Design a rate limiter (LLD angle) | Strategy, Factory | [RateLimiter](system_design_problems/RateLimiter_README.md) |
-| Design tic-tac-toe | Strategy, State | [TicTacToe](system_design_problems/TicTacToe_README.md) |
-| Design Splitwise / expense sharing | Strategy, Factory | [Splitwise](system_design_problems/Splitwise_README.md) |
+| Design a parking lot | Strategy, Factory, State | [ParkingLot](system_design_problems/ParkingLot.md) |
+| Design an elevator | State, Observer | [ElevatorSystem](system_design_problems/ElevatorSystem.md) |
+| Design a library management system | Builder, Observer, Strategy | [LibraryManagement](system_design_problems/LibraryManagement.md) |
+| Design a chess game | Command, Observer, Singleton | [ChessGame](system_design_problems/ChessGame.md) |
+| Design a vending machine | State, Strategy, Factory | [VendingMachine](system_design_problems/VendingMachine.md) |
+| Design an ATM | State, Command, Facade | [ATM](system_design_problems/ATM.md) |
+| Design a movie/flight/hotel booking system | Strategy, Observer, Builder | [OnlineBookingSystem](system_design_problems/OnlineBookingSystem.md) |
+| Design a ride-sharing app | Strategy, Observer, Factory, State | [RideSharing](system_design_problems/RideSharing.md) |
+| Design an LRU cache (+ LFU variant) | Decorator (thread-safe wrapper) | [LRUCache](system_design_problems/LRUCache.md) |
+| Design a rate limiter (LLD angle) | Strategy, Factory | [RateLimiter](system_design_problems/RateLimiter.md) |
+| Design tic-tac-toe | Strategy, State | [TicTacToe](system_design_problems/TicTacToe.md) |
+| Design Splitwise / expense sharing | Strategy, Factory | [Splitwise](system_design_problems/Splitwise.md) |
 
 ---
 
@@ -90,8 +90,8 @@ LLD describes how individual components are implemented — class relationships,
 | `concurrency_patterns/` | `../../java/concurrency/` — ExecutorService internals, ThreadPoolExecutor tuning, deep Java concurrency |
 | `concurrency_patterns/` | `../../java/java_memory_model/` — happens-before, volatile semantics, DCL correctness |
 | `system_design_problems/` | `../../hld/microservices/` — Parking Lot / Elevator at distributed system scale |
-| `system_design_problems/RateLimiter_README.md` | `../../hld/rate_limiting/` — single-JVM token bucket/sliding window here vs. Redis-backed distributed rate limiting at HLD scale |
-| `system_design_problems/LRUCache_README.md` | `../../hld/caching/`, `../../database/database_caching_patterns/` — exact in-process LRU here vs. approximated/sampled LRU eviction in Redis/Memcached at scale |
+| `system_design_problems/RateLimiter.md` | `../../hld/rate_limiting/` — single-JVM token bucket/sliding window here vs. Redis-backed distributed rate limiting at HLD scale |
+| `system_design_problems/LRUCache.md` | `../../hld/caching/`, `../../database/database_caching_patterns/` — exact in-process LRU here vs. approximated/sampled LRU eviction in Redis/Memcached at scale |
 
 ---
 
@@ -140,16 +140,28 @@ pasted into a file and compiled. Two consequences follow, and **neither is a def
 
 ---
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents two routes: the **Full Path** (all 9 modules = "Recommended
-Learning Order") and a curated **Interview-Specific Path** (7 modules). The interview
-subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths")
-and `game/app.js` (`STUDY_PATHS.lld.interview`, which drives the game's Study
-Full/Interview toggle). **Change one, change the other** — same modules, same order.
-Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
-Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle
-impact). The Study Plan pairs each week with a practice problem from
+`README.md` documents the **Full Path** (all 9 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (8 modules) and **Principal** (8). They are different
+cuts, not nested depths — senior is the craft (write the pattern, spot the misuse),
+principal is the judgment (which decomposition at what cost, what you tell a team *not*
+to do), so equal module counts here hide genuinely different *file* lists. Membership is
+declared ONCE per module, in a `<!-- study-paths -->` block in that module's own README
+naming the files each tier takes — and in `lld` that file list is the whole point: a
+category module holds dozens of nested pattern READMEs (`singleton/README.md`,
+`factory_method/README.md`, …), and before the markers existed a tiered category dragged
+in **every** one of them, so 7 modules shipped 62 sub-files, 90% of the section, in a path
+advertised as a cut. Listing a tier joins it, omitting the tier opts out, and `README.md`
+must always be listed. Order is never declared — it comes from `STUDY_ORDER.lld` in
+`game/app.js`, so a tier is an ordered subset by construction. **There is no path array in
+`app.js` to edit**: `extract.py` walks the markers and emits the gitignored
+`questions/paths.json`, which the game fetches at boot. The tier tables in `README.md` sit
+between `<!-- study-path-table <tier> -->` markers and are **generated** — regenerate with
+`python3 game/extract.py --write-paths`; a hand-edited or stale block fails
+`extract.py --strict` and the Pages deploy. There is no Case Studies track here (see
+below). The README also carries a Knowledge-Question Map and a 6-week Study Plan (prose;
+no path impact). The Study Plan pairs each week with a practice problem from
 `system_design_problems/` rather than a `case_studies/` file — LLD's `case_studies/`
 holds only a learning-path index (`case_studies/README.md`: pattern-dependency map +
 interview shortcuts) over the same 12 problems, not separate case-study write-ups.
@@ -162,6 +174,12 @@ interview shortcuts) over the same 12 problems, not separate case-study write-up
 4. Update the relevant **category** `README.md` (e.g., `behavioral/README.md`) — add a row to the pattern catalogue table
 5. Update the **master** `README.md` (the LLD master index) — add a row to the appropriate section table
 6. Add to the `pattern_comparisons/` file if it overlaps with other patterns
+7. **No `STUDY_ORDER` entry** — a nested `<category>/<pattern>/README.md` folds into its
+   parent category module (ids stay 2 segments; a 3-segment key is fatal under `--strict`).
+   If a tier should carry the pattern, add `<pattern_name>/README.md` to that tier's line
+   in the CATEGORY README's `<!-- study-paths -->` block; naming no tier leaves it
+   Full-path only, which is the right call for most patterns. Then run
+   `python3 game/extract.py --write-paths` to regenerate the master README's tier tables.
 
 ---
 

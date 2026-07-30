@@ -354,3 +354,21 @@ Proxy, Decorator-vs-Proxy, and Adapter-vs-Bridge come up most, because each need
 - **Facade**: keep the Facade thin. If it starts accumulating business logic, it has become a service layer, not a Facade. One Facade per client archetype, not one Facade for all.
 - **Flyweight**: make intrinsic state immutable (`final` fields). Use a `ConcurrentHashMap` as the factory cache for thread safety. Profile before applying — premature Flyweight adds complexity without measurable gain.
 - **Proxy**: know which proxy you actually get — Spring Boot defaults `spring.aop.proxy-target-class=true`, so CGLIB is used even for beans that implement interfaces; set it to `false` only if you deliberately want JDK interface proxies everywhere. Either way, never mark a proxied method or class `final`. Document all proxied methods and test them through the Spring context, not via `new`, to catch self-invocation and final-method failures early.
+
+---
+
+## 14. Tradeoffs — What Each Structural Pattern Costs
+
+Section 10 prices these patterns in CPU and memory. This section prices them in the currency that actually decides whether to use one: comprehension, coupling, and the failure mode you inherit. Every structural pattern inserts an object between a caller and the thing it wanted, and that indirection is the cost.
+
+| Pattern | What you gain | What you give up | The failure it causes when misapplied |
+|---------|--------------|------------------|--------------------------------------|
+| Adapter | An incompatible type usable behind the interface you already depend on | A translation layer that must be kept correct as either side evolves | A leaky adapter — `Arrays.asList().add()` throwing `UnsupportedOperationException`, or the adaptee's exception types escaping unchanged |
+| Bridge | Two dimensions vary independently instead of multiplying into N x M subclasses | Every operation must fit the implementor interface, and one more indirection on every call | A capability only one implementation has, leaking back out through `instanceof` |
+| Composite | Leaves and containers handled by one piece of client code | Either leaves throw on child operations (transparency) or callers test the node type (safety) | Unbounded recursion on a deep or cyclic tree — a `StackOverflowError`, not a theory |
+| Decorator | Behaviour added at runtime without subclass explosion | Debugging through a stack of wrappers, and an order that silently changes semantics | Retry inside a circuit breaker burning the breaker's window on every attempt |
+| Facade | One call replaces a subsystem's ceremony | A bottleneck the moment a caller needs something the facade did not expose | A facade that grows business logic and quietly becomes a second service layer |
+| Flyweight | Large memory savings when duplication is genuine | Mutable state must be split into intrinsic and extrinsic, which complicates every call site | Shared intrinsic state that turned out to be mutable, corrupting every context at once |
+| Proxy | Access control, laziness, caching, and remoting added without touching the subject | Behaviour that no longer matches the source you are reading | Self-invocation bypassing the proxy, so `@Transactional` silently does nothing |
+
+Two rules generalise across the table. **Wrappers are invisible in a stack trace but not in a debugger** — a five-deep decorator or proxy chain turns a one-line question into a stepping exercise, so keep the stack shallow and assemble it in one factory rather than at each call site. And **the transparency-versus-safety choice in Composite is the same choice Adapter and Proxy face**: a uniform interface makes clients simpler and pushes the failure to runtime, while a precise interface makes clients branch and catches the error at compile time. Pick deliberately and write down which one you picked.

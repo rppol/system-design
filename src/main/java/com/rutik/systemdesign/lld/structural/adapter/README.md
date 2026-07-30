@@ -529,3 +529,21 @@ A: In almost all cases, no — the cost is one additional virtual method call pl
 8. **Document the translation** — comment why each translation step exists, especially non-obvious type conversions.
 9. **Use dependency injection** — inject the adaptee into the adapter rather than constructing it internally, for testability.
 10. **Consider using Factory or Registry** — when you have many adapters for different providers, use a factory to select the right adapter at runtime.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.io.InputStreamReader` / `OutputStreamWriter` | The JDK's canonical adapter: a byte stream presented as a character stream, with the charset as the conversion rule | Any byte-to-text boundary; the textbook example to name in an interview |
+| `java.util.Arrays.asList(array)` | An array adapted to the `List` interface — fixed size, and writes pass through to the backing array | Reading an array through collection APIs; note it is a **view**, not a copy |
+| `java.util.Collections.enumeration` / `list` | Bidirectional adaptation between the legacy `Enumeration` and `Iterator` / `List` | Bridging old APIs that still return `Enumeration` |
+| `java.util.concurrent.Executors.callable(Runnable)` | A `Runnable` adapted to `Callable<Object>` so it can be submitted where a result type is required | Mixing task shapes in one executor API |
+| MapStruct | Compile-time generated adapters between entity and DTO types, with unmapped properties reported at build time | DTO conversion at scale — reflection-free and checked by the compiler |
+| SLF4J bindings (`logback-classic`, `log4j-slf4j2-impl`, `slf4j-simple`) and `jul-to-slf4j` | Adapters from one logging API to another backend, chosen at deploy time by what is on the classpath | Unifying logging across libraries that each picked a different API |
+| Micrometer registry implementations (`PrometheusMeterRegistry`, `OtlpMeterRegistry`) | One instrumentation API adapted to each monitoring backend's wire format | Instrumenting once and exporting anywhere |
+| Spring `HttpMessageConverter` and `HandlerAdapter` | Adaptation between HTTP bodies and Java types, and between the DispatcherServlet and heterogeneous handler kinds | Extending Spring MVC to a new content type or handler style |
+| `jakarta.xml.bind.annotation.adapters.XmlAdapter` | A declarative adapter between a bound Java type and its XML representation | JAXB marshalling of types the framework cannot map directly |
+
+Prefer the **object adapter** (delegation) over the class adapter (inheritance) in Java: it works with `final` adaptees, allows one adapter to wrap several adaptees, and keeps the adaptee's methods out of the adapter's public surface — and Java's single inheritance often makes the class adapter impossible anyway. The recurring bug is the leaky adapter: `Arrays.asList` throwing `UnsupportedOperationException` on `add`, or an adapter that translates the happy path but lets the adaptee's exception types escape unchanged.

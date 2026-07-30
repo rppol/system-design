@@ -179,6 +179,44 @@ Ask these questions during code review:
 
 ---
 
+## 8. Tradeoffs — The Cost of Each Principle
+
+SOLID is a set of heuristics, not laws, and each one has a failure mode on the far side of it. Interviewers separate candidates who have read the acronym from candidates who have paid for it by asking where each principle stops helping.
+
+| Principle | What it buys | What over-applying it costs | The symptom |
+|-----------|-------------|----------------------------|-------------|
+| SRP | Each class has one reason to change, so unrelated work stops colliding | Class explosion — a single behaviour spread across five files with no single place to read it | Implementing one feature means opening seven classes and none of them tells the whole story |
+| OCP | New behaviour arrives as new code rather than edits to tested code | Extension points built for variation that never arrives; every one is permanent API surface | A strategy interface with exactly one implementation, three years old |
+| LSP | Any subtype can be substituted without the caller checking | Deep hierarchies contorted to preserve substitutability instead of switching to composition | A base class whose contract is a list of things subclasses must not do |
+| ISP | Clients depend only on the methods they use | Interface proliferation — many one-method interfaces the reader must reassemble mentally | Six interfaces implemented by the same one class |
+| DIP | High-level policy is testable and independent of infrastructure | An interface per class and a wiring layer that hides what actually runs | Navigate-to-definition always lands on the interface |
+
+The conflicts are as important as the principles. **SRP versus cohesion**: splitting until every class has one reason to change eventually separates code that always changes together, which raises the cost of every feature. **OCP versus YAGNI**: an extension point is speculative flexibility until a second implementation exists — the honest rule is to edit the class the first time and extract the seam the second. **DIP versus navigability**: an interface with one implementation buys testability and costs readability, so it is worth it at a boundary you actually stub and not worth it inside a package.
+
+The practical stance to state in an interview: apply SRP and DIP at module and boundary level where the payoff is real, and apply OCP reactively, when a second variant proves the axis of change rather than when you guess it.
+
+---
+
+## 11. Technologies and Tools
+
+SOLID violations are structural, which means much of the review can be automated. That matters because the principles are otherwise enforced by opinion, and opinion does not survive a deadline.
+
+| Tool | Principle it helps enforce | How to use it |
+|------|---------------------------|---------------|
+| ArchUnit | DIP and SRP at the architectural level — no layer skipping, no concrete infrastructure types referenced from domain packages, no package cycles | Written as ordinary JUnit tests, so violations fail the build like any other test |
+| SonarQube / SonarLint | SRP via cognitive complexity, class and method length, and too-many-fields rules | Gate on new code only; also flags the `UnsupportedOperationException` throw that usually signals an LSP or ISP break |
+| Checkstyle | SRP via hard ceilings on class length, method length, and parameter count | The cheapest first gate; purely syntactic |
+| PMD | ISP and SRP via excessive-public-count, coupling-between-objects, and god-class rules | Tune the ruleset; the defaults are noisy on real codebases |
+| Error Prone | LSP-adjacent contract bugs — missing `@Override`, inconsistent `equals` and `hashCode`, and mutability escapes | Runs inside javac, so findings are compile errors |
+| Spring, Guice, or Jakarta CDI | DIP in practice — constructor injection makes the abstraction the only thing a class names | Prefer constructor injection; field injection hides the dependency and defeats the point |
+| Mockito with constructor injection | DIP verification — if a class is hard to test without a real database, it depends on a concrete detail | Difficulty writing the test is the signal, before any tool reports anything |
+| jQAssistant or Structure101 | Dependency direction and cycles across packages and modules | Periodic architecture review rather than per-commit |
+| IntelliJ IDEA refactorings — "Extract Interface", "Extract Delegate", "Replace inheritance with delegation" | Mechanical application of ISP, SRP, and composition-over-inheritance | The fastest route from a review comment to a safe change |
+
+The limitation is the same one every static rule has: **a tool sees shape, not responsibility**. A 300-line class can be perfectly cohesive and a 30-line one can have three reasons to change. Use the reports to find candidates for a human to read, and keep suppressions with a written reason instead of relaxing the threshold until the build is quiet.
+
+---
+
 ## 12. Interview Q&As
 
 Questions are ordered by interview frequency: traps and gotchas first, then internal mechanics, then edge cases.

@@ -56,15 +56,24 @@ NVIDIA CUDA is the default platform in worked examples; exactly one module (`gpu
 
 ---
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior)
 
-`README.md` documents two routes: the **Full Path** (all 24 modules = "6-Phase Learning
-Path") and a curated **Interview-Specific Path** (16 modules). The interview subset is a
-**dual-source list** — it lives in both `README.md` ("## Learning Paths") and
-`game/app.js` (`STUDY_PATHS.cuda.interview`, which drives the game's Study
-Full/Interview toggle). **Change one, change the other** — same modules, same order.
-Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
-Knowledge-Question Map and a 5-week Study Plan (interview-readiness prose; no toggle impact).
+`README.md` documents the **Full Path** (all 24 modules = "6-Phase Learning Path") plus
+one curated tier: **Senior** (16 modules). **This section has no Principal tier and needs
+none** — no module declares one, `check_wiring()` skips a tier whose markers declare zero
+modules, and adding a Principal heading with no members is a false alarm, not a gap.
+Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that module's
+own README naming the files each tier takes; listing a tier joins it, omitting the tier
+opts out, and `README.md` must always be listed. Order is never declared — it comes from
+`STUDY_ORDER.cuda` in `game/app.js`, so a tier is an ordered subset by construction.
+**There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits
+the gitignored `questions/paths.json`, which the game fetches at boot. The Senior table in
+`README.md` sits between `<!-- study-path-table senior -->` / `<!-- /study-path-table -->`
+and is **generated** — regenerate with `python3 game/extract.py --write-paths`; a
+hand-edited or stale block fails `extract.py --strict` and the Pages deploy. The 6 case
+studies carry no tier markers, so the Case Studies tab shows all of them with no Level
+filter. The README also carries a Knowledge-Question Map and a 5-week Study Plan (prose;
+no path impact).
 
 Every module dir MUST also appear in `STUDY_ORDER.cuda` in `game/app.js` at its
 learning-path position, or it sorts to the end of the Study browser.
@@ -138,7 +147,7 @@ When a module would restate one of the above, link it and add only the kernel-le
 1. Create `<module_name>/README.md` — 14-section template; 15 Q&As minimum (18 for the deep modules listed above), ordered by interview frequency (gotchas first). **Prefix every §12 question with `Q: ` inside the bold** (`**Q: <question>?**`) — repo-wide convention (root `CLAUDE.md` → Interview Q&A Rules); `extract.py` strips the label for the MCQ bank.
 2. Follow the CUDA-specific content rules above (dual-language code, concrete numbers, BROKEN→FIX, diagram policy).
 3. Update `README.md` §3 module table AND flip the file's status in the §8 build manifest.
-4. Add the module dir to `STUDY_ORDER.cuda` in `game/app.js` at its learning-path position (and to `STUDY_PATHS.cuda.interview` if it belongs in the interview cut — keep in sync with README).
+4. Add the module dir to `STUDY_ORDER.cuda` in `game/app.js` at its learning-path position. If it belongs in the Senior cut, write a `<!-- study-paths -->` block in its README with a `senior:` line (no `principal:` line — this section has no Principal tier), then run `python3 game/extract.py --write-paths` to regenerate `README.md`'s Senior table. Never hand-edit that table; a stale block fails `--strict`.
 5. Update root `README.md` CUDA phase table and root `CLAUDE.md` CUDA module count.
 6. Re-run `python3 game/extract.py`; confirm `questions/cuda.json` grows.
 

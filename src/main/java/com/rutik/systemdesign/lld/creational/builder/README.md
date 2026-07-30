@@ -831,3 +831,20 @@ A: An inherited fluent setter returns the *parent* builder's static type, so the
 9. **Static factory methods on the Builder for common configurations** — `HttpRequest.Builder.defaultGet(url)` returns a pre-configured Builder that callers can further customize before calling `build()`.
 
 10. **Keep the Builder inner and static** — static means no outer-class instance is needed. Inner (nested) means it can access the Product's private constructor.
+
+---
+
+## 19. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| Lombok `@Builder` / `@SuperBuilder` / `@Builder.Default` | A generated builder from annotations, with `@SuperBuilder` handling inheritance and `@Builder.Default` preserving field initialisers | Fastest way to add a builder to an existing class; the tradeoff is an annotation processor in the build |
+| Immutables (`@Value.Immutable`) | A generated immutable class plus builder, with **mandatory attributes checked at build time** — `build()` throws listing every missing required field | Value types where "you forgot to set `amount`" must fail loudly rather than produce a null |
+| Google AutoValue + `@AutoValue.Builder` | Generated `equals` / `hashCode` / `toString` and a builder, with no runtime dependency | Codebases that avoid Lombok's bytecode manipulation |
+| Java records (16+) | Immutability, `equals` / `hashCode` / `toString` and a compact constructor for validation — no builder at all | Small carriers, roughly four fields or fewer, where positional construction still reads clearly |
+| `java.net.http.HttpRequest.newBuilder()` / `HttpClient.newBuilder()` (JDK 11+) | The JDK's own modern builders, including `copy()` on a request builder | Naming a current JDK example instead of the legacy ones |
+| `java.util.stream.Stream.builder()`, `Locale.Builder`, `Calendar.Builder` | Builders inside the standard library for objects with many optional parts | JDK-native construction |
+| Protocol Buffers generated builders | A builder per message with `mergeFrom`, field presence tracking, and `build()` producing an immutable message | Anything speaking protobuf or gRPC |
+| Spring `UriComponentsBuilder`, Caffeine `Caffeine.newBuilder()`, OkHttp `OkHttpClient.Builder`, Resilience4j `RetryConfig.custom()` | Widely used library builders worth recognising by sight | Everyday framework configuration |
+
+Two judgement calls separate a good answer from a rote one. First, **a builder is not free**: it doubles the surface of the class and hides missing-field errors until runtime unless the tool checks them, which is exactly why Immutables' compile-time mandatory attributes are worth the extra dependency. Second, **records replaced most small builders** — reach for a builder when there are many optional parameters or the object is assembled across several call sites, not merely because the class is immutable (Effective Java Item 2).

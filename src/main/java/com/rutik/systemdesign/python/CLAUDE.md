@@ -44,15 +44,24 @@ Build manifest / status tracker: `README.md` §7 — check Batch Plan before sta
 
 ---
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents two routes: the **Full Path** (all 21 modules = "3-Phase Learning
-Path") and a curated **Interview-Specific Path** (13 modules). The interview subset is a
-**dual-source list** — it lives in both `README.md` ("## Learning Paths") and
-`game/app.js` (`STUDY_PATHS.python.interview`, which drives the game's Study
-Full/Interview toggle). **Change one, change the other** — same modules, same order.
-Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
-Knowledge-Question Map and a 3-week Study Plan (interview-readiness prose; no toggle impact).
+`README.md` documents the **Full Path** (all 21 modules = "3-Phase Learning Path") plus
+two curated tiers: **Senior** (16 modules) and **Principal** (7). They are different
+cuts, not nested depths — senior is the craft, principal is the judgment (which runtime
+model at what cost, what you tell a team *not* to do), so principal is the far smaller
+list here and much of it is material senior never sees. Membership is declared ONCE per
+module, in a `<!-- study-paths -->` block in that module's own README naming the files
+each tier takes; listing a tier joins it, omitting the tier opts out, and `README.md`
+must always be listed. Order is never declared — it comes from `STUDY_ORDER.python` in
+`game/app.js`, so a tier is an ordered subset by construction. **There is no path array
+in `app.js` to edit**: `extract.py` walks the markers and emits the gitignored
+`questions/paths.json`, which the game fetches at boot. The tier tables in `README.md`
+sit between `<!-- study-path-table <tier> -->` markers and are **generated** — regenerate
+with `python3 game/extract.py --write-paths`; a hand-edited or stale block fails
+`extract.py --strict` and the Pages deploy. This section has no case studies, so there is
+no Case Studies track. The README also carries a Knowledge-Question Map and a 3-week
+Study Plan (prose; no path impact).
 
 ---
 
@@ -90,8 +99,13 @@ Format: `[3.11]` inline or `Added in Python 3.11`.
 3. Add version tags for features introduced in specific Python versions
 4. Meet the Q&A minimum for the module's depth level
 5. Flip the module's Status from `pending` → `done` in `README.md` §7 tracker
-6. Update root `README.md` Phase table under the Python section
-7. Update root `CLAUDE.md` Python module table
+6. Add the module dir to `STUDY_ORDER.python` in `game/app.js` at its phase position — a
+   module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
+7. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it
+   belongs to (or none, for Full-path-only), then run `python3 game/extract.py --write-paths`
+   to regenerate `README.md`'s tier tables
+8. Update root `README.md` Phase table under the Python section
+9. Update root `CLAUDE.md` Python module table
 
 ---
 

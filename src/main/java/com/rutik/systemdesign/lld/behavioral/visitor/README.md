@@ -552,3 +552,19 @@ A: A file-system traversal tool: `FileSystemElement` (interface with `accept(Vis
 7. **Separate visitor interface from traversal:** The visitor handles per-element logic; the object structure or a separate traverser handles the traversal order. Don't mix these concerns.
 
 8. **Name visitors after the operation:** `TaxCalculatorVisitor`, `HtmlRenderVisitor`, `TypeCheckVisitor` — the name should describe the operation, not the elements it visits.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| Sealed interfaces + pattern matching for `switch` (Java 21+) | Exhaustive dispatch over a closed hierarchy, checked by the compiler, with no `accept` method and no visitor interface | New Java code — this is the modern replacement for double dispatch and should be your first consideration |
+| `java.nio.file.FileVisitor` / `SimpleFileVisitor` + `Files.walkFileTree` | A visitor over a directory tree with pre/post directory hooks and a `FileVisitResult` to prune or terminate the walk | Filesystem traversal with per-node logic |
+| `javax.lang.model.element.ElementVisitor` / `TypeVisitor` | Visitors over the Java language model during annotation processing, with versioned `AbstractElementVisitor` base classes | Writing an annotation processor |
+| ASM `ClassVisitor` / `MethodVisitor` / `FieldVisitor` | Streaming visitors over bytecode, chainable so each visitor transforms and delegates | Bytecode inspection or instrumentation |
+| JavaParser `VoidVisitorAdapter` / `GenericVisitorAdapter` | Visitors over a Java source AST with adapters that default to recursing | Source-level analysis and codemods |
+| ANTLR 4 generated `BaseVisitor` / `BaseListener` | Visitor (you control recursion, returns a value) and listener (the walker recurses, you react) over a parse tree | Anything built on an ANTLR grammar |
+| Jackson `JsonNode` traversal | A concrete object structure over which visitor-shaped operations are written | Ad-hoc structural operations on JSON |
+
+The tradeoff Visitor is famous for still holds and is the interview answer: it makes **adding an operation** cheap and **adding a node type** expensive, because every new element forces a new method on every visitor. Sealed hierarchies plus `switch` patterns keep the same benefit — the compiler now flags every non-exhaustive switch when you add a subtype — while removing the `accept` boilerplate from the element classes, which is why new code rarely needs the classical form.

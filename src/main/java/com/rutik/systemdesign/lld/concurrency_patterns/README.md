@@ -1,7 +1,7 @@
 # Concurrency Patterns
 
 <!-- study-paths
-senior: README.md, ThreadSafeSingleton_README.md, ProducerConsumer_README.md, ReadWriteLock_README.md, ThreadPool_README.md
+senior: README.md, ThreadSafeSingleton.md, ProducerConsumer.md, ReadWriteLock.md, ThreadPool.md
 files this module contributes to each curated path; omit a tier to leave it out
 -->
 Low-level design patterns that address coordination between threads sharing a JVM process. Each pattern targets a specific coordination failure mode.
@@ -12,10 +12,10 @@ Low-level design patterns that address coordination between threads sharing a JV
 
 | Pattern | File | Problem Solved | Primary Mechanism |
 |---------|------|---------------|-------------------|
-| Thread-Safe Singleton | [ThreadSafeSingleton_README.md](ThreadSafeSingleton_README.md) | One shared instance across all threads | DCL + volatile, enum, Holder idiom |
-| Producer-Consumer | [ProducerConsumer_README.md](ProducerConsumer_README.md) | Decouple production from consumption via bounded buffer | `BlockingQueue`, `wait()`/`notifyAll()` |
-| Read-Write Lock | [ReadWriteLock_README.md](ReadWriteLock_README.md) | Allow concurrent reads, exclusive writes | `ReentrantReadWriteLock`, `StampedLock` |
-| Thread Pool | [ThreadPool_README.md](ThreadPool_README.md) | Reuse worker threads across many tasks | `ExecutorService`, `ThreadPoolExecutor` |
+| Thread-Safe Singleton | [ThreadSafeSingleton.md](ThreadSafeSingleton.md) | One shared instance across all threads | DCL + volatile, enum, Holder idiom |
+| Producer-Consumer | [ProducerConsumer.md](ProducerConsumer.md) | Decouple production from consumption via bounded buffer | `BlockingQueue`, `wait()`/`notifyAll()` |
+| Read-Write Lock | [ReadWriteLock.md](ReadWriteLock.md) | Allow concurrent reads, exclusive writes | `ReentrantReadWriteLock`, `StampedLock` |
+| Thread Pool | [ThreadPool.md](ThreadPool.md) | Reuse worker threads across many tasks | `ExecutorService`, `ThreadPoolExecutor` |
 
 ---
 
@@ -83,7 +83,7 @@ These are the most frequent mistakes found in production code reviews. Each is a
 
 **Locking too narrowly** — two separate `synchronized` blocks that together form one logical atomic operation. Another thread can interleave between the two blocks and observe an inconsistent intermediate state.
 
-**DCL without volatile** — double-checked locking where the `instance` field is not `volatile`. Partial construction is visible: a second thread can observe a non-null reference to an incompletely-constructed object. See `ThreadSafeSingleton_README.md` for the broken and fixed versions.
+**DCL without volatile** — double-checked locking where the `instance` field is not `volatile`. Partial construction is visible: a second thread can observe a non-null reference to an incompletely-constructed object. See `ThreadSafeSingleton.md` for the broken and fixed versions.
 
 **`notify()` instead of `notifyAll()`** — with multiple consumers, `notify()` may wake a producer instead of a consumer, deadlocking the system. Use `notifyAll()` and re-check the condition in a `while` loop, not an `if`. `BlockingQueue` handles this internally.
 
@@ -415,3 +415,22 @@ Look for: (1) mutable shared fields accessed from multiple threads without synch
 When a virtual thread enters a `synchronized` block, it is pinned to its carrier platform thread for the duration of the block. If the virtual thread then blocks on I/O inside the `synchronized` block, the carrier platform thread is also blocked — eliminating the scalability benefit of virtual threads. On Java 21, this means a `synchronized`-heavy codebase does not benefit from `newVirtualThreadPerTaskExecutor()`. Fix: replace `synchronized` with `ReentrantLock`. `ReentrantLock.lock()`/`unlock()` allows the virtual thread to unmount from the carrier while waiting, freeing the carrier to run other virtual threads.
 
 ---
+
+---
+
+## 13. Tradeoffs — What Each Concurrency Pattern Costs
+
+Concurrency patterns are chosen by failure mode, not by elegance, so every one of them trades a class of bug for a different class of bug. State the cost, and state which symptom tells you the choice was wrong.
+
+| Pattern / Mechanism | What you gain | What it costs | How the wrong choice shows up |
+|--------------------|--------------|--------------|------------------------------|
+| Thread-safe singleton (enum or holder idiom) | Correct lazy initialisation with no locking on the hot path | Nothing beyond one extra class for the holder — this is the cheap option | Double-checked locking without `volatile` publishes a partially constructed object; the enum and holder forms cannot have this bug |
+| Producer-consumer with a bounded `BlockingQueue` | Backpressure: a fast producer is throttled instead of exhausting the heap | Producer threads block, so the pressure moves upstream and must be handled there | An unbounded queue instead: latency climbs, then `OutOfMemoryError` under a burst |
+| Thread pool (`ThreadPoolExecutor`) | Bounded parallelism and reused threads instead of one thread per task | Every parameter is a tuning decision, and the rejection policy is a design choice | A saturated pool with tasks waiting on results from the same pool — deadlock at exactly the wrong moment |
+| Virtual threads (Java 21+) | Blocking code that scales to hundreds of thousands of concurrent tasks | Pooling them is pointless, and `synchronized` pins a virtual thread to its carrier | Throughput no better than platform threads because the hot path is inside `synchronized` |
+| `ReentrantLock` over `synchronized` | `tryLock` with timeout, interruptibility, fairness, and no carrier pinning | `unlock()` must be in a `finally` block — the compiler will not do it for you | An exception on the happy path leaves the lock held forever, and every subsequent caller hangs |
+| Read-write lock (`ReentrantReadWriteLock` or `StampedLock`) | Concurrent readers when reads dominate | Writer starvation without fairness, and more expensive than a plain lock when writes are frequent | A read-heavy assumption that was wrong: throughput below what one `synchronized` block would have given |
+| Immutability and confinement | No synchronisation needed at all, because there is nothing to race on | Allocation per change, and the whole object graph must be immutable to count | A `final` field pointing at a mutable collection — immutable in name only |
+| Lock-free CAS (`AtomicReference`, `LongAdder`) | No blocking, no deadlock, and excellent throughput at low contention | Retry loops that live-lock under heavy contention, and code that is hard to prove correct | CPU pinned at 100% with throughput falling as contention rises |
+
+The single most useful framing: **locks trade throughput for simplicity, and lock-free code trades simplicity for throughput** — and immutability escapes the trade entirely, at the cost of allocation. Reach for immutability and thread confinement first, a plain lock second, and CAS only where a profiler has shown the lock is the bottleneck. Virtual threads change the arithmetic of the first choice but not of the last: they make blocking cheap, so the classic reason to write lock-free asynchronous code largely disappears, while the cost of getting lock-free code wrong does not.

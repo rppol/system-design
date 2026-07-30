@@ -728,3 +728,21 @@ A: A serializable Command must capture everything needed to execute remotely as 
 8. **Thread safety** — if commands are shared across threads, make them immutable after creation.
 9. **Log commands before execution** — for audit trails, log before `execute()`, not after (in case execute fails).
 10. **Design `undo()` defensively** — `undo()` can be called when the system is in an unexpected state; validate before reversing.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.lang.Runnable` / `java.util.concurrent.Callable<V>` | The JDK's Command interface — a parameterless unit of work, with `Callable` adding a return value and checked exceptions | Any in-process deferred execution; the default choice before writing a custom `Command` interface |
+| `ExecutorService` (including `Executors.newVirtualThreadPerTaskExecutor()`, Java 21+) | The Invoker: queues Commands, runs them on a pool, returns a `Future` handle | Asynchronous or throttled command execution inside one JVM |
+| `javax.swing.undo.UndoManager` + `UndoableEdit` | A ready-made undo/redo stack with edit coalescing (`addEdit` / `replaceEdit`) | Desktop editors — do not hand-roll the caretaker |
+| Quartz `Job` + `JobDetail` + `JobDataMap` | A Command with serializable parameters, durable storage, and cron/misfire scheduling | Scheduled or persisted commands that must survive a restart |
+| Spring `@Async` + `ApplicationEventPublisher` | Method-level command dispatch onto a `TaskExecutor` without a Command class per operation | Fire-and-forget side effects inside a Spring application |
+| Kafka / RabbitMQ / AWS SQS | The Command serialized and sent across a process boundary; the broker is the queue, the consumer is the receiver | Commands that must be durable, retried, or handled by another service |
+| Axon Framework | An explicit command bus with `@CommandHandler`, routing, and an event-sourced aggregate model | CQRS systems where commands, events, and aggregates are first-class |
+| Spring Batch `Tasklet` / `Step` | A restartable Command with transaction boundaries and execution metadata in the job repository | Batch operations that need checkpointing and rerun-from-failure |
+| `java.util.function.Consumer` / `Supplier` | A lambda as a Command when there is no undo and no metadata to carry | Small, stateless commands — avoids a class per operation |
+
+Two practical notes. Undo is the feature that forces a real `Command` interface: a `Runnable` has nowhere to store the inverse operation or the pre-execution state, so once you need `undo()` you need your own type. And the moment a command crosses a process boundary it becomes a message contract — version it, keep it serializable, and never put a live object reference in it.

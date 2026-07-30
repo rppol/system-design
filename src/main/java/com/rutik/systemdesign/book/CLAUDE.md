@@ -49,6 +49,14 @@ therefore requires a `BOOK_LABELS` entry in `game/app.js`** (name, author, short
 alongside its `STUDY_ORDER.book` entries — an unlisted book still renders (slug is
 title-cased as a fallback) but loses its author/short labels.
 
+**No curated tiers here — and do not add one.** Every other section declares Senior /
+Principal membership with a `<!-- study-paths -->` block in each module README; `book` is
+Full-path only, and `questions/paths.json` has no `book` key. A marker in a chapter README
+would not merely be ignored, it would **fail the build**: tier membership is validated as
+a 2-segment module id, and book ids are 3 segments (`book/<book_slug>/<chapter>`), so
+`extract.py --strict` rejects it with "module id must be 2 segments". Chapters are ordered
+by `STUDY_ORDER.book` alone.
+
 Per-chapter build status lives in each book's `README.md` **Build Manifest** table.
 
 ---

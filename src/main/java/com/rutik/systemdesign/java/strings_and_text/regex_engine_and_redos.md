@@ -737,7 +737,7 @@ in the replacement must be `\\$`, or use `Matcher.quoteReplacement(str)`.
 
 ---
 
-## 11. Best Practices and Tooling
+## 11. Best Practices
 
 1. **Compile once**: `private static final Pattern` — never `String.matches` in hot paths.
 2. **One `Matcher` per thread/use** — `Pattern` is shared, `Matcher` is not thread-safe.
@@ -749,11 +749,6 @@ in the replacement must be `\\$`, or use `Matcher.quoteReplacement(str)`.
 8. **Use RE2/J** (`com.google.re2j`) for user- or config-supplied patterns and DoS-sensitive endpoints.
 9. **Prefer `UNICODE_CHARACTER_CLASS`** when input may be non-ASCII.
 10. **Test with adversarial input** — feed each validation regex a run of its "cheap" character plus a failing suffix and assert it returns in single-digit milliseconds.
-
-**Tools:** static analyzers flag ReDoS shapes — [`redos-detector`](https://github.com/tjenkinson/redos-detector),
-SonarQube rule `S5852` (super-linear regex), CodeQL's `js/redos` / `java/redos`
-queries, and OWASP dependency scanners. `com.google.re2j` is the drop-in
-linear-time engine (same `Pattern`/`Matcher` API surface).
 
 ---
 
@@ -830,6 +825,25 @@ RE2/J (`com.google.re2j`) is a pure-Java port of Google's RE2 that runs in guara
 **Q: What is the gotcha with `$` and `\` in `replaceAll`'s replacement string?**
 **Short:** A literal $ or backslash in a replaceAll replacement string must be escaped, or wrapped with Matcher.quoteReplacement().
 In the replacement argument, `$` introduces a group reference (`$1`) and `\` escapes, so a literal `$` or `\` in the output must be written as `\\$` and `\\\\`. Passing user text directly as the replacement can throw `IllegalArgumentException` or inject unintended group references; wrap it in `Matcher.quoteReplacement(str)` to treat it literally. This is separate from `Pattern.quote`, which protects the *pattern* side.
+
+---
+
+## 13. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.util.regex` (`Pattern`, `Matcher`) | The full feature set — backreferences, lookaround, possessive and atomic groups — on a backtracking NFA whose worst case is exponential | Developer-authored patterns you have audited; compile once into a `static final Pattern` |
+| RE2/J (`com.google.re2j`) | Linear-time matching with the same `Pattern` / `Matcher` API shape, at the price of no backreferences and no lookaround | User- or config-supplied patterns, and any endpoint where a hang is a denial of service |
+| `Pattern.quote` / `Matcher.quoteReplacement` | Escaping of user-supplied text on the pattern side and the replacement side respectively — two different problems with two different methods | Any time untrusted text is embedded in a pattern or a replacement string |
+| `redos-detector` | Static proof that a regex is safe, or a concrete attack string when it is not | Reviewing a new validator before it merges |
+| SonarQube rule `S5852` | A CI gate that flags super-linear regular expressions | Continuous scanning of the whole codebase |
+| CodeQL `java/redos` | Dataflow-aware detection that connects an untrusted source to a vulnerable pattern | GitHub code scanning, where reachability matters as much as the pattern shape |
+| Possessive quantifiers (`a++`) and atomic groups (`(?>...)`) | A language-level guarantee that the engine will not backtrack into that sub-expression | The cheapest fix for a known-vulnerable validator, and the one that needs no new dependency |
+| `Pattern.compile(p, Pattern.UNICODE_CHARACTER_CLASS)` | `\d`, `\w`, and `\b` matching the Unicode definitions rather than the ASCII ones | Any input that can be non-ASCII |
+| JMH | A measured match time against input length, so a rewrite is proven rather than assumed | Confirming the blowup is gone — feed the failing suffix, not just the happy path |
+| regex101 (Java flavour) | Step-by-step match visualisation with a backtracking step counter | Understanding why a specific pattern explodes on a specific input |
+
+Two operational controls belong beside the tooling. **Cap input length before matching** untrusted strings — a hard ceiling turns an unbounded blowup into a bounded one regardless of the pattern — and where rewriting is not possible, run the match against an interrupt-aware `CharSequence` so a watchdog can abort it, since `Matcher` does not honour thread interruption on its own.
 
 ---
 

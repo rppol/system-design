@@ -297,6 +297,48 @@ Many LLD interview problems require combining multiple behavioral patterns. This
 
 ---
 
+## 10. Tradeoffs — What Each Behavioral Pattern Costs
+
+Every behavioral pattern buys decoupling with indirection. The question an interviewer is really asking is what you pay for it, so name the cost before the benefit.
+
+| Pattern | What you gain | What it costs | The failure it causes when misapplied |
+|---------|--------------|--------------|--------------------------------------|
+| Chain of Responsibility | Handlers added or reordered without touching the sender | No compile-time guarantee anyone handles the request; the chain order becomes hidden configuration | A request falls off the end of the chain and is silently dropped |
+| Command | Undo, queuing, logging, and retry of operations | One class per operation, plus state capture for undo | Command explosion — dozens of near-identical classes for operations that never get undone |
+| Interpreter | A grammar expressed directly as a class hierarchy | One class per grammar rule; performance is poor for anything non-trivial | A hand-written parser that becomes unmaintainable past roughly ten rules |
+| Iterator | Traversal without exposing internal structure | An extra object per traversal, and fail-fast semantics that surprise concurrent callers | `ConcurrentModificationException` under load, or a leaked cursor holding a connection |
+| Mediator | N colleagues coordinate without N-squared references | The mediator absorbs every interaction rule | The mediator becomes a God Object that nobody wants to modify |
+| Memento | Undo and rollback without breaking encapsulation | Full state copies retained in memory — a 2 MB state with a 100-step history is 200 MB | Unbounded history that shows up as a heap leak |
+| Observer | Publishers know nothing about subscribers | Non-deterministic ordering, and the call stack no longer shows who reacts | Listener leaks, and one throwing observer aborting the rest of the notification |
+| State | Transitions become explicit and illegal ones impossible | One class or enum constant per state, and transition logic spread across them | The whole graph is invisible in any single file once states exceed roughly a dozen |
+| Strategy | Algorithms swap at runtime, and each is testable alone | An interface plus a class per algorithm, and a selection point that must be maintained | A `switch` in the factory that has to change every time a strategy is added |
+| Template Method | The invariant algorithm is written once | Inheritance-only, consuming the subclass's single superclass slot | A fragile base class where changing the skeleton breaks every subclass |
+| Visitor | New operations without editing element classes | Adding an element type forces a new method on every visitor | Double dispatch that a sealed hierarchy plus a pattern-matching `switch` would express more simply |
+
+The pattern-level tradeoff worth stating out loud: Strategy, State, and Command all replace conditionals with polymorphism, which converts a readable `switch` into a class hierarchy you must navigate with an IDE. That is a win when the branches change independently or need independent tests, and a loss when there are three stable branches that fit on one screen.
+
+---
+
+## 11. Technologies and Tools
+
+| Pattern | Java Standard Library | Spring Framework | Third-Party |
+|---------|----------------------|-----------------|-------------|
+| Chain of Responsibility | `jakarta.servlet.Filter` + `FilterChain`, Logback `Filter` | `SecurityFilterChain`, `HandlerInterceptor`, Spring Cloud Gateway `GlobalFilter` | Netty `ChannelPipeline`, OkHttp `Interceptor`, gRPC `ServerInterceptor` |
+| Command | `Runnable`, `Callable`, `ExecutorService`, `javax.swing.undo.UndoManager` | `@Async`, Spring Batch `Tasklet` | Quartz `Job`, Axon command bus, Kafka or SQS messages |
+| Interpreter | — | Spring Expression Language (`SpelExpressionParser`) | ANTLR 4, Apache Commons JEXL 3, MVEL 2, Drools |
+| Iterator | `Iterator`, `Iterable`, `Spliterator`, `ResultSet`, `DirectoryStream` | Spring Data `Streamable`, `Slice`, `Stream<T>` query methods | Guava `AbstractIterator`, Reactor `Flux`, RxJava 3 |
+| Mediator | `java.util.concurrent.Flow` | `ApplicationEventPublisher`, Spring Integration `MessageChannel` | Guava `EventBus`, Vert.x event bus, Apache Pekko actors |
+| Memento | Records, `Serializable`, `AtomicReference` | — | Jackson deep copy, Kryo `copy`, Vavr persistent collections, Axon or EventStoreDB |
+| Observer | `PropertyChangeSupport`, `java.util.concurrent.Flow` | `@EventListener`, `@TransactionalEventListener(AFTER_COMMIT)` | Guava `EventBus`, Reactor `Flux`, RxJava 3, Kafka |
+| State | `enum` with per-constant bodies, `EnumMap`, sealed interfaces + `switch` patterns (Java 21+) | Spring Statemachine | Temporal, AWS Step Functions, Camunda or Flowable |
+| Strategy | `java.util.function`, `Comparator`, `ServiceLoader` | `Map<String, Strategy>` injection, `@Qualifier`, `@ConditionalOnProperty` | Resilience4j `IntervalFunction`, Caffeine eviction policies |
+| Template Method | `AbstractList`, `InputStream`, `HttpServlet.service()`, interface `default` methods | `JdbcTemplate`, `TransactionTemplate`, Spring Batch reader/processor/writer | JUnit 5 lifecycle and `@TestTemplate` |
+| Visitor | `FileVisitor` + `Files.walkFileTree`, `javax.lang.model` visitors, sealed types + `switch` patterns | — | ASM `ClassVisitor`, JavaParser adapters, ANTLR 4 generated visitors |
+
+The recurring lesson across the table: for most of these patterns the platform already ships an implementation, and hand-rolling one means giving up its ordering guarantees, lifecycle management, and observability. Write the pattern yourself only when no framework owns the extension point you need.
+
+---
+
 ## 12. Interview Q&As
 
 Questions are ordered by interview frequency: gotchas and traps first, then internal mechanics, then edge cases.

@@ -33,15 +33,25 @@ HLD is the architectural overview layer. The `backend/` section contains product
 
 ---
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents two routes: the **Full Path** (all 18 modules = "Recommended
-Learning Order") and a curated **Interview-Specific Path** (14 modules). The interview
-subset is a **dual-source list** — it lives in both `README.md` ("## Learning Paths")
-and `game/app.js` (`STUDY_PATHS.hld.interview`, which drives the game's Study
-Full/Interview toggle). **Change one, change the other** — same modules, same order.
-Non-Q&A narrative only; no `extract.py` re-run needed. The README also carries a
-Knowledge-Question Map and a 6-week Study Plan (interview-readiness prose; no toggle impact).
+`README.md` documents the **Full Path** (all 18 modules = "Recommended Learning Order")
+plus two curated tiers: **Senior** (14 modules) and **Principal** (11). They are
+different cuts, not nested depths — senior is the craft, principal is the judgment
+(which approach at what cost, what failure domains, what you tell a team *not* to do),
+so principal is usually the smaller list and much of it is material senior never sees.
+Membership is declared ONCE per module, in a `<!-- study-paths -->` block in that
+module's own README naming the files each tier takes; listing a tier joins it, omitting
+the tier opts out, and `README.md` must always be listed. Order is never declared — it
+comes from `STUDY_ORDER.hld` in `game/app.js`, so a tier is an ordered subset by
+construction. **There is no path array in `app.js` to edit**: `extract.py` walks the
+markers and emits the gitignored `questions/paths.json`, which the game fetches at boot.
+The tier tables in `README.md` sit between `<!-- study-path-table <tier> -->` markers and
+are **generated** — regenerate with `python3 game/extract.py --write-paths`; a
+hand-edited or stale block fails `extract.py --strict` and the Pages deploy. Case studies
+are tiered the same way from a block in `case_studies/README.md` (14 senior / 7
+principal of the 23), driving the Level filter on the game's Case Studies tab. The README
+also carries a Knowledge-Question Map and a 6-week Study Plan (prose; no path impact).
 
 ---
 
@@ -83,8 +93,13 @@ HLD modules intentionally stay at architectural-overview depth. For implementati
 3. Minimum 10 Q&As
 4. Add cross-references in the Cross-Reference Map above pointing to backend/ and database/ for deeper dives
 5. Update `README.md` HLD module table
-6. Update root `README.md` HLD section
-7. Update `hld/CLAUDE.md` module table (this file)
+6. Add the module dir to `STUDY_ORDER.hld` in `game/app.js` at its learning-path position —
+   a module missing from it falls to the 9999 sort (dead-last in Study) and fails `--strict`
+7. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it
+   belongs to (or none, for Full-path-only), then run `python3 game/extract.py --write-paths`
+   to regenerate the section README's tier tables
+8. Update root `README.md` HLD section
+9. Update `hld/CLAUDE.md` module table (this file)
 
 ---
 

@@ -271,6 +271,24 @@ public class FixedStack<T> {
 
 ---
 
+## 10. Tradeoffs — When Each Principle Costs More Than It Saves
+
+Every principle here is a heuristic with a failure mode on the far side of it, and applying one hard usually violates another. Knowing where each stops paying is the difference between quoting principles and using them.
+
+| Principle | What it buys | What it costs when over-applied | The symptom |
+|-----------|-------------|--------------------------------|-------------|
+| DRY | One place to change a rule | Coupling between things that merely looked alike | Two features share a helper, one needs a flag, the flag count grows and neither caller can be read alone |
+| KISS | Code a new joiner can read on day one | Genuine complexity pushed into the caller instead of being encapsulated | Every call site repeats the same six lines because "the abstraction was too clever" |
+| YAGNI | No dead flexibility to maintain | A hard rewrite when the need arrives after all | A hard-coded single-currency assumption threaded through 40 files |
+| Program to an Interface | Implementations swap; tests stub | An interface per class, most with exactly one implementation | Navigation always lands on the interface, never the code that runs |
+| Composition over Inheritance | Behaviour changes at runtime; no fragile base class | More wiring, and delegation boilerplate over a wide interface | Twenty pass-through methods that exist only to forward a call |
+| Law of Demeter | Callers survive changes to a collaborator's internals | Wrapper methods added purely to avoid a dot | The intermediate object grows a method for every field its caller wanted |
+| Separation of Concerns | Each concern testable alone | Layers that add a hop without adding a decision | A DTO copied unchanged through four layers |
+
+The direct conflicts are worth naming: **DRY versus decoupling** (deduplicating two similar rules from different domains couples them permanently — prefer duplication until the third occurrence proves the rule is genuinely shared), **YAGNI versus Program to an Interface** (an interface with one implementation is speculative flexibility unless a second is imminent or the seam exists for testing), and **Law of Demeter versus KISS** (a wrapper method per traversal step can be more code than the traversal it removed). When two principles conflict, the tiebreaker is which change you actually expect to make.
+
+---
+
 ## 11. Technologies and Tools
 
 | Tool / Technique | Principle Enforced |

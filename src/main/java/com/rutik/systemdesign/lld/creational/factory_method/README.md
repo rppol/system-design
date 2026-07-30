@@ -597,3 +597,20 @@ A: The anti-pattern is a single static method (often misleadingly named `XxxFact
 7. **Avoid returning null** from a factory method. Prefer a Null Object pattern or throw a meaningful exception.
 
 8. **Pair with an interface for the product** — even if you only have one concrete product today, using an interface leaves the door open for extensibility.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| Static factory methods in the JDK — `List.of`, `Map.of`, `Optional.of` / `ofNullable`, `Stream.of`, `LocalDate.of` / `now`, `Instant.now` | A named creation point that can return a cached instance, a subtype, or a specialised implementation the caller never sees (Effective Java Item 1) | Almost every value type you write; `List.of` returning a size-specialised immutable class is the standard illustration |
+| `java.util.concurrent.Executors` (`newFixedThreadPool`, `newVirtualThreadPerTaskExecutor` on Java 21+) | A factory whose return type is `ExecutorService` while the concrete class varies by method | Naming a current JDK factory that hides real implementation choice |
+| `java.util.ServiceLoader.load(Class)` | Creation of implementations declared in `META-INF/services` or a module's `provides ... with` clause | Products shipped in separate JARs or modules |
+| Spring `@Bean` methods | A factory method the container calls once per scope, with dependencies supplied as parameters | The normal way to construct anything non-trivial in Spring |
+| Spring `FactoryBean<T>` and `ObjectProvider<T>` | Deferred and conditional creation — `ObjectProvider.getIfAvailable()` avoids a hard dependency | Beans whose creation depends on runtime state |
+| `java.util.concurrent.ThreadFactory` | The factory itself as an injectable object, so naming, daemon status, and uncaught-exception handling are set in one place | Any custom thread pool — unnamed threads are a production debugging tax |
+| SLF4J `LoggerFactory.getLogger(Class)` | Instance lookup that may return a cached logger per name | Every class; also a clean example of a factory that caches |
+| `java.nio.charset.Charset.forName` | Lookup-by-name creation with a registry behind it | String-keyed product selection |
+
+Naming carries real information, so use the JDK conventions: `of` / `from` for conversion, `valueOf` for a canonical mapping, `getInstance` when an existing instance may be returned, `newInstance` when a fresh one is guaranteed. The failure mode to watch is the factory that grows a `switch` over a string key — push the decision into a `Map<String, Supplier<Product>>` or `ServiceLoader` so adding a product stops meaning editing the factory.

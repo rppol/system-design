@@ -12,9 +12,9 @@ Read these three first, in order:
 
 | Problem | File | Why First |
 |---------|------|-----------|
-| Vending Machine | [VendingMachine_README.md](../system_design_problems/VendingMachine_README.md) | Cleanest State pattern implementation — 5 states, tight FSM, easy to draw in 30 min |
-| Parking Lot | [ParkingLot_README.md](../system_design_problems/ParkingLot_README.md) | Combines Singleton + Strategy + Observer + Factory; most common LLD interview question |
-| ATM | [ATM_README.md](../system_design_problems/ATM_README.md) | State machine + Command with rollback behind a Facade; introduces transaction idempotency concerns |
+| Vending Machine | [VendingMachine.md](../system_design_problems/VendingMachine.md) | Cleanest State pattern implementation — 5 states, tight FSM, easy to draw in 30 min |
+| Parking Lot | [ParkingLot.md](../system_design_problems/ParkingLot.md) | Combines Singleton + Strategy + Observer + Factory; most common LLD interview question |
+| ATM | [ATM.md](../system_design_problems/ATM.md) | State machine + Command with rollback behind a Facade; introduces transaction idempotency concerns |
 
 These three cover State (FSM), Command, Strategy, Factory, Observer, and Singleton — the patterns
 that recur across most of the remaining problems. Once you can draw these three designs cold, the
@@ -30,33 +30,33 @@ Problems grouped by the dominant engineering concern they exercise:
 
 | Problem | Dominant Concern | File | Core Patterns |
 |---------|-----------------|------|--------------|
-| Vending Machine | FSM design — 5 states, clean transitions | [VendingMachine_README.md](../system_design_problems/VendingMachine_README.md) | State, Singleton (machine), Flyweight (shared state objects) |
-| ATM | FSM + transaction integrity | [ATM_README.md](../system_design_problems/ATM_README.md) | State, Command (execute + rollback), Facade |
-| Elevator System | Complex FSM + scheduling algorithm | [ElevatorSystem_README.md](../system_design_problems/ElevatorSystem_README.md) | State, Observer (floor requests), Strategy (SCAN/FCFS) |
-| Ride Sharing | Ride lifecycle FSM with rejected-transition handling | [RideSharing_README.md](../system_design_problems/RideSharing_README.md) | State (ride lifecycle), Strategy (fare), Observer (status), Factory (vehicle) |
+| Vending Machine | FSM design — 5 states, clean transitions | [VendingMachine.md](../system_design_problems/VendingMachine.md) | State, Singleton (machine), Flyweight (shared state objects) |
+| ATM | FSM + transaction integrity | [ATM.md](../system_design_problems/ATM.md) | State, Command (execute + rollback), Facade |
+| Elevator System | Complex FSM + scheduling algorithm | [ElevatorSystem.md](../system_design_problems/ElevatorSystem.md) | State, Observer (floor requests), Strategy (SCAN/FCFS) |
+| Ride Sharing | Ride lifecycle FSM with rejected-transition handling | [RideSharing.md](../system_design_problems/RideSharing.md) | State (ride lifecycle), Strategy (fare), Observer (status), Factory (vehicle) |
 
 ### Group B — Concurrency + Resource Management
 
 | Problem | Dominant Concern | File | Core Patterns |
 |---------|-----------------|------|--------------|
-| Parking Lot | Concurrent spot allocation, pricing strategy | [ParkingLot_README.md](../system_design_problems/ParkingLot_README.md) | Singleton (lot), Strategy (pricing), Observer (display boards), Factory (vehicle) |
-| Online Booking System | Double-booking prevention, seat reservation | [OnlineBookingSystem_README.md](../system_design_problems/OnlineBookingSystem_README.md) | Strategy (pricing), Observer (notifications), Builder (Movie/Show) |
+| Parking Lot | Concurrent spot allocation, pricing strategy | [ParkingLot.md](../system_design_problems/ParkingLot.md) | Singleton (lot), Strategy (pricing), Observer (display boards), Factory (vehicle) |
+| Online Booking System | Double-booking prevention, seat reservation | [OnlineBookingSystem.md](../system_design_problems/OnlineBookingSystem.md) | Strategy (pricing), Observer (notifications), Builder (Movie/Show) |
 
 ### Group C — Domain Modeling
 
 | Problem | Dominant Concern | File | Core Patterns |
 |---------|-----------------|------|--------------|
-| Library Management | Borrow/return lifecycle, overdue notifications | [LibraryManagement_README.md](../system_design_problems/LibraryManagement_README.md) | Builder (Book), Iterator (catalog search), Observer (overdue) |
-| Chess Game | Move validation, undo/redo, game phases | [ChessGame_README.md](../system_design_problems/ChessGame_README.md) | Command (move + undo), Observer (game events), Singleton (board) |
-| Splitwise | Expense-sharing ledger, debt-graph simplification | [Splitwise_README.md](../system_design_problems/Splitwise_README.md) | Strategy (split type), Factory (split-strategy selection) |
+| Library Management | Borrow/return lifecycle, overdue notifications | [LibraryManagement.md](../system_design_problems/LibraryManagement.md) | Builder (Book), Iterator (catalog search), Observer (overdue) |
+| Chess Game | Move validation, undo/redo, game phases | [ChessGame.md](../system_design_problems/ChessGame.md) | Command (move + undo), Observer (game events), Singleton (board) |
+| Splitwise | Expense-sharing ledger, debt-graph simplification | [Splitwise.md](../system_design_problems/Splitwise.md) | Strategy (split type), Factory (split-strategy selection) |
 
 ### Group D — Algorithms & Data Structures
 
 | Problem | Dominant Concern | File | Core Patterns |
 |---------|-----------------|------|--------------|
-| LRU Cache | O(1) get/put via doubly-linked list + HashMap; thread-safe wrapper | [LRUCache_README.md](../system_design_problems/LRUCache_README.md) | Decorator (thread safety), Observer (eviction listener) |
-| Rate Limiter | Per-client request throttling; 4 interchangeable algorithms | [RateLimiter_README.md](../system_design_problems/RateLimiter_README.md) | Strategy (algorithm), Factory (algorithm selection) |
-| Tic-Tac-Toe | Incremental win detection; pluggable AI move selection | [TicTacToe_README.md](../system_design_problems/TicTacToe_README.md) | Strategy (AI move), State (game state) |
+| LRU Cache | O(1) get/put via doubly-linked list + HashMap; thread-safe wrapper | [LRUCache.md](../system_design_problems/LRUCache.md) | Decorator (thread safety), Observer (eviction listener) |
+| Rate Limiter | Per-client request throttling; 4 interchangeable algorithms | [RateLimiter.md](../system_design_problems/RateLimiter.md) | Strategy (algorithm), Factory (algorithm selection) |
+| Tic-Tac-Toe | Incremental win detection; pluggable AI move selection | [TicTacToe.md](../system_design_problems/TicTacToe.md) | Strategy (AI move), State (game state) |
 
 ---
 

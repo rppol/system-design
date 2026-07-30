@@ -581,3 +581,20 @@ A: Inject a test double — either a hand-written stub Strategy, a lambda implem
 7. **Document the strategy contract on the interface** — javadoc the `Strategy` interface itself: what invariants every implementation must uphold, what the inputs/outputs mean, and which exceptions are allowed. (There is no `@Strategy` annotation in Java or Spring; the contract lives in the javadoc and the tests.)
 
 8. **Consider the Null Object Strategy** — instead of checking `if (strategy != null)` before delegating, provide a default no-op strategy (`NoOpPaymentStrategy`) to avoid null checks.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.util.function` (`Function`, `Predicate`, `BiFunction`, `Supplier`, `UnaryOperator`) | A strategy without declaring an interface — the lambda is the concrete strategy | Single-method, stateless strategies; avoids a class per algorithm |
+| `java.util.Comparator` + `comparing` / `thenComparing` / `reversed` | The JDK's canonical Strategy, plus composition of several ordering strategies into one | Sorting and ordering anywhere |
+| Spring: inject `Map<String, PaymentStrategy>` or `List<PaymentStrategy>` | The container collects every implementing bean; the map key is the bean name, so lookup by key replaces the `switch` | Strategy selection in a Spring application — new strategy = new `@Component`, no edit to the selector |
+| `@Qualifier`, `@ConditionalOnProperty`, `@Profile` | Selecting the strategy at wiring time rather than call time | The choice is per-deployment, not per-request |
+| `java.util.ServiceLoader` | Strategy discovery across a module or JAR boundary via `META-INF/services` | Plugins shipped independently of the host application |
+| Resilience4j `IntervalFunction`, `RetryConfig`, `SlidingWindowType` | Retry, backoff, and window strategies as configuration | Resilience behaviour that must be tuned without a redeploy |
+| Caffeine `Caffeine.newBuilder().expireAfter(...)` / `weigher(...)` | Pluggable expiry and weighting strategies on a cache | Cache eviction policy varies per cache |
+| Records or enums as strategy holders | An enum constant per strategy gives you a closed set, a name for logging, and free `valueOf` parsing | The set of strategies is fixed and must be nameable in config or an API |
+
+The Spring `Map<String, Strategy>` idiom is the one worth memorising, because it removes the last `switch`: annotate each strategy with a stable bean name, inject the map, and dispatch on the key. Guard it in one place — a missing key must throw a clear "unknown strategy" error at startup or first use, not return `null` deep inside a payment flow.

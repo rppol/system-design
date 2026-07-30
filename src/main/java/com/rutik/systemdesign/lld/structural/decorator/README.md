@@ -593,3 +593,20 @@ A: Decorator is one of the canonical implementations of OCP — you extend an ob
 8. **Avoid stateful decorators where possible** — state in decorators creates threading and lifecycle complications; keep decorators as stateless transformers.
 9. **Consider AOP for cross-cutting concerns** — in Spring applications, `@Transactional`, `@Cacheable` are cleaner than manual decorator chains for cross-cutting concerns.
 10. **Test each decorator in isolation** — because decorators implement the same interface, they can be tested with a mock wrapped component.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| `java.io` streams — `BufferedInputStream`, `GZIPInputStream`, `CipherInputStream`, `DataInputStream` | The reference implementation of the pattern: each wrapper adds one behaviour and delegates, so any stack composes | The example to name in an interview, and the model for your own wrappers |
+| `java.util.Collections.unmodifiableList` / `synchronizedList` / `checkedList` | Read-only, synchronised, and runtime type-checked views over any collection | Hardening a collection you hand to a caller; note `unmodifiable*` is a **view**, so the backing list can still change underneath it |
+| Guava `ForwardingList` / `ForwardingMap` / `ForwardingCollection` | Abstract decorator bases that delegate every method, so you override only what you change | Writing a decorator over a wide interface without hand-writing 30 pass-through methods |
+| Lombok `@Delegate` | Generated pass-through methods for a wrapped field | Removing delegation boilerplate, at the cost of an annotation processor |
+| `jakarta.servlet.http.HttpServletRequestWrapper` / `HttpServletResponseWrapper` | Standard decorators for the servlet request and response, which is how a filter can rewrite a body or cache it for re-reading | Filters that need to modify, not just observe, the request or response |
+| Resilience4j `Decorators.ofSupplier(...).withRetry(...).withCircuitBreaker(...).withBulkhead(...)` | Composable resilience decorators over any call, with the wrapping order made explicit in the fluent chain | Adding retry, circuit breaking, and rate limiting around a remote call |
+| Spring AOP proxies (`@Transactional`, `@Cacheable`, `@Async`) | Container-applied decoration, ordered by `@Order` on the advisors | Cross-cutting behaviour you do not want to write into every call site |
+| Caffeine's `LoadingCache` wrapping a loader | Caching added around an existing function without changing it | Memoisation of an expensive call |
+
+**Order is behaviour, not style.** Retry inside a circuit breaker means each retry burns a separate call against the breaker's window; retry outside it means one logical failure counts once. Compression before encryption compresses plaintext; after it, it compresses ciphertext and achieves nothing. Build the stack in one factory method rather than letting callers assemble it, and assert the order in a test — decorator ordering bugs are silent and only surface under failure.

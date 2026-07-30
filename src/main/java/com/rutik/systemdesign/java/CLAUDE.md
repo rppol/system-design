@@ -49,15 +49,27 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Learning Paths (Full + Interview-Specific)
+## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents two routes: the **Full Path** (all 33 modules = "8-Phase Learning
-Path") and a curated **Interview-Specific Path** (17 modules). The interview subset is a
-**dual-source list** — it lives in both `README.md` ("## Learning Paths") and
-`game/app.js` (`STUDY_PATHS.java.interview`, which drives the game's Study Full/Interview
-toggle). **Change one, change the other** — same modules, same order. Non-Q&A narrative
-only; no `extract.py` re-run needed. The README also carries a Knowledge-Question Map and
-a 5-week Study Plan (interview-readiness prose; no toggle impact).
+`README.md` documents the **Full Path** (all 33 modules = "8-Phase Learning Path") plus
+two curated tiers: **Senior** (19 modules) and **Principal** (15). They are different
+cuts, not nested depths — senior is the craft (write it, profile it, debug the 3am
+deadlock), principal is the judgment (which runtime at what cost, migration, what you
+tell a team *not* to do), so principal is usually the smaller list and much of it is
+material senior never sees. Membership is declared ONCE per module, in a
+`<!-- study-paths -->` block in that module's own README naming the files each tier takes
+— which is also the only way to curate **deep-dive sub-files**, since they have no
+`STUDY_ORDER` entry of their own. Listing a tier joins it, omitting the tier opts out,
+and `README.md` must always be listed. Order is never declared — it comes from
+`STUDY_ORDER.java` in `game/app.js`, so a tier is an ordered subset by construction.
+**There is no path array in `app.js` to edit**: `extract.py` walks the markers and emits
+the gitignored `questions/paths.json`, which the game fetches at boot. The tier tables in
+`README.md` sit between `<!-- study-path-table <tier> -->` markers and are **generated** —
+regenerate with `python3 game/extract.py --write-paths`; a hand-edited or stale block
+fails `extract.py --strict` and the Pages deploy. Case studies are tiered the same way
+from a block in `case_studies/README.md` (5 senior / 3 principal), driving the Level
+filter on the game's Case Studies tab. The README also carries a Knowledge-Question Map
+and a 5-week Study Plan (prose; no path impact).
 
 ---
 
@@ -147,9 +159,11 @@ When covering a feature, always include the version it was introduced and LTS st
 ## Adding a New Java Module
 
 1. Create `<module_name>/README.md` — 14-section template
-2. Minimum 15 Q&As; ordered by interview frequency (gotchas first). **First
-   answer sentence must be self-contained and 15–220 chars** or `extract.py`
-   silently drops the Q&A from the game bank.
+2. Minimum 15 Q&As; ordered by interview frequency (gotchas first). Author a
+   `**Short:**` line under each question (15–220 chars, no fence) — that line IS the
+   MCQ option. Without one `extract.py` derives the option from the answer's first
+   sentence and trims it at a clause boundary past 220 chars; nothing is dropped, but
+   a long or fence-opening first sentence ships as a mangled option.
 3. Add a row to the module table in `README.md` (the Java master index)
 4. Place it in the correct learning phase in the phase diagram in `README.md`
 5. Add cross-references in the Cross-Reference Map in `README.md` if applicable
@@ -157,10 +171,15 @@ When covering a feature, always include the version it was introduced and LTS st
 7. Update `java/CLAUDE.md` module table (this file)
 8. **REQUIRED for the game:** add the new module id (`java/<module_name>`) to
    `STUDY_ORDER.java` in `game/app.js` at its learning-path position — a module
-   missing from that array sorts to the end. (A new **sub-file**
+   missing from that array sorts to the end and fails `--strict`. (A new **sub-file**
    `<module>/<name>.md` needs no `STUDY_ORDER` entry; it groups under its parent
-   module's topic and its Q&As merge into that module's bank.)
-9. **Re-run `python3 game/extract.py`** to regenerate the question bank.
+   module's topic and its Q&As merge into that module's bank — but if a tier should
+   carry it, add its filename to that tier's line in the parent's `<!-- study-paths -->`
+   block, which is the only place a sub-file is addressable.)
+9. Write a `<!-- study-paths -->` block in the new module's README naming the tiers it
+   belongs to (or none, for Full-path-only), then run
+   `python3 game/extract.py --write-paths` to regenerate `README.md`'s tier tables.
+10. **Re-run `python3 game/extract.py`** to regenerate the question bank.
 
 ---
 

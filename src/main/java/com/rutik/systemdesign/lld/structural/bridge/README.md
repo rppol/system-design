@@ -576,3 +576,20 @@ A: Yes to both — the Abstraction typically holds a single reference to an `Imp
 8. **Don't split artificially** — only split when there are genuinely two independent dimensions; forced splits lead to awkward APIs.
 9. **Document the contract** — the Implementor interface is a contract between two teams; document preconditions, postconditions, and threading requirements.
 10. **Combine with Abstract Factory** — use a factory to create the right Concrete Implementor for the current platform/environment.
+
+---
+
+## 18. Technologies and Tools
+
+| Technology | What it gives you | When to reach for it |
+|-----------|-------------------|---------------------|
+| JDBC (`java.sql.Driver`, `DataSource`) | The archetypal Bridge: one API, many vendor implementations, selected at runtime by URL and classpath | Any database access; the standard interview example |
+| SLF4J API + a backend binding | The abstraction (`Logger`) and the implementation (Logback, Log4j 2) vary independently and are joined at deploy time | Libraries that must log without dictating the application's logging stack |
+| Micrometer `MeterRegistry` + `PrometheusMeterRegistry` / `OtlpMeterRegistry` | Instrumentation code written once against the abstraction, with the exporter chosen per environment | Metrics that must survive a change of monitoring vendor |
+| OpenTelemetry API + SDK | A stable instrumentation API bridged to a swappable SDK and exporters, so instrumented libraries take no SDK dependency | Tracing across services and languages |
+| `java.security.Provider` (JCA/JCE) — `MessageDigest`, `Cipher`, `KeyStore` | Algorithm abstractions bridged to provider implementations, ordered by the security policy | Cryptography, or FIPS-validated providers swapped in without code change |
+| `java.nio.file.spi.FileSystemProvider` | The `Path` / `Files` API bridged to any storage — default, zipfs, or a third-party object-store provider | Code that must run against local disk and object storage unchanged |
+| Spring `PlatformTransactionManager` | Transaction demarcation (`@Transactional`) separated from the transactional resource (JDBC, JPA, JTA) | Applications whose transaction strategy may change |
+| `java.util.ServiceLoader` | The wiring mechanism most of the above use to discover an implementor at runtime | Building your own bridge with pluggable implementors |
+
+Bridge earns its keep only when **both** sides really vary — that is the point to make in an interview. Its cost is one extra indirection and a permanent constraint: every operation must be expressible in the implementor interface, so a capability that only one implementation has either leaks through an `instanceof` check or is lost. Introduce it early; retrofitting a bridge after N x M concrete subclasses already exist is the expensive path.
