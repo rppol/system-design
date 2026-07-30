@@ -923,6 +923,14 @@ TECH_NOISE = re.compile(
 # are compounds ("htop / top", "Micrometer + Actuator"); an unspaced slash is part
 # of the name and must survive ("TCP/IP", "AWS SQS/SNS", "HTTP/2").
 NAME_SPLIT_RE = re.compile(r"\s+(?:/|\+|&amp;)\s+")
+# How much of a module's own description of a tool to keep. This was a bare 90, which
+# put 1,015 of 5,825 blurbs (17%) at EXACTLY the cap -- a cliff, not a distribution --
+# cutting them mid-word ("... Single-threaded Lua execution guarante"). The blurb is the
+# richest signal in the index: it is the citing module's own statement of what the tool is
+# FOR, and it is what any role/'"'"'what problem does this solve'"'"' derivation reads. Truncating it
+# was silently degrading that input. 220 matches the MCQ short-answer ceiling used elsewhere.
+BLURB_MAX = 220
+
 LIST_SPLIT_RE = re.compile(r"\s*(?:,|;)\s+")
 MD_TABLE_SEP = re.compile(r"^\|[\s:|-]+\|?\s*$")
 
@@ -1104,7 +1112,7 @@ def tech_from_bullets(body):
             continue
         for span in names:
             for name in _tech_names(span):
-                out.append((name, blurb[:90]))
+                out.append((name, blurb[:BLURB_MAX]))
     return out
 
 
@@ -1182,7 +1190,7 @@ def build_tech_index():
                         else:
                             names = list(_tech_names(row[0]))
                             blurb = " — ".join(tech_strip_md(c) for c in row[1:3] if c.strip())
-                        found += [(name, blurb[:90]) for name in names]
+                        found += [(name, blurb[:BLURB_MAX]) for name in names]
                 # Merged, not fallback: the technologies/ deep dives carry BOTH a flags
                 # table and the bullet prose that names the actual products, so a
                 # table-first-wins rule indexed Triton as 19 CLI flags and no tools.
