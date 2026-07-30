@@ -346,7 +346,9 @@ sv = tree_expl.shap_values(X_te)            # shape (n_samples, n_features)
 # Completeness check: base value + sum(shap) == model margin (log-odds)
 margin = gbm.predict(X_te, output_margin=True)
 recon = tree_expl.expected_value + sv.sum(axis=1)
-assert np.allclose(recon, margin, atol=1e-3), "TreeSHAP must satisfy completeness"
+# Use a RELATIVE tolerance, as shap's own check_additivity does: XGBoost margins are
+# float32 and can be large, so a fixed atol=1e-3 is too tight for some models.
+assert np.allclose(recon, margin, rtol=1e-3, atol=1e-3), "TreeSHAP must satisfy completeness"
 
 # Global importance = mean(|SHAP|) per feature (a proper global view built from local)
 global_imp = pd.Series(np.abs(sv).mean(axis=0), index=cols).sort_values(ascending=False)
@@ -620,7 +622,7 @@ US lenders must issue ECOA/Regulation B adverse-action notices. Wells Fargo's Co
 
 ### Fiddler AI and Arize — explainability as a monitoring product
 
-Fiddler AI and Arize sell production platforms that log SHAP attributions per prediction and track their *distribution* over time; a shift in the SHAP profile of a top feature is an early drift signal (see [`../monitoring_and_drift_detection/README.md`](../monitoring_and_drift_detection/README.md)) that often fires before raw accuracy degrades.
+The mechanism comes from research, not marketing. Lundberg et al. (2020, *Nature Machine Intelligence*) introduced the **SHAP monitoring plot** — track each feature's attribution distribution over time instead of only the loss — and demonstrated it on a retrospective hospital deployment: a labelling error in one operating-room feature is invisible in the model's overall loss but shows up plainly in that feature's SHAP monitoring plot, and a separate spike traced back to a previously undiscovered temporary EMR configuration problem. That is the concrete case for attribution monitoring catching a data fault before aggregate accuracy moves. Fiddler AI and Arize sell production platforms that implement this idea — logging SHAP attributions per prediction and tracking their distribution over time (see [`../monitoring_and_drift_detection/README.md`](../monitoring_and_drift_detection/README.md)) — but neither vendor publishes a benchmark for how much earlier it fires, so treat "earlier than accuracy" as the demonstrated mechanism, not a quantified SLA.
 
 ---
 
@@ -630,7 +632,7 @@ Fiddler AI and Arize sell production platforms that log SHAP attributions per pr
 
 | Method | Faithfulness | Speed | Correlated-feature safe | Best model | Audience |
 |--------|--------------|-------|-------------------------|-----------|----------|
-| TreeSHAP | Exact (axioms) | Fast (ms/batch) | Interventional variant helps | Trees/GBDT | All |
+| TreeSHAP | Exact (axioms) | Fast (ms/batch) | Pick your poison — see note | Trees/GBDT | All |
 | KernelSHAP | Approximate | Slow (m evals/inst) | No (independent perturb) | Any | Data scientist |
 | LIME | Local, unstable | Medium | No | Any | Debug hypothesis |
 | Integrated Gradients | Completeness | Medium (steps) | Baseline-dependent | Diff. nets | ML engineer |
@@ -639,6 +641,19 @@ Fiddler AI and Arize sell production platforms that log SHAP attributions per pr
 | PDP | Marginal effect | Medium | No (extrapolation) | Any | Data scientist |
 | ICE | Reveals interaction | Medium | Partially | Any | Data scientist |
 | Counterfactual (DiCE) | Actionable | Slow (search) | Feasibility constraint | Any | End user / regulator |
+
+**The TreeSHAP cell has no single answer, and an interviewer who knows the literature will
+press on it.** Chen, Janizek, Lundberg and Lee frame the choice as *true to the model* vs
+*true to the data* ("True to the Model or True to the Data?", arXiv 2006.16234). TreeSHAP's
+`interventional` (Independent Tree SHAP) mode breaks feature dependencies, so a feature the
+model never reads gets exactly zero credit — correct for a **model audit**, but it evaluates
+the model off the data manifold on inputs that could not occur. The `tree_path_dependent`
+mode respects the observed dependence structure, so it explains the **data-generating
+process**, but it spreads credit onto correlated proxies the model never used, which is
+precisely what you must not do in an adverse-action notice. Neither is "correlated-feature
+safe". Choose by the question: auditing what the model does → interventional; understanding
+what drives the outcome → path-dependent. Say which one you used, because the attributions
+differ and the difference is not a bug.
 
 ### 8.2 SHAP vs LIME
 

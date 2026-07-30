@@ -47,7 +47,7 @@ P(tree) = product over rules r used in the derivation of P(r)
 
 5. **Trees, not graphs, are the output constraint.** A valid dependency parse is a tree rooted at an artificial ROOT: every token has exactly one head, there are no cycles, and (for most formalisms) the tree is connected. Decoders must *enforce* this — a naive per-token argmax can produce cycles or multiple roots.
 
-6. **Projectivity is a structural restriction, not a linguistic universal.** A tree is projective if no arcs cross when words stay in linear order. English is ~99% projective; free-word-order languages (Czech, German) are not, forcing non-projective algorithms.
+6. **Projectivity is a structural restriction, not a linguistic universal.** A tree is projective if no arcs cross when words stay in linear order. Quote the two granularities separately or the numbers look contradictory: Nivre and Nilsson (2005) report that across dependency treebanks the proportion of non-projective *arcs* is normally only 1–2%, while 15–25% of *sentences* contain at least one. English sits at the low end (its PTB dependencies are converted from projective constituency trees); free-word-order languages sit at the high end, which is why the Czech Prague Dependency Treebank is the standard test bed for non-projective algorithms.
 
 **What it means.** Principle 2 in one sentence: "every parse tree has a probability — multiply the probability of every rule the derivation used — and the parser returns whichever tree multiplies out highest."
 
@@ -568,13 +568,22 @@ The `dep_`, `head`, and `children` attributes expose the full tree; `doc.noun_ch
 
 ```mermaid
 xychart-beta
-    title "English Penn Treebank dependency UAS by parser generation"
+    title "English PTB (Stanford deps) test UAS by parser generation"
     x-axis ["Greedy transition", "Graph MST", "Neural stack-LSTM", "Biaffine", "Biaffine + BERT"]
     y-axis "UAS %" 88 --> 98
-    bar [89.9, 90.9, 93.1, 95.7, 96.9]
+    bar [89.4, 90.7, 93.1, 95.7, 96.8]
 ```
 
-Each generation added roughly 1–2 UAS points; the biggest single jump came from biaffine attention (learned n×n arc scoring) and again from swapping the BiLSTM encoder for a pretrained contextual one.
+Every bar is a published test-set number on the same benchmark (English PTB converted to
+Stanford dependencies, punctuation excluded), so the deltas are real rather than indicative:
+MaltParser arc-standard `89.4` and MSTParser `90.7` from Chen and Manning (2014) Table 5,
+the stack-LSTM parser `93.1` from Dyer et al. (2015) Table 1, biaffine attention `95.74`
+from Dozat and Manning (2017), and a biaffine parser fed BERT embeddings `96.79` from
+He and Choi (2019) Table 4a. The two jumps that actually matter are `+2.4` for learning
+the representation instead of hand-crafting features, and `+2.6` for biaffine's learned
+n x n arc scoring. Pretrained contextual embeddings add a further `+1.1` — real, but the
+smallest of the three, because by then the parser was already at 95.7 and the remaining
+errors are genuine attachment ambiguities rather than representation failures.
 
 ### Transition-based vs graph-based
 

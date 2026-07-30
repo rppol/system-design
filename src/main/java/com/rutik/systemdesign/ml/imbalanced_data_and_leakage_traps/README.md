@@ -1094,11 +1094,12 @@ def find_duplicate_rows_across_split(
 must accompany ROC-AUC and why raw accuracy is meaningless once positives
 are this rare.
 
-**IEEE-CIS Fraud Detection (Kaggle):** the `TransactionDT` feature is a time
-delta from a reference date. Competitors who validated with a random K-Fold
-routinely saw their local CV diverge from the private leaderboard, while
-time-ordered validation schemes tracked it far more closely — a canonical,
-widely discussed temporal-leakage lesson from that competition.
+**IEEE-CIS Fraud Detection (Kaggle):** the `TransactionDT` feature is a
+monotonic time delta from a reference date, and the test set covers a later
+period than the training set. That structure — not any particular leaderboard
+anecdote — is why time-ordered validation is the standard recommendation for
+this dataset: a random K-Fold puts future transactions in the training folds
+and scores you on a task easier than the one the leaderboard actually asks.
 
 **Consumer-lending default risk (illustrative):** bureau and servicing
 tables routinely carry fields written by internal processes that only run
@@ -1121,8 +1122,13 @@ time.
 the same base sentence landing on both sides of a random split — duplicate
 leakage that specifically defeats the claim that a test set is "held out."
 
-**Manufacturing defect detection:** defect rates on a mature production line
-are routinely rarer than 1 in 1,000 parts. Class weights, SMOTE, and
+**Manufacturing defect detection:** quality on a production line is not
+quoted as a percentage at all — it is quoted in defects per million
+opportunities, and Six Sigma's canonical target is 3.4 DPMO. A line held
+anywhere near that target produces a dataset whose positive class is rarer
+than anything in this module's other examples, which is the point: you
+inherit the imbalance from the process capability, you do not choose it.
+Class weights, SMOTE, and
 threshold moving are
 all standard tools here, and PR-AUC — not accuracy, and often not even
 ROC-AUC — is the metric quality engineers actually track week over week.
@@ -1141,7 +1147,18 @@ ROC-AUC — is the metric quality engineers actually track week over week.
 | SMOTE / ADASYN | No | Grows dataset with synthetic rows | Synthetic points can bridge into majority territory in noisy/high-dim data |
 | Random undersampling | No | Shrinks dataset, discards data | Loses majority-class signal; risky at small n |
 | Tomek links / NearMiss | No | Shrinks dataset | Cleans only boundary noise (Tomek), or needs careful version choice (NearMiss) |
-| Focal loss | No — output is not the true posterior | None | Two extra hyperparameters (gamma, alpha) to tune |
+| Focal loss | No — output is not the true posterior (see note) | None | Two extra hyperparameters (gamma, alpha) to tune |
+
+Read the focal-loss row precisely, because the literature looks contradictory if you
+do not. The `(1 - p_t)^gamma` factor is row-dependent, so the loss is not minimized at
+`p(y|x)` — a focal-loss score is not a calibrated posterior and you cannot feed it
+straight into an expected-value calculation. That is a statement about the *minimizer*.
+It is entirely compatible with Mukhoti et al. (NeurIPS 2020), who show that on deep
+networks focal loss produces *lower* empirical ECE than cross-entropy, because the
+dominant real-world failure there is overconfidence from over-fitting, and down-weighting
+easy examples suppresses exactly that. Both are true: less overconfident than
+cross-entropy, still not the true posterior. If you need calibrated probabilities, fit a
+post-hoc calibrator on held-out data regardless of which loss you trained with.
 
 ### 8.2 ROC-AUC vs PR-AUC Under Imbalance
 

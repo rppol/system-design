@@ -467,7 +467,7 @@ p99 includes Redis wait and queueing, so using it inflates the fleet ~5x):
 | ETA serving | 175 × c5.2xlarge at $0.34/hr | ~$43k |
 | Redis Cluster (real-time traffic) | 10 × r5.2xlarge at $0.504/hr in each of 5 regions | ~$18k |
 | Flink streaming (traffic pipeline) | 20 TaskManagers (c5.2xlarge, 8 vCPU) per region × 5 | ~$25k |
-| Training (weekly retrain) | EMR, 50 nodes × 2h = ~433 node-hr/month on r5.4xlarge | ~$0.6k |
+| Training (weekly retrain) | EMR, 50 nodes × 2h = ~433 node-hr/month on r5.4xlarge at $1.008/hr EC2 + $0.252/hr EMR surcharge (AWS Price List, us-east-1) | ~$0.5k |
 | S3 storage (training data, logs) | 500GB/day compressed, 2-year retention ≈ 365 TB at $0.023/GB-mo | ~$8k |
 | **Total** | | **~$95k/month** |
 

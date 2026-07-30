@@ -298,6 +298,8 @@ One fixed model, three scores spanning `0.68` to `0.80` — a 12-point swing pro
 
 **How to pick `beta` in an interview.** Derive it from the cost asymmetry rather than guessing. If missing a positive costs roughly `k` times what a false alarm costs, `beta ≈ sqrt(k)` is the defensible starting point, and here is why: rewriting the metric in counts gives `F_beta = (1 + beta²)·TP / ((1 + beta²)·TP + beta²·FN + FP)`, so a false negative already carries weight `beta²` against a false positive's `1`. Setting `beta² = k` is what makes the metric's internal error weighting equal the business cost ratio. Say that out loud and then sanity-check it against the business, which is exactly the "state your assumptions explicitly" principle from §3.
 
+**Name the other convention before the interviewer does.** Two readings of `beta` coexist and they disagree. Van Rijsbergen's classical gloss — repeated in most textbook and encyclopaedia treatments — is that `beta` measures how many times as important recall is than precision, which reads as `beta = k`. The count-form identity above says the error weighting is `beta²`, which gives `beta = sqrt(k)`. No authority adjudicates between them, so a candidate who states only one can be pushed off it. State both: "the classical phrasing suggests `beta = k`; writing `F_beta` in counts shows the actual FN:FP weight is `beta²`, so I take `beta = sqrt(k)` and I'll say which convention I'm using." That answer cannot be caught out either way.
+
 ### Cascade Model — Latency vs Accuracy
 
 ```mermaid
@@ -311,7 +313,7 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     all(["All candidates · 10M items"])
-    all --> fast["Index-backed filter · BM25 / ANN\n<5ms"]
+    all --> fast["Index-backed filter · BM25 / ANN\nbudget ~5ms"]
     fast --> k1["Top-1000"]
     k1 --> med["Medium model · GBT / two-tower\n<10ms"]
     med --> k2["Top-100"]

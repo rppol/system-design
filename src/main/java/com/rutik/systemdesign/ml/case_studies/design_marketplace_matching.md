@@ -315,7 +315,7 @@ class EpsilonGreedyDispatch:
 Alternatives: (a) deep neural network — captures complex driver-rider feature interactions; 1-2pp improvement in match value; but requires GPU serving and has 50ms+ inference latency (too slow for 833 req/s with 500 candidates each); (b) RL policy (actor-critic) — learns optimal dispatch policy end-to-end; higher long-term value; but reward is delayed (trip outcome known only after 30 minutes) and training instability at production scale; (c) LightGBM ranking — fast (0.3ms per pair), interpretable, handles tabular matching features well. Decision: LightGBM for immediate deployment; RL for long-term research track. See [Algorithm Selection](../model_selection_and_algorithm_choice/README.md).
 
 **Decision 2: Global optimal assignment (Hungarian) over greedy assignment.**
-Greedy assignment assigns each request independently to the best available driver. This is locally optimal but globally suboptimal — the "best" driver for request 1 may be the "only adequate" driver for request 2. Hungarian algorithm solves the global bipartite matching in O(N³). For N=50 concurrent requests per matching cycle with 500 candidate drivers, Hungarian is feasible (<10ms). For N=500 requests, use the Auction algorithm (O(NM log N)) or LP relaxation. Measured improvement: global optimal assignment vs greedy reduces average wait time by 45 seconds and improves driver utilization by 6%.
+Greedy assignment assigns each request independently to the best available driver. This is locally optimal but globally suboptimal — the "best" driver for request 1 may be the "only adequate" driver for request 2. Hungarian algorithm solves the global bipartite matching in O(N³). For N=50 concurrent requests per matching cycle with 500 candidate drivers, Hungarian is feasible (<10ms). For N=500 requests, use the Auction algorithm (O(NM log N)) or LP relaxation. Illustrative improvement, not a published measurement: global optimal assignment vs greedy reduces average wait time by roughly 45 seconds and improves driver utilization by about 6%. No ride-hailing platform publishes a greedy-vs-optimal delta — Lyft's INFORMS write-up of its matching work (Azagirre et al., *INFORMS Journal on Applied Analytics* 54(1), 2024) reports incremental revenue, not a wait-time or utilization split. Both numbers feed the value calculation in §10, so run the switchback on your own marketplace before quoting either.
 
 **Decision 3: Separate demand and supply forecasting models, not a joint model.**
 Alternatives: (a) joint supply-demand model — captures correlations between supply and demand (supply increases when demand is high → surge pricing attracts drivers); but single model complexity makes debugging failures harder; (b) separate models for supply and demand — each model is simpler, debuggable, and improvable independently; correlations captured via features (demand_forecast as a feature in the supply model). Decision: separate models with cross-feature sharing. Supply forecasting MAPE: 15%; demand forecasting MAPE: 12%. The supply-demand ratio (computed from both model outputs) is the key feature for surge pricing decisions.
@@ -484,8 +484,10 @@ c5.4xlarge. Pricing 16-core servers at the 8-core rate is the single most common
 capacity tables end up wrong by 2×.
 
 At 10M rides/day × $0.50 platform take-rate contribution from improved match quality (vs greedy):
-$5M/day × 6% improvement = $300k/day attributable value. Infrastructure cost is ~$1.5k/day, or
-about 0.5% of the value generated.
+$5M/day × 6% improvement = $300k/day attributable value. That 6% is the illustrative figure carried
+from Decision 2, so read this as an order-of-magnitude sanity check rather than a booked number.
+Infrastructure cost is ~$1.5k/day, or about 0.5% of the value generated — a conclusion that survives
+being wrong by an order of magnitude on the 6%, which is the only reason it is worth stating.
 
 ---
 

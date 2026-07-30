@@ -255,6 +255,15 @@ Quality column: MS MARCO passage nDCG@10 as reported in the BEIR benchmark (arXi
 | **Learned sparse (SPARTA/SPLADE)** | Sparse BERT activations | Inverted index | Sparse dot product | <20ms | nDCG@10 0.351 (SPARTA) |
 | **Hybrid (BM25 + dense)** | Both | Both | RRF fusion | 30-60ms | Typically 1-3 points over the better arm |
 
+The learned-sparse row quotes SPARTA rather than SPLADE because SPARTA is what BEIR Table 2
+actually measured — **no primary source reports a SPLADE MS MARCO nDCG@10 at all.** SPLADE's
+own papers report MS MARCO in MRR@10 and BEIR as a 13-dataset nDCG@10 average, so the closest
+honest numbers are SPLADE++ SelfDistil at `37.6` MRR@10 / `50.7` BEIR-13 average and SPLADE-v3
+at `40.2` / `51.7` (Lassance et al., SPLADE-v3 tech report, Tables 1–2). Do not mix those into
+the column above — different metric, different dataset set. The ranking the column is there to
+teach still holds: learned sparse beats BM25 by a wide margin and lands near a good dense
+bi-encoder while keeping an inverted index.
+
 ### 4.2 Dense Retrieval Models
 
 | Model | Base | Dim | Training | MS MARCO dev MRR@10 |

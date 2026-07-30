@@ -773,6 +773,8 @@ Redis Cluster's automatic failover promoted a replica to primary. Because Redis 
 
 ## Capacity Planning
 
+This section sizes **one representative tenant workload** — 50 services, one fraud model, one recommender, a 100k req/hr prediction API — not the whole platform. The platform-level figures are the ones in the Problem Statement (1,000 production models, 500 engineers, 200 A100s); a platform bill is this arithmetic run per tenant and summed, with the shared control plane (registry, tracking DB, scheduler) amortised across all of them. Size a tenant first, because that is the unit a platform team actually gets asked to quote.
+
 **Data volume:**
 
 ```

@@ -708,7 +708,7 @@ def demonstrate_scaling_bug() -> None:
 
 ## 7. Real-World Examples
 
-**Text Classification (SVM + TF-IDF)**: Before transformer models, SVM with linear kernel was the dominant approach for document classification (news categorization, sentiment analysis). The high-dimensional sparse TF-IDF vectors (50,000+ dimensions) suit linear SVM perfectly — it finds a separating hyperplane in sparse space efficiently. sklearn's LinearSVC (based on liblinear) handles this in O(n * nnz) where nnz is the average number of non-zero TF-IDF values per document.
+**Text Classification (SVM + TF-IDF)**: Before transformer models, SVM with linear kernel was the dominant approach for document classification (news categorization, sentiment analysis). The high-dimensional sparse TF-IDF vectors (50,000+ dimensions) suit linear SVM perfectly — it finds a separating hyperplane in sparse space efficiently. sklearn's LinearSVC (based on liblinear) costs `O(n * nnz)` per pass over the data, where `nnz` is the average number of non-zero TF-IDF values per document — that product is just the total number of stored non-zeros, so the sparse representation, not the nominal 50,000 dimensions, sets the cost. Total work is that per-pass figure times the iteration count; liblinear's dual coordinate descent (Hsieh et al., ICML 2008) reaches an epsilon-accurate solution in `O(log(1/epsilon))` passes, which is why it converges in tens of passes rather than the thousands a naive subgradient method would need.
 
 **Cancer Detection (SVM with RBF)**: Radiology studies from the early 2010s used SVM with RBF kernel on engineered features extracted from tissue samples (texture, gradient magnitude, compactness). With 200–500 labeled samples — too few for deep learning — SVM consistently outperformed neural networks due to its maximum-margin generalization guarantee.
 
@@ -789,7 +789,7 @@ SVR's epsilon parameter is in the units of the target variable. If the target ha
 | sklearn SVR | SVM regression | epsilon-insensitive loss |
 | sklearn OneClassSVM | Anomaly detection | nu parameter controls boundary tightness |
 | libsvm | C library underlying sklearn SVC | Direct access for custom kernels |
-| ThunderSVM | GPU-accelerated SVM | 10-100x speedup for large datasets |
+| ThunderSVM | GPU-accelerated SVM | Its JMLR 2018 paper reports over 100x faster than LibSVM on GPUs and over 10x on CPUs. Dormant: last tagged release v0.3.4 (Nov 2019), last repo push April 2024 — check it still builds against your CUDA before adopting |
 | sklearn CalibratedClassifierCV | Add probability calibration to SVC | The only route to predict_proba; use ensemble=False |
 
 ---

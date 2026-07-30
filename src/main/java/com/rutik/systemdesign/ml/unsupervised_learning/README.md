@@ -1107,10 +1107,11 @@ labels = kmeans.fit_predict(embeddings)
 
 **Quick-reference comparison table:**
 
-| Approach | When to use | Trade-off |
+| Method | Reach for it when | What it costs you |
 |---|---|---|
-| Rule-based baseline | Always — establish before ML | Interpretable, brittle on edge cases |
-| Simple ML (LR, RF) | < 100k rows, tabular, fast iteration | Lower ceiling than deep models |
-| Deep learning | Large data, unstructured input (images/text) | Expensive training, needs GPU |
-| Ensembling | Final 1-2% accuracy gain in competition | Complexity, inference latency |
-| Distillation/quantization | Inference cost reduction | Accuracy-efficiency trade-off |
+| k-means / MiniBatchKMeans | You need `k` roughly spherical, similar-sized clusters and the data is large; MiniBatch is the only one here that is comfortable at 10M rows | You must choose `k`, every point is forced into a cluster, and the result is initialization-sensitive (`k-means++`, `n_init >= 10`) |
+| DBSCAN | Clusters are non-spherical, `k` is unknown, and you want outliers labelled as noise rather than absorbed | One global `eps` cannot fit clusters of differing density; scales poorly past ~1M points |
+| HDBSCAN | Same as DBSCAN but densities vary across clusters — it sweeps `eps` for you and leaves only `min_cluster_size` | Slower than DBSCAN, and the hierarchy is harder to explain to a stakeholder than a centroid |
+| Gaussian Mixture (GMM) | You want soft assignments (a probability per cluster) or elliptical clusters that k-means' spherical distance cannot represent | More parameters to fit, can collapse onto a single point without covariance regularisation |
+| PCA | Linear noise reduction before clustering, or when you need the components to stay interpretable and invertible | Maximises *variance*, so it discards low-variance directions — which is exactly where a rare but coherent cluster may live |
+| UMAP | Non-linear structure in text or image embeddings, and for visualisation | Distances and cluster sizes in the projection are not faithful; never read a metric off a UMAP plot |

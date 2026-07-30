@@ -790,9 +790,15 @@ REST API Service (single-SKU forecasting):
 
 Forecast Output Store (DynamoDB for inventory system consumption):
   10B forecasts refreshed weekly, ~100M reads/week from inventory system
-  Do NOT land all 10B in DynamoDB. The WRITE side is what costs: 10B items/week is
-  10,000M write request units at $0.625/M = ~$6,250 per refresh (~$27k/month),
-  plus 10B × 500B = 5TB at $0.25/GB-month = $1,250/month of storage.
+  Do NOT land all 10B in DynamoDB. The WRITE side is what costs. Each forecast item
+  is ~500B, i.e. under the 1KB that one write request unit covers, so 10B items/week
+  is 10,000M WRU at the on-demand rate of $0.625/M (AWS Price List, us-east-1)
+  = ~$6,250 per refresh (~$27k/month), plus 10B × 500B = 5TB at $0.25/GB-month
+  = $1,250/month of storage. Two levers change that number and both must be stated,
+  not assumed: an item above 1KB costs ceil(size/1KB) WRUs, and provisioned capacity
+  prices the same load differently — 10B writes spread evenly over a week is ~16.5K
+  sustained WCU, or 16,500 × $0.00065/hr × 730 = ~$7.8k/month. This table is priced
+  on-demand throughout, to match the rest of the design.
   Design: the full 10B forecast set goes to S3 Parquet (below); DynamoDB holds only
   the ~2M active SKU-store pairs the API actually serves.
   Reads: 100M/week = ~165 reads/s, so 1,000 provisioned RCU is ample headroom.

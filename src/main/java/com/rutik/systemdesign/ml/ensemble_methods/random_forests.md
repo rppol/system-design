@@ -496,7 +496,8 @@ rf.fit(X, y)
 # regressor), not AUC. sklearn also accepts a callable metric(y_true, y_pred):
 #   RandomForestClassifier(oob_score=roc_auc_score, ...)  -> oob_score_ is now AUC
 print(f"OOB accuracy: {rf.oob_score_:.4f}")
-# OOB ~= 3-fold CV error, computed for free during training
+# OOB ~= N-fold (leave-one-out) CV error per ESL 15.3.1 — not "3-fold", which is
+# a common misquote — and computed for free during training
 ```
 
 ### OOB Error vs Cross-Validation Comparison
@@ -907,9 +908,9 @@ No — Random Forests are invariant to any monotonic feature transformation, so 
 **Short:** A Random Forest regressor can never predict outside the min-max range of training targets because every prediction averages leaf values that are themselves means of training targets.
 No — a Random Forest regressor can never predict a value outside the min–max range of the training targets. Every prediction is an average of leaf values, and each leaf value is itself the mean of training targets that fell into it, so the ensemble output is bounded by the training target range. This makes RF unsuitable for trending time series or any problem where the target grows beyond historical values (e.g., forecasting revenue that is monotonically increasing). Gradient boosting shares this limitation; if extrapolation is required, use a linear or additive model, or detrend the target first and let RF model the residual.
 
-**Q: OOB error is said to approximate 3-fold CV. Why 3-fold specifically?**
-**Short:** OOB's roughly 36.8% per-tree holdout closely matches 3-fold CV's 33.3% holdout, though OOB folds are random and overlapping rather than 3-fold's deterministic partitions.
-With 3-fold CV, each model trains on 2/3 (≈ 66.7%) of the data and validates on 1/3 (≈ 33.3%). The OOB holdout fraction is approximately 36.8% per tree (vs 33.3% for 3-fold), making the holdout sizes nearly identical. The analogy is not exact: in 3-fold CV the fold assignments are deterministic, whereas OOB sets are random per tree and overlap — the OOB estimate averages many slightly different holdout evaluations. This makes OOB slightly noisier than 3-fold CV but the bias is minimal. For a 500-tree forest the averaging over 500 different ~37% holdouts gives a stable estimate.
+**Q: OOB error is often said to approximate 3-fold CV. Is that right?**
+**Short:** No. ESL 15.3.1 states an OOB error estimate is almost identical to N-fold (leave-one-out) CV, and its Exercise 15.2 asks you to show the identity becomes exact as B grows.
+No — the primary source says N-fold, not 3-fold. Hastie, Tibshirani and Friedman, *The Elements of Statistical Learning* (2nd ed.), Section 15.3.1, page 593: "An oob error estimate is almost identical to that obtained by N-fold cross-validation (see Exercise 15.2)"; Exercise 15.2 then asks the reader to show that as the number of bootstrap samples B gets large the OOB estimate approaches the N-fold CV estimate, and that in the limit the identity is exact. The reason is structural: OOB scores each observation i using only the trees whose bootstrap sample excluded i, which is a leave-one-out prediction for i — and N-fold CV, with N the number of observations, *is* leave-one-out. The "3-fold" folklore comes from a different quantity: each individual tree misses ~36.8% of the rows, close to 3-fold's 33.3% holdout per model. That coincidence describes how much data one tree trains on; it says nothing about what the aggregated estimate is equivalent to. Where OOB genuinely departs from textbook leave-one-out CV is variance rather than target — each observation is scored by a random, overlapping subset of about B/e trees, so the estimate is noisier at small B and stabilises as B grows (a 500-tree forest is comfortably stable).
 
 **Q: What is the proximity matrix in Random Forest and what is it used for?**
 **Short:** The Random Forest proximity matrix records how often two samples land in the same leaf across trees, enabling outlier detection, missing-value imputation, and MDS visualization at O(N^2) memory cost.
@@ -972,7 +973,7 @@ max_samples sets the number (or fraction) of rows drawn for each bootstrap sampl
 ## 13. Best Practices
 
 1. Set n_estimators >= 300 for any production model; plot OOB error vs n_estimators and stop at the elbow (typically 200-400 trees).
-2. Enable oob_score=True to get free validation without holding out data; it approximates 3-fold CV.
+2. Enable oob_score=True to get free validation without holding out data; per ESL 15.3.1 it approximates **N-fold (leave-one-out) CV**, not the widely repeated "3-fold".
 3. Always compute permutation importance (not MDI) for feature selection decisions on a held-out set.
 4. For imbalanced data, use class_weight="balanced_subsample" rather than no weighting.
 5. Set n_jobs=-1 always — Random Forest is embarrassingly parallel and scales linearly with CPU cores.

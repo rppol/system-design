@@ -144,7 +144,7 @@ Above `r = 512` you are storing more numbers *and* running two matrix multiplies
 ### TensorRT Optimization
 - NVIDIA's inference optimizer: layer fusion, kernel auto-tuning, precision calibration (FP32 → FP16 → INT8)
 - Engine serialization: compile once, load at serving time (no JIT overhead)
-- Order-of-magnitude expectation, not a benchmark: on the same NVIDIA GPU, FP16 typically lands in the 1.5–2x range over FP32 and INT8 adds a further ~1.5–2x on top, so 2–4x end to end. Actual numbers depend entirely on GPU generation, batch size, and how much of the graph TensorRT can fuse — always measure on your own hardware rather than quoting a figure from a module like this one
+- **There is no quotable speedup number, and treating any band as one is the mistake.** A conservative planning assumption is FP16 around 1.5–2x over FP32 with INT8 adding roughly another 1.5–2x, so 2–4x end to end — but that is a floor for budgeting, not a measurement, and it is not what published runs show. Third-party ResNet-50 benchmarks against an *unoptimized* FP32 PyTorch baseline report FP16 near 2x and INT8 an order of magnitude or more, because the comparison is folding in TensorRT's layer fusion and kernel auto-tuning as well as the precision change. NVIDIA publishes no single figure precisely because the answer depends on GPU generation, batch size, what the FP32 baseline was, and how much of the graph TensorRT can fuse. Measure on your own hardware; if you must quote something in an interview, quote the mechanism (fusion + reduced memory traffic + Tensor Core paths) and say the multiplier is workload-dependent
 
 ---
 
@@ -270,13 +270,20 @@ flowchart LR
 
 ```mermaid
 xychart-beta
-    title "Compression Pareto: size reduction vs accuracy retained"
+    title "Compression Pareto (schematic shape, not measured)"
     x-axis ["1x FP32", "1.4x Prune", "4x INT8", "8x INT4", "10x Distill", "40x Distill+INT4"]
-    y-axis "Accuracy retained (%)" 90 --> 100
+    y-axis "Relative quality retained (schematic)" 90 --> 100
     line [100, 99.5, 99.3, 98, 97, 95]
 ```
 
-*Accuracy erodes as compression grows more aggressive, and the drop is non-linear — INT8 is nearly free while INT4 and stacked distillation-plus-quantization cost several points, so pick the least aggressive method that meets the memory and latency budget.*
+*This is a schematic of the **shape**, not a measurement — no model, dataset or study
+sits behind the individual points, and they should never be quoted as retention figures.
+The one thing it is drawing is the non-linearity: accuracy erodes slowly through pruning
+and INT8, then falls off once you reach INT4 and stacked distillation-plus-quantization.
+The operating rule that follows is real even though the curve is not: pick the least
+aggressive method that meets the memory and latency budget, and measure the retention
+yourself on your own task. For a sourced anchor on one point of this curve, see
+DistilBERT — 40% smaller, 60% faster, 97% of BERT-base's GLUE score.*
 
 ---
 
@@ -291,8 +298,11 @@ the separate **torchao** package, and that eager mode (`torch.ao.quantization.qu
 `quantize_dynamic`) and FX graph mode should migrate to `torchao.quantization.quantize_`
 and the pt2e API respectively — with `torch.ao.quantization` slated for deletion "in 2.10
 if there are no blockers, or the earliest PyTorch version until all the blockers are
-cleared." It is still present and public as of the current release, so the eager-mode code
-below runs, but treat it as a maintenance path and reach for torchao on new work.
+cleared." That deletion has slipped: the current stable docs (2.13) still carry the full
+`torch.ao.quantization` reference behind that banner, so the eager-mode code below runs
+today. Treat it as a maintenance path and reach for torchao on new work — and re-check
+the banner before you build anything long-lived on it, because the removal is scheduled
+rather than cancelled.
 
 ```python
 import torch

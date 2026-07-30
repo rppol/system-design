@@ -339,9 +339,9 @@ Automated retraining is not permitted without MRM (model risk management) review
 **Decision 5: Bureau data PIT correctness for training.**
 Every historical training example uses the bureau report that was available at the time of that application — not today's bureau data. Bureau reports are pulled at application time and archived. Training data is assembled by joining archived bureau reports to origination records using the application date as the as-of timestamp. See [Feature Store and PIT Correctness](./cross_cutting/feature_store_and_point_in_time_correctness.md). Without this, the model would learn from bureau data that includes post-origination account changes — pure future leakage.
 
-**Comparison table:**
+**Comparison table.** No lender publishes underwriting AUCs, so read the AUC column as an *illustrative ordering*, not measured results — the defensible content is the ranking and the size of the gaps (single percentage points, not tens), and every downstream figure in this file that leans on it is flagged as a planning assumption. Re-derive the column on your own book before quoting any of it.
 
-| Model | AUC (2yr default) | Adverse-action | Monotonic | Regulatory acceptance |
+| Model | AUC (2yr default, illustrative) | Adverse-action | Monotonic | Regulatory acceptance |
 |---|---|---|---|---|
 | Traditional scorecard | 0.845 | Yes (points) | Yes (design) | High |
 | Logistic + WOE | 0.852 | Yes (coeff) | Yes (WOE) | High |
@@ -351,7 +351,7 @@ Every historical training example uses the bureau report that was available at t
 
 ```mermaid
 xychart-beta
-    title "2-year default AUC by model - accuracy rises as auditability falls"
+    title "2-year default AUC by model (illustrative) - accuracy rises as auditability falls"
     x-axis ["Scorecard", "Logistic+WOE", "LGBM monotonic", "LGBM uncon.", "Neural net"]
     y-axis "AUC" 0.80 --> 0.90
     bar [0.845, 0.852, 0.865, 0.873, 0.890]

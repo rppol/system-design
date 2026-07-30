@@ -173,7 +173,7 @@ flowchart LR
 The optimizer fits a surrogate over past results and hands each parallel agent a
 promising config (dotted arrows carry the reported metric back). A pruner
 (MedianPruner / Hyperband) kills any trial already worse than the median, cutting
-GPU hours 40-60% for the same number of useful trials.
+GPU hours by roughly 0.9x the prune rate for the same number of useful trials.
 
 **DVC pipeline DAG — content-addressed, incremental reruns**
 
@@ -604,7 +604,7 @@ A team used run names like "experiment_1", "experiment_2" without encoding hyper
 A team retrained the same model config 3 months later and got 2% lower accuracy. The dataset had been updated (new data added, some old data cleaned). The original training run had no record of which dataset version it used. The team spent 2 weeks debugging model code before discovering the root cause. Fix: always log dataset version as a run parameter — either a DVC commit ref, an S3 URI with version ID, or a dataset content hash.
 
 **Pitfall 4 — Hyperparameter search without pruning**
-A team ran 200 Optuna trials without early stopping (no pruner). Each trial trained for 50 epochs. 60% of trials were clearly worse by epoch 5 (val_loss 2x the best trial's loss at epoch 5) but ran to completion, consuming 60% of the GPU budget for no information gain. Fix: add `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` — prune any trial worse than the median at each step. In practice, this reduces GPU hours needed by 40-60% for a hyperparameter search with the same number of useful trials.
+A team ran 200 Optuna trials without early stopping (no pruner). Each trial trained for 50 epochs. 60% of trials were clearly worse by epoch 5 (val_loss 2x the best trial's loss at epoch 5) but ran to completion, consuming 60% of the GPU budget for no information gain. Fix: add `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` — prune any trial worse than the median at each step. The saving is `(epochs - warmup)/epochs` times the prune rate — here `45/50 = 0.9`, so a 40-60% prune rate returns 36-54% of the GPU hours with the same number of useful trials.
 
 **Read it like this.** The unit of GPU spend in a sweep is not the trial, it is the *trial-epoch* — so a pruner does not remove trials from the budget, it truncates them, and the saving is whatever fraction of the epoch grid you never ran.
 
@@ -627,11 +627,11 @@ A team ran 200 Optuna trials without early stopping (no pruner). Each trial trai
                                                           ------
                                                            4,600 trial-epochs
 
-  saved     = 10,000 - 4,600 = 5,400   ->  5,400 / 10,000 = 54%   <- inside the 40-60% band
+  saved     = 10,000 - 4,600 = 5,400   ->  5,400 / 10,000 = 54%   <- 0.9 x the 60% prune rate
   useful results are unchanged: the same 80 good configs still trained to epoch 50.
 ```
 
-The band's low end is just a lower prune rate, not a different mechanism — at 40% pruned the arithmetic is `80 x 5 + 120 x 50 = 6,400`, a 36% saving. Every extra point of prune rate converts a 50-epoch run into a 5-epoch run, which is why the headline number tracks the prune rate almost linearly.
+The low end is just a lower prune rate, not a different mechanism — at 40% pruned the arithmetic is `80 x 5 + 120 x 50 = 6,400`, a 36% saving. Every extra point of prune rate converts a 50-epoch run into a 5-epoch run, so the saving is exactly `(50 - 5)/50 = 0.9` times the prune rate. That closed form is where the numbers in this module come from — no vendor publishes a measured prune-rate benchmark, so treat 40-60% pruned (36-54% saved) as a planning band set by your own warmup and epoch budget, not as a reported result.
 
 **Why the warmup epochs exist.** With `n_warmup_steps = 0` the pruner would compare trials at epoch 0, where the ranking is pure initialization noise, and would happily kill the eventual winner — a config with a warmup learning-rate schedule looks terrible for its first few epochs by design. The 5-epoch grace period costs `200 x 5 = 1,000` trial-epochs of the 10,000 and buys the signal that makes the median comparison meaningful.
 
@@ -725,7 +725,7 @@ Comparison and search queries key on exact metric names, so `val_loss` in one ru
 
 **Q: How do early-stopping pruners like MedianPruner and Hyperband reduce hyperparameter-search cost?**
 **Short:** MedianPruner and Hyperband kill trials already worse than the median at a given step, typically pruning 40-60% of trials to save GPU budget.
-They kill trials that are already worse than the median at a given step, freeing GPU budget for promising configs instead of running every trial to completion. In a 200-trial Optuna study where 60% of configs are clearly bad by epoch 5, running them for the full 50 epochs wastes most of the budget for zero information gain. `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` or Hyperband typically prunes 40-60% of trials, roughly halving GPU hours for the same set of useful results — pruning requires reporting an intermediate value each step via `trial.report()`.
+They kill trials that are already worse than the median at a given step, freeing GPU budget for promising configs instead of running every trial to completion. In a 200-trial Optuna study where 60% of configs are clearly bad by epoch 5, running them for the full 50 epochs wastes most of the budget for zero information gain. `MedianPruner(n_startup_trials=5, n_warmup_steps=5)` or Hyperband typically prunes 40-60% of trials. The GPU-hour saving is not that number — it is the fraction of the trial-epoch grid you never ran, which for a 50-epoch budget with 5 warmup epochs works out to `(50-5)/50 = 0.9` times the prune rate, so 36-54% across that band. Pruning requires reporting an intermediate value each step via `trial.report()`.
 
 **Q: Why does random search outperform grid search in high-dimensional hyperparameter spaces?**
 **Short:** Random search beats grid search in high dimensions because it samples the few hyperparameters that actually matter, while grid search's cost scales as O(N^k).

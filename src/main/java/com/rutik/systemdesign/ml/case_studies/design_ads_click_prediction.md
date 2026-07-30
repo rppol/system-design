@@ -2,11 +2,11 @@
 
 ## Problem Statement
 
-Design a CTR prediction system for online advertising. For every ad auction (1 million per second), predict P(click | user, ad, context) within 10ms. Training data consists of roughly 1 billion labelled impressions per day after negative subsampling. The model must be well-calibrated — predicted CTR should closely match actual observed CTR at the same predicted score level (a predicted CTR of 5% should correspond to a 5% actual click rate in aggregate). Miscalibration directly distorts auction mechanics: in a generalized second-price auction ads are *ranked* by bid × predicted CTR, and the winner is *charged* the runner-up's rank score divided by the winner's own predicted CTR — so a 2x calibration error halves or doubles what the platform collects per impression.
+Design a CTR prediction system for online advertising. For every ad auction (1 million per second), predict P(click | user, ad, context) within 10ms. Training data consists of roughly 1-2 billion labelled impressions per day after negative subsampling (the capacity model in §10 derives ~1.72B from the served-impression rate, which is the number to size against). The model must be well-calibrated — predicted CTR should closely match actual observed CTR at the same predicted score level (a predicted CTR of 5% should correspond to a 5% actual click rate in aggregate). Miscalibration directly distorts auction mechanics: in a generalized second-price auction ads are *ranked* by bid × predicted CTR, and the winner is *charged* the runner-up's rank score divided by the winner's own predicted CTR — so a 2x calibration error halves or doubles what the platform collects per impression.
 
 Constraints:
 - 1M QPS, <10ms P99 end-to-end latency
-- ~1B training examples per day after subsampling (sparse: 0.1-2% click rate)
+- ~1-2B training examples per day after subsampling (sparse: 0.1-2% click rate)
 - Billions of unique user/ad/publisher IDs — sparse ID features dominate
 - Model must be calibrated. Brier score is only meaningful against its own base rate: at a 1% CTR a constant predictor already scores r(1-r) = 0.0099, so the target is Brier below ~0.0095 with the reliability diagram near the diagonal — a "Brier < 0.08" style target is trivially met and measures nothing
 - Daily retraining minimum; hourly preferred (fresh data = higher accuracy on new campaigns)
@@ -736,6 +736,11 @@ Redis Cluster (embedding tables, 10 fields x 1GB each):
   Key lookups: 1M auctions/sec x (1 user + 1 publisher + 20 ad embeddings)
     = 22M key lookups/sec, issued as ~1M pipelined batches/sec
   At a conservative 375K key-lookups/sec per node: 22M / 375K = ~59 nodes
+    (Deliberately far below Redis's own published figure — `redis-benchmark -P 16`
+     reaches ~1.8M GET/sec against a single instance in the Redis docs — because
+     that is a loopback benchmark with no cluster hop, no cross-slot fan-out and
+     no competing traffic. Re-run redis-benchmark at your real value size and
+     pipeline depth before committing this node count.)
   Hardware: 60x r5.2xlarge (64GB RAM each), plus replicas for failover
   Lookup latency: 0.5-1ms per pipelined batch
   Cost: 60 x $0.504/hr x 24 x 30 = ~$21,770/month

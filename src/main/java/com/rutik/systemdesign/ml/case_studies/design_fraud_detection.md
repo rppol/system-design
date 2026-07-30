@@ -744,9 +744,17 @@ def optimize_threshold_correct(
 ```python
 # BROKEN: two independent bugs in one class.
 # (1) A single explainer object is shared across request threads. shap's
-#     explainers are not documented as thread-safe (KernelExplainer is a
-#     confirmed offender, shap/shap#2863); a per-thread or per-process
-#     instance is the safe default rather than something to discover in prod.
+#     explainers are not documented as thread-safe: KernelExplainer is a
+#     confirmed offender (shap/shap#2863), and TreeExplainer carries its own
+#     documented shared mutable state — shap/shap#729 reports that
+#     `explainer.expected_value` flips from a scalar to a two-element list
+#     in place during a LightGBM `shap_values()` call, which is exactly the
+#     attribute the conservation check below reads. (Related: shap/shap#4162,
+#     where a TreeExplainer given a background dataset serialises onto one
+#     core and starves other threads in the process.) There is no published
+#     report of `shap_values()` returning wrong numbers under concurrency, so
+#     do not claim one; a per-thread or per-process instance is simply the
+#     safe default rather than something to discover in prod.
 # (2) The conservation check below compares the SHAP sum against
 #     predict_proba(). TreeExplainer defaults to model_output="raw", which for
 #     an XGBoost binary:logistic model is the LOG-ODDS margin — so

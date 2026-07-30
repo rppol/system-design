@@ -767,13 +767,14 @@ The catch worth stating in an interview: Bonferroni assumes the tests are indepe
 | Tool | Category | Notes |
 |------|----------|-------|
 | Evidently AI | Open-source monitoring | Feature drift, data quality, model/LLM evaluation reports. Actively maintained (0.7.x as of July 2026); the Report/Preset API was reworked in 0.7, so pre-0.7 snippets do not run |
-| whylogs (WhyLabs) | Data logging | Statistical profiles, drift detection, lightweight. **Effectively dormant** — last PyPI release 1.6.4 (Dec 2024), last commit to the GitHub mainline Jan 2025. Do not pick it for new work without checking whether it has resumed |
+| whylogs (WhyLabs) | Data logging | Statistical profiles, drift detection, lightweight. **Do not start new work on it** — WhyLabs, Inc. has announced it is discontinuing operations ("After an incredible journey, we are closing this chapter of our story"), and the library matches: last PyPI release 1.6.4 (Dec 2024), last commit to the GitHub mainline Jan 2025. The code stays Apache-2.0 on GitHub, so an existing deployment is not at risk, but there is no vendor behind it |
 | Arize AI | Commercial monitoring | Feature/prediction drift, explainability, retraining triggers |
 | Fiddler AI | Commercial monitoring | Explainability, fairness monitoring, alert management |
 | Grafana + Prometheus | Infrastructure + custom | Custom drift metrics pushed as Prometheus gauges |
 | MLflow | Experiment tracking | Not drift-specific; use for performance metric tracking |
 | Great Expectations | Data validation | Schema and distribution tests for batch data pipelines |
 | Deepchecks | Open-source | Train/test/production comparison, drift, integrity checks |
+| Alibi Detect (Seldon) | Drift / outlier / adversarial detection | The widest detector library here (MMD, learned-kernel MMD, KS, chi-squared, classifier drift, context-aware drift), with TensorFlow and PyTorch backends. **Not Apache-2.0 any more** — since January 2024 it ships under the Business Source License 1.1 alongside Seldon Core, free for non-production use only. Actively released (0.13.0, Dec 2025); check the licence against your deployment before you standardise on it |
 | NannyML | Confidence-based monitoring | Estimates performance without labels (CBPE). Requires well-calibrated probabilities and explicitly does NOT work under concept drift — it is a covariate-shift tool (latest release 0.13.1, July 2025) |
 | SciPy | Statistical tests | KS test, Chi-squared; Python standard for custom drift |
 

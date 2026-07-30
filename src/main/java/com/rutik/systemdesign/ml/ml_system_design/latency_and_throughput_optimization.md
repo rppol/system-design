@@ -52,7 +52,7 @@ must be re-measured on your own workload before it is budgeted for.
 | Quantization (INT4) | Weight-only; helps memory-bound decode, no INT4 tensor cores after Ampere | 8x | 1-3% | Medium |
 | Model pruning (unstructured) | Minimal without sparse hardware | 2-10x | 1-5% | High |
 | Model pruning (structured) | 2-4x | 2-4x | 1-5% | High |
-| Knowledge distillation | 5-50x (student vs teacher) | 5-50x | 5-20% | High |
+| Knowledge distillation | Scales with how much smaller you make the student; DistilBERT's published point is 1.6x faster | Same ratio as the student; DistilBERT is 40% smaller | ~3% at DistilBERT's ratio (97% of BERT-base GLUE); rises as the ratio grows | High |
 | ONNX export | 1.3-2x | None | None | Low |
 | TensorRT optimization | 2-8x (GPU) | 1.5-2x | <1% | Medium |
 | Feature caching (Redis) | Up to 10x on feature fetch | None (Redis cost) | None | Low |
@@ -192,7 +192,7 @@ flowchart LR
     class gpu train
 ```
 
-Firing on size-or-timeout keeps the tail bounded — the oldest request waits at most max_wait (5ms) before its batch fires. Batching lifts GPU utilization from ~5% to ~25% and throughput from 67 to 250 req/s, at the cost of ~5ms added wait on the earliest arrivals.
+Firing on size-or-timeout keeps the tail bounded — the oldest request waits at most max_wait (5ms) before its batch fires. The `batch=5` in the GPU node is deliberately the **timeout path**, not the size path: only 5 requests had arrived when the 5ms timer expired, so the batch fires short of the 32-request trigger. That is the common case at moderate QPS and the one worth doing the arithmetic on. Unbatched, each request costs 15ms end to end, so one worker sustains `1 / 0.015 = 67 req/s`. Batched, five requests share one 15ms GPU pass and wait up to 5ms first, so the batch completes in 20ms and the worker sustains `5 / 0.020 = 250 req/s` — **3.7x throughput for 5ms of added tail**, and both figures are exact given the stated 15ms pass. (Deliberately no GPU-utilization percentages here: they depend on the model's arithmetic intensity and the GPU, and the throughput ratio is the number you can actually check.)
 
 **In plain terms.** "Throughput is not a dial you turn. It is whatever falls out of how many requests you keep in flight divided by how long each one takes."
 
@@ -264,14 +264,14 @@ Folding feature_hash and model_ver into the key means stale features or a new mo
 
 ```mermaid
 xychart-beta
-    title "Batching by max_wait_ms: throughput gain (bar) vs added P99 latency (line)"
+    title "Saturating vs linear (bars are a schematic shape, not a benchmark)"
     x-axis "max_wait_ms" [0, 2, 5, 10, 20]
     y-axis "multiplier (x)  /  added ms" 0 --> 25
     bar [1, 4, 7, 11, 15]
     line [0, 2, 5, 10, 20]
 ```
 
-Throughput gain (bars) saturates past roughly 5ms while added P99 latency (line) keeps climbing almost 1:1 with max_wait. That divergence is why max_wait should be capped near 20% of the P99 budget — beyond that you buy latency without buying throughput.
+Read the two series differently, because only one of them is a real quantity. The **line** is exact by construction: added P99 latency equals `max_wait`, since that is the longest a request can sit in the queue. The **bars** are a schematic of the *shape* — throughput saturates — and the specific multipliers are not attributable to any benchmark; the real values depend on arrival rate, model, and batch-size cap, so measure them on your own service. What the picture is for is the divergence: a saturating curve crossed with a linear one, which is why `max_wait` should be capped near 20% of the P99 budget. Beyond the knee you buy latency without buying throughput.
 
 ---
 
@@ -882,22 +882,44 @@ INT4 tensor-core path. Do not budget an INT4 compute multiplier on an H100.
 
 ### Caching: Hit Rate vs Staleness
 
-| Cache TTL | Hit Rate (Typical) | Staleness Risk | Use For |
+There is no industry "typical" hit rate — hit rate is a pure function of your request
+locality, so derive it instead of looking it up. For a key whose requests arrive as a
+Poisson process with mean inter-arrival `m`, a TTL of `T` yields a hit whenever the next
+request lands inside the window: `hit_rate = 1 - exp(-T/m)`. The column below is that
+formula evaluated at **one stated workload, `m = 10 minutes` per key** — substitute your
+own `m` and the numbers move.
+
+| Cache TTL | Hit rate at `m = 10 min` | Staleness Risk | Use For |
 |-----------|------------------|---------------|---------|
-| 1 minute | Low (5-20%) | Very Low | Real-time-sensitive predictions |
-| 5 minutes | Medium (30-50%) | Low | User segment scores |
-| 30 minutes | High (60-80%) | Medium | Item quality scores |
-| 24 hours | Very High (90%+) | High | Stable entity properties |
+| 1 minute | `1 - e^-0.1` = 10% | Very Low | Real-time-sensitive predictions |
+| 5 minutes | `1 - e^-0.5` = 39% | Low | User segment scores |
+| 30 minutes | `1 - e^-3` = 95% | Medium | Item quality scores |
+| 24 hours | `1 - e^-144` ≈ 100% | High | Stable entity properties |
+
+The shape is what to take away: hit rate saturates exponentially in `T/m`, so the first
+multiple of the inter-arrival time buys most of the win and every TTL extension past
+roughly `3m` buys staleness for nothing.
 
 ### Batching: Latency vs Throughput
+
+Only the latency columns are derivable in general — added P99 tracks `max_wait` almost
+1:1 by construction, because that is the worst case a request waits. The throughput
+column has **no** general value: the gain depends on your arrival rate, your model's
+batch scaling, and your batch-size cap, so the table gives the shape rather than
+multipliers you could quote.
 
 | max_wait_ms | Throughput Gain | P50 Latency Impact | P99 Latency Impact |
 |-------------|----------------|-------------------|-------------------|
 | 0 (no wait) | 1x (baseline) | 0ms | 0ms |
-| 2ms | 3-5x | +1ms | +2ms |
-| 5ms | 5-10x | +2ms | +5ms |
-| 10ms | 8-15x | +5ms | +10ms |
-| 20ms | 10-20x | +10ms | +20ms |
+| 2ms | Rising steeply — batches are still filling | +1ms | +2ms |
+| 5ms | Most of the available gain is here | +2ms | +5ms |
+| 10ms | Flattening — batches mostly hit the size cap already | +5ms | +10ms |
+| 20ms | Saturated; you are buying latency only | +10ms | +20ms |
+
+For a worked example with exact numbers, see the §5 dynamic-batching walkthrough:
+5 requests, a 15ms GPU pass and a 5ms timeout give exactly `250 / 67 = 3.7x`. Run that
+same arithmetic on your own measured pass time to fill in the column above for your
+service.
 
 ---
 
@@ -1009,8 +1031,8 @@ ONNX is a standardized model format that lets a model trained in one framework r
 Collapse round-trips first, then remove them: pipelining, pooling, and a local cache attack the fetch in that order of payoff. In detail: (1) pipeline multiple GET commands into a single Redis round-trip — instead of N serial GETs, send all N as one pipeline batch, removing N-1 round-trip overheads, which is by far the largest single win; (2) connection pooling — maintain persistent connections so no request pays TCP (and, with TLS enabled, handshake) setup, worth roughly a millisecond per avoided handshake in-region and far more if connections are being re-established under load; (3) local cache (L1 cache) — keep the hottest features in an in-process dictionary with a short TTL (e.g., 5 seconds), which removes the network hop entirely for those keys; (4) data locality — collocate the serving process and Redis in the same availability zone, since a same-AZ round trip is a fraction of a millisecond while a cross-AZ one is typically sub-millisecond to low single-digit milliseconds, and a cross-region one is tens; (5) shard evenly — hash entity keys so load spreads across Redis shards rather than piling onto a hot shard.
 
 **Q: What is knowledge distillation and when is it appropriate for reducing serving cost?**
-**Short:** Distillation trains a small student to mimic a large teacher's soft outputs, often keeping 90-95% of quality at a tenth of the size.
-Knowledge distillation trains a small "student" model to mimic the output distribution of a large "teacher" model, rather than training the student directly on hard labels. The student learns from the teacher's soft probabilities (logits), which contain more information than one-hot labels. Result: a 10x smaller student model often achieves 90-95% of the teacher's quality. Use distillation when: (1) serving cost of the teacher model is prohibitive for the required QPS; (2) INT8 quantization is insufficient (too much quality loss); (3) you have sufficient compute for a one-time distillation training run. Distillation is more expensive to implement than quantization but produces a genuinely smaller, faster model rather than a compressed version of the same architecture.
+**Short:** Distillation trains a small student to mimic a large teacher's soft outputs; DistilBERT's published result is 97% of BERT-base's GLUE score at 40% fewer parameters.
+Knowledge distillation trains a small "student" model to mimic the output distribution of a large "teacher" model, rather than training the student directly on hard labels. The student learns from the teacher's soft probabilities (logits), which contain more information than one-hot labels. The one widely reproduced datapoint to quote is DistilBERT: 40% fewer parameters, 60% faster, and 97% of BERT-base's GLUE score, with SQuAD within 3.9 points. Resist generalising that into a ratio law — retention is a function of the compression ratio, the task, and whether the student was itself pretrained, and there is no published curve that holds across tasks. Distil, then measure. Use distillation when: (1) serving cost of the teacher model is prohibitive for the required QPS; (2) INT8 quantization is insufficient (too much quality loss); (3) you have sufficient compute for a one-time distillation training run. Distillation is more expensive to implement than quantization but produces a genuinely smaller, faster model rather than a compressed version of the same architecture.
 
 **Q: How do you design a serving system that handles traffic spikes (10x normal QPS)?**
 **Short:** Layer autoscaling, caching, bounded queuing with load shedding, and cascade degradation, since no single defense absorbs a 10x spike alone.

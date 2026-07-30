@@ -66,7 +66,7 @@ Why it matters: feature stores solve three painful production problems: (1) trai
 | Zipline / Chronon | Airbnb | Key-value store | Hive | Yes — open-sourced as Chronon (Apache 2.0, April 2024) |
 | Feast | Community | Redis / DynamoDB | BigQuery / Parquet | Yes |
 | Tecton | Startup | Redis / DynamoDB | S3 + Parquet | No (managed) |
-| Vertex AI Feature Store | Google | Bigtable | BigQuery | No (managed) |
+| Agent Platform Feature Store (ex-Vertex AI Feature Store) | Google | Bigtable | BigQuery | No (managed) |
 | SageMaker Feature Store | AWS | DynamoDB | S3 | No (managed) |
 
 ---
@@ -660,13 +660,17 @@ Note bin 3: mass unchanged, term exactly `0.0`. Bins that did not move contribut
 
 ### Online Store Comparison
 
-| Store | Read Latency | Write Throughput | Cost | Consistency | Best For |
+The Consistency column is the **default read behaviour**, not a guarantee under failure — read the caveats under the table before quoting a cell in an interview.
+
+| Store | Read Latency | Write Throughput | Cost | Consistency (default reads) | Best For |
 |-------|-------------|-----------------|------|-------------|---------|
 | Redis (single node) | <1ms | High | Low | Strong | <100GB, single region |
-| Redis Cluster | <3ms | Very High | Medium | Strong per shard | 100GB-10TB |
-| Cassandra | 5-15ms | Very High | High | Eventual | Multi-region, write-heavy |
-| DynamoDB | 1-5ms | High | Medium (pay-per-use) | Strong | AWS-native, variable load |
-| Bigtable | 5-10ms | Very High | High | Strong | GCP-native, massive scale |
+| Redis Cluster | <3ms | Very High | Medium | Strong on the primary; replication is async | 100GB-10TB |
+| Cassandra | 5-15ms | Very High | High | Tunable; eventual at the common `ONE`/`LOCAL_ONE` setting | Multi-region, write-heavy |
+| DynamoDB | 1-5ms | High | Medium (pay-per-use) | Eventual by default; strong on request (2x read cost) | AWS-native, variable load |
+| Bigtable | 5-10ms | Very High | High | Strong within a single cluster | GCP-native, massive scale |
+
+Two cells people over-read. **Redis Cluster is not strongly consistent as a system** — each shard's primary serves consistent reads, but replicas follow asynchronously, so a failover can silently drop writes the client already saw acknowledged; size your feature freshness SLO around that, not around the <3ms. **Cassandra is not inherently eventual** — `QUORUM` reads plus `QUORUM` writes give you read-your-writes, at the cost of the tail latency that made you pick Cassandra in the first place. The honest framing for a feature store is that every row here trades consistency for either latency or geography, and a stale feature value is usually the cheaper failure than a slow one.
 
 ### Offline Store Comparison
 
@@ -725,7 +729,7 @@ Note bin 3: mass unchanged, term exactly `0.0`. Bins that did not move contribut
 |----------|------|-------|
 | Open-Source Feature Store | Feast | Most mature OSS option; Python SDK; multiple backend support |
 | Managed Feature Store | Tecton | Managed platform from the team that originally built Feast, but its own SDK (Rift compute engine, Stream Ingest API) — not a Feast-compatible API |
-| Cloud Feature Store | Agent Platform Feature Store (GCP, formerly Vertex AI Feature Store) | BigQuery as the data source; Bigtable online serving, with scheduled or continuous sync per feature view. Embeddings are served by Vector Search, not the feature store |
+| Cloud Feature Store | Agent Platform Feature Store (GCP, formerly Vertex AI Feature Store) | BigQuery as the data source; Bigtable online serving, with scheduled or continuous sync per feature view. Embeddings are served by Vector Search, not the feature store. Two things are on a published sunset clock, and they are not the whole product: **Feature Store (Legacy)** and **Optimized online serving** both feature-froze on 17 May 2026 and shut off entirely on 17 Feb 2027, so a legacy `featurestores` deployment or an optimized-serving endpoint has a hard migration deadline to the current Bigtable-backed store (or Vector Search for embeddings) |
 | Cloud Feature Store | SageMaker Feature Store (AWS) | DynamoDB online; S3 offline; tight SageMaker integration |
 | Online Store | Redis | De facto standard for <5ms P99; requires cluster for >100GB |
 | Online Store | Apache Cassandra | Better for multi-region writes; 5-15ms P99 |

@@ -754,7 +754,7 @@ def popularity_fallback(
 | Tool | Type | Notes |
 |------|------|-------|
 | `implicit` (Python) | ALS + BPR | Fast Cython/GPU ALS, production-grade; maintained by Ben Frederickson |
-| `LightFM` | Hybrid CF+CB | Supports user/item features alongside CF; useful for cold start |
+| `LightFM` | Hybrid CF+CB | Supports user/item features alongside CF; useful for cold start. Dormant: last PyPI release 1.17 (March 2023), last repo push July 2024, not archived — the formulation is still sound, but expect to build from source on new Python versions |
 | `Surprise` | SVD, KNN | Research/prototyping, not production scale |
 | `RecBole` | Research framework | 100+ models, unified interface for benchmarking |
 | `PyTorch` | Custom MF/BPR | Full control for non-standard loss functions |
@@ -803,7 +803,7 @@ With regularization lambda close to 0, user and item latent vectors can grow arb
 **Q: How does SVD++ extend standard matrix factorization?**
 **Short:** SVD++ augments the user vector with an implicit term derived from which items the user chose to interact with.
 
-SVD++ adds an implicit-feedback term to the user vector, so which items a user chose to rate shapes their taste alongside how they rated them. Concretely: user_vector_u = user_factor_u + (1/sqrt(|N(u)|)) * sum over j in N(u) of implicit_factor_j, where N(u) is the set of items user u has interacted with (regardless of rating value) and implicit_factor_j is a learned vector for each item. This captures the notion that which items a user chose to interact with (not just how they rated them) is informative. SVD++ was one of the strongest single models inside the Netflix Prize-winning blend and consistently beat plain SVD on the same data — by a margin that looks small in absolute RMSE but was decisive in a contest whose entire target was 10%.
+SVD++ adds an implicit-feedback term to the user vector, so which items a user chose to rate shapes their taste alongside how they rated them. Concretely: user_vector_u = user_factor_u + (1/sqrt(|N(u)|)) * sum over j in N(u) of implicit_factor_j, where N(u) is the set of items user u has interacted with (regardless of rating value) and implicit_factor_j is a learned vector for each item. This captures the notion that which items a user chose to interact with (not just how they rated them) is informative. SVD++ was one of the strongest single models inside the Netflix Prize-winning blend and consistently beat plain SVD on the same data. Koren's KDD 2009 Table 2 puts numbers on it: at `f = 50 / 100 / 200` factors, SVD scores RMSE `.9046 / .9025 / .9009` and SVD++ scores `.8952 / .8924 / .8911` — a gain of roughly `0.0095` RMSE, or about 1%. That looks tiny until you remember the whole contest asked for a 10% improvement over Cinematch's `.9514`, so a free 1% from data you already had was decisive.
 
 **Q: What is the complexity of item-item CF pre-computation and how would you scale it?**
 **Short:** Naive item-item similarity is O(I^2 * U); LSH and co-occurrence filtering scale it to millions of items.

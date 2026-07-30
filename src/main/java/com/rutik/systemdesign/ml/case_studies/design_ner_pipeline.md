@@ -683,7 +683,9 @@ A media monitoring NER system was trained when "Twitter" was the brand. After re
 ```
 throughput_docs_per_sec = (GPU_count × batch_size) / (bert_forward_ms + crf_viterbi_ms + overhead_ms) × 1000
 
-For A10G (24 GB GDDR6, g5.xlarge):
+For A10G (24 GB GDDR6, 600 GB/s, 70 TFLOPS dense BFLOAT16 tensor-core —
+140 TFLOPS is the *with-sparsity* figure and does not apply to a dense
+BERT graph; both from the AWS/NVIDIA A10G datasheet — on g5.xlarge):
   bert_forward_ms   = 38ms  (batch=32, seq_len=512, BF16)
   crf_viterbi_ms    = 3ms   (23 tags, seq_len=512)
   overhead_ms       = 9ms   (tokenization + span extraction)

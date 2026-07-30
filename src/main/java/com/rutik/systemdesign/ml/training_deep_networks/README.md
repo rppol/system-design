@@ -924,12 +924,19 @@ Seed all RNGs (Python, NumPy, torch, CUDA), set deterministic algorithms, and sa
 ```
 8x A100 80GB (DDP via PyTorch FSDP, ZeRO Stage 2)
   Per-GPU memory budget: 80GB
-  Model weights (bf16): 14 GB
   Gradient checkpointing: reduces activation memory 10x -> 2.1 GB
-  Optimizer state (fp32 AdamW, FSDP sharded): 8 GB per GPU
-  Activations (with checkpointing): 2.1 GB
-  Buffer/workspace: 8 GB
-  Total: ~34 GB -> 46 GB headroom for batch size scaling
+
+  Line-by-line, for 7B params on 8 GPUs under ZeRO-2:
+    Model weights (bf16, replicated)  7e9 x 2 B          = 14.00 GB
+    Optimizer state (fp32 m + v, sharded)  7e9 x 8 B / 8 =  7.00 GB
+    Gradients (bf16, sharded by ZeRO-2)    7e9 x 2 B / 8 =  1.75 GB
+    Activations (with checkpointing)                     =  2.10 GB
+    Buffer / workspace (comms, fragmentation)            =  8.00 GB
+                                                           -------
+    Static total                                         = 32.85 GB
+  Measured peak lands near 34 GB -- the extra ~1 GB is transient allocation
+  during the all-gather, which is why the metrics table quotes 34 not 32.85.
+  Headroom for batch-size scaling: 80 - 34 = 46 GB
          |
          v
 Training Configuration

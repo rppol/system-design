@@ -452,14 +452,14 @@ magnitude faster, so always calibrate this constant against your own job before 
 
 | Component | Configuration | Cost/day |
 |---|---|---|
-| Spark cluster (EMR) | 50 × m5.4xlarge ($0.768/hr EC2), 45 min | 50 × 0.768 × 0.75 = ~$29/day EC2, plus the EMR service charge on top |
+| Spark cluster (EMR) | 50 × m5.4xlarge, 45 min. EC2 $0.768/hr + EMR surcharge $0.192/hr = $0.960/hr all-in (AWS Price List, us-east-1) | 50 × 0.960 × 0.75 = ~$36/day |
 | LightGBM scoring | 1 × c5.4xlarge ($0.68/hr), 20 min | ~$0.25/day |
 | SHAP computation | 1 × c5.4xlarge ($0.68/hr), 40 min | ~$0.45/day |
 | DynamoDB (5M writes/day, 48h TTL) | On-demand: $0.625 per million writes + $0.25/GB-month | ~$3/day |
 | S3 storage (prediction logs) | 60GB/month | ~$1.40/month |
-| **Total** | | **~$35/day (~$1,050/month)** |
+| **Total** | | **~$40/day (~$1,200/month)** |
 
-At 400k churners/month and 5% intervention conversion rate, the model prevents 20k churns/month. At $150 average LTV: $3M retained value / month. The ML pipeline itself costs about $1k/month — a roughly 3000:1 ratio on that line alone, but that is the wrong denominator to quote to finance. Add the ~$150k/month of contact delivery from §2 and the retention offers themselves (capped at $5 per high-risk customer, §4.3) and the campaign-level return lands around 15-20:1. Quote the campaign number, not the infrastructure number.
+At 400k churners/month and 5% intervention conversion rate, the model prevents 20k churns/month. At $150 average LTV: $3M retained value / month. The ML pipeline itself costs about $1.2k/month — a roughly 2,500:1 ratio on that line alone, but that is the wrong denominator to quote to finance. Add the ~$150k/month of contact delivery from §2 and the retention offers themselves (capped at $5 per high-risk customer, §4.3) and the campaign-level return lands around 15-20:1. Quote the campaign number, not the infrastructure number.
 
 ---
 

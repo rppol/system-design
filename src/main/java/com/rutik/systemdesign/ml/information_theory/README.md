@@ -1057,14 +1057,36 @@ def kl_fixed(p_counts, q_counts, epsilon=1e-6):
 # With n=20 samples, KL of 0.08 from sampling noise triggers false alert
 kl = compute_kl_divergence(snapshot_current.counts, snapshot_ref.counts)
 if kl > 0.05:
-    send_alert(model_id, kl)   # FPR = 18% at n=20 samples per window
+    send_alert(model_id, kl)   # fires on 100% of NULL windows at n=20, B=100
 
 # FIX: require both KL threshold AND statistical significance (chi2 p-value)
 kl = compute_kl_divergence(...)
 chi2_stat, chi2_p = chi2_drift_test(...)
 if kl > 0.05 and chi2_p < 0.01:   # dual condition
-    send_alert(model_id, kl)   # FPR drops to 0.8% at same n=20 window
+    send_alert(model_id, kl)      # still 19% at n=20 -- the gate is not enough
 ```
+
+Those two rates are simulated, not asserted, and you can reproduce them: draw `N`
+windows of `n` samples from the *same* multinomial the reference was estimated from
+(so every alert is by construction a false positive), smooth with the same epsilon,
+and count how often each rule fires. With `B = 100` buckets:
+
+| samples/window `n` | mean null KL | KL-only fires | KL + chi2 fires |
+|---|---|---|---|
+| 20 | 1.256 | 100% | 19% |
+| 100 | 0.408 | 100% | 8.9% |
+| 1,000 | 0.052 | 62% | 2.5% |
+| 5,000 | 0.010 | 0% | 0% |
+
+Read the top row carefully: at `n = 20` the *expected* KL from pure sampling noise is
+`1.256`, twenty-five times the `0.05` threshold, so the KL-only rule is not
+noisy — it is unconditionally broken. The chi-squared gate helps but does not rescue
+it, because chi-squared itself is invalid when expected cell counts are far below 5.
+The real fix is the sample floor, and the table shows where it has to sit: this
+model's `min_samples_per_window = 100` guard is still firing 8.9% of the time under
+the null, and the rule does not become trustworthy until roughly `n = 5,000`. A
+threshold you did not simulate against your own bucket count is a threshold you do
+not know the false-positive rate of.
 
 **Pitfall 3 - Monitoring output distributions only misses input covariate shift before it propagates to outputs:**
 ```python
@@ -1111,4 +1133,4 @@ for feature in top_20_features:
 
 **How would you extend this system to handle multivariate input drift using mutual information?** Mutual information I(X; Y) = H(X) + H(Y) - H(X, Y) measures statistical dependence between two variables. For detecting multivariate input drift, monitor the joint distribution of the top 5 most correlated input feature pairs: if I(feature_A_current, feature_B_current) drops significantly from the reference mutual information, it indicates that the correlation structure (not just marginal distributions) has changed - a deeper form of drift. Copula-based approaches estimate joint distributions non-parametrically. An alternative is to use the model's loss on a small labelled anchor dataset (100-500 labelled samples updated weekly) as a sensitive single-number drift signal combining all distributional changes.
 
-**What is the computational cost of computing KL divergence for 400 models every 5 minutes?** With 400 models, each with output distributions over B=100 buckets, one KL computation requires 100 multiplications and 100 log evaluations: approximately 10 microseconds per model on a single CPU core. The chi-squared test requires an additional 200 multiplications: 15 microseconds per model. Total for 400 models: 400 * 25 microseconds = 10 milliseconds per monitoring cycle - negligible compared to the 5-minute (300,000ms) window. The primary cost is I/O: reading 5-minute count aggregates from Redis for all 400 models (400 * 100 * 8 bytes = 320 KB) at < 2ms round-trip. The total monitoring pipeline runs in under 50ms per 5-minute cycle; amortised over the 360,000 events in that window that is under 0.15 microseconds per event, four orders of magnitude inside the 3ms per-event budget. The only truly inline cost is `record_prediction`, a single array increment.
+**What is the computational cost of computing KL divergence for 400 models every 5 minutes?** With 400 models, each with output distributions over B=100 buckets, one KL computation requires 100 multiplications and 100 log evaluations. Measured with NumPy plus `scipy.special.rel_entr` on one core of an arm64 laptop, a smoothed 100-bucket KL costs about 6 microseconds and a hand-rolled chi-squared with its survival-function lookup about 30 microseconds - roughly 36 microseconds for the pair, and note that the chi-squared dominates purely through Python and SciPy call overhead, not arithmetic. Total for 400 models: 400 * 36 microseconds = about 14 milliseconds per monitoring cycle - negligible compared to the 5-minute (300,000ms) window. The primary cost is I/O: reading 5-minute count aggregates from Redis for all 400 models (400 * 100 * 8 bytes = 320 KB) at < 2ms round-trip. The total monitoring pipeline runs in under 50ms per 5-minute cycle; amortised over the 360,000 events in that window that is under 0.15 microseconds per event, four orders of magnitude inside the 3ms per-event budget. The only truly inline cost is `record_prediction`, a single array increment.

@@ -477,7 +477,7 @@ on:
     branches: [main]
 
 env:
-  PYTHON_VERSION: "3.10"
+  PYTHON_VERSION: "3.12"   # matches the KFP component base images below
   MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
 
 jobs:
@@ -751,7 +751,7 @@ Fix: the sklearn `Pipeline` object bundles the scaler and the classifier into a 
 
 **Serving and Traffic Management:**
 - Istio / Envoy — service mesh; fine-grained traffic splitting for canary deployments
-- Seldon Core — Kubernetes-native model serving with canary and shadow mode built in
+- Seldon Core — Kubernetes-native model serving; Core 2 has Experiments (HTTP traffic split for A/B and canary) and shadow deployment via a mirror model built in. Not open source any more: since 22 January 2024 all new releases of Core 1, Core 2, Alibi Explain and Alibi Detect are under the Business Source License 1.1 — free for non-production use, paid for production
 - BentoML — model packaging and serving; cloud-agnostic
 - Dynamo Triton (NVIDIA) — high-performance GPU serving; supports TensorRT, ONNX, PyTorch, Python backends
 
@@ -1226,7 +1226,7 @@ Widen the ramp and the same arithmetic gives the exposure at each step of the 5/
 
 **Why shrinking the window is the wrong economy.** Cut the canary to 5 minutes and the sample drops to `400 x 5 x 60 x 0.1 = 12,000` requests, `20` Prometheus points, and a single model refresh cycle — enough to catch a model that is broken outright, not enough to distinguish a real 2x error-rate move from one unlucky scrape. The 30-minute window is what makes the *automatic* rollback trustworthy; without the sample size behind it, the controller either flaps on noise or is quietly ignored by the on-call.
 
-**Metrics and results:**
+**Metrics and results** (illustrative outcomes for the composite scenario above — no company published these):
 
 | Metric | Before (manual) | After (MLflow + GH Actions CI) |
 |---|---|---|

@@ -121,7 +121,7 @@ The feature store is split by latency need: Redis serves online features with a 
 
 **Sampled softmax for two-tower training**: Full softmax over 10M items is prohibitive. Sample 1000 negatives per positive. Use in-batch negatives (treat other items in minibatch as negatives) — cheap and effective. Correction for popularity bias: subtract log(item_frequency) from logits.
 
-**FAISS IVF with PQ compression**: IVF (Inverted File Index) partitions embedding space into 4096 Voronoi cells. At query time, search only nprobe=64 cells. PQ (Product Quantization) compresses 256-dim float32 (1KB/vector) to 32 bytes — a 32× reduction. 10M items: 10M × 32B = 320MB in RAM vs 10.24GB uncompressed. Target Recall@100 > 95% at nprobe=64, and verify it: 32× quantization is aggressive, and the achieved recall depends on how clustered the embedding space is. Measure recall against an exact `IndexFlatIP` on a held-out query sample before shipping the PQ index.
+**FAISS IVF with PQ compression**: IVF (Inverted File Index) partitions embedding space into 4096 Voronoi cells. At query time, search only nprobe=64 cells. PQ (Product Quantization) compresses 256-dim float32 (1KB/vector) to 32 bytes — a 32× reduction. 10M items: 10M × 32B = 320MB in RAM vs 10.24GB uncompressed. Recall@100 is an acceptance test here, not a property of the index: 32× quantization is aggressive, and the achieved recall depends on how clustered the embedding space is. Measure recall against an exact `IndexFlatIP` on a held-out query sample before shipping the PQ index and agree the bar with the product side — 0.90-0.95 is the usual band for a candidate generator feeding a re-ranker. If PQ32 at nprobe=64 misses that bar, the levers in order of cost are OPQ pre-rotation (free at query time), a higher nprobe, and a less aggressive PQ64 code (which doubles the index to 640MB).
 
 **LightGBM over deep ranking**: LightGBM trains in hours (vs days for deep models), handles missing features gracefully, is interpretable (feature importance), and stays competitive on tabular ranking features. The illustrative gap used throughout this design is NDCG@10 0.47 (LightGBM) vs 0.49 (DNN) — 4% relative — bought back by an order of magnitude faster iteration. Measure the gap on your own feature set: it widens as you add sequence and embedding features, which is exactly where trees stop being competitive.
 
@@ -677,7 +677,9 @@ Redis Feature Store (user embeddings):
 Kafka (event ingestion):
   8 partitions, 3 replicas, 12K events/sec sustained
   3-broker Amazon MSK cluster (kafka.m5.large at $0.21/hr in us-east-1)
-  Cost: 3 × $0.21/hr × 730 = ~$460/month brokers + ~$140 EBS storage = ~$600/month
+  Cost: 3 × $0.21/hr × 730 = ~$460/month brokers
+        + 3 × 470 GB EBS at $0.10/GB-month = ~$140/month storage
+        = ~$600/month  (both rates from the AWS Price List API, us-east-1)
 
 Total monthly serving cost: $2,450 + $4,900 + $1,814 + $600 = ~$9,764
 ```

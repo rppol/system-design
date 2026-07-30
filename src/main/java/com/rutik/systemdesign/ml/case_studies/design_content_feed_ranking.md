@@ -738,7 +738,11 @@ MMOE Inference (100K QPS × 800 candidates):
   Stage-2 ranking is 800 candidates per user, batched together.
   100K user requests/sec × 800 candidates = 80M feature vectors assembled,
   but only 100K MMOE forward passes of batch-800.
-  MMOE of batch 800: ~5ms on one A10G → 200 requests/sec per A10G.
+  MMOE of batch 800: ASSUME ~5ms on one A10G → 200 requests/sec per A10G.
+    This 5ms is an assumption, not a measurement — no benchmark is published for
+    an MMoE of unstated width, and every dollar below is linear in it. Treat the
+    block as a sensitivity analysis over two inputs (candidate count, per-batch
+    latency) and re-run it once you have profiled your own graph.
   A10Gs needed: 100K / 200 = 500.
   g5.48xlarge carries 8× A10G at $16.288/hr (us-east-1 on-demand),
   so ceil(500 / 8) = 63 nodes.
@@ -998,7 +1002,7 @@ Quarterly      Scheduled                                   Full bias audit (demo
 ## Additional Interview Questions
 
 **Q: How does MMoE (Multi-gate Mixture of Experts) differ from a simple shared-bottom multi-task network?**
-A shared-bottom network has one shared feature extractor (bottom MLP) that feeds all task-specific heads. All tasks use identical shared representations, which is problematic when tasks conflict: optimizing for engagement might learn representations that hurt dwell time prediction. MMoE introduces n expert networks (each a separate MLP) and k gating networks (one per task). Each task's gating network learns a softmax mixture over the experts, producing a task-specific weighted combination of expert outputs. This means different tasks can specialize to different experts: engagement may rely heavily on experts 1-3 (interaction pattern experts), while quality relies on experts 5-7 (content semantic experts). Expert specialization is learned, not hard-coded. The improvement over shared-bottom is typically 3-8% on secondary task metrics in production systems.
+A shared-bottom network has one shared feature extractor (bottom MLP) that feeds all task-specific heads. All tasks use identical shared representations, which is problematic when tasks conflict: optimizing for engagement might learn representations that hurt dwell time prediction. MMoE introduces n expert networks (each a separate MLP) and k gating networks (one per task). Each task's gating network learns a softmax mixture over the experts, producing a task-specific weighted combination of expert outputs. This means different tasks can specialize to different experts: engagement may rely heavily on experts 1-3 (interaction pattern experts), while quality relies on experts 5-7 (content semantic experts). Expert specialization is learned, not hard-coded. Do not quote a general "x% better" band — the one published production comparison is YouTube's live experiment in Zhao et al. (RecSys 2019, Table 1), where an 8-expert MMoE at matched model complexity (6.1M multiplications) moved the engagement metric +0.45% and the satisfaction metric +3.07% against the shared-bottom baseline. The asymmetry is the point: the secondary objective gains several times what the primary one does, because shared-bottom was the thing sacrificing it.
 
 **Q: How do you define and enforce content diversity in a feed ranking system?**
 Diversity has multiple dimensions: (1) topic/content diversity — avoiding 10 consecutive posts about the same news event; (2) creator diversity — avoiding one creator monopolizing the feed; (3) format diversity — mix of video, images, text posts; (4) sentiment diversity — not all negative news. Enforcement mechanisms: (1) Hard constraints in re-ranking: max 3 posts from same creator, max 4 posts on same topic cluster (BERTopic assignment) in top-20. (2) DPP diversity: probabilistic subset selection that explicitly maximizes diversity via kernel matrix. (3) Weighted diversity score in multi-objective: diversity_score = 1 - top_creator_share × top_topic_concentration, added as 4th optimization objective. (4) Evaluation: Gini coefficient of creator share in served feeds; topic entropy (higher = more diverse); intra-list distance (average cosine distance between adjacent feed items).

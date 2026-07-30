@@ -788,8 +788,12 @@ Isolation Forest Weekly Retrain:
   Dataset: 30-day rolling window × 100K metrics × 15-min windows
   = 100K metrics × 96 windows/day × 30 days = 288M samples (subsample 1% = 2.88M)
   Hardware: c5.4xlarge (16 vCPU, 32GB RAM) at $0.68/hr
-  Duration: 3 hours (parallel sklearn with n_jobs=-1)
+  Duration: budget a 3-hour batch window, not 3 hours of compute. With
+    max_samples=256 and n_estimators=200 each tree is built from 256 rows, so the
+    sklearn fit over 2.88M 10-dim samples is a matter of minutes with n_jobs=-1;
+    the window covers feature extraction, the S3 read and scoring the full set.
   Cost: $0.68/hr × 3hr = $2.04/run; at ~4.33 runs/month = ~$8.84/month
+    (the padding is worth ~$6/month, which is why nobody tunes it)
 
 Autoencoder Weekly Retrain:
   Dataset: same 2.88M subsampled windows, each a 10-dim feature vector

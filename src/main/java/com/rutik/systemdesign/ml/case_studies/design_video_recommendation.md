@@ -590,6 +590,14 @@ Target: 1M req/sec, 200 ms p99, 500 candidates ranked per request
 Ranking (GPU):
   500 candidates × 1M req/sec = 5 × 10^8 candidate-scores/sec
   One A10G-class GPU: ~3-5 × 10^6 candidate-scores/sec for a mid-size MMoE (batched)
+    No benchmark is published for an MMoE of unstated width, so make this
+    checkable rather than trusting it: throughput = (achieved FLOPS) / (FLOPs
+    per candidate). The A10G's dense BFLOAT16 tensor-core peak is 70 TFLOPS
+    (the 140 TFLOPS on the datasheet is the with-sparsity number and does not
+    apply here), and in MMoE every expert runs for every candidate, so FLOPs
+    per candidate is roughly n_experts x the per-expert MLP cost plus the
+    towers. Write both numbers down for your own model; if the quotient lands
+    an order of magnitude under the figure above, the figure is wrong.
   Required GPUs: 5e8 / 4e6 ≈ 125 GPUs; with headroom + redundancy → ~200 GPUs
 
 Candidate generation (ANN, CPU):

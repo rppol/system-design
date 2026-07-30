@@ -482,7 +482,9 @@ def complement_nb_example() -> None:
         pipeline.fit(train_data.data, train_data.target)
         acc = pipeline.score(test_data.data, test_data.target)
         print(f"{name:15s} accuracy on 20newsgroups: {acc:.4f}")
-    # ComplementNB typically beats MultinomialNB by 1-3% on this task
+    # Expect a small edge here: Rennie et al. 2003 Table 2 reports 0.848 -> 0.857
+    # on 20 Newsgroups, which is nearly class-balanced. The large CNB wins show up
+    # on genuinely skewed corpora (their Industry Sector run goes 0.582 -> 0.889).
 ```
 
 ### 6.2 Laplace Smoothing — Manual Implementation
@@ -961,7 +963,7 @@ They fix different failure modes: var_smoothing guards against zero-variance con
 **Q: Why does ComplementNB often outperform MultinomialNB on imbalanced text?**
 **Short:** ComplementNB estimates parameters from the complement class, giving more stable estimates on imbalanced text.
 
-ComplementNB estimates each class's parameters from the complement of that class — all documents NOT in it — giving a far larger, more stable sample when the class itself is tiny. Standard MultinomialNB estimates P(word | class) from only the in-class documents, so a minority class with few examples yields noisy, count-starved likelihoods biased toward the majority. Using the complement also counteracts the tendency to assign long documents to text-heavy classes. On skewed 20-Newsgroups-style corpora, ComplementNB typically beats MultinomialNB by 1–3% accuracy.
+ComplementNB estimates each class's parameters from the complement of that class — all documents NOT in it — giving a far larger, more stable sample when the class itself is tiny. Standard MultinomialNB estimates P(word | class) from only the in-class documents, so a minority class with few examples yields noisy, count-starved likelihoods biased toward the majority. Using the complement also counteracts the tendency to assign long documents to text-heavy classes. Size the expected win by how skewed the corpus actually is: in Rennie et al. (2003) Table 2, weight-normalized CNB lifts 20 Newsgroups accuracy from 0.848 to 0.857 — under a point, because 20 Newsgroups is close to balanced — while on the genuinely skewed Industry Sector corpus it goes from 0.582 to 0.889. The complement trick pays in proportion to the imbalance, not as a flat percentage.
 
 ---
 

@@ -474,7 +474,7 @@ chunks it takes -- because 128 MB is the amount of data one Spark task should ho
 |--------|------------|
 | `input_size_gb` | Size of the data crossing the shuffle, in GB — not the raw source size if you filtered first |
 | `1024` | GB to MB. Purely a unit conversion |
-| `128` | Target MB per partition. The 128-256 MB rule of thumb from `create_spark_session` above |
+| `128` | Target MB per partition. The 128-256 MB rule of thumb from `create_spark_session` above — a community heuristic with no upstream Spark source. Note that Spark's own AQE advisory, `spark.sql.adaptive.advisoryPartitionSizeInBytes`, defaults to **64 MB**, so this target is 2-4x the engine's. The two coexist: AQE coalesces *post-shuffle* partitions toward 64 MB when it is enabled, while this formula sets `spark.sql.shuffle.partitions` up front. Pick one number deliberately rather than inheriting both |
 | result | Number of post-shuffle partitions, i.e. the number of tasks in the next stage |
 | `spark.sql.shuffle.partitions` | The knob this sets. Default `200`, which is a constant unrelated to your data |
 

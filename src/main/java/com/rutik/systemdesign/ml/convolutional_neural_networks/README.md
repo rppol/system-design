@@ -572,7 +572,7 @@ The latency column is an illustrative order of magnitude for batch-1 fp32 infere
 ## 10. Common Pitfalls
 
 **War story 1 — Wrong normalization statistics at inference:**
-A team trained a ResNet on ImageNet-normalized images (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) but forgot to apply the same normalization to inference images. Accuracy dropped from 76% to 35%. The model had learned to expect normalized inputs; raw pixel values [0-255] are wildly out of distribution relative to training.
+A team trained a ResNet on ImageNet-normalized images (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) but forgot to apply the same normalization to inference images. Accuracy dropped from 76% to 35% — an illustrative pair, like the latency figures in Section 7; the incident is anonymized and no public report exists to check the exact numbers against, but the collapse is trivially reproducible on any torchvision ResNet-50 by deleting the `Normalize` transform at eval time. The model had learned to expect normalized inputs; raw pixel values [0-255] are wildly out of distribution relative to training.
 
 ```python
 from torchvision import transforms
@@ -615,7 +615,7 @@ Fine-tuning a ResNet-50 on a thermal infrared dataset (very different pixel stat
 | Tool | Purpose |
 |------|---------|
 | `torchvision.models` | Pretrained ResNet, EfficientNet, MobileNet, ViT |
-| `timm` (PyTorch Image Models) | 700+ pretrained vision models, easy fine-tuning |
+| `timm` (PyTorch Image Models) | The largest catalogue of pretrained vision backbones; easy fine-tuning. No headline model count is published any more — get the live number for your pinned version with `len(timm.list_models(pretrained=True))` |
 | `albumentations` | Fast image augmentation (RandomCrop, CLAHE, GridDistortion) |
 | `torchvision.transforms.v2` | Modern transform pipeline with consistent API |
 | `torch.utils.data.DataLoader` | Multi-process data loading; num_workers=4, pin_memory=True |

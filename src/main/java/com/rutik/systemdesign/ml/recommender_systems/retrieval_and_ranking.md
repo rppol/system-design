@@ -776,6 +776,13 @@ instrument.
 | LambdaMART | Medium | Very Fast (GBDT) | Best for tabular | Tabular only |
 | Neural Ranker | Slow | Medium | Best with deep features | All + interactions |
 
+Both tables below are **indicative, not benchmark results** — no dataset, hardware or build
+parameters are cited, and ANN numbers are meaningless without them. Read them for the
+*ordering* between index families and the *shape* of the recall/latency curve; for real
+figures on a stated dataset and dimension, run your own sweep or consult
+`ann-benchmarks.com`. Every index here is tunable across a wide operating range, so any row
+can be moved several points in either direction by changing its build parameters.
+
 | ANN Index | Recall@100 | QPS (1M vecs, D=256) | Memory | Notes |
 |-----------|------------|---------------------|--------|-------|
 | Brute Force (Flat) | 100% | ~500 | Low | Exact; scales linearly |
@@ -784,13 +791,23 @@ instrument.
 | ScaNN | ~95-97% | ~100K | Medium | Google's; fastest QPS |
 | Annoy | ~90% | ~20K | Low | Simple; Spotify |
 
-| nprobe (IVF) | Recall@100 | Latency (ms) |
+| nprobe (IVF) | Recall@100 (illustrative) | Latency (ms) |
 |--------------|------------|--------------|
 | 8 | ~85% | 1 |
 | 32 | ~93% | 3 |
 | 64 | ~96% | 6 |
 | 128 | ~98% | 12 |
 | 256 (= n_lists) | ~100% (exact) | 25 |
+
+The two columns of the `nprobe` table are not equally trustworthy, and the difference is the
+point. **Latency is derivable** from the §5 cost model: work is a fixed centroid scan plus
+`N x nprobe/n_lists` distance computations, so it is affine in `nprobe` — fit the endpoints
+`(8, 1ms)` and `(256, 25ms)` and you get `0.0968 x nprobe + 0.23`, which reproduces the
+middle rows to within a rounding step. **Recall is not derivable at all** — it depends
+entirely on how well the dataset's true neighbours cluster into the same Voronoi cells, so
+those percentages are a plausible curve shape and nothing more. The operating rule survives
+either way: recall saturates while latency keeps growing linearly, so tune `nprobe` against
+a measured recall curve on *your* vectors and stop at the knee.
 
 ---
 

@@ -64,7 +64,7 @@ Why it matters: without online evaluation, every ML improvement is a guess. Even
 |---|---|---|---|
 | CUPED | 30-50% typical | Pre-experiment covariate (same metric in pre-period) | Introduced at Microsoft (Deng, Xu, Kohavi, Walker, WSDM 2013); now standard at Netflix, Booking.com, Airbnb, DoorDash |
 | Stratification | 10-30% | Stratification factor known before randomization | Applied at design time |
-| CUPAC | DoorDash reports ~25-40% shorter switchback tests | Rich pre-experiment feature set; ML covariate | ML-predicted control metric as covariate |
+| CUPAC | DoorDash reports "more than 25%" shorter switchback tests at equal power | Rich pre-experiment feature set; ML covariate | ML-predicted control metric as covariate |
 | Delta method | N/A (SE correction) | Ratio metrics (CTR = clicks/impressions) | Prevents invalid t-test on ratio metrics |
 
 ---
@@ -304,7 +304,7 @@ xychart-beta
     bar [5, 8, 12, 16, 21]
 ```
 
-One pre-specified look holds the nominal 5%; checking for significance daily across a 14-day test drives the true Type I error to roughly 21% — the reason sequential (always-valid) tests exist. The bars are simulated from the code above with the number of equally spaced looks varied; the inflation-with-repeated-testing result itself dates to Armitage, McPherson and Rowe (1969), "Repeated Significance Tests on Accumulating Data".
+One pre-specified look holds the nominal 5%; checking for significance daily across a 14-day test drives the true Type I error to roughly 21% — the reason sequential (always-valid) tests exist. Read the bars as simulation output, not as a published table: they come from re-running the code above with the number of equally spaced looks varied, the 14-look bar being the seeded 10,000-replicate run printed above and the intermediate bars shorter runs that carry roughly a percentage point of Monte Carlo error each. The inflation-with-repeated-testing result itself dates to Armitage, McPherson and Rowe (1969), "Repeated Significance Tests on Accumulating Data" (JRSS A 132:235-244), whose Table 1 gives the exact values if you need them to more than one significant figure.
 
 ```python
 # CORRECT: sequential testing with mSPRT (mixture Sequential Probability Ratio Test)
