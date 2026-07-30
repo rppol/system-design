@@ -48,13 +48,13 @@ Understanding JVM internals is what separates engineers who can explain *why* a 
 
 ### 4.2 GC Algorithm Comparison
 
-| GC | Default | Pause Type | Best For |
+| GC | How to select | Pause Type | Best For |
 |----|---------|-----------|---------|
-| Serial GC | -XX:+UseSerialGC | Stop-the-world (single thread) | Single-core, small heap |
-| Parallel GC | Java 8 default | Stop-the-world (multi-thread) | High throughput batch |
-| G1 GC | Java 9+ default | Concurrent marking + STW evacuation | Balanced latency/throughput |
-| ZGC | -XX:+UseZGC (Java 15 GA; generational is the only mode from Java 24) | Sub-millisecond STW | Ultra-low latency |
-| Shenandoah | -XX:+UseShenandoahGC | Concurrent compaction | Low latency (alternative to ZGC) |
+| Serial GC | `-XX:+UseSerialGC` | Stop-the-world (single thread) | Single-core, small heap |
+| Parallel GC | `-XX:+UseParallelGC` | Stop-the-world (multi-thread) | High throughput batch |
+| G1 GC | `-XX:+UseG1GC` — **the default** on any server-class machine | Concurrent marking + STW evacuation | Balanced latency/throughput |
+| ZGC | `-XX:+UseZGC` — generational is the only mode (JEP 490, Java 24 removed the non-generational one) | Sub-millisecond STW | Ultra-low latency |
+| Shenandoah | `-XX:+UseShenandoahGC` | Concurrent compaction | Low latency (alternative to ZGC) |
 
 ### 4.3 JIT Compilation Tiers
 
@@ -478,7 +478,7 @@ Java construct → barrier mappings:
 **Use ZGC when**:
 - Service has strict latency SLAs (sub-10ms P99)
 - Large heaps (>32GB)
-- Java 15+ available
+- ZGC is available on your platform
 
 **Use G1 (default) when**:
 - General-purpose server application
@@ -670,7 +670,7 @@ Deoptimization is the JVM discarding compiled (C2) code and falling back to the 
 
 ### Diagnosing a G1GC Mixed-GC Pause Storm in a 32GB-Heap Service (Java 17 LTS)
 
-**Scenario.** A config-aggregation service on Java 17 (LTS) runs with `-Xmx32g` using G1GC. After ~6 hours of uptime, it enters a **mixed-GC pause storm**: 2-second stop-the-world pauses every ~5 minutes, blowing the 200ms pause target and tripping the load balancer's health timeout. Restarts clear it for another 6 hours — the signature of a slow leak filling the old generation until G1 thrashes trying to reclaim it. The service handles ~3,000 config lookups/sec; each lookup parses and *caches* a config object in a `static Map` that is never evicted.
+**Scenario.** A config-aggregation service on Java 25 (LTS) runs with `-Xmx32g` using G1GC. After ~6 hours of uptime, it enters a **mixed-GC pause storm**: 2-second stop-the-world pauses every ~5 minutes, blowing the 200ms pause target and tripping the load balancer's health timeout. Restarts clear it for another 6 hours — the signature of a slow leak filling the old generation until G1 thrashes trying to reclaim it. The service handles ~3,000 config lookups/sec; each lookup parses and *caches* a config object in a `static Map` that is never evicted.
 
 ```
   heap (32GB)

@@ -228,7 +228,7 @@ public PooledConnection acquire(long timeout, TimeUnit unit) throws SQLException
 FIX — `isValid(1)` is the JDBC-standard liveness check:
 
 ```java
-// FIX — Java 11 LTS: isValid(timeout) sends a lightweight ping to the DB
+// FIX: isValid(timeout) sends a driver-level liveness ping (JDBC 4.0 standard)
 public PooledConnection acquire(long timeoutMs, TimeUnit unit) throws SQLException {
     long deadline = System.nanoTime() + unit.toNanos(timeoutMs);
     while (System.nanoTime() < deadline) {
@@ -676,7 +676,7 @@ try {
 FIX — try-with-resources guarantees each resource closes independently:
 
 ```java
-// FIX (Java 7+): each resource closed in reverse declaration order
+// FIX: each resource closed in reverse declaration order
 try (PooledConnection conn = pool.acquire(50, MILLISECONDS);
      PreparedStatement ps = conn.prepareStatement("SELECT ...");
      ResultSet rs = ps.executeQuery()) {

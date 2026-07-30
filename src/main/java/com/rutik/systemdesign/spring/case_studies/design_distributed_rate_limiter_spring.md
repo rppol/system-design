@@ -466,10 +466,11 @@ Supports fixed window and sliding window; the Redis backend uses the same Lua at
 exposes the plugin via declarative config, which is equivalent to the `RateLimitProperties` approach.
 
 **Spring Cloud Gateway:** the built-in `RequestRateLimiter` filter is backed by
-`org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter`, which runs a token-bucket
+`org.springframework.cloud.gateway.filter.ratelimit.RedisRateLimiter`, shipped in the
+`spring-cloud-starter-gateway-server-webflux` artifact. It runs a token-bucket
 Lua script over a `ReactiveStringRedisTemplate` — the same algorithm as above, configured with
-`replenishRate`, `burstCapacity` and `requestedTokens` per route in `application.yml` or via
-`RouteLocatorBuilder`. If your stack is already Gateway, use it rather than the filter here; the
+`replenishRate`, `burstCapacity` and `requestedTokens` per route in `application.yml` (under the
+`spring.cloud.gateway.server.webflux.*` prefix) or via `RouteLocatorBuilder`. If your stack is already Gateway, use it rather than the filter here; the
 custom version earns its place only when you need per-endpoint keys the filter cannot express.
 
 **Cloudflare Rate Limiting:** the interesting counter-design, because it refuses to store a log.

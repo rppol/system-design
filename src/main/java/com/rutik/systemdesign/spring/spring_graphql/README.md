@@ -3,7 +3,7 @@
 > How Spring for GraphQL maps a GraphQL schema onto Spring controllers, how
 > `DataLoader` defeats the N+1 problem that GraphQL makes worse, how subscriptions
 > stream over WebSocket/SSE, and how to do pagination and error handling the GraphQL
-> way. Spring for GraphQL 1.x (on graphql-java) / Spring Boot 3.x.
+> way. Spring for GraphQL 2.x (on graphql-java) / Spring Boot 4.1.
 
 ---
 

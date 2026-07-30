@@ -90,7 +90,7 @@ flowchart TD
 
 Note the two independent branches: `PagingAndSortingRepository` does **not** extend `CrudRepository`. They were decoupled in Spring Data 3.0 so a paging-only repository need not expose writes, and `JpaRepository` now reaches both by extending `ListCrudRepository` and `ListPagingAndSortingRepository` (plus `QueryByExampleExecutor<T>` for Example queries). The `List*` variants exist purely to return `List<T>` instead of `Iterable<T>`.
 
-Three `JpaRepository` methods are deprecated and should not be written in new code: `deleteInBatch` (use `deleteAllInBatch`), and `getOne`/`getById` (use `getReferenceById`).
+Use `getReferenceById` for a lazy proxy reference and `deleteAllInBatch` for a single bulk delete. Their `@Deprecated` predecessors — `getOne`, `getById`, `deleteInBatch` — are still on the interface and still show up in IDE autocomplete, which is the only reason to be able to name them. `getById` is the dangerous one: it reads like a sibling of `findById` but returns a proxy that throws `EntityNotFoundException` on first access rather than an `Optional`, so an autocompleted call site silently changes the not-found contract.
 
 ### Query Strategies
 

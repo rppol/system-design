@@ -35,7 +35,7 @@ This section covers:
 | 4 | [spring_configuration](spring_configuration/) | 1 — Core Container | Beginner | @Configuration, @Bean, @ComponentScan, @PropertySource, @Profile, @Conditional |
 | 5 | [spring_proxies](spring_proxies/) | 2 — Proxies & AOP | Advanced | JDK dynamic proxy, CGLIB, proxyTargetClass, self-invocation bypass, proxy order |
 | 6 | [spring_aop](spring_aop/) | 2 — Proxies & AOP | Advanced | Pointcut expressions, advice types, AspectJ weaving, @Around, proxy limitations |
-| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | 3 — Spring Boot | Intermediate | @EnableAutoConfiguration, spring.factories / AutoConfiguration.imports, @Conditional* |
+| 7 | [spring_boot_autoconfiguration](spring_boot_autoconfiguration/) | 3 — Spring Boot | Intermediate | @EnableAutoConfiguration, AutoConfiguration.imports, @Conditional* |
 | 8 | [spring_boot_configuration](spring_boot_configuration/) | 3 — Spring Boot | Beginner | @ConfigurationProperties, relaxed binding, config server, secrets management |
 | 9 | [spring_boot_actuator](spring_boot_actuator/) | 3 — Spring Boot | Intermediate | Health indicators, metrics (Micrometer), custom endpoints, security, Prometheus |
 | 10 | [spring_modulith](spring_modulith/) | 3 — Spring Boot | Advanced | Modular monolith: @ApplicationModule, ArchUnit verification, @ApplicationModuleListener, event publication registry, module tests, docs |
@@ -191,7 +191,7 @@ A ruthless cut to what a **senior Spring / Spring Boot interview** actually prob
 | Data & Transactions | [Spring Data JPA](spring_data_jpa/README.md), [Spring Transactions](spring_transactions/README.md), [Spring Caching](spring_caching/README.md) | N+1 and fetch strategies, propagation/isolation/rollback rules, cache stampede — the highest-value data round |
 | Security | [Security Architecture](spring_security_architecture/README.md), [JWT & OAuth2](spring_security_jwt_oauth/README.md) | SecurityFilterChain, authN vs authZ, JWT validation, OAuth2 resource server, PKCE |
 | Cloud & Messaging | [Spring Cloud Patterns](spring_cloud_patterns/README.md), [Spring Messaging](spring_messaging/README.md) | Gateway + Resilience4j circuit breakers, Kafka `@KafkaListener` with idempotency and DLQ |
-| Testing | [Spring Testing](spring_testing/README.md) | `@SpringBootTest` vs slice tests, `@MockBean`, MockMvc, Testcontainers |
+| Testing | [Spring Testing](spring_testing/README.md) | `@SpringBootTest` vs slice tests, `@MockitoBean`, MockMvc, Testcontainers |
 
 **Deliberately deferred to the Full Path** (valuable, lower interview yield): Boot configuration properties, Modulith, GraphQL, HATEOAS/REST maturity, gRPC, Session, Cloud Config, Batch, Events & Scheduling, Spring AI, Integration (EIP), performance tuning, observability/tracing, and native/GraalVM. A niche flagged in an interview (e.g. "have you used Spring Batch?") is a bonus, not a gate — reach for these once the 21 above are solid.
 
@@ -220,7 +220,7 @@ The highest-frequency Spring *knowledge* questions mapped to the file that answe
 | `@Cacheable` and preventing cache stampede. | [Spring Caching](spring_caching/README.md) |
 | Bean scopes — the prototype-in-singleton injection trap. | [Bean Lifecycle](bean_lifecycle/README.md), [IoC Container](ioc_container/README.md) |
 | `@Configuration` full vs lite mode — what is `@Bean` method interception? | [Spring Configuration](spring_configuration/README.md) |
-| `@SpringBootTest` vs slice tests; `@MockBean`; Testcontainers. | [Spring Testing](spring_testing/README.md) |
+| `@SpringBootTest` vs slice tests; `@MockitoBean`; Testcontainers. | [Spring Testing](spring_testing/README.md) |
 | Resilience4j circuit breaker + retry in Spring Cloud. | [Spring Cloud Patterns](spring_cloud_patterns/README.md) |
 | `@KafkaListener` — idempotency, manual ack, and DLQ. | [Spring Messaging](spring_messaging/README.md) |
 
@@ -253,7 +253,7 @@ The current generation is **Spring Framework 7.0 / Spring Boot 4.1** (Boot 4.1.0
 | Auto-config SPI | `AutoConfiguration.imports` | `AutoConfiguration.imports` |
 | JSON | Jackson 2.x (`com.fasterxml.jackson`) | **Jackson 3.x default** (`tools.jackson`), 2.x support deprecated |
 | Starter naming | `spring-boot-starter-web` | Modular starters — `spring-boot-starter-webmvc`, `spring-boot-starter-security-oauth2-resource-server`, each with a `-test` companion |
-| Synchronous HTTP client | `RestClient` | `RestClient` (`RestTemplate` is deprecated in the 7.0 reference docs) |
+| Synchronous HTTP client | `RestClient` | `RestClient` (`RestTemplate` still ships un-annotated; `@Deprecated` is scheduled for 7.1, removal for 8.0) |
 | HTTP interface clients | `@HttpExchange` + `HttpServiceProxyFactory` | `@ImportHttpServices` group registration + Boot auto-configuration |
 | API versioning | Hand-rolled (URI segment / custom header) | First-class: `@RequestMapping(version = "1.2")`, `spring.mvc.apiversion.*` |
 | Resilience | Spring Retry (separate project) | `@Retryable` / `@ConcurrencyLimit` in core via `@EnableResilientMethods` |

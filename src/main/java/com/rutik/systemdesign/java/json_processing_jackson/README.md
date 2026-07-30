@@ -4,7 +4,9 @@
 
 Jackson is the de facto JSON library for the Java ecosystem — it is the default JSON engine inside Spring Boot, Micronaut, Quarkus, Dropwizard, and most REST clients, and it ships three distinct processing models under one umbrella: a low-level **streaming** API, an in-memory **tree** API, and a reflection-driven **data-binding** API that maps JSON directly to POJOs and records.
 
-Most engineers only ever touch data binding (`ObjectMapper.readValue()` / `writeValueAsString()`), which is correct for the common case but hides two things that matter at senior level: (1) all three models are layered on the same streaming core, so understanding the streaming layer explains *why* the other two behave the way they do; and (2) Jackson's convenience features — especially polymorphic ("default") typing — have a well-documented, decade-long history of enabling remote code execution when applied to untrusted input. Knowing when to reach for tree or streaming instead of data binding, and knowing exactly why `enableDefaultTyping()` is dangerous, are two of the highest-signal things a senior Java interview probes for on this topic.
+Most engineers only ever touch data binding (`ObjectMapper.readValue()` / `writeValueAsString()`), which is correct for the common case but hides two things that matter at senior level: (1) all three models are layered on the same streaming core, so understanding the streaming layer explains *why* the other two behave the way they do; and (2) Jackson's convenience features — especially polymorphic ("default") typing — have a well-documented, decade-long history of enabling remote code execution when applied to untrusted input. Knowing when to reach for tree or streaming instead of data binding, and knowing exactly why unvalidated default typing is dangerous, are two of the highest-signal things a senior Java interview probes for on this topic.
+
+This module is written against **Jackson 3** (GA October 2025), whose coordinates are `tools.jackson.core:jackson-databind` and whose packages are `tools.jackson.*` — only the annotations stayed at `com.fasterxml.jackson.annotation`. Jackson 3 is the default JSON library in Spring Boot 4. The three facts that reshape everyday code are: mappers and stream factories are **fully immutable** and built with `JsonMapper.builder()`; **`java.time`, `Optional`, and constructor-parameter-name support are built into `jackson-databind`** with no module to register; and **every Jackson exception is unchecked** (`JacksonException`, no longer an `IOException`).
 
 ---
 
@@ -16,17 +18,17 @@ Most engineers only ever touch data binding (`ObjectMapper.readValue()` / `write
 
 **Why it matters**: Picking the wrong model has real production consequences — using tree or data binding on a multi-gigabyte payload can OOM a service that streaming would process in constant memory; using data binding's polymorphic-typing convenience feature on attacker-controlled input has caused real remote-code-execution CVEs across the Java ecosystem. Interviewers use this topic to probe whether a candidate treats a JSON library as a black box or understands its cost and trust boundaries.
 
-**Key insight**: `ObjectMapper` is expensive to configure but cheap to reuse — the entire point of its internal caches is that you build it once, at startup, and never touch its configuration again. Every Jackson production incident in this file traces back to violating one of two rules: either "don't rebuild what you can reuse" or "don't let untrusted JSON tell you what Java class to instantiate."
+**Key insight**: `ObjectMapper` is expensive to build but cheap to reuse — the entire point of its internal caches is that you construct it once, at startup, and hand the same instance to everyone. Jackson 3 makes that structural by sealing the mapper: there is no configuration to touch after `build()`. Every Jackson production incident in this file traces back to violating one of two rules: either "don't rebuild what you can reuse" or "don't let untrusted JSON tell you what Java class to instantiate."
 
 ---
 
 ## 3. Core Principles
 
 - **One streaming core, three consumers.** `JsonParser`/`JsonGenerator` are the foundation; `JsonNode` tree building and `ObjectMapper` data binding are both implemented on top of the same token stream.
-- **`ObjectMapper` is a configuration-then-immutable object.** Thread-safe for concurrent reads/writes only after all `configure()`/`registerModule()`/`setXxx()` calls have completed and *before* it is shared across threads.
+- **`ObjectMapper` is immutable.** Every setting is fixed by `JsonMapper.builder()...build()`; there are no setters, no `configure()`, no `registerModule()` on the finished instance. Thread safety is therefore a property of the type, not a discipline you have to enforce.
 - **Reflection is expensive once, cheap forever.** Introspecting a class's fields, getters, setters, and annotations into a `BeanDeserializer`/`BeanSerializer` is the costly step; Jackson caches the result per `Class` so every later call for that type is a cache hit.
 - **Trust boundary lives at the type level.** Binding JSON into a type you named at compile time (`readValue(json, Invoice.class)`) is safe; letting the JSON itself name the Java class to instantiate (default/polymorphic typing without an allowlist) is not.
-- **Know which major version's defaults you are on.** Jackson 2.x is strict by design: `FAIL_ON_UNKNOWN_PROPERTIES` and `WRITE_DATES_AS_TIMESTAMPS` both default to `true`, so schema drift and date-shape ambiguity fail loudly. **Jackson 3.0 (GA October 2025) flipped both to `false`** and folded `java.time` support into `jackson-databind` so no module registration is needed. Never assume a default — read it off the version you actually ship. Spring Boot 4 (November 2025) makes Jackson 3 the default JSON library, so this is a live difference, not a future one.
+- **Set the defaults you depend on explicitly.** `DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES` and `DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS` are both **off** by default, and `DeserializationFeature.FAIL_ON_TRAILING_TOKENS` is **on** — so schema drift is tolerated, dates emit ISO-8601 strings, and trailing garbage after a parsed value is rejected. Each of those is a contract decision; state it in the builder rather than inheriting it.
 - **Immutable derived readers/writers exist so you never have to touch the shared mapper.** `ObjectReader`/`ObjectWriter` are cheap, thread-safe, per-call-shape configurations built once from the shared `ObjectMapper`.
 
 ---
@@ -126,7 +128,7 @@ STREAMING -- JsonParser (token by token, nothing kept in memory)
 TREE -- JsonNode (generic node graph, whole document held in memory)
   ObjectNode
     id     -> IntNode(42)
-    name   -> TextNode("Ada")
+    name   -> StringNode("Ada")
     active -> BooleanNode(true)
   memory: O(payload), untyped; node.get("name").asText() -- no compile-time check
 
@@ -140,14 +142,14 @@ Code you must write:     streaming >>> tree > data binding
 
 The same six tokens feed all three models — the difference is entirely in what each layer chooses to keep and how much type information survives the trip.
 
-### ObjectMapper reuse vs recreate — per-call cost
+### Mapper reuse vs rebuild — per-call cost
 
 ```
 Cost of one (de)serialize call -- bar length is order-of-magnitude, not to scale
 
-new ObjectMapper() every single call     ################   ~10-20 ms   (construct + introspect)
-shared ObjectMapper, first call ever     ################   ~10-20 ms   (introspect once, cached)
-shared ObjectMapper, every call after    ##                 ~1-50 us    (cache hit, no reflection)
+fresh mapper built per call              ################   ~10-20 ms   (construct + introspect)
+shared mapper, first call ever           ################   ~10-20 ms   (introspect once, cached)
+shared mapper, every call after          ##                 ~1-50 us    (cache hit, no reflection)
 
 At 1,000 req/s, recreate-per-call spends roughly 15 CPU-seconds of every
 wall-clock second inside Jackson alone -- more than one full core saturated
@@ -195,34 +197,33 @@ The 300x is measured at the *pessimistic* end of the cached range. The point is 
 
 ### ObjectMapper cost, caching, and the thread-safety contract
 
-Constructing `new ObjectMapper()` sets up a `JsonFactory`, default serialization/deserialization configuration, and any registered modules — on the order of low single-digit milliseconds by itself. The expensive step is deferred: the first time you call `readValue`/`writeValueAsString` for a given `Class`, Jackson reflectively introspects its fields, getters, setters, and annotations, builds a `BeanDeserializer`/`BeanSerializer` for it, and stores that in an internal per-mapper cache. For a moderately complex POJO this introspection commonly costs on the order of tens of milliseconds; every later call for the same class against the same mapper is a cache hit that costs low microseconds — pure delegation to already-compiled (de)serialization logic.
+`JsonMapper.builder().build()` sets up a `TokenStreamFactory` (the `JsonFactory` in the JSON case), the default serialization/deserialization configuration, and any added modules — on the order of low single-digit milliseconds by itself. The expensive step is deferred: the first time you call `readValue`/`writeValueAsString` for a given `Class`, Jackson reflectively introspects its fields, getters, setters, and annotations, builds a `BeanDeserializer`/`BeanSerializer` for it, and stores that in an internal per-mapper cache. For a moderately complex POJO this introspection commonly costs on the order of tens of milliseconds; every later call for the same class against the same mapper is a cache hit that costs low microseconds — pure delegation to already-compiled (de)serialization logic.
 
-This is exactly why Jackson's own contract is: an `ObjectMapper` is safe to share and use concurrently across threads **provided all configuration happens before it is shared**. The caches themselves are safe for concurrent reads. What is *not* safe is calling `mapper.configure(...)`, `mapper.registerModule(...)`, `mapper.setDateFormat(...)`, or similar mutators on an instance that other threads are already using — those configuration fields are not written with the synchronization needed to make concurrent mutation-while-reading safe, so doing so is a data race that can manifest as intermittent, load-dependent, maddening-to-reproduce formatting bugs in production.
+A `JsonMapper` is safe to share and use concurrently across every thread in the process, and Jackson 3 enforces that structurally: the mapper and its stream factory are fully immutable, so there is no `configure(...)`, no `registerModule(...)`, no `setDateFormat(...)` to race against. The whole class of intermittent, load-dependent formatting bugs that came from one request handler retuning the shared mapper is gone by construction — the only way to get a differently configured mapper is `mapper.rebuild()...build()`, which returns a *new* instance and leaves the original untouched.
 
 ```java
-// BROKEN: a new ObjectMapper per request throws away every cache on every call
+// BROKEN: a new mapper per request throws away every cache on every call
 public String handle(Order order) {
-    ObjectMapper mapper = new ObjectMapper();   // pays introspection cost EVERY time
-    mapper.registerModule(new JavaTimeModule());
+    JsonMapper mapper = JsonMapper.builder().build();   // pays introspection cost EVERY time
     return mapper.writeValueAsString(order);
 }
 
 // FIX: build once, reuse forever — this is the entire point of the caches
 public final class OrderJson {
-    private static final ObjectMapper MAPPER = JsonMapper.builder()
-            .addModule(new JavaTimeModule())
-            .build();                              // configured ONCE, before any sharing
+    private static final JsonMapper MAPPER = JsonMapper.builder().build();   // built ONCE
 
-    public static String toJson(Order order) throws JsonProcessingException {
+    public static String toJson(Order order) {
         return MAPPER.writeValueAsString(order);   // cache hit after the first call
     }
 }
 ```
 
-When different call sites need different *shapes* of the same mapper (pretty-printing here, a stricter feature set there), do not spin up separate `ObjectMapper`s — derive immutable `ObjectReader`/`ObjectWriter` instances instead:
+Note what the `FIX` no longer needs: no date/time module, no `throws` clause. `java.time` support lives inside `jackson-databind`, and `writeValueAsString` throws the unchecked `JacksonException`.
+
+When different call sites need different *shapes* of the same mapper (pretty-printing here, a stricter feature set there), do not spin up separate mappers — derive immutable `ObjectReader`/`ObjectWriter` instances instead:
 
 ```java
-private static final ObjectMapper MAPPER = JsonMapper.builder().addModule(new JavaTimeModule()).build();
+private static final JsonMapper MAPPER = JsonMapper.builder().build();
 
 // Cheap, thread-safe, immutable — safe to build once and store as a constant
 private static final ObjectWriter PRETTY_WRITER = MAPPER.writer().withDefaultPrettyPrinter();
@@ -231,7 +232,7 @@ private static final ObjectReader ORDER_READER  = MAPPER.readerFor(Order.class);
 
 ### Data binding: POJOs, records, and generics
 
-Classic POJO binding needs a no-arg constructor plus JavaBean getters/setters (or public fields, or an explicitly annotated constructor). **Java records** (Jackson 2.12+, November 2020) are supported without any annotation for the simple case: Jackson's introspector recognizes `Class.getRecordComponents()` and treats the canonical constructor as an implicit creator. This works more reliably than plain-class constructor binding because record component names are always available via reflection (JEP 359) regardless of compiler flags — ordinary classes need `-parameters` or `@ConstructorProperties`/explicit `@JsonProperty` on every constructor argument to recover parameter names, but a record never loses them.
+Classic POJO binding needs a no-arg constructor plus JavaBean getters/setters (or public fields, or an explicitly annotated constructor). **Java records** are supported without any annotation for the simple case: Jackson's introspector recognizes `Class.getRecordComponents()` and treats the canonical constructor as an implicit creator. This works more reliably than plain-class constructor binding because record component names are always available via reflection (JEP 359) regardless of compiler flags — ordinary classes still need the class file to carry parameter names (compile with `-parameters`) or an explicit `@JsonProperty`/`@ConstructorProperties` on every constructor argument, but a record never loses them.
 
 ```java
 public record UserDto(long id, String name, @JsonProperty("is_active") boolean active) {
@@ -280,32 +281,28 @@ public class InvoiceDto {
 }
 ```
 
-`PropertyNamingStrategies.SNAKE_CASE` (Jackson 2.12+; the modern replacement for the older singleton-based `PropertyNamingStrategy`) applies the `camelCase` <-> `snake_case` conversion mapper-wide instead of annotating every field individually — the common choice when the Java service talks to Python/Ruby/JS clients that default to snake_case:
+`PropertyNamingStrategies.SNAKE_CASE` applies the `camelCase` <-> `snake_case` conversion mapper-wide instead of annotating every field individually — the common choice when the Java service talks to Python/Ruby/JS clients that default to snake_case:
 
 ```java
-ObjectMapper mapper = JsonMapper.builder()
+JsonMapper mapper = JsonMapper.builder()
         .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
         .build();
 ```
 
 ### java.time support
 
-On **Jackson 2.x**, a stock `ObjectMapper` does not know how to (de)serialize `LocalDateTime`, `Instant`, `Duration`, or any other `java.time` type — it throws an `InvalidDefinitionException` whose message names the missing module. The fix is registering `JavaTimeModule` from `jackson-datatype-jsr310`. (**Jackson 3.0 builds `java.time` support into `jackson-databind`**, so this whole failure mode is gone there; the code below is what a 2.x codebase needs.)
+`java.time` binding is built into `jackson-databind` — `Instant`, `LocalDateTime`, `Duration` and the rest work on a stock `JsonMapper.builder().build()` with nothing registered, and they serialize as ISO-8601 strings because `DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS` is off by default. The same is true of `Optional`/`OptionalInt` and of constructor-parameter-name detection: all three of what used to be separate "Java 8 modules" are now core.
+
+Date/time behaviour is tuned through the dedicated `DateTimeFeature` enum rather than through `SerializationFeature`/`DeserializationFeature`:
 
 ```java
-ObjectMapper mapper = JsonMapper.builder()
-        .addModule(new JavaTimeModule())
+JsonMapper mapper = JsonMapper.builder()
+        .enable(DateTimeFeature.WRITE_DATES_WITH_ZONE_ID)          // "2026-07-29T10:15:30+02:00[Europe/Paris]"
+        .disable(DateTimeFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE) // keep the offset the payload carried
         .build();
 ```
 
-Spring Boot auto-configures this for you, which is precisely why the failure mode is almost never seen by Spring users but hits plain-Jackson code (batch jobs, shared libraries, non-Spring microservices) constantly. Once the module is registered, the *next* surprise on 2.x is date shape: `SerializationFeature.WRITE_DATES_AS_TIMESTAMPS` defaults to `true` there, so a `LocalDateTime` serializes as a numeric array (`[2026,7,7,10,15,30]`) and an `Instant` as a decimal epoch value (`1783419330.000000000`) rather than ISO-8601 strings. Jackson 3 defaults this feature to `false`; on 2.x you disable it yourself:
-
-```java
-ObjectMapper mapper = JsonMapper.builder()
-        .addModule(new JavaTimeModule())
-        .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)   // -> "2026-07-07T10:15:30"
-        .build();
-```
+**The one migration hazard worth naming.** Turning on `WRITE_DATES_AS_TIMESTAMPS` (or upgrading a service that had it on) flips every `LocalDateTime` to a numeric array (`[2026,7,29,10,15,30]`) and every `Instant` to a decimal epoch value (`1785320130.000000000` for `2026-07-29T10:15:30Z`). That is a wire-format change, not a formatting preference: any consumer parsing the field as a string breaks silently on the first payload. Pin the feature explicitly in the builder and assert the emitted shape in a test, so the wire format is something the build enforces rather than something a default decides.
 
 ### Polymorphic deserialization and the default-typing CVE history
 
@@ -321,27 +318,19 @@ The safe way to deserialize into one of several subtypes is a **closed, explicit
 public sealed interface PaymentMethod permits CardPayment, WalletPayment, BankTransfer {}
 ```
 
-Contrast that with **default typing** — a mapper-wide setting that embeds the *runtime* Java class name into the JSON (as an `"@class"` property by default) for essentially any `Object`-typed field, and on deserialization instantiates whatever class name shows up in the JSON:
+Contrast that with **default typing** — a mapper-wide setting that embeds the *runtime* Java class name into the JSON (as an `"@class"` property, say) for essentially any `Object`-typed field, and on deserialization instantiates whatever class name shows up in the JSON. If that JSON comes from an untrusted caller, the attacker can name **any class on the runtime classpath**, including third-party library classes never intended for deserialization, whose constructors/setters — when chained together — perform dangerous side effects (a "gadget chain," the same class of bug 2015's "Marshalling Pickles" research made famous for native Java serialization).
+
+This is the rare case where the history is the lesson, because it is what forced the API you use today. **CVE-2017-7525** is the canonical origin: unvalidated default typing combined with Apache Commons Collections on the classpath produced unauthenticated remote code execution. Jackson's first response was a hardcoded blacklist of known-dangerous classes — which triggered years of whack-a-mole as new gadget classes turned up in other common libraries (Spring, c3p0, Groovy, and more), each one requiring a new CVE and a blacklist update; **CVE-2019-12384** (jackson-databind before 2.9.9.2, via logback and JNDI) is one of dozens. A blacklist can never be complete, because the attack surface is "every class on the classpath," including jars the Jackson maintainers have never heard of. The permanent fix was to invert the direction and require an **allowlist**.
+
+Jackson 3 makes that allowlist non-optional. Default typing is activated only through the builder, and only by passing a `PolymorphicTypeValidator` you supply yourself: the permissive `LaissezFaireSubTypeValidator` is no longer a public class, so there is no longer a way to switch this on and inherit "permit every subtype" by accident.
 
 ```java
-// BROKEN: never do this against JSON you did not fully control end to end
-ObjectMapper mapper = new ObjectMapper();
-mapper.enableDefaultTyping();                          // deprecated, dangerous
-Object obj = mapper.readValue(untrustedRequestBody, Object.class);
-// an attacker sends {"@class":"some.gadget.ClassOnTheClasspath", ...} -> RCE
-```
-
-If that JSON comes from an untrusted caller, the attacker can name **any class on the runtime classpath**, including third-party library classes never intended for deserialization, whose constructors/setters — when chained together — perform dangerous side effects (a "gadget chain," the same class of bug 2015's "Marshalling Pickles" research made famous for native Java serialization). **CVE-2017-7525** is the canonical origin: `enableDefaultTyping()` combined with Apache Commons Collections on the classpath produced unauthenticated remote code execution. Jackson's first response was a hardcoded blacklist of known-dangerous classes — which triggered years of whack-a-mole as new gadget classes turned up in other common libraries (Spring, c3p0, Groovy, and more), each one requiring a new CVE and a blacklist update, **CVE-2019-12384** (jackson-databind before 2.9.9.2, via logback and JNDI) is one of dozens that followed over the next few years. A blacklist can never be complete because the attack surface is "every class on the classpath," including jars the Jackson maintainers have never heard of.
-
-The real fix, shipped in Jackson 2.10 (2019), added an **allowlist** mechanism: `PolymorphicTypeValidator`, with `activateDefaultTyping(PolymorphicTypeValidator, ...)` as the new entry point. Do not read that as "2.10 made default typing safe by default" — it did not. For backwards compatibility the mapper's default validator is `LaissezFaireSubTypeValidator`, which performs **no validation at all and permits every subtype**, and the old `enableDefaultTyping()` keeps working against it. The protection is opt-in: you get it only by passing a real validator. Jackson 3.0 finally removed the most dangerous variant (`DefaultTyping.EVERYTHING`), but the permissive default validator is still what you inherit if you activate default typing without naming one.
-
-```java
-// If default typing is truly unavoidable, gate it with an explicit allowlist:
+// If default typing is truly unavoidable, the validator is mandatory:
 PolymorphicTypeValidator ptv = BasicPolymorphicTypeValidator.builder()
         .allowIfSubType("com.example.payments.model.")
         .build();
-ObjectMapper mapper = JsonMapper.builder()
-        .activateDefaultTyping(ptv, ObjectMapper.DefaultTyping.NON_FINAL)
+JsonMapper mapper = JsonMapper.builder()
+        .activateDefaultTypingAsProperty(ptv, DefaultTyping.NON_CONCRETE_AND_ARRAYS, "@class")
         .build();
 
 // Strongly preferred: skip default typing entirely and use a closed
@@ -349,26 +338,30 @@ ObjectMapper mapper = JsonMapper.builder()
 // comes from the caller.
 ```
 
+Note `DefaultTyping` now lives in `tools.jackson.databind`, not nested inside `ObjectMapper`, and the broadest variant (`EVERYTHING`) is gone. The narrowest setting that satisfies your model is still the right one — an allowlisted validator plus `NON_CONCRETE_AND_ARRAYS` beats an allowlisted validator plus `NON_FINAL`.
+
 ### Config gotchas
 
-- **`FAIL_ON_UNKNOWN_PROPERTIES`** (`DeserializationFeature`; default `true` on Jackson 2.x, `false` on Jackson 3.0) throws `UnrecognizedPropertyException` the instant JSON contains a field with no matching property — brittle the moment an upstream service or partner adds a field you don't care about. Disable globally (`mapper.disable(...)`) or per-class (`@JsonIgnoreProperties(ignoreUnknown = true)`) for external contracts you don't control; many teams deliberately leave it `true` for internal service-to-service contracts so a typo'd field name fails fast instead of being silently ignored.
+- **`FAIL_ON_UNKNOWN_PROPERTIES`** (`DeserializationFeature`, **off** by default) throws `UnrecognizedPropertyException` the instant JSON contains a field with no matching property. Left off, an upstream service adding a field you don't care about is a non-event — the right posture for partner-controlled payloads. Turn it on per class (`@JsonIgnoreProperties`'s inverse, or `.enable(...)` on the builder) for internal service-to-service contracts you own end to end, where a typo'd field name should fail loudly rather than bind to nothing.
+- **`FAIL_ON_TRAILING_TOKENS`** (`DeserializationFeature`, **on** by default) rejects any content following the value you asked for, so `{"a":1}{"b":2}` no longer parses as just the first object. This catches concatenated or truncated payloads at the boundary; disable it only for a trusted, latency-critical path where the extra scan is measurable.
 - **`@JsonAnySetter`** routes any JSON property that doesn't match a declared field into a method (typically populating a `Map<String,Object>`) instead of erroring or silently dropping it — useful for round-tripping or forwarding a payload you don't fully model.
-- **Failure on "empty beans"** (`SerializationFeature.FAIL_ON_EMPTY_BEANS`, default `true`) throws `InvalidDefinitionException: ... no properties discovered` when Jackson finds zero serializable properties on a class — often a marker class, a class with only private fields and no getters/annotations, or (before registering the right module) a Kotlin data class.
+- **Failure on "empty beans"** (`SerializationFeature.FAIL_ON_EMPTY_BEANS`, default `true`) throws `InvalidDefinitionException: ... no properties discovered` when Jackson finds zero serializable properties on a class — often a marker class, a class with only private fields and no getters/annotations, or (before adding the right module) a Kotlin data class.
+- **Property order is alphabetical by default** (`MapperFeature.SORT_PROPERTIES_ALPHABETICALLY` is on), so field-declaration order does not survive into the output. If a consumer or a golden-file test depends on ordering, pin it with `@JsonPropertyOrder` rather than on the declaration order of the class.
 
 ### Performance levers
 
-Beyond reusing the mapper (already covered above), the streaming API is the right tool for payloads too large to fully materialize, and Jackson ships two bytecode/method-handle-generation modules that replace reflective getter/setter calls with generated accessors: **Afterburner** (`jackson-module-afterburner`, ASM-generated bytecode, a double-digit-percentage win on typical POJOs but no longer actively evolved for the newest JDKs, and its bytecode generation fights the module system) and its modern replacement **Blackbird** (`jackson-module-blackbird`, `MethodHandle`-based, the recommended choice on JDK 11+). Jackson also internally recycles parser/generator buffers and symbol tables per `JsonFactory` — another reason a shared, long-lived `ObjectMapper` outperforms constructing fresh ones.
+Beyond reusing the mapper (already covered above), the streaming API is the right tool for payloads too large to fully materialize, and **Blackbird** (`tools.jackson.module:jackson-module-blackbird`) replaces reflective getter/setter calls with `LambdaMetafactory`-generated accessors — worth a double-digit-percentage win on reflection-heavy POJO workloads, and the module to reach for when profiling actually points at bean accessors. Jackson also internally recycles parser/generator buffers and symbol tables per `TokenStreamFactory` — another reason a shared, long-lived mapper outperforms constructing fresh ones.
 
 ```java
-ObjectMapper mapper = JsonMapper.builder()
-        .addModule(new BlackbirdModule())   // MethodHandle-generated accessors, JDK 11+
+JsonMapper mapper = JsonMapper.builder()
+        .addModule(new BlackbirdModule())   // LambdaMetafactory-generated accessors
         .build();
 ```
 
 For payloads too large to hold as a tree or a fully-materialized list, stream one element at a time with `MappingIterator` instead of `readValue(json, List.class)`:
 
 ```java
-try (JsonParser parser = MAPPER.getFactory().createParser(hugeFile);
+try (JsonParser parser = MAPPER.createParser(hugeFile);
      MappingIterator<InvoiceLine> it = MAPPER.readerFor(InvoiceLine.class)
              .readValues(parser)) {
     while (it.hasNext()) {
@@ -383,7 +376,7 @@ Cross-reference: for the type-erasure and reflection concepts underlying `TypeRe
 
 ## 7. Real-World Examples
 
-- **Spring Boot's `Jackson2ObjectMapperBuilder`** auto-configures and hands out a single application-scoped `ObjectMapper` bean (with `JavaTimeModule` already registered) — the singleton-reuse pattern this file recommends is Spring's *default*, not an opt-in optimization.
+- **Spring Boot auto-configures a single application-scoped `JsonMapper` bean** and lets you adjust it with a `JsonMapperBuilderCustomizer` rather than by mutating the mapper — the singleton-reuse pattern this file recommends is Spring's *default*, not an opt-in optimization, and the customizer hook exists precisely because the finished mapper is immutable.
 - **Twitter's API** serializes 64-bit Snowflake IDs as both a JSON number (`id`) and a string (`id_str`) — JavaScript's `Number` type loses precision above 2^53, so any JSON consumer parsing the numeric field in a browser silently corrupts large IDs. The lesson generalizes directly to Jackson: prefer `String`/`@JsonFormat(shape = STRING)` for any 64-bit identifier that might cross into JavaScript.
 - **Log and event pipelines** (Kafka consumers, bulk ETL jobs) parsing newline-delimited JSON (NDJSON) at hundreds of thousands of records per second use the streaming API or `MappingIterator` specifically to avoid materializing the whole file as a tree or a `List`.
 - **Payment and billing APIs** configure `DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS` to avoid `double` rounding error on money fields — parsing `19.99` as a Java `double` and later re-serializing it can drift by fractions of a cent at scale.
@@ -438,11 +431,11 @@ The silence is what makes this dangerous. There is no exception, no truncation w
 
 | Aspect | Jackson | Gson | JSON-B (Yasson) | Manual streaming |
 |--------|---------|------|------------------|-------------------|
-| Raw speed | Fastest general-purpose (Afterburner/Blackbird push it further) | Good, slightly behind Jackson on deep object graphs | Comparable to Jackson databind | Fastest possible — you own every allocation |
-| Ecosystem | Largest — Spring default, JSR-310/Kotlin/Scala/XML/YAML/CSV modules | Simple, Android-friendly, minimal dependencies | Jakarta EE standard (JSR 367), portable across compliant runtimes | None — fully custom |
+| Raw speed | Fastest general-purpose (Blackbird pushes it further) | Good, slightly behind Jackson on deep object graphs | Comparable to Jackson databind | Fastest possible — you own every allocation |
+| Ecosystem | Largest — Spring default, Kotlin/Scala/XML/YAML/CSV modules, `java.time` built in | Simple, Android-friendly, minimal dependencies | Jakarta EE standard (JSR 367), portable across compliant runtimes | None — fully custom |
 | Streaming API | Yes (`JsonParser`/`JsonGenerator`) | Yes (`JsonReader`/`JsonWriter`) | Limited | Is the streaming API |
-| Polymorphism | `@JsonTypeInfo`/`@JsonSubTypes`; historically risky default typing (now allowlisted) | `RuntimeTypeAdapterFactory` — manual, allowlist-shaped by construction | `@JsonbTypeInfo`, newer and less battle-tested | Fully manual, fully explicit |
-| Security track record | Long CVE history from default typing, fixed via `PolymorphicTypeValidator` since 2.10 | No equivalent history — never shipped an attacker-controlled default-typing feature | Smaller attack surface, less scrutinized in the wild | Depends entirely on what you build |
+| Polymorphism | `@JsonTypeInfo`/`@JsonSubTypes`; default typing requires an explicit validator | `RuntimeTypeAdapterFactory` — manual, allowlist-shaped by construction | `@JsonbTypeInfo`, newer and less battle-tested | Fully manual, fully explicit |
+| Security track record | Long CVE history from default typing; the allowlist validator is now mandatory to enable it | No equivalent history — never shipped an attacker-controlled default-typing feature | Smaller attack surface, less scrutinized in the wild | Depends entirely on what you build |
 | Best for | Spring/Java-EE-style backends, complex object graphs, broad interop | Android, simple DTOs, minimal setup | Jakarta EE portability requirement | Ultra-high-throughput log/event pipelines |
 
 ---
@@ -473,10 +466,16 @@ The silence is what makes this dangerous. There is no exception, no truncation w
 
 ### War Story 1: "Flexible" default typing became an RCE finding
 
-A team building an internal automation platform exposed an endpoint that accepted a generic `payload` field — sometimes a card charge, sometimes a webhook config, sometimes a script parameter — and reached for `mapper.enableDefaultTyping()` so the field could hold "any" object without hand-writing a closed type hierarchy. Eight months later, a routine penetration test sent a crafted body with an `"@class"` property naming a class from a logging library sitting transitively on the classpath, and the pentest report came back with remote code execution as the finding. The fix was exactly the allowlist pattern shown in Section 6: replace default typing with `@JsonTypeInfo`/`@JsonSubTypes` naming only the three or four payload shapes the endpoint actually needed, closing off the "any class on the classpath" attack surface entirely.
+A team building an internal automation platform exposed an endpoint that accepted a generic `payload` field — sometimes a card charge, sometimes a webhook config, sometimes a script parameter — and turned on default typing so the field could hold "any" object without hand-writing a closed type hierarchy. The validator is mandatory, so they wrote one — and wrote it to allow `Object`, which is a validator in name only. Eight months later, a routine penetration test sent a crafted body with an `"@class"` property naming a class from a logging library sitting transitively on the classpath, and the pentest report came back with remote code execution as the finding. The lesson is that the API forces you to *name* a policy, not to have a good one: an allowlist rooted at `Object` allows the entire classpath. The fix was the pattern shown in Section 6 — replace default typing with `@JsonTypeInfo`/`@JsonSubTypes` naming only the three or four payload shapes the endpoint actually needed.
 
 ```java
-mapper.enableDefaultTyping();                                    // BROKEN
+// BROKEN: an allowlist rooted at Object permits every class on the classpath
+PolymorphicTypeValidator wideOpen = BasicPolymorphicTypeValidator.builder()
+        .allowIfSubType(Object.class)
+        .build();
+JsonMapper mapper = JsonMapper.builder()
+        .activateDefaultTypingAsProperty(wideOpen, DefaultTyping.NON_FINAL, "@class")
+        .build();
 Object payload = mapper.readValue(untrustedBody, Object.class);  // attacker picks the class
 
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "kind")
@@ -495,7 +494,7 @@ JsonNode root = mapper.readTree(response.getInputStream());
 for (JsonNode record : root) { process(record); }
 
 // FIXED: stream element by element, one record resident at a time
-try (JsonParser p = mapper.getFactory().createParser(response.getInputStream());
+try (JsonParser p = mapper.createParser(response.getInputStream());
      MappingIterator<ExportRecord> it = mapper.readerFor(ExportRecord.class).readValues(p)) {
     while (it.hasNext()) { process(it.next()); }
 }
@@ -537,10 +536,11 @@ The multiplier is what turns a payload that "obviously fits" into an OOM. The he
 
 ### Additional pitfalls
 
-1. **Mutating a shared mapper's configuration at runtime.** A developer called `mapper.setDateFormat(...)` from a request-scoped code path "just for this response," on the same singleton every other thread was using — the result was intermittent, load-dependent date formatting bugs that only reproduced under concurrent traffic, never in a single-threaded test.
-2. **Missing `JavaTimeModule` surfacing only in production.** A field of type `Instant` was added to a DTO in a non-Spring batch service; local tests used a hand-rolled mapper that happened to have the module registered, but the production mapper did not — the deploy failed at the first request touching that field with `InvalidDefinitionException`.
-3. **`FAIL_ON_UNKNOWN_PROPERTIES` breaking on a partner's routine schema change.** A partner added an undocumented field to their webhook payload; every consumer with the default `true` setting started throwing `UnrecognizedPropertyException` and dropping the webhook, even though not a single consumer cared about the new field.
+1. **Calling `rebuild()` on the hot path.** A developer needed pretty-printed output for one endpoint and wrote `MAPPER.rebuild().enable(SerializationFeature.INDENT_OUTPUT).build()` inside the handler. The shared mapper was never corrupted — immutability guarantees that — but every request now constructed a fresh mapper with empty (de)serializer caches, reintroducing the exact per-request introspection cost the singleton existed to avoid. The fix is one `ObjectWriter` constant: `MAPPER.writer().withDefaultPrettyPrinter()`, which shares the parent's caches.
+2. **`FAIL_ON_NULL_FOR_PRIMITIVES` biting a creator on upgrade.** A DTO had an `int quantity` bound through a canonical record constructor. Payloads that omitted the field, or sent `"quantity": null`, had been quietly binding to `0`; after the service moved to Jackson 3 — where the feature is on by default — those same payloads started failing the whole request. The real bug was the model: `0` and "absent" were never the same thing, and the fix was `Integer` plus an explicit validation rule, not disabling the feature.
+3. **Enabling `FAIL_ON_UNKNOWN_PROPERTIES` on a partner-facing endpoint.** A team turned the check on platform-wide to catch typo'd field names in their own internal DTOs. It caught those — and also started throwing `UnrecognizedPropertyException` on every webhook from a partner who had added an undocumented field, dropping traffic nobody had a reason to reject. Strictness is a per-contract decision: on for contracts you own both ends of, off at the boundary with someone else's schema.
 4. **Type erasure producing a `ClassCastException` far from the real bug.** `readValue(json, List.class)` compiled without warning; the `ClassCastException` surfaced two call frames later where the list's elements were finally cast to the expected type, sending the on-call engineer down the wrong path before someone noticed the missing `TypeReference`.
+5. **An `IOException` catch block that silently stops covering parse failures.** `JacksonException` is a `RuntimeException` and no longer extends `IOException`. A `try` block holding *only* a `readValue` call fails to compile, which is the loud, easy case. The quiet one is a `try` block that also opens a stream or reads a file: it still compiles, the `catch (IOException e)` still runs for the I/O, and malformed-JSON failures now sail past the handler that used to translate them into a 400. Catch `JacksonException` explicitly wherever a parse failure has a defined response.
 
 ---
 
@@ -548,16 +548,15 @@ The multiplier is what turns a payload that "obviously fits" into an OOM. The he
 
 | Tool / Library | Purpose | Notes |
 |-----------------|---------|-------|
-| `jackson-databind` | `ObjectMapper`, data binding, tree model | The module most code depends on directly. Jackson 3.x moved the coordinates to `tools.jackson.core:jackson-databind` and the packages to `tools.jackson.*`; 2.x remains `com.fasterxml.jackson.*` |
-| `jackson-core` | `JsonParser`/`JsonGenerator`, streaming | Foundation layer for the other two modules |
-| `jackson-annotations` | `@JsonProperty`, `@JsonIgnore`, etc. | Lightweight, no databind dependency |
-| `jackson-datatype-jsr310` | `JavaTimeModule` | Required for any `java.time` type on Jackson 2.x; folded into `jackson-databind` in Jackson 3 |
-| `jackson-datatype-jdk8` | `Optional`, `OptionalInt`, etc. support | Pairs with JDK 8+ idioms |
-| `jackson-module-parameter-names` | Recovers constructor parameter names for plain classes | Needed alongside `-parameters` for non-record POJOs |
-| `jackson-module-afterburner` | Bytecode-generated accessors | Older performance module |
-| `jackson-module-blackbird` | `MethodHandle`-generated accessors | Recommended over Afterburner on JDK 11+ |
-| `jackson-dataformat-yaml` / `-csv` / `-xml` | Same data-binding model, different wire format | Reuse your POJOs/records across formats |
-| Spring `Jackson2ObjectMapperBuilder` | Application-scoped `ObjectMapper` bean | Auto-registers `JavaTimeModule` and sensible defaults |
+| `tools.jackson.core:jackson-databind` | `ObjectMapper`/`JsonMapper`, data binding, tree model | The artifact most code depends on directly; pulls `jackson-core` and `jackson-annotations` transitively |
+| `tools.jackson.core:jackson-core` | `JsonParser`/`JsonGenerator`, `TokenStreamFactory`, streaming | Foundation layer for the other two |
+| `com.fasterxml.jackson.core:jackson-annotations` | `@JsonProperty`, `@JsonIgnore`, etc. | The one component that kept its 2.x coordinates and package — the annotations are shared |
+| `tools.jackson:jackson-bom` | Version alignment across every Jackson artifact | Import as a platform/BOM and declare modules without versions |
+| `java.time`, `Optional`, parameter names | Built into `jackson-databind` | Nothing to add; tune date/time through the `DateTimeFeature` enum |
+| `tools.jackson.module:jackson-module-blackbird` | `LambdaMetafactory`-generated accessors | The performance module to reach for when profiling points at bean accessors |
+| `tools.jackson.module:jackson-module-kotlin` | Kotlin data classes, nullability, default arguments | Without it, a Kotlin data class trips `FAIL_ON_EMPTY_BEANS` |
+| `tools.jackson.dataformat:jackson-dataformat-yaml` / `-csv` / `-xml` | Same data-binding model, different wire format | Use the format-specific mapper (`YAMLMapper`, `CsvMapper`, `XmlMapper`), not a plain `ObjectMapper` with a swapped factory |
+| Spring Boot `JsonMapperBuilderCustomizer` | Adjusts the auto-configured application `JsonMapper` | The supported hook, since the finished mapper cannot be mutated |
 | Gson | Alternative JSON library | Simpler, Android-friendly, no default-typing RCE surface |
 | JSON-B (Yasson) | Jakarta EE standard JSON binding | Portability across compliant runtimes |
 
@@ -565,35 +564,35 @@ The multiplier is what turns a payload that "obviously fits" into an OOM. The he
 
 ## 12. Interview Questions with Answers
 
-**Is ObjectMapper thread-safe?**
-**Short:** Yes, once fully configured, but reconfiguring it after sharing across threads is unsafe.
+**Q: Is `ObjectMapper` thread-safe?**
+**Short:** Yes — the mapper and its stream factory are fully immutable, so one instance is safe on every thread.
 
-Yes, once fully configured — but reconfiguring it after sharing across threads is not safe. Jackson's own contract is that all `configure()`/`registerModule()`/`setXxx()` calls must complete before the instance is shared; the per-type (de)serializer caches are safe for concurrent reads after that point. Build one mapper at startup, treat it as effectively immutable, and use derived `ObjectReader`/`ObjectWriter` instances for any per-call variation instead of mutating the shared mapper.
+Yes, and it is now guaranteed by the type rather than by discipline: `ObjectMapper`, `JsonMapper` and `TokenStreamFactory` are fully immutable, built through `JsonMapper.builder()...build()`, with no setters, no `configure()`, and no `registerModule()` on the finished object. The per-type (de)serializer caches are safe for concurrent reads. Build one mapper at startup and share it everywhere; for per-call variation derive an `ObjectReader`/`ObjectWriter`, which shares the parent's caches — and reach for `mapper.rebuild()` only at startup, since it returns a brand-new mapper with cold caches.
 
 **Why is creating a new ObjectMapper for every request an anti-pattern?**
 **Short:** It repeats costly reflective setup on every call instead of reusing one warm, cached mapper.
 
 Because construction plus first-use reflection costs on the order of tens of milliseconds that a shared instance pays only once. Every new `ObjectMapper` starts with cold `BeanDeserializer`/`BeanSerializer` caches, so it repeats the expensive introspection step on every single call instead of hitting a warm cache — at meaningful request volume this is one to several CPU-seconds of pure waste per wall-clock second. Build the mapper once at startup (or as a Spring-managed singleton) and reuse it for the life of the process.
 
-**Q: What made `enableDefaultTyping()` dangerous, and how did Jackson respond?**
+**Q: What made unvalidated default typing dangerous, and how did Jackson respond?**
 **Short:** It let attacker-controlled JSON name the class to instantiate, enabling gadget-chain RCE.
 
-It let attacker-controlled JSON name the exact Java class to instantiate, enabling gadget-chain remote code execution. CVE-2017-7525 was the canonical origin (default typing plus Commons Collections on the classpath); Jackson's initial blacklist-based mitigation triggered years of whack-a-mole as new gadget classes were found in other libraries, CVE-2019-12384 among dozens that followed. Jackson 2.10 added the allowlist-based `PolymorphicTypeValidator` and the `activateDefaultTyping(validator, ...)` entry point — but be precise about what that did and did not change: the mapper's *default* validator is still `LaissezFaireSubTypeValidator`, which permits every subtype, so the protection only exists if you supply a real validator. The dependable fix is avoiding default typing entirely in favor of a closed `@JsonTypeInfo`/`@JsonSubTypes` set you control.
+It let attacker-controlled JSON name the exact Java class to instantiate, enabling gadget-chain remote code execution. CVE-2017-7525 was the canonical origin (default typing plus Commons Collections on the classpath); Jackson's initial blacklist-based mitigation triggered years of whack-a-mole as new gadget classes were found in other libraries, CVE-2019-12384 among dozens that followed. A blacklist can never cover "every class on the classpath," so the fix was inverted into an allowlist: `PolymorphicTypeValidator`. Today that allowlist is not optional — default typing is activated only through the builder, and the permissive `LaissezFaireSubTypeValidator` is no longer a public class, so you cannot switch this on and inherit "permit every subtype" by accident. The dependable answer is still to avoid default typing entirely in favor of a closed `@JsonTypeInfo`/`@JsonSubTypes` set you control.
 
 **Why does `mapper.readValue(json, List.class)` silently lose the element type?**
 **Short:** Type erasure removes generics at compile time, so the call returns raw LinkedHashMaps instead.
 
 Type erasure removes generic parameters at compile time, so the JVM only ever sees a raw `List` of `Object`. The call compiles without warning and returns a list of generic `LinkedHashMap`s rather than your intended element type, producing a `ClassCastException` wherever the first element is finally cast. The fix is `mapper.readValue(json, new TypeReference<List<MyType>>() {})`, whose mandatory anonymous-subclass body is what lets Jackson recover the reified generic signature via `getGenericSuperclass()`.
 
-**Q: Why does deserializing a `LocalDateTime` field fail with a stock Jackson 2.x ObjectMapper?**
-**Short:** Jackson 2.x has no built-in java.time support until the JavaTimeModule is registered.
+**Q: How do you control the wire shape of a `java.time` value?**
+**Short:** Through the DateTimeFeature enum on the mapper builder; java.time binding itself is built into jackson-databind.
 
-Jackson 2.x has no built-in support for `java.time` types until the `JavaTimeModule` is registered. The fix is adding `jackson-datatype-jsr310` and calling `registerModule(new JavaTimeModule())` (Spring Boot does this automatically, which is why the failure is mostly seen in non-Spring code). Once registered, the next 2.x surprise is that dates serialize as numeric timestamps by default — a `LocalDateTime` as an array, an `Instant` as a decimal epoch value — so disable `SerializationFeature.WRITE_DATES_AS_TIMESTAMPS` to get ISO-8601 strings. Jackson 3.0 removes both papercuts: `java.time` support ships inside `jackson-databind` and the timestamp feature defaults to `false`.
+Through the dedicated `DateTimeFeature` enum passed to `JsonMapper.builder()`. `java.time` binding needs no module at all — it lives inside `jackson-databind` alongside `Optional` support and constructor-parameter-name detection. Out of the box `DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS` is off, so an `Instant` emits an ISO-8601 string rather than a decimal epoch value and a `LocalDateTime` emits a string rather than a numeric array; `WRITE_DATES_WITH_ZONE_ID` and `ADJUST_DATES_TO_CONTEXT_TIME_ZONE` cover the offset-versus-zone questions. Treat all of these as wire-format decisions, not formatting preferences: pin the ones your consumers depend on in the builder and assert the emitted shape in a test, because flipping any of them silently changes the JSON type a downstream parser sees.
 
-**Q: What does `FAIL_ON_UNKNOWN_PROPERTIES` do, and why does its default depend on your Jackson version?**
-**Short:** It throws on any unmapped JSON field, defaulting to true in 2.x and false in Jackson 3.0.
+**Q: What does `FAIL_ON_UNKNOWN_PROPERTIES` do, and when should you turn it on?**
+**Short:** It throws on any unmapped JSON field; it is off by default and belongs on only for contracts you own both ends of.
 
-It makes any JSON field without a matching POJO property throw `UnrecognizedPropertyException`, and its default flipped between major versions: `true` in Jackson 2.x, `false` in Jackson 3.0. On 2.x this is brittle across schema evolution — an upstream service adding a field you don't care about breaks every consumer that hasn't disabled the check — which is exactly why 3.0 reversed it. The migration hazard runs the other way: a service that relied on the strict default to catch typo'd field names loses that safety net silently on upgrade. Set the value explicitly rather than inheriting it: lenient for external, partner-controlled contracts; strict for internal contracts you fully own.
+It makes any JSON field without a matching POJO property throw `UnrecognizedPropertyException`, and it is off by default — an upstream service adding a field you don't care about is a non-event, which is the right posture at a boundary you don't control. Turn it on for internal service-to-service contracts you own end to end, where a typo'd or renamed field should fail loudly rather than bind to nothing. The related trap runs in the other direction: `FAIL_ON_TRAILING_TOKENS` *is* on by default, so a concatenated or truncated payload that used to parse as "just the first value" now throws. Decide both per contract and state them in the builder instead of inheriting them.
 
 **When do you choose streaming over tree over data binding?**
 **Short:** Choose streaming for huge or hot-path payloads, tree for unknown shapes, binding otherwise.
@@ -605,10 +604,10 @@ Streaming for huge or hot-path payloads, tree for unknown or dynamic shapes, dat
 
 ObjectReader and ObjectWriter are immutable, thread-safe views derived from a mapper, cheap to create for each distinct call "shape" you need. Calling `.with(...)` on either returns a new instance rather than mutating anything, so they share the parent mapper's caches without ever needing to touch its configuration — build one per shape (a pretty-printing writer, a lenient reader) once at startup and store it as a constant.
 
-**How does Jackson bind JSON to a Java record?**
-**Short:** Since Jackson 2.12, a record's canonical constructor is treated as an implicit creator.
+**Q: How does Jackson bind JSON to a Java record?**
+**Short:** A record's canonical constructor is treated as an implicit creator, with no annotation required.
 
-Since Jackson 2.12, the canonical constructor is treated as an implicit creator with no annotations required. Record component names are always available via reflection (JEP 359), unlike ordinary classes which need `-parameters` or explicit `@ConstructorProperties`/`@JsonProperty` to recover constructor parameter names — you can still add `@JsonCreator`/`@JsonProperty` on a record's compact constructor for renaming or validation, but the simple case needs nothing extra.
+The canonical constructor is treated as an implicit creator with no annotations required. Record component names are always available via reflection (JEP 359), unlike ordinary classes, whose constructor parameter names survive into the class file only if you compile with `-parameters` (otherwise you need explicit `@ConstructorProperties`/`@JsonProperty`) — you can still add `@JsonCreator`/`@JsonProperty` on a record's compact constructor for renaming or validation, but the simple case needs nothing extra. One upgrade-relevant detail for records with primitive components: `FAIL_ON_NULL_FOR_PRIMITIVES` is on by default, so a missing or null `int` field fails the bind instead of silently becoming `0`.
 
 **What is `@JsonTypeInfo`/`@JsonSubTypes` and how is it safer than default typing?**
 **Short:** It declares a closed, application-controlled set of subtypes instead of trusting the JSON.
@@ -628,7 +627,7 @@ It collects any JSON properties that don't match a declared field into a map ins
 **Why would serializing a class throw "no properties discovered to create BeanSerializer"?**
 **Short:** Jackson found zero detectable getters, fields, or annotations and refuses to serialize an empty object.
 
-Jackson found zero detectable getters, fields, or annotations on the class and refuses to silently serialize it as an empty object (`SerializationFeature.FAIL_ON_EMPTY_BEANS` defaults to `true`). Common causes are a marker/placeholder class, a class with only private fields and no getters or annotations at all, or a Kotlin data class before the Kotlin module is registered — the fix is almost always adding the missing accessor, annotation, or module rather than suppressing the check.
+Jackson found zero detectable getters, fields, or annotations on the class and refuses to silently serialize it as an empty object (`SerializationFeature.FAIL_ON_EMPTY_BEANS` defaults to `true`). Common causes are a marker/placeholder class, a class with only private fields and no getters or annotations at all, or a Kotlin data class without `jackson-module-kotlin` on the builder — the fix is almost always adding the missing accessor, annotation, or module rather than suppressing the check.
 
 **What is `PropertyNamingStrategies.SNAKE_CASE` used for?**
 **Short:** It rewrites Java camelCase names to JSON snake_case without per-field annotations.
@@ -638,7 +637,7 @@ It rewrites all property names between Java camelCase and JSON snake_case withou
 **How does Jackson achieve high (de)serialization performance internally?**
 **Short:** It compiles and caches a reusable BeanDeserializer or BeanSerializer per class after first use.
 
-It compiles a reusable `BeanDeserializer`/`BeanSerializer` per class on first use and caches it for every later call, turning reflection into a one-time cost rather than a per-call one. Beyond that base caching, the Afterburner and Blackbird modules replace the generated accessors' reflective `Method.invoke()` calls with generated bytecode or `MethodHandle`s respectively, and Jackson recycles internal parser/generator buffers and symbol tables per `JsonFactory` rather than reallocating them on every call.
+It compiles a reusable `BeanDeserializer`/`BeanSerializer` per class on first use and caches it for every later call, turning reflection into a one-time cost rather than a per-call one. Beyond that base caching, the Blackbird module replaces those accessors' reflective `Method.invoke()` calls with `LambdaMetafactory`-generated ones, and Jackson recycles internal parser/generator buffers and symbol tables per `TokenStreamFactory` rather than reallocating them on every call.
 
 **What happens when JSON contains an enum value your Java enum doesn't define?**
 **Short:** By default Jackson throws an InvalidFormatException on any enum value the Java enum lacks.
@@ -669,16 +668,16 @@ Break the cycle with `@JsonManagedReference`/`@JsonBackReference` on the two sid
 
 ## 13. Best Practices
 
-1. **Build one `ObjectMapper` per application and reuse it for the process lifetime** — never construct one per request, per message, or inside a loop.
-2. **Configure fully before sharing, then treat the mapper as immutable** — derive `ObjectReader`/`ObjectWriter` for any per-call variation instead of mutating a shared instance.
-3. **Never enable default/polymorphic typing against caller-influenced input** — use a closed `@JsonTypeInfo`/`@JsonSubTypes` allowlist for any type that varies by shape.
-4. **Always register `JavaTimeModule`** when any `java.time` type appears in a model, and decide `WRITE_DATES_AS_TIMESTAMPS` deliberately rather than accepting the array-shaped default by accident.
+1. **Build one `JsonMapper` per application and reuse it for the process lifetime** — never construct one per request, per message, or inside a loop, and keep `rebuild()` at startup where its cold caches cost nothing.
+2. **Derive `ObjectReader`/`ObjectWriter` for any per-call variation** — they are immutable, cheap, and share the parent mapper's caches, which a second mapper would not.
+3. **Never enable default/polymorphic typing against caller-influenced input** — use a closed `@JsonTypeInfo`/`@JsonSubTypes` allowlist for any type that varies by shape, and if default typing is unavoidable, scope the `PolymorphicTypeValidator` to your own packages.
+4. **Pin the date/time features your consumers depend on** via `DateTimeFeature` on the builder, and assert the emitted shape in a test — a flipped feature is a wire-format change, not a formatting preference.
 5. **Use `TypeReference` (or `TypeFactory`) for every generic collection type** — never hand a raw `Class` to `readValue` when the element type matters.
 6. **Reach for the streaming API or `MappingIterator`** the moment a payload is large enough that materializing a tree or full list would be a meaningful fraction of available heap.
-7. **Decide `FAIL_ON_UNKNOWN_PROPERTIES` per contract, not globally by accident** — lenient for partner/external payloads that evolve out of your control, strict for internal contracts you own end to end.
-8. **Prefer Java records for new DTOs** — Jackson 2.12+ binds them with zero extra annotation in the common case, and their immutability sidesteps a class of partial-construction bugs POJOs are prone to.
-9. **Add Blackbird (not Afterburner) for reflection-heavy hot paths on JDK 11+** — measure first; the base cache alone is often enough.
-10. **Never catch and swallow `JsonProcessingException`** — it almost always signals either a real data-contract bug or a security-relevant malformed payload, not a condition to paper over.
+7. **Decide `FAIL_ON_UNKNOWN_PROPERTIES` per contract, not globally by accident** — leave it off for partner/external payloads that evolve out of your control, turn it on for internal contracts you own end to end.
+8. **Prefer Java records for new DTOs** — Jackson binds them with zero extra annotation in the common case, and their immutability sidesteps a class of partial-construction bugs POJOs are prone to.
+9. **Add Blackbird for reflection-heavy hot paths** — measure first; the base cache alone is often enough.
+10. **Never catch and swallow `JacksonException`** — it almost always signals either a real data-contract bug or a security-relevant malformed payload, not a condition to paper over. Because it is unchecked, an untouched code path will not force you to notice it: catch it explicitly wherever a parse failure has a defined response.
 
 ---
 
@@ -782,10 +781,12 @@ The discriminator (`eventType`) only ever selects among three internal record ty
 @Component
 public final class WebhookMapper {
 
-    // Configured once at startup, shared for the process lifetime.
-    private final ObjectMapper mapper = JsonMapper.builder()
-            .addModule(new JavaTimeModule())
-            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+    // Built once at startup, immutable, shared for the process lifetime.
+    // java.time needs no module, dates are ISO-8601, and unknown properties are
+    // tolerated -- all three are the defaults, stated here because they are
+    // contract decisions this gateway depends on.
+    private final JsonMapper mapper = JsonMapper.builder()
+            .disable(DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS)
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)   // partners add fields often
             .build();
 
@@ -795,25 +796,25 @@ public final class WebhookMapper {
             ShipmentEvent.class, mapper.readerFor(ShipmentEvent.class),
             RefundEvent.class,   mapper.readerFor(RefundEvent.class));
 
-    public JsonNode peekDiscriminator(byte[] body) throws IOException {
+    public JsonNode peekDiscriminator(byte[] body) {
         // Tree model: read just enough to decide how to route, nothing else.
         return mapper.readTree(body).path("eventType");
     }
 
-    public <T extends CanonicalEvent> T bind(byte[] body, Class<T> type) throws IOException {
+    public <T extends CanonicalEvent> T bind(byte[] body, Class<T> type) {
         return readersByType.get(type).forType(type).readValue(body);
     }
 
-    public ObjectMapper rawMapper() { return mapper; }   // for the streaming path below
+    public JsonMapper rawMapper() { return mapper; }   // for the streaming path below
 }
 ```
 
 #### Streaming path for bulk manifests
 
 ```java
-public void ingestBulkManifest(InputStream carrierManifest, WebhookMapper webhookMapper) throws IOException {
-    ObjectMapper mapper = webhookMapper.rawMapper();
-    try (JsonParser parser = mapper.getFactory().createParser(carrierManifest);
+public void ingestBulkManifest(InputStream carrierManifest, WebhookMapper webhookMapper) {
+    JsonMapper mapper = webhookMapper.rawMapper();
+    try (JsonParser parser = mapper.createParser(carrierManifest);
          MappingIterator<ShipmentEvent> it =
                  mapper.readerFor(ShipmentEvent.class).readValues(parser)) {
         while (it.hasNext()) {
@@ -825,11 +826,11 @@ public void ingestBulkManifest(InputStream carrierManifest, WebhookMapper webhoo
 
 ### Common Pitfalls (production war stories)
 
-**1. The first version used a fresh ObjectMapper per webhook.** Early code built `new ObjectMapper()` inside the request handler "to keep things simple." At 50,000 events/sec this alone consumed more CPU than the rest of the ingestion logic combined; switching to the shared, startup-configured mapper above cut Jackson's share of CPU time by roughly an order of magnitude.
+**1. The first version built a fresh mapper per webhook.** Early code called `JsonMapper.builder().build()` inside the request handler "to keep things simple." At 50,000 events/sec this alone consumed more CPU than the rest of the ingestion logic combined; switching to the shared, startup-built mapper above cut Jackson's share of CPU time by roughly an order of magnitude.
 
 **2. A carrier's manifest format grew past the in-memory threshold without anyone updating the router.** The size check initially compared against a 10 MB constant set when manifests were small; a carrier's holiday-season manifest crossed 10 MB, got routed down the tree/databind path instead of streaming, and the ingestion pod OOM'd. The fix paired the size threshold with a hard cap that forces streaming above any threshold, plus alerting when actual payload sizes approach it.
 
-**3. Leaving `FAIL_ON_UNKNOWN_PROPERTIES` at Jackson 2.x's default `true` broke ingestion the first time a partner added a field.** A payment partner added an undocumented `riskScore` field to their webhook; every event from that partner started failing with `UnrecognizedPropertyException` until someone disabled the check platform-wide, as shown in the mapper configuration above.
+**3. `FAIL_ON_UNKNOWN_PROPERTIES` was turned on platform-wide to catch internal typos, and broke partner ingestion.** A payment partner added an undocumented `riskScore` field to their webhook; every event from that partner started failing with `UnrecognizedPropertyException`. The check went back off for the inbound boundary, as shown in the mapper configuration above, and moved to the *internal* canonical-event contract instead — the same feature, applied where both ends are owned.
 
 ### Interview Discussion Points
 

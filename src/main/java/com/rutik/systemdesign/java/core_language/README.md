@@ -97,7 +97,7 @@ flowchart TD
     OBJ --> HC["hashCode(): int\ndefault: identity hash, JVM-generated"]
     OBJ --> TS["toString(): String\ndefault: ClassName@hexHashCode"]
     OBJ --> CL["clone(): Object\nprotected; shallow copy; needs Cloneable"]
-    OBJ --> FI["finalize(): void\ndeprecated; unreliable pre-GC hook"]
+    OBJ --> FI["finalize(): void\ndeprecated for removal (JEP 421)\nuse Cleaner or AutoCloseable"]
     OBJ --> WN["wait() / notify() / notifyAll()\nintrinsic lock coordination"]
     OBJ --> GC["getClass(): Class&lt;?&gt;\nruntime type"]
 
@@ -537,7 +537,7 @@ Static nested: helper classes that don't need outer state (e.g., `Map.Entry`, `B
 **Q10: What are all the methods defined on java.lang.Object?**
 **Short:** Every Java object inherits equals, hashCode, toString, clone, getClass, wait, notify, and notifyAll from Object.
 
-`equals()`, `hashCode()`, `toString()`, `clone()` (protected), `finalize()` (deprecated), `getClass()`, `wait()` (3 overloads), `notify()`, `notifyAll()`. Every Java object inherits these. The most important are `equals`/`hashCode` (collection contracts), `toString` (debugging), and `wait`/`notify` (low-level concurrency — prefer `java.util.concurrent` instead).
+`equals()`, `hashCode()`, `toString()`, `clone()` (protected), `finalize()` (protected, deprecated for removal), `getClass()`, `wait()` (3 overloads), `notify()`, `notifyAll()`. Every Java object inherits these. The most important are `equals`/`hashCode` (collection contracts), `toString` (debugging), and `wait`/`notify` (low-level concurrency — prefer `java.util.concurrent` instead). `finalize()` is the one to be able to speak about as a lifecycle question rather than an API question: JEP 421 deprecated the whole finalization mechanism for removal, the JDK has been dismantling it in stages (`--finalization=disabled` today, individual `finalize()` overrides being deleted from the JDK release by release), and the replacements are `Cleaner`/`PhantomReference` for unreachability cleanup and `AutoCloseable` with try-with-resources for deterministic release. Never override it in new code, and treat an inherited override as debt with a known expiry.
 
 **Q11: What is a bridge method and when does the compiler generate one?**
 **Short:** A bridge method is a synthetic compiler-generated method that preserves polymorphism after generic type erasure.

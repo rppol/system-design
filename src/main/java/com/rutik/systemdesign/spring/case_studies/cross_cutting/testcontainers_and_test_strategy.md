@@ -141,10 +141,12 @@ class OrderServiceIntegrationTest {
     static GenericContainer<?> redis =
         new GenericContainer<>("redis:8-alpine").withExposedPorts(6379);
 
-    // If you do hand-wire it, the properties are spring.data.redis.*:
-    // spring.redis.host/port were deprecated at ERROR level in Boot 3.0 and bind to
-    // nothing now, so a @DynamicPropertySource using them fails silently and the test
-    // quietly talks to localhost:6379 instead of the container.
+    // If you do hand-wire it, the properties are spring.data.redis.*.
+    // Worth knowing why this specific key is a trap: the old spring.redis.* prefix
+    // is gone, and an unknown property is not an error -- a @DynamicPropertySource
+    // setting spring.redis.host binds to nothing, the test silently talks to
+    // localhost:6379 instead of the container, and it passes on any dev machine
+    // with Redis running. Assert against the container's mapped port, not the default.
 
     @Autowired
     private OrderService orderService;
@@ -482,14 +484,14 @@ class PaymentServiceTest {
 
 ## 7. Real-World Examples
 
-### Pivotal/VMware — Spring Boot's official Testcontainers support
+### The Spring team — Boot's official Testcontainers support
 
-Spring Boot 3.1 (2023) added first-class `@ServiceConnection` support, reflecting the Spring
-team's position that Testcontainers is the preferred integration test strategy. The `spring-boot-testcontainers`
-module auto-discovers container types (PostgreSQL, MySQL, Redis, Kafka, RabbitMQ, MongoDB, etc.)
-and configures the corresponding Spring Boot auto-configuration. No more manual
-`@DynamicPropertySource` for supported containers — this was the primary friction point in the
-3.0 era. Reference: Spring Boot 3.1 release notes (2023).
+`@ServiceConnection` (added in Spring Boot 3.1) is the Spring team's statement that Testcontainers
+is the preferred integration test strategy. The `spring-boot-testcontainers` module auto-discovers
+container types (PostgreSQL, MySQL, Redis, Kafka, RabbitMQ, MongoDB, and more) and configures the
+corresponding Spring Boot auto-configuration, so a supported container needs no
+`@DynamicPropertySource` at all — which removes exactly the silent-misbinding failure shown in
+§4.2, because there is no property name left to typo.
 
 ### Reusing containers across runs — what `withReuse(true)` actually costs
 

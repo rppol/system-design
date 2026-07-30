@@ -2,18 +2,18 @@
 
 ## 1. Concept Overview
 
-Spring's validation and error handling stack combines the Java Bean Validation specification (JSR-380 / Hibernate Validator) with Spring MVC's exception resolution pipeline and Spring Boot 3's RFC 9457 `ProblemDetail` support.
+Spring's validation and error handling stack combines the **Jakarta Validation** specification (3.1, implemented by Hibernate Validator 9.x) with Spring MVC's exception resolution pipeline and the RFC 9457 `ProblemDetail` error model. Two naming points, because both show up in older material and in interview questions: the constraint annotations live in `jakarta.validation.constraints`, not `javax.validation.constraints`; and the specification is versioned as Jakarta Validation 3.1, not as a JSR number — "JSR-380" named Bean Validation 2.0, the last release before the move to Jakarta EE, and no Jakarta-era version has a JSR.
 
 Key components:
-- **Bean Validation (JSR-380)** — constraint annotations (`@NotNull`, `@Size`, `@Pattern`, custom `@ConstraintValidator`)
-- **`@Valid`** — triggers JSR-380 validation on a method parameter (Spring MVC, WebFlux)
+- **Jakarta Validation 3.1** — constraint annotations (`@NotNull`, `@Size`, `@Pattern`, custom `@ConstraintValidator`)
+- **`@Valid`** — triggers Jakarta Validation on a method parameter (Spring MVC, WebFlux)
 - **`@Validated`** — Spring wrapper; adds validation groups + enables method-level validation on non-`@Controller` beans via AOP
 - **`MethodValidationPostProcessor`** — enables `@Validated` method validation on services/repositories
 - **`@ControllerAdvice` / `@ExceptionHandler`** — centralised exception-to-response mapping
-- **`ProblemDetail`** — RFC 9457-compliant error response body (Spring Boot 3+ / Spring Framework 6)
+- **`ProblemDetail`** — RFC 9457-compliant error response body (`org.springframework.http.ProblemDetail`)
 - **`spring.mvc.problemdetails.enabled=true`** — auto-enables ProblemDetail for standard Spring exceptions
 
-Spring Boot 3.0 / Spring Framework 6 made `ProblemDetail` the standard error response format for built-in exceptions (`MethodArgumentNotValidException`, `ConstraintViolationException`, etc.).
+`ProblemDetail` is the standard error response format for Spring's built-in exceptions (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, and the rest), emitted as `application/problem+json`.
 
 ---
 
@@ -30,10 +30,10 @@ Spring Boot 3.0 / Spring Framework 6 made `ProblemDetail` the standard error res
 ## 3. Core Principles
 
 1. **Validate at the boundary**: validate HTTP request bodies, `@RequestParam`, path variables, and service method inputs — not deep inside domain logic.
-2. **`@Valid` vs `@Validated`**: `@Valid` = JSR-380 validation without group support; `@Validated` = Spring extension with groups + method-level AOP validation on any Spring bean.
+2. **`@Valid` vs `@Validated`**: `@Valid` = standard Jakarta Validation without group support; `@Validated` = Spring extension with groups + method-level AOP validation on any Spring bean.
 3. **All violations at once**: Bean Validation collects ALL constraint violations before throwing `ConstraintViolationException` (service) or `MethodArgumentNotValidException` (MVC). Clients can fix all errors in one round trip.
 4. **`@ControllerAdvice` centralises error mapping**: `@ExceptionHandler` methods in a `@ControllerAdvice` class handle exceptions thrown by any controller, avoiding duplicated error-handling code.
-5. **`ProblemDetail` (RFC 9457)**: Spring Boot 3+ returns structured JSON error bodies (`type`, `title`, `status`, `detail`, `instance`) by default for Spring's built-in exceptions.
+5. **`ProblemDetail` (RFC 9457)**: Spring returns structured JSON error bodies (`type`, `title`, `status`, `detail`, `instance`) for its built-in exceptions once `spring.mvc.problemdetails.enabled=true`.
 6. **Validation groups allow phased constraints**: annotate constraints with `groups` to apply different rules for CREATE vs UPDATE operations (e.g., `id` is forbidden on CREATE, required on UPDATE).
 
 ---
@@ -42,7 +42,7 @@ Spring Boot 3.0 / Spring Framework 6 made `ProblemDetail` the standard error res
 
 ### 4.1 @Valid vs @Validated
 
-| Feature | `@Valid` (JSR-380) | `@Validated` (Spring) |
+| Feature | `@Valid` (Jakarta Validation) | `@Validated` (Spring) |
 |---|---|---|
 | Standard | Jakarta Validation 3.1 | Spring Framework extension |
 | Validation groups | No | Yes — `@Validated(Create.class)` |
@@ -256,7 +256,7 @@ public class ValidationConfig {
         return pp;
     }
 }
-// Spring Boot 3 auto-configures this; explicit bean only needed for customization.
+// Spring Boot auto-configures this; an explicit bean is only needed for customization.
 
 // Service with method-level validation
 @Service
@@ -277,10 +277,10 @@ public class OrderService {
 }
 ```
 
-### 6.5 @ControllerAdvice with ProblemDetail (Spring Boot 3+)
+### 6.5 @ControllerAdvice with ProblemDetail
 
 ```java
-// Spring Boot 3.x: enable ProblemDetail for built-in Spring exceptions
+// Enable ProblemDetail for Spring's built-in exceptions
 // application.yaml:
 //   spring:
 //     mvc:
@@ -381,7 +381,7 @@ GitHub's REST API returns error bodies similar to RFC 9457:
   "documentation_url": "https://docs.github.com/..."
 }
 ```
-Spring Boot 3's `ProblemDetail` follows the same pattern but with the standardised RFC 9457 fields (`type`, `title`, `status`, `detail`, `instance`) plus custom extension fields via `setProperty()`.
+Spring's `ProblemDetail` follows the same pattern but with the standardised RFC 9457 fields (`type`, `title`, `status`, `detail`, `instance`) plus custom extension fields via `setProperty()`.
 
 ### 7.2 Stripe API — Idempotency + Validation Error Codes
 
@@ -415,7 +415,7 @@ Stripe returns structured error codes (`"error_code": "invalid_number"`) allowin
 
 ### Do NOT use Bean Validation when:
 - Business rules are complex and stateful (e.g., "discount is valid only if the customer has purchased > $500 this year") — use a domain service with explicit validation logic
-- Cross-field validation with complex interdependencies — consider a dedicated `Validator` class (Spring's `org.springframework.validation.Validator` interface, not JSR-380)
+- Cross-field validation with complex interdependencies — consider a dedicated `Validator` class (Spring's `org.springframework.validation.Validator` interface, not a Jakarta constraint)
 - Performance-critical paths with very high validation volume — Hibernate Validator is fast but not free; avoid validating in tightest inner loops
 
 ---
@@ -469,13 +469,13 @@ If a `@Validated` service method is called via `@Async`, the validation AOP prox
 |---|---|---|
 | Jakarta Validation 3.1 | Jakarta EE 11 | Constraint annotation specification |
 | Hibernate Validator 9.x | Spring Boot 4.x default (4.1 manages 9.1.0.Final) | Jakarta Validation reference implementation |
-| `@Valid` | JSR-380 | Cascade validation trigger |
+| `@Valid` | Jakarta Validation 3.1 | Cascade validation trigger |
 | `@Validated` | Spring Framework | Groups support + method-level validation |
 | `MethodValidationPostProcessor` | Spring Framework | AOP proxy for service-level @Validated |
 | `@ControllerAdvice` + `@ExceptionHandler` | Spring MVC | Centralised exception-to-response mapping |
 | `ResponseEntityExceptionHandler` | Spring MVC | Base class for ProblemDetail error handling |
 | `ProblemDetail` | Spring 6 / Boot 3 | RFC 9457-compliant error response object |
-| `spring.mvc.problemdetails.enabled=true` | Spring Boot 3 | Auto-enables ProblemDetail for built-in exceptions |
+| `spring.mvc.problemdetails.enabled=true` | Spring Boot | Auto-enables ProblemDetail for built-in exceptions |
 | `ErrorAttributes` / `BasicErrorController` | Spring Boot | Customise `/error` fallback endpoint |
 | `spring-boot-starter-validation` | Spring Boot | Includes Hibernate Validator; required for Bean Validation |
 
@@ -484,9 +484,9 @@ If a `@Validated` service method is called via `@Async`, the validation AOP prox
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between `@Valid` and `@Validated` in Spring?**
-**Short:** @Valid is the JSR-380 standard with no group support; @Validated is Spring's extension adding group selection.
+**Short:** @Valid is the Jakarta Validation standard with no group support; @Validated is Spring's extension adding group selection.
 
-`@Valid` is the standard JSR-380 annotation (from `jakarta.validation`). It triggers constraint validation on the annotated parameter, including cascading to nested `@Valid` fields. It does not support validation groups. `@Validated` is Spring's extension (`org.springframework.validation.annotation.Validated`). It adds group selection — `@Validated(OnCreate.class)` activates only constraints in that group. At the class level, `@Validated` marks a bean for method-level validation via `MethodValidationPostProcessor` — enabling `@NotNull`, `@Size`, etc. on service and repository method parameters and return values. In Spring MVC controllers, both are interchangeable for non-group cases; only `@Validated` supports groups.
+`@Valid` is the standard Jakarta Validation annotation (from `jakarta.validation`). It triggers constraint validation on the annotated parameter, including cascading to nested `@Valid` fields. It does not support validation groups. `@Validated` is Spring's extension (`org.springframework.validation.annotation.Validated`). It adds group selection — `@Validated(OnCreate.class)` activates only constraints in that group. At the class level, `@Validated` marks a bean for method-level validation via `MethodValidationPostProcessor` — enabling `@NotNull`, `@Size`, etc. on service and repository method parameters and return values. In Spring MVC controllers, both are interchangeable for non-group cases; only `@Validated` supports groups.
 
 **Q2: What exception is thrown for MVC validation failure vs service-layer validation failure, and how do you handle both?**
 **Short:** MVC-level @Valid failures throw MethodArgumentNotValidException; service-level @Validated failures throw ConstraintViolationException.
@@ -503,10 +503,10 @@ Validation groups are marker interfaces (empty, by convention). Each constraint 
 
 Create an annotation (e.g., `@UniqueEmail`) with `@Constraint(validatedBy = UniqueEmailValidator.class)`. The validator class implements `ConstraintValidator<UniqueEmail, String>`. Because the validator is managed by Spring (via `@Component` + Hibernate Validator's Spring integration), `@Autowired` works inside it. The `isValid()` method calls `userRepository.existsByEmail(email)` — if the email exists, return `false` (violation). Important: return `true` for null values (let `@NotNull` handle null — compose constraints rather than duplicating logic). Gotcha: the validator runs inside a request transaction if invoked via Spring MVC, but from a non-transactional context (an `@Async` thread, a scheduled job) nothing is bound to the thread — mark the lookup `@Transactional(readOnly = true)` so the default `REQUIRED` propagation opens one.
 
-**Q5: What is `ProblemDetail` and why was it introduced in Spring Boot 3?**
+**Q5: What is `ProblemDetail` and what problem does it solve?**
 **Short:** ProblemDetail implements RFC 9457, giving every error response a consistent type, title, status, detail, and instance structure.
 
-`ProblemDetail` (`org.springframework.http.ProblemDetail`) is Spring's implementation of RFC 9457 "Problem Details for HTTP APIs." Before Spring Boot 3, error response bodies were inconsistent — some APIs returned `{message: "..."}`, others returned `{error: "...", status: 400}`, with no standard structure. RFC 9457 defines: `type` (URI identifying the error kind), `title` (human-readable summary), `status` (HTTP status), `detail` (specific description for this occurrence), `instance` (URI of the specific request that failed), plus extensible custom properties. `ProblemDetail` lets `@ExceptionHandler` methods return a structured, machine-readable body without reinventing the format. Spring Boot 3 auto-applies it to built-in Spring exceptions (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, etc.) when `spring.mvc.problemdetails.enabled=true`.
+`ProblemDetail` (`org.springframework.http.ProblemDetail`) is Spring's implementation of RFC 9457 "Problem Details for HTTP APIs." Without it, error response bodies drift apart across a codebase — some APIs returned `{message: "..."}`, others returned `{error: "...", status: 400}`, with no standard structure. RFC 9457 defines: `type` (URI identifying the error kind), `title` (human-readable summary), `status` (HTTP status), `detail` (specific description for this occurrence), `instance` (URI of the specific request that failed), plus extensible custom properties. `ProblemDetail` lets `@ExceptionHandler` methods return a structured, machine-readable body without reinventing the format. Spring Boot auto-applies it to built-in Spring exceptions (`MethodArgumentNotValidException`, `HttpMessageNotReadableException`, etc.) when `spring.mvc.problemdetails.enabled=true`.
 
 **Q6: How does `@ControllerAdvice` determine which controllers it applies to?**
 **Short:** @ControllerAdvice applies globally by default but can be scoped to packages, specific controllers, or annotation types.
@@ -531,7 +531,7 @@ Spring MVC resolves exceptions through a chain of `HandlerExceptionResolver` imp
 **Q10: How would you validate a `@RequestParam` or `@PathVariable` (not a request body)?**
 **Short:** Validating a @RequestParam or @PathVariable requires class-level @Validated plus a constraint directly on the method parameter.
 
-Request params and path variables are primitive or String types, not POJOs — `@Valid` cascade does not apply. Two approaches: (1) `@Validated` at the class level + `MethodValidationPostProcessor` — put constraints directly on the method parameters: `public ResponseEntity<User> getUser(@PathVariable @Positive long id)`. When `id <= 0`, Spring throws `ConstraintViolationException` (map to 400 in `@ControllerAdvice`). (2) Custom `@ExceptionHandler(MethodArgumentTypeMismatchException.class)` for type conversion failures (e.g., `"abc"` as a `long` path variable). Spring Boot 3 with `problemdetails.enabled=true` handles type mismatch automatically.
+Request params and path variables are primitive or String types, not POJOs — `@Valid` cascade does not apply. Two approaches: (1) `@Validated` at the class level + `MethodValidationPostProcessor` — put constraints directly on the method parameters: `public ResponseEntity<User> getUser(@PathVariable @Positive long id)`. When `id <= 0`, Spring throws `ConstraintViolationException` (map to 400 in `@ControllerAdvice`). (2) Custom `@ExceptionHandler(MethodArgumentTypeMismatchException.class)` for type conversion failures (e.g., `"abc"` as a `long` path variable). With `spring.mvc.problemdetails.enabled=true`, type mismatch is handled automatically.
 
 **Q11: What is the difference between `@ResponseStatus` on an exception class and `@ExceptionHandler`?**
 **Short:** @ResponseStatus on an exception class sets the status automatically but returns a default body, not a customizable ProblemDetail.
@@ -570,7 +570,7 @@ class OrderControllerValidationTest {
     }
 }
 ```
-Verify `Content-Type: application/problem+json` — the RFC 9457 media type. `ProblemDetail` serialises to this content type in Spring Boot 3.
+Verify `Content-Type: application/problem+json` — the RFC 9457 media type. `ProblemDetail` serialises to this content type.
 
 **Q14: What is `@AssertTrue` / `@AssertFalse` and when is it useful for cross-field validation?**
 **Short:** @AssertTrue on a boolean method gives lightweight cross-field validation without writing a full custom ConstraintValidator.
@@ -580,7 +580,7 @@ Verify `Content-Type: application/problem+json` — the RFC 9457 media type. `Pr
 **Q15: How would you globally configure the message source for constraint violation messages?**
 **Short:** Constraint violation messages come from ValidationMessages.properties, overridable per key or wired into Spring's MessageSource.
 
-Bean Validation uses `ValidationMessages.properties` in the classpath root for constraint message templates (e.g., `{jakarta.validation.constraints.NotBlank.message}`). Override messages by creating `src/main/resources/ValidationMessages.properties`:
+Jakarta Validation uses `ValidationMessages.properties` in the classpath root for constraint message templates (e.g., `{jakarta.validation.constraints.NotBlank.message}`). Override messages by creating `src/main/resources/ValidationMessages.properties`:
 ```properties
 jakarta.validation.constraints.NotBlank.message=This field is required
 com.example.UniqueEmail.message=This email is already taken
@@ -595,12 +595,12 @@ Spring Boot also integrates with `MessageSource` — configure `spring.validatio
 2. **Use `@Valid` for cascade on nested objects** — without it, nested constraints are ignored.
 3. **Use `@Validated(Group.class)` for CREATE vs UPDATE** — avoids duplicate request record classes.
 4. **Extend `ResponseEntityExceptionHandler`** in your `@ControllerAdvice` to inherit Spring's built-in exception handling + ProblemDetail integration.
-5. **Enable `spring.mvc.problemdetails.enabled=true`** in Spring Boot 3 — auto-applies RFC 9457 to standard Spring exceptions.
+5. **Enable `spring.mvc.problemdetails.enabled=true`** — auto-applies RFC 9457 to Spring's standard exceptions.
 6. **Handle `ConstraintViolationException`** separately from `MethodArgumentNotValidException` — service-layer violations reach `@ControllerAdvice` as `ConstraintViolationException`, not `MethodArgumentNotValidException`.
 7. **Return ALL violations at once** — populate `ProblemDetail.setProperty("violations", list)` with all `FieldError`s / `ConstraintViolation`s.
 8. **Keep `@ExceptionHandler` methods exception-safe** — wrap with try/catch; never let a handler itself throw uncaught.
 9. **Test validation in integration tests** (`@SpringBootTest` or `@WebMvcTest`) — unit tests of controllers don't activate the full Spring validation pipeline.
-10. **Use `spring-boot-starter-validation`** explicitly in `pom.xml` / `build.gradle` — Hibernate Validator is not on the classpath by default in Spring Boot 3; the starter adds it.
+10. **Use `spring-boot-starter-validation`** explicitly in `pom.xml` / `build.gradle` — Hibernate Validator is not on the classpath by default; the starter adds it.
 
 ---
 

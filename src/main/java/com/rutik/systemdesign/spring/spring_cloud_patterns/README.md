@@ -6,6 +6,8 @@
 
 Spring Cloud provides a curated suite of tools for building distributed systems on top of Spring Boot. Where a monolith handles cross-cutting concerns (routing, fault tolerance, load balancing, observability) inside a single process, microservices must handle them at the network layer. Spring Cloud externalizes these concerns into composable, declaratively configured components.
 
+The version this module is written against is the **Spring Cloud 2025.1.0 "Oakwood"** release train, which builds on Spring Framework 7 / Spring Boot 4. Spring Cloud versions by *train*, not per-artifact, so the one coordinate that matters is `spring-cloud-dependencies` imported as a BOM — every starter below then goes in without a version, and the train guarantees they agree with each other and with your Boot version.
+
 This module covers the six pillars of production Spring Cloud deployments:
 
 1. **Spring Cloud Gateway** — API gateway; edge routing, filtering, rate limiting. Ships in two flavours: `gateway-server-webflux` (reactive, Netty) and `gateway-server-webmvc` (blocking, ideal with virtual threads).
@@ -673,7 +675,7 @@ public class OrderProcessingService {
 | Threading model | Semaphore (default), thread pool optional | Thread pool per command |
 | API style | Functional decorators, composable independently | One monolithic `HystrixCommand` object |
 | Maintenance | Active | Maintenance-only since 2018 |
-| Integration | Current Spring Boot, Micrometer metrics | No Jakarta EE / Spring Boot 3+ path exists |
+| Integration | Current Spring Boot, Micrometer metrics | No Jakarta EE path exists, so no Spring Boot 3 or 4 path either |
 
 ### Eureka vs Kubernetes Service Discovery
 
@@ -1070,7 +1072,7 @@ Retrying a non-idempotent POST can create duplicate side effects, such as two or
 
 **Q: Why was Netflix Hystrix retired in favor of Resilience4j, and what changed architecturally?**
 **Short:** Hystrix entered maintenance mode in 2018; Resilience4j replaced it with lightweight, independently configurable decorators.
-Netflix put Hystrix into maintenance-only mode in 2018, and Resilience4j replaced it as the actively maintained standard. Architecturally, Hystrix isolated every command in its own dedicated thread pool by default, giving strong isolation but adding thread-context-switch overhead and memory cost per command; Resilience4j defaults to a lightweight semaphore-based bulkhead and composes circuit breaker, retry, rate limiter, bulkhead, and time limiter as separate, independently configurable decorators instead of one monolithic command object. Resilience4j also has first-class support for Java 8+ functional interfaces (`Supplier`, `CompletionStage`) and integrates natively with Micrometer for metrics, whereas Hystrix predates both and only reaches Spring Boot through the deprecated `spring-cloud-netflix` bridge. In practice this means any new Spring Boot 3 project should use Resilience4j exclusively — Hystrix has no Spring Boot 3 / Jakarta EE support path.
+Netflix put Hystrix into maintenance-only mode in 2018, and Resilience4j replaced it as the actively maintained standard. Architecturally, Hystrix isolated every command in its own dedicated thread pool by default, giving strong isolation but adding thread-context-switch overhead and memory cost per command; Resilience4j defaults to a lightweight semaphore-based bulkhead and composes circuit breaker, retry, rate limiter, bulkhead, and time limiter as separate, independently configurable decorators instead of one monolithic command object. Resilience4j also builds directly on functional interfaces (`Supplier`, `CompletionStage`) and integrates natively with Micrometer for metrics, whereas Hystrix predates both. In practice Resilience4j is the only option: Hystrix never made the `javax` to `jakarta` transition, so there is no Spring Boot 3 or 4 support path and none is coming. Read it as a lifecycle lesson rather than a library comparison — a dependency that stops shipping releases does not fail on the day it is archived, it fails on the day a platform baseline moves underneath it, which is exactly what the Jakarta namespace change did.
 
 ---
 

@@ -68,7 +68,7 @@ Think of a hypermedia API as **a website built for machines**. When you browse a
 |--------|-------|--------|-------|
 | `RestClient` | Synchronous fluent | **GA in Boot 3.2** (Spring 6.1) | Modern replacement for `RestTemplate`; blocking |
 | `@HttpExchange` interface | Declarative | Interface since Spring 6.0; `RestClientAdapter` GA in **Boot 3.2** | Define an interface, `HttpServiceProxyFactory` implements it |
-| `RestTemplate` | Synchronous template | Maintenance mode | Still supported; not deprecated but no new features |
+| `RestTemplate` | Synchronous template | Maintenance mode | Supported and un-annotated today; `@Deprecated` scheduled for Framework 7.1, removal for 8.0 |
 | `WebClient` | Reactive/non-blocking | GA (WebFlux) | Use when you need reactive streams or high concurrency |
 
 ### API Versioning Strategies
@@ -143,7 +143,7 @@ flowchart LR
     ASM["OrderModelAssembler\ntoModel(order)"]
     LINK["WebMvcLinkBuilder\nlinkTo(methodOn(...)).withRel(...)"]
     EM["EntityModel(OrderDto)\ncontent + links"]
-    CONV["HAL message converter\nHateoasJackson2..."]
+    CONV["HAL message converter\nHalJacksonModule"]
     HAL([HAL response\napplication/hal+json])
 
     ORD --> ASM --> LINK --> EM --> CONV --> HAL
@@ -379,7 +379,7 @@ class OrderExceptionHandler {
 |----------------|-----------|------|
 | `RestClient` | Yes | Default for servlet apps (Boot 3.2+) |
 | `WebClient` | No | Reactive stacks, high fan-out concurrency |
-| `RestTemplate` | Yes | Legacy code only (maintenance mode) |
+| `RestTemplate` | Yes | Existing code only; maintenance mode, with removal scheduled for Framework 8.0 |
 | `@HttpExchange` interface | Either backend | Declarative, testable client contracts |
 
 | Versioning | Cache-friendly | Cleanliness | Complexity |
@@ -440,7 +440,7 @@ Affordances only render as `_templates` when the client sends `Accept: applicati
 
 ### Pitfall 5: Leaking entities and losing links to serialization config
 
-Returning a raw JPA entity (not a DTO) inside `EntityModel` exposes the DB schema and can trigger lazy-loading serialization errors. Also, registering a custom `ObjectMapper` without the HAL module (`Jackson2HalModule`) silently drops `_links`. Always wrap DTOs, and let the HATEOAS auto-configuration own the HAL `ObjectMapper`.
+Returning a raw JPA entity (not a DTO) inside `EntityModel` exposes the DB schema and can trigger lazy-loading serialization errors. Also, registering a custom mapper without the HAL module (`HalJacksonModule`) silently drops `_links`. Always wrap DTOs, and let the HATEOAS auto-configuration own the HAL mapper.
 
 ### Pitfall 6: Breaking clients by removing a link `rel`
 
@@ -503,7 +503,7 @@ It is an interface with a `toModel(entity)` method that centralizes conversion o
 
 **Q: When would you choose `RestClient` over `RestTemplate` or `WebClient`?**
 **Short:** Use RestClient for synchronous servlet calls; it is the modern replacement for maintenance-mode RestTemplate.
-Use `RestClient` (GA in Boot 3.2) for synchronous, blocking HTTP in a servlet application — it is the modern fluent replacement for `RestTemplate`, which is now in maintenance mode. Use `WebClient` when you need reactive, non-blocking calls or very high concurrency fan-out. `RestTemplate` is only for legacy code you are not modernizing; it is supported but receives no new features.
+Use `RestClient` (GA in Boot 3.2) for synchronous, blocking HTTP in a servlet application — it is the modern fluent replacement for `RestTemplate`, which is in maintenance mode. Use `WebClient` when you need reactive, non-blocking calls or very high concurrency fan-out. `RestTemplate` is only for code you are not modernizing: it is supported and carries no `@Deprecated` annotation today, but `@Deprecated` is scheduled for Framework 7.1 and removal for 8.0, so treat every remaining call site as dated work rather than a permanent choice.
 
 **Q: How does `@HttpExchange` create a declarative HTTP client, and what backs it?**
 **Short:** You declare an annotated interface, and HttpServiceProxyFactory generates the implementation at runtime.

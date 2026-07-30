@@ -1,10 +1,10 @@
-# Testing — JUnit 5 & Mockito
+# Testing — JUnit 6 (Jupiter) & Mockito
 
 ## 1. Concept Overview
 
-Testing in Java is a discipline built on three interacting tools: **JUnit 5** (the test framework — lifecycle, assertions, parameterization), **Mockito** (the mocking framework — replacing collaborators with controllable doubles), and design principles that make code testable in the first place.
+Testing in Java is a discipline built on three interacting tools: **JUnit** (the test framework — lifecycle, assertions, parameterization), **Mockito** (the mocking framework — replacing collaborators with controllable doubles), and design principles that make code testable in the first place.
 
-JUnit 5 introduced the modern architecture — JUnit Platform (the launcher and engine SPI) + JUnit Jupiter (the programming model this module teaches) + JUnit Vintage (a JUnit 4 bridge). The Jupiter annotations and assertions below are the current API: the line ships today as JUnit 6.x (`org.junit.jupiter:junit-jupiter`), which unified all module version numbers, raised the baseline to Java 17, and deprecated the Vintage engine. Mockito 5.x provides deep integration via `@ExtendWith(MockitoExtension.class)`. Together they enable the test pyramid strategy: a large base of fast, isolated unit tests supplemented by fewer integration and end-to-end tests.
+The architecture is three layers: JUnit Platform (the launcher and engine SPI), JUnit Jupiter (the programming model this module teaches), and JUnit Vintage (a bridge for a JUnit 4 suite you have not migrated yet). The line ships as JUnit 6.x (`org.junit.jupiter:junit-jupiter`), where all three share one version number, the runtime baseline is Java 17, and Vintage is deprecated — it reports an INFO-level discovery issue the moment it finds a JUnit 4 test class, which is the signal to finish the migration rather than a reason to pin. Mockito 5.x provides deep integration via `@ExtendWith(MockitoExtension.class)`. Together they enable the test pyramid strategy: a large base of fast, isolated unit tests supplemented by fewer integration and end-to-end tests.
 
 ---
 
@@ -33,7 +33,7 @@ JUnit 5 introduced the modern architecture — JUnit Platform (the launcher and 
 
 ## 4. Types / Architectures / Strategies
 
-### 4.1 JUnit 5 Annotations
+### 4.1 JUnit Jupiter Annotations
 
 | Annotation | Purpose |
 |-----------|---------|
@@ -144,7 +144,7 @@ void shouldReturnUserById() {
 
 ## 6. How It Works — Detailed Mechanics
 
-### JUnit 5 Core Assertions
+### Jupiter Core Assertions
 
 ```java
 import static org.junit.jupiter.api.Assertions.*;
@@ -538,7 +538,7 @@ A team tested a concurrent queue by creating threads in `@Test`, having them `ad
 | Testcontainers | 2.x | Real Docker containers in integration tests |
 | Surefire plugin | 3.5.x | Maven plugin that discovers and runs tests |
 | Jacoco | — | Code coverage reporting |
-| `@SpringBootTest` / `@MockitoBean` | Spring Boot 3.4+ | Spring context integration test with bean overrides |
+| `@SpringBootTest` / `@MockitoBean` | Spring Boot | Spring context integration test with bean overrides; `@MockitoBean` is the only form — `@MockBean` was removed in Boot 4 |
 
 ---
 
@@ -652,7 +652,7 @@ All three work with plain `mockito-core` 5.x, because the inline mock maker beca
 4. **Use `@DisplayName`** for human-readable test names in CI reports.
 5. **Prefer `@MethodSource`** over `@CsvSource` for complex parameter objects — type-safe, refactor-friendly.
 6. **Inject `Clock`** in any class that uses current time — never hardcode `Instant.now()`.
-7. **Use `assertThrows()`** to test exception behavior — never rely on `@Test(expected=...)` (JUnit 4 style, too coarse).
+7. **Use `assertThrows()`** to test exception behavior — it scopes the expectation to one statement and hands you the exception to assert on, which a method-level "this test should throw" declaration cannot do.
 8. **Use `ArgumentCaptor`** for complex objects instead of `eq()` matchers with manually constructed expected objects.
 9. **Don't verify trivial interactions** — verifying a getter was called adds no value; test the behavior, not implementation.
 10. **Run tests with mutation testing** (PIT) occasionally — catches tests that always pass regardless of code correctness.
@@ -744,7 +744,7 @@ The shape, not the count, is what sets the feedback loop.
 ### The Test Class
 
 ```java
-@ExtendWith(MockitoExtension.class)           // JUnit 5 wiring; strict stubbing by default
+@ExtendWith(MockitoExtension.class)           // Jupiter wiring; strict stubbing by default
 class PaymentServiceTest {
 
     @Mock private PaymentGateway gateway;

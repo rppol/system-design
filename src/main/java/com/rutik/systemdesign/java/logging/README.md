@@ -89,7 +89,7 @@ Field names are typically standardized against a shared schema (ECS is the most 
 | Manual capture/restore | Snapshot on the submitting thread, restore inside the pooled task, clear in `finally` |
 | Task decorator | A reusable `Runnable`/`Callable` wrapper (or Spring's `TaskDecorator`) that automates the capture/restore |
 | Reactor `Context` | Immutable context riding the reactive subscription instead of any thread — see [Reactive Programming](../reactive_programming/README.md) |
-| `ScopedValue` (JEP 446) | Structured, immutable, scoped to a call tree; composes with `StructuredTaskScope` — see [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) |
+| `ScopedValue` (JEP 506, final in Java 25) | Structured, immutable, scoped to a call tree; composes with `StructuredTaskScope` — see [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) |
 
 ---
 
@@ -210,7 +210,7 @@ Thread pools recycle `Thread` objects across unrelated tasks, so whatever a work
 
 ### SLF4J Binding Resolution
 
-Modern SLF4J (2.x) uses the standard Java `ServiceLoader` mechanism: any jar that ships a `META-INF/services/org.slf4j.spi.SLF4JServiceProvider` file is a candidate provider. Older SLF4J 1.7.x instead looked for a compiled `org/slf4j/impl/StaticLoggerBinder` class on the classpath — a jar-naming convention rather than a service entry, which is why older tutorials talk about "the binding jar" as if it were a magic filename. Both mechanisms fail identically when more than one candidate exists: SLF4J logs a startup warning naming every provider found, then picks one — in the `ServiceLoader` model, by iteration order that is not guaranteed stable across JVMs or classloaders.
+SLF4J uses the standard Java `ServiceLoader` mechanism: any jar that ships a `META-INF/services/org.slf4j.spi.SLF4JServiceProvider` file is a candidate provider. When exactly one candidate exists, that is the binding, and the whole question is invisible. When more than one exists, SLF4J logs a startup warning naming every provider found and then picks one by `ServiceLoader` iteration order, which is not guaranteed stable across JVMs or classloaders.
 
 ```
 SLF4J: Class path contains multiple SLF4J providers.
@@ -476,7 +476,7 @@ CompletableFuture.supplyAsync(() -> {
 
 **Reactive pipelines (Project Reactor / WebFlux)** sidestep the problem entirely rather than patching it: Reactor's `Context` is immutable and rides the reactive `Subscription`, not any particular thread, so it survives hops across `Schedulers` without any `ThreadLocal` copying. Bridge it back to MDC at logging time with `Hooks.enableAutomaticContextPropagation()` plus the `micrometer-context-propagation` library, which snapshots `Context` values into MDC immediately before each log call. See [Reactive Programming](../reactive_programming/README.md).
 
-**Virtual threads and `ScopedValue`**: virtual threads do not fix the MDC problem by themselves — MDC is still `ThreadLocal`, and manual capture/restore does not scale cleanly to millions of short-lived virtual threads. The structured-concurrency-native answer is `ScopedValue` (JEP 446): an immutable value bound for the dynamic extent of a call tree (typically a `StructuredTaskScope`), automatically visible to every child task spawned within that scope with no manual copying, and automatically unbound when the scope exits. See [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) for the full mechanics.
+**Virtual threads and `ScopedValue`**: virtual threads do not fix the MDC problem by themselves — MDC is still `ThreadLocal`, and manual capture/restore does not scale cleanly to millions of short-lived virtual threads. The structured-concurrency-native answer is `ScopedValue` (JEP 506, final in Java 25): an immutable value bound for the dynamic extent of a call tree (typically a `StructuredTaskScope`), automatically visible to every child task spawned within that scope with no manual copying, and automatically unbound when the scope exits. See [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md) for the full mechanics.
 
 ### Structured (JSON) Logging in Practice
 
@@ -566,10 +566,10 @@ logger.error("Rejected request from: {}", userAgent);
 ```
 Immediate, no redeploy:  -Dlog4j2.formatMsgNoLookups=true          (only works on >= 2.10.0)
 Immediate, no redeploy:  remove org/apache/logging/log4j/core/lookup/JndiLookup.class from the jar
-Proper fix:              upgrade to Log4j2 >= 2.17.1
+Proper fix:              upgrade to the current 2.x release (the cluster was closed in 2.17.1)
 ```
 
-The "proper fix" version is 2.17.1, not 2.15.0, because the incident was actually a cluster of four CVEs discovered in quick succession: **CVE-2021-44228** (the original RCE), **CVE-2021-45046** (the 2.15.0 fix was incomplete for certain non-default configurations), **CVE-2021-45105** (a denial-of-service via uncontrolled recursion in lookups, fixed in 2.17.0), and **CVE-2021-44832** (a lower-severity RCE via JDBC Appender requiring attacker control of the logging configuration, fixed in 2.17.1). Log4j 1.x is **not** vulnerable to this specific flaw — it never had message-level lookup substitution — but it is not a safe fallback: it reached EOL in 2015 and has its own unpatched deserialization CVEs.
+2.17.1 is the floor, not the target: today's supported line is Log4j 2.26.x, and pinning to the exact version that closed a four-year-old CVE cluster only means the next one finds you unpatched. The floor is 2.17.1 rather than 2.15.0 because the incident was a cluster of four CVEs discovered in quick succession: **CVE-2021-44228** (the original RCE), **CVE-2021-45046** (the 2.15.0 fix was incomplete for certain non-default configurations), **CVE-2021-45105** (a denial-of-service via uncontrolled recursion in lookups, fixed in 2.17.0), and **CVE-2021-44832** (a lower-severity RCE via JDBC Appender requiring attacker control of the logging configuration, fixed in 2.17.1). Log4j 1.x is **not** vulnerable to this specific flaw — it never had message-level lookup substitution — but it is not a safe fallback: it reached EOL in 2015 and has its own unpatched deserialization CVEs.
 
 ### Performance — Sync vs. Async, Caller Data, Throwable Cost
 
@@ -647,7 +647,7 @@ Constructing any `Throwable` invokes `fillInStackTrace()`, which walks and captu
 | MDC (`ThreadLocal`) | Attached to the `Thread` object | No — needs manual capture/restore or a `TaskDecorator` |
 | Manual parameter passing | Explicit method arguments | Yes, but invasive and verbose |
 | Reactor `Context` | Immutable, rides the reactive subscription | Yes, natively across operators |
-| `ScopedValue` (JEP 446) | Structured, immutable, scoped to a call tree | Yes — composes with `StructuredTaskScope` |
+| `ScopedValue` (JEP 506, final in Java 25) | Structured, immutable, scoped to a call tree | Yes — composes with `StructuredTaskScope` |
 
 | Aspect | Plaintext (PatternLayout) | JSON (Logstash/ECS encoder) |
 |--------|---------------------------|------------------------------|
@@ -681,7 +681,7 @@ Constructing any `Throwable` invokes `fillInStackTrace()`, which walks and captu
 
 ### War Story: Log4Shell Incident Response
 
-A mid-size SaaS company's security team received the public Log4Shell disclosure on a Friday afternoon (December 10, 2021). Their first scan found `log4j-core` on the classpath of 40+ services — some direct, most **transitive**, pulled in by frameworks and internal libraries nobody remembered added them. The immediate action, applied within hours across the fleet, was the zero-redeploy mitigation: setting `-Dlog4j2.formatMsgNoLookups=true` as a JVM flag via the deployment platform's environment-variable override, buying time without waiting for a build pipeline. Over the following week, every service was rebuilt against Log4j2 2.17.1+, and — critically — the team added a permanent CI gate (an OWASP Dependency-Check / Snyk scan failing the build on any known-CVE dependency, direct or transitive) so the NEXT ecosystem-wide CVE would be caught by automation, not by a Friday-afternoon fire drill. **Fix, generalized**: patch to the fixed version, not just the mitigation flag (2.15.0's fix was later found incomplete — CVE-2021-45046); treat "what's in my transitive dependency tree" as a continuously monitored question, not a one-time audit.
+A mid-size SaaS company's security team received the public Log4Shell disclosure on a Friday afternoon (December 10, 2021). Their first scan found `log4j-core` on the classpath of 40+ services — some direct, most **transitive**, pulled in by frameworks and internal libraries nobody remembered added them. The immediate action, applied within hours across the fleet, was the zero-redeploy mitigation: setting `-Dlog4j2.formatMsgNoLookups=true` as a JVM flag via the deployment platform's environment-variable override, buying time without waiting for a build pipeline. Over the following week, every service was rebuilt against a Log4j2 release past the whole CVE cluster, and — critically — the team added a permanent CI gate (an OWASP Dependency-Check / Snyk scan failing the build on any known-CVE dependency, direct or transitive) so the NEXT ecosystem-wide CVE would be caught by automation, not by a Friday-afternoon fire drill. **Fix, generalized**: patch to the fixed version, not just the mitigation flag (2.15.0's fix was later found incomplete — CVE-2021-45046); treat "what's in my transitive dependency tree" as a continuously monitored question, not a one-time audit.
 
 ### Other Pitfalls
 
@@ -721,7 +721,7 @@ A mid-size SaaS company's security team received the public Log4Shell disclosure
 **What is Log4Shell (CVE-2021-44228) and why was it so severe?**
 **Short:** Log4Shell let attacker-controlled log input trigger a JNDI lookup that executed remote code.
 
-Log4Shell is a critical remote-code-execution flaw in Log4j2's message-lookup feature, scored CVSS 10.0, the maximum possible severity. Versions up to 2.14.1 interpolated `${jndi:...}` lookup syntax found inside a *logged message*, so logging attacker-controlled input (an HTTP header, a username) that contained that string triggered a JNDI lookup fetching and executing a remote Java class — full unauthenticated RCE. Its blast radius was enormous because Log4j2 is deeply transitive, bundled inside frameworks, app servers, and consumer products like Minecraft; the fix is patching to 2.17.1+, and the lasting lesson is continuous transitive-dependency scanning, not a one-time audit.
+Log4Shell is a critical remote-code-execution flaw in Log4j2's message-lookup feature, scored CVSS 10.0, the maximum possible severity. Versions up to 2.14.1 interpolated `${jndi:...}` lookup syntax found inside a *logged message*, so logging attacker-controlled input (an HTTP header, a username) that contained that string triggered a JNDI lookup fetching and executing a remote Java class — full unauthenticated RCE. Its blast radius was enormous because Log4j2 is deeply transitive, bundled inside frameworks, app servers, and consumer products like Minecraft; the fix is patching past the whole CVE cluster (2.17.1 is the floor, the current 2.x line is the target), and the lasting lesson is continuous transitive-dependency scanning, not a one-time audit.
 
 **Why does MDC lose context in a thread pool?**
 **Short:** MDC is a ThreadLocal, and reused pool threads carry their own stale or empty context, not the caller's.
@@ -798,10 +798,10 @@ Creating a `Throwable` calls `fillInStackTrace()`, which walks and captures ever
 
 Choose synchronous appenders when durability matters more than latency — low-volume batch jobs, audit trails, or compliance logs that must survive a crash. An async appender hands events to a queue and returns immediately, which is right for a request-handling thread in a high-throughput service, but it introduces a bounded window where a crash loses events still sitting in the queue. A nightly reconciliation job processing a fixed, modest volume of records usually has latency to spare and a much stronger requirement that every line reach disk, making synchronous writes the safer default there.
 
-**How does SLF4J locate its binding at runtime?**
-**Short:** Modern SLF4J uses ServiceLoader to discover a binding; 1.7.x instead looked for a StaticLoggerBinder class.
+**Q: How does SLF4J locate its binding at runtime?**
+**Short:** SLF4J uses ServiceLoader to discover any jar declaring an SLF4JServiceProvider entry.
 
-Modern SLF4J (2.x) uses the standard Java `ServiceLoader` mechanism to discover any jar providing a `META-INF/services/org.slf4j.spi.SLF4JServiceProvider` entry. Older SLF4J 1.7.x instead looked for a compiled `org/slf4j/impl/StaticLoggerBinder` class on the classpath — a jar-naming convention rather than a service-loader entry, which is why old tutorials reference specific jars as "the binding." Both mechanisms fail identically when more than one candidate is present: SLF4J emits the "multiple bindings" warning and picks one non-deterministically.
+SLF4J uses the standard Java `ServiceLoader` mechanism to discover any jar providing a `META-INF/services/org.slf4j.spi.SLF4JServiceProvider` entry, and binds to it at first `LoggerFactory` use. This is why the binding is a *packaging* decision, not a configuration one: no property, system flag, or config file selects the backend — only what is on the classpath does. With more than one candidate present, SLF4J emits the "multiple bindings" warning and picks one by `ServiceLoader` iteration order, which is not guaranteed stable across JVMs or classloaders, so the only reliable fix is to exclude the unwanted provider from the dependency tree.
 
 **How do you propagate correlation context into a reactive (Project Reactor / WebFlux) pipeline where there's no single owning thread?**
 **Short:** Reactor replaces ThreadLocal MDC with an immutable Context that rides the subscription itself.
@@ -816,7 +816,7 @@ This line pays two costs on every single call regardless of whether DEBUG is ena
 **How do virtual threads and `ScopedValue` change the MDC-propagation problem?**
 **Short:** Virtual threads alone don't fix MDC propagation; ScopedValue is the structured-concurrency-native answer.
 
-Virtual threads don't eliminate the MDC problem by themselves — MDC is still `ThreadLocal`, and manual capture/restore doesn't scale to millions of short-lived virtual threads. The structured-concurrency-native answer is `ScopedValue` (JEP 446): an immutable value bound for the dynamic extent of a call tree, typically a `StructuredTaskScope`, automatically visible to every child task spawned within that scope with no manual copying, and automatically unbound when the scope exits — composing correctly with fork-join-style structured concurrency in a way `ThreadLocal` copying never did. See [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md).
+Virtual threads don't eliminate the MDC problem by themselves — MDC is still `ThreadLocal`, and manual capture/restore doesn't scale to millions of short-lived virtual threads. The structured-concurrency-native answer is `ScopedValue` (JEP 506, final in Java 25): an immutable value bound for the dynamic extent of a call tree, typically a `StructuredTaskScope`, automatically visible to every child task spawned within that scope with no manual copying, and automatically unbound when the scope exits — composing correctly with fork-join-style structured concurrency in a way `ThreadLocal` copying never did. See [Structured Concurrency & Loom](../structured_concurrency_and_loom/README.md).
 
 **What happens if a `RollingFileAppender`'s policy has no size/history cap?**
 **Short:** Without a history or size cap, a rolling appender keeps every file forever until the disk fills.

@@ -6,7 +6,9 @@
 
 Spring has shipped four generations of HTTP client since 2009, and — unlike most "legacy vs. modern" stories — all four are in active production use today and none has fully retired the others. **`RestTemplate`** (Spring 3) is the original synchronous, template-method-style client; Spring 5 put it into **maintenance mode** the day `WebClient` shipped, meaning it still receives bug and security fixes but no new capability. **`WebClient`** (Spring 5 / WebFlux) is the reactive, non-blocking client backed by Project Reactor and, by default, Reactor Netty; it is usable in any Spring application — including a plain Spring MVC app — by pulling in `spring-webflux` and calling `.block()` at the very boundary of the reactive chain. **`RestClient`** (Spring 6.1, GA in Boot 3.2, November 2023) is the newest synchronous client: a fluent, `WebClient`-styled builder API that — this is the detail interviewers probe for — is **not** built on Reactor at all. It sits on exactly the same blocking transport infrastructure as `RestTemplate` (`ClientHttpRequestFactory`, `ClientHttpRequestInterceptor`), so it is best understood as *RestTemplate's plumbing wearing WebClient's clothes*. **`@HttpExchange`** (Spring 6.0) is a declarative alternative to all three: you write an interface, and `HttpServiceProxyFactory` generates a runtime proxy that dispatches through whichever of the three concrete clients you choose as its adapter.
 
-All four eventually delegate the actual socket work to one of a small number of shared transport implementations: `HttpComponentsClientHttpRequestFactory` (Apache HttpClient 5), `JdkClientHttpRequestFactory` (`java.net.http.HttpClient`, Java 11+), `SimpleClientHttpRequestFactory` (the JDK's original `HttpURLConnection`), or, for `WebClient`, `ReactorClientHttpConnector` (Reactor Netty) with Jetty and JDK reactive alternatives. This module is about that shared plumbing — pooling, timeouts, interceptors, error handling, retries, and testing — as much as it is about the four client APIs themselves, because the plumbing is where production incidents actually happen.
+All four eventually delegate the actual socket work to one of a small number of shared transport implementations: `HttpComponentsClientHttpRequestFactory` (Apache HttpClient 5), `JdkClientHttpRequestFactory` (`java.net.http.HttpClient`), `SimpleClientHttpRequestFactory` (the JDK's original `HttpURLConnection`), or, for `WebClient`, `ReactorClientHttpConnector` (Reactor Netty) with Jetty and JDK reactive alternatives. This module is about that shared plumbing — pooling, timeouts, interceptors, error handling, retries, and testing — as much as it is about the four client APIs themselves, because the plumbing is where production incidents actually happen.
+
+**Where each one stands today, precisely.** `RestClient` is the recommendation for new blocking code and the client that gets new higher-level features (API versioning, HTTP service groups). `WebClient` is the recommendation whenever you genuinely need reactive composition or streaming. `RestTemplate` is still shipped and still un-annotated — it is *not* `@Deprecated` in the code you compile against today — but the published plan is explicit: `@Deprecated` lands in Spring Framework 7.1, removal in 8.0, leaving open-source support into 2029. That is a lifecycle policy worth reading the way you would read any vendor's: migrate on your own schedule during work you are already doing, not as a fire drill, and not by pretending the date will not arrive. Boot 4 makes the intent visible in packaging too, splitting `spring-boot-starter-restclient` and `spring-boot-starter-webclient` out so a dependency on an HTTP client no longer drags in a web server.
 
 ---
 
@@ -39,7 +41,7 @@ All four eventually delegate the actual socket work to one of a small number of 
 
 | Client | Style | Blocking? | Since | Status |
 |--------|-------|-----------|-------|--------|
-| `RestTemplate` | Template methods (`getForObject`, `postForEntity`, `exchange`) | Yes | Spring 3 (2009) | Maintenance mode since Spring 5 — supported, no new features |
+| `RestTemplate` | Template methods (`getForObject`, `postForEntity`, `exchange`) | Yes | Spring 3 (2009) | Maintenance mode — supported, no new features; `@Deprecated` scheduled for 7.1, removal for 8.0 |
 | `WebClient` | Reactive fluent (`Mono`/`Flux`) | No (blockable via `.block()`) | Spring 5 / WebFlux (2017) | GA, actively developed |
 | `RestClient` | Synchronous fluent, WebClient-styled | Yes | Spring 6.1 / Boot 3.2 GA (Nov 2023) | GA, default recommendation for new blocking code |
 | `@HttpExchange` interface | Declarative (Feign-like) | Depends on adapter | Spring 6.0 (2022); sync adapters in 6.1 | GA |
@@ -49,7 +51,7 @@ All four eventually delegate the actual socket work to one of a small number of 
 | Factory | Backing library | Pooling | HTTP/2 | Used by default when |
 |---------|-----------------|---------|--------|----------------------|
 | `SimpleClientHttpRequestFactory` | `java.net.HttpURLConnection` | JDK keep-alive cache only (`http.maxConnections`, default 5/destination) | No | `new RestTemplate()` — always, regardless of classpath |
-| `JdkClientHttpRequestFactory` | `java.net.http.HttpClient` (Java 11+) | Yes, JDK-managed | Yes | `RestClient.create()` when Apache/Jetty are absent |
+| `JdkClientHttpRequestFactory` | `java.net.http.HttpClient` | Yes, JDK-managed | Yes | `RestClient.create()` when Apache, Jetty and Reactor Netty are all absent |
 | `HttpComponentsClientHttpRequestFactory` | Apache HttpClient 5 | Yes, `PoolingHttpClientConnectionManager` | Yes | First choice when `httpclient5` is on the classpath, for both `RestTemplate` (via Boot's builder) and `RestClient` |
 | `JettyClientHttpRequestFactory` | Jetty `HttpClient` | Yes | Yes | When `jetty-client` is on the classpath and preferred |
 
@@ -68,6 +70,8 @@ All four eventually delegate the actual socket work to one of a small number of 
 | `WebClientAdapter` | `WebClient` | Spring 6.0 | No |
 | `RestClientAdapter` | `RestClient` | Spring 6.1 / Boot 3.2 | Yes |
 | `RestTemplateAdapter` | `RestTemplate` | Spring 6.1 | Yes |
+
+Wiring the factory by hand is now the fallback, not the norm. Annotate the application class with `@ImportHttpServices` (naming interfaces, or a package to scan) and Boot registers each one as a bean for you, organised into **groups**. Groups are what make this more than syntactic sugar: every group is configurable by property — `spring.http.client.service.read-timeout` globally, `spring.http.client.service.group.<name>.base-url` per group — and customisable in code with a `RestClientHttpServiceGroupConfigurer` (or `WebClientHttpServiceGroupConfigurer`) bean, so one partner integration can carry its own timeout budget and interceptors without a bespoke `HttpServiceProxyFactory` per client.
 
 ### 4.5 The Three Timeout Windows
 
@@ -563,7 +567,7 @@ mockServer.shutdown();
 - A dependency or house library only exposes a `RestTemplate`-based integration point.
 
 **Do NOT use `RestTemplate` when:**
-- Starting new code on Spring 6.1+/Boot 3.2+ — use `RestClient` instead; `RestTemplate` receives no new capabilities.
+- Writing new code — use `RestClient`. `RestTemplate` receives no new capabilities and is scheduled for `@Deprecated` in Framework 7.1 and removal in 8.0.
 
 **Use `WebClient` when:**
 - The application is already on WebFlux, or the call site needs genuine reactive composition (concurrent fan-out via `Mono.zip`, backpressure, streaming).
@@ -574,7 +578,7 @@ mockServer.shutdown();
 - The only motivation is "it's newer" — adding Reactor as a dependency purely to call `.block()` immediately adds complexity `RestClient` does not have.
 
 **Use `RestClient` when:**
-- Writing new synchronous, blocking Spring code on 6.1+/Boot 3.2+ — this is the default recommendation today.
+- Writing new synchronous, blocking Spring code — this is the default recommendation, and the client that receives new higher-level features such as API versioning and HTTP service groups.
 
 **Use `@HttpExchange` when:**
 - You want a typed, mockable, Feign-like client contract without adding OpenFeign, and the call shapes (paths, params, bodies) are fixed and known at compile time.
@@ -701,15 +705,18 @@ See [Spring HATEOAS & REST Maturity](../spring_hateoas_rest_maturity/README.md) 
 
 | Technology | Role |
 |------------|------|
-| `RestTemplate` | Synchronous template-style HTTP client; maintenance mode |
+| `RestTemplate` | Synchronous template-style HTTP client; maintenance mode, `@Deprecated` scheduled for Framework 7.1 |
 | `WebClient` | Reactive, non-blocking HTTP client (Reactor `Mono`/`Flux`) |
-| `RestClient` | Synchronous fluent HTTP client (Spring 6.1) |
+| `RestClient` | Synchronous fluent HTTP client; the default for new blocking code |
 | `@HttpExchange` + `HttpServiceProxyFactory` | Declarative HTTP client interfaces |
 | `HttpComponentsClientHttpRequestFactory` | Apache HttpClient 5-backed synchronous transport |
 | `JdkClientHttpRequestFactory` / `JdkClientHttpConnector` | `java.net.http.HttpClient`-backed transport (sync/reactive) |
 | `SimpleClientHttpRequestFactory` | `HttpURLConnection`-backed fallback transport |
 | `ReactorClientHttpConnector` | Reactor Netty-backed reactive transport (WebClient default) |
-| `ClientHttpRequestFactoryBuilder` / `ClientHttpRequestFactorySettings` | Spring Boot 3.4+ unified factory-building/timeout API |
+| `ClientHttpRequestFactoryBuilder` / `ClientHttpRequestFactorySettings` | Spring Boot's unified factory-building/timeout API |
+| `spring-boot-starter-restclient` / `spring-boot-starter-webclient` | Boot 4 starters that bring a client without bringing a web server |
+| `@ImportHttpServices` + `spring.http.client.service.*` | Boot's auto-configuration of `@HttpExchange` interfaces, grouped and configured by properties |
+| `InetAddressFilter` | Boot 4.1's SSRF mitigation on both blocking and reactive clients |
 | `PoolingHttpClientConnectionManager` | Apache HttpClient 5's connection pool |
 | `ConnectionProvider` | Reactor Netty's connection pool |
 | `ClientHttpRequestInterceptor` | Synchronous interceptor SPI (`RestTemplate`/`RestClient`) |
@@ -740,9 +747,9 @@ They bound three separate waits inside a single HTTP call: time to lease a conne
 **Short:** No, new RestTemplate() always builds a SimpleClientHttpRequestFactory regardless of the classpath.
 No — at the Spring Framework level, `new RestTemplate()` always constructs a `SimpleClientHttpRequestFactory` regardless of what HTTP client libraries are present on the classpath. Only Spring Boot's `RestTemplateBuilder` (and, unified since Boot 3.4, `ClientHttpRequestFactoryBuilder.detect()`) performs classpath auto-detection, preferring Apache HttpClient 5, then Jetty, then the JDK `HttpClient`, and falling back to `Simple` last. A team that assumes "Apache HttpClient 5 is a dependency, so pooling must already be happening" for a hand-constructed `RestTemplate` bean is walking straight into the infinite-timeout trap.
 
-**Q: `RestTemplate` is described as being in "maintenance mode" — what does that actually mean in practice?**
-**Short:** It still receives bug and security fixes but gains no new capabilities at all.
-It means `RestTemplate` keeps receiving bug fixes and security patches, but gains no new capability at all. Features added to `RestClient`/`WebClient` after Spring 5 either never reach it or arrive only as a compatibility shim, such as the `RestTemplateAdapter` bridge for `@HttpExchange`. It is not deprecated and existing code is not at risk of removal. The practical guidance is one-directional: keep existing `RestTemplate` code running, but write new synchronous call sites with `RestClient` instead.
+**Q: `RestTemplate` is in "maintenance mode" — what does that actually mean, and is it deprecated?**
+**Short:** It receives bug and security fixes but no new capabilities, and is not yet annotated `@Deprecated`.
+It keeps receiving bug fixes and security patches while gaining no new capability at all. Features added to `RestClient`/`WebClient` either never reach it or arrive only as a compatibility shim, such as the `RestTemplateAdapter` bridge for `@HttpExchange`. Be precise about its status, because interviewers use this to separate people repeating blog headlines from people who checked: it carries **no** `@Deprecated` annotation in the version you compile against today, and the published plan is `@Deprecated` in Spring Framework 7.1, removal in 8.0, with open-source support running into 2029. That is a long, announced runway, not a deadline — the practical guidance is unchanged and one-directional: keep existing `RestTemplate` code running, migrate it during refactoring you are doing anyway, and write every new synchronous call site with `RestClient`.
 
 **Q: Why is it safe to call `.block()` on a `WebClient` `Mono` from a Spring MVC controller but unsafe from a WebFlux controller?**
 **Short:** MVC blocks a disposable platform thread, while WebFlux can deadlock its own event-loop thread.

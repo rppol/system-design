@@ -24,7 +24,7 @@ This module is pure Java — no Spring. It pairs with [JVM Internals](../jvm_int
 
 ## 3. Core Principles
 
-- **Magic + version gate every class**: The first 4 bytes are `0xCAFEBABE`; the next 4 are `minor_version` (u2) + `major_version` (u2). Major 52 = Java 8, 61 = Java 17, 65 = Java 21. A newer major on an older JVM throws `UnsupportedClassVersionError`.
+- **Magic + version gate every class**: The first 4 bytes are `0xCAFEBABE`; the next 4 are `minor_version` (u2) + `major_version` (u2). Major 52 = Java 8, 61 = Java 17, 65 = Java 21, 69 = Java 25, 70 = Java 26. A newer major on an older JVM throws `UnsupportedClassVersionError`.
 - **The constant pool is 1-indexed**: Valid indices run `1..constant_pool_count-1`; index 0 is reserved. `CONSTANT_Long`/`CONSTANT_Double` occupy **two** consecutive slots, so the next entry's index jumps by 2 — a classic parsing trap.
 - **Stack-based execution**: No registers. Operands live on a per-frame operand stack; arguments and locals live in the local variable array. Each `Code` attribute declares `max_stack` and `max_locals`.
 - **Symbolic references, resolved lazily**: A `Methodref` names a class/method/descriptor by pool indices. The JVM resolves the symbolic reference to a direct one on first use (link phase — see [JVM Internals](../jvm_internals/README.md)).
@@ -80,7 +80,7 @@ This module is pure Java — no Spring. It pairs with [JVM Internals](../jvm_int
 | **ASM** | low-level visitor (`ClassVisitor`/`MethodVisitor`) — you emit opcodes | you manage (or `COMPUTE_FRAMES`) | max control/perf; used *inside* Byte Buddy, CGLIB, Jacoco, Kotlin |
 | **Byte Buddy** | fluent, type-safe DSL (`@Advice`, `MethodDelegation`) | computed for you | agents, mocks, proxies — the modern default |
 | **Javassist** | source-string API (`"{ x++; }"`) | computed for you | quick prototypes; slower, weaker on generics |
-| **CGLIB** | subclass proxy factory (legacy) | ASM under the hood | old Spring/Hibernate proxies (superseded by Byte Buddy) |
+| **CGLIB** | subclass proxy factory | ASM under the hood | the standalone project is dormant, but Spring ships a live repackaged fork (`org.springframework.cglib`) that still backs every Spring class-based proxy |
 
 ### 4.5 Java Agent Attach Modes
 
@@ -129,7 +129,7 @@ Offset  Raw bytes        Field (JVMS ClassFile)     Meaning / example
 ------  ---------------  -------------------------  --------------------------------
 0x00    CA FE BA BE      u4 magic                   0xCAFEBABE  "is this a class?"
 0x04    00 00            u2 minor_version           0
-0x06    00 3D            u2 major_version           61 = Java 17   (52=8, 65=21)
+0x06    00 45            u2 major_version           69 = Java 25   (52=8, 61=17, 65=21)
 0x08    00 1F            u2 constant_pool_count      31 -> real entries are #1..#30
 0x0A    <variable>       cp_info[count-1]           the constant pool (1-INDEXED)
   |     01 00 05 ...     CONSTANT_Utf8       tag 01  u2 length + modified UTF-8 bytes
@@ -173,7 +173,7 @@ That framing matters because it explains the format's one real constraint: nothi
                                                  -> pool always starts at 0x0A
 
   major_version decoded:   feature = major - 44
-      45 -> Java 1.1     52 -> Java 8      61 -> Java 17     65 -> Java 21
+      45 -> Java 1.1     52 -> Java 8      61 -> Java 17     65 -> Java 21     69 -> Java 25
 
   the eight pool entries of Adder, each sized from its own tag
       #1  Methodref     1 tag + 2 + 2                        =  5    5
@@ -191,7 +191,7 @@ That framing matters because it explains the format's one real constraint: nothi
 
 Half of this two-line class is the string `java/lang/Object` and its wrappers. That is the constant pool's whole point: those 19 bytes are written once and every `Methodref`, `Class`, and `NameAndType` that needs the name spends only 2 bytes pointing at it.
 
-The `+ 44` offset exists purely for history — major 45 was Java 1.1, and the counter simply kept incrementing. It is why `UnsupportedClassVersionError` messages read "class file version 65.0" rather than "Java 21", and subtracting 44 is the whole translation.
+The `+ 44` offset exists purely for history — major 45 was Java 1.1, and the counter simply kept incrementing. It is why `UnsupportedClassVersionError` messages read "class file version 69.0" rather than "Java 25", and subtracting 44 is the whole translation.
 
 ### `invokedynamic` — Bootstrap-Method Linkage
 
@@ -279,7 +279,7 @@ Compile `class Adder { public int add(int a, int b) { return a + b; } }` with `j
 ```
 public class Adder
   minor version: 0
-  major version: 61                         // Java 17
+  major version: 69                         // Java 25
   flags: (0x0021) ACC_PUBLIC, ACC_SUPER
   this_class: #7                            // Adder
   super_class: #2                           // java/lang/Object
@@ -437,8 +437,8 @@ The bridge (`ACC_BRIDGE | ACC_SYNTHETIC`) satisfies the erased `Comparable.compa
 
 ## 7. Real-World Examples
 
-- **Mockito + Byte Buddy**: Mockito's default `mock-maker` uses Byte Buddy to generate, at runtime, a subclass of your type whose every method is redirected to Mockito's interceptor. `when(x.foo()).thenReturn(1)` works because `foo()` in the generated subclass calls into the stub registry, not your code.
-- **Spring CGLIB proxies**: When a Spring bean can't be proxied by a JDK dynamic proxy (no interface), Spring generates a **CGLIB subclass** (now via Spring's repackaged ASM/Byte Buddy) that overrides methods to weave in `@Transactional`/`@Async` advice. This is why `final` methods can't be advised — you can't override them in the generated subclass.
+- **Mockito + Byte Buddy**: Mockito's default **inline** mock maker uses Byte Buddy plus a Java agent to *retransform the loaded class itself*, routing every method body through Mockito's interceptor — which is how a `final` class or a `static` method becomes mockable with no extra artifact. The alternative `mockito-subclass` maker uses Byte Buddy the other way, generating a subclass whose overrides call the interceptor; that one cannot touch `final`, but it is the maker that works under GraalVM native image, where there is no instrumentation to retransform with. Either way, `when(x.foo()).thenReturn(1)` works because `foo()` reaches the stub registry instead of your code.
+- **Spring CGLIB proxies**: When a Spring bean is proxied as a class rather than through an interface, Spring generates a **CGLIB subclass** — via `org.springframework.cglib`, its own repackaged CGLIB fork with ASM underneath — that overrides methods to weave in `@Transactional`/`@Async` advice. This is why `final` methods can't be advised: you can't override them in the generated subclass.
 - **Jacoco code coverage**: A Java agent (`-javaagent:jacocoagent.jar`) inserts a probe (`boolean[]` flag write) at each branch via ASM at load time. Uninstrumented, the class is untouched; the coverage report is just which probe flags flipped.
 - **APM agents (Datadog, New Relic, Dynatrace)**: Attach as `-javaagent`, register a `ClassFileTransformer`, and wrap framework entry points (servlet dispatch, JDBC `execute`, HTTP client calls) with timing/tracing bytecode — zero source changes to the monitored app.
 - **`record` and `enum`**: Compiler-generated bytecode. A `record Point(int x, int y)` produces synthetic `equals`/`hashCode`/`toString` implemented via an `invokedynamic` to `ObjectMethods.bootstrap`, plus accessor methods — all visible in `javap`.
@@ -488,7 +488,7 @@ The bridge (`ACC_BRIDGE | ACC_SYNTHETIC`) satisfies the erased `Comparable.compa
 ## 10. Common Pitfalls
 
 ### War Story 1: `VerifyError` in production after an agent upgrade
-An APM agent was upgraded; a new transform inserted a `try/finally` around JDBC calls but a bug left it computing only `COMPUTE_MAXS`, not `COMPUTE_FRAMES`. On Java 17 (verifier mandatory) every instrumented class threw `VerifyError: Inconsistent stackmap frames` at load — the app wouldn't boot. **Fix**: recompute frames (`COMPUTE_FRAMES`) whenever control flow changes; test transforms on the target JDK's verifier, not just by eyeballing the bytecode.
+An APM agent was upgraded; a new transform inserted a `try/finally` around JDBC calls but a bug left it computing only `COMPUTE_MAXS`, not `COMPUTE_FRAMES`. On any modern JDK (the type-checking verifier is mandatory) every instrumented class threw `VerifyError: Inconsistent stackmap frames` at load — the app wouldn't boot. **Fix**: recompute frames (`COMPUTE_FRAMES`) whenever control flow changes; test transforms on the target JDK's verifier, not just by eyeballing the bytecode.
 
 ### War Story 2: Metaspace OOM from a mock-heavy test suite
 A large suite created thousands of distinct Mockito mocks; each generated subclass loaded a new class into Metaspace, and a static holder kept references alive across tests. After ~20 minutes CI failed with `OutOfMemoryError: Metaspace`. **Fix**: reuse mocks, close `MockitoSession`/`@ExtendWith(MockitoExtension.class)` scopes so generated classes become collectible, and cap `-XX:MaxMetaspaceSize` to fail fast (see [JVM Internals](../jvm_internals/README.md)).
@@ -572,7 +572,7 @@ You changed the control flow (added a branch) without updating the `StackMapTabl
 **Q2: What is the magic number and what does the major version tell you?**
 **Short:** 0xCAFEBABE marks a class file, and its major_version byte reveals which Java release compiled it.
 
-The first four bytes of every `.class` file are `0xCAFEBABE`, identifying it as a class file; bytes 6-7 are the `major_version`. Major 52 = Java 8, 61 = Java 17, 65 = Java 21 (major = Java feature version + 44). If a class's major version exceeds what the running JVM supports, you get `UnsupportedClassVersionError` at load. This is the concrete cause of "class compiled by a newer version" errors — check the target `--release`.
+The first four bytes of every `.class` file are `0xCAFEBABE`, identifying it as a class file; bytes 6-7 are the `major_version`. Major 52 = Java 8, 61 = Java 17, 65 = Java 21, 69 = Java 25 (major = Java feature version + 44). If a class's major version exceeds what the running JVM supports, you get `UnsupportedClassVersionError` at load. This is the concrete cause of "class compiled by a newer version" errors — check the target `--release`.
 
 **Q3: Is the constant pool 0-indexed or 1-indexed, and why does that trip people up?**
 **Short:** The constant pool is 1-indexed, and long/double constants each occupy two consecutive slots.
