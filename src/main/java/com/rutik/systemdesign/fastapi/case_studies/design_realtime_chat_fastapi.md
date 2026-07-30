@@ -177,7 +177,7 @@ flowchart LR
         ping("send ping<br/>every 20s") --> pwait{"pong within<br/>10s?"}
         pwait -->|"yes"| healthy("connection<br/>healthy")
         healthy -.-> ping
-        pwait -->|"no"| close("close ws<br/>code 1001")
+        pwait -->|"no"| close("close ws<br/>code 4008")
         close --> remove("remove from<br/>registry")
     end
 
@@ -485,7 +485,12 @@ async def _heartbeat(
                 await asyncio.wait_for(pong_event.wait(), timeout=PONG_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("Ping timeout for ws=%s in room=%s", id(ws), room_id)
-                await ws.close(code=1001, reason="ping timeout")
+                # 4008, not 1001. RFC 6455 defines 1001 as "going away" — a server
+                # shutting down or a browser navigating away. A peer that stopped
+                # answering pings is neither, and reusing 1001 makes a dead client
+                # indistinguishable from a rolling deploy in the close-code metrics.
+                # 4000-4999 is the private-use range, same as 4001/4003 above.
+                await ws.close(code=4008, reason="ping timeout")
                 return
     except asyncio.CancelledError:
         raise
@@ -614,9 +619,8 @@ def verify_jwt(token: str) -> dict:
 |-----------|-------|
 | `fastapi.WebSocket` | Manages individual WS connection lifecycle (accept, receive, send, close) |
 | `fastapi.WebSocketDisconnect` | Exception raised when client closes the connection |
-| `asyncio.create_task` + a task-reference set | Defers the PostgreSQL write off the broadcast path. `BackgroundTasks` is deliberately NOT used: it only drains after an HTTP response, so on a WebSocket route the task never runs |
+| `asyncio.create_task` + a task-reference set | Used twice: to defer the PostgreSQL write off the broadcast path, and to spawn the per-connection writer and heartbeat coroutines alongside the receive loop. `BackgroundTasks` is deliberately NOT used — it only drains after an HTTP response, so on a WebSocket route the task never runs. Every returned Task must stay referenced or it can be garbage-collected mid-flight |
 | `asyncio.Queue` | Per-connection bounded buffer that decouples slow consumers from the Redis subscriber |
-| `asyncio.create_task` | Spawns per-connection writer and heartbeat coroutines concurrently with the main receive loop; the returned Task must be kept referenced or it can be garbage-collected mid-flight |
 | `asyncio.wait_for` | Enforces auth timeout (10 s) and pong timeout (10 s) |
 | `redis.asyncio` (aioredis) | Async Redis client; `pubsub()` for subscription, `publish()` for fan-out |
 | `sqlalchemy.ext.asyncio` | Async PostgreSQL session for non-blocking persistence |
@@ -689,7 +693,7 @@ Between `await manager.publish()` and the background task writing to PostgreSQL,
 Scale horizontally to 10 pods (10k connections per pod). Each pod runs a single asyncio event loop — there is no GIL contention for I/O-bound WebSocket operations. Size Redis from the fan-out, not from the publish rate: 100k users at 3 msg/min is ~5,000 `PUBLISH` calls/s, but each one is delivered to every pod subscribed to that room, so with 10 pods the server does ~50,000 message deliveries/s. `PUBLISH` is O(subscribers), so it is the delivery count, not the publish count, that has to fit — 50k/s sits comfortably inside a single node's measured throughput, but re-measure with `redis-benchmark` before trusting it. For connection memory, each asyncio WebSocket plus a 64-item queue costs roughly 50-100 KB — 10k connections per pod is approximately 500 MB-1 GB of RAM, within a standard 2-4 GB pod allocation. Raise the pod's file-descriptor limit too: 10k sockets needs `ulimit -n` well above the common 1024 default.
 
 **Q: How do you detect and clean up zombie connections (client crash without sending a CLOSE frame)?**
-The TCP FIN/RST may not arrive if the client's network disappears (mobile, NAT timeout). The server-side ping-pong loop sends a JSON `{"type":"ping"}` every 20 seconds. If no `{"type":"pong"}` arrives within 10 seconds, the server closes the WebSocket with code 1001 and calls `manager.disconnect()`. This bounds the zombie window to at most 30 seconds (20 s interval + 10 s timeout), which satisfies the 30-second cleanup requirement.
+The TCP FIN/RST may not arrive if the client's network disappears (mobile, NAT timeout). The server-side ping-pong loop sends a JSON `{"type":"ping"}` every 20 seconds. If no `{"type":"pong"}` arrives within 10 seconds, the server closes the WebSocket with private-range code 4008 and calls `manager.disconnect()`. Use a 4xxx code rather than 1001: RFC 6455 reserves 1001 for "going away" (server shutdown, browser navigation), so reusing it for a dead peer makes zombie cleanup indistinguishable from a rolling deploy on a close-code dashboard. This bounds the zombie window to at most 30 seconds (20 s interval + 10 s timeout), which satisfies the 30-second cleanup requirement.
 
 **Q: What changes are needed to support direct messages (DMs) in addition to rooms?**
 Model a DM as a room with exactly two participants. Generate a canonical DM room ID from the two user IDs (e.g., `dm:{min(uid_a,uid_b)}:{max(uid_a,uid_b)}`). The WebSocket endpoint, ConnectionManager, and Redis pub/sub channel all remain identical — only the room ID format changes. Access control (verifying the requesting user is one of the two participants) is enforced during the auth phase by checking the JWT `sub` against the room membership in PostgreSQL.

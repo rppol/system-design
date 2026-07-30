@@ -663,43 +663,51 @@ Stripe uses a consistent error object:
     "code": "card_declined",
     "decline_code": "insufficient_funds",
     "message": "Your card has insufficient funds.",
-    "param": "amount",
     "type": "card_error"
   }
 }
 ```
 
-Key lessons: machine-readable `code`, optional sub-code (`decline_code`), identifies the
-offending parameter (`param`), and separates error category (`type`) from specific cause
-(`code`). This pattern maps directly onto the FastAPI envelope approach.
+Key lessons: machine-readable `code`, optional sub-code (`decline_code`), and a `type` that
+separates the error *category* from the specific cause — `type` is one of exactly four
+documented values (`api_error`, `card_error`, `idempotency_error`, `invalid_request_error`).
+A parameter-specific failure additionally carries `param` naming the offending field; a decline
+like this one omits it, because no single request parameter is at fault. This pattern maps
+directly onto the FastAPI envelope approach.
 
 ### 7.2 GitHub API — its own error envelope
 
-GitHub v3 returns:
+GitHub's REST API returns (this is a live `GET /search/issues?q=` response, unedited):
 
 ```json
 {
   "message": "Validation Failed",
   "errors": [
     {
-      "resource": "Issue",
-      "field": "title",
-      "code": "missing_field"
+      "resource": "Search",
+      "field": "q",
+      "code": "missing"
     }
   ],
-  "documentation_url": "https://docs.github.com/rest"
+  "documentation_url": "https://docs.github.com/v3/search",
+  "status": "422"
 }
 ```
 
 This is not Problem Details — GitHub predates it and uses `message` + `errors[]` — but
 `documentation_url` serves the same purpose as RFC 9457's `type`: a stable reference for the
-error category. FastAPI apps often add a `docs_url` field pointing to internal API docs.
+error category. Two details are easy to miss: the per-item `code` comes from a small closed set
+(`missing`, `missing_field`, `invalid`, `already_exists`, `unprocessable`, `custom`), and the
+top-level `status` is a *string*, not an integer, even though it mirrors the HTTP status.
+FastAPI apps often add a `docs_url` field pointing to internal API docs.
 
 ### 7.3 Google Cloud APIs
 
-Google uses `google.rpc.Status` with `code` (gRPC status code), `message`, and `details`
-(list of Any proto messages). This is Google's own AIP error model, not Problem Details, and
-its `code` is a gRPC code rather than an HTTP one. For REST, the body is:
+Google uses `google.rpc.Status` with `code`, `message`, and `details` (list of `Any` proto
+messages). This is Google's own AIP error model (AIP-193), not Problem Details. The trap is that
+`code` changes meaning between transports: in the proto it is a `google.rpc.Code` enum value
+(`NOT_FOUND` is 5), while the JSON/REST body carries the *HTTP* code it maps to (404) and moves
+the enum name into a separate string field, `status`. For REST, the body is:
 
 ```json
 {

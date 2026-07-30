@@ -228,11 +228,15 @@ CREATE POLICY tenant_isolation_tasks ON tasks
 -- TABLES IN SCHEMA public TO app_api;  -- and never grant it BYPASSRLS.
 ```
 
-The failure mode is worth seeing concretely. On PostgreSQL 16, with `ENABLE ROW
-LEVEL SECURITY` but no `FORCE`, connecting as the table owner and setting the
-tenant variable to tenant A returns **both** tenants' rows — the policy is
-simply not applied. Adding `FORCE ROW LEVEL SECURITY` returns tenant A's row
-only. The one-word difference is the whole isolation guarantee.
+The failure mode is worth seeing concretely. With `ENABLE ROW LEVEL SECURITY`
+but no `FORCE`, connecting as the table owner and setting the tenant variable to
+tenant A returns **both** tenants' rows — the policy is simply not applied.
+Adding `FORCE ROW LEVEL SECURITY` returns tenant A's row only. The one-word
+difference is the whole isolation guarantee. This is not a version quirk to grow
+out of: the documentation has said the same thing since the feature shipped, and
+still does — "Table owners normally bypass row security as well, though a table
+owner can choose to be subject to row security with `ALTER TABLE ... FORCE ROW
+LEVEL SECURITY`."
 
 ### Application configuration
 

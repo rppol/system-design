@@ -618,6 +618,8 @@ Cross-references:
 
 Batch size and flush timeout must be tuned per model and hardware. A batch of 8 on a T4 GPU reduces per-request GPU time from ~15 ms to ~3 ms, easily justifying the 10 ms queue wait.
 
+Every GPU figure in this case study is quoted against an **NVIDIA T4** (Turing, 2018), the part behind AWS `g4dn`. It is deliberately the slow end of what you would deploy on: it is still sold, so the numbers are a real floor rather than an aspiration, and the batching argument only gets stronger on a faster card. Do not carry the absolute milliseconds onto current-generation inference hardware — AWS positions `g6` (L4) at up to 2x the deep-learning inference performance of `g4dn`, and `g6e` (L40S) higher still. What transfers between parts is the *shape*: batching amortises the kernel launch, so per-request GPU time falls sharply with batch size and the queue wait is worth paying. Re-measure the constants on the card you actually run.
+
 ### SSE vs WebSocket for streaming
 
 | Dimension | SSE (chosen) | WebSocket |

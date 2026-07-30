@@ -331,7 +331,8 @@ from fastapi import FastAPI, Request
 DATABASE_URL = "postgresql://user:pass@host/db"
 
 async def get_db_pool():
-    # BROKEN: asyncpg.create_pool() is expensive (~500ms, opens min_size connections)
+    # BROKEN: create_pool() does not return until min_size connections are open —
+    #         TCP + TLS + auth handshakes every time (illustrative ~500ms; see note below)
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
     try:
         yield pool
@@ -381,11 +382,15 @@ async def read_data(conn: asyncpg.Connection = Depends(get_conn)):
 
 **Why it matters**: At 100 req/s the broken version creates and destroys 100 pools per second. Each pool opens 5–20 TCP connections to Postgres. That is 500–2000 TCP handshakes per second instead of 5–20 persistent connections. The fix reduces Postgres connection load by 99%.
 
-The `~500 ms` used throughout this section is an illustrative round number for the cost of
-building a pool of `min_size=5` against a remote Postgres — it stands for "one TLS handshake and
-authentication round trip per connection, times `min_size`", which is network-dependent and can be
-an order of magnitude either way on your infrastructure. The arithmetic below is what matters; the
-conclusion holds for any value large enough to notice.
+The `~500 ms` used throughout this section is an illustrative round number, not a published
+figure — no vendor benchmarks pool construction, because the cost is dominated by network round
+trips and TLS. What it stands for is concrete and checkable: `create_pool()` does not return
+until `min_size` connections are open, and each one pays a TCP handshake, a TLS handshake and
+Postgres authentication. asyncpg connects the first holder on its own and then `gather`s the
+remaining `min_size - 1` concurrently (`Pool._initialize` in `asyncpg/pool.py`), so the wall
+clock is about two handshakes deep rather than `min_size` of them — which is why the figure
+barely moves with `min_size` but moves an order of magnitude with distance to the database.
+The arithmetic below is what matters; the conclusion holds for any value large enough to notice.
 
 #### Decoding the scope mistake
 
@@ -894,7 +899,7 @@ FastAPI's `asynccontextmanager`-based wrapping does call `throw()` into the gene
 
 ### Pitfall 3: App-scoped resource in request-scoped dependency
 
-See Section 6.3 for the complete BROKEN → FIX example. Creating a connection pool inside `get_db()` creates and destroys a pool on every request. At 100 req/s this is 100 pool creations per second, each costing ~500ms of I/O and opening 5–20 TCP sockets. Under load the app runs out of file descriptors (default 1024 on Linux) within seconds.
+See Section 6.3 for the complete BROKEN → FIX example. Creating a connection pool inside `get_db()` creates and destroys a pool on every request. At 100 req/s this is 100 pool creations per second, each paying a fresh round of TCP/TLS/auth handshakes (illustrative ~500ms against a remote database) and opening 5–20 TCP sockets. Under load the app runs out of file descriptors (default 1024 on Linux) within seconds.
 
 ### Pitfall 4: Swallowing exceptions in teardown
 
@@ -994,7 +999,7 @@ LIFO — innermost first, outermost last. FastAPI builds a DAG at startup. At te
 
 **Q: Why should connection pools live in `lifespan` rather than in a yield dependency?**
 **Short:** A pool created inside a yield dependency rebuilds itself on every request, adding hundreds of milliseconds of setup cost.
-Yield dependencies are request-scoped. Placing a pool in a yield dep recreates it on every request — an asyncpg pool takes ~500ms to create and opens 5–20 TCP connections. Under load this exhausts OS file descriptors and adds hundreds of milliseconds to request latency. `lifespan` creates the pool once at startup and shares it across all requests.
+Yield dependencies are request-scoped. Placing a pool in a yield dep recreates it on every request — `create_pool()` opens 5–20 TCP connections and does not return until the first `min_size` of them have completed TCP, TLS and authentication (illustrative ~500ms against a remote database; the real figure tracks network distance, not `min_size`). Under load this exhausts OS file descriptors and adds hundreds of milliseconds to request latency. `lifespan` creates the pool once at startup and shares it across all requests.
 
 **Q: How do you test a route that uses a yield dependency?**
 **Short:** Override the yield dependency in app.dependency_overrides with a matching generator, then clear the override afterward.
@@ -1073,7 +1078,7 @@ The request fails with a 500 at teardown, not at setup. FastAPI advances the gen
 
 **Put the `yield` inside a context manager when possible.** `async with async_session_factory() as session: yield session` delegates cleanup to the context manager. This is safer than manual `session.close()` in `finally:` because the context manager handles nested exceptions correctly.
 
-**Separate resource creation from resource acquisition.** Create pools in `lifespan`. Acquire connections in yield deps. This two-level pattern gives you fast per-request checkout (~0.1ms) without per-request pool creation overhead (~500ms).
+**Separate resource creation from resource acquisition.** Create pools in `lifespan`. Acquire connections in yield deps. This two-level pattern gives you fast per-request checkout (~0.1ms) instead of a fresh round of connection handshakes per request (illustrative ~500ms remote).
 
 **Keep teardown fast.** Teardown runs synchronously in the request processing path (even though the response has been sent, the event loop is occupied). A 50ms `session.commit()` or expensive audit log write in teardown reduces the effective request throughput. Use background tasks for expensive post-response work.
 
@@ -1228,7 +1233,7 @@ async def get_order(
 - Under 800 req/s: max 20 concurrent DB connections, average checkout ~0.3ms
 - Redis pool: 20 connections shared across all workers
 - HTTP client: 20 keep-alive connections to downstream; no TCP handshake overhead per request
-- Teardown cost per request: ~0.1ms (connection return to pool) vs ~500ms (pool creation/destruction)
+- Teardown cost per request: ~0.1ms (connection return to pool) vs a full round of connection handshakes (illustrative ~500ms) if the pool were built per request
 - On handler exception: asyncpg transaction auto-rolls back; connection returns to pool cleanly
 - On shutdown: all three resources close gracefully with zero leaked connections
 

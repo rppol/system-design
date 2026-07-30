@@ -429,14 +429,16 @@ async def send_confirmation_email(ctx: dict[str, Any], order_id: str) -> str:
         return "duplicate"
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.sendgrid.com/v3/mail/send",
-                json={"order_id": order_id},
-                headers={"Authorization": f"Bearer {ctx['sendgrid_key']}"},
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                resp.raise_for_status()
+        # Session is built once in startup(ctx) — see src/worker.py below. Building one
+        # per job would tear down the TCP/TLS pool 50 times over at max_jobs=50.
+        session: aiohttp.ClientSession = ctx["session"]
+        async with session.post(
+            "https://api.sendgrid.com/v3/mail/send",
+            json={"order_id": order_id},
+            headers={"Authorization": f"Bearer {ctx['sendgrid_key']}"},
+            timeout=aiohttp.ClientTimeout(total=5),
+        ) as resp:
+            resp.raise_for_status()
 
         duration = (time.monotonic() - start) * 1000
         await store_result(redis, job_id, "success", duration)
@@ -509,14 +511,14 @@ async def update_erp_inventory(ctx: dict[str, Any], order_id: str) -> str:
         return "duplicate"
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://erp.internal/inventory/update",
-                json={"order_id": order_id},
-                headers={"Idempotency-Key": f"{order_id}:update_erp_inventory"},
-                timeout=aiohttp.ClientTimeout(total=8),
-            ) as resp:
-                resp.raise_for_status()
+        session: aiohttp.ClientSession = ctx["session"]
+        async with session.post(
+            "https://erp.internal/inventory/update",
+            json={"order_id": order_id},
+            headers={"Idempotency-Key": f"{order_id}:update_erp_inventory"},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            resp.raise_for_status()
 
         duration = (time.monotonic() - start) * 1000
         await store_result(redis, job_id, "success", duration)
@@ -537,6 +539,7 @@ async def update_erp_inventory(ctx: dict[str, Any], order_id: str) -> str:
 
 
 # ── src/worker.py ─────────────────────────────────────────────────────────────
+import aiohttp
 import redis.asyncio as aioredis
 from arq.connections import RedisSettings
 
@@ -547,9 +550,15 @@ from .tasks.order_tasks import generate_invoice, send_confirmation_email, update
 async def startup(ctx: dict) -> None:  # type: ignore[type-arg]
     ctx["redis"] = await aioredis.from_url(settings.redis_dsn, decode_responses=True)
     ctx["sendgrid_key"] = "sg_key_from_env"
+    # One HTTP connection pool per worker process, shared by all max_jobs coroutines.
+    # limit_per_host caps concurrent sockets to SendGrid/ERP below the worker's max_jobs.
+    ctx["session"] = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=100, limit_per_host=20)
+    )
 
 
 async def shutdown(ctx: dict) -> None:  # type: ignore[type-arg]
+    await ctx["session"].close()
     await ctx["redis"].aclose()
 
 
@@ -671,7 +680,7 @@ app.include_router(admin_router)
 | `fastapi.BackgroundTasks` | **Not used for durable work** — shown in broken example only |
 | `contextlib.asynccontextmanager` + `lifespan` | Manages ARQ pool and Redis client lifecycle |
 | `pydantic_settings.BaseSettings` | Typed config with `.env` support |
-| `aiohttp.ClientSession` | Async HTTP client for SendGrid and ERP calls |
+| `aiohttp.ClientSession` | Async HTTP client for SendGrid and ERP calls — built once in `startup(ctx)`, read from `ctx["session"]`, so the TCP/TLS pool is reused across jobs |
 | `Annotated[..., Depends(...)]` | FastAPI 0.95+ dependency injection style |
 | `APIRouter` | Splits orders and admin endpoints into separate routers |
 | `HTTPException` | Raises 404 when result key not found or TTL expired |

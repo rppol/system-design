@@ -53,13 +53,12 @@ The primary building block. Fields are declared as class-level annotations with 
 
 ```python
 from pydantic import BaseModel, Field
-from typing import Optional
 
 class User(BaseModel):
     id: int
     name: str
     email: str
-    age: Optional[int] = None
+    age: int | None = None
     score: float = Field(default=0.0, ge=0.0, le=100.0, description="User ranking score")
 ```
 
@@ -237,7 +236,6 @@ flowchart LR
 ```python
 from __future__ import annotations
 from pydantic import BaseModel, Field
-from typing import Optional
 from datetime import UTC, datetime
 
 class Product(BaseModel):
@@ -247,7 +245,7 @@ class Product(BaseModel):
     stock: int = Field(default=0, ge=0, description="Units in stock")
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     tags: list[str] = Field(default_factory=list)
-    description: Optional[str] = None  # explicit None default
+    description: str | None = None  # explicit None default
 
 # Coercion: "42" -> 42, "19.99" -> 19.99
 p = Product(id="42", name="  Widget  ", price="19.99")
@@ -379,17 +377,16 @@ p = OrmProduct(id=1, name="Widget", price=9.99)
 
 ```python
 from pydantic import BaseModel
-from typing import Optional
 
 class Address(BaseModel):
     street: str
     city: str
-    zip_code: Optional[str] = None
+    zip_code: str | None = None
 
 class Contact(BaseModel):
     name: str
     email: str
-    address: Optional[Address] = None
+    address: Address | None = None
     internal_token: str = ""
 
 c = Contact(
@@ -498,7 +495,6 @@ print(type(c.phone))  # <class '__main__.PhoneNumber'>
 # pip install pydantic-settings
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, SecretStr
-from typing import Optional
 
 class DatabaseSettings(BaseSettings):
     host: str = "localhost"
@@ -731,7 +727,6 @@ print(type(m.content))  # <class '__main__.ImageContent'>
 ```python
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator, EmailStr
-from typing import Optional
 
 # pip install pydantic[email] for EmailStr
 app = FastAPI()
@@ -745,7 +740,7 @@ class UserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=50, pattern=r"^[a-z0-9_]+$")
     email: str
     age: int = Field(ge=13, le=120)
-    address: Optional[AddressIn] = None
+    address: AddressIn | None = None
 
     @field_validator("email", mode="before")
     @classmethod
@@ -793,12 +788,11 @@ class ProductSchema(BaseModel):
 
 ```python
 from pydantic import BaseModel
-from typing import Optional
 
 class UserUpdate(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    age: Optional[int] = None
+    name: str | None = None
+    email: str | None = None
+    age: int | None = None
 
 # Client sends only the fields they want to change
 payload = {"email": "new@example.com"}
@@ -1219,7 +1213,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from typing import Optional, Annotated
+from typing import Annotated
 from decimal import Decimal
 from typing import Self
 
@@ -1247,8 +1241,8 @@ class OrderCreate(BaseModel):
 
     customer_email: EmailStr
     items: list[OrderItem] = Field(min_length=1, description="At least one item required")
-    discount_code: Optional[str] = None
-    notes: Optional[str] = Field(default=None, max_length=500)
+    discount_code: str | None = None
+    notes: str | None = Field(default=None, max_length=500)
 
     @field_validator("customer_email", mode="before")
     @classmethod
@@ -1284,15 +1278,15 @@ class OrderResponse(BaseModel):
     id: int
     customer_email: str
     total_price: Decimal
-    discount_code: Optional[str] = None
+    discount_code: str | None = None
     status: str
 
 
 class OrderUpdate(BaseModel):
     """Partial update — only provided fields are applied."""
-    discount_code: Optional[str] = None
-    notes: Optional[str] = None
-    status: Optional[str] = None
+    discount_code: str | None = None
+    notes: str | None = None
+    status: str | None = None
 
 
 # --- Usage ---

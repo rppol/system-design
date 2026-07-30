@@ -603,6 +603,11 @@ async def get_user(user_id: int) -> dict:
 The `expire` parameter sets the TTL in seconds. Cache invalidation requires calling
 `FastAPICache.clear()` or deleting the key directly from Redis.
 
+Maintenance caveat: the package has published no release since 0.2.2 (July 2024) and the
+upstream repository's last code commit was September 2024 with 100+ open issues, so treat it as
+soft-maintained. It still imports and runs against current FastAPI, but for a new service prefer
+`cashews`, which is actively released and ships tags, soft TTL and anti-stampede in the box.
+
 ### 6.7 HTTP Caching Headers in FastAPI
 
 ```python
@@ -1000,7 +1005,7 @@ async def get_user(user_id: int) -> dict:
 | `redis.asyncio` | Async Redis client | Full Redis feature set; production-grade; connection pool | Requires Redis server; adds infra dependency |
 | `cachetools` | In-process TTL/LRU | Pure Python; zero infra; TTL + size bound | Not shared across processes; no persistence |
 | `functools.lru_cache` | In-process LRU | Built-in; zero-overhead decorator | No TTL; sync only; caches stale data forever |
-| `fastapi-cache2` | Decorator-based response caching | Easy to use; pluggable backends (Redis, in-memory) | Limited control over key logic; hard to invalidate selectively |
+| `fastapi-cache2` | Decorator-based response caching | Easy to use; pluggable backends (Redis, in-memory) | Limited control over key logic; hard to invalidate selectively; no release since 0.2.2 (Jul 2024) |
 | `cashews` | Async-first cache with decorators | Tags, soft TTL, anti-stampede built in; async-native | Less widely used; smaller ecosystem |
 | `aiocache` | Async caching library | Multiple backends; serializers; TTL support | Less active maintenance; API surface is larger |
 | `orjson` | Fast JSON serializer | 3-5x faster than stdlib; handles `datetime`/`UUID` natively | Requires Rust toolchain for source install |
@@ -1075,9 +1080,12 @@ guarantees (Redis with `appendfsync always`).
 **Short:** orjson serializes 3-5x faster than stdlib json via Rust, but only helps when serialization, not database I/O, is the actual bottleneck.
 `orjson` serializes Python objects to JSON 3-5x faster than stdlib `json` because it is
 implemented in Rust. It natively handles `datetime`, `UUID`, and `dataclass` without custom
-encoders. Set `default_response_class=ORJSONResponse` on the `FastAPI` constructor to apply
-globally. It does not help when the bottleneck is database I/O or network transfer rather than
-serialization — profile first with `py-spy` to confirm serialization is the actual hot path.
+encoders. Do not reach for `ORJSONResponse` to get it — that class is deprecated in current
+FastAPI; declare a return type or `response_model` and Pydantic's Rust core writes the JSON bytes
+directly, and call `orjson.dumps` yourself only for payloads that never pass through a model
+(Redis cache values, log lines). It does not help when the bottleneck is database I/O or network
+transfer rather than serialization — profile first with `py-spy` to confirm serialization is the
+actual hot path.
 
 **Q9: What is probabilistic early expiration (XFetch) and how does it differ from a mutex?**
 **Short:** XFetch recomputes a key probabilistically before expiry, with the odds rising toward certainty near expiration, so a stampede never forms.
@@ -1175,8 +1183,9 @@ The two TTLs serve different failure domains, and L1's is short because its inva
 5. **Wrap all cache operations in `try/except`.** Caches should be transparent accelerators.
    A Redis outage must degrade to slower (DB) reads, not 500 errors.
 
-6. **Use `orjson` for large payloads.** Set `default_response_class=ORJSONResponse` globally;
-   the cost is a Rust dependency; the benefit is 3-5x faster serialization for free.
+6. **Let Pydantic serialize large payloads.** Declare a return type or `response_model` so the
+   Rust core writes JSON bytes directly; `ORJSONResponse` is deprecated and is no longer the
+   fast path. Use `orjson.dumps` by hand only outside the response cycle (Redis values, logs).
 
 7. **Combine in-process (L1) and Redis (L2) for hot data.** The L1 cache absorbs repeated
    reads within a single request burst; L2 serves cross-process consistency. L1 TTL should be
@@ -1313,11 +1322,12 @@ async def invalidate_product(product_id: int, r: redis.Redis) -> None:
 import hashlib
 import json
 from fastapi import APIRouter, Depends, Request, Response
-from fastapi.responses import ORJSONResponse
 from app.services.product_service import get_product, invalidate_product
 from app.cache import get_redis
 
-router = APIRouter(default_response_class=ORJSONResponse)
+# No custom JSON response class: the declared return types below let Pydantic
+# write the response bytes in Rust, which is the fast path FastAPI documents.
+router = APIRouter()
 
 @router.get("/products/{product_id}")
 async def product_detail(
