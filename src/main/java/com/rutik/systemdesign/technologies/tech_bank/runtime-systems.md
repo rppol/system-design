@@ -67,11 +67,19 @@ Reach for it when a coroutine has to touch the filesystem on a request path, suc
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/collections-and-algorithms @2
 
+Its combinators accept either a plain iterable or an async iterable and are consumed with `async for`, so `chain`, `islice`, `groupby` and `zip` keep working once a stage of a pipeline becomes a coroutine. Everything stays lazy, pulling one item at a time.
+
+Reach for it when a pipeline reads from an async source too large to hold in memory, such as a paginated API or a database cursor. Be clear about what it does not do: composing these operators adds no concurrency, since each stage awaits the one before it, so fan-out still needs a task group. For two or three steps a hand-written async generator is shorter.
+
 ### aiomonitor
 **Short:** Live introspection for a running asyncio loop over a telnet REPL: task list, ready-queue length and stack dumps.
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1, observability/profiling-and-performance @2
+
+It starts a small server alongside your running loop and accepts a terminal connection into a REPL that has the loop in scope, where one command lists every live task with its state and another prints a chosen task's stack. It inspects task objects, so it answers the question a hung service cannot answer for itself.
+
+Reach for it when a long-running asyncio service stops making progress and restarting would destroy the evidence. The cost is that an unauthenticated console inside your process is a remote code execution primitive, so bind it to loopback. On recent Pythons, `python -m asyncio ps` attaches to a PID with no cooperation arranged in advance.
 
 ### aiter
 **Short:** Python builtin returning an async iterator from an object, the async half of the iteration protocol.
@@ -117,17 +125,29 @@ Reach for it when writing a library that must run under either asyncio or trio w
 **Lang:** java
 **Roles:** runtime-systems/text-encoding-and-regex @1
 
+The pieces worth knowing are `StringSubstitutor`, which expands `${name}` placeholders from a map, environment or system properties; `StringEscapeUtils`, which moved here from Commons Lang and escapes HTML, XML, JSON and CSV; `WordUtils` for wrapping; and a similarity package with Levenshtein and Jaro-Winkler behind one interface.
+
+Reach for it for config templating and text munging where a full template engine would be overkill. The trap is worth naming: the interpolating substitutor enables `script`, `url` and `dns` lookups, so expanding an untrusted template becomes remote code execution, which is CVE-2022-42889 and the reason to stay current and build substitutors with a minimal lookup set.
+
 ### Apache Pekko (or Akka) actors
 **Short:** JVM actor toolkit: single-threaded actors with mailboxes and supervision hierarchies for message-passing concurrency.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, apis-frameworks/design-patterns-and-principles @2
 
+Each actor owns private state and a mailbox, and a dispatcher assigns actors to a shared thread pool so exactly one message is processed at a time per actor. That serialization is the trick: state inside an actor needs no lock because there is never a second thread in it. A parent supervises its children and decides to resume, restart or stop on a crash.
+
+Reach for it when the domain really is many independent stateful entities exchanging messages, such as devices, sessions or trading instruments. The costs: mailboxes are unbounded by default, so a slow actor becomes a memory leak; you lose the call stack; and state is gone on restart without persistence. For plain request-response work, virtual threads are far less machinery.
+
 ### Apache Pekko (or Akka) FSM
 **Short:** Actor-based finite state machine where mailbox-serialized messages drive transitions, so no locking is needed.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, apis-frameworks/design-patterns-and-principles @2
+
+The behaviour is a function from current state and incoming message to the next state plus side effects, and since the mailbox already serializes delivery, each transition runs to completion before the next message is examined. No lock and no interleaving are possible by construction, which removes the class of bug where two threads observe a half-applied transition.
+
+Reach for it when a protocol genuinely has named states with legal and illegal transitions, such as an order lifecycle or a saga, because encoding it this way makes an illegal transition an explicit testable case rather than a missing branch. The cost is durability: state is lost on crash unless paired with event sourcing. Where durability matters more than throughput, a state column plus a transition table is simpler.
 
 ### Arena
 **Short:** Java FFM API scoped allocator: allocates native MemorySegments and deterministically frees them when closed.
@@ -152,6 +172,10 @@ Reach for it when writing a library that must run under either asyncio or trio w
 **Kind:** concept
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+Bit i lives in word `a[i >> 5]` at position `i & 31`, so setting is an OR with a shifted one and testing is an AND. Packing this way costs one bit per element where a Java `boolean[]` costs a byte, so the same information fits in far fewer cache lines. For bitmask dynamic programming a single `int` instead enumerates all subsets of up to 32 items.
+
+Reach for it when the universe is dense and known, or when implementing something a library does not provide, such as the bit array inside a Bloom filter. The costs are all safety: no bounds checking on the bit index, an off-by-one in the shift silently corrupts a neighbour, and nothing is thread safe. `BitSet` and `EnumSet` do the same packing with a real API.
 
 ### ArrayDeque
 **Short:** Resizable circular-array deque; the preferred JDK stack and queue implementation over Stack and LinkedList.
@@ -253,11 +277,19 @@ It deliberately stops at classes — no parsing, no serialization, no coercion o
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, inference/quantization-and-compression @2, inference/compiler-and-runtime-optimization @3
 
+The Vector Neural Network Instructions add `VPDPBUSD`, which multiplies pairs of 8-bit integers and accumulates into 32-bit lanes in one instruction. Before it the same INT8 dot product needed a three-instruction widen, multiply-add and accumulate sequence, so instructions per accumulate drop by roughly a factor of three. It arrived on Cascade Lake server parts.
+
+You almost never write it by hand: oneDNN, OpenVINO and ONNX Runtime detect it and dispatch quantized kernels to it, so the work is quantizing the model and confirming the runtime chose the right kernel. The costs are that it does nothing for a floating-point model, that heavy AVX-512 use can lower sustained clocks, and that AMX supersedes it for large matrix multiplications on the newest Xeons.
+
 ### awk
 **Short:** Pattern-action text processing language for column extraction and record-level transformation in shell pipelines.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1, devtools/version-control-and-workbench @3
+
+It reads one record at a time, by default a line, splits it on whitespace or the separator given to `-F`, and runs every pattern-action block whose pattern matches. Fields are `$1` through `$NF` and `BEGIN` and `END` blocks run before and after the stream. Because it also has associative arrays, accumulating into `sum[$1] += $2` computes a group-by over a stream of any size without sorting it.
+
+Reach for it when the data is delimiter separated and the job is extraction or a running aggregate in a pipeline, where it is far shorter than the equivalent script and starts instantly. Its limits are sharp: it has no concept of quoted CSV fields. Past about ten lines of program, readability and speed both favour Python, and `cut` is clearer for pure column selection.
 
 ### AWS VPC Reachability Analyzer
 **Short:** AWS service that traces the virtual path between two VPC resources and names the rule blocking it.
@@ -265,11 +297,19 @@ It deliberately stops at classes — no parsing, no serialization, no coercion o
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/alerting-and-incident-response @3, security/authorization-and-policy @3
 
+It sends no packets. It reads the configuration of your network, route tables, security groups, network ACLs, interfaces, gateways and peering connections, and performs static analysis on that model between a source and destination you name. A reachable result comes back as the hop-by-hop path; an unreachable one names the specific component and rule that stops the packet.
+
+Reach for it for the common ticket where two things cannot talk and nobody agrees whose layer is at fault, especially across transit gateways. Because it is configuration-only, it will call a path reachable when the host firewall drops the packet or no process is listening, so a clean result narrows the problem to the endpoints rather than proving health. Analyses are billed per run.
+
 ### B+Tree index
 **Short:** Balanced, high-fanout tree with linked leaves; the default database index because it serves range scans in O(log n).
 **Kind:** concept
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1, data-stores/key-value-and-embedded @2, data-stores/relational @3
+
+Internal nodes hold only separator keys and child pointers, so a page a few kilobytes wide fans out to hundreds of children and a billion-row table is about four levels deep, with the upper levels resident so a lookup costs one or two real reads. Values live in the leaves, which are chained left to right, so a range scan descends once and walks sideways sequentially.
+
+It is the default because one structure serves point lookups, ranges, prefix matches and sorted output at predictable cost. The costs are on the write side: every insert must locate and possibly split a page, so write-heavy workloads pay random I/O, which is the gap LSM trees fill. A random UUID key scatters inserts and fragments the tree. It also cannot answer substring queries.
 
 ### beartype
 **Short:** Near-zero-overhead runtime type checker that enforces Python annotations at call time.
@@ -286,6 +326,10 @@ Its limits follow from what Python can actually check at runtime. A `Protocol` p
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, observability/profiling-and-performance @2
+
+You supply the function and a data generator that produces an input of size n, and it times repeated runs across a range of sizes, then fits each candidate complexity class, constant through exponential, by least squares. It reports the best-fitting class along with the residuals of all of them, so you can judge how confident the fit actually is.
+
+Reach for it to confirm that an implementation behaves the way its analysis claims, a useful check when a library call hidden inside a loop has quietly made something quadratic. Treat the answer as a hypothesis: what it measures is your machine, so caches and constant factors dominate at small n, and the sizes you can afford to time may never reach asymptotic behaviour.
 
 ### BigDecimal
 **Short:** Java arbitrary-precision decimal type; the correct representation for money, with explicit scale and RoundingMode.
@@ -317,6 +361,10 @@ Its limits follow from what Python can actually check at runtime. A `Protocol` p
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+Packing one bit per element turns set operations into word operations: union, intersection and difference become OR, AND and ANDNOT over the backing words, so combining two million-element sets is tens of thousands of instructions rather than a million comparisons, and cardinality is a popcount. Java's `BitSet` grows automatically and offers `nextSetBit` for sparse iteration.
+
+Reach for it when the universe is dense and bounded and the work is set algebra rather than lookup, which is why it backs Bloom filters, bitmask dynamic programming and postings intersection. The cost is that memory is proportional to the largest index present, not the number of members, so ten values with an index near two billion allocate hundreds of megabytes. Sparse universes belong in a hash set or a Roaring bitmap.
+
 ### BlockHound
 **Short:** Java agent that instruments the JDK to throw when blocking calls run on Reactor/Netty non-blocking threads.
 **Kind:** tech
@@ -333,6 +381,10 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+It is pure Python with no dependencies, organized as modules named after the standard library ones they extend. `iterutils` carries `chunked`, `windowed` and the excellent `remap`, which recursively visits and rewrites an arbitrarily nested structure of dicts and lists in one call; `fileutils` has an atomic save that writes to a temporary file and renames, so a crash never leaves a half-written file.
+
+Reach for it when you want one of these behaviours without adding a compiled dependency, and note that because each module stands alone you can vendor a single file rather than take the package. The costs are that it is a grab-bag, so you will not know a utility exists until you look, and that the standard library keeps absorbing this ground.
+
 ### BreakIterator
 **Short:** Java/ICU4J class finding locale-aware grapheme, word, line and sentence boundaries instead of splitting on chars.
 **Kind:** api
@@ -344,6 +396,10 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/metrics-and-monitoring @3
+
+It reads `/proc` and draws four panels: per-core CPU with a rolling history graph, memory and swap with disk, network throughput, and a filterable, sortable process tree. The history graphs are the real difference from `top`, because you see the shape of the last minute rather than one instantaneous sample, which distinguishes a steady load from a spike that has already passed.
+
+Reach for it as the first screen on a host you have a terminal into and a vague complaint about, since it answers CPU, memory, disk and network in one view. The costs: it has only its own short history, drawing it costs measurably more CPU than `top` on an already saturated machine, and it is frequently absent from a minimal image where `htop` or `top` will be present.
 
 ### bytes.decode
 **Short:** Python bytes method that turns raw bytes into str using an explicit codec at the I/O boundary.
@@ -387,6 +443,10 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Lang:** python
 **Roles:** runtime-systems/text-encoding-and-regex @1
 
+It is a port of Mozilla's universal charset detector and runs several probers over the byte stream at once: an escape-sequence prober, a multi-byte prober checking whether byte sequences are valid for each candidate, and a single-byte prober comparing character frequencies against per-language models. Each returns a confidence and the highest wins, so the result is a guess with a number attached rather than a fact.
+
+Reach for it only where the encoding is genuinely unknown, such as legacy uploads or scraped pages whose charset header is absent or lying. It needs a reasonable amount of text, the single-byte Windows codepages are frequently indistinguishable on short input, and it returns a confident wrong answer rather than admitting defeat. Where a BOM or header declares the encoding, believe the declaration.
+
 ### chars
 **Short:** Java String.chars() streaming UTF-16 code units; contrast with codePoints() when correctness above the BMP matters.
 **Kind:** api
@@ -398,6 +458,10 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/text-encoding-and-regex @1
+
+Instead of language frequency models it works by brute force and scoring: decode the bytes with each plausible codec, then rate the result for mess, meaning the proportion of unlikely sequences and suspicious character transitions, and for coherence against known languages. The least implausible decoding wins. It is pure Python and MIT licensed, which is why `requests` adopted it in place of chardet.
+
+Reach for it at an ingestion boundary where the encoding really is unknown, and treat the output as a decision to record rather than a property of the data. The same limits apply as to every detector: short strings carry too little signal, and the Windows single-byte codepages overlap so heavily that distinguishing them from bytes alone is often impossible. Where an encoding is declared, honour it and skip detection.
 
 ### checkedList
 **Short:** Collections.checkedList - a decorating view that enforces the element type at runtime, catching heap pollution early.
@@ -411,11 +475,19 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+A symmetric positive-definite matrix factors as a lower-triangular matrix times its transpose, at about half the work of a general LU factorization and needing no pivoting. What you buy is that everything downstream becomes triangular: a solve is two substitutions, the log-determinant is twice the sum of the logs of the diagonal and cannot overflow, and sampling a multivariate Gaussian is a matrix-vector product against standard normal noise.
+
+That makes it the workhorse wherever a covariance or Gram matrix appears, in Gaussian log-likelihoods, Gaussian process regression and Kalman filters. Its failure mode is its diagnostic: it fails when the matrix is not positive definite, usually because rounding made a near-singular covariance indefinite. Adding a small multiple of the identity is the standard remedy, and if that jitter must keep growing, the model is rank-deficient.
+
 ### chrt
 **Short:** Linux CLI that sets a process's real-time scheduling policy and priority (SCHED_FIFO, SCHED_RR, SCHED_DEADLINE).
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+It wraps `sched_setscheduler`, changing which scheduling class a task belongs to. Under `SCHED_FIFO` a task with a static priority from 1 to 99 preempts every ordinary task and runs until it blocks or yields; `SCHED_RR` adds a time slice among equal priorities; `SCHED_DEADLINE` takes a runtime, period and deadline triple and the kernel refuses the request if the budget is not feasible.
+
+Reach for it when a thread has a genuine latency bound, in audio or a packet-processing loop, where being scheduled late is a correctness failure. The danger is proportionate: a real-time thread that spins without blocking locks out everything below it including your shell, and the kernel's real-time throttle, 950 milliseconds of each second by default, is what saves the machine. For ordinary services cgroup weights express what you actually want.
 
 ### close
 **Short:** generator.close() - raises GeneratorExit in a suspended generator so its cleanup runs and the generator finishes.
@@ -495,11 +567,19 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Lang:** java
 **Roles:** runtime-systems/text-encoding-and-regex @1
 
+It compiles the pattern into a finite automaton and simulates it, tracking the set of states reachable as it consumes each character, so it never backtracks and time is bounded by input length times pattern size however the quantifiers nest. It is pure Java with no native library to ship, and the API mirrors `java.util.regex` closely enough that most migrations are an import change.
+
+Reach for it wherever a pattern or its input comes from outside your program, such as a user-supplied search or a rule loaded from configuration, because one catastrophic pattern on a request thread is a single-input denial of service. The trade is stated up front: backreferences and lookaround are unsupported, so patterns need auditing. On short trusted patterns the JDK engine is often faster.
+
 ### Compact strings
 **Short:** JDK 9 JEP 254: String backed by byte[] plus a coder, storing Latin-1 text at one byte per character.
 **Kind:** concept
 **Lang:** java
 **Roles:** runtime-systems/memory-processes-and-os @1, runtime-systems/text-encoding-and-regex @2
+
+Before Java 9 a `String` always held a `char[]`, two bytes per character, even for pure ASCII. JEP 254 replaced that with a `byte[]` plus a one-byte coder field: if every character fits in Latin-1 the array holds one byte per character, otherwise UTF-16 as before. Every operation branches on the coder, and the whole thing is invisible through the API.
+
+For a typical server, where strings and their arrays are usually the largest live category in a heap dump, the saving is substantial and free. The check is per string, so a single code point above U+00FF, a CJK character, an emoji or a curly quote, forces that whole string to two bytes each. Pair it with string deduplication when the heap also holds many equal strings.
 
 ### comparing
 **Short:** Comparator.comparing and its thenComparing chain: the JDK's canonical way to compose ordering strategies.
@@ -567,6 +647,10 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+It is a dependently typed language in which a proposition is a type and a proof is a term inhabiting it, so checking a proof is type-checking. You build the term interactively with tactics, and a small trusted kernel re-checks the finished term, so a buggy tactic cannot produce an unsound proof. Programs extract to OCaml or Haskell, making a verified algorithm into code you can run.
+
+Reach for it when correctness is worth an order of magnitude more effort than testing and the artifact is small and formal, such as a compiler pass or a cryptographic protocol. The costs are honest: verification is measured in person-years, refactoring drags the proofs along, and a proof is only as meaningful as a specification that can itself be wrong. For distributed protocols, TLA+ finds most real bugs far more cheaply.
+
 ### Counter
 **Short:** Python stdlib dict subclass for frequency counting, with arithmetic and most_common(k).
 **Kind:** api
@@ -591,6 +675,10 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, platform-delivery/container-and-image @2, observability/profiling-and-performance @3
 
+It uses the kernel checkpoint machinery to dump a running process, heap, initialized classes and JIT-compiled code included, to disk, then restores that image in a fresh process, so the JVM comes back warm with no class loading and no re-profiling. The coordinated half is an API: components implement before-checkpoint and after-restore hooks to close descriptors and rebuild pools, because a live connection cannot survive being dumped.
+
+Reach for it when JVM cold start is the actual problem, in serverless functions and fleets that scale out under load, taking time to first request from seconds to tens of milliseconds. The costs: the image holds everything in memory including secrets, every library must be checkpoint-aware, and it needs Linux and a supporting JDK. GraalVM native image solves the same problem at build time instead.
+
 ### ctypes
 **Short:** Python stdlib FFI: call C libraries and lay out or inspect raw C-style memory buffers from pure Python.
 **Kind:** api
@@ -602,6 +690,10 @@ Install it in tests with `BlockHound.install()`, add allow-list customizers for 
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @2, devtools/testing-and-mocking @3
+
+The command line is a thin shell over libcurl, which implements HTTP/1.1, HTTP/2 and HTTP/3 along with FTP, SMTP and more, so anything the tool does is available from a program or a language binding. The options compose: `-H` adds a header, `-L` follows redirects, `--resolve` pins a hostname to an address so you can hit one backend directly, and `-w` prints timing fields such as `time_starttransfer`.
+
+Its real value is as a reproduction case: a curl line is a bug report anyone can run, and if curl reproduces the failure the client library is not the cause. The timing breakdown separates slow DNS from slow connection setup from slow server think time. Two cautions: `-k` disables certificate verification and has no business in a committed script, and curl is a client, not a load generator.
 
 ### curl --http3
 **Short:** curl flag that forces an HTTP/3 over QUIC request, for testing HTTP/3 endpoints from the command line.
@@ -624,11 +716,19 @@ Related flags cover the rest: `-i` includes response headers with the body, `-I`
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @2, devtools/testing-and-mocking @3
 
+Over TLS, asking for HTTP/2 means offering `h2` in the ALPN extension during the handshake, and the verbose output prints exactly what was offered and what the server selected, so you can see whether the connection is really HTTP/2 or quietly fell back to HTTP/1.1. Over plaintext the flag attempts the `Upgrade` handshake instead, and a prior-knowledge variant skips negotiation entirely.
+
+Reach for it to establish which protocol each hop actually speaks, since the common surprise is an edge that terminates HTTP/2 from clients and forwards HTTP/1.1 to the origin, with a header lost at the seam. What you do not get is frame-level detail: HPACK table state, stream identifiers and window updates need `nghttp -nv`, `--trace` or a packet capture.
+
 ### Cython with nogil
 **Short:** Compiles annotated Python to C and releases the GIL inside nogil blocks so CPU hotspots run truly in parallel.
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1, devtools/compiler-toolchain-and-codegen @2, observability/profiling-and-performance @3
+
+Cython compiles annotated Python into C. Inside a `nogil` block the generated code releases the interpreter lock, so that block runs genuinely in parallel with Python on other cores, but the compiler enforces the condition that makes this safe: no Python object may be touched inside, restricting it to C-typed scalars, typed memoryviews and calls into C. Combining it with `prange` emits an OpenMP loop.
+
+Reach for it when a numeric hotspot is a tight loop NumPy cannot vectorize, such as a stencil update or a custom distance, and moving data to a process pool would cost more than the computation. The costs are a build step and a compiler per platform, a second dialect for reviewers, and the discipline that any accidental object access is a compile error. Numba gets much of this with no build step.
 
 ### cytoolz
 **Short:** C-accelerated build of toolz: lazy functional utilities for composing iterator pipelines over Python data.
@@ -700,17 +800,29 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+You build an explicit joint distribution over discrete outcomes and then ask questions of it, so the numbers returned are exact for the distribution you supplied rather than estimates from samples. Beyond entropy and mutual information it implements the multivariate measures no other Python library really covers: total correlation, co-information, and partial information decomposition, which splits what two sources tell you about a target into unique, redundant and synergistic parts.
+
+Reach for it when the object of study is the information structure itself, for instance whether two features carry redundant or genuinely synergistic information about a label, which a pair of ordinary mutual-information scores cannot distinguish. The cost follows from the design: you must supply or estimate the joint first, and estimating a joint over more than a handful of variables from finite samples is exactly where entropy estimates go badly biased.
+
 ### dk.brics.automaton
 **Short:** Java library building explicit DFAs and NFAs from regular expressions, with determinization and minimization.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/text-encoding-and-regex @1, runtime-systems/collections-and-algorithms @3
 
+It compiles a regular expression into an explicit finite automaton and exposes the operations regex libraries do not: determinize and minimize, intersect, complement and union automata, test whether a language is empty or whether two patterns accept the same strings, and enumerate the strings accepted up to a given length. Matching walks the automaton one character at a time with no backtracking.
+
+Reach for it when the question is about the language rather than one match, such as whether two firewall rules overlap or generating inputs a pattern accepts. The costs: the syntax is its own rather than Perl-compatible, there are no capture groups or lookaround, and determinization can blow up exponentially in memory, moving a hostile pattern's denial of service from time to space. For plain linear-time matching, RE2J is the smaller change.
+
 ### dmesg
 **Short:** Prints the Linux kernel ring buffer - the place OOM kills, driver faults and hardware errors show up first.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/logging @2
+
+It prints the kernel's ring buffer, an in-memory log the kernel writes to before and independently of any userspace logging daemon, which is why it holds the events nothing else recorded. The OOM killer's report is here, naming the process it chose and the memory state at the time; so are block-device I/O errors, filesystems remounting read-only, driver resets and connection-tracking overflows.
+
+Reach for it first when a process died with no application log entry, the signature of something outside the process killing it: a container exiting with status 137 is almost always an out-of-memory kill visible here. Two limits: the buffer is a fixed-size ring, so older messages are silently overwritten and absence of evidence means nothing, and inside a container you are reading the host kernel's log.
 
 ### DoubleStream
 **Short:** Primitive-specialized Java stream of doubles; avoids boxing and offers sum, average and summaryStatistics.
@@ -719,16 +831,24 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Roles:** runtime-systems/collections-and-algorithms @1, observability/profiling-and-performance @3
 
 ### Eclipse Collections persistent collections
-**Short:** Immutable JVM collections using structural sharing, so a copy reuses unchanged parts instead of duplicating them.
+**Short:** Eclipse Collections' immutable containers: copy-on-write ImmutableList, Set and Map with size-specialized forms for small sizes.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @3
+
+Calling `toImmutable()` returns a type whose interface simply has no mutating methods, so immutability is enforced by the compiler rather than by a wrapper that throws at run time the way `Collections.unmodifiableList` does. For sizes zero through ten there are dedicated implementations holding elements in fields, avoiding an array object entirely. Derived instances come from `newWith` and `newWithout`, which copy the contents.
+
+Reach for it where a collection is genuinely shared and must not change, such as configuration, a lookup table or a value object's field. The cost is the copying: every derivation duplicates the elements, so building one item at a time is quadratic, and the right pattern is to build in a mutable collection and convert once. For cheap repeated derivation, a genuinely persistent library such as Vavr shares structure instead.
 
 ### Eclipse Collections primitive collections
 **Short:** Eclipse Collections' int/long/double collections that store primitives unboxed, cutting memory over boxed types.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @3
+
+The library ships the full cross-product of primitive containers, from `IntList` to `IntIntHashMap`, storing values directly in primitive arrays with open addressing rather than as boxed objects behind references. The saving compounds: a boxed `Integer` is about sixteen bytes on a 64-bit JVM and a hash entry node roughly thirty-two more. The values also sit contiguously, so iteration reads cache lines instead of chasing pointers.
+
+Reach for it for large collections of numbers, such as identifier sets, counters, adjacency lists and feature indexes, where boxing dominates both the heap and the time. The costs are that these types do not implement the `java.util` interfaces, so values must be converted at any boundary expecting a `List` or `Map`, and that it is another dependency. fastutil and HPPC fill the same niche.
 
 ### enum.Enum
 **Short:** Python enumeration base class whose EnumMeta metaclass and _EnumDict enforce unique, singleton named members.
@@ -754,6 +874,10 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1
 
+It talks to the network driver beneath the IP stack: `-S` dumps driver and hardware counters, including the per-queue drop counters that explain loss no application log records; `-g` and `-G` read and resize the receive and transmit rings; `-k` and `-K` toggle offloads such as TSO and checksum offload; `-C` tunes interrupt coalescing; and the bare command shows negotiated speed, duplex and link state.
+
+Reach for it when packets are disappearing and you need to know whether the NIC dropped them before the kernel ever saw them; the classic finding is an undersized receive ring under bursty traffic. The costs: counter names are driver-specific so there is no portable meaning, changes do not survive a reboot, and disabling an offload to make a capture readable will cost real throughput if you forget to restore it.
+
 ### Executors
 **Short:** java.util.concurrent factory class for thread pools, scheduled pools and virtual-thread-per-task executors.
 **Kind:** api
@@ -771,6 +895,10 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Kind:** concept
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+Each cell of the backing array stores the sum of a block whose length is the lowest set bit of its index, which is what makes the whole structure a single array with no pointers. A prefix sum walks down by repeatedly clearing the lowest set bit and an update walks up by adding it, so both touch about log n cells using the `i & -i` trick and nothing else.
+
+Reach for it when the aggregate is invertible, meaning sums, counts or XOR, and you need prefix aggregates with point updates, which covers counting inversions, order statistics over a compressed value range and running rank queries. That invertibility is exactly its limit: a range minimum cannot be answered by subtracting one prefix from another, so minimum and gcd need a segment tree, at roughly twice the memory and several times the code.
 
 ### file -i
 **Short:** POSIX command printing a file's guessed MIME type and character encoding from its magic bytes.
@@ -802,6 +930,10 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @3
 
+It brings a Scala-flavoured functional vocabulary to Python: an underscore placeholder that turns an expression into a function without a lambda, a wrapper for composition and partial application, currying, a lazy stream type that can refer to itself, immutable linked structures, and trampoline decorators that make deep recursion safe by turning it into a loop.
+
+The honest guidance is that this is not the default choice in new code. The package is old and has seen little activity for years, and most of what it offers is now covered by `functools`, `itertools` and comprehensions, with `toolz` as the maintained option for pipeline composition. The placeholder syntax also produces functions that are hard to introspect, so a traceback tells you much less than a named function would.
+
 ### fnmatch
 **Short:** Python stdlib module matching strings against shell glob patterns such as *.log.
 **Kind:** api
@@ -813,6 +945,10 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+It formats a handful of fields from `/proc/meminfo`. The one to read is available, the kernel's own estimate of how much a new workload could allocate without swapping, because it counts reclaimable page cache and slab that free does not. A healthy busy Linux machine shows almost no free memory by design, since the kernel uses everything spare as cache and hands it back on demand.
+
+Reach for it as a five-second check on whether a host is under genuine memory pressure, reading available together with the swap row: a low available figure alongside growing swap use is the shape of a machine about to thrash. Its limits are that it is one instantaneous sample with no history and no attribution, so `vmstat 1` gives the trend and `ps` sorted by resident size names the culprit.
 
 ### functools.total_ordering
 **Short:** Python class decorator that fills in the remaining rich-comparison dunders from __eq__ plus one ordering method.
@@ -832,11 +968,19 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Lang:** python
 **Roles:** runtime-systems/text-encoding-and-regex @1, runtime-systems/collections-and-algorithms @2, search-retrieval/lexical-and-hybrid-search @3
 
+Its core call searches for occurrences of a substring inside a longer text within a bounded Levenshtein distance and returns each match's start, end and distance. It chooses among several algorithms depending on the constraints given, and separate limits on substitutions, insertions and deletions are considerably cheaper than a general edit-distance budget. The inner loops are a C extension.
+
+Reach for it when you need the location of an approximate occurrence inside a document, such as finding a quoted passage in text that OCR mangled, which is a different problem from scoring how similar two whole strings are; RapidFuzz is far faster at that. Its cost grows quickly with the allowed distance, so keep the budget small, and put an n-gram index in front of it for search across many documents.
+
 ### G1 for native
 **Short:** GraalVM Native Image option using the G1 collector instead of Serial GC, for large-heap native Java services.
 **Kind:** concept
 **Lang:** java
 **Roles:** runtime-systems/memory-processes-and-os @1, devtools/compiler-toolchain-and-codegen @2
+
+A GraalVM native image defaults to a serial collector, fine for a command-line tool but stopping the world for a full collection whose pause scales with the live set, so a long-running service with a multi-gigabyte heap sees pauses grow uncomfortable. Building with the G1 option compiles a generational, region-based, mostly concurrent collector into the image instead, with the same pause-target tuning a JVM-hosted service would have.
+
+Reach for it when the native image is a server rather than a short-lived process, which in practice means once the live heap passes roughly a gigabyte. The costs are that it is not available in every distribution or on every platform, and that it makes both the image and its runtime footprint larger, eating into the small-footprint argument for a native image at all.
 
 ### gc module
 **Short:** CPython's cyclic garbage collector control surface: thresholds, freeze, disable and forced collect.
@@ -868,11 +1012,19 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Lang:** cpp
 **Roles:** runtime-systems/text-encoding-and-regex @1, security/supply-chain-and-runtime-security @3, runtime-systems/collections-and-algorithms @3
 
+It compiles a pattern into an automaton and simulates it, building the deterministic automaton lazily and caching states, so each input byte is consumed once and the worst case is text length times pattern size. Two engineering details matter as much as the theory: it extracts required literal substrings and uses fast memory scanning to skip regions that cannot match, and it enforces a per-pattern memory budget rather than exploding.
+
+It exists because a backtracking engine turns a user-supplied pattern into a denial-of-service primitive, and it is used wherever patterns arrive from outside the program. The trade is explicit: backreferences and lookaround are not regular constructs and are unsupported, so a pattern needing them is usually a parser in disguise. RE2J is the JVM port and Go's standard regexp package uses the same design.
+
 ### GraalVM Polyglot
 **Short:** Embeds JavaScript, Python or Ruby inside a JVM app with host-access control and resource limits.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, devtools/compiler-toolchain-and-codegen @2, security/supply-chain-and-runtime-security @3
+
+The Truffle framework runs guest languages on the same VM as your Java code, so values cross the boundary without serialization: a Java object can be handed to a script and have its methods called, and a guest function comes back as a value you can execute. A context is constructed with explicit policy over which host classes are reachable, whether the guest may do I/O or create threads, plus limits on statements executed and memory used.
+
+The use case is user-supplied logic inside a JVM service, such as pricing rules or plugins, where you want an expressive language with a sandbox and a kill switch. The costs are substantial: guest startup and warmup are far from free, memory per context is not small, and language completeness varies. It also pushes deployment toward a GraalVM-based JDK rather than any JDK.
 
 ### greenlet
 **Short:** Low-level coroutine primitive with switchable stacks; powers SQLAlchemy's sync-inside-async bridge.
@@ -902,11 +1054,19 @@ That is precisely how SQLAlchemy's async support works: its ORM internals are wr
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, apis-frameworks/dependency-injection-and-config @3
 
+The file is plain text named for the fully qualified service interface, with one implementation class per line. `ServiceLoader.load` scans every such file on the classpath, loads each named class, instantiates it through its public no-argument constructor and yields the instances lazily. That is how JDBC drivers, charset providers and annotation processors register themselves, with no framework and no classpath scanning.
+
+The costs all come from it being an untyped text file. A typo or a class renamed in a refactor becomes a runtime configuration error rather than a compile error, and building a fat jar silently overwrites one provider file with another unless the shade plugin concatenates them, which is the classic cause of a driver that works in the IDE and vanishes when deployed. An annotation processor removes the drift.
+
 ### hashids
 **Short:** Library encoding integer ids into short reversible strings; obfuscation for public URLs, never a security boundary.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1, data-access/schema-and-migration @2, security/privacy-and-compliance @3
+
+Despite the name it is neither a hash nor encryption: it is a reversible encoding of one or more non-negative integers into a short string, using an alphabet shuffled from a salt, with a guard character and an optional minimum length. Given the same salt you decode the string straight back to the original numbers, so nothing needs to be stored.
+
+Use it to keep sequential database keys out of public URLs so a customer cannot count your orders or walk to the next one. Be precise about the guarantee: the salt is not a key, the algorithm is public, and it has been reversed from a handful of observed outputs, so this defeats casual enumeration and nothing more. Every fetch still needs an authorization check. The project is unmaintained and its author points at `sqids`.
 
 ### HashMap
 **Short:** Java's hash table: default capacity 16 and load factor 0.75, converting a long bucket chain to a red-black tree.
@@ -926,6 +1086,10 @@ That is precisely how SQLAlchemy's async support works: its ORM internals are wr
 **Lang:** *
 **Roles:** runtime-systems/concurrency-and-async @1, devtools/testing-and-mocking @2, observability/profiling-and-performance @3
 
+It runs the binary on Valgrind's synthetic CPU, watching every memory access and pthread operation, and builds a happens-before relation from locks, condition variables and thread creation. From that it reports accesses to memory not consistently protected by any single lock, misuse of the pthread API, and lock-order inversions that could deadlock even though this run did not.
+
+That third check is the reason to prefer it over a pure race detector, because it finds a potential ABBA deadlock from one non-deadlocking execution. The cost is Valgrind's cost, commonly a twenty-fold slowdown or worse, so it belongs in a targeted test and never in production. It also covers native code only, so for a JVM service it inspects the JNI side. ThreadSanitizer is much faster but needs recompilation.
+
 ### Hooks.onOperatorDebug
 **Short:** Reactor hook capturing assembly-time stack traces so a reactive error shows where the chain was built.
 **Kind:** api
@@ -941,17 +1105,15 @@ That is precisely how SQLAlchemy's async support works: its ORM internals are wr
 htop is an interactive process viewer: per-core load bars, memory and swap gauges, and a sortable, scrollable process list with function keys to search, renice or kill without dropping to another command. Two toggles do most of the work — thread display, which resolves a process sitting at 400% CPU into which of its threads is actually spinning, and tree view, which attributes a runaway child to the parent that spawned it.
 
 Use it as the first ten seconds of triage on a box: is this CPU, memory pressure or one specific process. Once you know which process, move to a real profiler, because htop reads `/proc` and shows current state with no history — it tells you what is happening now, never what happened at 03:00.
-### HTTP/2
-**Short:** Binary, multiplexed HTTP revision with header compression and server push over a single TCP connection.
-**Kind:** spec
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @2, apis-frameworks/rpc-graphql-and-streaming @3
-
 ### hwloc
 **Short:** Portable hardware locality library and CLI that renders CPU, cache and NUMA topology for pinning decisions.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+It builds a tree model of the machine from the operating system and firmware: packages, NUMA nodes with their attached memory, the L3, L2 and L1 caches and which cores share each, physical cores, and the SMT threads inside each core. It also attaches I/O devices, so you can ask which NUMA node a given network card or GPU hangs off, which is how MPI and OpenMP runtimes place workers.
+
+Reach for it whenever placement matters: pinning a latency-sensitive pool so its threads share an L3, or keeping packet-processing threads on the node the NIC attaches to. The costs are that it describes hardware rather than recommending anything, so the decision and the measurement remain yours and a wrong pinning is worse than none. Inside a container it reports only the cpuset you were granted. `lstopo` is its CLI.
 
 ### IANA tzdata
 **Short:** The IANA time-zone database of offsets and DST transition rules, shipped with the JDK and most OSes.
@@ -959,17 +1121,29 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1, runtime-systems/runtime-internals-and-types @3
 
+It is a set of source files, maintained collaboratively and published by IANA, defining each zone as a history of rules: UTC offsets, the dates daylight saving starts and ends, and every change back to the adoption of standard time. A compiler turns them into the binary files under the system zoneinfo directory and the copy the JDK carries internally. Because zone rules are political, releases appear several times a year with little notice.
+
+The practical consequence is that a correct future local time is a function of data your runtime shipped with, not of arithmetic, so a container image pinned two years ago produces wrong local times once a government moves a boundary. Keep every copy patched: the OS package, a JDK patch release, and the tzdata package for Python. Store an instant in UTC alongside the zone identifier, never a fixed offset.
+
 ### iconv
 **Short:** POSIX library and CLI that converts a byte stream or file between two named character encodings.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1
 
+Given a source and a target encoding it decodes the input to an internal representation and re-encodes it, and a list option enumerates the several hundred encodings the local C library knows. A character with no representation in the target is an error by default, which is the right default; a transliterate suffix substitutes a similar character and an ignore suffix drops it. The same conversion is available as a C API.
+
+Reach for it at an ingest boundary where both encodings are known, converting a legacy export to UTF-8 once so nothing downstream needs to know about cp1252. Its trap is that it cannot tell you what the input encoding is and will produce plausible-looking mojibake if you name the wrong one. The ignore option silently discards data, and on some platforms also sets a nonzero exit status, so check both output and status.
+
 ### ICU
 **Short:** Reference Unicode library (C/C++/Java) for normalization, collation, segmentation and transliteration.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1
+
+It is the reference implementation of Unicode and CLDR behaviour and covers the operations that are wrong when done naively: normalization in all four forms, collation that sorts by a locale's real rules rather than code-point order, boundary analysis for grapheme clusters, words and sentences, case mapping that respects locale such as the Turkish dotless i, transliteration between scripts, and message formatting with plural selection.
+
+Reach for it whenever text must be correct for humans rather than merely processed as bytes: sorting names for a locale, counting characters the way a user perceives them, or case-folding for comparison. The costs are size and versioning. The data tables run to tens of megabytes. And two systems on different versions can order the same strings differently, the mechanism behind database index corruption after a collation upgrade, so pin the version.
 
 ### id() built-in
 **Short:** Python built-in returning an object's identity, in CPython its memory address; used to reason about aliasing.
@@ -982,6 +1156,10 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1
+
+It reads and writes interface state through the old ioctl interface: address, netmask, MTU, flags such as UP and PROMISC, and per-interface counters. Its limits are structural rather than cosmetic, because that interface predates most of modern Linux networking: it shows only one IPv4 address per interface even when several are configured, its IPv6 support is incomplete, and it knows nothing about policy routing, network namespaces or VRFs.
+
+It survives because a decade of runbooks use it and because it remains the native tool on macOS and the BSDs. On Linux it belongs to the deprecated net-tools package and is frequently not installed in a container image, so `ip addr`, `ip link` and `ip route` are the commands worth learning. If you do use it on Linux, treat its output as a hint and confirm anything surprising with `ip`.
 
 ### inspect
 **Short:** Python stdlib introspection module (signatures, closures, members); also the name of AISI's Inspect eval framework.
@@ -1025,11 +1203,19 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2, runtime-systems/io-networking-and-syscalls @3
 
+It is part of sysstat, and its first report is the average since boot rather than current activity, so the useful invocation samples at an interval with the first block discarded. The extended columns decide a diagnosis: reads and writes per second give the shape of the load, the await columns give the time a request spent queued plus serviced, and utilization is the fraction of the interval with at least one request in flight.
+
+Read utilization carefully, because it is the most misinterpreted number here. On a single spinning disk it approximates saturation, but on an SSD servicing many requests concurrently, one hundred percent only means never idle and the device may be far from its limit. Judge saturation instead from await rising while service time stays flat. It reports per device, so the next question, which process, needs `pidstat -d` or `iotop`.
+
 ### ip
 **Short:** The iproute2 CLI for inspecting and configuring Linux interfaces, addresses, routes and neighbours; replaces ifconfig.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1
+
+It is the iproute2 front end to the kernel's netlink interface, organized as objects with subcommands: `ip addr` for addresses, several per interface and both families, `ip link` for interfaces and state, `ip route` for the routing table, `ip neigh` for the neighbour cache, `ip rule` for policy routing and `ip netns` for namespaces. Because it speaks netlink it can express everything modern Linux networking supports.
+
+This is the tool to know on Linux, because it is present where `ifconfig` and `route` frequently are not, and because it is what container runtimes and CNI plugins manipulate underneath. Two notes: changes take effect immediately but do not survive a reboot unless written into the network configuration, and inside a container you see one namespace, so a route that exists on the host is invisible rather than broken.
 
 ### ip tcp_metrics
 **Short:** iproute2 subcommand showing the kernel's cached per-peer TCP metrics (cwnd, RTT, ssthresh) used to warm new connections.
@@ -1037,11 +1223,19 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1
 
+The kernel keeps a small cache of what it learned from previous connections to each peer: smoothed round-trip time and variance, the slow-start threshold and congestion window it converged on, the path MSS, and whether the peer supports features such as Fast Open. A new connection to the same address starts from those values rather than cold defaults, which is why a second connection often ramps faster than the first.
+
+It matters most when the cache works against you: a transient loss event that drove the slow-start threshold very low is remembered, and every subsequent connection to that peer starts conservatively and looks mysteriously slow while other destinations behave normally. Flushing the entry and watching the behaviour change confirms that quickly. The cache is per host, does not survive a reboot, and is keyed by address, so backends behind one load balancer share an entry.
+
 ### iperf3
 **Short:** Client-server tool that saturates a link to measure achievable TCP or UDP throughput, jitter and loss.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, devtools/testing-and-mocking @2
+
+One side runs as a server and the other as a client; the client opens a control connection and pushes generated data over one or more TCP streams for a fixed duration, reporting throughput per interval plus retransmits and the congestion window on Linux. Switching to UDP with a target rate measures jitter and loss instead, the right mode for voice and video paths. Parallel streams and a reverse-direction flag cover unrepresentative cases.
+
+Reach for it to establish what a path can carry before blaming an application: a service moving forty megabytes per second across a link that saturates above a gigabit has an application problem. The traps: it needs a cooperating server at the far end, it deliberately saturates the link so it will hurt production traffic sharing that path, and a single TCP stream over a long path is limited by window size rather than the link.
 
 ### iperf3 -c server
 **Short:** iperf3 client mode: drives a TCP or UDP stream against a server to measure achievable throughput.
@@ -1054,6 +1248,10 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, security/supply-chain-and-runtime-security @3, traffic-edge/proxy-and-load-balancer @3
+
+It is a front end to netfilter. Rules live in chains, the built-in ones covering input, output, forwarding and the two NAT hook points, grouped into tables by purpose: filter for accept and drop, nat for translation, mangle for editing packet fields, raw for bypassing connection tracking. A packet traverses chains in a fixed order and takes the first matching rule's target, so ordering is semantics rather than style.
+
+You still meet it everywhere, because Docker's published ports and kube-proxy's default mode are generated iptables rules, even though nftables has replaced it as the kernel implementation. The costs: rules in a chain are evaluated linearly, so a large service set produces thousands of rules and measurable per-packet CPU, which drove IPVS and eBPF alternatives; nothing persists across a reboot; and a mistaken default policy locks you out of a remote host.
 
 ### Iterable
 **Short:** Java's iteration contract; implementing it is what makes a custom collection usable in the enhanced for loop.
@@ -1397,6 +1595,10 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, devtools/compiler-toolchain-and-codegen @2
 
+It disassembles a compiled class file rather than reading source, so it shows what the JVM will actually link against. The private flag includes non-public members and the signature flag prints the internal descriptor of each field and method, the encoded form every invoke instruction references. Adding the code flag prints bytecode and the verbose flag adds the constant pool and the signature attribute that preserves generic types the descriptor erases.
+
+This is how you answer questions the source cannot: what a lambda compiled to, which is a synthetic method plus an `invokedynamic` call site; why two overloads collide after erasure; whether the compiler inserted a bridge method for an inner class; and what a string concatenation became. It reads class files only, so anything generated at run time by a proxy or agent is invisible.
+
 ### jcmd <pid> GC.class_histogram
 **Short:** jcmd diagnostic printing live object count and bytes per class; the fast first check before a full heap dump.
 **Kind:** api
@@ -1427,11 +1629,19 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1, gpu/gpu-math-libraries @3
 
+It is the Fortran library of dense linear algebra routines layered on BLAS: LU, QR, Cholesky and singular-value factorizations, linear solves, least squares and eigenvalue problems. Its performance comes from being blocked, operating on submatrices sized to fit cache and expressing the inner work as level-three BLAS matrix-matrix operations, which an optimized BLAS turns into vectorized, multithreaded kernels.
+
+You rarely call it directly, since NumPy, SciPy, R and MATLAB all dispatch into it, but knowing it is underneath explains real behaviour. Numerical results differ slightly between machines because a different BLAS chose a different order of operations. And plain NumPy code can suddenly consume every core because the BLAS is multithreaded, which is why thread-count environment variables matter when you also run process-level parallelism.
+
 ### ldd
 **Short:** Prints the shared libraries a dynamically linked binary needs and where the loader resolves each one.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/runtime-internals-and-types @1, devtools/compiler-toolchain-and-codegen @2
+
+It reports the dynamic dependencies of an ELF binary and, for each one, which file the loader resolves it to, or reports it as not found. It obtains this by asking the dynamic loader to perform a trial resolution, which is why the output reflects the real search order: the RPATH baked into the binary, then the library path environment variable, then the loader cache, then the default directories.
+
+It is the first command for the container failure where a binary built against one C library runs on an image with another. Two cautions. Because it may invoke the loader against the binary, running it on an untrusted executable can execute code, so `readelf -d` is the safe equivalent. And it shows only what is linked at startup, so libraries opened later through `dlopen`, which is how plugins load, never appear.
 
 ### Levenshtein PyPI package
 **Short:** C-extension edit-distance and string-similarity library, roughly 100x faster than a pure-Python dynamic program.
@@ -1439,11 +1649,19 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, runtime-systems/text-encoding-and-regex @2
 
+It is a C extension computing edit distance and related metrics using bit-parallel algorithms, so for patterns up to a machine word it evaluates a whole row of the dynamic-programming matrix in a few word operations instead of cell by cell, which is where the large constant-factor win over pure Python comes from. It also provides normalized ratios, Hamming, Jaro-Winkler, and the edit operations themselves.
+
+Reach for it when scoring one-to-one string similarity in bulk, for deduplication keys, fuzzy joins and spell-check ranking. The cost to plan around is not the individual comparison but the number of them: the algorithm is quadratic in string length and comparing every pair is quadratic again, so block on a cheap key or an n-gram index first. This package and `python-Levenshtein` are one lineage maintained under RapidFuzz.
+
 ### Linked list sentinel/dummy node
 **Short:** A placeholder head node that removes special-case handling for empty lists and head deletion in linked-list code.
 **Kind:** concept
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+You allocate one node that carries no data and always sits before the first real element, so the head pointer is never null and every real node has a predecessor. That single invariant collapses the two special cases responsible for most linked-list bugs: inserting into an empty list and deleting the first element both become the ordinary operation of rewiring a predecessor's next pointer.
+
+The everyday idiom is to build a result behind a local dummy and return the node after it, which is why merging two sorted lists or removing the nth node from the end is short with one and fiddly without. The costs are small but real: one extra allocation per list, and a discipline that every traversal must remember the sentinel is not an element, since a length count that forgets is off by one.
 
 ### LinkedHashMap
 **Short:** Java hash map preserving insertion or access order; the usual base class for an LRU cache.
@@ -1481,6 +1699,10 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, observability/logging @3, data-movement/message-broker @3
 
+It replaces a queue of nodes with a pre-allocated ring buffer of reusable event objects addressed by a monotonically increasing sequence. A producer claims a slot by advancing a sequence with a compare-and-swap, writes into the object already there, then publishes; each consumer tracks its own sequence. So there is no per-message allocation and no garbage, no lock on the fast path, and the sequence counters are padded onto their own cache lines.
+
+Reach for it when a single process must move millions of events per second through a known pipeline at low and predictable latency, which is why matching engines and asynchronous loggers use it. The costs: the ring is fixed size, so you must decide what happens when it fills; events are recycled, so holding a reference past your handler is a correctness bug; and busy-spinning costs a whole core per consumer.
+
 ### LongAdder
 **Short:** Striped, padded counter that beats AtomicLong under heavy contention by avoiding cache-line ping-pong.
 **Kind:** api
@@ -1499,6 +1721,10 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, runtime-systems/memory-processes-and-os @2
 
+It walks every process's file-descriptor table and prints one row per open object with the owning process and user, the descriptor number, its type and its name. Because on Unix nearly everything is a file descriptor, that listing covers regular files, pipes, sockets, memory-mapped libraries and deleted-but-still-open inodes alike, and it filters by address, by process or by directory.
+
+Two situations make it indispensable. A too-many-open-files error is a descriptor leak, and counting a process's rows against its limit shows which kind is accumulating, usually sockets stuck in CLOSE_WAIT because the code never closed its side. And a filesystem reporting full while directory sizes account for nothing is a deleted file still held open, which shows here marked deleted. It is slow on a large host and needs root to see other users.
+
 ### lsof -i
 **Short:** lsof invocation listing open network sockets with owning process, port and connection state.
 **Kind:** api
@@ -1511,17 +1737,29 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** cpp
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/rpc-graphql-and-streaming @2
 
+It implements QUIC and HTTP/3 as an engine you drive rather than a server you run: it owns no sockets and no event loop, so the embedding application reads UDP datagrams and feeds them in, and the library calls back when it has packets to send and when to arm a timer. That design lets it drop into an existing server architecture without dictating its threading model.
+
+Reach for it when adding HTTP/3 or a QUIC-based protocol to a C or C++ program and you want a stack that carries production traffic. The cost is that the integration work is substantial and yours: the UDP socket, the timer wheel, and routing by connection identifier across a load balancer so migrated connections land on the right instance. For a client, a curl build with HTTP/3 support is far less work.
+
 ### lstopo
 **Short:** hwloc CLI that draws the machine's CPU, cache and NUMA topology so you can pin threads sensibly.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
 
+It renders the topology hwloc discovered as nested boxes: the machine, NUMA nodes with their memory sizes, packages, the L3 shared by a group of cores, then L2 and L1 per core, and finally the SMT threads inside each. It opens a graphical window by default, prints an ASCII tree when run without graphics, which is the form you want over ssh, and writes an image for a runbook.
+
+Look at it before making any pinning decision, because two facts are only visible here. Which logical CPUs are hyperthread siblings of one physical core determines whether pinning a producer and consumer pair gives you two cores or half of one, and which cores share an L3 determines whether a pool shares cache or pays cross-socket latency. Inside a container it shows only the cpuset you were granted.
+
 ### ltrace
 **Short:** Linux tracer that prints a process's library and system calls, answering why a process appears stuck.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @2
+
+It works one layer above `strace`: instead of intercepting system calls it intercepts calls into dynamically linked shared libraries by manipulating the procedure linkage table, printing each function with its arguments and return value, and a flag interleaves the system calls so you see both layers. That answers questions `strace` cannot, such as which TLS library function a process is sitting inside.
+
+Reach for it when a process is stuck inside a library you have no source-level visibility into. Its limits are real: it only sees calls crossing a dynamic library boundary, so a statically linked or inlined binary shows nothing. Argument decoding depends on prototypes it may not have, so pointers frequently print as addresses. Overhead is heavier than `strace`, and eBPF tooling gives the same visibility far more cheaply.
 
 ### madvise
 **Short:** Linux syscall hinting the kernel about a mapping's access pattern, e.g. MADV_SEQUENTIAL or MADV_WILLNEED.
@@ -1577,6 +1815,10 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, ml-lifecycle/evaluation-and-benchmarks @3
 
+It has two layers. A figure owns a set of axes; each axes owns its scales and ticks and a list of artists, the lines, patches, text and images that a backend rasterizes to PNG or emits as vectors. The `pyplot` module is a thin stateful wrapper tracking a current figure, which makes a quick plot a one-liner, while creating the figure and axes explicitly is what you want in anything reusable.
+
+Reach for it when you need exact control and a static, publication-quality artifact, since every element is addressable and the output is deterministic. The costs are a large and historically inconsistent API, defaults that need work to look modern, and rendering that slows past tens of thousands of points. Seaborn sits on top for statistical plots in fewer calls, and Plotly or Altair answer the need for interactivity.
+
 ### MemoryLayout
 **Short:** Panama FFM type describing a C struct, union or sequence so Java reads native memory at correct offsets.
 **Kind:** api
@@ -1595,11 +1837,19 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1, search-retrieval/rag-and-document-processing @2, ml-lifecycle/labeling-and-synthetic-data @3
 
+Represent each document as a set of shingles, meaning overlapping n-grams. Apply k independent hash functions and keep the minimum value produced by each. The probability that two sets share the same minimum under a given hash is exactly their Jaccard similarity, so the fraction of the k positions on which two documents agree estimates it without bias. Every document collapses to a fixed-size signature regardless of length.
+
+What makes it work at scale is banding: split the signature into bands of several rows, hash each band, and treat any pair colliding in a band as a candidate. That is locality-sensitive hashing, and it turns an all-pairs comparison into a lookup, which is how pretraining corpora are deduplicated. The costs: it is blind to word order and paraphrase, and the band and row choice implicitly sets a similarity threshold.
+
 ### MiniSat, Glucose, CryptoMiniSat, Kissat
 **Short:** The standard CDCL SAT solvers: take a CNF formula and find a satisfying assignment or prove there is none.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+All four are conflict-driven clause-learning solvers. They assign a variable, propagate forced consequences using watched literals, and when a clause is falsified they analyse the implication graph to derive a new clause explaining the conflict, add it, and backjump non-chronologically. Activity-based branching, restarts and clause-database reduction let this scale to millions of clauses. Kissat is a heavily engineered modern solver leading recent competitions.
+
+Reach for one when a problem is naturally a set of Boolean constraints, such as hardware equivalence checking, dependency resolution or bounded model checking, with the caveat that encoding it into conjunctive normal form is usually the hard part and decides whether it solves in a second or never. Runtimes are unpredictable, and the answer is a satisfying assignment rather than an optimum, so optimization belongs to MaxSAT, CP-SAT or an SMT solver.
 
 ### mlock
 **Short:** Syscall pinning pages in physical RAM so they are never swapped; needs root or CAP_IPC_LOCK.
@@ -1625,17 +1875,29 @@ Use it as the first ten seconds of triage on a box: is this CPU, memory pressure
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+It is a pure-Python library built on `itertools` shipping both the recipes from the standard library documentation and many more, staying lazy wherever possible. The ones you reach for repeatedly are `chunked` for batching, `windowed` for sliding windows, `peekable` for looking ahead without consuming, `partition` for dividing on a predicate, `unique_everseen`, `first` and `one` with sensible errors, and `collapse` for nesting.
+
+Reach for it whenever you are about to write a small iterator helper, because the version here is tested, lazy and named the same thing the rest of the ecosystem uses. Two costs: it is pure Python, so per-element overhead is real in a hot numeric loop, and the surface is large enough that you should check the standard library first, since `itertools.batched` arrived in Python 3.12.
+
 ### mpstat
 **Short:** sysstat CLI printing per-CPU utilization breakdowns over time; first stop for CPU saturation and core imbalance.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2
 
+It is sysstat's per-CPU reporter. Asking for all processors at a one-second interval prints, for every logical CPU, the split of time into user, system, iowait, hard and soft interrupt, steal and idle. As with the rest of sysstat the first sample is the average since boot and should be discarded.
+
+The reason to use it rather than the aggregate in `top` is that averaging hides the two most common CPU pathologies. One core pinned at a hundred percent while the rest idle means single-threaded work or an interrupt bound to one CPU, and on a sixteen-core box that reads as six percent system-wide. And nonzero steal on a virtual machine means the hypervisor is not giving you the CPU you pay for, which no application tuning fixes.
+
 ### msquic
 **Short:** Microsoft's cross-platform C implementation of the QUIC transport, used as the base for HTTP/3 stacks.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/rpc-graphql-and-streaming @3
+
+It is a cross-platform QUIC implementation in C with a callback-driven API over connections and streams. Unlike the library-only stacks it owns its own UDP sockets, worker threads and datapath, using platform features such as segmentation offload for throughput, and delegates only the handshake to a TLS provider. It is the QUIC layer beneath Windows' HTTP stack and .NET's HTTP/3 APIs, and it is MIT licensed.
+
+Reach for it to add HTTP/3 or a custom QUIC protocol to a native or .NET application, particularly on Windows where it is the supported path. The costs are QUIC's rather than the library's: congestion control runs in user space, so CPU per gigabit is well above kernel TCP; middleboxes block UDP on port 443 often enough that a TCP fallback is mandatory; and connection migration complicates load balancing.
 
 ### mtr
 **Short:** Combined traceroute and ping that continuously reports per-hop loss and latency along a network path.
@@ -1682,6 +1944,10 @@ Read the loss column carefully, because the most common misreading is treating l
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1
+
+It connects standard input and output to a TCP or UDP socket, either dialling out or listening, which turns a shell pipeline into a network client or a throwaway server. That is enough to hand-type an HTTP exchange and read the raw reply, to test whether a port accepts a connection at all, to pipe a file between two hosts, or to stand up a fake backend and see exactly what a client sends.
+
+Reach for it as the layer beneath curl, because it proves TCP reachability with no HTTP client's interpretation in the way, separating a firewall drop, nothing listening, and an application answering badly. Two cautions: several incompatible implementations exist whose flags differ; and a build with the option to execute a program on connect is a remote shell, which is why it is often absent from hardened images.
 
 ### netstat
 **Short:** Classic CLI that lists sockets, listening ports, connection states, TIME_WAIT counts and listen-queue depth.
@@ -1737,11 +2003,19 @@ That flexibility is also the cost. It is pure Python with substantial memory per
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, security/supply-chain-and-runtime-security @3, traffic-edge/proxy-and-load-balancer @3
 
+It replaces the four separate iptables tools with one command and one syntax over a single kernel subsystem. Tables and chains are created by you rather than being fixed, a chain declares which netfilter hook it attaches to and at what priority, and rules compile into bytecode run by a small in-kernel virtual machine. The structural improvement is sets and maps: one lookup replaces a linear chain of thousands of rules, and sets update atomically while traffic flows.
+
+It is the kernel's supported implementation now, and a compatibility layer translates legacy syntax onto it, so most systems already run nftables whether anyone chose it or not. Reach for the native syntax when writing a firewall from scratch, especially with large or frequently changing address sets. The costs are that the syntax is a genuine rewrite, and that mixing legacy and native rules on one host produces evaluation-order surprises.
+
 ### nghttp2
 **Short:** HTTP/2 C library shipping client, server and debug CLIs for inspecting frames, streams and HPACK on the wire.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @2, apis-frameworks/rpc-graphql-and-streaming @3
+
+The C library implements the HTTP/2 protocol state machine only, meaning frames, streams, flow control and HPACK, and calls back into the application to read and write bytes, so it embeds under any I/O model. That is why curl and several language runtimes build on it. Alongside it ship the tools that are the practical reason to know the name: a verbose client that prints every frame, a test server, a benchmarking client and a translating proxy.
+
+Reach for the verbose client when curl says a request failed and you need frame-level truth: which SETTINGS the peer announced, how the flow-control windows moved, whether a stream reset or GOAWAY arrived and with what error code. That is the layer at which complaints about HTTP/2 being slow through a proxy resolve, typically as a small initial window or a low concurrent-stream limit at one hop.
 
 ### nghttp3
 **Short:** C library implementing HTTP/3 framing and QPACK on top of a QUIC transport such as ngtcp2.
@@ -1749,11 +2023,19 @@ That flexibility is also the cost. It is pure Python with substantial memory per
 **Lang:** cpp
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @3
 
+It implements only the HTTP/3 layer: the control and request streams, frame encoding, and QPACK header compression with its separate encoder and decoder streams. It expects a QUIC transport underneath, normally ngtcp2, to provide the streams. The split is deliberate, because HTTP/3 is essentially HTTP/2's semantics remapped onto QUIC's streams, while loss recovery, congestion control and migration are a separate concern.
+
+You usually meet it as a dependency rather than a decision, since curl's HTTP/3 support is built on nghttp3 plus ngtcp2 and that pairing is the reference stack people test against. Reach for it directly only when building an HTTP/3 endpoint in C where you already own a QUIC transport. The costs are integration: two libraries plus a TLS library exposing the QUIC handshake interface, which is why single-package stacks exist.
+
 ### ngtcp2
 **Short:** C library implementing the QUIC transport protocol, pairing with a separate TLS library for HTTP/3 stacks.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/rpc-graphql-and-streaming @3
+
+It implements the QUIC transport itself: the handshake driven by an external TLS 1.3 library, separate packet number spaces, loss detection and congestion control, stream multiplexing and flow control, connection identifiers and migration, and zero round-trip resumption. What it deliberately does not own is sockets, an event loop or cryptography, so the application feeds it datagrams and timer expiries and receives packets to send.
+
+The pairing to remember is ngtcp2 for transport plus nghttp3 for HTTP/3, which is how curl speaks HTTP/3. Reach for it when you need QUIC in C and want control of the I/O path. The cost is glue code: the socket, the timer wheel, demultiplexing by connection identifier behind a load balancer, and the TLS integration, which together is more work than an all-in-one stack. QUIC also costs more CPU per byte than kernel TCP.
 
 ### nice
 **Short:** POSIX command setting a process's scheduling niceness (-20 to +19); without root a user can only lower its own priority.
@@ -1789,6 +2071,10 @@ Reach for it to verify what a host actually exposes against what the security gr
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, platform-delivery/container-and-image @2
 
+Given a target process id it opens that process's namespace files under `/proc`, calls `setns` for each namespace you select, network, mount, PID, UTS or IPC, then executes a program inside them. The program itself comes from wherever you invoked it, which is the whole point: you run the host's tools inside a container that contains none of them.
+
+That is the answer to debugging a distroless image. Entering only the network namespace gives you the container's network view while keeping the host's filesystem, whereas also entering the mount namespace hands back the empty filesystem you were trying to escape. The costs are that it needs root on the host and effectively grants container access from outside, so it is a break-glass tool; an ephemeral debug container is the auditable equivalent.
+
 ### nslookup
 **Short:** CLI DNS query tool for resolving names and debugging resolver, record and cluster-DNS problems.
 **Kind:** tech
@@ -1818,6 +2104,10 @@ Interleaving is the opposite choice, spreading pages across all nodes for a larg
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2
+
+It prints the kernel's per-node allocation counters: hits, where an allocation was satisfied on the node the process asked for, misses and foreign allocations where it wanted one node and was served by another, and the local and remote totals. With a process argument it switches to a per-process view of resident memory by node, the picture that shows one process's pages split across sockets.
+
+Use it to confirm or refute a NUMA hypothesis before you start pinning anything. Rising misses mean memory pressure is pushing allocations to a remote node, and a supposedly pinned service with most of its resident set on the other node means either the binding did not take or the memory was touched first, since Linux allocates a page on the node that writes to it. Difference two samples, since the counters are cumulative.
 
 ### NumberFormat
 **Short:** java.text formatter for locale-aware numbers, currency and percentages; instances are not thread-safe.
@@ -1871,6 +2161,10 @@ Essentially every other array library in Python builds on it or copies its inter
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1
 
+Rather than validating every element of a container, the checker verifies the container's own type and then a single element chosen by an index that varies between calls, so the work per call is constant whether the list holds ten items or ten million. Across the many calls a running service makes, the sampling covers the data statistically, so a systematically wrong element type surfaces quickly.
+
+This is what makes runtime type checking affordable on a hot path, because the honest alternative of walking the data is linear in its size and turns the check into the dominant cost of the function it guards. The trade is stated rather than hidden: detection is probabilistic, so a single mistyped element in a large container can pass unnoticed. Where you need certainty, a validating parser that inspects every field is the right tool.
+
 ### Objects.hash
 **Short:** JDK helper that composes a null-safe hashCode from several fields, matching an equals implementation.
 **Kind:** api
@@ -1888,6 +2182,10 @@ Essentially every other array library in Python builds on it or copies its inter
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, apis-frameworks/aop-middleware-and-scheduling @2, devtools/compiler-toolchain-and-codegen @3
+
+It allocates an instance of a class without running any constructor, choosing a strategy at run time for the JVM it finds itself on, typically the serialization machinery's constructor factory or a low-level allocation intrinsic. The resulting object has all fields at their default values, so no initialization logic, no validation and no constructor side effects have run.
+
+That is exactly what proxying and mocking libraries need: Mockito and the CGLIB proxies behind Spring must produce a subclass instance without knowing which constructor arguments to pass, and serialization frameworks such as Kryo need it for the same reason. The cost is that such an object has skipped every invariant its constructor established, so final fields are null, making it safe only when something else populates the object immediately afterwards.
 
 ### openssl s_client
 **Short:** OpenSSL CLI that opens a TLS connection and dumps the handshake, cipher, certificate chain and expiry.
@@ -1910,6 +2208,10 @@ Reach for it when a client reports a TLS failure and you need the server's real 
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+You declare variables with domains, constraints relating them, and an objective, and the solver searches for a feasible or optimal assignment while proving bounds. Gurobi and CPLEX solve the linear relaxation, then branch and cut with cutting planes and heuristics, reporting the gap between the best solution and the best bound. CP-SAT instead encodes the model into a satisfiability problem and runs clause learning alongside propagators for constraints such as all-different and no-overlap.
+
+Reach for one when the problem is genuinely combinatorial optimization under hard constraints, such as crew rostering, routing or bin packing, rather than something a greedy heuristic handles. The costs: modelling is the real work and the encoding decides whether an instance solves in seconds or never, runtimes are unpredictable, and licensing differs sharply. Set a time limit and accept the incumbent with its reported gap.
 
 ### OutputStreamWriter
 **Short:** JDK bridge presenting a byte OutputStream as a character Writer using a charset; the canonical adapter example.
@@ -1941,11 +2243,19 @@ Reach for it when a client reports a TLS failure and you need the server's real 
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1, runtime-systems/concurrency-and-async @3
 
+Before this change, a `StopIteration` raised anywhere inside a generator body was indistinguishable from the generator returning normally, including one that escaped from a nested `next` call. The consuming loop simply stopped, quietly and successfully, so a bug deep inside a pipeline truncated the data with no error anywhere. The rule makes the machinery catch such an exception and re-raise it as a `RuntimeError` chained to the original.
+
+It arrived behind a future import in Python 3.5 and became unconditional in 3.7, and the same reasoning was applied to asynchronous generators. The practical consequence is that a bare `next(iterator)` inside a generator must be given a default or have its exception caught explicitly. That migration was mildly annoying and removed an entire class of incident where a consumer silently received a short result.
+
 ### pgrep
 **Short:** Linux CLI that finds process IDs by name, user or other attributes for scripting and quick lookups.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+It matches processes by an extended regular expression against the process name, or against the full command line when asked, and prints the matching process ids, with selectors for user, parent, session and terminal and options to print the command line or count matches.
+
+It exists to replace the fragile pipeline of listing processes, grepping, filtering out the grep itself and cutting a column. Its sibling `pkill` takes the same selectors and sends a signal. Two cautions save real incidents. The default matches only the first fifteen characters of the process name, taken from the kernel's truncated field, which is why matching the full command line is often necessary for anything launched through an interpreter. And a loose pattern can select far more than intended.
 
 ### ping
 **Short:** ICMP echo utility for testing host reachability and round-trip latency.
@@ -1953,11 +2263,19 @@ Reach for it when a client reports a TLS failure and you need the server's real 
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1
 
+It sends ICMP echo requests and reports the replies, one line per packet with a sequence number and a round-trip time, then a summary with loss and minimum, average and maximum. The sequence numbers make it diagnostic: gaps show exactly which packets went missing and out-of-order arrivals show reordering. Setting the do-not-fragment bit while varying payload size is how you bisect a path MTU smaller than you think.
+
+It answers exactly one question, whether an IP path works and with what latency and loss, which is why it is the first command and rarely the last. A host that does not answer may be healthy behind a policy dropping ICMP, and one that answers may have every application port closed. Routers also deprioritize the ICMP they generate themselves, so latency to an intermediate device can look far worse than traffic passing through it.
+
 ### Pingouin
 **Short:** User-friendly Python statistics package: hypothesis tests, effect sizes, power analysis and tidy result tables.
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, ml-lifecycle/evaluation-and-benchmarks @3
+
+It is built on pandas and SciPy, and its distinguishing choice is that every test returns a tidy DataFrame containing not merely the statistic and p-value but what a careful reader asks for and SciPy omits: the effect size, a confidence interval, degrees of freedom, achieved power, and for several tests a Bayes factor. The catalogue covers t-tests, analysis of variance including repeated-measures designs, post-hoc comparisons and correlation variants.
+
+Reach for it when doing conventional inferential statistics and you want the complete result from one call rather than assembling effect sizes and intervals around `scipy.stats` yourself, which is where reporting errors creep in. The costs are that it is a smaller project than statsmodels and does not attempt general regression modelling, time series or econometrics, and that its convenience does nothing to tell you which test the design calls for.
 
 ### pmap -x <pid>
 **Short:** Linux command listing every memory mapping of a process - text, data, heap, stack, mmap - with resident sizes.
@@ -1976,12 +2294,6 @@ Reach for it when a client reports a TLS failure and you need the server's real 
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1
-
-### Process management
-**Short:** Supervising worker processes for a server: spawning, restarting and reaping them via a built-in master or systemd.
-**Kind:** concept
-**Lang:** *
-**Roles:** runtime-systems/memory-processes-and-os @1, apis-frameworks/web-framework-and-http-client @3
 
 ### ProcessPoolExecutor
 **Short:** Pool of worker processes executing submitted callables in parallel, sidestepping the GIL at IPC cost.
@@ -2029,17 +2341,29 @@ It is the engine under Spring WebFlux and the reactive Spring Data drivers, wher
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, applied-ml/interpretability-fairness-and-causal @3
 
+It computes discrete information-theoretic quantities from sample data rather than from an explicit distribution: entropy, joint and conditional entropy, mutual and conditional mutual information, divergences and variation of information, over NumPy arrays of discrete symbols. Its distinguishing feature is a choice of estimators that correct the bias plain frequency counting introduces, rather than only the maximum-likelihood estimate.
+
+That bias correction is the reason to use it instead of counting frequencies yourself. With finite samples the naive entropy estimate is systematically too low and the naive mutual information too high, and the error grows with alphabet size, so two genuinely independent variables with many levels will show a confident and entirely spurious dependence. The costs are that everything must be discretized first and the binning choice usually changes the answer more than the estimator does.
+
 ### pyparsing
 **Short:** Python library for building recursive-descent grammars in code, an alternative to unreadable regexes.
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/text-encoding-and-regex @1, devtools/compiler-toolchain-and-codegen @2
 
+A grammar is built by composing Python objects rather than writing a grammar file: literals, character-class words, regexes, optionals, repetitions, groups and a forward declaration for recursion, combined with operators for sequence and alternation. Parse actions attach a callback to a matched element so it is transformed as it is recognized, which is how an evaluator or a syntax tree falls out of the grammar itself rather than a second pass.
+
+Reach for it when a format has real structure, meaning nesting, recursion or operator precedence, because that is precisely what a regular expression cannot express and where a regex-based parser becomes a liability. The costs are that it is pure Python and considerably slower than a compiled parser, so it is wrong for gigabytes of log lines, and that for a genuine language a parser generator gives a readable grammar and better error messages.
+
 ### Python
 **Short:** General-purpose interpreted language; the default escalation when shell automation outgrows shell scripts.
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1, devtools/version-control-and-workbench @3
+
+CPython compiles source to bytecode, caches it so imports skip re-parsing, and executes it in an interpreter loop over a stack machine. Objects are reference counted with a cyclic collector behind them, so most memory is freed deterministically. Until the free-threaded builds a global interpreter lock served one thread of bytecode at a time, which explains the concurrency advice: threads suit I/O because the lock is released while waiting, while CPU-bound parallelism needs processes.
+
+As the successor to a shell script it wins the moment the task needs data structures, error handling or anything beyond string pipelines, and its standard library covers most of what automation reaches for with no dependency. Two costs decide when a shell script is still right: interpreter startup is measurably slower than a small binary, and anything importing third-party packages needs an environment on the target machine.
 
 ### python -m asyncio
 **Short:** Stdlib async REPL that starts with a running event loop so top-level await works interactively.
@@ -2065,11 +2389,19 @@ It is the engine under Spring WebFlux and the reactive Spring Data drivers, wher
 **Lang:** python
 **Roles:** runtime-systems/text-encoding-and-regex @1
 
+It adds four things the standard library historically lacked. A parser that reads almost any written date, with flags to resolve day-first and year-first ambiguity. A relative delta performing calendar arithmetic a fixed-duration timedelta cannot, such as adding one month or jumping to the next Friday. An implementation of the iCalendar recurrence rule. And time zone objects, which predated the standard library having any.
+
+Reach for it for the parser and the relative delta, which still have no standard equivalent. Stop reaching for the time zones, since `zoneinfo` is the right source now, and stop using the fuzzy parser on machine-generated input, where `datetime.fromisoformat` is far faster and raises on a malformed value rather than guessing. Guessing is the real cost: given an ambiguous numeric date it will be silently wrong for half the world's conventions.
+
 ### python3.14t
 **Short:** The free-threaded CPython 3.14 build with the GIL removed, so CPU-bound Python threads run in parallel.
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1, runtime-systems/concurrency-and-async @2
+
+The trailing letter marks the free-threaded build, in which the global interpreter lock is removed and reference counting is made safe by other means, including biased reference counting and immortal objects, with fine-grained locks where internal structures require them. Threads therefore execute bytecode genuinely in parallel across cores. It is a separate binary with a separate ABI, so extension modules must be rebuilt and declare support or the lock is re-enabled at import.
+
+Reach for it when work is CPU-bound, shares a large in-memory structure that would be expensive to pickle into worker processes, and the dependency stack has free-threaded wheels. The costs are real: single-threaded performance is somewhat lower because reference counting costs more per operation, the wheel ecosystem is still catching up, and code that quietly relied on the lock for atomicity is now a genuine race needing an explicit lock.
 
 ### queue.Queue
 **Short:** Python's thread-safe in-process FIFO with blocking put/get, the standard producer-consumer handoff.
@@ -2082,6 +2414,10 @@ It is the engine under Spring WebFlux and the reactive Spring Data drivers, wher
 **Kind:** tech
 **Lang:** rust
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/rpc-graphql-and-streaming @3
+
+It is structured as a state machine with no I/O of its own: you hand it received UDP datagrams and it produces datagrams to send plus the deadline at which to call it back, so it drops into whatever event loop the host program already runs. Alongside the Rust crate it exposes a C API, which is how it is embedded into nginx through Cloudflare's patch, and it uses BoringSSL for the TLS 1.3 handshake.
+
+Reach for it when you want a QUIC stack that carries a very large share of a major CDN's edge traffic while keeping control of the I/O path. The costs are the standard QUIC ones plus integration: you own the socket, the timers and connection-identifier routing so a migrated connection reaches the right instance, user-space congestion control burns more CPU per gigabit than kernel TCP, and public deployments need a plan for networks blocking UDP.
 
 ### random
 **Short:** Python stdlib pseudo-random generator used for sampling, shuffling and Monte Carlo simulation.
@@ -2107,17 +2443,29 @@ It is the engine under Spring WebFlux and the reactive Spring Data drivers, wher
 **Lang:** cpp
 **Roles:** runtime-systems/text-encoding-and-regex @1
 
+It takes seriously the fact that a regular expression describes a regular language, which means it can be recognized by a finite automaton advancing through the input once, keeping track of the set of states currently reachable. Time is therefore bounded by input length times pattern size regardless of how the quantifiers nest, which removes the exponential blowup a backtracking engine suffers on nested repetition over a long non-matching string.
+
+The rule of thumb is simple: if either the pattern or the input comes from outside your program, use an engine with this guarantee, because otherwise a single crafted input is a CPU exhaustion attack against the thread evaluating it. The price is that backreferences and lookaround are not regular constructs and are unsupported, and a pattern genuinely needing them is usually a parser in disguise. Go's regexp package applies the same design.
+
 ### RE2/J
 **Short:** Java port of RE2 giving linear-time regex matching - no catastrophic backtracking - at the cost of lookaround.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/text-encoding-and-regex @1, traffic-edge/rate-limiting-and-resilience @3
 
+It is a pure-Java reimplementation, so there is no native library to ship and no JNI boundary, and its surface deliberately mirrors `java.util.regex` with the same pattern, matcher, find and replace vocabulary, which makes most migrations an import change plus a review. Matching simulates the automaton rather than backtracking, so the cost is linear in the input and independent of how the pattern nests quantifiers.
+
+Reach for it wherever patterns are untrusted or supplied by configuration, such as user search filters or log-parsing rules, since one catastrophic pattern on a request thread is a single-input denial of service against the JDK's backtracking engine. The costs: lookahead, lookbehind and backreferences are unsupported, so existing patterns need an audit; and on short trusted patterns the JDK engine is frequently faster, so this is a safety choice rather than a performance one.
+
 ### Reactor Core
 **Short:** Reactive Streams implementation for the JVM: Flux and Mono, operators, backpressure and schedulers.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1
+
+This is the artifact that actually contains the reactive types, the operator library and the scheduler factory, and it depends only on the Reactive Streams interfaces, so a plain library can expose an asynchronous API built on it with no framework in sight. An operator chain is assembled eagerly but executes nothing until something subscribes, at which point demand travels back up the chain as explicit requests, which makes backpressure structural rather than an add-on.
+
+Reach for it when a library must offer a cancellable, backpressured asynchronous API without dragging in a web framework, which is what the reactive database drivers do. The costs: thread locals do not propagate, so logging and security context need explicit plumbing; stack traces name operator internals unless you add checkpoints; and on Java 21 virtual threads give comparable concurrency to ordinary blocking code.
 
 ### Reactor Sinks.Many
 **Short:** Project Reactor's multi-subscriber sink: a backpressure-aware in-JVM broadcast point for pushing events.
@@ -2131,11 +2479,19 @@ It is the engine under Spring WebFlux and the reactive Spring Data drivers, wher
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, observability/profiling-and-performance @2
 
+It is the artifact containing Reactor's debug agent, which rewrites operator call sites as classes load so each assembled operator records the stack trace of the line in your code that declared it. When an error later propagates through the chain, that assembly trace is attached to the exception, turning a stack full of internal operator frames into a direct pointer at the pipeline step that failed.
+
+It exists because a reactive stack trace is close to useless by default, since the throwing frame is inside an operator and nothing names the code that built the pipeline. Reach for it in development and anywhere a production reactive error must be diagnosed, because it is far cheaper than the hook that captures a stack trace at every operator assembly. It must run before any pipeline is assembled, and for a single suspect chain a checkpoint suffices.
+
 ### ReactorDebugAgent
 **Short:** Java agent instrumenting Reactor operators to capture assembly-time stack traces, making reactive traces readable.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, observability/tracing-apm-and-llm-observability @2, observability/profiling-and-performance @3
+
+It instruments classes as they load, rewriting Reactor's operator assembly points so each publisher captures the stack trace of where it was declared. Because the instrumentation happens once at class load rather than on every subscription, its runtime cost is far below the equivalent global hook, which captures a fresh stack trace at every assembly for the life of the process. Errors are then decorated with a suppressed exception naming the assembly line.
+
+Initialize it as the very first statement in main, before any publisher is built, or classes already loaded remain uninstrumented, which is the most common reason people report it appears to do nothing. Its limits follow: chains assembled by libraries whose classes loaded earlier are not covered, and it clarifies where an error came from rather than what it means. A named checkpoint gives the same information with no agent.
 
 ### Records
 **Short:** Java record classes: shallowly immutable data carriers with generated equals, hashCode, toString and accessors.
@@ -2148,6 +2504,10 @@ It is the engine under Spring WebFlux and the reactive Spring Data drivers, wher
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1, data-stores/key-value-and-embedded @2
+
+The filter is a bit array plus a set of hash functions, sized from the error rate and capacity you declare when reserving the key. Adding an item sets several bits; testing checks those bits, so a negative answer is certain and a positive answer is right except at approximately the configured false-positive rate. The scaling variant chains a larger sub-filter when capacity is exceeded, at the cost of a rising error rate.
+
+The point is memory: a few bits per element instead of a whole key, so hundreds of millions of members fit where a set would not. That makes it right where a false positive merely costs a wasted lookup, such as guarding a cache against penetration or asking whether a URL has been seen. The costs: it cannot delete or enumerate, sizing is committed up front, and the module must actually be loaded.
 
 ### ReentrantLock
 **Short:** Java explicit mutual-exclusion lock with tryLock, timeouts, interruptibility, fairness and multiple condition queues.
@@ -2171,11 +2531,19 @@ The grapheme support is why text that must respect user-perceived characters —
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1, devtools/version-control-and-workbench @3
 
+It compiles your pattern against a chosen engine, with PCRE2, ECMAScript, Python, Java, Go and .NET all available, highlights matches and capture groups live, and explains the pattern token by token. The feature that earns it a place here is the debugger, which steps through the match and shows every backtrack with a running step counter and a cap that aborts a runaway pattern.
+
+Use the engine selector deliberately, because the same pattern behaves differently across engines: lookbehind support, named-group syntax and whether the digit class is Unicode-aware all vary, so testing in PCRE2 while shipping in Java is how a pattern passes here and fails in production. The step counter is a practical backtracking check: hundreds of thousands of steps against a short string is a denial of service waiting to happen. Never paste production data into it.
+
 ### renice
 **Short:** Unix CLI that changes a running process's nice value (-20 to +19); only root can raise priority.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+It changes the scheduling niceness of a running process, process group or user's processes, from minus twenty for most favourable to plus nineteen for least. Under Linux's fair scheduler the value is a weight rather than a cap: each step changes the relative CPU weight by roughly a quarter, so a process at plus ten receives on the order of a tenth of the CPU a default-priority process gets when both are runnable, and nothing is taken away while the machine is idle.
+
+Reach for it to stop a batch job or a runaway build from stealing time from an interactive service on the same box, since deprioritizing the offender is often faster and less disruptive than killing it. Three limits: an unprivileged user may only raise their own processes' nice value and never lower it again; it affects CPU only, so `ionice` is the counterpart for disk; and cgroup quotas dominate anything nice can express.
 
 ### reversed
 **Short:** Comparator.reversed(): flips an ordering strategy and composes with thenComparing; the JDK's canonical Strategy.
@@ -2195,11 +2563,19 @@ The grapheme support is why text that must respect user-perceived characters —
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1
 
+It brings the ReactiveX vocabulary to the JVM as `Observable`, `Single`, `Maybe`, `Completable` and the backpressure-aware `Flowable`, composed with a large operator set covering mapping, flattening, combining, debouncing and retrying. Nothing executes until subscription, the subscription is a disposable handle used to cancel, and errors travel the chain as a terminal signal rather than as thrown exceptions, which lets a retry be an operator rather than a try block.
+
+Its strength is composing events over time: combining a network call with a cache, debouncing user input, coordinating concurrent calls under one timeout policy. That is why it became the standard on Android before coroutines, and Project Reactor occupies the same slot on the server. The costs are a large operator surface with a genuine learning curve, the easy mistake of using the non-backpressured type, and traces that name operators rather than your code.
+
 ### RxJava 3
 **Short:** JVM reactive-streams library of composable Observable/Flowable operators with backpressure; common on Android.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1
+
+Version three moved to a new root package and raised the baseline to Java 8, so the standard functional interfaces, `Optional` and `Stream` interoperate directly, and `Flowable` implements the Reactive Streams publisher interface, letting it bridge to Reactor. The package rename was deliberate: version two and version three can sit on one classpath simultaneously, so a large codebase migrates module by module rather than in one commit.
+
+On Android it remains widely deployed and is often the reason a codebase has a reactive layer at all, and the explicit backpressure strategies of buffer, drop, latest and none impose a discipline the unbounded type does not. New Android code generally chooses Kotlin coroutines and flows, with interop libraries converting between them, so the realistic decision is incremental migration rather than a rewrite. Disposal discipline tied to a lifecycle is the recurring cost.
 
 ### RxJava 3 Flowable
 **Short:** Reactive Streams publisher with backpressure: the push-based dual of Iterator for unbounded async sources.
@@ -2212,6 +2588,10 @@ The grapheme support is why text that must respect user-perceived characters —
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1
+
+It is a small wrapper over the scheduling system calls that queries and sets in one place what `chrt` and `taskset` set separately: the scheduling policy, static priority for the real-time policies, nice value, and CPU affinity, either against an existing process or on a command it launches. Run against a process id with no other arguments it prints the current policy, priority and affinity mask on one line.
+
+Its distinct value is easy access to the two policies the common tools expose less conveniently. The batch policy tells the scheduler a task is throughput-oriented and should never be treated as interactive. The idle policy runs a task only when nothing else wants the CPU, the cleanest way to run a background scrubber that must never disturb the workload. It is a small third-party utility frequently not installed where `chrt` and `taskset` always are.
 
 ### ScheduledExecutorService
 **Short:** Java executor running tasks after a delay or at a fixed rate/delay, replacing polling loops and Timer.
@@ -2300,6 +2680,10 @@ In machine-learning work it is usually the statistics and sparse pieces that get
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, applied-ml/interpretability-fairness-and-causal @3
 
+It takes a tidy DataFrame and column names rather than arrays, and maps columns to visual roles such as position, hue, size and facet, so grouping and faceting are arguments instead of loops. It performs the statistics the plot implies: aggregating with a bootstrap confidence interval, fitting a regression line, estimating a kernel density. Figure-level functions build a whole grid of axes while axes-level functions draw into an axes you own, and confusing the two is the main source of frustration.
+
+Reach for it for exploratory statistical graphics, where distributions, category comparisons and correlation heatmaps are a couple of lines against dozens in raw Matplotlib. The costs are that convenience ends where customization begins, at which point you need both APIs; that automatic bootstrapping is slow on large data; and that it produces static images, so interactive charts belong to Plotly or Altair.
+
 ### Sealed interfaces
 **Short:** Java feature closing a type hierarchy so the compiler checks exhaustive matching; replaces double dispatch.
 **Kind:** api
@@ -2312,11 +2696,19 @@ In machine-learning work it is usually the statistics and sparse pieces that get
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1, devtools/version-control-and-workbench @2
 
+It reads input a line at a time into a pattern space, applies your commands and prints the result. Substitution is the command everyone uses, with a flag for every occurrence on the line and references to the match and its capture groups in the replacement. Addresses restrict a command to a line number, a range or a regex match. In-place editing exists but its backup-suffix argument differs between GNU and BSD, the usual reason a script works on Linux and fails on macOS.
+
+Reach for it for line-oriented, regex-shaped edits in a pipeline or across many files: rewriting a configuration value, stripping a prefix, extracting a group. Two limits define where it stops. It is line-based, so a pattern spanning lines requires the hold space and becomes unreadable immediately. And its dialect is POSIX basic regular expressions, so the digit class and lazy quantifiers are absent. Structured formats deserve a parser.
+
 ### Segment tree
 **Short:** Tree structure supporting range aggregate queries and point updates in O(log n) over an array.
 **Kind:** concept
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+It is a binary tree over an array in which each node stores the aggregate of a contiguous range, the root covering everything and each leaf a single element. A range query descends and combines a logarithmic number of canonical nodes that exactly tile the requested interval, and a point update rewrites one root-to-leaf path. Lazy propagation, where a pending modification is parked at a node and pushed down only when a child is visited, makes range updates logarithmic too.
+
+It is the general structure where a Fenwick tree is the specialised one: any associative combine works, including minimum, maximum and gcd, none of which a Fenwick tree can express because they have no inverse to subtract. Choose the Fenwick tree when the operation is a sum and you want half the memory and a tenth of the code; choose this when the operation is not invertible or a node must hold something richer than a number.
 
 ### send
 **Short:** Generator method from PEP 342 that pushes a value into a paused generator, making coroutines bidirectional.
@@ -2396,6 +2788,10 @@ In machine-learning work it is usually the statistics and sparse pieces that get
 **Lang:** java
 **Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/aop-middleware-and-scheduling @2, data-movement/message-broker @3
 
+The inbound adapter polls a directory on a trigger and emits each file as a message, with filters controlling what it picks up: a name pattern, and an accept-once filter which, in its persistent form backed by a metadata store, prevents reprocessing everything after a restart. Outbound, the writing handler persists a payload through a configurable filename generator, writing to a temporary name and renaming so a consumer never sees a partial file.
+
+Reach for it when a genuine integration boundary is a drop directory, such as a partner batch feed or an SFTP landing zone, and you want retries, error channels and transactional semantics around it rather than a hand-written poller. The costs are inherent to the pattern: polling races against writers, a shared directory across instances needs the persistent filter plus locking, and the metadata store grows unless pruned. An object-storage notification is a better trigger where available.
+
 ### spring.threads.virtual.enabled=true
 **Short:** Spring Boot 3.2+ property that switches Tomcat request handling and @Async execution onto virtual threads.
 **Kind:** api
@@ -2407,6 +2803,10 @@ In machine-learning work it is usually the statistics and sparse pieces that get
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1, data-stores/relational @3
+
+It is the successor to Hashids by the same author. It encodes one or more non-negative integers into a short URL-safe string using an alphabet you supply that is shuffled per call, so consecutive inputs do not produce visibly consecutive outputs, and decodes exactly back with no stored mapping. It also carries a blocklist and re-encodes when a generated string would contain an offensive word, a real problem for anything shown to users.
+
+Use it to keep sequential primary keys out of public URLs so a customer cannot count your records or walk to the next one. Be exact about what it is not: there is no key and no secret, and it is neither encryption nor an access control. Every fetch still needs an authorization check. When unguessability is a real requirement use a random UUID, and UUIDv7 or ULID when you also want sortability.
 
 ### ss
 **Short:** Linux CLI that lists sockets and their state: listening ports, TIME_WAIT counts, accept-queue depth.
@@ -2490,6 +2890,10 @@ It attaches via `ptrace` and prints every system call a process makes with argum
 **Lang:** java
 **Roles:** runtime-systems/memory-processes-and-os @1, runtime-systems/text-encoding-and-regex @2
 
+When enabled, the collector queues strings that have survived a threshold number of young collections, and a background thread hashes each one's backing array, looks it up in a weak table, and if an equal array exists repoints the string at the shared one. Only the arrays are shared: the string objects stay distinct, so identity and reference equality are unaffected, which makes it safe to switch on without auditing code. It is off by default.
+
+Reach for it when a heap dump shows character or byte arrays dominating and many strings are equal but you cannot intern them or restructure the code producing them, the shape of a service parsing many documents with a small set of repeated values. Where it applies the saving can be a large fraction of the heap; where strings are mostly unique it saves nothing. There is also a delay before any string is deduplicated.
+
 ### String Templates
 **Short:** Java's previewed string interpolation (JEP 430/459), withdrawn after Java 22 - no shipping interpolation syntax today.
 **Kind:** api
@@ -2568,6 +2972,10 @@ It attaches via `ptrace` and prints every system call a process makes with argum
 **Lang:** *
 **Roles:** runtime-systems/concurrency-and-async @1
 
+It applies to concurrency the discipline that made structured programming work. A task can only be started inside a scope, the scope's block cannot exit until every child has completed, been cancelled or failed, and a child's failure cancels its siblings and propagates out like an ordinary exception. That one rule eliminates a task nobody awaits, an error that disappears into a discarded future, and a timeout that returns while the work continues invisibly.
+
+It also restores a relationship between the code you read and the work that runs, since the concurrency tree matches the call tree, which is what makes a stack trace and a cancellation mean something again. Trio's nurseries pioneered it, and Python's task groups and Java's structured task scope are the standard-library forms. The cost is that long-lived background work must be modelled deliberately, keeping a scope alive at the level that owns the lifetime.
+
 ### StructuredTaskScope
 **Short:** JDK structured-concurrency API: fork subtasks in a scope that joins, cancels and propagates failure as a unit.
 **Kind:** api
@@ -2597,6 +3005,10 @@ It attaches via `ptrace` and prints every system call a process makes with argum
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, ml-lifecycle/evaluation-and-benchmarks @3
+
+It is a computer algebra system written in pure Python. Expressions are trees of immutable objects partially simplified as they are built, and everything downstream operates on the tree exactly rather than numerically: simplification, factoring, solving, differentiation, integration, limits, series and matrices. Rational and arbitrary-precision arithmetic mean no floating-point error creeps in, and a lambdify step compiles an expression into a fast NumPy-backed callable when you do want numbers.
+
+In machine-learning pipelines the common use is verification: parse a model's answer and the reference into expressions and ask whether their difference simplifies to zero, which accepts an algebraically equivalent form a string comparison would reject. The costs: being pure Python it is slow, general simplification is a heuristic that can hang on a large expression, and symbolic equivalence is undecidable, so a not-equal verdict can be a failure to simplify.
 
 ### SymPy rsolve
 **Short:** SymPy solver that finds closed-form solutions to recurrence relations symbolically.
@@ -2645,6 +3057,10 @@ It attaches via `ptrace` and prints every system call a process makes with argum
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, platform-delivery/infrastructure-as-code-and-config @3
+
+It is the front end to systemd, operating on units, of which services are one type alongside sockets, timers, mounts and targets. Starting and stopping change the current state while enabling and disabling change whether a unit starts at boot, and the two being independent is the distinction people trip over most. Status shows the unit's state, its main process, its full cgroup with every child, and recent log lines; a daemon reload is required after editing a unit file.
+
+What makes this different from an init script is that a service is a cgroup, so systemd knows every process it spawned, can apply memory and CPU limits declaratively, and can reliably stop the whole tree rather than leaving orphans. The costs: unit semantics are easy to get subtly wrong, particularly the service type that decides when systemd believes the service is ready, and inside a container the orchestrator plays this role instead.
 
 ### taskset
 **Short:** Linux command that pins a process or thread to specific CPU cores, cutting cache misses in latency-sensitive services.
@@ -2786,6 +3202,10 @@ Build with `-fsanitize=thread` on Clang or GCC and the compiler instruments ever
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1
 
+It is a companion library by the author of the standard date and time API, carrying the value types the JDK deliberately left out: an interval between two instants with proper contains, overlaps and abuts semantics; year-week and year-quarter types; separate typed amounts for days, weeks, months and years rather than one general period; and a mutable clock for tests. Everything implements the standard temporal interfaces, so it composes with the JDK types.
+
+Reach for it for the two types people otherwise reimplement badly: an interval with correct half-open comparison, and quarter or week-based dates in reporting code, where the ISO week-year rules produce off-by-one-year bugs at January boundaries with impressive reliability. The costs are an extra dependency and that its types will not survive a serialization boundary unless both sides have it, so two instants is the safer wire form.
+
 ### throw
 **Short:** generator.throw() - raises an exception at the generator's suspension point, part of PEP 342 bidirectional generators.
 **Kind:** api
@@ -2797,6 +3217,10 @@ Build with `-fsanitize=thread` on Clang or GCC and the compiler instruments ever
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/collections-and-algorithms @1, data-access/transactions-and-consistency @3
+
+You write a specification as a state machine: variables, an initial-state predicate, and a next-state relation, expressed in set theory and temporal logic rather than in code. The model checker then enumerates every reachable state of a finite instance you configure, perhaps three nodes and two clients, checks your invariants against all of them, and produces a minimal counterexample trace when one fails. PlusCal is a pseudocode-flavoured front end that compiles to the same specification.
+
+It earns its cost on concurrent and distributed designs, where the bug is an interleaving nobody imagined and no test would generate; AWS has published on using it to find serious flaws in designs that had already survived review. Reach for it before implementing a protocol, not afterwards. The costs: state-space explosion means you verify a small instance and argue that it generalizes, and it verifies a design rather than the code you ship.
 
 ### toolz
 **Short:** Functional utility library for Python: lazy pipe, compose, curry and iterator combinators; cytoolz is the C build.
@@ -2821,6 +3245,10 @@ It refreshes a sorted process table every few seconds with load average, per-pro
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1
+
+Like traceroute it sends probes with increasing time-to-live and reads the resulting ICMP time-exceeded replies to name each hop, but it differs in two useful ways. It uses ordinary unprivileged UDP sockets, so it needs no special capability, and it tracks the path MTU as it goes, starting at the interface MTU and reacting to fragmentation-needed replies, printing the new value where the maximum drops.
+
+That MTU discovery is the reason to reach for it. A path MTU black hole, typically a tunnel with a smaller MTU combined with a device dropping the ICMP that would have said so, produces a distinctive symptom: the connection establishes, small requests work, and the transfer hangs the moment a large response is sent. Its limits are one sample per hop, so it says nothing about intermittent loss, where `mtr` is the right tool.
 
 ### traceroute
 **Short:** CLI that maps the hop-by-hop path to a host and shows per-hop latency and loss; also used for MTU discovery.
@@ -2849,6 +3277,10 @@ Read the output carefully, because it lies in a specific way: routers deprioriti
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1
 
+Its central mechanism is the checkpoint: every operation that can block is a point where the task yields to the scheduler and where cancellation may be delivered, and the library guarantees each of its own async functions contains at least one, so cancellation is both prompt and predictable. It is delivered as an ordinary exception at a checkpoint, so it unwinds through your finally blocks exactly as synchronous cleanup does. Nurseries supply the other half, since a task can only be spawned into one.
+
+The payoff is that asyncio's characteristic failure modes largely cannot occur: a task cannot be orphaned, an exception cannot vanish into a dropped reference, and a timeout genuinely stops the work. The obstacle is the ecosystem, since asyncio-only libraries need a bridge, so most production Python stays on asyncio and imports the ideas through anyio. Reach for trio when the concurrency structure is the hard part and you control the dependency stack.
+
 ### trio 0.33
 **Short:** Alternative Python async runtime built on structured concurrency: nurseries and strict cancel-scope semantics.
 **Kind:** tech
@@ -2864,6 +3296,10 @@ The obstacle is ecosystem. Trio has its own primitives and does not run asyncio 
 **Kind:** tech
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1, devtools/testing-and-mocking @3
+
+It enforces annotations at run time. A decorator on a function, or its import hook installed across a package, rewrites the function so arguments, return values and yielded values are checked against their annotations, with an error naming the parameter and the type expected. Unlike a sampling checker it validates containers deeply by default, walking the elements of a list, and it ships a pytest plugin that turns any annotation violation during a test run into a failure.
+
+Reach for it in tests and continuous integration, where the deep checking is exactly what you want and its cost does not matter: it converts annotations you already wrote into assertions and catches the mismatch a static checker cannot see because the value arrived from untyped JSON. In production that same deep walk is the cost, since checking every element of a large list is linear work per call, which is why beartype's sampling exists.
 
 ### TypeVariable.getBounds
 **Short:** Reflection call returning a type variable's full bound list at runtime, including bounds erased from the descriptor.
@@ -2901,17 +3337,29 @@ The obstacle is ecosystem. Trio has its own primitives and does not run asyncio 
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1
 
+It is a single runtime dependency maintained alongside CPython's own typing module, providing new typing constructs on older interpreters and the newest ones before they appear in any release. Anything added to the standard module lands here first, and it re-exports the standard version when the interpreter already has it, so an import works identically across versions with no conditional. Type checkers treat the two as equivalent by design.
+
+Reach for it in a library supporting several Python versions that wants current typing, such as the self type, an override marker or type-narrowing predicates, without version-gated imports scattered through the codebase. The costs are that it is a genuine runtime dependency, so an otherwise dependency-free library gives that up, and that its behaviour tracks the installed version, so declare a floor and drop the import once your minimum Python includes the construct.
+
 ### tzupdater
 **Short:** Oracle tool patching a JDK's bundled tzdata so date handling stays correct when governments change DST rules.
 **Kind:** tech
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1
 
+It patches an installed JDK's bundled time-zone data in place, replacing the compiled database the runtime reads with one built from a newer IANA release, so an existing installation picks up current daylight-saving rules without a full JDK upgrade. It can also report the version currently installed and validate rather than write, which is how you audit a fleet.
+
+It exists because the JDK carries its own copy of the time-zone database rather than reading the operating system's, which surprises teams every time a government moves a daylight-saving boundary: patching the OS package changes nothing for a Java process, and a scheduler quietly fires an hour off. The costs are that it is version-sensitive and modifies an installation in place, which a container rebuild undoes anyway. Taking a newer JDK patch release is the maintainable answer.
+
 ### Unicode Character Database
 **Short:** The Unicode Consortium's authoritative data files defining every code point's category and properties.
 **Kind:** spec
 **Lang:** *
 **Roles:** runtime-systems/text-encoding-and-regex @1
+
+It is the set of data files published with each Unicode version that define, for every assigned code point, its name and general category, canonical and compatibility decompositions, case mappings including those that change a string's length, bidirectional class, script, numeric value and boolean properties such as alphabetic and whitespace, along with the rules for grapheme, word and line breaking. Every regex property class and every normalization and collation table is generated from these files.
+
+The reason to know it exists is that what counts as a letter or as whitespace is a data question with a version attached, not a constant. Two systems on different Unicode versions can disagree about whether a code point is alphabetic or where a grapheme boundary falls, which is how the same validation rule passes in one service and fails in another. Pin the version wherever stored order or validation results depend on it.
 
 ### unicodedata.normalize
 **Short:** Python stdlib call applying Unicode NFC, NFD, NFKC or NFKD normalization before comparing or hashing strings.
@@ -2949,6 +3397,10 @@ Vavr brings a functional standard library to Java: `Option` in place of nullable
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1
 
+A virtual thread is a thread whose stack lives on the heap as a continuation rather than in an operating-system thread's fixed allocation. When it blocks on something the runtime knows about, a socket read, a lock, a sleep, the JVM unmounts it, parks its stack and returns the carrier platform thread to a scheduler. The stack starts at a few hundred bytes and grows on demand, against a platform thread's roughly one megabyte of reserved stack plus a kernel scheduling entity.
+
+The point is that thread-per-request blocking code, the style everyone can read and debug with real stack traces, now scales to concurrency that previously demanded reactive style. Two costs matter. Pinning: a virtual thread that cannot be unmounted holds its carrier and starves the pool, and while newer JDKs removed the synchronized-block case, native frames still pin. And they do nothing for CPU-bound work, where a fixed pool remains correct.
+
 ### Virtual threads (Thread.ofVirtual())
 **Short:** Java 21 JVM-scheduled lightweight threads letting blocking code scale to millions of concurrent tasks.
 **Kind:** api
@@ -2961,17 +3413,29 @@ Vavr brings a functional standard library to Java: `Option` in place of nullable
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2
 
+It reads kernel counters and prints, per interval, six groups on one line: runnable and uninterruptibly blocked process counts, memory free and cache, swap in and out, block I/O in and out, interrupts and context switches, and the CPU split into user, system, idle, iowait and steal. The first line is the average since boot rather than current activity and should be ignored.
+
+The value is that one screen separates four saturation stories that look identical from inside the application. A run queue persistently above the core count is CPU saturation. Nonzero swap in and out turns memory pressure into disk latency and is nearly always the worst item on the list. Large block I/O with high iowait is an I/O-bound workload. And a high context-switch rate with low user time is thrash from far too many threads.
+
 ### vmstat 1
 **Short:** Per-second virtual memory statistics; nonzero si/so columns mean the machine is swapping and thrashing.
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2
 
+The argument is the sampling interval, so every line after the first is a delta over that second rather than an average since boot, which is the entire point: a machine that swapped heavily an hour ago and is fine now looks identical to one swapping right now in the boot-average line. A second argument bounds the number of samples, and flags select units and per-line timestamps.
+
+The swap-in and swap-out columns are the ones to read first, because they are unambiguous. Any sustained nonzero value means the kernel is moving anonymous pages to and from disk to satisfy allocations, and a page fault served from disk costs orders of magnitude more than one from memory, which is the signature of thrashing where the machine looks busy while throughput collapses. A small one-off swap-out with no swap-in is harmless.
+
 ### VPN
 **Short:** Encrypted tunnel joining networks; in cloud designs the site-to-site link giving a VPC reach into on-prem.
 **Kind:** concept
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, platform-delivery/cloud-platform-and-cost @2, security/authentication-and-identity @3
+
+A VPN carries private-network traffic inside an encrypted tunnel across a network you do not trust, and the two shapes matter differently. A site-to-site tunnel joins two networks by terminating on a gateway at each end with routes pointing the relevant prefixes at it, so hosts on either side address each other as if adjacent. A remote-access VPN terminates on a user's device instead. IPsec and WireGuard operate at the IP layer, while TLS-based options tunnel over port 443.
+
+In cloud design it is the pragmatic bridge during a migration, giving a VPC reach to an on-premises database in hours rather than the weeks a circuit takes. The costs explain why it is usually temporary: the tunnel runs over the public internet, so throughput is unpredictable and a single tunnel is capped by its gateway, redundancy needs a second tunnel and dynamic routing, and overlapping address ranges are a painful blocker.
 
 ### walrus operator :=
 **Short:** Python 3.8 assignment expression that binds a name and yields its value inside a condition or comprehension.
@@ -3006,6 +3470,10 @@ Encrypted traffic you own becomes readable by pointing it at the key log file a 
 **Kind:** tech
 **Lang:** *
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @2
+
+The stream graphs plot one direction of one conversation over the life of the capture: a time-sequence graph showing bytes sent against time alongside the receiver's advertised window, a throughput graph, and a round-trip-time graph derived from each segment and its acknowledgement. Separately, the expert analysis tags segments as retransmissions, duplicate acknowledgements, out-of-order or zero-window, so one display filter pulls every anomaly out of a large capture.
+
+These turn a vague complaint that a transfer is slow into a named cause. A sequence graph flattening against a window line that keeps closing is a receiver too slow to drain its buffer, an application problem at the far end rather than a network one. A staircase punctuated by retransmissions is loss driving congestion control down. You need a capture taken near the right end, since loss looks different from each side.
 
 ### yield
 **Short:** Python keyword that suspends a function and hands a value to the caller, making it a lazy generator.
