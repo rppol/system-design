@@ -534,7 +534,7 @@ The oplog is a capped collection. If a secondary falls too far behind (e.g., slo
 | `mongotop` | Top collection activity (reads/writes per collection) |
 | `mongostat` | Server-wide stats (ops/s, connections, memory) |
 | `mongodump/mongorestore` | Logical backup/restore |
-| Atlas | Managed MongoDB (AWS/Azure/GCP), auto-sharding, atlas search |
+| MongoDB Atlas | Managed MongoDB (AWS/Azure/GCP), auto-sharding, Atlas Search |
 | Mongoose (Node.js) | ODM for MongoDB with schema validation |
 | Spring Data MongoDB | Java ODM for MongoDB |
 | Debezium MongoDB connector | CDC from MongoDB change streams |

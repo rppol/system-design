@@ -676,26 +676,6 @@ rule written too tightly produces constant false failures and gets `@Disabled`, 
 frozen baseline for existing violations and require a written reason for each exception. For
 coarse boundaries, a real module system enforces the same thing with no test code.
 
-### ASGI compliance
-**Short:** Conformance to the ASGI 3 async server/application interface that lets a Python app run on any ASGI server.
-**Kind:** spec
-**Lang:** python
-**Roles:** apis-frameworks/web-framework-and-http-client @1, runtime-systems/concurrency-and-async @3
-
-The interface is one async callable taking three arguments: a `scope` dict describing the
-connection, a `receive` awaitable yielding incoming event dicts, and a `send` awaitable for
-outgoing ones. Because HTTP is expressed as a stream of events rather than a single
-request-response pair, the same interface covers WebSocket and long-lived streaming, which
-WSGI structurally cannot. A separate `lifespan` scope carries startup and shutdown, which is
-where connection pools are opened and closed. ASGI 3 replaced the earlier two-callable form
-with this single one.
-
-Conforming to it is what makes an application and a server independent: the same app runs
-under Uvicorn, Hypercorn or Daphne, and middleware written to the interface composes across
-frameworks. The cost is that the contract is async throughout — a blocking call anywhere in a
-coroutine handler stalls the whole event loop, so synchronous work must be dispatched to a
-thread pool, which is exactly what frameworks do for a plain `def` endpoint.
-
 ### AspectJAdviceParameterNameDiscoverer
 **Short:** Spring's last-resort discoverer deducing advice parameter names from a pointcut when javac -parameters is absent.
 **Kind:** api
@@ -1502,12 +1482,6 @@ instead.
 **Lang:** java
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/aop-middleware-and-scheduling @2
 
-### Explicit in signature
-**Short:** Comparison-table cell, not a product: dependencies declared as function parameters rather than pulled from globals.
-**Kind:** concept
-**Lang:** python
-**Roles:** apis-frameworks/dependency-injection-and-config @1
-
 ### ExposeInvocationInterceptor
 **Short:** Spring AOP interceptor exposing the current MethodInvocation in a ThreadLocal for AspectJ advisors.
 **Kind:** api
@@ -1765,24 +1739,6 @@ clearer.
 **Lang:** java
 **Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/design-patterns-and-principles @2
 
-### Graceful reload
-**Short:** Restarting workers without dropping in-flight requests, so config or code changes deploy with no downtime.
-**Kind:** concept
-**Lang:** *
-**Roles:** apis-frameworks/web-framework-and-http-client @1, platform-delivery/ci-cd-and-release @2
-
-The supervisor starts replacement workers while the old ones are still running, then signals
-the old set to stop accepting new connections and finish what they are holding; the listening
-socket is owned by the master or shared with `SO_REUSEPORT`, so no connection is refused
-during the swap. After a grace period the stragglers are killed. In Kubernetes the same
-sequence is a rolling update plus a readiness probe that starts failing and a `preStop` hook
-that delays the `SIGTERM` until the endpoint has actually been removed from every proxy.
-
-Reach for it for routine config and code deploys. The limit is the grace period: long-polling
-and WebSocket connections do not drain within it, so they need a client reconnect story
-instead, and a worker in the middle of a non-idempotent write can still be cut. Where zero
-disruption matters, drain at the load balancer first and signal the process only afterwards.
-
 ### GraphiQL
 **Short:** In-browser GraphQL IDE for exploring a schema, autocompleting and running queries against any GraphQL endpoint.
 **Kind:** tech
@@ -1896,12 +1852,6 @@ orchestrator to keep routing traffic to a process that cannot reach its database
 **Kind:** api
 **Lang:** *
 **Roles:** apis-frameworks/rpc-graphql-and-streaming @1, apis-frameworks/aop-middleware-and-scheduling @2, apis-frameworks/design-patterns-and-principles @3
-
-### gRPC support
-**Short:** Whether a framework can serve or consume gRPC; a comparison-table attribute rather than a product.
-**Kind:** concept
-**Lang:** *
-**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
 
 ### grpc-client-spring-boot-starter
 **Short:** Community Spring Boot starter autoconfiguring gRPC client channels via @GrpcClient and grpc.client.* properties.
@@ -3550,12 +3500,6 @@ messages that take practice to read.
 **Lang:** java
 **Roles:** apis-frameworks/aop-middleware-and-scheduling @1
 
-### Production readiness
-**Short:** A framework-comparison attribute rating how ready for production a stack is; not a product.
-**Kind:** concept
-**Lang:** *
-**Roles:** apis-frameworks/web-framework-and-http-client @1
-
 ### PropertyChangeListener
 **Short:** JavaBeans bound-property mechanism: register listeners and fire events only when a property value actually changes.
 **Kind:** api
@@ -4125,25 +4069,6 @@ noise, since reordering or a comment change yields a new id unless you normalize
 alerts people learn to ignore are worse than none. Pair it with compatibility rules — additive
 fields only, never reuse an identifier — so the common version bump requires no consumer
 action at all.
-
-### Scope
-**Short:** The lifetime a dependency-injected object gets; FastAPI dependencies are per-request by default.
-**Kind:** concept
-**Lang:** python
-**Roles:** apis-frameworks/dependency-injection-and-config @1
-
-A FastAPI dependency is resolved once per request and cached for the rest of it, so two
-endpoints' sub-dependencies that both ask for the same callable receive the same object;
-`Depends(fn, use_cache=False)` opts out. There is no built-in scope wider than the request:
-anything process-lifetime lives outside the injector, typically created in the `lifespan`
-handler and stashed on `app.state`, or as a module-level object closed over by the dependency.
-
-Match the scope to the resource. A database session belongs to the request so it is committed
-and closed as the response finishes; an HTTP client or a connection pool belongs to the
-process, because building one per request discards the pooling that justifies it. The cost of
-the missing wider scope is that process-wide state is a global you manage yourself, and
-overriding it in tests means `dependency_overrides` or monkeypatching. Containers with named
-scopes, such as `dependency-injector` or Litestar's layered DI, exist if you need them.
 
 ### ScopedProxyMode
 **Short:** Spring setting injecting a proxy for a shorter-lived bean so a singleton can hold a request-scoped dependency.
@@ -5323,12 +5248,6 @@ surface wherever it is deployed, so it should be disabled or protected in produc
 large documents render slowly; and that it is optimized for trying calls rather than for
 reading — for reference documentation people read end to end, Redoc's layout is better.
 
-### Teardown support
-**Short:** Comparison-table cell, not a product: whether a DI mechanism can release resources after the response, e.g. via yield.
-**Kind:** concept
-**Lang:** python
-**Roles:** apis-frameworks/dependency-injection-and-config @1
-
 ### Template Method
 **Short:** Behavioral pattern: a base class fixes the algorithm skeleton and subclasses fill in the varying steps.
 **Kind:** concept
@@ -5632,24 +5551,6 @@ and note that Starlette uses it under the hood so a FastAPI endpoint is already 
 The costs are that it is deliberately low level — no rooms, no reconnection, no message
 routing, all of which you write — and that per-message compression, while supported, costs CPU
 and memory per connection and is worth disabling for many small messages.
-
-### Worker model
-**Short:** The multi-process deployment shape for ASGI apps: N worker processes, each running one event loop.
-**Kind:** concept
-**Lang:** python
-**Roles:** apis-frameworks/web-framework-and-http-client @1, runtime-systems/concurrency-and-async @2, runtime-systems/memory-processes-and-os @3
-
-A supervisor forks N processes, each with its own interpreter, event loop and heap, and the
-kernel distributes accepted connections among them. This is how a Python service uses more
-than one core at all, since the GIL confines a single process to one core for bytecode
-execution, and it is also the fault boundary: one worker segfaulting or wedging takes its
-in-flight requests with it and nothing else.
-
-Size it to the workload — roughly one worker per core for CPU-bound handlers, more when
-handlers spend their time awaiting I/O. The cost that surprises people is that nothing is
-shared: an in-process cache, a rate-limit counter, a scheduled job or a WebSocket session
-registry exists once per worker, so anything that must be global moves to Redis or the
-database, and resident memory multiplies by N beyond whatever copy-on-write saves after fork.
 
 ### wrapt
 **Short:** Python decorator and proxy library that wraps functions transparently, preserving the descriptor protocol for methods.

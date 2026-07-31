@@ -2041,16 +2041,6 @@ It walks the keyspace with `SCAN`, samples keys by pattern, and for each pattern
 
 Reach for it when memory is high and the server's own summary only confirms the total, because the answer is usually one pattern with no expiry, or a hash grown large enough to leave its memory-efficient encoding. Scanning a large instance takes time and adds load and the numbers are sampled estimates, so run it against a replica. `MEMORY USAGE` answers for one key and the big-keys scan is the cheap first look.
 
-### Result metrics
-**Short:** The metric series a load or performance test emits so results are analysed alongside normal system signals.
-**Kind:** concept
-**Lang:** *
-**Roles:** observability/metrics-and-monitoring @1, devtools/testing-and-mocking @3
-
-The practice is to have the load generator emit its own results as time series into the same store the system under test reports to — request rate, error rate, latency percentiles and concurrency measured client-side, tagged with a run identifier — rather than leaving them in the summary the tool prints at the end. The mainstream load tools all have an output that does this.
-
-Once both sides live in one store, a single dashboard puts client-observed latency beside CPU, queue depth, pool saturation and garbage collection for the same seconds, which is what turns a test result into a diagnosis, and it makes runs comparable over time. The costs are discipline about run identifiers and the reminder that a percentile computed by an under-provisioned generator measures the generator.
-
 ### Rootly
 **Short:** Incident management platform automating declaration, roles, comms, timelines and retrospectives from chat.
 **Kind:** tech

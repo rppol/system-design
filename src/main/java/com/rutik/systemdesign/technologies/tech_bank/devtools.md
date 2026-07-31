@@ -1555,16 +1555,6 @@ Weigh that dependence on unsupported compiler internals against the boilerplate 
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/design-patterns-and-principles @2
 
-### Managed load testing
-**Short:** Cloud-hosted distributed load-generation services that run test agents on managed compute such as Fargate.
-**Kind:** tech
-**Lang:** *
-**Roles:** devtools/testing-and-mocking @1, platform-delivery/cloud-platform-and-cost @2
-
-The service runs your existing test script — k6, JMeter, Gatling, Locust — on compute it provisions, typically containers on Fargate or a similar elastic backend, then aggregates the results from every generator into one report. Two problems disappear: a single machine's ceiling of open sockets and CPU, and the fact that traffic originating in the same region as the service under test hides real network latency and DNS behaviour.
-
-It is metered per virtual-user-hour or per task-minute, so the sensible pattern is to develop and iterate locally and reserve the managed run for the scale or geography you cannot reproduce. Also check the egress path: generators outside your VPC hit the public edge, which is either the point or a distortion depending on what you are measuring.
-
 ### Mandrel
 **Short:** Red Hat's GraalVM downstream distribution, trimmed to the native-image toolchain Quarkus builds against.
 **Kind:** tech
@@ -2336,12 +2326,6 @@ One Rust binary that reimplements the rule sets of flake8 and a long list of its
 
 The speed changes how it is used rather than merely saving time: whole-repository checks on every save and in a pre-commit hook become practical, so violations never accumulate. What it cannot do is type inference — a wrong argument type or a violated Protocol is invisible to it — so mypy or Pyright remains a separate, complementary step.
 
-### Run generators on
-**Short:** Table-row fragment, not a product: where load-test generator processes are hosted, such as ECS/Fargate or GKE.
-**Kind:** concept
-**Lang:** *
-**Roles:** devtools/testing-and-mocking @1
-
 ### RuntimeHintsRegistrar
 **Short:** Spring AOT interface for declaring reflection, resource and proxy hints needed by a GraalVM native image.
 **Kind:** api
@@ -2617,16 +2601,6 @@ The pairing to know is Failsafe, its sibling bound to `integration-test` and `ve
 Terratest is a Go library, not a framework: a test is an ordinary `go test` function that calls `terraform.InitAndApply`, reads outputs, then makes real assertions against the provisioned infrastructure — an HTTP request to the load balancer, an SSH command on the instance, an API call checking a bucket's encryption — with `defer terraform.Destroy` guaranteeing teardown. Retry helpers with timeouts handle the fact that cloud resources become ready asynchronously.
 
 That it deploys for real is both the value and the cost: it validates what the provider actually created rather than what the plan said, and it charges money and takes tens of minutes. Use unique namespaced resource names so parallel runs cannot collide, and reserve it for modules worth that expense — `tflint`, `tfsec` and plan-level policy checks are the fast gates.
-
-### Testable without framework
-**Short:** Being unit-testable with plain constructor wiring, without needing the framework's context to run a test.
-**Kind:** concept
-**Lang:** *
-**Roles:** devtools/testing-and-mocking @1
-
-The property is concrete: the class can be constructed with `new`, its collaborators handed in as arguments, and its behaviour exercised without starting a container, a context or a servlet environment. Achieving it forces every dependency to be explicit in the constructor signature, which is the same discipline that keeps a class's responsibilities visible — you can count them.
-
-The failure is instructive rather than merely annoying. If a test cannot run without the framework, the class is reaching outward on its own — a static call, a `new` on a collaborator, a service locator, field injection into a private field — and the substitute has to be forced in by reflection. Fixing the test is the same edit as fixing the design. Framework-loading tests still belong at the integration layer; they just should not be the only way to test logic.
 
 ### Testcontainers
 **Short:** Starts real dependencies (PostgreSQL, Kafka, Redis) in throwaway Docker containers for integration tests.

@@ -1127,6 +1127,16 @@ is an operational problem. The costs are a cluster to run training, memory-hungr
 and a winning ensemble that scores slowly and explains badly -- the best single model on the
 leaderboard is often the better production choice.
 
+### HELM (Stanford)
+**Short:** Stanford's Holistic Evaluation of Language Models: one harness running many models over many scenarios on a fixed metric set.
+**Kind:** dataset
+**Lang:** *
+**Roles:** ml-lifecycle/evaluation-and-benchmarks @1
+
+Its argument is that a single accuracy number hides most of what matters, so it runs every model across a matrix of scenarios and reports a fixed set of metrics for each cell - accuracy alongside calibration, robustness to perturbation, fairness, bias, toxicity and efficiency. Because every model meets the same prompts under the same conditions, the comparison is like-for-like in a way that collecting published per-paper scores never is, and the per-cell results stay inspectable rather than collapsing into one figure.
+
+Reach for it when you need a defensible breadth claim about a model, or when the question is a non-accuracy axis such as calibration or robustness that most leaderboards do not report at all. It is expensive to run in full and its scenario set lags the frontier, so for a specific capability a targeted benchmark answers faster. Unrelated to Helm, the Kubernetes package manager, which shares only the name.
+
 ### HLE
 **Short:** Humanity's Last Exam: a very hard closed-ended reasoning benchmark used as frontier model context.
 **Kind:** dataset
@@ -1450,25 +1460,6 @@ eviction scheme, where the question is what long context actually costs in quali
 weakness is that averages hide catastrophic per-query failures -- a scheme that evicts the
 tokens holding the answer scores fine on average and fails totally on the queries that matter
 -- so pair it with a targeted recall eval on your own documents.
-
-### Managed training
-**Short:** Cloud-run training jobs such as SageMaker Training or Vertex AI Training, where the provider owns the cluster.
-**Kind:** concept
-**Lang:** *
-**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, model-training/distributed-training @3
-
-The unit of work is a job, not a machine. You submit a container image or a source package, a
-machine and accelerator type, a replica count and input and output locations in object
-storage; the provider allocates hardware, runs the entrypoint, streams logs and metrics, then
-releases the hardware when the process exits. Multi-worker runs get the cluster topology
-injected into each replica's environment, so a standard distributed launch works with no
-networking configuration of your own.
-
-Reach for it for bursty demand -- a few hours of many accelerators, occasionally -- and where
-checkpoints must survive a preempted spot node. The costs are startup latency measured in
-minutes, which ruins a tight edit-run loop, a per-second accelerator price well above owning
-the hardware if utilization is high, and quotas that appear at the worst moment. A standing
-cluster wins once demand is steady.
 
 ### math-verify
 **Short:** Library that symbolically checks whether a model's math answer equals the reference, for grading and RL reward signals.

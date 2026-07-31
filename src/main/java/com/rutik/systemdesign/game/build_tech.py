@@ -522,6 +522,13 @@ TECH_ALIASES = {                       # written this way -> indexed as this
 # speculative-decoding method in llm/.
 TECH_HOMONYMS = {
     "medusa": {"llm": "Medusa (speculative decoding)"},
+    # Stanford's HELM benchmark vs Helm the Kubernetes package manager. tech_key lowercases,
+    # so `| **HELM** | Holistic evaluation | Stanford; multi-scenario |` in
+    # llm/evaluation_and_benchmarks landed on the k8s tool's row -- which then shipped titled
+    # "Helm", described as a package manager, carrying a Stanford-eval citation. Verified
+    # section-separable before adding this: the only llm/ mentions of Helm-the-k8s-tool are
+    # prose in a bullet and two case studies, none of which the §11 walk indexes.
+    "helm": {"llm": "HELM (Stanford)"},
 }
 # The DISPLAY name is normally voted on from the surface forms the modules actually wrote.
 # Two cases need that vote overridden, and both fail the same way without it: the row keeps

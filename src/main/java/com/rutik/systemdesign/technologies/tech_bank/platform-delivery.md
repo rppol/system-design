@@ -1077,16 +1077,6 @@ Artifact Registry is the successor to Container Registry and handles more than i
 
 Reach for it for anything running on Google Cloud, where per-repository IAM, regional locality with GKE and Cloud Run, and the Binary Authorization gate are the reasons to prefer it over a generic registry. It is provider-specific, and the remote-repository and scanning features carry charges on top of storage and egress, so a small project publishing public images may be better served by GHCR.
 
-### GPU instances
-**Short:** Cloud accelerator VM families (AWS p4d/p5/g5, GCP a2/a3/g2) that rent A100/H100/L4 capacity for training and inference.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/cloud-platform-and-cost @1, ml-lifecycle/ml-platform-and-pipelines @3, gpu/multi-gpu-and-collectives @3
-
-A GPU instance is a VM with one or more accelerators attached over PCIe or a vendor interconnect, and the interconnect usually decides whether a job is viable at all: multi-GPU training scales on nodes with NVLink or a switched fabric between cards and high-bandwidth networking between nodes, while a single-GPU inference server does not care. The driver and CUDA stack must match what the framework expects.
-
-Rent them when demand is bursty or when the hardware would be obsolete before it amortized, and commit or reserve once a GPU is busy most of the day, since on-demand accelerator pricing is punishing at that duty cycle. The binding constraints in practice are availability, because the newest accelerators are frequently unobtainable in a given region without a reservation, and data gravity, since moving a training set to wherever capacity exists can cost more than the compute.
-
 ### Harbor
 **Short:** Self-hosted OCI registry adding vulnerability scanning, signing policy, RBAC and cross-registry replication.
 **Kind:** tech
@@ -1413,16 +1403,6 @@ It is a dynamic provisioner that satisfies a claim by creating a directory on wh
 
 Reach for it when a cluster needs dynamic provisioning to exist at all, such as a single-node development cluster, a throwaway CI cluster or an edge box with no CSI driver available. Understand what you gave up: the data lives on one node's disk, so a rescheduled pod finds an empty volume, there is no replication, no snapshot and no capacity enforcement, and losing the node loses the data. Anything with a durability requirement needs a real CSI driver or a replicated storage layer.
 
-### Managed K8s GPU
-**Short:** Cloud-managed Kubernetes with GPU node pools and a GPU operator, as on EKS or GKE, for ML workloads.
-**Kind:** concept
-**Lang:** *
-**Roles:** platform-delivery/cloud-platform-and-cost @1, platform-delivery/kubernetes-and-orchestration @2, ml-lifecycle/ml-platform-and-pipelines @3
-
-The pattern is a managed Kubernetes cluster with one or more node pools of accelerator instances, taints keeping ordinary workloads off them, and a device plugin advertising a GPU extended resource so pods request accelerators the way they request CPU. In practice the whole node stack, meaning the matching driver, the container toolkit, the device plugin, a metrics exporter and any partitioning configuration, is installed by the vendor's GPU operator rather than baked into the image, so a driver upgrade becomes a cluster operation instead of an image rebuild.
-
-Reach for it when GPU workloads have to share a platform with everything else and you want one scheduler, one identity model and one deployment pipeline. The costs are that GPUs are indivisible by default, so a pod requesting one holds the whole card unless partitioning or time-slicing is configured, and that an idle GPU node is the most expensive idle resource in the cluster, which is why queueing and gang scheduling come up immediately.
-
 ### Metacontroller
 **Short:** Kubernetes add-on that lets you write operators as simple webhooks, avoiding a full controller-runtime codebase.
 **Kind:** tech
@@ -1466,16 +1446,6 @@ Reach for it once the number of VPCs and on-premises sites makes a full mesh of 
 **Kind:** api
 **Lang:** *
 **Roles:** platform-delivery/kubernetes-and-orchestration @1, security/supply-chain-and-runtime-security @2, runtime-systems/io-networking-and-syscalls @3
-
-### Node autoscaler
-**Short:** Kubernetes node-provisioning autoscalers (Karpenter, Cluster Autoscaler) that add node capacity for pending pods.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/cloud-platform-and-cost @2
-
-Node autoscaling is a distinct layer from pod autoscaling and the two are routinely confused. An HPA changes replica count; a node autoscaler watches for pods the scheduler cannot place and adds machines so they fit, then removes machines whose workloads could run elsewhere. The trigger is therefore scheduling failure rather than a utilization metric, and resource requests rather than actual usage are what it reasons about, so a pod requesting far more than it uses inflates the fleet while a pod requesting nothing can look free.
-
-You want one in any cluster whose workload varies, since otherwise capacity is a number somebody picked and rarely revisits. Three things decide whether it works: honest resource requests, PodDisruptionBudgets that permit scale-down without permitting an outage, and enough headroom to cover the minute or two a new node takes to become ready. Cluster Autoscaler operates within predefined node groups, while Karpenter provisions instance shapes directly from what the pending pods ask for.
 
 ### Nomad
 **Short:** HashiCorp's lightweight scheduler that orchestrates containers, binaries and VMs from one binary.
@@ -1738,16 +1708,6 @@ Reach for it when releases should be a consequence of merging rather than a ritu
 A `serverless.yml` declares functions and their events, whether HTTP, schedule, queue or stream, plus IAM statements and any supporting resources, and the framework expands that into a full deployment for the target provider, which on AWS means generating and deploying a CloudFormation stack while uploading the packaged code. Plugins are the ecosystem, covering local emulation, bundling, step functions, warmers and support for providers beyond AWS.
 
 Reach for it for a function-centric application when you want less ceremony than raw CloudFormation and a large plugin catalogue. Weigh two things: it is another abstraction whose failures surface as provider errors underneath, and recent major versions introduced a commercial licence for larger organizations, which pushed some teams elsewhere. SAM is the AWS-native equivalent, and CDK is the choice when you want a real language and infrastructure beyond the functions themselves.
-
-### Serverless GPU
-**Short:** Pay-per-invocation GPU capacity such as SageMaker Serverless or Cloud Run GPU; scales inference to zero.
-**Kind:** concept
-**Lang:** *
-**Roles:** platform-delivery/cloud-platform-and-cost @1, inference/model-server @2
-
-The pattern is a GPU-backed endpoint that scales its worker count with the request queue and down to zero when idle, billed by the second of execution rather than by the hour of instance uptime. What makes it different from serverless CPU is where the time goes: an invocation on a cold worker has to schedule a scarce accelerator, pull an image that is frequently tens of gigabytes, and load weights into device memory, so cold start is measured in tens of seconds unless the platform snapshots state or keeps workers warm.
-
-Reach for it when traffic is genuinely intermittent, such as an internal tool, a demo, an occasional batch, or a long tail of rarely used models, where an always-on GPU would sit idle at full price. The crossover comes early: once a GPU is busy even a modest fraction of the day a reserved or committed instance is cheaper, and any latency-sensitive user-facing path needs a warm floor, at which point the serverless billing advantage disappears.
 
 ### Skaffold
 **Short:** Google tool automating the build-push-deploy inner loop against a Kubernetes cluster with file-watch redeploys.
