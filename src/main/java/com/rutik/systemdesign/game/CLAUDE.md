@@ -117,7 +117,7 @@ The `game/` directory is an application, not study content — see
   **Re-run `python3 extract.py` after editing any module's Q&A**, then reload.
 - **`tech_index.json` is GENERATED and gitignored, like every other bank artifact.**
   Its source is `technologies/tech_bank/*.md` (a taxonomy file plus 18 tier shards);
-  `extract.py`'s `build_tech_bank()` parses it, validates it, and writes the JSON at the
+  `build_tech.py`'s `build_tech_bank()` parses it, validates it, and writes the JSON at the
   game root. It was committed only because deriving a tool's roles needed a judgement
   pass — that judgement lives in markdown now, so **the `[BANK]` comment's old "NOT
   CI-regenerable" claim is dead.** The bank directory is excluded from BOTH `extract.py`

@@ -343,10 +343,14 @@ Reach for it when the model must run on the user's device for privacy, offline u
 **Roles:** inference/model-format-and-edge @1, runtime-systems/memory-processes-and-os @3
 
 ### NVIDIA Triton
-**Short:** Multi-framework inference server with dynamic batching, model ensembles and concurrent model instances.
+**Short:** NVIDIA's multi-framework model server: dynamic batching, model ensembles, versioning and TensorRT backends.
 **Kind:** tech
 **Lang:** *
-**Roles:** inference/model-server @1, inference/inference-engine @3, ml-lifecycle/ml-platform-and-pipelines @3, platform-delivery/kubernetes-and-orchestration @3
+**Roles:** inference/model-server @1, inference/inference-engine @3, ml-lifecycle/ml-platform-and-pipelines @3, platform-delivery/kubernetes-and-orchestration @3, inference/compiler-and-runtime-optimization @3
+
+Models live in a repository directory, each with a `config.pbtxt` declaring inputs, outputs, batching, and instance count, and the server exposes them over HTTP, gRPC, and an in-process C API. Backends cover TensorRT, ONNX Runtime, PyTorch, TensorFlow, Python, and LLM engines, so one server fronts a mixed fleet instead of one bespoke service per framework.
+
+Throughput comes from two levers: dynamic batching queues arriving requests for a few milliseconds and fuses them into one GPU call, and multiple model instances per GPU overlap execution. Ensembles and business-logic scripting chain preprocess, model, and postprocess server-side so intermediate tensors never cross the network, and the model control API hot-swaps versions. Reach for it when GPU utilization and batching are what you are optimizing; a single small CPU model behind FastAPI does not need any of this. Unrelated to OpenAI Triton, the GPU kernel DSL, which shares only the name.
 
 ### NVIDIA Triton OpenVINO backend
 **Short:** Triton backend that executes models through Intel OpenVINO so CPU models serve inside the same Triton fleet.
@@ -636,16 +640,6 @@ The handler is where custom preprocessing and batching logic lives, which makes 
 **Roles:** inference/quantization-and-compression @1, gpu/gpu-portability-and-precision @2, model-training/distributed-training @3
 
 FP8 is not merely a cast, because the format has too little dynamic range to hold activations and gradients directly. The library keeps per-tensor scaling factors, tracks a history of observed amax values and applies a delayed-scaling recipe, using E4M3 where precision matters and E5M2 where the wider exponent range does. It packages that behind drop-in modules such as `te.Linear`, `te.LayerNorm` and `te.TransformerLayer` plus an `fp8_autocast` context, so an existing PyTorch model can adopt it without a rewrite, and it brings fused attention kernels along with it. Reach for it on Hopper or Blackwell hardware where the low-precision tensor cores exist, since on older GPUs there is nothing to gain; NeMo and Megatron-LM already integrate it if you are training at that scale.
-
-### Triton Inference Server
-**Short:** NVIDIA's multi-framework model server: dynamic batching, model ensembles, versioning and TensorRT backends.
-**Kind:** tech
-**Lang:** *
-**Roles:** inference/model-server @1, inference/inference-engine @3, inference/compiler-and-runtime-optimization @3
-
-Models live in a repository directory, each with a `config.pbtxt` declaring inputs, outputs, batching, and instance count, and the server exposes them over HTTP, gRPC, and an in-process C API. Backends cover TensorRT, ONNX Runtime, PyTorch, TensorFlow, Python, and LLM engines, so one server fronts a mixed fleet instead of one bespoke service per framework.
-
-Throughput comes from two levers: dynamic batching queues arriving requests for a few milliseconds and fuses them into one GPU call, and multiple model instances per GPU overlap execution. Ensembles and business-logic scripting chain preprocess, model, and postprocess server-side so intermediate tensors never cross the network, and the model control API hot-swaps versions. Reach for it when GPU utilization and batching are what you are optimizing; a single small CPU model behind FastAPI does not need any of this.
 
 ### vLLM
 **Short:** Self-hosted LLM serving engine: PagedAttention KV cache, continuous batching, prefix caching, LoRA serving.

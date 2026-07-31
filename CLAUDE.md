@@ -521,8 +521,11 @@ silently dropped from the game or renders wrong. These rules are derived from
   relative `.md` links (the `/content/` route serves any file) — so linking to a
   case study from a module is fine; its Q&As just never enter the quiz bank.
 - **`technologies/tech_bank/` is excluded from BOTH walks by exact path** — the Q&A/file-
-  tree walk in `main()` and the §11/§8 walk in `build_tech_index()` (`TECH_BANK_DIR` /
-  `in_tech_bank()` in `extract.py`). It is authored DATA, the source of
+  tree walk in `extract.py`'s `main()` and the §11/§8 walk in `build_tech_index()`
+  (`TECH_BANK_DIR` / `in_tech_bank()` — both live in `game/build_tech.py`, which
+  `extract.py` imports; the technology code was split out of `extract.py` on 2026-07-31
+  so the question bank and the technology bank are separate programs sharing only
+  `game/build_common.py`). It is authored DATA, the source of
   `game/tech_index.json`, not study content: no `STUDY_ORDER` entry, no
   `<!-- study-paths -->` block, no questions, not in the reader's module tree. The
   exclusion is load-bearing and silent — as a plain module dir it becomes a phantom

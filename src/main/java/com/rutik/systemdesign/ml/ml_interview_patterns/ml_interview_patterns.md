@@ -893,7 +893,7 @@ A team built and trained an excellent model but did not set up monitoring. Three
 | Tabular ML | XGBoost, LightGBM, CatBoost | Structured data |
 | Feature store | Feast, Tecton, Vertex Feature Store | Training-serving consistency |
 | Experiment tracking | MLflow, Weights & Biases, Neptune | Hyperparameter and metric logging |
-| Model serving | TorchServe, BentoML, Triton | Production inference |
+| Model serving | TorchServe, BentoML, NVIDIA Triton | Production inference |
 | Pipeline orchestration | Airflow, Prefect, Kubeflow | Training pipelines |
 | Monitoring | Evidently AI, Arize Phoenix, Whylogs | Drift detection |
 | A/B testing | Statsig, Optimizely, Eppo | Experiment platforms |

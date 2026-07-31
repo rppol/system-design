@@ -1086,10 +1086,14 @@ You push and pop named ranges around regions of your own code, and the profiler 
 Add the ranges before you profile rather than after. Without them the hardest part of reading a large GPU trace is working out which phase of your program a given burst of kernels belongs to, and that is exactly the question the timeline cannot answer on its own.
 
 ### OpenAI Triton
-**Short:** Python DSL and compiler for writing GPU kernels at block level; most of vLLM's kernels are written in it.
+**Short:** Python-embedded DSL for writing block-level GPU kernels without CUDA C++; also the torch.compile codegen backend.
 **Kind:** tech
 **Lang:** python
-**Roles:** gpu/kernel-programming @1, inference/compiler-and-runtime-optimization @2, gpu/gpu-portability-and-precision @3
+**Roles:** gpu/kernel-programming @1, inference/compiler-and-runtime-optimization @2, gpu/gpu-math-libraries @3, gpu/gpu-portability-and-precision @3
+
+You write a kernel as a Python function decorated `@triton.jit` that operates on blocks of elements — pointer arithmetic, `tl.load`/`tl.store` with masks, `tl.dot` for the matmul — and the compiler handles what CUDA C++ makes you do by hand: mapping work onto threads within a block, staging data through shared memory, and selecting the tensor-core instruction. You still choose block sizes and tiling, which is where the performance lives, and `triton.autotune` sweeps those configurations.
+
+Its most common role is not hand-written at all: `torch.compile`'s Inductor backend generates Triton for fused elementwise and reduction kernels. Write it yourself when a fusion the compiler will not find is the bottleneck — a custom attention variant, a fused normalization — and stay with cuBLAS or cuDNN for the standard shapes they already tune better than you will. Note the name collision with NVIDIA Triton, an unrelated model-serving product.
 
 ### Pallas
 **Short:** JAX's block-level Python kernel DSL for writing fused custom kernels targeting both GPU and TPU.
@@ -1258,16 +1262,6 @@ Reach for it so that you never hand-write a reduction or a scan, both of which a
 **Kind:** api
 **Lang:** python
 **Roles:** gpu/kernel-programming @1, devtools/compiler-toolchain-and-codegen @2
-
-### Triton
-**Short:** Python-embedded DSL for writing block-level GPU kernels without CUDA C++; also the torch.compile codegen backend.
-**Kind:** tech
-**Lang:** python
-**Roles:** gpu/kernel-programming @1, inference/compiler-and-runtime-optimization @2, gpu/gpu-math-libraries @3
-
-You write a kernel as a Python function decorated `@triton.jit` that operates on blocks of elements — pointer arithmetic, `tl.load`/`tl.store` with masks, `tl.dot` for the matmul — and the compiler handles what CUDA C++ makes you do by hand: mapping work onto threads within a block, staging data through shared memory, and selecting the tensor-core instruction. You still choose block sizes and tiling, which is where the performance lives, and `triton.autotune` sweeps those configurations.
-
-Its most common role is not hand-written at all: `torch.compile`'s Inductor backend generates Triton for fused elementwise and reduction kernels. Write it yourself when a fusion the compiler will not find is the bottleneck — a custom attention variant, a fused normalization — and stay with cuBLAS or cuDNN for the standard shapes they already tune better than you will. Note the name collision with NVIDIA's Triton Inference Server, an unrelated model-serving product.
 
 ### vendor ICDs
 **Short:** OpenCL's Installable Client Driver mechanism: each vendor ships an ICD, host code enumerates all at runtime.
