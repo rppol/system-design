@@ -21,11 +21,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** gpu/gpu-portability-and-precision @1, inference/compiler-and-runtime-optimization @2, runtime-systems/memory-processes-and-os @3
 
+The extension adds eight two-dimensional tile registers, each 1 KB laid out as 16 rows of 64 bytes, plus a TMUL unit that multiplies two tiles and accumulates into a third in FP32. A configuration register declares how many rows and column bytes are actually in use, so the same registers hold a BF16 block or a wider INT8 one; software loads tiles with `tileloadd`, issues `tdpbf16ps` or `tdpbusd`, and stores the accumulator back.
+
+It matters when inference has to run on CPU: an INT8 or BF16 GEMM through oneDNN, OpenVINO or PyTorch reaches throughput AVX-512 cannot, with no accelerator in the box. It needs Sapphire Rapids or later Xeon plus kernel support for the AMX register state, and the advantage disappears for anything not shaped like a matrix multiply, where the memory system is the limit.
+
 ### Apex
 **Short:** NVIDIA PyTorch extension with fused optimizers such as FusedAdam and the original mixed-precision training tools.
 **Kind:** tech
 **Lang:** python
 **Roles:** gpu/gpu-portability-and-precision @1, model-training/distributed-training @2, model-training/deep-learning-framework @3
+
+Apex has been outlived by most of what it introduced. What remains useful is the fused CUDA kernels: `FusedAdam` and `FusedLAMB` collapse the optimizer's elementwise math into one launch over flattened parameter buffers, and `FusedLayerNorm` and fused softmax cut launch count and memory traffic inside transformer blocks. Its distributed data-parallel wrapper overlapped gradient reduction with the backward pass before core PyTorch did.
+
+The `apex.amp` mixed-precision layer, with its O0 through O3 opt levels, is deprecated; `torch.amp` is the supported path and is built into PyTorch. Reach for Apex only when a framework still imports a specific fused kernel from it, as Megatron-LM and older NeMo builds do, and expect to compile it from source against your exact CUDA and PyTorch versions.
 
 ### atomicAdd
 **Short:** CUDA device intrinsic doing a read-modify-write add atomically; the building block for counters and ready flags.
@@ -63,11 +71,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, devtools/compiler-toolchain-and-codegen @2
 
+Codeplay builds the compiler plugins that give the oneAPI DPC++ toolchain backends beyond Intel's own hardware: install the NVIDIA plugin and `icpx -fsycl -fsycl-targets=nvptx64-nvidia-cuda` lowers SYCL kernels to PTX, or the AMD plugin lowers them to GCN, from unmodified single-source C++. The company is part of Intel and also maintains oneMKL and oneDNN interface layers that dispatch to cuBLAS or rocBLAS underneath.
+
+This is the path when one SYCL codebase must run on Intel, NVIDIA and AMD accelerators instead of maintaining CUDA and HIP versions side by side. The catch is performance rather than correctness: a kernel tuned for one vendor's memory hierarchy and subgroup width rarely lands at native speed on another, so benchmark on every target before committing to the portability story.
+
 ### community SYCL backends
 **Short:** SYCL-for-CUDA and SYCL-for-HIP plugins that let one SYCL source target NVIDIA and AMD GPUs, not just Intel.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1
+
+A SYCL implementation splits between a compiler front end and per-target backends, and these plugins supply the backends the vendor does not ship: the CUDA plugin lowers kernels through the NVPTX target to PTX, the HIP plugin to AMD GCN. Nothing in the SYCL source changes, the target list is a compiler flag, and ahead-of-time compilation for several targets produces one binary that picks a device at run time.
+
+They exist so a vendor-neutral codebase can keep a single kernel source across a mixed fleet. Expect a lag behind each vendor's own toolchain, since new hardware features and recent SYCL extensions land here last, and expect to leave performance on the table against hand-tuned CUDA or HIP. Where one vendor dominates the deployment, its native stack is still the faster answer.
 
 ### compute-sanitizer
 **Short:** CUDA Toolkit runtime checker whose memcheck, racecheck, synccheck and initcheck tools catch kernel OOB access and races.
@@ -96,6 +112,10 @@ Compile with `-lineinfo` so reports point at source lines, and expect a substant
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1, gpu/kernel-programming @3
+
+The tool instruments shared-memory accesses and reports pairs that conflict: a write and a read, or two writes, reaching the same address from different threads of a block with no `__syncthreads()` ordering them. Both source locations are named, and a hazard-analysis mode points at the barrier that should have been there rather than only listing the addresses involved.
+
+Reach for it whenever a kernel using shared memory returns an answer that changes with block size, GPU model or a rebuild, because that is what an unsynchronized tile handoff looks like. Compile with `-lineinfo` so hazards map to source lines, and run the smallest input that reproduces: instrumenting every shared access costs an order of magnitude or more. It sees shared memory only, so global-memory races need different reasoning.
 
 ### Cooperative Groups
 **Short:** CUDA API for composable thread groups and barriers, including warp tiles and grid-wide synchronization.
@@ -161,11 +181,19 @@ It is the path a framework's `matmul` and `nn.Linear` already take for Tensor Co
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, devtools/compiler-toolchain-and-codegen @3, gpu/gpu-math-libraries @3
 
+The programming model is a grid of thread blocks, each block resident on one SM with its own shared memory and barrier, and threads executing in warps of 32 lanes. Around it sits a toolchain, with `nvcc` splitting host and device code, PTX as a forward-compatible intermediate and SASS as the real instruction set, two host APIs, and the math libraries most applications actually call: cuBLAS, cuDNN, cuFFT, cuSPARSE, Thrust and CUB.
+
+It is the default because the ecosystem is here first, from every deep-learning framework to the profilers and kernel libraries. The costs are that it is NVIDIA-only, so portability means SYCL, HIP or an abstraction layer that trades ecosystem for reach, and that version coupling is an operational tax: driver, toolkit, cuDNN and the framework build all have to agree before anything runs.
+
 ### CUDA C++
 **Short:** NVIDIA's C++ dialect for authoring device kernels with full control of memory, launch config and intrinsics.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, devtools/compiler-toolchain-and-codegen @3
+
+You mark functions `__global__`, `__device__` or `__host__`, launch with the triple-chevron syntax, and index work off `blockIdx`, `blockDim` and `threadIdx`. The dialect adds what the hardware exposes and standard C++ has no words for: `__shared__` tiles, `__syncthreads()`, warp shuffle and vote intrinsics, scoped atomics, texture and constant memory, and inline PTX. Templates, lambdas and much of the standard library work in device code within the compiler's supported subset.
+
+Write it when you need control the layers above cannot express, such as a fused kernel, an unusual data layout, or an explicit shared-memory staging plan. The price is that every performance decision becomes yours: occupancy, coalescing, bank conflicts and register pressure. For block-level tiled kernels Triton usually reaches comparable speed with far less code, and for standard GEMM and convolution the vendor libraries already win.
 
 ### CUDA Driver API
 **Short:** Low-level CUDA API for explicit context, module and launch control; how nvrtc-compiled PTX is loaded and launched.
@@ -197,6 +225,10 @@ It is the path a framework's `matmul` and `nn.Linear` already take for Tensor Co
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1
 
+This is the `cudaXxx` layer in `libcudart` that most code uses. It creates a context implicitly on first use, so there is no explicit initialization step, and it hides module loading: kernels compiled into the binary by `nvcc` are launched by name through the triple-chevron syntax rather than looked up as handles. Memory, streams, events, graphs and peer access all have runtime entry points, and every call returns a `cudaError_t` that an asynchronous launch may only surface later.
+
+Use it unless you specifically need what it hides. The Driver API is the alternative when contexts must be explicit, when modules are loaded from PTX or cubins produced at run time, or when a library must not assume anything about the process's context, which is why JIT-oriented stacks such as CuPy and PyCUDA sit on the driver layer instead.
+
 ### cuda-gdb
 **Short:** Source-level device debugger for CUDA kernels: step threads and blocks, inspect shared memory, catch races.
 **Kind:** tech
@@ -213,11 +245,19 @@ It needs a build with device debug information, which disables optimization, so 
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1
 
+It ran an application under device-side instrumentation and reported out-of-bounds and misaligned accesses to global, shared and local memory, invalid device frees, and hardware exceptions, naming the offending block and thread. Sub-tools extended the same harness to shared-memory races, barrier misuse and reads of uninitialized device memory, which is the structure its successor kept unchanged.
+
+It has been removed from the CUDA Toolkit and its functionality moved wholesale into `compute-sanitizer`, which has better SASS-level attribution on current architectures. If a script or a runbook still invokes it, substitute `compute-sanitizer --tool memcheck`; nothing is lost in the move, and on recent GPU generations the old binary will not run at all.
+
 ### cuda-memcheck/compute-sanitizer
 **Short:** CUDA memory checker that catches out-of-bounds accesses, misaligned pointers and race conditions in kernels.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1
+
+Both names refer to one facility: a runtime that instruments device code so an illegal access is reported at the instruction that made it, with the kernel name, the block and thread, the address and a host stack trace, instead of surfacing as a corrupted result or an unrelated crash much later. Four sub-tools split the work, covering out-of-bounds and misalignment, shared-memory races, barrier misuse, and uninitialized reads.
+
+Reach for it the moment a kernel's output depends on block size, GPU model or build flags. Build with `-lineinfo` for source attribution and run the smallest reproducing input, because instrumentation costs a large multiple of normal runtime. The older name is the retired binary; `compute-sanitizer` is what ships in current toolkits, and the sub-tool names carried over unchanged.
 
 ### cuda.laneid
 **Short:** Python-side lane-id intrinsic for GPU kernels, compiling to the same PTX as the CUDA C++ warp primitives.
@@ -545,11 +585,19 @@ cuDNN implements the primitives deep learning frameworks are built from -- convo
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1
 
+Work is organized around a plan: you describe the transform once, giving dimensionality, sizes, batch count, in-place or out-of-place, real-to-complex or complex-to-complex, and the library selects algorithms and sizes its workspace at plan time so the repeated call is just an execute on the same handle. Lengths factorable into small primes take the fast radix paths, while a large prime factor falls back to a slower general algorithm.
+
+Reach for it for signal processing, convolution through the frequency domain, and spectral solvers where the data is already on the device. Create plans once and reuse them, since planning is the expensive part, and watch the real-to-complex layout: the output is the half spectrum with a non-obvious padding rule, and misreading it is the usual source of wrong results.
+
 ### cuobjdump
 **Short:** CUDA CLI that inspects fatbinaries and objects: SASS disassembly and the list of embedded architectures.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1, devtools/compiler-toolchain-and-codegen @2
+
+It reads the fatbinary embedded in an executable, an object file or a cubin and reports what is inside: the list of architectures compiled in, SASS disassembly for each, and the PTX the driver would JIT for an architecture not listed. It also prints per-kernel resource usage, which is how you learn a shipped binary's register and shared-memory footprint without having its source.
+
+The common use is diagnosing a launch failure on new hardware: if the fatbinary carries SASS only for older architectures and no PTX, there is nothing for the driver to JIT and the kernel simply cannot run. It is the container-aware tool of the pair, while `nvdisasm` works on an extracted cubin and is the one that produces control-flow graphs and per-instruction analysis.
 
 ### cuobjdump --dump-sass
 **Short:** Disassembles a CUDA binary to SASS so you can see the exact instructions and memory paths the compiler emitted.
@@ -585,6 +633,10 @@ It also exposes the machinery that decides whether the GPU actually wins: memory
 **Lang:** python
 **Roles:** gpu/multi-gpu-and-collectives @1
 
+`cupy.cuda.nccl` is a thin wrapper over the NCCL C library: build a communicator from a unique id broadcast to every rank, then call `allReduce`, `broadcast`, `reduceScatter` or `allGather` passing the raw device pointer from an array's `data.ptr`, an element count, a dtype code and a stream. There is no autograd, no process-group abstraction and no launcher, so rendezvous and rank numbering are yours to arrange.
+
+Reach for it when a CuPy-based multi-GPU program needs real collectives and pulling in a training framework's distributed stack just for them would be absurd. If the workload is already PyTorch, use `torch.distributed`, which wraps the same library with process groups, timeouts and a launcher, and gets far more testing across topologies.
+
 ### CuPy RawKernel
 **Short:** CuPy entry point for compiling and launching hand-written CUDA C++ source, including shared memory, from Python.
 **Kind:** api
@@ -609,11 +661,19 @@ It also exposes the machinery that decides whether the GPU actually wins: memory
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1
 
+It offers two very different interfaces. The host API fills a device array in bulk from one generator, choosing among XORWOW, MRG32k3a, MTGP32, Philox and Sobol quasi-random sequences, which suits a kernel that consumes a pre-generated array. The device API instead gives every thread its own state, initialized from a seed plus a per-thread sequence number and offset, and drawn from inside the kernel with calls such as `curand_uniform`.
+
+The device path is the one that bites: state is large, so initializing it on every launch costs real time and keeping it live pressures registers and occupancy. Allocate the states once and reuse them across launches, and give threads distinct sequence numbers rather than distinct seeds, which is what keeps the substreams independent and the run reproducible.
+
 ### cuSPARSE
 **Short:** NVIDIA's GPU sparse linear algebra library covering CSR, COO and block-sparse matrix operations.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1
+
+It implements sparse linear algebra over the standard layouts, CSR, CSC, COO and blocked ELL, with the generic API expressing operations through descriptors: sparse matrix times dense vector, sparse times dense matrix, sparse-sparse products, format conversions and triangular solves. Many routines run in phases, a buffer-size query and an analysis pass whose result can be reused across every call sharing the same sparsity pattern.
+
+The performance reality is that these kernels are bandwidth- and irregularity-bound: scattered access and load imbalance across rows mean a sparse multiply reaches a small fraction of what a dense GEMM does on the same card. Sparsity has to be very high before an unstructured sparse multiply beats a dense one on a GPU, which is why structured 2:4 sparsity through cuSPARSELt is the path that actually converts pruning into speed.
 
 ### cuSPARSELt
 **Short:** NVIDIA library for structured-sparse (2:4) matrix multiply on tensor cores, turning pruned weights into real speedup.
@@ -621,11 +681,19 @@ It also exposes the machinery that decides whether the GPU actually wins: memory
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1, inference/quantization-and-compression @2
 
+It targets exactly one pattern, 2:4 sparsity, meaning two zeros in every group of four contiguous weights, because that is what the sparse tensor cores on Ampere and later can consume. Pruned weights are compressed offline into a values array roughly half the original size plus a small metadata array of index bits, and the matmul reads that metadata to skip zero operands in hardware rather than in software, so the multiply itself runs faster instead of merely fitting in less memory.
+
+The workflow is prune to the 2:4 pattern, usually with a fine-tuning pass to recover accuracy, compress once, then call the library at inference. Reach for it when weights are already in that pattern and the GEMM is the bottleneck. Arbitrary unstructured sparsity gets nothing from it, and the realized speedup lands well below the ideal because only the matmul portion of a layer changes.
+
 ### CUTE
 **Short:** CUTLASS's C++ template layer of tensor and layout abstractions for building Hopper/Blackwell Tensor Core kernels.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1, gpu/kernel-programming @2
+
+CuTe's core abstraction is the layout, a nested pair of shapes and strides mapping a logical coordinate to an offset, with a tensor being a pointer plus a layout. Because layouts compose, divide and tile algebraically, partitioning a threadblock tile among warps, then among threads, then into the fragments a matrix instruction expects becomes layout arithmetic the compiler resolves at compile time rather than index expressions you derive by hand and get wrong.
+
+It is the foundation CUTLASS 3.x was rebuilt on, and it is what makes recent hardware features expressible without hand-written address math: asynchronous bulk copies, warpgroup matrix instructions, and swizzled shared-memory layouts that avoid bank conflicts. Reach for it when writing a tensor-core kernel from scratch. The price is a steep learning curve, since the layout algebra must be understood before the code reads as anything but templates.
 
 ### CUTLASS
 **Short:** NVIDIA's header-only C++ template library for building near-cuBLAS GEMM and convolution kernels with fused epilogues.
@@ -653,17 +721,29 @@ Reach for it for fleet-level monitoring, capacity accounting and alerting across
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1, gpu/kernel-programming @3
 
+It is one of the CUDA samples, a short program that walks every visible device and prints the whole `cudaDeviceProp` structure: name and compute capability, SM count, global memory, shared memory and registers per block and per SM, maximum threads per block, warp size, clock rates, L2 size, whether unified addressing and peer access are available, and the driver and runtime versions it was built against.
+
+It answers the first question of any GPU triage, whether the runtime sees the hardware at all and whether it is the card you think it is, which makes it the standard smoke test inside a container or after a driver change. Modern toolkits no longer ship it as a binary, so you build it from the samples repository, or get the same facts from `nvidia-smi -q` and a few lines calling `cudaGetDeviceProperties` yourself.
+
 ### DPC++ compiler
 **Short:** Intel's SYCL implementation and compiler (icpx/dpcpp) for single-source C++ that targets CPUs, Intel GPUs and beyond.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, devtools/compiler-toolchain-and-codegen @2, gpu/kernel-programming @2
 
+`icpx -fsycl` compiles single-source C++ in which host code and kernels share a translation unit: the front end splits the device code out and compiles it either ahead of time for named targets or to SPIR-V for finalization by the driver, then embeds the result beside the host object. DPC++ is SYCL 2020 plus Intel extensions such as unified shared memory, subgroups and reductions, several of which were later folded into the standard itself.
+
+Reach for it when the deployment is Intel CPUs, Arc or Data Center GPUs, or when one source genuinely must span vendors through the NVIDIA and AMD plugins. Against CUDA it trades a narrower ecosystem for portability, and the SPIR-V path means kernels are finalized at run time unless you compile ahead of time for the exact device, which is worth doing where startup latency matters.
+
 ### Flash Attention
 **Short:** IO-aware fused attention kernels that tile QKV in SRAM, cutting memory traffic and enabling long sequences.
 **Kind:** tech
 **Lang:** python
 **Roles:** gpu/gpu-math-libraries @1, inference/inference-engine @2, gpu/kernel-programming @3, model-training/deep-learning-framework @3
+
+Attention is bound by memory traffic rather than arithmetic, because the score matrix is quadratic in sequence length and every element makes a round trip to HBM. The kernel keeps that matrix from ever existing: tiles of queries, keys and values are loaded into on-chip SRAM, partial scores are computed there, and the softmax is combined across tiles with a running maximum and running denominator, rescaling the accumulated output as it goes.
+
+Memory then grows linearly rather than quadratically with sequence length, which is what makes long contexts affordable in training and prefill at all. The constraints are practical rather than theoretical: support is per head dimension, dtype and mask shape, and an unusual attention bias sends the framework back to the materializing path, which shows up as a sudden jump in memory rather than as an error.
 
 ### Flash Attention 2
 **Short:** IO-aware fused attention kernel that cuts memory traffic and runs 2-4x faster than naive attention.
@@ -690,11 +770,19 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** python, cpp
 **Roles:** gpu/gpu-math-libraries @1, gpu/kernel-programming @2, inference/compiler-and-runtime-optimization @3
 
+The repository ships kernels rather than a model layer: a standard entry point taking packed query, key and value tensors, a variable-length variant that takes a cumulative-sequence-lengths array so a batch of ragged sequences needs no padding, and KV-cache entry points for decoding. It builds CUDA and CUTLASS-heavy sources against your installed PyTorch and CUDA, which is why installation is the part that goes wrong.
+
+Install it when a training or serving stack asks for it by name, or when you need the variable-length packing that PyTorch's built-in scaled dot-product attention does not expose. For ordinary attention the built-in dispatcher already selects a flash kernel when dtype, head dimension and mask qualify, so the extra dependency buys nothing and costs a fragile build step.
+
 ### flash-attn-3
 **Short:** FlashAttention-3: Hopper-optimized fused attention kernels with async pipelining and FP8, ~75% FLOP utilization.
 **Kind:** tech
 **Lang:** python
 **Roles:** gpu/kernel-programming @1, inference/compiler-and-runtime-optimization @2, gpu/gpu-portability-and-precision @3
+
+The Hopper rewrite exploits hardware the earlier kernels could not: the Tensor Memory Accelerator moves tiles asynchronously so loads overlap the matmul instead of stalling it, warp specialization splits producer and consumer roles across warpgroups, and the softmax of one tile is interleaved with the GEMM of the next so non-matmul work leaves the critical path. FP8 is supported with block-level scaling to keep the accuracy loss small.
+
+It pays only on H100-class hardware, since on Ampere and earlier the instructions it is built around do not exist and version 2 remains the kernel. Coverage is also narrower than version 2 across head dimensions, masking modes and backward support, so a serving stack normally keeps both and dispatches per configuration rather than switching over wholesale.
 
 ### flash-linear-attention
 **Short:** Triton fused-kernel library for linear-attention architectures such as GLA, RetNet, RWKV and Mamba-2.
@@ -702,11 +790,19 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** python
 **Roles:** gpu/kernel-programming @1, inference/compiler-and-runtime-optimization @2, model-training/deep-learning-framework @3
 
+Linear-attention and state-space architectures replace softmax attention with a recurrent state update, which is cheap in theory and terrible as naive PyTorch, because a sequential scan over thousands of timesteps launches thousands of tiny kernels. The library provides the chunked formulation in Triton instead: the sequence is split into chunks, the within-chunk contribution is computed as a matmul and the cross-chunk contribution through the recurrent state, so the GPU sees a few large tensor-core operations.
+
+It covers GLA, RetNet, RWKV variants, Mamba-2 style updates and related designs, with fused forward and backward kernels and both recurrent and chunked modes so decoding and training each use the right one. Reach for it when training or serving one of these architectures; for standard softmax attention the flash-attention kernels are the equivalent layer and are far more widely tested.
+
 ### flash_attn
 **Short:** The pip package shipping Flash Attention 1/2/3 CUDA kernels; install with --no-build-isolation against your torch build.
 **Kind:** tech
 **Lang:** python
 **Roles:** gpu/gpu-math-libraries @1, inference/compiler-and-runtime-optimization @2, model-training/deep-learning-framework @3
+
+This is the import name and the pip distribution behind the FlashAttention kernels. The `--no-build-isolation` flag matters because the build imports `torch` at setup time to discover the CUDA version and the C++ ABI it must compile against, and an isolated build environment has no torch in it, so the install either fails outright or produces an extension that will not load beside your interpreter's torch.
+
+Prefer a prebuilt wheel matching your exact torch, CUDA and Python versions. A source build compiles a large amount of template-heavy code and can exhaust memory on a small machine, which is why `MAX_JOBS` is usually turned down for it. The characteristic run-time failure is an undefined symbol on import, and it always means the extension and torch were built against different versions.
 
 ### FlashAttention
 **Short:** IO-aware fused attention kernels that tile QK^V in SRAM, avoiding the materialized N-by-N attention matrix.
@@ -714,11 +810,19 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** *
 **Roles:** gpu/gpu-math-libraries @1, inference/compiler-and-runtime-optimization @2, gpu/kernel-programming @3
 
+The kernel fuses the whole attention block, the query-key product, the scaling, the mask, the softmax and the value multiply, into one pass that tiles the sequence and keeps intermediates in shared memory and registers. What makes it exact rather than approximate is online softmax: each tile updates a running row maximum and a running normalizer, and the already-accumulated output is rescaled whenever the maximum moves, so the result matches the unfused computation up to floating-point reassociation.
+
+The backward pass makes the same bargain in the other direction, recomputing scores from saved statistics instead of storing the score matrix, trading arithmetic that is cheap here for bandwidth that is not. That is why it cuts activation memory during training as much as it improves speed, and why long-context training plans simply assume it is present rather than treating it as an optimization.
+
 ### FlashAttention and FlashInfer
 **Short:** Fused IO-aware attention kernel libraries; FlashInfer additionally targets paged KV layouts used by serving engines.
 **Kind:** tech
 **Lang:** python, cpp
 **Roles:** gpu/gpu-math-libraries @1, inference/inference-engine @2, gpu/kernel-programming @3
+
+They solve the same problem at different points of the pipeline. The FlashAttention kernels assume contiguous query, key and value tensors, which fits training and prefill. FlashInfer targets decoding inside a server, where the KV cache is paged: one sequence's keys and values live in scattered fixed-size blocks, sequences in a batch have different lengths, and blocks are shared between requests with a common prefix. Its kernels take the block table as an input and gather as they go.
+
+A serving engine usually carries both and dispatches per phase, prefill through one and decode through the other. FlashInfer additionally generates and caches kernels for a given page size, head configuration and mask type, so an unusual configuration compiles on first use rather than silently falling back to a slow generic path.
 
 ### Global Load/Store Efficiency
 **Short:** Legacy CUDA profiler metric: requested bytes over transacted bytes, where 100% means perfectly coalesced access.
@@ -726,11 +830,19 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** *
 **Roles:** gpu/gpu-profiling-and-debugging @1
 
+The metric is the ratio of bytes the threads requested to bytes the memory system actually moved. A warp issues one instruction across 32 lanes and the hardware coalesces those addresses into 32-byte sector transactions; when consecutive lanes touch consecutive addresses the sectors are fully used and the ratio approaches one, while a strided or scattered pattern pulls a whole sector for each useful element and the ratio collapses.
+
+A low value is a data-layout problem, not a code-tuning problem: the fixes are converting an array of structures into a structure of arrays, transposing through shared memory, and padding rows so each warp's segment stays aligned. The name comes from the retired nvprof metric set; Nsight Compute reports the same idea as sectors per request and in its memory workload tables.
+
 ### GPUDirect RDMA
 **Short:** NVIDIA capability letting a NIC DMA straight into GPU memory, skipping host bounce buffers on inter-node traffic.
 **Kind:** tech
 **Lang:** *
 **Roles:** gpu/multi-gpu-and-collectives @1, runtime-systems/io-networking-and-syscalls @3
+
+The GPU exposes a window of its memory through a PCIe base-address register, and a kernel module, either `nvidia-peermem` or the newer dma-buf path, hands those physical addresses to the NIC driver so the adapter's DMA engine reads and writes device memory directly. An arriving message therefore lands in GPU memory without a staging copy into host RAM and a second copy across PCIe, removing both the latency of the bounce and the CPU work of driving it.
+
+It is what lets multi-node NCCL and MPI collectives reach line rate, and topology decides whether you get it: the GPU and the NIC should sit under the same PCIe switch or root complex, which is why dense nodes are built with a NIC per GPU pair. Check the paths with `nvidia-smi topo -m`, because when a transfer has to cross sockets it silently falls back to the host path and only the throughput tells you.
 
 ### hipify-clang
 **Short:** AMD tool that translates CUDA source to HIP by parsing the real AST, more accurate than the text-pattern hipify-perl.
@@ -738,11 +850,19 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, devtools/compiler-toolchain-and-codegen @2
 
+It is a Clang-based tool, so it parses the translation unit into a real syntax tree using your include paths and macro definitions, then rewrites CUDA constructs from that: allocation and copy calls become their HIP equivalents, kernel launches are rewritten, and CUDA library calls map onto the ROCm counterparts. Because it type-checks first it handles macros, templates and conditional compilation correctly, and it reports what it could not translate instead of leaving a plausible-looking wrong token behind.
+
+Use it on real projects, where a pattern matcher would mangle anything hidden behind a macro. The price is that the source must actually compile, so the CUDA headers and the right flags have to be present, which is more setup than the alternative. Either way the output is a starting point: tuning for a different memory hierarchy and a 64-lane wavefront is not something a translator can do for you.
+
 ### hipify-perl
 **Short:** Text-pattern translator rewriting CUDA source into HIP for AMD GPUs; the lighter sibling of hipify-clang.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, devtools/compiler-toolchain-and-codegen @2
+
+It is a text substitution script, a large table of CUDA identifiers mapped to HIP names applied with regular expressions and no understanding of the code. Because it needs no compiler, no headers and no build configuration, it runs over a directory of sources in seconds and can convert files that would not even compile on the machine running it, which is exactly why it is the tool people try first.
+
+That is also its limit. Anything hidden behind a macro, a template parameter or a conditional include is invisible to it, and a wrongly substituted token looks correct until the build fails or, worse, succeeds and behaves differently. Reach for it to survey how much of a codebase is mechanically portable; for the migration you intend to keep, hipify-clang's syntax-tree translation is the one to trust.
 
 ### In-kernel assert
 **Short:** assert() inside a CUDA kernel: aborts and prints file, line and thread on failure; compiled out under NDEBUG.
@@ -762,6 +882,10 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, gpu/gpu-math-libraries @2, devtools/compiler-toolchain-and-codegen @3
 
+The toolkit is the `icx` and `icpx` compilers plus a set of libraries with one interface across devices: oneMKL for BLAS, FFT and solvers, oneDNN for deep-learning primitives, oneTBB for host threading, oneCCL for collectives and oneDAL for classical analytics. VTune and Advisor come with it for hotspot, roofline and offload analysis, and the same library call dispatches to the CPU's AVX-512 and AMX paths or to an Intel GPU depending on the queue it is submitted to.
+
+Reach for it when the hardware is Intel and one source should span CPU, integrated GPU and discrete GPU. Outside that case the libraries are the more common entry point than the compiler, since PyTorch and OpenVINO call oneDNN and oneMKL underneath whether or not you ever write a line of SYCL yourself.
+
 ### kernel<<<grid, block, shmem, stream>>>()
 **Short:** CUDA triple-chevron launch syntax choosing grid, block, dynamic shared memory and stream; also launches child kernels.
 **Kind:** api
@@ -773,6 +897,10 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, gpu/kernel-programming @2
+
+The SDK is not a driver. It packages the official headers, the C++ bindings and the ICD loader, the library your program links against, which at run time reads the vendor entries installed on the machine and forwards every call into whichever installable client drivers are present. That indirection is what lets a single binary enumerate an NVIDIA GPU, an AMD GPU, an Intel integrated GPU and a CPU runtime as platforms and choose among them.
+
+Reach for it when cross-vendor reach matters more than peak performance, particularly on hardware CUDA does not cover such as FPGAs, embedded GPUs and older silicon. The realities to plan for are that kernels are strings compiled at run time, that vendor support for newer OpenCL versions is uneven, and that vendor-specific tuning still decides speed even though the same source compiles everywhere.
 
 ### launch_bounds
 **Short:** CUDA per-kernel compiler hint capping registers for a target block size; preferred over a file-wide maxrregcount.
@@ -786,11 +914,19 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, runtime-systems/concurrency-and-async @2
 
+It is the CUDA C++ standard library: heterogeneous implementations of standard components usable in both host and device code under `cuda::std::`, plus CUDA-specific extensions under `cuda::`. The concurrency layer is the important part, because `cuda::atomic` and `cuda::atomic_ref` carry an explicit thread scope alongside the memory order, so you state whether a synchronization must be visible within a block, across the device or across the system, and `cuda::barrier` and `cuda::pipeline` express asynchronous shared-memory staging.
+
+Reach for it instead of raw `atomicAdd` and `__threadfence` whenever a kernel does real inter-thread synchronization: a block-scoped atomic compiles to weaker and faster instructions than a system-scoped one, and the memory model is specified rather than folklore. It ships with the toolkit inside CCCL alongside Thrust and CUB, and the subset of the standard library it covers grows with each release.
+
 ### libcudadevrt
 **Short:** CUDA device runtime library that must be linked for any translation unit launching kernels from the device.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, devtools/compiler-toolchain-and-codegen @2
+
+Dynamic parallelism, a kernel launching another kernel, is not free-standing code. The device-side launch compiles to a call into this static library, which holds the runtime that queues the child grid, tracks the parent-child dependency and implements the device-side portion of the runtime API. Because it is a separate library linked into the device image, the translation unit must be compiled as relocatable device code with `-rdc=true` and then linked with `-lcudadevrt`.
+
+Getting it wrong shows up as a link error naming a device launch symbol, which is why the two flags are always mentioned together. It only matters if you actually issue device-side launches. Note that relocatable device code also disables some whole-program device optimizations, so enable it for the translation units that need it rather than across the entire build.
 
 ### Metal
 **Short:** Apple's GPU compute and graphics API with MSL kernels, plus MPS and MPSGraph tuned primitive libraries.
@@ -798,11 +934,19 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, gpu/kernel-programming @2, gpu/gpu-math-libraries @3
 
+Kernels are written in the Metal Shading Language, a C++-based dialect, and compiled either ahead of time into a library or from source at run time. The host API is explicit and object-based: a device, a command queue, command buffers holding encoders, and pipeline state objects built once from a compiled function. Apple silicon has unified memory, so a buffer is visible to CPU and GPU with no copy, and the cost model is cache coherence and storage mode rather than PCIe transfers.
+
+It is the only first-class compute path on Apple hardware, and it is what PyTorch's MPS backend, llama.cpp's Metal backend and Core ML's GPU path sit on. Reach for it for on-device inference and Mac-native tooling. There is no portability story at all, so cross-platform code targets it indirectly through an abstraction layer or through one of those higher-level runtimes.
+
 ### Metal Performance Shaders
 **Short:** Apple's tuned GPU kernel library plus the MPSGraph API, the compute stack for Apple silicon.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1, gpu/gpu-portability-and-precision @2
+
+MPS is the tuned kernel library, covering matrix multiply, convolution, pooling, normalization, reductions and image operations, hand-written per GPU family so you are not authoring shading-language kernels for standard work. MPSGraph sits above it as a deferred graph API: you build the computation symbolically and it fuses and schedules the operations and places them on the GPU or the Neural Engine, so a whole model runs from one compile rather than one encoder per layer.
+
+This is the layer PyTorch's `mps` device and Core ML's GPU path call into, so most people use it without writing against it directly. Reach for it when building a Mac or iOS application around a model and you want the tuned primitives without a framework. Expect gaps, since coverage of unusual operations lags CUDA's and the fallback is a hand-written Metal kernel.
 
 ### MIG
 **Short:** NVIDIA Multi-Instance GPU: hardware partitioning of an A100/H100 into isolated slices shared by several workloads.
@@ -810,11 +954,19 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** *
 **Roles:** gpu/multi-gpu-and-collectives @1, platform-delivery/kubernetes-and-orchestration @3, inference/model-server @3
 
+The partition is in hardware rather than in the scheduler: a GPU instance receives its own slice of SMs, its own memory-controller channels and L2 slices, and its own framebuffer, so one tenant's memory traffic cannot steal bandwidth from another and a fault in one instance does not take the others down. Each instance appears as a separate device with its own identifier, and containers are assigned one through the device plugin exactly as they would be assigned a whole GPU.
+
+Reach for it when several small models or several users must share a card with hard isolation and predictable latency, which is the case MPS handles badly because it shares SMs. The constraints are real: profiles are fixed sizes rather than arbitrary fractions, reconfiguration requires draining the GPU, a job cannot span instances, and no workload can use more than its partition even when the rest of the card sits idle.
+
 ### MIG partitioning per replica
 **Short:** Splitting an A100/H100 into MIG slices and pinning one server replica per slice for hard memory and SM isolation.
 **Kind:** concept
 **Lang:** *
 **Roles:** gpu/multi-gpu-and-collectives @1, inference/model-server @2, platform-delivery/cloud-platform-and-cost @3
+
+The pattern is to configure a card into fixed instances, expose them through the Kubernetes device plugin, and schedule one model-server replica per instance so a replica's request for a GPU resolves to a slice rather than the whole board. Each replica then owns a private framebuffer and a private share of SMs and memory bandwidth, so a traffic spike on one model cannot evict another's weights or starve its decode loop.
+
+It suits fleets of small and medium models that individually cannot fill a card and must not interfere with each other. The tradeoffs are that a replica stays capped at its slice even when neighbours are idle, that the coarse profile sizes strand some capacity, and that changing the layout means draining the node. Where isolation is not actually required, MPS or plain multi-instance serving packs the same GPU more tightly.
 
 ### mma.sync
 **Short:** The PTX warp-level matrix-multiply-accumulate instruction that Tensor Cores actually execute.
@@ -828,17 +980,29 @@ Version 2 improves how the work is partitioned across warps and thread blocks so
 **Lang:** *
 **Roles:** gpu/multi-gpu-and-collectives @1, model-training/distributed-training @2, data-movement/batch-and-distributed-compute @3
 
+The model is fixed-size process groups, ranks within a communicator, and explicit messages: point-to-point sends and receives in blocking and non-blocking forms, and collectives including barrier, broadcast, reduce, allreduce, allgather and alltoall, over derived datatypes that describe non-contiguous buffers. It is a specification with several implementations, notably Open MPI and MPICH with their vendor derivatives, and CUDA-aware builds accept device pointers so a transfer can use GPUDirect instead of staging through the host.
+
+In GPU work its usual job is the bootstrap rather than the data path: a launcher starts one rank per GPU and supplies the rank, world size and rendezvous information that NCCL or `torch.distributed` then use for the collectives carrying the tensors. Reach for MPI itself in HPC codes and for host-side coordination; for gradient reduction between GPUs, NCCL is the faster and better-tuned path.
+
 ### mpirun
 **Short:** MPI process launcher that starts one rank per GPU and sets the rendezvous environment NCCL and torch.distributed need.
 **Kind:** tech
 **Lang:** *
 **Roles:** gpu/multi-gpu-and-collectives @1, model-training/distributed-training @2
 
+It is the launcher: given a host list or a scheduler allocation it starts the requested number of processes across nodes, wires up their standard streams, and injects the environment each rank needs, namely its rank, the world size and the addresses used to find the others. Binding options control which cores and NUMA node a rank lands on, which matters because a rank pinned to the wrong socket reaches both its GPU and its NIC the long way around.
+
+In GPU training it is often used purely as a bootstrap for a stack that does its own communication, one rank per GPU with NCCL carrying the tensors. Under Slurm, `srun` usually replaces it and takes the allocation directly, and `torchrun` is the PyTorch-native equivalent that is simpler when the job is a single PyTorch script rather than a mixed MPI application.
+
 ### MPS
 **Short:** NVIDIA Multi-Process Service letting several processes share one GPU's SMs, packing inference fleets tighter.
 **Kind:** tech
 **Lang:** *
 **Roles:** gpu/multi-gpu-and-collectives @1, inference/model-server @2, runtime-systems/memory-processes-and-os @3
+
+Without it, kernels from different processes time-slice the GPU: only one context is active at a time, and the switching wastes the SMs that a small kernel could never fill on its own. MPS inserts a server process that funnels clients' work into a single context so their kernels are genuinely resident together. On Volta and later each client keeps its own address space, and an active-thread-percentage setting caps how much of the SM pool one client may occupy.
+
+Reach for it when several processes each run kernels too small to fill the GPU, such as an inference fleet of small models or MPI ranks sharing a card. The isolation is soft: clients share memory capacity with no hard quota, and a fatal fault in one can take down the server and its peers. Where the blast radius must be bounded, MIG's hardware partitioning is the correct answer instead.
 
 ### NCCL
 **Short:** NVIDIA's topology-aware GPU collective library (AllReduce, AllGather) under most multi-GPU training stacks.
@@ -866,11 +1030,19 @@ Run it before you profile a slow distributed training job. In a few minutes it s
 **Lang:** *
 **Roles:** gpu/gpu-profiling-and-debugging @1
 
+It opens the report files the command-line kernel profiler writes, which is the normal workflow on a cluster: collect headless on the GPU node, copy the report to a laptop, explore it there. The interface groups a kernel's counters into sections, covering speed of light against the roofline, memory workload with its transaction and sector breakdown, scheduler and warp-stall statistics, and occupancy with its limiting factor, each metric carrying a description and a rule-based hint.
+
+Two things are hard to get from the command line. Source view interleaves CUDA, PTX and SASS with per-line stall attribution when the binary was built with `-lineinfo`, and baseline comparison diffs two reports so an optimization's effect on every counter is visible at once. Reach for it after the CLI has told you which kernel is worth studying, not as the way to find that kernel.
+
 ### NPP
 **Short:** NVIDIA Performance Primitives: GPU image and signal routines for resize, colour conversion and JPEG decode.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1, applied-ml/vision-speech-and-multimodal @2
+
+The library is a large set of primitives for images and signals, grouped by data type and channel count, with the names encoding both so that a call site states the pixel format and the region-of-interest convention it is using. Coverage runs to resizing and warping, colour-space conversion, filtering and morphology, arithmetic and logical operations, statistics and histograms, plus one-dimensional signal routines, and the calls take stream contexts so preprocessing composes into the same stream as the model.
+
+Reach for it to keep a vision pipeline's preprocessing on the GPU, so decoded frames never make a round trip to the CPU for a resize and a normalize before inference. Two cautions: the functions are low level and easy to misuse on channel order and ROI arithmetic, and for a full decode-and-transform pipeline the higher-level DALI is usually far less code for the same result.
 
 ### Nsight Compute
 **Short:** NVIDIA per-kernel CUDA profiler: occupancy, memory throughput, bank conflicts, warp-stall and Tensor-Core metrics.
@@ -913,6 +1085,10 @@ It samples the whole process (CUDA API calls, kernel executions, memory copies, 
 **Kind:** tech
 **Lang:** *
 **Roles:** gpu/gpu-profiling-and-debugging @1, observability/profiling-and-performance @2
+
+It is the desktop front end for the Nsight family's report files. It reads timeline reports with rows for CPU threads, CUDA API calls, kernels, memory copies, NVTX ranges and NCCL activity, and it can also open kernel-profiler reports. The timeline is where the analysis happens: zoom into one training step, correlate a launch on the API row with its execution on the GPU row, and read the gaps between them rather than the bars themselves.
+
+The normal workflow is headless collection on the machine with the GPU and interactive analysis elsewhere, which matters because a trace of a realistic step is large; remote profiling over SSH is also supported. What it cannot tell you is why one kernel is slow, because that needs the replayed hardware counters the kernel profiler collects.
 
 ### Numba
 **Short:** JIT compiler that turns decorated Python functions into machine code or CUDA PTX via LLVM/NVVM.
@@ -990,11 +1166,19 @@ Three flags earn their keep: `-lineinfo` so profilers can attribute samples to s
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1, devtools/compiler-toolchain-and-codegen @2
 
+It disassembles a cubin, an ELF holding device code for one architecture, into SASS, the instruction set the SM actually executes. Beyond a linear listing it emits control-flow and call graphs in DOT form for rendering, prints the per-instruction control information the scheduler encodes, and, given a `-lineinfo` build, attributes each instruction to the source line it came from.
+
+Reach for it when the question is what the compiler really emitted: whether a loop was unrolled, whether a local array spilled into local memory, whether the tensor-core instruction you expected is present at all. Note the division of labour with `cuobjdump`, which understands fatbinary containers inside executables and delegates the disassembly, while this tool works on an extracted cubin and owns the graph and analysis output.
+
 ### NVIDIA cuDNN
 **Short:** NVIDIA's tuned deep-learning primitive library; picks the fastest convolution algorithm behind PyTorch and TensorFlow.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1, inference/compiler-and-runtime-optimization @2, model-training/deep-learning-framework @3
+
+The library's defining problem is that no single convolution algorithm wins: implicit GEMM, FFT-based and Winograd approaches each dominate for particular filter sizes, batch shapes, layouts and precisions. It therefore makes algorithm selection an explicit step, offering a heuristic that predicts from the descriptor and an exhaustive mode that benchmarks the candidates for your exact shapes and caches the winner. The graph API generalizes this from single operations to fused subgraphs.
+
+Frameworks expose that choice as a switch, `torch.backends.cudnn.benchmark`, which pays for itself when input shapes are constant and costs a fresh benchmark on every new shape when they are not. Layout matters as much as algorithm: a channels-last memory format with a half-precision dtype and aligned channel counts is what routes a convolution onto tensor cores at all, and getting it wrong quietly keeps you on the slow path.
 
 ### NVIDIA Nsight
 **Short:** NVIDIA's GPU profiling and debugging tool family (Systems, Compute, Graphics) for kernel and timeline analysis.
@@ -1012,6 +1196,10 @@ Use them in that order: the timeline tells you which kernel matters, the kernel 
 **Lang:** *
 **Roles:** gpu/gpu-profiling-and-debugging @1, observability/profiling-and-performance @3
 
+It works by replaying each kernel launch several times, collecting a different set of hardware counters on each pass and combining them into one report. That is why the kernel must be deterministic and free of cross-launch side effects, and why the wall time it reports is not the wall time your application sees. Scoping matters: without a kernel-name filter or a launch count, a run tries to profile every launch in the program.
+
+The report answers one question well, which is what limits this kernel. Speed of light gives compute and memory utilization against the hardware roofline, the memory section shows requested versus transferred sectors, the scheduler section attributes cycles to specific stall reasons, and the occupancy section names its own limiter. It says nothing about host code, multi-GPU behaviour or which kernel matters, so start with a timeline profiler.
+
 ### NVIDIA Nsight Systems
 **Short:** System-wide GPU timeline profiler showing kernels, memcopies, NVTX ranges and CPU-GPU gaps.
 **Kind:** tech
@@ -1027,11 +1215,19 @@ It is the right tool for "where is the time going" across a whole process or a w
 **Lang:** python
 **Roles:** gpu/gpu-portability-and-precision @1, gpu/gpu-math-libraries @2, model-training/distributed-training @2, inference/quantization-and-compression @3
 
+FP8 needs per-tensor scaling because the format's exponent range cannot hold activations and gradients as they are. The library maintains an amax history per tensor, derives a scale from it with a delayed-scaling recipe so the current step does not wait on its own statistics, and picks the E4M3 encoding where precision matters and E5M2 where range does. GEMMs then run in FP8 with FP32 accumulation, and fused attention and normalization kernels keep the casts out of separate launches.
+
+In practice you adopt it through drop-in modules such as `te.Linear` and `te.TransformerLayer` inside an `fp8_autocast` context, which is why Megatron-LM and NeMo integrate it rather than reimplementing the recipe. It requires Hopper or later, since that is where the FP8 tensor cores are; on Ampere it falls back to BF16 and there is nothing to gain.
+
 ### NVIDIA TransformerEngine
 **Short:** NVIDIA library running transformer layers in FP8 on Hopper and later, handling scaling factors automatically.
 **Kind:** tech
 **Lang:** python
 **Roles:** gpu/gpu-portability-and-precision @1, inference/quantization-and-compression @2, model-training/distributed-training @3
+
+The interesting engineering is the scaling state, not the cast. Every FP8 tensor carries a scale and its inverse, updated from a rolling history of observed maxima, and that state is part of the model: it must be checkpointed, gathered correctly under tensor and sequence parallelism, and kept consistent when a step is skipped. Newer recipes narrow the granularity from per-tensor towards per-block scaling, which holds accuracy better on the latest hardware.
+
+The practical reason to use it rather than casting by hand is that this bookkeeping is where FP8 training goes wrong: a loss that diverges halfway through a long run usually traces back to scaling, not to the format itself. Reach for it when training or serving transformers at a scale where the low-precision tensor cores are the point; on hardware without them, `torch.amp` with BF16 is the correct tool.
 
 ### nvidia-smi
 **Short:** NVIDIA's CLI for GPU inventory and telemetry: driver version, utilization, memory, power and thermals.
@@ -1049,17 +1245,29 @@ Reach for it for fleet-level questions — is this GPU busy, is its memory full,
 **Lang:** *
 **Roles:** gpu/gpu-profiling-and-debugging @1, observability/metrics-and-monitoring @2
 
+It prints one line per device per interval, by default every second, with SM and memory-controller utilization, encoder and decoder activity, framebuffer use, power draw, temperature, SM and memory clocks and PCIe throughput, with flags to choose the metric groups and restrict the device list. Unlike the default table it is a stream rather than a snapshot, so it pipes straight to a file and lines up against a job's own timestamps.
+
+Reach for it as the cheap first look at a long run: whether the GPU is busy at all, whether power or thermal limits are capping the clocks, whether memory is creeping up over hours. Read the utilization column as carefully here as anywhere else, since it counts intervals in which a kernel was resident rather than how well the SMs were used, so a flat line at 100 is a starting point rather than a verdict.
+
 ### nvJPEG
 **Short:** NVIDIA GPU library for JPEG decode and image preprocessing, keeping the pipeline off the CPU.
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-math-libraries @1, applied-ml/vision-speech-and-multimodal @2
 
+Decoding runs on the GPU, and on datacentre parts there is a dedicated hardware JPEG engine that performs the entropy decode and inverse transform outside the SMs, leaving them free for the model. The library is batch-oriented, so hundreds of images are decoded in one call with the Huffman phase and the pixel phase pipelined, and the output is a device tensor in the colour format you asked for, which means decode, resize and normalize can all stay on the device.
+
+Reach for it when input decoding is the bottleneck of a vision pipeline, which happens sooner than people expect once the model itself is fast. It is the decoder underneath DALI, and DALI is usually the easier entry point because it wraps decode, augmentation and batching into one pipeline. For a handful of images per second, CPU decoding is entirely adequate.
+
 ### NVLink
 **Short:** NVIDIA's high-bandwidth GPU-to-GPU interconnect (~900 GB/s per H100) and the NVSwitch crossbar fabric.
 **Kind:** tech
 **Lang:** *
 **Roles:** gpu/multi-gpu-and-collectives @1
+
+It is a point-to-point serial link and a GPU carries many of them, aggregated so that one peer connection uses several links at once. Against PCIe it is not only wider but coherent enough for direct peer loads and stores, so one GPU addresses another's memory without a staged copy and a collective library can reduce across it at close to the raw rate. Grace Hopper parts extend the same fabric to the CPU rather than stopping at the GPUs.
+
+The consequence for system design is a bandwidth cliff at the node boundary: inside the node the links are fast, between nodes you have the network. That is why tensor parallelism, which exchanges activations at every layer, is kept within an NVLink domain while pipeline and data parallelism, which communicate far less often, are allowed to span nodes. Check what a machine actually has with `nvidia-smi topo -m`, since some SKUs ship fewer links or none.
 
 ### nvrtc
 **Short:** NVIDIA's runtime CUDA C++ to PTX compiler library; backs JIT kernel paths in CuPy, Numba, PyCUDA and PyTorch.
@@ -1074,6 +1282,10 @@ NVRTC compiles a CUDA C++ source string to PTX inside your own process -- create
 **Kind:** tech
 **Lang:** *
 **Roles:** gpu/multi-gpu-and-collectives @1
+
+With direct links alone an eight-GPU node is a partial mesh: some pairs are adjacent and others are not, so a collective's achieved bandwidth depends on which GPUs happen to be talking. NVSwitch is a crossbar that terminates every GPU's links, so any pair communicates at the full per-GPU rate simultaneously and topology stops being a factor in the algorithm the collective library picks. Rack-scale systems extend this with switch trays placing many GPUs in one domain.
+
+This is what makes all-to-all patterns practical inside a node rather than throttled by the worst pair, which matters for mixture-of-experts routing and large tensor-parallel groups. It is a property of the machine rather than something you configure, and the practical implication is that a switched node and an unswitched one with the same GPUs are different machines for collective-heavy work; measure with `nccl-tests` instead of assuming.
 
 ### nvtx
 **Short:** NVIDIA annotation library that names ranges and markers so profiler timelines show application phases.
@@ -1109,17 +1321,29 @@ Pallas is a JAX extension for writing kernels at block level: you declare a grid
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, devtools/compiler-toolchain-and-codegen @2, gpu/gpu-profiling-and-debugging @3
 
+PTX is a virtual instruction set rather than machine code: the compiler emits it, and either `ptxas` compiles it ahead of time to SASS for a named architecture or the driver compiles it at load time for a newer one. The specification defines the instructions, the state spaces for global, shared, local, parameter and constant memory, the type system, the memory consistency model, and the asynchronous copy, barrier and matrix-multiply instructions that have no C++ surface at all.
+
+You read it for two reasons: to check what the compiler emitted from a `--ptx` build, and to write inline PTX for something the intrinsics do not expose, such as a particular matrix-multiply shape, a cache hint on a load, or an asynchronous copy. Do not mistake it for the real instruction set. SASS is what executes, `ptxas` reorders and allocates registers freely, and a PTX instruction count says very little about the final schedule.
+
 ### py3nvml
 **Short:** Python bindings over NVML exposing the same GPU utilization, memory and power queries as nvidia-smi.
 **Kind:** tech
 **Lang:** python
 **Roles:** gpu/gpu-profiling-and-debugging @1, observability/metrics-and-monitoring @3
 
+It wraps NVML, the same C library `nvidia-smi` is a front end for, so a Python process queries the driver directly instead of shelling out and parsing text: device count and handles, utilization rates, memory used and total, power draw and limits, temperature, clocks and throttle reasons, ECC counters, and the list of compute processes with their per-process memory. Everything is read from the driver, so it works whether or not the calling process holds a CUDA context.
+
+Reach for it to build a metrics exporter, to log GPU state alongside training steps, or to pick a free device at startup. Two cautions: it reports device-wide state, so per-process attribution is limited to memory, and this package is a third-party fork rather than the official binding, with `pynvml` and the newer `nvidia-ml-py` being what most projects now depend on.
+
 ### PyCUDA
 **Short:** Thin Python bindings over the CUDA driver API with explicit contexts, memory and inline kernel compilation.
 **Kind:** tech
 **Lang:** python
 **Roles:** gpu/kernel-programming @1, gpu/gpu-math-libraries @3
+
+It exposes the driver API rather than the runtime: contexts are pushed and popped explicitly, device memory is allocated and copied through direct calls, and a source module compiles a CUDA C++ string at run time and hands back a callable kernel you launch with explicit block and grid tuples. A thin array type adds elementwise operations on top, and Python's garbage collector is wired into device deallocation so buffers free when they go out of scope.
+
+Reach for it when you want the CUDA model itself from Python with nothing in between, for teaching, an experiment or a one-off kernel in a script. For array-oriented work CuPy is the more complete library and interoperates with the rest of the ecosystem, and for a kernel inside a training stack, `torch.utils.cpp_extension` or Triton fits better than managing your own contexts.
 
 ### pycuda.tools.OccupancyRecord
 **Short:** PyCUDA occupancy calculator from a kernel's register and shared-memory use; its DeviceData limits are hardcoded.
@@ -1144,6 +1368,10 @@ Pallas is a JAX extension for writing kernels at block level: you declare a grid
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1, gpu/gpu-math-libraries @2, gpu/kernel-programming @2, gpu/gpu-profiling-and-debugging @3
+
+HIP is the portability layer: an API deliberately shaped like CUDA's, so the allocation, copy and launch calls map one to one and the same source compiles for AMD through `hipcc` or for NVIDIA through nvcc. Underneath sit the counterparts to the CUDA libraries, with rocBLAS and hipBLASLt for dense linear algebra, MIOpen for deep-learning primitives, RCCL for collectives, rocFFT and rocSPARSE, plus `rocprof` and `rocgdb` for profiling and debugging.
+
+PyTorch and JAX have ROCm builds and vLLM runs on it, so mainstream training and inference work without source changes. What still bites is coverage at the edges: a hand-written CUDA kernel, a dependency pinned to a CUDA-only library, or a very new model implementation may have no equivalent yet. Check the supported-hardware list carefully, since support is per architecture target and consumer cards are often outside it.
 
 ### Sectors per Request
 **Short:** Nsight Compute metric: 32-byte sectors fetched per warp memory instruction; 4 is ideal, higher means waste.
@@ -1190,6 +1418,10 @@ Reach for it so that you never hand-write a reduction or a scan, both of which a
 **Kind:** tech
 **Lang:** cpp
 **Roles:** gpu/kernel-programming @1, gpu/gpu-math-libraries @2
+
+The abstraction is the tile rather than the thread. You declare register tiles and shared tiles of a fixed small shape and call operations on them, including load, store, multiply-accumulate, transpose and reductions, while the library handles the lane mapping, the swizzled shared-memory layout that avoids bank conflicts, and the asynchronous copies that keep the pipeline fed. A fused attention kernel then reads as a few dozen tile operations instead of hundreds of lines of index arithmetic.
+
+It targets recent tensor-core hardware specifically, building on the asynchronous copy and warpgroup matrix instructions that Hopper and Blackwell provide, so it is not a portability layer. Reach for it to write a custom fused kernel where CUTLASS feels too heavy and Triton does not give enough control over the memory pipeline. It is a research-led project, so expect the API to keep moving.
 
 ### torch.amp.autocast
 **Short:** PyTorch context manager that runs eligible ops in bf16/fp16 automatically while keeping reductions in fp32.
@@ -1269,11 +1501,19 @@ Reach for it so that you never hand-write a reduction or a scan, both of which a
 **Lang:** cpp
 **Roles:** gpu/gpu-portability-and-precision @1
 
+An OpenCL program links against a loader, not a driver. Each vendor installs a shared library plus a small entry naming it, and at platform enumeration the loader reads those entries, loads each driver it finds, and returns all of them as platforms. Every subsequent call is dispatched through the object's own function table, which is what allows one process to hold contexts on several vendors' devices at the same time.
+
+This is why a single OpenCL binary runs on whatever hardware a machine happens to have, and it is also the usual cause of a program reporting no platforms at all: the runtime package is missing, a vendor entry points at a library that is not there, or a container never mounted the host's driver. Debug it by listing the vendor directory and running `clinfo` before suspecting your own code.
+
 ### wgpu
 **Short:** Rust implementation of the WebGPU standard, giving portable GPU compute in browsers and in native apps.
 **Kind:** tech
 **Lang:** rust
 **Roles:** gpu/gpu-portability-and-precision @1, gpu/kernel-programming @2
+
+It implements the WebGPU API in Rust over native backends, namely Vulkan, Metal, DirectX 12 and OpenGL, so the same code runs as a desktop binary or, compiled to WebAssembly, against the browser's own WebGPU implementation. Compute work is written in WGSL and dispatched as workgroups over storage buffers bound through explicit bind groups and pipelines, with resource state and lifetime validated rather than left to the programmer.
+
+Reach for it when the target is the browser or a portable desktop application and shipping vendor drivers is not an option. It is not a datacentre compute stack: the portable API has no tensor-core-class matrix instructions, buffer size and workgroup limits are conservative, and support for the newest hardware features only arrives once the standard defines them.
 
 ### When each wins
 **Short:** Table-row fragment, not a product: MIG versus MPS, hard blast-radius isolation against shared small-model throughput.
@@ -1296,3 +1536,7 @@ PyTorch's built-in scaled dot product attention now covers the common case, so r
 **Kind:** spec
 **Lang:** *
 **Roles:** gpu/gpu-portability-and-precision @1, inference/quantization-and-compression @3
+
+These are systolic matrix engines inside each Xe-core, separate from the vector engines, executing a dot-product-and-accumulate instruction over a small matrix block with FP16, BF16, INT8 and INT4 inputs accumulating into a wider type. They fill the same role tensor cores do on NVIDIA parts and AMX does on Xeon, letting matrix work run on dedicated hardware while the vector units handle everything that is not a matrix multiply.
+
+You reach them through libraries rather than directly, since oneDNN, OpenVINO and the SYCL joint-matrix extension all target them, so the practical question is whether your precision and layout qualify. Note that not every Intel GPU has them: they are on the Arc, Flex and Max parts, while integrated graphics without XMX fall back to the vector path and lose most of the low-precision advantage.
