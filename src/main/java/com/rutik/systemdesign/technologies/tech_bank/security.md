@@ -300,21 +300,12 @@ Reach for it when you are on Azure and want redaction without hosting a model, p
 bcrypt is a deliberately slow password hash built on Blowfish's expensive key schedule, with a cost factor that doubles the work each time you raise it, so you can keep pace with faster hardware by changing one number. The salt and the cost are encoded in the output string itself, so verification simply re-derives using whatever parameters are stored with the hash, and old hashes stay verifiable after you raise the cost for new ones.
 
 Reach for it, or for Argon2id which additionally resists GPU and ASIC attack by being memory-hard, for any stored password; a plain SHA-256 is not a password hash no matter how it is salted. Two traps are worth remembering: input is truncated past 72 bytes, so long passphrases can collide unless you pre-hash, and the 100 to 300 milliseconds you tuned for is 100 to 300 milliseconds of your own CPU per login attempt, which makes the login endpoint a denial-of-service surface that needs rate limiting.
+
 ### BCryptPasswordEncoder
 **Short:** Spring Security password hasher applying bcrypt with a tunable cost factor and per-password salt.
 **Kind:** api
 **Lang:** java
 **Roles:** security/secrets-and-cryptography @1, security/authentication-and-identity @2
-
-### Bedrock Guardrails
-**Short:** AWS Bedrock content filter applying denied topics, word filters, PII redaction and grounding checks.
-**Kind:** tech
-**Lang:** *
-**Roles:** security/ai-safety-and-guardrails @1, platform-delivery/cloud-platform-and-cost @3
-
-The policy object is independent of the model: content filters with per-category strength, denied topics written as short natural-language definitions, exact word and profanity lists, PII detection that either blocks or masks, and a contextual grounding check scoring a response against supplied source text. Input and output are evaluated as separate passes, so you can be strict about what users may ask and stricter still about what comes back.
-
-Attach it to a Bedrock invocation or call it standalone to screen text from anywhere, including retrieved documents before they enter a prompt. It bills per unit of text evaluated, and denied topics are matched by a model rather than by rules, so tune them against real traffic and log what was blocked: a topic definition that reads unambiguously to you will still catch adjacent legitimate questions.
 
 ### Bouncy Castle
 **Short:** Full-suite Java/C# crypto provider covering algorithms and PKI formats the JDK does not ship.
@@ -325,16 +316,6 @@ Attach it to a Bedrock invocation or call it standalone to screen text from anyw
 The provider registers with the JCA and JCE, so a call like `Cipher.getInstance("ChaCha20-Poly1305", "BC")` reaches its implementations through standard APIs and application code stays portable. Its reach is why it is everywhere: Argon2, scrypt, ChaCha20-Poly1305, EdDSA, extended and national curves, and more often the real motive, the PKI and message formats the JDK does not handle at all, including CMS, PKCS#10 certificate requests, OpenPGP, timestamping and S/MIME.
 
 Add it when the JDK genuinely lacks the algorithm or format you need, not reflexively: the default Sun providers are well maintained, and a second cryptographic implementation is one more dependency to track for advisories and one more question in a FIPS-validated environment, where a separately certified distribution exists. For certificate and CMS work the lightweight API is often easier than going through the JCA.
-
-### BouncyCastle
-**Short:** Java crypto provider adding algorithms the JDK lacks: Argon2, scrypt, ChaCha20-Poly1305, extended curves, GOST.
-**Kind:** tech
-**Lang:** java
-**Roles:** security/secrets-and-cryptography @1
-
-Two APIs ship in the same artifacts. The JCA and JCE provider slots in behind `Cipher`, `Signature` and `KeyFactory` so existing code reaches new algorithms just by naming a transform string, while the lightweight API is plain Java classes you drive directly, avoiding provider registration entirely, which is the easier route on Android and in restricted runtimes.
-
-Reach for it for Argon2 or scrypt on a JDK that has neither, ChaCha20-Poly1305 or EdDSA on older runtimes, and PKI work such as CMS signing, certificate and CSR generation or OpenPGP where nothing in the JDK helps. The costs are a large dependency, a second crypto implementation to watch for advisories, and needing the separately certified build when FIPS validation is required.
 
 ### Burp Suite
 **Short:** Intercepting proxy and DAST scanner for probing a running web application for vulnerabilities.
@@ -375,6 +356,7 @@ Reach for it in any cluster that terminates TLS, including internal traffic wher
 checkov scans infrastructure as code — Terraform source and plan output, CloudFormation, Kubernetes manifests, Helm charts, Dockerfiles, ARM templates — against a large built-in policy set and reports each failure with file, line and a description. The findings are the ones that keep causing incidents: a bucket readable by anyone, an unencrypted volume or snapshot, a security group open to the whole internet, logging or versioning left off.
 
 The value is where it runs: in the pull request, so the misconfiguration is discussed before apply rather than found in a quarterly audit. Custom policies are written in Python or YAML when your organisation's rules go beyond the defaults. When you must accept a finding, suppress that specific check inline with a comment so the exception is visible and reviewable, rather than dropping the rule for the whole repository.
+
 ### circuit-breaker tooling
 **Short:** Representation-engineering defence that ablates harmful internal directions rather than filtering the output text.
 **Kind:** concept
@@ -553,16 +535,6 @@ It decomposes jailbreak attacks into interchangeable parts, namely a seed set, m
 
 Reach for it to run several attack families against one model and get numbers that belong in the same table, or when building a new attack and wanting the surrounding machinery for free. It follows the papers rather than optimising them, so expect research-grade throughput, and the evaluator's definition of a successful jailbreak is a decision to inspect rather than accept, because it sets every number you report.
 
-### Entra ID
-**Short:** Microsoft's cloud identity provider (formerly Azure AD): OIDC/SAML SSO, MFA, conditional access and workload identities.
-**Kind:** tech
-**Lang:** *
-**Roles:** security/authentication-and-identity @1, security/authorization-and-policy @3
-
-The tenant is the directory, holding users, groups, devices, app registrations and the service principals that represent an application. Applications receive OIDC ID tokens and OAuth2 access tokens and validate them against the tenant's JWKS, checking issuer, audience and the `roles` or `scp` claims. Two features carry most of the weight in practice: conditional access, which decides at sign-in whether to demand MFA or a compliant device from risk signals, and managed identities, which give Azure workloads an identity with no secret to store.
-
-It is the default wherever Microsoft 365 is deployed, because the directory and its joiner-mover-leaver process already exist. Plan for the awkward parts: the rename from Azure AD leaves documentation, SDKs and portal names inconsistent, the legacy directory APIs have given way to Microsoft Graph, and delegated versus application permissions with admin consent is the concept that most often blocks a first integration.
-
 ### External Secrets Operator
 **Short:** Kubernetes operator that syncs secrets from Vault or a cloud secret manager into native K8s Secrets.
 **Kind:** tech
@@ -572,6 +544,7 @@ It is the default wherever Microsoft 365 is deployed, because the directory and 
 The operator adds two custom resources: a `SecretStore` that says where secrets live and how to authenticate — HashiCorp Vault, AWS Secrets Manager, Google Secret Manager, Azure Key Vault — and an `ExternalSecret` that names which keys to fetch and what the resulting Kubernetes Secret should look like. The controller authenticates using the workload's own identity, fetches the values, and writes an ordinary Secret that pods consume as an environment variable or mounted file with no application changes.
 
 That is what makes GitOps workable with secrets: the repository holds only a reference to a secret's name, never its value, so manifests can be public while the value stays in the vault. Two things to plan for anyway — the fetched value does land in etcd as a normal Secret, which is base64 encoding rather than encryption, so enable encryption at rest and keep RBAC tight; and refreshing a value does not restart the pods holding the old one, so pair it with a reloader or a rollout.
+
 ### Falco
 **Short:** CNCF runtime security tool watching kernel syscalls and flagging suspicious container behaviour against rules live.
 **Kind:** tech
@@ -613,6 +586,7 @@ Reach for it while iterating on attacks during development, where clean and fast
 Garak is a scanner you point at a model, an endpoint or a whole application. It runs probe families — prompt injection, jailbreak templates, encoding and obfuscation attacks, glitch tokens, training-data replay, malware and toxic-content generation — and scores the responses with detectors, producing a report of which attacks got through and at what rate.
 
 Treat it as a red-team regression suite rather than a runtime guardrail: wire it into CI so that changing a system prompt, a model version or a filter tells you whether an attack that was previously blocked now succeeds. Its coverage is deliberately generic, so it will not know your application's own abuse cases — the payment flow that must never be talked into a refund, the agent tool that must never be reachable from user text — and those need probes you write yourself.
+
 ### Gatekeeper
 **Short:** OPA Gatekeeper - a Kubernetes admission controller enforcing Rego constraint templates before an object is applied.
 **Kind:** tech
@@ -917,16 +891,6 @@ Pasting a token splits it into header, payload and signature and decodes the fir
 
 It is the fastest way to read a token during development, and the site also catalogues JWT libraries per language. Remember that a JWT is not encrypted and pasting one into a web page discloses everything inside it, so never paste a production or customer token: use a locally issued test token, or decode offline with a CLI, since base64url decoding needs no service at all.
 
-### Key Vault
-**Short:** Azure Key Vault: managed store for secrets, certificates and keys with HSM backing and RBAC access.
-**Kind:** tech
-**Lang:** *
-**Roles:** security/secrets-and-cryptography @1, platform-delivery/cloud-platform-and-cost @3
-
-The vault stores three kinds of object with different rules. Secrets are opaque strings read back over the API; certificates bundle a private key with an issuance policy and automatic renewal from a configured authority; keys are the strict case, where material never leaves and you send data or a digest for the vault to sign, verify, wrap or unwrap, HSM-backed on the Premium tier or in Managed HSM.
-
-Reach for it as the default store for anything running on Azure, with applications authenticating by managed identity so no bootstrap credential ships in configuration. Two behaviours cause most incidents: request throttling when code fetches a secret on every call instead of caching it, and soft-delete with purge protection reserving a deleted vault or secret name for the retention window, which breaks automation that tears down and recreates by name.
-
 ### Keycloak
 **Short:** Self-hosted identity provider and OAuth2/OIDC/SAML authorization server with user federation and RBAC.
 **Kind:** tech
@@ -956,6 +920,7 @@ Use it for Java-specific work such as populating a trust store, preparing a keys
 kube-bench runs the CIS Kubernetes Benchmark checks against a cluster: it reads the flags, configuration files and file permissions of the API server, controller manager, scheduler, etcd and kubelet, and reports each control as pass, fail or warn with the remediation text attached. It is normally deployed as a Job or DaemonSet so it can see the host filesystem and the process arguments it needs.
 
 Use it to get an honest baseline on a self-managed cluster and to re-check after upgrades, which quietly change defaults. On a managed control plane the master-node checks do not apply — you cannot see or set those flags — so run the managed profile and focus on the node and policy controls you actually own. It audits configuration only; it does not scan images, workloads or running behaviour.
+
 ### Kyverno
 **Short:** Kubernetes-native policy engine: YAML admission rules that validate, mutate, generate and verify image signatures.
 **Kind:** tech
@@ -965,6 +930,7 @@ Use it to get an honest baseline on a self-managed cluster and to re-check after
 Kyverno is a Kubernetes admission controller whose policies are themselves Kubernetes resources written in YAML, so there is no separate policy language to learn. A rule matches resources and then does one of four things: `validate` rejects a pod that has no resource limits or runs as root, `mutate` injects a sidecar or a default label, `generate` creates companion objects such as a default NetworkPolicy in every new namespace, and `verifyImages` requires a valid signature and refuses unsigned images.
 
 That familiarity is the main reason teams adopt it over an engine with its own language; the tradeoff is less expressive power once the logic gets genuinely complicated, where Rego-based tooling still wins. Roll every new policy out in audit mode first and read the reports, because a validate rule promoted straight to enforce will block deployments of workloads that predate it.
+
 ### Lakera Guard
 **Short:** Hosted API detecting prompt injection, jailbreaks, PII and unsafe content in LLM inputs and outputs.
 **Kind:** tech
@@ -1298,6 +1264,7 @@ Reach for it when authorization rules should be versioned, unit-tested and revie
 This is a hosted classifier endpoint: send text, or text and images with the omni model, and it returns a flag and a score per category — harassment, hate, self-harm, sexual content, violence and their sub-categories. It is free to call with an API key, which makes it the cheapest possible first filter to place in front of user input and behind model output.
 
 Two limits shape how you use it. The category set is fixed and safety-oriented, so your product's own policy — competitor mentions, unlicensed advice, personal data leaking into a response — still needs a classifier you build. And any threshold you tune against the raw scores is tied to the current model version, so treat a model upgrade as a reason to re-validate the cutoffs against a labelled set rather than assuming the numbers carry over.
+
 ### OpenFHE
 **Short:** Open-source fully homomorphic encryption library (BFV, BGV, CKKS) for computing directly on encrypted data.
 **Kind:** tech
@@ -1650,16 +1617,6 @@ Each secret is a container of immutable versions: you add a version and the late
 
 Use it for database passwords, API keys and signing material that must not live in a repository or an image. It stores and versions values but does not know how to change a credential on the target system, since a rotation schedule only triggers your own function, so Vault's dynamic secrets engines are the alternative when the store itself should mint short-lived credentials. Cache reads in the application, because fetching per request is both slow and billable.
 
-### Secrets Manager
-**Short:** AWS service storing credentials encrypted with KMS, with fine-grained IAM access, versioning and automatic rotation.
-**Kind:** tech
-**Lang:** *
-**Roles:** security/secrets-and-cryptography @1, apis-frameworks/dependency-injection-and-config @3, platform-delivery/cloud-platform-and-cost @3
-
-A secret holds versions labelled with staging tags, and rotation is a Lambda following a fixed four-step contract of creating a new credential, setting it on the target, testing it, then moving the current label. That sequence is what allows a credential to change with no window in which neither the old nor the new one works. Values are KMS-encrypted, access is IAM per secret with resource policies for cross-account use, and secrets can be replicated to other regions.
-
-Reach for it when rotation rather than storage is the requirement, especially for RDS and other AWS databases where the rotation function is supplied ready-made. It is billed per secret per month plus per API call, so the mistake to avoid is fetching on every request instead of using the caching client. When you only need encrypted configuration and can live without managed rotation, SSM Parameter Store does the same job for far less.
-
 ### Secrets Store CSI Driver
 **Short:** Kubernetes CSI driver mounting secrets from Vault or a cloud secret manager into a pod as a tmpfs volume.
 **Kind:** tech
@@ -1848,16 +1805,6 @@ The module implements the client half of OAuth2 and OIDC. A `ClientRegistration`
 
 Reach for it for social or enterprise sign-in in a browser application, and for calling a protected downstream API without hand-rolling token refresh. Points to watch: the authorized-client repository is session-backed by default, so a multi-instance deployment needs shared sessions or a JDBC repository, the redirect URI registered at the provider must match exactly, and login support authenticates users while the client support only obtains tokens, so choosing the wrong one produces a confusing half-working setup.
 
-### spring-security-oauth2-resource-server
-**Short:** Spring Security module validating bearer JWTs or opaque tokens on API requests and mapping them to authorities.
-**Kind:** tech
-**Lang:** java
-**Roles:** security/authentication-and-identity @1, security/authorization-and-policy @2
-
-The module that turns bearer tokens into an authenticated principal. A `JwtDecoder` built from the issuer or JWK set URI verifies the signature, checks expiry and issuer, and a converter maps claims to Spring authorities; alternatively an opaque-token introspector calls the provider's introspection endpoint for tokens that are not JWTs. Validation happens in a filter ahead of your controller, so the method body sees an already authenticated token principal.
-
-Use it for any API where an external provider issues the tokens, which is nearly every microservice behind a gateway. Configure two things the defaults leave open: an audience validator, because a token from the same issuer intended for another service otherwise passes, and a claim converter when roles live somewhere other than `scope`. Prefer JWT validation over introspection unless instant revocation is required, since introspection adds a network call to every request.
-
 ### spring-security-rsocket
 **Short:** Spring Security module securing RSocket routes with @EnableRSocketSecurity, JWT auth and payload authorization.
 **Kind:** tech
@@ -1939,6 +1886,7 @@ Reach for it to design and simulate a federated algorithm, covering the round st
 The library provides differentially private training: optimizers that clip each individual example's gradient to a fixed norm and then add calibrated Gaussian noise to the summed batch gradient, so no single training record can move the resulting weights by more than a bounded amount and membership inference is provably limited. Alongside them ships a privacy accountant that converts your noise multiplier, sampling rate and number of steps into the epsilon and delta you can actually state in a document.
 
 Reach for it when a formal privacy claim about a model trained on personal data is a requirement rather than a preference — regulated data, a model you intend to publish, a claim you must defend. The costs are concrete: per-example gradient clipping is substantially slower than ordinary training, and accuracy falls as epsilon tightens, so the epsilon you pick is an explicit trade of utility for guarantee.
+
 ### Tetragon
 **Short:** eBPF runtime security for Kubernetes: observes and enforces on syscalls, process exec and network activity.
 **Kind:** tech

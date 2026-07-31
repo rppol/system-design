@@ -89,16 +89,6 @@ It runs the Airflow scheduler, web server and workers as a managed environment: 
 
 Reach for it when you want Airflow's operator ecosystem without running the scheduler and its database yourself. The costs are the ones every managed Airflow carries: upgrades happen on the provider's cadence, dependency installation is constrained to the requirements file and a bad pin can fail an environment update for half an hour, and you pay continuously even when no DAG is running. Cloud Composer and Astronomer Astro are the equivalents elsewhere.
 
-### Amazon SQS
-**Short:** Fully managed AWS queue with at-least-once standard and exactly-once FIFO modes, visibility timeouts and DLQs.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/message-broker @1, data-movement/task-queue-and-jobs @2, platform-delivery/cloud-platform-and-cost @3
-
-A queue is a regional endpoint rather than a broker you size: throughput scales on its own, messages are stored redundantly across availability zones, and the payload limit is 256 KB, with larger bodies handled by putting the object in S3 and passing a pointer through the extended client library. Retention defaults to four days and can be raised to fourteen, delay queues postpone first delivery, and long polling holds a receive call open so idle consumers do not burn API calls on empty responses.
-
-Reach for it as the default buffer between an AWS producer and a consumer whose rate you do not control. FIFO queues trade throughput for ordering and deduplication within a message group, so use them only where ordering is a genuine requirement rather than a comfort. Because redelivery is normal rather than exceptional every handler must be idempotent, and anything needing replay or several independent readers of one stream belongs in Kinesis or Kafka.
-
 ### Anthropic Message Batches API
 **Short:** Anthropic endpoint for submitting many messages as one asynchronous batch job at reduced cost.
 **Kind:** api
@@ -210,6 +200,7 @@ Reach for it when Airflow is central enough that upgrade cadence, observability 
 DMS provisions a replication instance that connects a source endpoint to a target endpoint and moves rows between them. A task normally runs two phases: a full load that copies existing data, then ongoing change data capture that tails the source's write-ahead log, binlog or redo log, so the target keeps converging and cutover means pointing the application at the new database during a short window rather than taking a long outage.
 
 Source and target need not be the same engine — Oracle to PostgreSQL is the classic case, paired with Schema Conversion Tool for the DDL — and a target can also be Kinesis, Kafka or S3, which is how it gets used as a plain CDC tap for outbox relays and analytics feeds. It moves data, it does not convert schemas or logic, and large object columns and exotic types are where migrations usually get stuck.
+
 ### AWS EMR
 **Short:** Managed Hadoop/Spark clusters on EC2, commonly run on Spot instances for cheap large-scale batch processing.
 **Kind:** tech
@@ -848,16 +839,6 @@ Airflow's core ships the scheduler, the DAG model and the executor machinery, wh
 
 The practical consequence is dependency management: providers pull real client libraries, so an environment installing many of them accumulates conflicting version constraints, which is the usual reason a managed Airflow environment refuses to update. Install only the providers actually used, pin them, and prefer running work in a container or pod operator when an integration's dependency set would otherwise poison the scheduler's own environment.
 
-### Pub/Sub
-**Short:** Google Cloud Pub/Sub: managed at-least-once topic and subscription messaging with push or pull delivery.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/message-broker @1, platform-delivery/cloud-platform-and-cost @3
-
-Delivery comes in two shapes: pull, where a subscriber holds a streaming connection and extends the acknowledgement deadline while it works, and push, where the service posts to an HTTPS endpoint and treats the response code as the acknowledgement, backing off when the endpoint fails. Client-library flow control bounds how many messages or bytes may be outstanding, which is the real throttle on a subscriber. Exactly-once delivery can be enabled per subscription, and BigQuery and Cloud Storage subscriptions write straight to those sinks with no consumer code.
-
-Reach for it as the default asynchronous transport on Google Cloud, particularly where load is spiky and you do not want to size anything. The costs are per-message pricing at high volume, ordering that holds only within an ordering key, and a duplicate rate you must design around unless exactly-once is turned on. Kafka remains the choice when consumers need offsets, long retention and replay from an arbitrary point.
-
 ### RabbitMQ
 **Short:** AMQP broker with exchange-based routing and durable queues; common Celery/Dramatiq backend and STOMP relay.
 **Kind:** tech
@@ -867,6 +848,7 @@ Reach for it as the default asynchronous transport on Google Cloud, particularly
 RabbitMQ is an AMQP 0-9-1 broker. Producers never name a queue; they publish to an exchange, and bindings decide which queues receive a copy — direct on an exact routing key, topic on a pattern, fanout to everything bound. Routing therefore lives in broker configuration and can change without redeploying producers. Queues are durable, each message is delivered to one consumer, and an unacknowledged message is requeued when that consumer dies.
 
 That is a work-queue model, not a log: once acknowledged a message is gone, and there are no consumer-owned offsets to rewind, which is the line between it and Kafka. Reach for it for task distribution and complex routing — it is the common Celery and Dramatiq backend, and its STOMP plugin makes it the external relay behind Spring's WebSocket messaging — and use quorum queues, which replicate through Raft, when a queue must survive losing a node.
+
 ### RabbitMQ STOMP plugin
 **Short:** RabbitMQ plugin exposing STOMP, letting browsers and app servers use the broker as a production relay.
 **Kind:** tech
@@ -876,16 +858,6 @@ That is a work-queue model, not a log: once acknowledged a message is gone, and 
 Enabling the plugin adds a STOMP listener alongside AMQP and maps STOMP destinations onto the broker's own objects: a queue destination is a durable queue, an exchange destination publishes with a routing key, a topic destination goes through the topic exchange, and temporary destinations support reply-to. Subscriptions carry an acknowledgement mode, so a client can acknowledge per message rather than relying on auto-ack, and a companion Web STOMP plugin exposes the same protocol over WebSocket so a browser can connect directly.
 
 This matters because an application's built-in simple STOMP broker keeps subscriptions in the memory of one process, so a second instance never sees the first instance's subscribers and fan-out silently breaks the moment you scale out. Pointing the application at RabbitMQ as an external relay moves that state into the broker and makes horizontal scaling work. The cost is a broker in the path of every message and its own capacity to plan.
-
-### rabbitmq_stomp plugin
-**Short:** RabbitMQ plugin exposing a STOMP listener on port 61613 so an app can relay WebSocket STOMP traffic to a real broker.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/message-broker @1, apis-frameworks/rpc-graphql-and-streaming @2
-
-The plugin ships with the broker and is turned on with `rabbitmq-plugins enable rabbitmq_stomp`, after which it listens on 61613 by default with 61614 the conventional TLS port. Login credentials in the `CONNECT` frame map to ordinary broker users and permissions, so authorization is the broker's rather than the application's, and heartbeat negotiation in that same frame is what detects a dead peer on an otherwise idle connection. A default virtual host and default user can be configured for anonymous clients, which is usually a mistake in production.
-
-Reach for it when application servers should hand WebSocket messaging to a real broker instead of holding subscription state in process memory. The operational point to remember is that every subscription becomes a broker object: an application creating a queue per connected user needs auto-delete and expiry policies, or an idle-user population turns into thousands of queues the broker keeps until someone notices.
 
 ### Ray
 **Short:** Distributed Python compute framework; Train/Tune/Serve/Data on top, and the placement layer for multi-node vLLM.
@@ -962,16 +934,6 @@ Reach for it when you want durable execution from a single self-hostable binary 
 Enqueuing pushes a job onto a Redis list; a worker pops it, forks a child process to execute it, and writes the result and status back to Redis under a TTL. The fork per job is deliberate -- a crashed or memory-hungry job cannot damage the worker -- and it is also why the worker is Unix-only and why throughput is bounded by process creation. Failed jobs land in a failed-job registry with the traceback preserved, and retries, scheduling and job dependencies exist but are deliberately minimal.
 
 Reach for it when you want background jobs in a Python web application with almost no concepts to learn and Redis is already running. The limits are the design: one backend, no complex routing or workflow composition, modest throughput, no Windows support. Celery is where you go for multiple brokers, canvas workflows and a large ecosystem, Dramatiq for safer defaults, and ARQ or taskiq when the application is asyncio.
-
-### SNS
-**Short:** AWS Simple Notification Service: managed pub/sub topics fanning out to queues, functions and endpoints.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/message-broker @1, observability/alerting-and-incident-response @3
-
-A topic is an endpoint rather than a stored queue: publishing is a synchronous API call, and delivery to each subscription happens afterwards, so nothing is retained beyond whatever the retry policy for that protocol allows. Subscription protocols cover SQS, Lambda, HTTPS, email, SMS and mobile push, and each has its own retry schedule -- the HTTPS delivery policy is configurable, while the in-AWS targets are internal and effectively reliable. Topics can be encrypted with a managed key and subscribed cross-account by policy.
-
-Reach for it for one-to-many notification inside AWS and for the operational path where alarms, budget events and deployment notices reach people. Its structural weakness is that a subscriber with no durable buffer can miss messages permanently, which is why anything that matters gets an SQS queue per consumer with its own dead-letter policy rather than a direct HTTPS or email subscription.
 
 ### Soda
 **Short:** Data quality platform: declarative checks in SodaCL run against warehouse tables and fail the pipeline on breach.
@@ -1069,16 +1031,6 @@ Reach for it when a Spring application's real work is integration -- polling a d
 
 Reach for it in any Spring Boot service that produces or consumes Kafka, because the container solves what people get wrong by hand -- rebalance-safe offset commits, retries that do not stall the whole group, and non-blocking retry topics when they would. The trap is assuming an exception in a listener is handled: with no configured error handler and dead-letter topic, a poison record retries forever and its partition stops advancing.
 
-### Spring State Machine
-**Short:** Spring framework for explicit state machines - states, transitions, guards, actions - fits a saga orchestrator core.
-**Kind:** tech
-**Lang:** java
-**Roles:** data-movement/workflow-and-durable-execution @1, apis-frameworks/design-patterns-and-principles @2, data-access/transactions-and-consistency @3
-
-You declare states, events and transitions in a configurer, attaching guards that can veto a transition and actions that run on entry, exit or transition, with hierarchical states and orthogonal regions available when one flat chart is not enough. Timers fire transitions on a delay, and the machine's context can be persisted to Redis, JPA or MongoDB so a long-lived machine is rehydrated per entity rather than held in memory. Sending an event returns whether it was accepted, making an illegal transition an explicit outcome rather than a silent no-op.
-
-Reach for it when a domain object has a genuinely complex lifecycle -- an order, a claim, a provisioning request -- and scattered boolean flags have become the source of bugs; as a saga core it hands you the transition table and the compensation entry points. The costs are configuration weight and a persistence design you must make. For a handful of states an enum with an explicit transition map is clearer, and for cross-service durability a workflow engine is the honest answer.
-
 ### spring-amqp
 **Short:** Spring's RabbitMQ integration: RabbitTemplate for publishing, @RabbitListener for consuming, retries and DLX.
 **Kind:** tech
@@ -1109,16 +1061,6 @@ This is the engine without the transport adapters: the channel implementations -
 
 Reach for the core alone when the endpoints are your own code -- routing, splitting, aggregating and enriching in process -- and no external transport is involved, so you avoid pulling in adapter dependencies you never use. The costs are a real learning curve and stack traces that thread through channel and handler infrastructure. Plain method calls or an in-process event publisher are clearer when there is no correlation, buffering or routing to do.
 
-### spring-kafka
-**Short:** Spring's Kafka integration: KafkaTemplate, @KafkaListener containers and Kafka transaction management.
-**Kind:** tech
-**Lang:** java
-**Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2
-
-Configuration flows through a concurrent listener container factory whose concurrency setting decides how many consumers a group runs inside one application -- more than the partition count simply leaves threads idle. Transactions are managed by a Kafka transaction manager, so a listener can commit produced records and consumed offsets atomically, which is the read-process-write exactly-once pattern; chaining it with a database transaction manager still leaves a small dual-commit window. Batch listeners hand you a whole poll when throughput matters more than per-record error handling.
-
-Reach for it as the standard Kafka layer in Spring Boot, where an embedded broker or Testcontainers makes listener behaviour genuinely testable in a way hand-rolled consumers rarely are. The recurring production issue is rebalancing caused by long processing between polls: `max.poll.interval.ms` and `max.poll.records` are the knobs, and pausing the container is the correct move rather than sleeping inside a listener.
-
 ### spring-modulith-events-jpa
 **Short:** Persists published application events in a JPA event registry so they survive a crash and are republished.
 **Kind:** tech
@@ -1128,26 +1070,6 @@ Reach for it as the standard Kafka layer in Spring Boot, where an embedded broke
 The starter supplies the JPA implementation of the event publication registry: a table holding the serialized event, the target listener's identifier, and the publication and completion timestamps. A row is inserted in the same transaction that publishes the event and marked complete only when that listener returns, so any row with no completion timestamp after a restart is a delivery that never finished. Republication can run at startup or on a schedule, and completed rows are purged under a configurable retention so the table does not grow unbounded.
 
 Reach for it when application events must survive a crash and the application already uses JPA -- it is the transactional outbox applied to in-process listeners, with no broker required. The costs are a table in your operational schema, serialized payloads that must stay deserializable across deploys, and at-least-once redelivery that makes listener idempotency mandatory. JDBC and MongoDB variants exist for stacks that are not JPA.
-
-### SQS
-**Short:** AWS managed queue with at-least-once delivery, visibility timeouts, DLQs and optional FIFO ordering.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/message-broker @1, data-movement/task-queue-and-jobs @2, platform-delivery/cloud-platform-and-cost @3
-
-A producer sends a message; a consumer receives it and gets a visibility timeout during which the message is hidden from everyone else. Deleting it inside that window completes the work, and failing to — a crash, or a timeout shorter than the job — makes it visible again for redelivery. Standard queues are unordered and at-least-once with effectively unlimited throughput; FIFO queues add per-message-group ordering and deduplication at a lower throughput ceiling.
-
-Because redelivery is normal rather than exceptional, consumers must be idempotent, and a redrive policy should send repeatedly failing messages to a dead-letter queue instead of letting them cycle forever. Reach for it as the default AWS work queue, and for Kafka or Kinesis instead when several consumers must independently read the same stream or replay history, which a queue deletes.
-
-### Step Functions
-**Short:** AWS managed state-machine orchestrator: durable multi-step workflows with retries, parallel branches and integrations.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/workflow-and-durable-execution @1, platform-delivery/cloud-platform-and-cost @2
-
-A state machine can call a very large number of AWS APIs directly through SDK integrations, so a step that lists objects or writes an item needs no function of its own. Long-running work uses the callback pattern: a task issued with a task token stays pending until something reports success or failure with that token, which is how a human approval or an external system is modelled. Distributed Map fans a state machine out over millions of items with its own concurrency and failure tolerance, and every state declares its own retry and catch behaviour.
-
-Reach for it when orchestration should be infrastructure rather than a service you run, and when a visible execution history is worth as much as the logic itself. The costs are billing per state transition, which makes a chatty loop surprisingly expensive, quotas on execution history size, and a definition language that is neither unit-testable nor portable the way ordinary code is.
 
 ### Task Execution API
 **Short:** Airflow 3.0's Task Execution API, the boundary that lets workers run tasks without direct metadata-DB access.

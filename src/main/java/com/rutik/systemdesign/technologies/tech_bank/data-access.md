@@ -307,16 +307,6 @@ Instead of triggers, it creates a shadow copy of the table, copies rows into it,
 
 Reach for it for a large ALTER on a busy MySQL table that must stay online. It requires row-based binary logging, a suitable unique key, and no foreign keys pointing at the table, and the cutover is a brief lock, so schedule it rather than assume it is invisible.
 
-### HashiCorp Raft library
-**Short:** HashiCorp's Go implementation of the Raft consensus protocol; the replication core of Consul, Vault and Nomad.
-**Kind:** tech
-**Lang:** go
-**Roles:** data-access/transactions-and-consistency @1
-
-The library implements the protocol and leaves you everything else: you supply an `FSM` with `Apply`, `Snapshot` and `Restore`, a log store and a stable store — usually BoltDB on disk — and a transport, and it runs elections, replicates the log to followers, commits an entry once a majority has persisted it, and calls `Apply` on every node in the same order. Snapshotting truncates the log, and membership changes go through the log itself.
-
-Reach for it when a Go service must replicate its own state machine and you do not want an external coordination cluster. Understand what it does not give you: no key-value API, no watches, and no client routing, so forwarding writes to the leader is your code's job — and a two-node or even-sized cluster tolerates no failures at all.
-
 ### hashicorp/raft
 **Short:** HashiCorp's battle-tested Go implementation of the Raft consensus protocol for replicated state machines.
 **Kind:** tech
@@ -662,6 +652,7 @@ Reach for it when you self-manage a MySQL fleet on classic replication and want 
 Patroni is a daemon that runs alongside each PostgreSQL instance and turns a set of them into a cluster with exactly one primary. Leadership is a key with a TTL in a distributed configuration store — etcd, Consul, ZooKeeper or Kubernetes objects — that the current leader must keep renewing; if it cannot, the key expires and the healthy replicas race to promote one. Split-brain is prevented by the store's own consensus, not by PostgreSQL, which is why the DCS needs its own quorum of nodes.
 
 Each Patroni exposes a REST endpoint reporting whether its node is primary or replica, which HAProxy or a Kubernetes service uses to route writes to whoever holds the leader key right now. Reach for it when you self-manage PostgreSQL and need automatic failover; managed services already do this for you. The failure mode to plan for is a DCS outage, which demotes the primary rather than risking two.
+
 ### Paxos
 **Short:** The classic consensus protocol letting a replica set agree on a value despite crashes; the ancestor of Raft and friends.
 **Kind:** concept

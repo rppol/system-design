@@ -75,12 +75,6 @@ AWX is the upstream open-source project behind Red Hat's automation controller. 
 
 Reach for it when playbooks are run by people who did not write them, or when production secrets must not sit on laptops. It is a real service to operate, with a database, a task queue and a Kubernetes-based deployment through its operator, so a small team running playbooks from a reviewed CI job gains little from adding it.
 
-### Anthropic Message Batches
-**Short:** Anthropic API mode that submits many messages for asynchronous processing at roughly half the price of live calls.
-**Kind:** api
-**Lang:** *
-**Roles:** platform-delivery/cloud-platform-and-cost @1, data-movement/batch-and-distributed-compute @2, llm-apps/llm-gateway-and-routing @3
-
 ### ApplicationSets
 **Short:** Argo CD controller and CRD that templates one Application definition across many clusters, environments or repo paths.
 **Kind:** api
@@ -97,16 +91,6 @@ In the current `gha-runner-scale-set` design you install a controller plus one H
 
 Reach for it when builds need cluster resources, private VPC access, or hardware GitHub does not sell, and when you want a fresh runner per job rather than a reused machine accumulating state. You take on node capacity and image-pull latency at the start of every job, plus the security question of what a workflow can reach from inside your cluster: a self-hosted runner exposed to a public repository's pull requests is a well-known compromise path.
 
-### Argo CD
-**Short:** GitOps controller that continuously reconciles a Kubernetes cluster to the manifests declared in Git.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/ci-cd-and-release @1, platform-delivery/kubernetes-and-orchestration @2
-
-An `Application` resource names a repo, a path and a revision; the controller renders whatever is there, plain YAML, Helm or Kustomize, and compares it with live objects, reporting each as Synced or OutOfSync and separately as Healthy or Degraded through per-kind health assessments. Sync waves and resource hooks order the apply, so a migration Job can complete before the Deployment rolls, and an automated sync policy with prune and self-heal turns a manual `kubectl edit` into drift the controller reverts.
-
-The visual diff and resource tree are why it is the usual pick when many people need to see what is actually deployed. Secrets are the standing gap, since manifests live in a repository and need Sealed Secrets or the External Secrets Operator beside them; Flux is the alternative if you prefer a set of composable controllers over a server with a UI.
-
 ### Argo Rollouts
 **Short:** Kubernetes controller for progressive delivery: canary and blue-green rollouts gated by automated metric analysis.
 **Kind:** tech
@@ -121,9 +105,9 @@ It replaces the `Deployment` with a `Rollout` resource that owns the same pod te
 **Lang:** *
 **Roles:** platform-delivery/ci-cd-and-release @1, platform-delivery/kubernetes-and-orchestration @2
 
-An `Application` resource names a git repo, a path and a revision; the controller renders whatever it finds there (plain YAML, Helm, Kustomize), diffs it against live cluster state, and either reports the drift or reconciles it away. Because it pulls from inside the cluster, CI never holds cluster credentials — it only pushes a commit — and git history becomes the deploy audit trail.
+An `Application` resource names a repo, a path and a revision; the controller renders whatever is there, plain YAML, Helm or Kustomize, and compares it with live objects, reporting each as Synced or OutOfSync and separately as Healthy or Degraded through per-kind health assessments. Sync waves and resource hooks order the apply, so a migration Job can complete before the Deployment rolls, and an automated sync policy with prune and self-heal turns a manual `kubectl edit` into drift the controller reverts.
 
-Use it when desired state should be reviewable and revertible like code, with the app-of-apps pattern when one root Application bootstraps many. It fits badly anything git cannot describe: imperative one-off jobs, and secrets, which need a sealed-secret or external-secret layer since the manifests live in a repository.
+The visual diff and resource tree are why it is the usual pick when many people need to see what is actually deployed. Secrets are the standing gap, since manifests live in a repository and need Sealed Secrets or the External Secrets Operator beside them; Flux is the alternative if you prefer a set of composable controllers over a server with a UI.
 
 ### ArgoCD Image Updater
 **Short:** Argo CD companion that watches a registry and writes new image tags back to Git so GitOps reconciles the deploy.
@@ -384,6 +368,7 @@ Reach for it when several pods genuinely need one shared filesystem: uploaded as
 Azure Functions is Azure's function-as-a-service runtime. A function declares a trigger — HTTP request, timer, queue or Service Bus or Event Hub message, blob creation — plus input and output bindings, and the platform handles connecting to those services, deserializing the payload and scaling instances out as the backlog grows. The Consumption plan bills per execution and gigabyte-second and scales to zero, which is why cold starts appear; Premium and Dedicated plans keep instances warm and add virtual network integration.
 
 Durable Functions layer stateful orchestration on top of the stateless model, so fan-out/fan-in, retries with backoff and waits for human approval survive process restarts by replaying an event history. Reach for it for event-driven glue and spiky workloads. Steady high-throughput or latency-sensitive services are usually cheaper and more predictable on a container platform.
+
 ### Azure SDKs
 **Short:** Azure's per-language client libraries, with built-in retry, backoff and throttling behaviour for its managed services.
 **Kind:** tech
@@ -463,16 +448,6 @@ Reach for it when the default builder refuses something: a registry cache export
 Calico gives each pod an address and, in its native mode, routes to it as plain layer 3 rather than encapsulating: a BGP daemon on every node advertises the pod CIDRs it owns, so pod-to-pod packets are ordinary routed traffic the surrounding fabric can see. Where BGP is unavailable it falls back to an IP-in-IP or VXLAN overlay, and on capable kernels it offers an eBPF dataplane that replaces kube-proxy. Policy is enforced per node, implementing Kubernetes NetworkPolicy plus its own richer global policy with rule ordering, explicit deny and host endpoints.
 
 Reach for it when you need real segmentation, when pods should be routable on the wider network, or when policy has to cover the hosts themselves. Its extended policy model does not port to another CNI, and BGP mode needs cooperation from whoever runs the network; Cilium is the direct alternative when L7 policy and a sidecar-free mesh matter more.
-
-### CDK
-**Short:** AWS Cloud Development Kit: define infrastructure in a real programming language, synthesized to CloudFormation.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/cloud-platform-and-cost @2
-
-A CDK app is a tree of constructs, and `cdk synth` walks that tree to produce a cloud assembly of templates plus assets such as function bundles and container images. Deploying requires a bootstrapped environment, a stack holding the asset bucket, the ECR repository and the deployment roles. `cdk diff` compares the synthesized template against the deployed stack before you commit to an update, and because the app is ordinary code, assertions over the synthesized template make infrastructure unit-testable.
-
-Reach for it when a team already writes in one of the supported languages and wants abstractions, since a construct encoding your organisation's defaults is reusable in a way a copied template is not. The traps are logical id stability, where moving a construct in the tree renames and therefore replaces resources, and version skew between construct libraries across a large estate. CDKTF applies the same idea over Terraform providers.
 
 ### CDKTF
 **Short:** Cloud Development Kit for Terraform: write infrastructure in TypeScript, Python or Go and synthesize Terraform JSON.
@@ -603,16 +578,6 @@ Reach for it for the minimum that makes a fresh instance reachable and identifia
 Cloudability ingests billing data from AWS, Azure and Google Cloud and normalizes it into one model so multi-cloud spend can be compared and allocated. Its differentiator is business mapping rather than raw tags: rules attribute untagged and shared costs such as support charges, data transfer and a shared cluster to teams and products, which is what makes a chargeback number defensible. It also tracks reservation and commitment coverage and recommends purchases and rightsizing.
 
 Reach for it in an organization with several clouds and a finance function whose allocation has to survive scrutiny. The costs are a commercial contract usually priced against spend, an integration effort, and allocation rules that need an owner or they drift. On a single cloud, that provider's native cost tooling plus an enforced tagging policy usually answers the same questions; Kubernetes-level allocation is better served by OpenCost or Kubecost.
-
-### CloudFormation
-**Short:** AWS-native infrastructure as code: declare stacks of resources in YAML or JSON and let AWS reconcile and roll back.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/cloud-platform-and-cost @3
-
-A template has a fixed anatomy of `Parameters`, `Mappings`, `Conditions`, `Resources` and `Outputs`, and intrinsic functions such as `Ref`, `Fn::GetAtt` and `Fn::Sub` wire the pieces together, so one resource's generated name or ARN feeds another's property without you knowing it in advance. Exports and `Fn::ImportValue` share values between stacks, and anything AWS has not modelled can be handled by a custom resource backed by a function you write.
-
-Splitting an estate into small stacks along clear boundaries is what makes it workable, because a large stack is slow and one failed resource rolls back everything in it. Cross-stack exports are the trap in the other direction, since an exported value cannot be changed while another stack imports it. Most teams stop hand-writing templates entirely and generate them from CDK or SAM.
 
 ### CloudHealth
 **Short:** Third-party FinOps platform for multi-cloud cost visibility, allocation, and pre-deploy IaC cost estimates.
@@ -749,6 +714,7 @@ Reach for it on a node when `kubectl` cannot help, because the API server is unr
 Crossplane installs into a Kubernetes cluster and adds providers whose custom resources represent real cloud infrastructure — a bucket, a database instance, a VPC, an IAM role. You create infrastructure by applying YAML, and a controller then reconciles continuously against that spec, so drift is corrected rather than merely reported at the next plan. The state of the world lives in the cluster's API objects instead of a state file you have to store and lock.
 
 Compositions are what platform teams actually use it for: define one claim such as a managed Postgres instance, and let it expand into the database, subnet group, parameter group, secret and network rules with your organisation's defaults already applied, so a product team requests a database without learning the provider's surface. The tradeoff against Terraform is real in both directions — you gain a live control loop and the Kubernetes RBAC and GitOps ecosystem, and you accept that your infrastructure now depends on a healthy cluster and on provider CRDs keeping up with cloud APIs.
+
 ### crun
 **Short:** C-based OCI container runtime; a faster, lower-memory drop-in replacement for runc used by Podman and CRI-O.
 **Kind:** tech
@@ -1086,6 +1052,7 @@ Reach for it for anything running on Google Cloud, where per-repository IAM, reg
 Harbor is a registry you run yourself, storing OCI images and other OCI artifacts such as Helm charts, with projects as the unit of RBAC and quota. On top of plain storage it adds the controls a regulated pipeline needs: vulnerability scanning on push with a policy that can block pulling an image with a critical CVE, signature verification so unsigned images are refused, tag immutability and retention rules with garbage collection, and replication to or from another registry.
 
 That replication is what makes it practical in air-gapped or multi-region setups — mirror upstream images inward so builds do not depend on a public registry's availability or rate limits, and push outward to a regional registry so nodes pull locally. Reach for it when images must stay inside your network, or when a managed registry's policy controls are not enough.
+
 ### Helm
 **Short:** Kubernetes package manager: templated, versioned chart releases of manifests with values-driven overrides.
 **Kind:** tech
@@ -1095,16 +1062,6 @@ That replication is what makes it practical in air-gapped or multi-region setups
 A chart is a directory of templated manifests plus a `values.yaml` of defaults. Installing one renders the templates against your overrides and records the result as a named release with revision history, so `helm rollback` restores the previous revision without you having kept the old YAML anywhere. That gives you a single versioned artifact for an application that is really a dozen objects — Deployment, Service, Ingress, ConfigMap, ServiceAccount, HPA.
 
 The standing complaint is that templating YAML with a text templating engine is fragile and indentation bugs surface as invalid manifests. Run `helm template` and review the rendered output rather than trusting the values file alone.
-
-### Helm 3
-**Short:** Kubernetes package manager: templated charts, versioned releases, upgrade and rollback of a whole application.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/kubernetes-and-orchestration @1, platform-delivery/ci-cd-and-release @2, devtools/build-and-dependency-management @3
-
-Helm 3 removed Tiller, the in-cluster server component version 2 required, so the client acts as you through your own kubeconfig and RBAC applies normally, and release state is stored as a Secret in the release's own namespace rather than centrally. Upgrades use a three-way strategic merge comparing the old manifest, the new manifest and live cluster state, so a change someone made with `kubectl` is no longer silently reverted or ignored. Charts can be pushed to and installed from OCI registries alongside images, and `--atomic` with `--timeout` rolls a failed upgrade back automatically.
-
-This is simply what Helm means now, since version 2 is long unsupported and its Tiller security model was the main objection to using Helm at all. The remaining complaints are unchanged: releases are tracked per namespace, so the same chart in two namespaces is two unrelated releases, and an upgrade interrupted midway leaves a release pending, requiring a rollback before anything else will proceed.
 
 ### helm-diff
 **Short:** Helm plugin that renders the diff between the released manifests and a pending upgrade.
@@ -1173,6 +1130,7 @@ Reach for it for interactive investigation, where its advantage over `kubectl` i
 Kaniko builds an image from a Dockerfile inside an ordinary unprivileged container. It extracts the base image into its own filesystem, executes each instruction in userspace, and snapshots the changed files as a layer, so there is no Docker daemon, no privileged pod, and no host docker socket mounted into a build job. Removing that socket mount is the security point: anything that can talk to the node's daemon effectively has root on the node, and CI runs untrusted-ish code by definition.
 
 Because there is no daemon there is also no local layer cache between runs, so enable caching to a registry repository or builds get slower, not faster. It is one of several daemonless builders — BuildKit in rootless mode and Buildah solve the same problem with different tradeoffs — so check which one your platform already supports before adopting it.
+
 ### Karpenter
 **Short:** Kubernetes node autoscaler that provisions just-in-time, right-sized, Spot-aware instances for pending pods.
 **Kind:** tech

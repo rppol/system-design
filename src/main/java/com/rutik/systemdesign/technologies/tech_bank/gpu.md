@@ -735,16 +735,6 @@ It answers the first question of any GPU triage, whether the runtime sees the ha
 
 Reach for it when the deployment is Intel CPUs, Arc or Data Center GPUs, or when one source genuinely must span vendors through the NVIDIA and AMD plugins. Against CUDA it trades a narrower ecosystem for portability, and the SPIR-V path means kernels are finalized at run time unless you compile ahead of time for the exact device, which is worth doing where startup latency matters.
 
-### Flash Attention
-**Short:** IO-aware fused attention kernels that tile QKV in SRAM, cutting memory traffic and enabling long sequences.
-**Kind:** tech
-**Lang:** python
-**Roles:** gpu/gpu-math-libraries @1, inference/inference-engine @2, gpu/kernel-programming @3, model-training/deep-learning-framework @3
-
-Attention is bound by memory traffic rather than arithmetic, because the score matrix is quadratic in sequence length and every element makes a round trip to HBM. The kernel keeps that matrix from ever existing: tiles of queries, keys and values are loaded into on-chip SRAM, partial scores are computed there, and the softmax is combined across tiles with a running maximum and running denominator, rescaling the accumulated output as it goes.
-
-Memory then grows linearly rather than quadratically with sequence length, which is what makes long contexts affordable in training and prefill at all. The constraints are practical rather than theoretical: support is per head dimension, dtype and mask shape, and an unusual attention bias sends the framework back to the materializing path, which shows up as a sudden jump in memory rather than as an error.
-
 ### Flash Attention 2
 **Short:** IO-aware fused attention kernel that cuts memory traffic and runs 2-4x faster than naive attention.
 **Kind:** tech
@@ -764,15 +754,6 @@ Reach for it whenever sequence length is long enough to matter, in training and 
 FlashAttention computes exact attention without ever materializing the full sequence-by-sequence score matrix in HBM. It tiles the query, key and value blocks into on-chip SRAM and accumulates the softmax with a running maximum and denominator, so memory traffic falls from quadratic to linear in sequence length and the kernel stops being bandwidth-bound. The result is numerically the same attention, not an approximation, so there is no quality tradeoff to weigh.
 
 Version 2 improves how the work is partitioned across warps and thread blocks so the GPU stays busy at long sequence lengths; version 3 targets Hopper specifically, overlapping asynchronous memory movement with computation and supporting lower-precision formats. It is the default attention path in modern training and serving stacks, and long context is impractical without it; support is per head dimension and dtype, so an unusual configuration may fall back.
-### flash-attention
-**Short:** The pip-installable FlashAttention kernels: fused, IO-aware attention with sub-linear memory for long sequences.
-**Kind:** tech
-**Lang:** python, cpp
-**Roles:** gpu/gpu-math-libraries @1, gpu/kernel-programming @2, inference/compiler-and-runtime-optimization @3
-
-The repository ships kernels rather than a model layer: a standard entry point taking packed query, key and value tensors, a variable-length variant that takes a cumulative-sequence-lengths array so a batch of ragged sequences needs no padding, and KV-cache entry points for decoding. It builds CUDA and CUTLASS-heavy sources against your installed PyTorch and CUDA, which is why installation is the part that goes wrong.
-
-Install it when a training or serving stack asks for it by name, or when you need the variable-length packing that PyTorch's built-in scaled dot-product attention does not expose. For ordinary attention the built-in dispatcher already selects a flash kernel when dtype, head dimension and mask qualify, so the extra dependency buys nothing and costs a fragile build step.
 
 ### flash-attn-3
 **Short:** FlashAttention-3: Hopper-optimized fused attention kernels with async pipelining and FP8, ~75% FLOP utilization.
@@ -793,16 +774,6 @@ It pays only on H100-class hardware, since on Ampere and earlier the instruction
 Linear-attention and state-space architectures replace softmax attention with a recurrent state update, which is cheap in theory and terrible as naive PyTorch, because a sequential scan over thousands of timesteps launches thousands of tiny kernels. The library provides the chunked formulation in Triton instead: the sequence is split into chunks, the within-chunk contribution is computed as a matmul and the cross-chunk contribution through the recurrent state, so the GPU sees a few large tensor-core operations.
 
 It covers GLA, RetNet, RWKV variants, Mamba-2 style updates and related designs, with fused forward and backward kernels and both recurrent and chunked modes so decoding and training each use the right one. Reach for it when training or serving one of these architectures; for standard softmax attention the flash-attention kernels are the equivalent layer and are far more widely tested.
-
-### flash_attn
-**Short:** The pip package shipping Flash Attention 1/2/3 CUDA kernels; install with --no-build-isolation against your torch build.
-**Kind:** tech
-**Lang:** python
-**Roles:** gpu/gpu-math-libraries @1, inference/compiler-and-runtime-optimization @2, model-training/deep-learning-framework @3
-
-This is the import name and the pip distribution behind the FlashAttention kernels. The `--no-build-isolation` flag matters because the build imports `torch` at setup time to discover the CUDA version and the C++ ABI it must compile against, and an isolated build environment has no torch in it, so the install either fails outright or produces an extension that will not load beside your interpreter's torch.
-
-Prefer a prebuilt wheel matching your exact torch, CUDA and Python versions. A source build compiles a large amount of template-heavy code and can exhaust memory on a small machine, which is why `MAX_JOBS` is usually turned down for it. The characteristic run-time failure is an undefined symbol on import, and it always means the extension and torch were built against different versions.
 
 ### FlashAttention
 **Short:** IO-aware fused attention kernels that tile QK^V in SRAM, avoiding the materialized N-by-N attention matrix.
@@ -1050,9 +1021,9 @@ Reach for it to keep a vision pipeline's preprocessing on the GPU, so decoded fr
 **Lang:** *
 **Roles:** gpu/gpu-profiling-and-debugging @1, gpu/kernel-programming @3
 
-It profiles one kernel at a time by replaying each launch and collecting hardware counters, which is why overhead is enormous and you must scope a run with `-k` or `--launch-count`. In return you get achieved occupancy, memory throughput against the roofline, shared-memory bank conflicts, warp-stall reasons, and Tensor-Core activity -- and with a `-lineinfo` build it correlates those stalls back to source lines.
+It works by replaying each kernel launch several times, collecting a different set of hardware counters on each pass and combining them into one report. That is why the kernel must be deterministic and free of cross-launch side effects, and why the wall time it reports is not the wall time your application sees. Scoping matters: without a kernel-name filter or a launch count, a run tries to profile every launch in the program.
 
-Reach for it once you already know which kernel matters, which is a question for Nsight Systems or a timeline. It answers "why is this kernel slow", never "where does my program spend its time", and it says nothing about host-side or multi-GPU behaviour.
+The report answers one question well, which is what limits this kernel. Speed of light gives compute and memory utilization against the hardware roofline, the memory section shows requested versus transferred sectors, the scheduler section attributes cycles to specific stall reasons, and the occupancy section names its own limiter. It says nothing about host code, multi-GPU behaviour or which kernel matters, so start with a timeline profiler.
 
 ### Nsight Compute Roofline chart
 **Short:** Nsight Compute view plotting a kernel against the memory and compute roofs, showing which limit it is hitting.
@@ -1170,16 +1141,6 @@ It disassembles a cubin, an ELF holding device code for one architecture, into S
 
 Reach for it when the question is what the compiler really emitted: whether a loop was unrolled, whether a local array spilled into local memory, whether the tensor-core instruction you expected is present at all. Note the division of labour with `cuobjdump`, which understands fatbinary containers inside executables and delegates the disassembly, while this tool works on an extracted cubin and owns the graph and analysis output.
 
-### NVIDIA cuDNN
-**Short:** NVIDIA's tuned deep-learning primitive library; picks the fastest convolution algorithm behind PyTorch and TensorFlow.
-**Kind:** tech
-**Lang:** cpp
-**Roles:** gpu/gpu-math-libraries @1, inference/compiler-and-runtime-optimization @2, model-training/deep-learning-framework @3
-
-The library's defining problem is that no single convolution algorithm wins: implicit GEMM, FFT-based and Winograd approaches each dominate for particular filter sizes, batch shapes, layouts and precisions. It therefore makes algorithm selection an explicit step, offering a heuristic that predicts from the descriptor and an exhaustive mode that benchmarks the candidates for your exact shapes and caches the winner. The graph API generalizes this from single operations to fused subgraphs.
-
-Frameworks expose that choice as a switch, `torch.backends.cudnn.benchmark`, which pays for itself when input shapes are constant and costs a fresh benchmark on every new shape when they are not. Layout matters as much as algorithm: a channels-last memory format with a half-precision dtype and aligned channel counts is what routes a convolution onto tensor cores at all, and getting it wrong quietly keeps you on the slow path.
-
 ### NVIDIA Nsight
 **Short:** NVIDIA's GPU profiling and debugging tool family (Systems, Compute, Graphics) for kernel and timeline analysis.
 **Kind:** tech
@@ -1189,45 +1150,6 @@ Frameworks expose that choice as a switch, `torch.backends.cudnn.benchmark`, whi
 Two of the tools are the ones you actually reach for. Nsight Systems is the timeline profiler: it shows CPU threads, CUDA API calls, kernel executions, memory copies and your own annotated ranges on one axis, which is how you discover that the GPU is idle waiting on the data loader rather than slow. Nsight Compute is the per-kernel profiler, reporting occupancy, achieved memory and compute throughput, roofline position and the stall reasons behind them.
 
 Use them in that order: the timeline tells you which kernel matters, the kernel profiler tells you why it is slow. They replace nvprof on current GPU architectures. One thing to keep in mind is that the kernel profiler replays each kernel several times to collect its counters, so its reported wall clock is not your application's wall clock.
-
-### NVIDIA Nsight Compute
-**Short:** NVIDIA's kernel-level profiler reporting occupancy, memory access patterns, stall reasons and roofline position.
-**Kind:** tech
-**Lang:** *
-**Roles:** gpu/gpu-profiling-and-debugging @1, observability/profiling-and-performance @3
-
-It works by replaying each kernel launch several times, collecting a different set of hardware counters on each pass and combining them into one report. That is why the kernel must be deterministic and free of cross-launch side effects, and why the wall time it reports is not the wall time your application sees. Scoping matters: without a kernel-name filter or a launch count, a run tries to profile every launch in the program.
-
-The report answers one question well, which is what limits this kernel. Speed of light gives compute and memory utilization against the hardware roofline, the memory section shows requested versus transferred sectors, the scheduler section attributes cycles to specific stall reasons, and the occupancy section names its own limiter. It says nothing about host code, multi-GPU behaviour or which kernel matters, so start with a timeline profiler.
-
-### NVIDIA Nsight Systems
-**Short:** System-wide GPU timeline profiler showing kernels, memcopies, NVTX ranges and CPU-GPU gaps.
-**Kind:** tech
-**Lang:** *
-**Roles:** gpu/gpu-profiling-and-debugging @1, observability/profiling-and-performance @2
-
-`nsys profile` samples CPU threads, CUDA API calls, kernel launches, memory copies, NCCL collectives and OS runtime activity onto one shared timeline. The value is in the gaps rather than the kernels: you see the GPU idle while the data loader catches up, a synchronize that serialized what should have overlapped, or a collective where one rank arrives late and everyone waits. Annotating your own phases with NVTX ranges makes the timeline readable instead of a wall of anonymous kernels.
-
-It is the right tool for "where is the time going" across a whole process or a whole multi-GPU job. Once you know which kernel to blame, switch to Nsight Compute, which profiles inside a single kernel — occupancy, memory throughput, instruction mix — and answers a different question.
-### NVIDIA Transformer Engine
-**Short:** NVIDIA library automating FP8 scaling for transformer layers on Hopper/Blackwell; used inside Megatron-LM and NeMo.
-**Kind:** tech
-**Lang:** python
-**Roles:** gpu/gpu-portability-and-precision @1, gpu/gpu-math-libraries @2, model-training/distributed-training @2, inference/quantization-and-compression @3
-
-FP8 needs per-tensor scaling because the format's exponent range cannot hold activations and gradients as they are. The library maintains an amax history per tensor, derives a scale from it with a delayed-scaling recipe so the current step does not wait on its own statistics, and picks the E4M3 encoding where precision matters and E5M2 where range does. GEMMs then run in FP8 with FP32 accumulation, and fused attention and normalization kernels keep the casts out of separate launches.
-
-In practice you adopt it through drop-in modules such as `te.Linear` and `te.TransformerLayer` inside an `fp8_autocast` context, which is why Megatron-LM and NeMo integrate it rather than reimplementing the recipe. It requires Hopper or later, since that is where the FP8 tensor cores are; on Ampere it falls back to BF16 and there is nothing to gain.
-
-### NVIDIA TransformerEngine
-**Short:** NVIDIA library running transformer layers in FP8 on Hopper and later, handling scaling factors automatically.
-**Kind:** tech
-**Lang:** python
-**Roles:** gpu/gpu-portability-and-precision @1, inference/quantization-and-compression @2, model-training/distributed-training @3
-
-The interesting engineering is the scaling state, not the cast. Every FP8 tensor carries a scale and its inverse, updated from a rolling history of observed maxima, and that state is part of the model: it must be checkpointed, gathered correctly under tensor and sequence parallelism, and kept consistent when a step is skipped. Newer recipes narrow the granularity from per-tensor towards per-block scaling, which holds accuracy better on the latest hardware.
-
-The practical reason to use it rather than casting by hand is that this bookkeeping is where FP8 training goes wrong: a loss that diverges halfway through a long run usually traces back to scaling, not to the format itself. Reach for it when training or serving transformers at a scale where the low-precision tensor cores are the point; on hardware without them, `torch.amp` with BF16 is the correct tool.
 
 ### nvidia-smi
 **Short:** NVIDIA's CLI for GPU inventory and telemetry: driver version, utilization, memory, power and thermals.

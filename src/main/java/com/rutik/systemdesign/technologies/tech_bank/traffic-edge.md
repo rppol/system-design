@@ -19,16 +19,6 @@ A service network is the unit of configuration: you register services with their
 
 Reach for it when services are spread across many accounts and VPCs and the networking rather than the application is what makes them hard to connect. It is AWS-only and gives less than a full mesh, with no sidecar-level protocol control and no cross-cloud story, and is metered per service and per gigabyte. A mesh such as Istio, or a federated Consul, remains the answer where portability or fine-grained data-plane behaviour matters.
 
-### API Gateway
-**Short:** AWS API Gateway: managed HTTP front door doing routing, authorization, throttling and Lambda integration.
-**Kind:** tech
-**Lang:** *
-**Roles:** traffic-edge/api-gateway @1, traffic-edge/rate-limiting-and-resilience @2, platform-delivery/cloud-platform-and-cost @3
-
-A gateway is the single ingress that owns the concerns no individual service should reimplement: TLS termination, authentication and token validation, per-client throttling, request and response shaping, routing to the correct backend, and access logging with a correlation id attached. On AWS this is a managed regional endpoint in front of Lambda functions, containers or any HTTP origin, configured declaratively rather than deployed as instances you size and patch.
-
-Reach for it when several teams publish APIs and you want one enforcement point for authentication and quotas. Two costs recur: it is billed per request, which becomes the dominant line item at high volume and is what pushes teams towards a load balancer or a self-run proxy, and centralising policy makes the gateway a shared failure and change-management surface. Keep business logic out of it and treat its configuration as versioned code rather than console clicks.
-
 ### API Gateway request quotas
 **Short:** Per-client request quotas enforced at the gateway as admission control, shedding load before it reaches services.
 **Kind:** concept
@@ -598,16 +588,6 @@ Reach for it in any busy cluster, and especially where those intermittent multi-
 Polly wraps a call in a pipeline of resilience strategies — retry with backoff and jitter, circuit breaker, timeout, rate limiter, hedging, fallback — each configured declaratively and applied in the order you compose them. Ordering is what people get wrong: a timeout inside a retry bounds each attempt while a timeout outside bounds the whole operation, and a circuit breaker placed beneath a retry will be tripped by your own retries rather than by the dependency failing.
 
 In .NET it plugs into the HTTP client factory so outbound calls inherit a policy without call sites changing. It is the ecosystem's counterpart to Resilience4j on the JVM, and the patterns transfer directly between them.
-
-### Private Link
-**Short:** Cloud feature exposing a single service into your VPC through a private endpoint, so traffic never crosses the internet.
-**Kind:** tech
-**Lang:** *
-**Roles:** traffic-edge/service-mesh-and-discovery @1, runtime-systems/io-networking-and-syscalls @2, security/authorization-and-policy @3
-
-The pattern is the same wherever it appears. A provider publishes a service behind an internal load balancer, a consumer creates an endpoint that materialises as a network interface holding a private address in their own subnet, and traffic flows over the cloud's internal fabric. Because the connection is one-directional and scoped to a single service, the two networks are not joined: no route exchange, no shared address space, and therefore no CIDR overlap problem, which is what separates it from peering.
-
-Reach for it when a vendor's service must be reachable without an internet path, or when a rule forbids public egress. Costs are charged per endpoint and per gigabyte and multiply across many services and accounts, DNS needs care so the name resolves to the endpoint rather than the public address, and the granularity means one endpoint per service. For broad any-to-any connectivity, peering or a transit hub is still the right shape.
 
 ### PrivateLink
 **Short:** AWS PrivateLink: expose or consume a single service privately over VPC endpoints, never traversing the internet.

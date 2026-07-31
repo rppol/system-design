@@ -304,15 +304,6 @@ It is packaged as a container that takes a Hub model id, which makes it a short 
 This is Intel's compression toolkit for models coming from PyTorch, TensorFlow or ONNX: post-training dynamic and static quantization, quantization-aware training, magnitude and structured pruning, and distillation, all driven from one configuration rather than framework-specific code. Its distinguishing feature is the accuracy-aware tuning loop, which tries quantization recipes — which operators to keep in higher precision, which calibration to use — until the metric drop lands inside the tolerance you declared, instead of leaving you to bisect by hand.
 
 Reach for it when serving happens on Intel CPUs and int8 or bf16 is what gets you to the throughput you need, since it targets the VNNI and AMX instructions that make CPU int8 worthwhile. On NVIDIA GPUs, the vendor's own toolchain is the better path.
-### Intel OpenVINO
-**Short:** Intel's inference toolkit: graph conversion, INT8 quantization and optimized CPU/iGPU/NPU runtimes.
-**Kind:** tech
-**Lang:** *
-**Roles:** inference/compiler-and-runtime-optimization @1, inference/quantization-and-compression @2, inference/model-format-and-edge @2, inference/model-server @3
-
-The toolkit converts a trained model into its own intermediate representation, an `.xml` topology beside a `.bin` of weights, then runs it through a core object that compiles the graph for a specific device plugin. Compilation is where the work happens: operations are fused, layouts are chosen for the target's vector units, and the compiled result can be cached to disk so the next process start skips it. AUTO picks a device, HETERO splits a graph across several, and performance hints select latency or throughput scheduling instead of hand-set thread counts.
-
-Reach for it when inference runs on Intel CPUs, integrated or discrete GPUs, or an NPU, and INT8 through NNCF is what reaches the required throughput. It is not a datacentre GPU stack; on NVIDIA hardware TensorRT or a dedicated LLM engine is the equivalent, and conversion coverage is the usual friction for a brand-new architecture.
 
 ### KServe
 **Short:** Kubernetes CRD-based model serving with a standard inference protocol, canary rollout and scale-to-zero.
@@ -543,6 +534,7 @@ The value is decoupling: export once from PyTorch and the same file feeds ONNX R
 ONNX Runtime loads a model in the ONNX graph format, applies graph-level optimizations such as constant folding, operator fusion and layout transformation, then partitions the graph across execution providers — CPU, CUDA, TensorRT, OpenVINO, CoreML, DirectML, WebAssembly in a browser. That is the point of it: you export once from PyTorch and the same file runs on a server, a laptop, a phone and in a browser, so the training framework stops dictating the serving environment.
 
 It also ships post-training quantization tooling for int8 dynamic and static quantization of those graphs. Reach for it for CPU and edge inference and for fleets with mixed hardware; for maximum throughput on data-centre GPUs a specialized engine wins. The usual friction is export: an unsupported or custom operator fails at conversion, before you ever get to run it.
+
 ### ONNX Runtime Mobile
 **Short:** Trimmed ONNX Runtime build for iOS and Android: reduced binary size running prepacked ORT-format models.
 **Kind:** tech
@@ -562,16 +554,6 @@ Reach for it when application size is a genuine constraint on iOS or Android and
 Execution providers let ONNX Runtime hand parts of a graph to another backend. This one asks OpenVINO which nodes it can take, gives it those subgraphs to compile and execute, and keeps the remainder on the default CPU provider, stitching the results back together at the boundaries. The device is chosen through the provider's options, covering CPU, GPU, NPU and an automatic mode, and compiled graphs can be cached so process start does not repeat the compile.
 
 Reach for it when an application is already built on ONNX Runtime and the deployment is Intel hardware: you get OpenVINO's kernels and INT8 paths by adding a provider rather than rewriting against a second API. Watch the partitioning, because a graph fragmented into many small supported islands pays to cross between providers repeatedly and can end up slower than the plain CPU path.
-
-### ONNXRuntime
-**Short:** Cross-platform ONNX inference runtime doing graph fusion, with CPU, GPU and NPU execution providers.
-**Kind:** tech
-**Lang:** *
-**Roles:** inference/compiler-and-runtime-optimization @1, inference/inference-engine @2, inference/model-format-and-edge @2, inference/model-server @3, inference/quantization-and-compression @3
-
-The session is the unit of work: you create one from a model file with a list of execution providers in priority order, and it partitions the graph across them after applying graph optimizations such as constant folding, redundant-node elimination, operator fusion and layout transformation, at a level you choose and optionally saved so later starts skip the work. A session is safe for concurrent inference calls, and the intra-operator and inter-operator thread pools are configured on it.
-
-Two details decide performance. Binding inputs and outputs lets tensors stay on the device between calls instead of being copied in and out on every inference. And provider fallback is silent: a node the chosen provider does not support runs on CPU and cuts the graph in two, so profile the placement rather than assuming the accelerator received the whole model.
 
 ### OpenAI API
 **Short:** Hosted OpenAI model endpoint with decoding controls, automatic prompt caching, function calling and remote MCP support.
@@ -798,16 +780,6 @@ Reach for it when you own NVIDIA hardware and need the last increment of tokens 
 Point it at a directory whose subdirectories are numbered versions and it loads the highest automatically, keeping the outgoing version alive until in-flight requests drain; a serving config can instead pin explicit versions or attach labels such as stable and canary so traffic can be split by label. Both gRPC and REST predict endpoints are exposed from the same model.
 
 Server-side batching is the setting that decides throughput: incoming requests are grouped up to a maximum batch size or timeout, trading a little latency for far better accelerator utilization. Reach for it when the models are already SavedModels and the deployment is TensorFlow end to end; a PyTorch or mixed-framework fleet is better served by a framework-agnostic server such as Triton, which also gives you one autoscaling and metrics story across models.
-
-### TGI
-**Short:** Hugging Face Text Generation Inference: a self-hosted, batched production serving stack for LLMs.
-**Kind:** tech
-**Lang:** *
-**Roles:** inference/inference-engine @1, inference/model-server @2
-
-A single container serves one model: point it at a Hub id or a local path, give it the tensor-parallel degree and the memory limits, and it loads the weights, shards them across the GPUs and starts serving. The settings that matter are the ones bounding the batch, namely maximum input length, maximum total tokens and the token budget per batch, because together they decide how many concurrent sequences fit in KV cache before new requests start queueing.
-
-It exposes Prometheus metrics for queue time, batch size and tokens per second, and an OpenAI-compatible route alongside its native one, so it drops into an existing client. Reach for it when you want a supported container from the same ecosystem as your checkpoints; for the newest quantization formats, cache-reuse strategies and speculative decoding, the dedicated engines usually get there first.
 
 ### TinyLlama
 **Short:** 1.1B-parameter Apache-2.0 Llama-architecture model, small enough for edge devices and cheap experimentation.

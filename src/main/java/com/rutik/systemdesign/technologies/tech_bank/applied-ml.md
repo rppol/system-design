@@ -683,16 +683,6 @@ It replaces left-to-right decoding with iterative refinement: a block of output 
 
 Treat it as experimental rather than a production choice: availability is limited, quality on long-form reasoning trails frontier autoregressive models, and the tooling around streaming, tool calls and token budgeting all assumes sequential generation. The reason to track it is the latency ceiling it implies if diffusion decoding keeps closing the quality gap.
 
-### Gemini Live
-**Short:** Google's low-latency multimodal API for end-to-end speech-to-speech conversation with interruption handling.
-**Kind:** model
-**Lang:** *
-**Roles:** applied-ml/vision-speech-and-multimodal @1, llm-apps/agent-framework @3
-
-It is a speech-native model rather than a text model with speech bolted on: audio goes in and audio comes out without an intermediate transcription-and-resynthesis round trip, so prosody, pacing and emotion in the input survive into the response and the turn latency is one model hop instead of three. Interruption is handled in the model's turn logic, so a user talking over it cuts the response rather than queueing behind it.
-
-Reach for it when the conversation must feel like a conversation -- interruptions, backchannels, natural pauses. The tradeoffs are that the intermediate text is no longer the source of truth you can log, filter and moderate before it is spoken, cost is billed in audio tokens rather than the cheaper text ones, and swapping model vendors means re-plumbing the whole audio path rather than one component.
-
 ### Gemini Live API
 **Short:** Google's bidirectional streaming endpoint carrying live audio and video to Gemini, for voice agents.
 **Kind:** tech
@@ -783,16 +773,6 @@ The 'omni' part is that one model was trained across text, image and audio rathe
 
 It was for a long time the sensible default for multimodal work: good enough at vision, fast, and cheap relative to the frontier tier. Later OpenAI models supersede it on both quality and price, and for pure reasoning depth the reasoning-model line is the better spend. Its lasting relevance is as the point where multimodality stopped being a separate pipeline.
 
-### GPT-4o API
-**Short:** OpenAI's hosted multimodal endpoint accepting image and text input alongside text generation.
-**Kind:** model
-**Lang:** *
-**Roles:** applied-ml/vision-speech-and-multimodal @1, llm-apps/llm-gateway-and-routing @2
-
-Images are content parts in the same message array as text, supplied as a URL or a base64 data URI, and a detail setting controls whether the image is downscaled to a cheap fixed-cost thumbnail or tiled into high-resolution crops that each add tokens. That means image cost is predictable and controllable, and it is the first thing to tune when a document pipeline's bill is dominated by vision rather than text.
-
-Reach for it when a request has to reason over both a picture and instructions and you would rather not stand up a model. The constraints are the ones every hosted multimodal endpoint has: images count against the context window, there is no coordinate output so you cannot draw a box back on the page, and rate limits are usually token-based, which images consume quickly.
-
 ### GPT-4V
 **Short:** OpenAI's vision-capable GPT-4 endpoint: reasoning over one or many images alongside a text prompt.
 **Kind:** model
@@ -852,26 +832,6 @@ It is the default vocoder because it generates in a single non-autoregressive pa
 Its scope is what distinguishes it: bias metrics and mitigations are provided not only for binary classification but for regression, multiclass, clustering and recommender systems, where most fairness libraries stop -- exposure and equality of opportunity across items in a ranking are a different measurement problem from group error rates in a classifier. Mitigations are offered at the usual three stages, pre-, in- and post-processing, alongside modules for explainability, robustness and privacy risk.
 
 Reach for it when the system being audited is a ranker or a segmentation, and the standard toolkits have nothing to say about it. For plain tabular classification, fairlearn and aif360 are more established, better documented and more likely to match what a reviewer expects to see. As with every such library, the metric choice is a policy decision it cannot make for you.
-
-### HuggingFace diffusers
-**Short:** HuggingFace library of diffusion pipelines and schedulers for image, audio and increasingly text generation.
-**Kind:** tech
-**Lang:** python
-**Roles:** applied-ml/vision-speech-and-multimodal @1, model-training/deep-learning-framework @3
-
-What makes the checkpoint ecosystem usable is that a repository id resolves to a whole pipeline -- denoiser, VAE, text encoder, scheduler config and preprocessing -- so loading a community fine-tune is one call and it comes wired correctly. On top of that sit the composition mechanisms: LoRA weights loaded into an existing pipeline, ControlNet and adapters attached for spatial conditioning, and components swapped between pipelines because they share interfaces.
-
-Reach for it as the standard runtime for open image generation and for the training scripts behind LoRA and DreamBooth fine-tuning. The memory knobs -- attention slicing, VAE tiling, sequential CPU offload -- are opt-in, and forgetting them is the usual reason a pipeline exhausts a consumer GPU. For serving at volume, a compiled or quantized deployment path outruns the eager pipeline by a wide margin.
-
-### HuggingFace tokenizers
-**Short:** Rust-backed BPE/WordPiece/Unigram tokenizer training and inference, roughly 100x faster than pure Python.
-**Kind:** tech
-**Lang:** python
-**Roles:** applied-ml/nlp-and-text @1, runtime-systems/text-encoding-and-regex @3
-
-The whole pipeline -- normalizer, pre-tokenizer, model, post-processor and decoder -- is implemented in Rust with thin Python bindings, and it can train a vocabulary from a corpus as well as apply one. Crucially the encoding carries offset mappings back into the original string, which is what makes token-level NER, question answering and span highlighting align with the raw text.
-
-You usually meet it through `transformers`, where the "fast" tokenizer classes are this library. Reach for it directly when you are training your own vocabulary or tokenizing a large corpus where the pure-Python path would dominate your preprocessing time.
 
 ### Hunspell
 **Short:** Spell checker and morphological analyzer used for query correction and stemming in search pipelines.

@@ -1051,25 +1051,6 @@ accuracy anywhere else. Its limits are the cost and subjectivity of expert gradi
 fact that a one-shot deliverable omits the iteration, context and accountability a real job
 carries -- a strong result does not imply the work can be automated end to end.
 
-### Google Vertex AI
-**Short:** Google Cloud's managed ML platform: training, pipelines, registry, endpoints and hosted Gemini and partner models.
-**Kind:** tech
-**Lang:** *
-**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, inference/model-server @2, llm-apps/llm-gateway-and-routing @2, platform-delivery/cloud-platform-and-cost @3
-
-One control plane over separately billed services: custom training jobs run your container on
-managed CPU, GPU or TPU pools; Pipelines executes a compiled Kubeflow DAG serverlessly; the
-Model Registry versions artifacts; endpoints host a model behind an autoscaled service with
-traffic splitting between versions; and the same API surface fronts hosted Gemini and partner
-models, so a self-trained model and a foundation model are called through comparable plumbing.
-Everything reads and writes Cloud Storage and BigQuery, which is the real integration point.
-
-Reach for it when the data already lives in BigQuery and you want managed training and serving
-without operating GKE. The costs: endpoint replicas bill continuously whether or not requests
-arrive, deployment and cold start take minutes, accelerator quota is per-region and slow to
-raise, and moving off the platform is genuine work. A single small model is far cheaper on
-Cloud Run.
-
 ### Google Vertex AI AutoML
 **Short:** Vertex AI's managed AutoML for tabular and image models: upload data, get a trained and deployable model.
 **Kind:** tech
@@ -1187,26 +1168,26 @@ The core object is a feature group -- a table of features registered with a prim
 **Lang:** python
 **Roles:** ml-lifecycle/ml-platform-and-pipelines @1, ml-lifecycle/experiment-tracking-and-tuning @2, applied-ml/nlp-and-text @3, model-training/deep-learning-framework @3
 
-The Hub is a hosting service where models, datasets and demo Spaces live as git repositories with large files in LFS, each with a model card, a licence and revision history. Around it sits the Python ecosystem that pulls from it: `transformers` for model and tokenizer classes, `datasets` for loading and streaming corpora, `peft` for adapter finetuning, `accelerate` for device placement and distributed launch, `optimum` for exporting to inference runtimes.
-
-In practice it is both where you get a pretrained checkpoint and where you publish your finetune. Two things matter in production: pin a revision, because a repository can change under you between deploys, and read the licence on the model card rather than assuming, since it varies per model and some forbid commercial use.
-### huggingface
-**Short:** The Hugging Face ecosystem: the model/dataset hub plus the Python libraries that download, run and share those models.
-**Kind:** tech
-**Lang:** python
-**Roles:** ml-lifecycle/experiment-tracking-and-tuning @1, model-training/deep-learning-framework @2, applied-ml/vision-speech-and-multimodal @2, applied-ml/nlp-and-text @2
-
 The libraries are separable and compose. `transformers` supplies model and tokenizer classes
+
 behind a uniform loader, `datasets` memory-maps corpora as Arrow tables, `tokenizers` is the
+
 fast Rust implementation underneath, `accelerate` handles device placement and distributed
+
 launch, `peft` adds adapter fine-tuning, `trl` the preference-training loops, `optimum`
+
 exports to ONNX Runtime, OpenVINO and TensorRT, and `safetensors` is the weight format that
+
 loads without executing pickled Python.
 
 The value is that a checkpoint, its tokenizer and its preprocessing config travel together, so
+
 swapping models is a string change. The costs are equally concrete: `trust_remote_code=True`
+
 executes arbitrary code from the repository, minor releases change behaviour often enough that
+
 pinning is mandatory, and the convenience layer hides dtype and memory decisions that matter
+
 at scale. For serving, an inference engine such as vLLM replaces `transformers` outright.
 
 ### HuggingFace Hub
@@ -1406,24 +1387,6 @@ number means matching the version and settings rather than merely the task name.
 produces as a comparison between models on public tasks -- those tasks are in pretraining
 corpora, several are saturated, and none of them is your product. Keep a private eval for
 decisions and use this one as the common yardstick.
-
-### lm-eval-harness
-**Short:** EleutherAI harness that runs a language model over standard benchmarks such as ARC, GSM8K, MATH and HumanEval.
-**Kind:** tech
-**Lang:** python
-**Roles:** ml-lifecycle/evaluation-and-benchmarks @1
-
-Tasks are declared as YAML naming the dataset, the prompt template, the few-shot count and the
-metric, so adding a benchmark is configuration rather than code. A run is a single command
-naming a model backend, a task list and a shot count; results come back per task with a
-standard error, and the harness records the exact task and package versions in its output so a
-number can be traced back to how it was produced.
-
-It is what generates most public open-model benchmark tables, which makes it the right tool
-for putting your fine-tune and its base model on the same footing. Two costs to plan for: a
-full suite over a large model is many GPU-hours, and the benchmarks it runs are public and
-largely saturated or contaminated, so a point of MMLU is not evidence your model got better at
-your task.
 
 ### lm-evaluation-harness
 **Short:** EleutherAI's standard harness for running LLM benchmarks (MMLU, HellaSwag, ARC) reproducibly across backends.
@@ -1938,6 +1901,7 @@ was wrong, not the model. Write down what happens with no model before choosing 
 Prodigy is a scriptable annotation tool from the spaCy team that runs on your own machines. You write a recipe — a Python generator of examples plus a choice of interface such as manual span labelling, text classification or a binary accept/reject — and it serves a keyboard-driven UI tuned for speed, where most decisions are one keystroke. Because the recipe is code, the loop can be active learning: a model in the loop scores the unlabeled pool and shows you the examples it is least sure about first, so a fixed annotation budget buys more signal.
 
 Reach for it when a small team needs a few thousand high-quality labels quickly and the data cannot leave your infrastructure. It is commercial and single-team by nature; a large outsourced labelling workforce is better served by a managed platform with reviewer workflows.
+
 ### Promptfoo
 **Short:** CLI eval and red-team runner for prompts and models; declarative YAML assertions run in CI across model matrices.
 **Kind:** tech
@@ -2165,6 +2129,7 @@ an expensive request.
 BLEU is not comparable across implementations, because the score depends on how the text was tokenized before scoring — the same translations can differ by several points. sacrebleu fixes that by owning the tokenization and the settings itself: you feed it raw detokenized hypotheses and references, and it prints a version signature alongside the score that says exactly which configuration produced it, so a published number can be reproduced.
 
 It also implements chrF and TER for the same reason. Use corpus-level scoring rather than averaging sentence-level BLEU, which is a different and non-comparable quantity: n-gram precision behaves badly on a single short sentence, and the average of per-sentence scores is not the corpus score.
+
 ### SageMaker Feature Store
 **Short:** AWS-managed feature store pairing an online low-latency store with an offline S3/Athena store.
 **Kind:** tech
@@ -2733,6 +2698,7 @@ enough registry.
 You package training code as a container image or a Python distribution, submit a custom job describing the machine types and accelerators you want, and Vertex provisions the workers, runs the job, streams logs, writes checkpoints and artifacts to Cloud Storage, then tears the cluster down. For multi-worker runs it injects the cluster specification into each replica's environment, so a standard PyTorch or TensorFlow distributed launch works without you managing VMs or networking. Hyperparameter tuning jobs run the same container repeatedly under a search strategy.
 
 Reach for it on Google Cloud when you need a burst of GPUs or TPUs for hours rather than a standing cluster, and when checkpoints must survive a preempted node. The tradeoffs are per-second accelerator pricing and non-trivial job startup time, which makes it a poor fit for a tight edit-run loop.
+
 ### Vertex Feature Store
 **Short:** Google Cloud's managed feature store serving the same features online and offline with point-in-time correctness.
 **Kind:** tech

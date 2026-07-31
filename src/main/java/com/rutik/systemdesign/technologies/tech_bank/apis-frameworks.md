@@ -464,6 +464,7 @@ converted, an explicit anti-corruption layer is the honest name for it.
 aiohttp implements HTTP on top of `asyncio`: a `ClientSession` for outbound calls and a small server framework with its own router. The client half is what most projects want, because one session pools connections and keeps sockets alive, so thousands of concurrent requests share a single thread while each awaits its own socket rather than occupying a worker.
 
 Reach for it when a service fans out to many slow upstreams and you are already inside an event loop; a blocking call made from a coroutine still stalls every other request on that loop. Its server half is rarely chosen over an ASGI framework today, and `httpx` is the usual alternative on the client side.
+
 ### annotated-types
 **Short:** Tiny Python package of standard constraint metadata (Gt, Lt, Len) that validators like Pydantic read from Annotated.
 **Kind:** tech
@@ -615,6 +616,7 @@ Reach for it when several teams own different parts of one API and you want them
 You give Apollo Server a schema plus a resolver map and it serves that schema over HTTP, handling parsing, validation, execution order, batching hooks and error formatting so you only write the field resolvers. Around that it adds the operational layer a GraphQL endpoint needs: persisted queries, response caching hints, subscriptions, plugins for tracing, and Federation for composing several subgraph services into one supergraph.
 
 Reach for it when the GraphQL layer itself is Node; if your services are Java or Python, use that ecosystem's GraphQL server rather than adding a Node hop purely for the schema.
+
 ### Apollo/Relay clients
 **Short:** Browser-side GraphQL clients that issue queries, normalize results into a local cache and manage fragments.
 **Kind:** tech
@@ -883,6 +885,7 @@ offers little over gzip while Zstandard is faster at similar ratios.
 Buf replaces the raw `protoc` invocation with a configured toolchain: `buf lint` enforces naming and style rules, `buf breaking` diffs your `.proto` files against a previous commit or a registry version and fails when a change would break the wire or the generated API, and `buf generate` runs plugins from a YAML config instead of a long shell line. The Buf Schema Registry hosts modules so consumers depend on a versioned schema rather than vendoring files.
 
 Reach for it in any repo where more than one team consumes the same protos — the breaking-change gate is the reason, since renumbering a field or changing a type is silent at compile time and corrupt at runtime.
+
 ### buf.build
 **Short:** Protobuf toolchain and schema registry: linting, breaking-change detection and remote code generation.
 **Kind:** tech
@@ -2357,12 +2360,6 @@ The module-level API mirrors `requests`, but the piece that matters is using `Cl
 
 Two habits prevent most production incidents with it: set an explicit `timeout` on every call or on the client, because a hung upstream otherwise ties up a connection and a task indefinitely, and set `follow_redirects=False` when the URL came from a user, since redirect-following is a standard SSRF vector.
 
-### httpx AsyncClient
-**Short:** httpx's async HTTP client with connection pooling; shared via lifespan or scoped per request in a yield dependency.
-**Kind:** api
-**Lang:** python
-**Roles:** apis-frameworks/web-framework-and-http-client @1, runtime-systems/concurrency-and-async @3
-
 ### httpx-auth
 **Short:** Auth extension for httpx supplying OAuth2, API key and AWS SigV4 flows as reusable request authenticators.
 **Kind:** tech
@@ -3808,6 +3805,7 @@ container fill it from the bean names.
 Redoc turns an OpenAPI document into a three-panel reference page: navigation on the left, prose and schema in the middle, request and response samples on the right. You either drop it on a page as a script tag pointing at your spec URL, or build a single self-contained HTML file in CI so the docs are a deploy artifact that cannot drift from the spec.
 
 The contrast with Swagger UI is what decides it: Swagger UI centres on an interactive "try it" console, Redoc centres on readability and deep schema rendering. Publish Redoc when the spec is your public contract; keep Swagger UI when developers mostly want to fire requests at a dev environment.
+
 ### ReflectiveMethodInvocation
 **Short:** Spring AOP's invocation object that walks the interceptor chain in proceed() before reflectively calling the target.
 **Kind:** api
@@ -4254,12 +4252,6 @@ costs outweigh it: the fallback transports need sticky routing and generate far 
 traffic, binary frames are not supported so everything is text, and the emulation is close but
 not identical, which produces subtle differences in close codes and back-pressure behaviour.
 
-### Spring @Async
-**Short:** Spring annotation dispatching a method onto a TaskExecutor, making it fire-and-forget or Future-returning.
-**Kind:** api
-**Lang:** java
-**Roles:** apis-frameworks/aop-middleware-and-scheduling @1, runtime-systems/concurrency-and-async @2, data-movement/task-queue-and-jobs @3
-
 ### Spring @Bean methods
 **Short:** A factory method the Spring container calls once per scope, with dependencies supplied as method parameters.
 **Kind:** api
@@ -4271,24 +4263,6 @@ not identical, which produces subtle differences in close codes and back-pressur
 **Kind:** api
 **Lang:** java
 **Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/design-patterns-and-principles @2
-
-### Spring @HttpExchange
-**Short:** Spring annotation that turns a Java interface into a typed HTTP client proxy, marshalling calls into requests.
-**Kind:** api
-**Lang:** java
-**Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/design-patterns-and-principles @2, apis-frameworks/rpc-graphql-and-streaming @3
-
-### Spring @Scheduled
-**Short:** Spring annotation running a bean method on a cron expression or fixed rate/delay from a managed task scheduler.
-**Kind:** api
-**Lang:** java
-**Roles:** apis-frameworks/aop-middleware-and-scheduling @1, data-movement/task-queue-and-jobs @3
-
-### Spring @Scope
-**Short:** Declares a bean's lifecycle scope - singleton, prototype, request, session - which is not object cloning.
-**Kind:** api
-**Lang:** java
-**Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/design-patterns-and-principles @3
 
 ### Spring AOP
 **Short:** Spring's proxy-based aspect layer intercepting bean method calls to apply @Transactional, @Cacheable and custom advice.
@@ -4314,12 +4288,6 @@ interception on constructors, fields or intra-class calls, AspectJ weaving is th
 **Kind:** api
 **Lang:** java
 **Roles:** apis-frameworks/aop-middleware-and-scheduling @1, apis-frameworks/design-patterns-and-principles @2, apis-frameworks/dependency-injection-and-config @3
-
-### Spring ApplicationEventPublisher
-**Short:** Spring's in-process event bus: type-dispatched observers, @Order, @Async and commit-bound delivery.
-**Kind:** api
-**Lang:** java
-**Roles:** apis-frameworks/design-patterns-and-principles @1, apis-frameworks/dependency-injection-and-config @2, apis-frameworks/aop-middleware-and-scheduling @3
 
 ### Spring Batch
 **Short:** Spring's batch framework: chunk-oriented read-process-write steps with transactions and restartability.
@@ -4455,12 +4423,6 @@ Reach for it as the default in a Spring Boot application, since it fits the bean
 **Kind:** api
 **Lang:** java
 **Roles:** apis-frameworks/aop-middleware-and-scheduling @1, apis-frameworks/design-patterns-and-principles @3
-
-### Spring RestClient
-**Short:** Spring's fluent synchronous HTTP client, a facade over the underlying client, message converters and error handling.
-**Kind:** api
-**Lang:** java
-**Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/design-patterns-and-principles @2
 
 ### Spring Statemachine
 **Short:** Spring framework for declarative state machines: states, transitions, guards, nested regions, state persistence.
@@ -5005,15 +4967,6 @@ the reasons behind the boundaries still have to be written by a human; that the 
 place to be published or nobody reads it; and that the diagrams need PlantUML rendering in the
 docs toolchain.
 
-### spring-websocket
-**Short:** Spring's servlet-stack WebSocket module: WebSocketHandler, STOMP messaging and SockJS fallback transports.
-**Kind:** tech
-**Lang:** java
-**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
-
-This is Spring's servlet-stack WebSocket support. At the low level you register a `WebSocketHandler` through `WebSocketConfigurer` and deal in raw text and binary frames; at the messaging level you enable STOMP over WebSocket and then work in familiar Spring terms — `@MessageMapping` methods, a destination hierarchy, and `SimpMessagingTemplate` to push to a topic or to one user.
-
-The broker behind those destinations is either the built-in simple in-memory one, which is fine for a single node, or an external relay to RabbitMQ or ActiveMQ, which is what lets several app instances share subscriptions. SockJS fallback transports cover clients or proxies that refuse the upgrade. Note this is the servlet stack only — WebFlux has its own reactive equivalent.
 ### spring.batch.jdbc.initialize-schema=always
 **Short:** Spring Boot property that auto-creates the Spring Batch BATCH_* metadata tables at startup; use never in production.
 **Kind:** api

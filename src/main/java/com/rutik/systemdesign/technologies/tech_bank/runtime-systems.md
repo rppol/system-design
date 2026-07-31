@@ -710,6 +710,7 @@ Its real value is as a reproduction case: a curl line is a bug report anyone can
 The `-v` flag makes curl narrate the whole exchange: DNS resolution and connection, the TLS handshake with the negotiated protocol version, cipher and certificate chain, the exact request headers it sent, and the response status and headers it got back. That is how you separate a DNS failure from a TLS failure from a 502, and how you confirm which headers a proxy or gateway actually added, rewrote or stripped on the way through.
 
 Related flags cover the rest: `-i` includes response headers with the body, `-I` sends a HEAD request, `--resolve` pins a hostname to an address so you can test one backend directly, and `--trace-ascii` dumps raw bytes when headers are not enough. Reach for curl before reaching for a client library — if curl reproduces the problem, your application code is not the cause.
+
 ### curl -v --http2
 **Short:** curl invocation that negotiates HTTP/2 and prints the handshake, so you can verify protocol and headers.
 **Kind:** tech
@@ -1006,16 +1007,6 @@ Reach for it when the native image is a server rather than a short-lived process
 **Lang:** java
 **Roles:** runtime-systems/runtime-internals-and-types @1, apis-frameworks/dependency-injection-and-config @2
 
-### google/re2
-**Short:** DFA-based regex engine with linear-time matching, so untrusted patterns cannot backtrack catastrophically.
-**Kind:** tech
-**Lang:** cpp
-**Roles:** runtime-systems/text-encoding-and-regex @1, security/supply-chain-and-runtime-security @3, runtime-systems/collections-and-algorithms @3
-
-It compiles a pattern into an automaton and simulates it, building the deterministic automaton lazily and caching states, so each input byte is consumed once and the worst case is text length times pattern size. Two engineering details matter as much as the theory: it extracts required literal substrings and uses fast memory scanning to skip regions that cannot match, and it enforces a per-pattern memory budget rather than exploding.
-
-It exists because a backtracking engine turns a user-supplied pattern into a denial-of-service primitive, and it is used wherever patterns arrive from outside the program. The trade is explicit: backreferences and lookaround are not regular constructs and are unsupported, so a pattern needing them is usually a parser in disguise. RE2J is the JVM port and Go's standard regexp package uses the same design.
-
 ### GraalVM Polyglot
 **Short:** Embeds JavaScript, Python or Ruby inside a JVM app with host-access control and resource limits.
 **Kind:** tech
@@ -1105,6 +1096,7 @@ That third check is the reason to prefer it over a pure race detector, because i
 htop is an interactive process viewer: per-core load bars, memory and swap gauges, and a sortable, scrollable process list with function keys to search, renice or kill without dropping to another command. Two toggles do most of the work — thread display, which resolves a process sitting at 400% CPU into which of its threads is actually spinning, and tree view, which attributes a runaway child to the parent that spawned it.
 
 Use it as the first ten seconds of triage on a box: is this CPU, memory pressure or one specific process. Once you know which process, move to a real profiler, because htop reads `/proc` and shows current state with no history — it tells you what is happening now, never what happened at 03:00.
+
 ### hwloc
 **Short:** Portable hardware locality library and CLI that renders CPU, cache and NUMA topology for pinning decisions.
 **Kind:** tech
@@ -2567,16 +2559,6 @@ It brings the ReactiveX vocabulary to the JVM as `Observable`, `Single`, `Maybe`
 
 Its strength is composing events over time: combining a network call with a cache, debouncing user input, coordinating concurrent calls under one timeout policy. That is why it became the standard on Android before coroutines, and Project Reactor occupies the same slot on the server. The costs are a large operator surface with a genuine learning curve, the easy mistake of using the non-backpressured type, and traces that name operators rather than your code.
 
-### RxJava 3
-**Short:** JVM reactive-streams library of composable Observable/Flowable operators with backpressure; common on Android.
-**Kind:** tech
-**Lang:** java
-**Roles:** runtime-systems/concurrency-and-async @1
-
-Version three moved to a new root package and raised the baseline to Java 8, so the standard functional interfaces, `Optional` and `Stream` interoperate directly, and `Flowable` implements the Reactive Streams publisher interface, letting it bridge to Reactor. The package rename was deliberate: version two and version three can sit on one classpath simultaneously, so a large codebase migrates module by module rather than in one commit.
-
-On Android it remains widely deployed and is often the reason a codebase has a reactive layer at all, and the explicit backpressure strategies of buffer, drop, latest and none impose a discipline the unbounded type does not. New Android code generally chooses Kotlin coroutines and flows, with interop libraries converting between them, so the realistic decision is incremental migration rather than a rewrite. Disposal discipline tied to a lifecycle is the recurring cost.
-
 ### RxJava 3 Flowable
 **Short:** Reactive Streams publisher with backpressure: the push-based dual of Iterator for unbounded async sources.
 **Kind:** api
@@ -2608,11 +2590,6 @@ Its distinct value is easy access to the two policies the common tools expose le
 SciPy is the algorithm layer on top of NumPy arrays. `scipy.sparse` and its linear-algebra module handle matrices too large to store densely, including truncated decompositions such as `svds` that give you the top k singular vectors without forming the full factorization. `scipy.stats` provides distributions and hypothesis tests, `optimize` covers root finding and minimization, and there are modules for signal processing, interpolation, integration and spatial structures.
 
 In machine-learning work it is usually the statistics and sparse pieces that get used: fitting a distribution to a tail for thresholding, running a two-sample test between a reference and a live window to detect drift, or a truncated SVD over a term-document matrix. The heavy routines are compiled C and Fortran that release the interpreter lock, so they genuinely parallelize across threads.
-### SciPy stats
-**Short:** SciPy's statistics submodule: probability distributions, hypothesis tests, confidence intervals, entropy and KL.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/collections-and-algorithms @1, ml-lifecycle/evaluation-and-benchmarks @2
 
 ### SciPy stats.bootstrap
 **Short:** SciPy function computing bootstrap confidence intervals, including BCa, for any statistic you supply.
@@ -3259,6 +3236,7 @@ That MTU discovery is the reason to reach for it. A path MTU black hole, typical
 traceroute sends probes with a time-to-live of one, then two, then three, and so on. Each router that decrements the TTL to zero replies with an ICMP time-exceeded message, so the sequence of replies reveals the routers along the path and the round-trip time to each. That is how you localize where latency or loss enters — your network, your provider, a transit peer, or the far end.
 
 Read the output carefully, because it lies in a specific way: routers deprioritize or rate-limit the ICMP replies they generate, so a single hop showing asterisks or a high time is normal and means nothing on its own. Only latency or loss that appears at one hop and persists through every hop after it is evidence. For intermittent loss, `mtr` runs the same probes continuously and gives you a distribution instead of a single sample.
+
 ### TreeMap
 **Short:** Java red-black-tree sorted map: O(log n) operations plus ordered iteration and floorKey/ceilingKey/subMap range queries.
 **Kind:** api
@@ -3416,16 +3394,6 @@ The point is that thread-per-request blocking code, the style everyone can read 
 It reads kernel counters and prints, per interval, six groups on one line: runnable and uninterruptibly blocked process counts, memory free and cache, swap in and out, block I/O in and out, interrupts and context switches, and the CPU split into user, system, idle, iowait and steal. The first line is the average since boot rather than current activity and should be ignored.
 
 The value is that one screen separates four saturation stories that look identical from inside the application. A run queue persistently above the core count is CPU saturation. Nonzero swap in and out turns memory pressure into disk latency and is nearly always the worst item on the list. Large block I/O with high iowait is an I/O-bound workload. And a high context-switch rate with low user time is thrash from far too many threads.
-
-### vmstat 1
-**Short:** Per-second virtual memory statistics; nonzero si/so columns mean the machine is swapping and thrashing.
-**Kind:** tech
-**Lang:** *
-**Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2
-
-The argument is the sampling interval, so every line after the first is a delta over that second rather than an average since boot, which is the entire point: a machine that swapped heavily an hour ago and is fine now looks identical to one swapping right now in the boot-average line. A second argument bounds the number of samples, and flags select units and per-line timestamps.
-
-The swap-in and swap-out columns are the ones to read first, because they are unambiguous. Any sustained nonzero value means the kernel is moving anonymous pages to and from disk to satisfy allocations, and a page fault served from disk costs orders of magnitude more than one from memory, which is the signature of thrashing where the machine looks busy while throughput collapses. A small one-off swap-out with no swap-in is harmless.
 
 ### VPN
 **Short:** Encrypted tunnel joining networks; in cloud designs the site-to-site link giving a VPC reach into on-prem.

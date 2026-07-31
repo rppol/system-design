@@ -319,47 +319,11 @@ It was designed so that a single-GPU training script becomes distributed with a 
 
 Reach for it for TensorFlow, or for a shop running more than one framework that wants a single distribution layer. For PyTorch specifically, distributed data parallel is native, uses the same collectives underneath, and is what most current code and documentation assume.
 
-### Hugging Face PEFT
-**Short:** Hugging Face library for parameter-efficient fine-tuning: LoRA, QLoRA, prefix tuning and adapter merging.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/fine-tuning-and-peft @1
-
-The library keeps pretrained weights frozen and trains a small set of added parameters, with the method chosen by a config object -- `LoraConfig`, `IA3Config`, `PrefixTuningConfig` and others -- handed to `get_peft_model`. Because the wrapper preserves the underlying model's interface, the rest of the stack is unaffected: `Trainer`, `accelerate`, DeepSpeed and TRL all treat it as an ordinary model, and `save_pretrained` writes only the adapter.
-
-The operational payoff is the adapter as a deployable unit: kilobytes to megabytes per task, hot-swappable at request time against one loaded base model, or merged into the weights when you would rather have no inference overhead at all. Its limit is that it adapts an existing model rather than teaching it genuinely new capability -- when a domain sits far from the pretraining distribution, continued pretraining or a full fine-tune is the honest answer.
-
 ### Hugging Face Trainer
 **Short:** Transformers' training loop handling optimization, evaluation, checkpointing and multi-GPU launch from a config.
 **Kind:** api
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1, model-training/fine-tuning-and-peft @2, model-training/distributed-training @3
-
-### HuggingFace datasets
-**Short:** Library and hub for loading, streaming, mapping and versioning training and evaluation corpora as Arrow tables.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/fine-tuning-and-peft @1, data-movement/data-quality-and-lineage @2, ml-lifecycle/evaluation-and-benchmarks @3
-
-Datasets are memory-mapped Arrow tables on disk, so a corpus much larger than RAM loads instantly and several processes share one copy without duplicating it. `map` applies a transform in batches across worker processes and caches the result keyed by a fingerprint of the function and its arguments, so re-running a script skips work already done. Streaming mode iterates a remote dataset without downloading it, and `interleave_datasets` mixes sources at chosen proportions.
-
-Reach for it as the default data layer for training on the Hugging Face stack, since it takes tokenization out of the training loop and makes preprocessing reproducible. The traps are the cache, which quietly grows to tens of gigabytes and will not invalidate on a change it cannot fingerprint, and streaming, which gives up random access, so shuffling degrades to a bounded buffer rather than a true shuffle.
-
-### HuggingFace PEFT
-**Short:** Library for parameter-efficient fine-tuning: LoRA, QLoRA, adapters, prefix and prompt tuning on HF models.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/fine-tuning-and-peft @1, inference/quantization-and-compression @3
-
-Wrapping a loaded model with `get_peft_model` freezes the base weights and injects small low-rank matrices into the targeted projection modules; only those train, so optimizer state and gradients shrink by orders of magnitude and the artifact you ship is an adapter of a few megabytes rather than a full checkpoint. That is what makes per-tenant or per-task variants practical - adapters can be stored, swapped and even served against one shared base model.
-
-It composes with quantized loading through `prepare_model_for_kbit_training`, which is the QLoRA recipe, and `merge_and_unload()` folds the adapter back into the base weights so inference has no runtime overhead at all. The choices that decide quality are which modules to target and what rank and alpha to use; adapting only the attention projections is cheaper but consistently weaker than including the MLP projections.
-
-### HuggingFace Trainer
-**Short:** The transformers training loop: model, dataset and TrainingArguments in, steps, eval and checkpoints out.
-**Kind:** api
-**Lang:** python
-**Roles:** model-training/fine-tuning-and-peft @1, model-training/deep-learning-framework @2, model-training/distributed-training @3
 
 ### HuggingFace transformers config
 **Short:** The config.json a checkpoint ships, declaring layer count, hidden size and KV head count used in memory sizing.
@@ -528,6 +492,7 @@ Reach for it to get a fine-tune running today, and to compare methods or base mo
 llm-foundry is the training stack MosaicML built and Databricks now maintains: YAML-configured pretraining and finetuning runs for LLMs, using Composer for the training loop and callbacks, streaming datasets read directly from object storage so nodes do not need the corpus on local disk, FSDP for sharding, and deterministic resumption from checkpoints when a node dies mid-run.
 
 Its warmup-stable-decay learning rate schedule is the part worth knowing: the rate stays flat through the bulk of training and only decays at the end, so a run can be extended or branched from the stable phase without having committed to a total step count in advance. Reach for it when you want a configuration-file path to a real multi-node run rather than assembling the loop yourself; for the largest models, stacks built around tensor and pipeline parallelism go further.
+
 ### LM-Cocktail
 **Short:** Weight-merging method that blends a domain fine-tune back with the base model to keep general ability.
 **Kind:** tech
@@ -765,6 +730,7 @@ Use it for domain adaptation of a language model to clinical and biomedical text
 In PyMC you write the generative story of your data directly — priors, deterministic transforms, and a likelihood — inside a model context block, and the library compiles that graph, derives gradients, and samples the posterior with NUTS, or approximates it variationally when sampling is too slow. What comes back is a distribution over every parameter rather than a point estimate, so uncertainty, credible intervals and hierarchical partial pooling across groups are first-class rather than bolted on.
 
 Reach for it when data per group is thin and pooling helps, when you need calibrated uncertainty rather than a number, or when domain knowledge deserves to be an explicit prior — small-sample A/B tests, hierarchical forecasting, measurement models. The cost is inference time and the need to check convergence; it does not compete with gradient boosting for raw predictive accuracy on large tabular data.
+
 ### PyTorch
 **Short:** Tensor and autograd framework with dynamic graphs; the default runtime for training and running deep models on GPU.
 **Kind:** tech

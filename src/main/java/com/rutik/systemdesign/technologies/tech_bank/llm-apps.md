@@ -319,16 +319,6 @@ Sonnet is the middle tier, close enough to Opus on coding and agentic work to be
 
 Reach for it as the workhorse: the model behind the agent loop, the extraction pipeline, the chat product. Two directions to escape it are worth knowing -- the hardest long-horizon reasoning still favours Opus, and high-volume classification or routing is cheaper on Haiku or a fine-tuned small model. Effort level moves cost more than tier choice does on many workloads, so sweep it before upgrading.
 
-### Anthropic Computer Use
-**Short:** Claude tool that drives a real screen: the model sees a screenshot and returns mouse/keyboard actions.
-**Kind:** tech
-**Lang:** *
-**Roles:** llm-apps/agentic-environments @1, llm-apps/tool-use-and-mcp @2
-
-The tool gives the model a screen resolution and a small action vocabulary -- take a screenshot, move the mouse, click, type, press keys, scroll. Your harness executes each returned action against a real desktop and sends back a fresh screenshot as the tool result, so the loop is see, act, see again. Everything the model knows about the machine comes from those images.
-
-Reach for it when a task genuinely has no API and no accessibility surface: a legacy desktop application, an installer, a thick client. The costs are steep -- every step carries an image, so token spend and latency are high, small UI targets are missed, and anything visible on screen is untrusted input, which makes prompt injection from a webpage a live attack path. Sandbox the machine and scope its credentials.
-
 ### Anthropic Computer Use API
 **Short:** Anthropic tool letting a model see a screen and drive mouse and keyboard to operate a real desktop.
 **Kind:** tech
@@ -338,16 +328,6 @@ Reach for it when a task genuinely has no API and no accessibility surface: a le
 It is a client-executed tool: Anthropic defines the schema and the model's action vocabulary, but the environment is yours to supply and the actions are yours to execute, with a reference container image showing one way to do it. Coordinate accuracy depends on the resolution you report and the image you send back, which is also what determines the token cost of every step.
 
 Reach for it when the target is a whole desktop rather than a browser, and treat the harness as the engineering work -- action execution, screenshot cadence, resolution, and a step budget that stops a confused loop. For web tasks a browser tool driven by the accessibility tree is faster, cheaper and far more reliable, because it acts on named elements instead of pixels.
-
-### anthropic SDK
-**Short:** Official client library for the Anthropic Messages API: streaming, tool use, and structured output helpers.
-**Kind:** tech
-**Lang:** python, js
-**Roles:** llm-apps/tool-use-and-mcp @1, llm-apps/prompting-context-and-structured-output @2
-
-What the client library adds over hand-rolled HTTP is the tedious half: streaming events accumulated into a usable final message, retries with backoff on the retryable status codes, a typed exception per failure class so retry logic is not string matching, token counting before you send, helpers that validate a response against a schema into a typed object, and a loop helper that runs your tool functions and feeds results back.
-
-Reach for it rather than raw requests in any language it supports -- the reimplementation cost is higher than it looks, particularly around streaming and retries. Its limitation is scope: it speaks one provider, so cross-provider portability comes from a layer above it, not from the SDK.
 
 ### Anthropic tool use
 **Short:** Claude's function-calling interface: JSON tool schemas the model selects and fills, plus constrained outputs.
@@ -501,16 +481,6 @@ It pairs a local MCP server with a browser extension that drives your existing b
 
 Reach for it when the task needs authenticated access to sites where scripted login is impractical. That convenience is also the danger: the agent acts as you, with your cookies, in your real browser, so a prompt injection on any visited page can act on your accounts. A separate profile, or Playwright with a disposable context, contains the blast radius.
 
-### Browser Use
-**Short:** Python library letting an LLM drive a Playwright browser: page state to the model, clicks and typing back out.
-**Kind:** tech
-**Lang:** python
-**Roles:** llm-apps/agentic-environments @1
-
-The library-level surface is small: construct an agent with a task string, a model and optionally a schema for the data you want back, then run it and read a structured result rather than a transcript. Underneath it ships its own system prompt and a registry of actions -- navigate, click, type, scroll, extract, done -- which you extend by registering your own Python functions as additional actions.
-
-Reach for it when a workflow needs a browser and you would rather describe the goal than script the selectors. Budget for step count: cost and latency scale with page complexity, since each step sends a fresh page representation, and a task that takes a human ten clicks can take the agent twenty model calls. Script the parts that are stable and let the model handle only what is not.
-
 ### browser-use
 **Short:** Python library that drives Chromium via Playwright and the accessibility tree so an LLM can browse the web.
 **Kind:** tech
@@ -578,16 +548,6 @@ Reach for it when the user is the one driving and you want the fastest path to a
 The family is tiered -- a top reasoning tier, a balanced mid tier and a small fast tier -- all behind one request shape, so moving between them is a model-string change plus re-testing. Common to all of them: content is a list of typed blocks rather than a string, tools are JSON-schema definitions the model fills, thinking is billed as output tokens, and caching a long stable prefix cuts its cost dramatically on repeat calls.
 
 Pick the tier per route rather than per application: the top tier for planning and hard reasoning, the mid tier as the default workhorse, the small tier for classification and bulk transformation. The expensive mistake is sending everything to the largest model, and the second most expensive is not caching a system prompt that is identical on every request.
-
-### Claude API
-**Short:** Anthropic's hosted Claude endpoint; long-context (1M on Opus 5/Sonnet 5) text and tool-use generation.
-**Kind:** model
-**Lang:** *
-**Roles:** llm-apps/llm-gateway-and-routing @1, llm-apps/prompting-context-and-structured-output @2
-
-The endpoint is stateless: every turn resends the whole conversation, which is why prompt caching exists and why context management is your job rather than the server's. A response is a list of typed blocks -- text, thinking, tool use -- and a stop reason that tells you what to do next: run the tools and send results back in a user turn, resume a paused server-side tool, or finish.
-
-Reach for it directly when you want the full vendor surface and reproducible behaviour. Two consequences of statelessness to design for: input cost grows with conversation length unless you cache the stable prefix and compact or prune the rest, and there is no server-side session to fall back on, so history durability is something your application owns.
 
 ### Claude Code
 **Short:** Anthropic's terminal coding agent: autonomous file editing, subagents, prompt caching and MCP tool access.
@@ -1266,6 +1226,7 @@ Reach for it whenever local generation feeds a parser. The subtleties are all at
 This is LlamaIndex's agent layer, which turns indices, retrievers and query engines into tools an LLM can choose between. `ReActAgent` runs the reason-act-observe loop, deciding at each step which tool to call and when it has enough to answer. `SubQuestionQueryEngine` takes a compound question, decomposes it into sub-questions, routes each to whichever index can answer it, and synthesizes the parts — which is how you answer a question that spans two document collections.
 
 Reach for it when the agent's job is mostly answering over your own corpora and you want the retrieval plumbing, node postprocessing and response synthesis already assembled. When you need explicit control of the state machine — branching, retries, checkpoints, human approval mid-run — a graph-based framework gives you more, at the cost of writing more.
+
 ### llguidance
 **Short:** Compile-free token-trie lexer engine for constrained decoding; backs Guidance and vLLM's guidance grammar backend.
 **Kind:** tech
@@ -1412,16 +1373,6 @@ Server authoring is handler registration: one handler lists the tools with their
 
 Reach for the low-level interface when you need control the decorator API abstracts away: dynamic tool lists, custom lifespan management, unusual transports. For ordinary servers the high-level interface in the same package is far less code. Everything is asynchronous, so blocking work inside a handler stalls the whole server -- push it to a thread or a subprocess.
 
-### mcp SDK
-**Short:** Model Context Protocol client and server SDK that hides transport details behind tool, resource and prompt APIs.
-**Kind:** tech
-**Lang:** *
-**Roles:** llm-apps/tool-use-and-mcp @1
-
-Whatever the language, an SDK provides the same four things: JSON-RPC framing, the initialize handshake and capability negotiation, a transport abstraction covering a locally spawned child process and a remote HTTP endpoint, and typed representations of tools, resources, prompts and content blocks. Client and server are symmetric, so the same package builds both sides.
-
-Reach for the official SDK for your language rather than implementing the wire format -- the framing is easy and the negotiation and lifecycle details are not. The thing to check before committing is maintenance tier: the first-party implementations track the specification closely while others lag, so a newer protocol feature may simply not exist in the SDK you picked.
-
 ### MCP servers
 **Short:** Model Context Protocol servers: processes exposing tools, resources and prompts over stdio or HTTP.
 **Kind:** concept
@@ -1544,26 +1495,6 @@ It is the single supported path Microsoft points at for building agents on .NET 
 
 Reach for it when the organization is already on Azure and .NET, where the alternatives are thin. Elsewhere the Python agent ecosystem is considerably denser, and Microsoft publishes a migration guide for the AutoGen code this supersedes.
 
-### Microsoft Semantic Kernel
-**Short:** Microsoft's enterprise agent SDK for C#, Python and Java: plugins, planners, memory and multi-agent orchestration.
-**Kind:** tech
-**Lang:** csharp, python, java
-**Roles:** llm-apps/agent-framework @1, llm-apps/tool-use-and-mcp @2, llm-apps/prompting-context-and-structured-output @3
-
-Capability is packaged as plugins -- collections of kernel functions, each either a native method or a prompt template with typed inputs -- and the kernel holds the services, resolves the functions and runs the function-calling loop. Filters wrap every invocation so logging, approval gates and telemetry are cross-cutting rather than sprinkled through call sites, which is the part that makes it feel native on .NET.
-
-Reach for it when the organisation is on .NET, where the alternatives are thin, and the dependency-injection and observability integration is the reason to prefer it over calling a provider SDK. Note the direction of travel: Microsoft has folded it together with its multi-agent framework into a single supported offering, and the older planner abstractions have been superseded by native function calling.
-
-### Microsoft.SemanticKernel
-**Short:** Microsoft's .NET SDK for LLM applications: plugins, planners, function calling and agent orchestration.
-**Kind:** tech
-**Lang:** csharp
-**Roles:** llm-apps/agent-framework @1, llm-apps/tool-use-and-mcp @3
-
-On .NET the kernel is registered into the service collection alongside everything else, plugins are ordinary classes whose attributed methods become callable functions with schemas derived from their signatures and documentation comments, and each model provider is a separate connector package. The result is that an LLM call looks like any other injected service rather than a foreign subsystem.
-
-Reach for it when the application is already ASP.NET and the integration with configuration, logging and dependency injection is worth more than the newest model features. Two costs: the .NET implementation leads the others in the family, so cross-language parity is uneven, and the package has been through significant restructuring -- check which generation a sample targets before copying it.
-
 ### modelcontextprotocol/csharp-sdk
 **Short:** Official tier-1 C# SDK for building MCP servers and clients in .NET.
 **Kind:** tech
@@ -1624,16 +1555,6 @@ Server authors publish a `server.json` describing the package, its transports an
 
 Consume it to discover servers or to let a client or a downstream registry mirror the catalogue. It is still in preview, so expect the metadata schema and the publishing flow to move, and verify a server yourself before trusting it regardless of listing.
 
-### OpenAI Agents SDK
-**Short:** OpenAI's agent runtime: Agent/Runner loop, typed tools, handoffs between agents, guardrails, sessions and tracing.
-**Kind:** tech
-**Lang:** python
-**Roles:** llm-apps/agent-framework @1, llm-apps/tool-use-and-mcp @2, security/ai-safety-and-guardrails @3, observability/tracing-apm-and-llm-observability @3
-
-Three pieces do most of the work beyond the basic loop. Sessions persist conversation state so you are not threading history through call sites; guardrails run as separate, usually cheaper model calls on input or output and can trip a tripwire that aborts a run before an expensive turn; and tracing is on by default, emitting a span per generation, tool call and handoff so a run is inspectable rather than a black box.
-
-Reach for it when you want the loop, the routing and the observability handled while the rest stays ordinary Python. Its thinness is the limit: there is no retrieval layer, no memory beyond sessions and no durable execution, so a crashed process loses the run -- anything needing checkpoints, branching or human approval mid-flight belongs in a graph or workflow runtime.
-
 ### OpenAI Agents SDK handoff
 **Short:** OpenAI Agents SDK primitive that transfers a conversation to another agent; sequential, not parallel.
 **Kind:** api
@@ -1693,16 +1614,6 @@ Reach for it whenever Python calls OpenAI directly. The awkwardness to plan arou
 **Kind:** api
 **Lang:** *
 **Roles:** llm-apps/tool-use-and-mcp @1, llm-apps/agent-framework @2, llm-apps/agentic-environments @3, llm-apps/prompting-context-and-structured-output @3
-
-### openai SDK
-**Short:** OpenAI's official client library, including native structured outputs via chat.completions.parse.
-**Kind:** tech
-**Lang:** python, js
-**Roles:** llm-apps/prompting-context-and-structured-output @1, llm-apps/llm-gateway-and-routing @2, llm-apps/tool-use-and-mcp @3
-
-Its most load-bearing helper is structured output: hand a parse method a schema class and it converts it into a JSON Schema marked strict, so the server constrains decoding rather than merely being asked nicely, and returns a parsed, typed object plus a refusal field to check before using it. That turns extraction from parse-and-retry into a typed function call.
-
-Reach for it wherever code consumes the model's output. Two constraints: strict mode supports only a subset of JSON Schema -- no arbitrary length or numeric bounds, additional properties disallowed, recursion limited -- so an expressive schema needs simplifying, and a schema's first use pays a compilation cost. As always, guaranteed shape is not guaranteed content.
 
 ### OpenAI Structured Outputs
 **Short:** OpenAI API mode constraining decoding to a JSON Schema, so a response always parses into your declared type.
@@ -1962,16 +1873,6 @@ Everything is a kernel function -- either a native method or a prompt template w
 
 Reach for it in enterprise environments where the surrounding platform integration matters more than the newest agent pattern. Two costs: the abstraction count is high relative to what it does, so a small application carries a lot of ceremony, and cross-language parity is uneven -- the .NET implementation leads and the others follow, so a feature in one language's documentation may not exist in yours.
 
-### semantic-kernel
-**Short:** Microsoft's agent SDK: plugins, planners and connectors for embedding LLM calls in an application.
-**Kind:** tech
-**Lang:** python, csharp
-**Roles:** llm-apps/agent-framework @1, llm-apps/tool-use-and-mcp @2
-
-The base package is thin and everything concrete arrives as a connector: a chat-completion service per provider, an embedding service, and a vector-store abstraction with implementations for the common search and database backends, all registered into the kernel so swapping a backend is a registration change rather than a rewrite of the calling code.
-
-Reach for it when the value is that uniform registration -- one place that decides which model and which store the application uses. The costs are churn and leakage: the connector surface, and the vector-store abstraction in particular, have been restructured more than once, so pin versions and expect breaking changes on minor bumps, and test each backend rather than trusting the shared interface.
-
 ### semantic-kernel-azure-ai-inference
 **Short:** Semantic Kernel connector for Azure AI Inference, exposing Azure-hosted models such as Phi-3 and Llama 3.
 **Kind:** tech
@@ -2216,9 +2117,9 @@ Reach for it when code cannot leave the network and a hosted assistant is theref
 **Lang:** *
 **Roles:** llm-apps/tool-use-and-mcp @1, search-retrieval/rag-and-document-processing @3
 
-One call does what an agent would otherwise do in three: run the search, fetch the top pages, strip navigation and boilerplate, and return ranked content chunks with relevance scores, optionally with a short synthesised answer. Depth, domain filters and result count are parameters, so the same endpoint covers a quick lookup and a deeper sweep.
+One call runs the search, fetches the result pages, strips navigation and boilerplate, and returns extracted content per result along with a short synthesised answer, so an agent receives text it can put straight in a prompt rather than a list of URLs it must crawl itself. Parameters shape that work, covering search depth, domain allowlists and blocklists, result count, topic and recency filters, and the depth setting is the direct cost-versus-quality dial.
 
-Reach for it when the agent needs content rather than links and you would rather not own a page-extraction pipeline. The costs are per-call credits that scale with depth -- a deep search on every turn adds up quickly -- and an opinionated cleaning step that discards structure, so pages where tables or code carry the meaning may come back worse than raw HTML. A cheap search API plus your own fetcher trades money for work.
+Reach for it when an agent needs current information and you do not want to own crawling, HTML extraction, robots handling and rate limits. It is a metered external dependency sitting in your latency path, and the answers are only as good as the pages it found, so cache aggressively and pass the source URLs through to the user. Where the corpus is your own documents rather than the web, this is the wrong layer entirely and a vector index is the right one.
 
 ### to_a2a
 **Short:** Google ADK helper that exposes an agent as an A2A server, or wraps a remote A2A agent as a local one.

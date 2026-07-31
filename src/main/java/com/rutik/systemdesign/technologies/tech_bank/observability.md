@@ -165,16 +165,6 @@ It is a toolkit and a library at once: a collection of ready-made tracing progra
 
 Most of the value is the shipped tools, since `execsnoop`, `opensnoop`, `biolatency`, `tcpconnect` and `runqlat` each answer a specific question in one command with no change to the application. The cost is a runtime dependency on kernel headers and an LLVM toolchain, which is why bpftrace, a one-line language over the same machinery, is the usual choice for ad-hoc work and libbpf with CO-RE for tools you ship.
 
-### Blackbox exporter
-**Short:** Prometheus exporter that probes endpoints over HTTP, TCP, ICMP or DNS to produce black-box availability SLIs.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/metrics-and-monitoring @1
-
-It does not run on the target. Prometheus scrapes the exporter with the probe target passed as a URL parameter, the exporter performs the probe defined by a named module — an HTTP request with expected status codes and a body regex, a TCP connect, an ICMP echo, a DNS lookup — and returns `probe_success`, `probe_duration_seconds`, per-phase timings and certificate expiry for that one target. Relabeling in the scrape config turns a URL list into per-target series.
-
-Reach for it for the outside-in view: whether the service answers at all, whether the certificate expires next week, whether DNS still resolves. It measures the path from wherever the exporter runs, so a probe from inside the cluster proves nothing about the internet path, and a hosted synthetic service probing from several regions is what you want for a genuine user-perspective signal.
-
 ### blackbox_exporter
 **Short:** Prometheus exporter that actively probes endpoints over HTTP, TCP, ICMP or DNS to produce synthetic SLO signals.
 **Kind:** tech
@@ -313,16 +303,6 @@ It records control-plane API calls — who, from which address, with which crede
 
 Reach for it whenever the question is what changed and who changed it, since an incident's root cause is often a console action nobody mentioned and compliance regimes require the trail regardless. Deliver to a locked bucket in a separate account with log file validation enabled, because stopping the trail is an attacker's first move. It is not application logging and it is not real time, so expect minutes of delay.
 
-### CloudWatch
-**Short:** AWS's native observability service: metrics, log groups, dashboards and alarms across every AWS resource.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/metrics-and-monitoring @1, observability/logging @2, observability/alerting-and-incident-response @2
-
-The metric model is a namespace plus a name plus dimensions, and each distinct dimension combination is a separate metric you are billed for; samples are retained at progressively coarser resolution as they age, out to fifteen months. Log groups carry their own retention setting which by default never expires — the most common source of surprise cost — and metric filters turn a log pattern into a metric an alarm can watch.
-
-Composite alarms combine several alarms so one page replaces a cascade, and metric math builds a signal across many series before evaluation. Reach for it wherever AWS is the platform. The friction is that querying is weaker than PromQL or a purpose-built log store, which is why teams that outgrow it usually keep it as the collection point and stream data out rather than replacing it outright.
-
 ### Cortex
 **Short:** Horizontally scalable, multi-tenant long-term storage behind Prometheus remote-write.
 **Kind:** tech
@@ -382,6 +362,7 @@ Reach for it when you would rather buy the whole observability stack than operat
 Per-language tracer libraries auto-instrument common frameworks, HTTP clients and database drivers, propagate trace context across service boundaries, and ship spans through the host agent to the SaaS backend, where a request becomes a flame graph, a service map and per-endpoint latency percentiles. Because database spans carry the obfuscated statement, a request issuing three hundred nearly identical queries is visible as an N+1 rather than as an endpoint that is merely slow.
 
 The reason teams pay for it is correlation: a trace links to the logs emitted during it and to the host metrics at that moment, so triage stops being three tools and a timestamp. The thing to manage is cost — billing is per host plus indexed spans, so sampling rules and retention filters are a design decision, not an afterthought.
+
 ### Datadog LLM
 **Short:** Datadog's LLM observability product: auto-instrumented prompt/response traces correlated with infrastructure APM.
 **Kind:** tech
@@ -601,6 +582,7 @@ Reach for it when log volume makes a full-text engine expensive and most of your
 Mimir accepts Prometheus `remote_write` and stores the series in object storage, splitting the work across components — distributors, ingesters, store gateways, queriers, compactors — so ingest and query scale independently and retention stops being limited by a single Prometheus server's disk. A query frontend splits large queries by time, caches results and shards them across queriers, which is what keeps a year-long range query answerable.
 
 It is natively multi-tenant: every series carries a tenant id with its own limits and its own query isolation, so one team cannot exhaust another's capacity. Reach for it when many Prometheus instances need one global view and long retention. A single team with one Prometheus and short retention needs none of this and should not pay the operational cost.
+
 ### Grafana OnCall
 **Short:** Open-source on-call scheduling, escalation and paging tool integrated with Grafana alerting.
 **Kind:** tech
@@ -1333,16 +1315,6 @@ Micrometer is the metrics facade in Spring Boot — counters, timers, gauges and
 
 Watch tag cardinality: a tag whose value is a user id or a raw URL path creates a distinct time series per value and is the standard way to overwhelm Prometheus, which is why Boot tags HTTP metrics with the templated route rather than the concrete URI. Percentiles need explicit configuration too — publish histogram buckets if you want a p99 that can be aggregated across instances rather than one computed per instance.
 
-### micrometer-tracing
-**Short:** Vendor-neutral tracing facade for Spring apps, bridged at runtime to OpenTelemetry or Brave.
-**Kind:** tech
-**Lang:** java
-**Roles:** observability/tracing-apm-and-llm-observability @1
-
-This artifact is the facade only — the tracer, span, baggage and propagation interfaces — with no implementation behind it, which is why adding it alone produces no spans. Spring Boot's auto-configuration wires it to whichever bridge is present, and an observation written once then emits a timer to the meter registry and a span to the tracer from the same instrumentation point rather than two separate ones.
-
-Sampling, exporter endpoint and propagation format are configured through Spring properties rather than the underlying SDK's own configuration, which is convenient and occasionally surprising when a native setting appears to be ignored. Reach for it with the OTLP bridge on a new system, or the Brave bridge for an estate already speaking B3 to Zipkin. Outside Spring the extra layer buys comparatively little.
-
 ### micrometer-tracing-bridge-brave
 **Short:** Micrometer Tracing bridge that implements spans with Brave and propagates B3 headers for Zipkin-native tracing.
 **Kind:** tech
@@ -1438,6 +1410,7 @@ It was built for the case where dashboards must stay fast while millions of seri
 New Relic ingests traces, metrics, logs and custom events into a single store queried with NRQL, its SQL-like query language, fed by language agents that auto-instrument the application or by an OpenTelemetry pipeline. Because everything lands in one place, a slow page can be followed from browser timing through the distributed trace to the specific database statement, without correlating across products by hand.
 
 Alongside APM it covers real-user and mobile monitoring, synthetic checks, infrastructure, continuous profiling and alerting. It occupies the same slot as Datadog, and the choice usually comes down to pricing shape and agent quality for your stack rather than feature lists; here billing follows ingested data volume plus billable users, so the lever you control is what you send and how long you keep it.
+
 ### Nobl9
 **Short:** Managed SLO platform pulling SLIs from many observability sources and tracking error budgets and burn rate.
 **Kind:** tech
@@ -1619,6 +1592,7 @@ Reach for it as the first piece of tracing on a FastAPI service, and pair it wit
 OpsGenie takes an alert and figures out who should actually be woken. You define schedules and rotations per team, then escalation policies — page the primary, and if nobody acknowledges within five minutes page the secondary, then the manager — and it delivers through push, SMS and phone calls until someone acknowledges or the policy runs out. Routing and deduplication rules collapse a flapping check into one alert instead of ten pages.
 
 Reach for it, or an equivalent paging service, as soon as on-call involves more than one person and an email filter. Two things decide whether it works: alerts must carry enough context to act on, and every page must be actionable, because a rotation that learns to ignore the phone is worse than no paging at all.
+
 ### OTLP
 **Short:** OpenTelemetry's vendor-neutral wire protocol over gRPC or HTTP carrying traces, metrics and logs.
 **Kind:** spec
@@ -1760,6 +1734,7 @@ Reach for it while a database is misbehaving right now, because it shows the sta
 This PostgreSQL extension normalizes every executed statement into a fingerprint with the literal values stripped, then accumulates per fingerprint the call count, total and mean execution time, rows returned and shared-buffer hits versus reads. It has to be loaded via `shared_preload_libraries` and enabled with `CREATE EXTENSION`, which means a restart, so it is worth doing before you need it.
 
 It converts "the database is slow" into a ranked list. Order by total execution time rather than mean, because the real cost is usually a fast query executed a million times — the classic N+1 — not the slow report you were already suspicious of. Reset the counters before a measurement window so the numbers describe that window, and remember the view is capped at a configured number of fingerprints, so unparameterized SQL with inlined literals can evict everything useful.
+
 ### pg_stat_user_indexes
 **Short:** PostgreSQL catalog view of per-index scan counts; the standard way to find indexes nothing ever reads.
 **Kind:** api
@@ -1955,6 +1930,7 @@ Its one legitimate use is the service-level outcome of a batch job, meaning last
 py-spy reads the memory of a running CPython process from the outside and reconstructs its call stacks, so it needs no code change, no import, no restart and no cooperation from the target. That is what makes it a production tool: you attach to a pid that is already misbehaving. `py-spy top` gives a live view of where time is going, `record` writes a flame graph, and `dump` prints the current stack of every thread, which is how you find what a hung process is actually blocked on.
 
 Overhead is around one percent because it samples rather than instruments. Two caveats: by default it shows Python frames only, so time inside a C extension appears as the calling frame until you pass `--native`, and attaching needs ptrace permission, which containers commonly drop — you may need to add SYS_PTRACE or run it in the same pid namespace.
+
 ### py-spy record --gil
 **Short:** py-spy mode recording only stacks that hold the GIL, showing which code owns the lock in a live process.
 **Kind:** api
@@ -2134,15 +2110,6 @@ The pattern that works is exactly that split, plus a dedicated channel per incid
 SLF4J ships an API and nothing else. Your code calls `LoggerFactory.getLogger(...)` against `slf4j-api`, and at runtime whichever binding is on the classpath — Logback, Log4j 2 through its adapter, java.util.logging — supplies the implementation. That is why every library logs through it: a library must not impose a logging backend on the application that embeds it, and this is the facade that lets the application decide. Bridge jars redirect calls made to older logging APIs into the same pipeline, so a dependency tree with four logging frameworks still produces one stream.
 
 Always log with parameterized messages rather than string concatenation, so argument formatting is skipped entirely when the level is disabled. The classic startup problem is two bindings on the classpath, which SLF4J warns about and then picks one arbitrarily.
-### SLF4J API
-**Short:** Java logging facade letting a library log while the application picks Logback or Log4j 2 at deploy time.
-**Kind:** tech
-**Lang:** java
-**Roles:** observability/logging @1, apis-frameworks/design-patterns-and-principles @2
-
-This is the artifact a library depends on, and it contains interfaces and a lookup mechanism rather than an implementation. At runtime whichever binding is on the classpath supplies the backend — Logback natively, Log4j 2 or the JDK's logging through adapters — located through the service loader in modern versions. With nothing present, calls become no-ops and a warning is printed at startup rather than an exception thrown.
-
-Depending on the API alone is a compatibility contract, because a library that logs must not decide the application's backend, configuration format or output destination. Reach for it in any code that will be somebody's dependency, and add a binding only in the application and its tests. Bridge artifacts redirect calls made to older logging APIs into the same pipeline, so a mixed dependency tree still yields one stream.
 
 ### SLF4J LoggerFactory.getLogger
 **Short:** SLF4J's factory returning the cached logger for a name; the standard way every Java class obtains its logger.
@@ -2159,6 +2126,7 @@ Depending on the API alone is a compatibility contract, because a library that l
 You write a short YAML spec — the service, the objective such as 99.9%, and the Prometheus queries that count total events and error events — and Sloth expands it into the full rule set: recording rules for the error ratio over several windows, SLO metadata metrics, and multi-window multi-burn-rate alerts where a fast burn pages and a slow burn opens a ticket. The generated rules follow the SRE workbook's structure, which is fiddly to write correctly by hand and drifts between services when each team writes their own.
 
 It generates rules and stops there — Prometheus still evaluates them and Alertmanager still routes them — and it pairs with dashboards that read the metrics it defines. Reach for it once you have more than a couple of SLOs, so that error budget and burn-rate mean the same thing across every service.
+
 ### spanmetrics connector
 **Short:** OpenTelemetry Collector connector that derives RED metrics - request rate, errors, duration - from the span stream.
 **Kind:** tech
@@ -2188,21 +2156,12 @@ Its reputation follows its pricing, historically tied to daily indexed volume, w
 Actuator adds management endpoints under `/actuator`: `health` with per-component contributors and liveness and readiness groups that map straight onto Kubernetes probes, `metrics` and `prometheus` backed by the Micrometer registry, `loggers` for changing a log level at runtime without a restart, `env`, `info`, `threaddump` and `heapdump`, plus endpoints contributed by starters such as `flyway` and `liquibase`, which report applied migrations, and `refresh` when Spring Cloud Config is in play.
 
 Only `health` is exposed over HTTP by default; the rest you opt into explicitly, and that default is deliberate. Treat these as privileged surface — `env` prints configuration and `heapdump` hands over everything in memory — so bind them to a separate management port, or put them behind authentication, and never expose them to the internet.
+
 ### Spring Boot Actuator /actuator/caches
 **Short:** Actuator endpoint listing every registered cache and supporting eviction over HTTP DELETE.
 **Kind:** api
 **Lang:** java
 **Roles:** observability/metrics-and-monitoring @1, caching/in-process-cache @2
-
-### spring-boot-actuator
-**Short:** Spring Boot module exposing health, metrics, env and other production endpoints over HTTP or JMX.
-**Kind:** tech
-**Lang:** java
-**Roles:** observability/metrics-and-monitoring @1, observability/alerting-and-incident-response @3, apis-frameworks/dependency-injection-and-config @3
-
-This is the artifact holding the endpoint infrastructure itself: the annotations for declaring an endpoint and its read and write operations, the built-in endpoint implementations, the health and information contributor interfaces, and the HTTP and JMX exposure machinery. On its own it decides nothing, because the auto-configuration module is what determines which endpoints actually exist based on what is present on the classpath.
-
-You depend on it directly when writing a custom endpoint or health indicator inside a library that should not drag in the whole starter; an application takes the starter instead. The rule that outlives the packaging detail is that these endpoints are privileged, since the environment and configuration ones print configuration, the heap dump hands over memory and the loggers one changes behaviour at runtime, so keep them off the public listener.
 
 ### spring-boot-actuator-autoconfigure
 **Short:** Spring Boot module auto-configuring Actuator endpoints (health, metrics, env, info) from classpath and properties.
@@ -2251,6 +2210,7 @@ The protocol is one line per metric -- `page.views:1|c` for a counter, `|g` for 
 Statuspage is a hosted page where you publish component status and incident updates — investigating, identified, monitoring, resolved — and schedule maintenance windows, while subscribers receive email, SMS, Slack or webhook notifications and the page keeps a public uptime history. It exists so that during an outage your customers and your support queue learn what is happening from one authoritative place instead of from your engineers.
 
 Two operational rules matter more than the tool. Host it on infrastructure independent of the product it reports on, since a status page that shares your failure domain goes down exactly when it is needed. And decide the update cadence and who writes updates before an incident, because during one nobody has spare attention to negotiate it.
+
 ### structlog
 **Short:** Structured logging for Python: a processor pipeline producing JSON events, async-safe with ContextVars.
 **Kind:** tech

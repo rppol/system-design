@@ -151,16 +151,6 @@ Cohere sells enterprise-oriented models through an API and, unusually, also publ
 
 Reach for it when retrieval quality and deployment location matter more than having the strongest general-purpose chat model. For frontier reasoning and broad multimodality the larger labs are ahead. For a rerank stage specifically, the hosted endpoint is usually the cheapest quality improvement available to a RAG pipeline, and the self-hosted alternative is a BGE or Jina cross-encoder on a GPU you already run.
 
-### Cohere Embed
-**Short:** Cohere's hosted text embedding models for dense retrieval, with multilingual and compressed variants.
-**Kind:** model
-**Lang:** *
-**Roles:** search-retrieval/ann-index-library @1, applied-ml/nlp-and-text @2
-
-The distinguishing feature is input types: you declare whether a piece of text is a search query, a search document, a classification input or a clustering input, and the model encodes accordingly, so short queries and long passages land in a space where they compare correctly. Compressed outputs are first-class too, since the same call can return `int8` or binary vectors that cut index memory several-fold at a modest recall cost, and the multilingual variants place many languages in one shared space so a query in one language retrieves documents written in another.
-
-Reach for it when a hosted endpoint is acceptable and multilingual coverage or compressed vectors matter. The constraints are the usual hosted ones: per-token cost that grows with the corpus, a network hop on every query, and text leaving your network. Since re-embedding everything is the price of ever changing model, pick the model and the dimension deliberately at the start rather than iterating on them later.
-
 ### Cohere Embed API
 **Short:** Cohere's managed embedding endpoint (embed-v4.0): multimodal inputs, 128k context and truncatable Matryoshka dims.
 **Kind:** model
@@ -190,16 +180,6 @@ Reach for it when the right passage is somewhere in the top fifty but not the to
 It reads query and candidate together in a single pass, so the score reflects term-level interaction that first-stage vectors cannot represent, and the wider context window means a long chunk is judged whole rather than on its opening few hundred tokens. Documents may also be sent as structured fields rather than flat text, which lets a title, a body and metadata each contribute in their own right instead of being concatenated and then truncated at an arbitrary point.
 
 Reach for it when the corpus is multilingual, the chunks are long, or the search is over semi-structured records such as products or support tickets where the deciding signal is not in the prose. Latency and price both scale with the number and length of candidates, so rerank a few dozen rather than a few hundred. If none of those conditions apply, a small self-hosted cross-encoder captures most of the improvement for the price of hardware you already have.
-
-### Cohere Rerank API
-**Short:** Managed cross-encoder endpoint that rescores retrieved documents against the query and returns relevance scores.
-**Kind:** tech
-**Lang:** *
-**Roles:** search-retrieval/reranking @1
-
-The endpoint is deliberately stateless: no index, no ingestion, no embeddings to keep in sync. You post a query and the candidate list you already retrieved, and receive indices, relevance scores and optionally the documents themselves. Because of that shape it appears as a drop-in postprocessor in essentially every retrieval framework, and it can be added to an existing search stack without changing how documents are stored or how the first stage works.
-
-Reach for it as the second stage of a two-stage pipeline, retrieving broadly and cheaply and then paying for accuracy only on the survivors. Two cautions are worth naming: the returned score is a relative ranking signal rather than a calibrated probability, so a fixed cut-off transfers badly across query types, and every rerank is a synchronous external call inside your latency budget. Where that is unacceptable, host a cross-encoder next to the application instead.
 
 ### ColBERT
 **Short:** Late-interaction retrieval model scoring per-token embeddings with MaxSim: near cross-encoder quality, lower latency.
@@ -266,6 +246,7 @@ Reach for it when you want Elastic's own stack rather than the fork, and want up
 Elasticsearch wraps Lucene in a distributed layer: documents are analyzed into an inverted index, indices are split into shards spread across nodes and replicated, and a query scatters to the shards and gathers the merged top results, so both corpus size and query throughput grow by adding nodes. Relevance defaults to BM25 and is tunable per field through analyzers, boosts and function scoring, and the same engine also serves aggregations, dense-vector nearest-neighbour search and learned sparse retrieval — which is why one cluster can back both log analytics and hybrid retrieval with rank fusion.
 
 Reach for it when you need real relevance ranking, filters and facets over text, rather than a wildcard `LIKE` scan in your relational database. Do not treat it as a system of record: there are no transactions across documents, refresh is near-real-time rather than immediate, and the primary shard count is fixed when the index is created, so capacity planning happens up front.
+
 ### Elasticsearch/OpenSearch
 **Short:** Distributed inverted-index search engine and JSON document store, widely used as the log-aggregation backend.
 **Kind:** tech
@@ -317,16 +298,6 @@ Reach for it when a hosted rerank API is ruled out by cost, latency or data resi
 **Kind:** model
 **Lang:** *
 **Roles:** search-retrieval/ann-index-library @1, search-retrieval/rag-and-document-processing @2, applied-ml/vision-speech-and-multimodal @3
-
-### GraphRAG
-**Short:** Microsoft's open-source pipeline that builds an entity/community knowledge graph from a corpus and queries it for RAG.
-**Kind:** tech
-**Lang:** python
-**Roles:** search-retrieval/rag-and-document-processing @1, data-stores/graph-db @3
-
-Indexing is the expensive half. An LLM reads every chunk and extracts entities, relationships and claims, those are deduplicated into a graph, the Leiden algorithm partitions the graph into a hierarchy of communities, and the model then writes a summary of each community from the bottom up. All of that happens once, before any user asks anything, which is why indexing a corpus costs real money in tokens rather than being an ingestion script.
-
-Querying comes in two modes and the split is the point. Local search answers a question about specific entities by walking their neighbourhood in the graph, while global search answers a corpus-wide question, such as the recurring themes across everything, by map-reducing over the community summaries, which chunk retrieval cannot do because no single chunk contains that answer. Reach for it when the questions are genuinely global; for lookup-shaped questions plain vector retrieval is far cheaper and just as good.
 
 ### Harvey AI
 **Short:** Vertical legal AI product for contract review, legal research and drafting over a firm's document corpus.
@@ -598,16 +569,6 @@ It is released with weights, training code and training data, which is rarer tha
 
 Reach for it as a self-hosted default when a permissive licence and provenance matter, or when the deployment is offline, since it is small enough to run under Ollama or a CPU-only runtime. Hosted frontier embeddings still edge it on hard retrieval and on multilingual corpora. As always, the prefixes must match between indexing and querying, or recall drops with nothing in the logs to explain it.
 
-### OpenAI embeddings
-**Short:** OpenAI's hosted text embedding endpoints producing dense vectors for semantic search, clustering and RAG retrieval.
-**Kind:** model
-**Lang:** *
-**Roles:** search-retrieval/ann-index-library @1, search-retrieval/rag-and-document-processing @2, applied-ml/nlp-and-text @3
-
-One request returns a dense vector per input, and the v3 generation is trained with Matryoshka representation, so a `dimensions` parameter truncates the vector at a small accuracy cost: you can index at 512 or 1024 dimensions instead of the full width and cut index memory proportionally without changing model. Vectors come back normalised, which means cosine similarity and dot product rank identically, and there is no query-versus-document distinction to get wrong, since the same call embeds both sides.
-
-Reach for it when a hosted endpoint is acceptable and you want a strong general-purpose model with no infrastructure. The costs are a per-token bill paid once over the corpus and again on every query, a network hop in the retrieval path, and text leaving your network. Batch inputs, cache aggressively, and treat the choice as sticky, since changing model means re-embedding everything. Self-hosted BGE, E5 or Qwen models are the alternative.
-
 ### OpenAI Embeddings API
 **Short:** OpenAI's hosted text embedding endpoint (text-embedding-3-small/large) producing vectors for semantic search and RAG.
 **Kind:** model
@@ -694,23 +655,15 @@ The stack is a sequence of decisions and each one is a place quality leaks away:
 
 Reach for retrieval rather than fine-tuning when the knowledge changes, when provenance is required, or when access control must follow the user. The costs are an ingestion pipeline to keep in sync with the source, an index to operate, and an evaluation set you have to build yourself. For a small stable corpus that fits in a long context window, putting the documents in the prompt is simpler and often better.
 
-### rank-bm25
-**Short:** Pure-Python BM25 implementation for prototyping lexical retrieval over a small in-memory corpus; not production scale.
-**Kind:** tech
-**Lang:** python
-**Roles:** search-retrieval/lexical-and-hybrid-search @1, search-retrieval/rag-and-document-processing @3
-
-BM25 scores a document by summing, over the query terms it contains, an inverse-document-frequency weight multiplied by a saturating term-frequency factor. Two parameters control that shape: `k1` sets how quickly repeated occurrences of a term stop adding value, so a document mentioning a word twenty times does not outrank one mentioning it five times by four, and `b` sets how strongly the score is normalised by document length, with 1 meaning full normalisation and 0 none.
-
-Reach for it to add lexical matching to a prototype or small hybrid retriever, where exact tokens such as identifiers, error strings and rare names are what embeddings blur. Tokenisation is entirely your responsibility, including lowercasing, stemming and stopwords. Scoring is a linear scan with no inverted index and no persistence, so anything real belongs in a search engine implementing the same formula over postings lists.
-
 ### rank_bm25
 **Short:** Small pure-Python BM25 implementation for in-memory sparse keyword retrieval over a document collection.
 **Kind:** tech
 **Lang:** python
 **Roles:** search-retrieval/lexical-and-hybrid-search @1
 
-You hand it a list of already-tokenized documents, it computes term-frequency statistics in memory, and `get_scores(query_tokens)` returns a BM25 score per document; that is essentially the whole API, with `BM25Okapi`, `BM25L` and `BM25Plus` as scoring variants. It exists so a hybrid retrieval pipeline can add a lexical signal beside dense embeddings, which is what rescues the exact matches that vectors blur, such as product codes, error strings and rare proper nouns. Scoring is a linear scan over the corpus with no inverted index and no persistence, so it is fine for a few thousand chunks in a notebook or a prototype and the wrong tool beyond that, where Elasticsearch, OpenSearch or a store with native BM25 belongs.
+BM25 scores a document by summing, over the query terms it contains, an inverse-document-frequency weight multiplied by a saturating term-frequency factor. Two parameters control that shape: `k1` sets how quickly repeated occurrences of a term stop adding value, so a document mentioning a word twenty times does not outrank one mentioning it five times by four, and `b` sets how strongly the score is normalised by document length, with 1 meaning full normalisation and 0 none.
+
+Reach for it to add lexical matching to a prototype or small hybrid retriever, where exact tokens such as identifiers, error strings and rare names are what embeddings blur. Tokenisation is entirely your responsibility, including lowercasing, stemming and stopwords. Scoring is a linear scan with no inverted index and no persistence, so anything real belongs in a search engine implementing the same formula over postings lists.
 
 ### RetrievalAugmentationAdvisor
 **Short:** Spring AI advisor that retrieves from a VectorStore and injects the context into the prompt for naive or advanced RAG.
@@ -752,16 +705,6 @@ The training half matters as much: contrastive losses such as MultipleNegativesR
 **Lang:** python
 **Roles:** search-retrieval/reranking @1, applied-ml/nlp-and-text @3
 
-### SentenceTransformers
-**Short:** Python library for sentence/text embedding models and cross-encoders: encode, fine-tune and score similarity.
-**Kind:** tech
-**Lang:** python
-**Roles:** search-retrieval/ann-index-library @1, applied-ml/nlp-and-text @2, model-training/fine-tuning-and-peft @2, search-retrieval/reranking @3
-
-A model here is a small pipeline of modules, typically a transformer, a pooling layer and sometimes a dense projection and normalisation step, serialised together, which is why a checkpoint from the hub loads and produces comparable vectors without the caller deciding how to pool token outputs. Mean pooling is the common default and CLS pooling the other, and the choice belongs to the model rather than to you: applying the wrong one to a checkpoint produces vectors that look perfectly normal and rank badly.
-
-Reach for it as the standard way to run any open embedding or cross-encoder model locally, and for the evaluators that let you compare two candidates on your own queries instead of on a leaderboard. Encoding a large corpus is GPU-bound work that batches well, so measure throughput before assuming ingestion is cheap. Hosted embedding APIs remain simpler where there is no GPU and the data may leave the network.
-
 ### Solr
 **Short:** Apache Lucene-based search server: inverted-index full-text search, faceting and distributed SolrCloud sharding.
 **Kind:** tech
@@ -781,16 +724,6 @@ Reach for it in a JVM shop that wants deep faceted search over structured conten
 It runs a masked-language-model head over the input and takes, for every vocabulary term, the maximum activation across positions, producing weights for terms that never appeared in the text, so a document about a laptop also carries weight on notebook and computer. A regularisation term during training pushes most of those weights to zero, keeping the representation sparse enough to store in an ordinary inverted index, which means the expansion is learned while retrieval remains postings-list arithmetic that scales the way lexical search does.
 
 Reach for it when you want the vocabulary-mismatch robustness of embeddings while keeping an inverted index, exact-term matching and interpretable per-term scores, which suits hybrid pipelines well. The costs are a neural pass to encode every document at index time and the query at search time, longer postings lists than plain BM25, and an engine that supports impact or term-weight indexing. Without a GPU, BM25 plus a dense retriever is the practical substitute.
-
-### Tavily Search API
-**Short:** RAG-oriented web search API that returns cleaned, LLM-ready page text instead of raw HTML result links.
-**Kind:** tech
-**Lang:** *
-**Roles:** search-retrieval/rag-and-document-processing @1, llm-apps/tool-use-and-mcp @2, search-retrieval/lexical-and-hybrid-search @3
-
-One call runs the search, fetches the result pages, strips navigation and boilerplate, and returns extracted content per result along with a short synthesised answer, so an agent receives text it can put straight in a prompt rather than a list of URLs it must crawl itself. Parameters shape that work, covering search depth, domain allowlists and blocklists, result count, topic and recency filters, and the depth setting is the direct cost-versus-quality dial.
-
-Reach for it when an agent needs current information and you do not want to own crawling, HTML extraction, robots handling and rate limits. It is a metered external dependency sitting in your latency path, and the answers are only as good as the pages it found, so cache aggressively and pass the source URLs through to the user. Where the corpus is your own documents rather than the web, this is the wrong layer entirely and a vector index is the right one.
 
 ### Thomson Reuters AI
 **Short:** Legal research assistant built into Westlaw and Practical Law, answering over licensed case law with citations.

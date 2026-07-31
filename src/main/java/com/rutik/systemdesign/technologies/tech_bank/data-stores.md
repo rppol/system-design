@@ -49,26 +49,6 @@ botocore builds and signs AWS requests and parses responses, but sends them over
 
 Reach for it when an asyncio service makes many AWS calls — S3 uploads, SQS polling, DynamoDB reads — and pushing them onto a thread pool has become the bottleneck. The cost is coupling: it pins to particular botocore versions and can lag new SDK releases, so upgrades are less free than with boto3. For a handful of calls, running boto3 in an executor is simpler and perfectly adequate.
 
-### Amazon Aurora
-**Short:** AWS MySQL/PostgreSQL-compatible relational engine with a shared distributed storage layer and fast replica failover.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-stores/relational @1, data-access/replication-ha-and-backup @2, platform-delivery/cloud-platform-and-cost @3
-
-Aurora keeps the MySQL or PostgreSQL query engine and replaces everything below it. The engine writes only redo log records, which go to a storage fleet spread over six replicas in three availability zones; storage applies them to build pages, and a write is durable once a quorum acknowledges. There are no full-page writes, no replica separately replaying a log, and no checkpoint stalls, which is where the throughput advantage over the stock engines comes from.
-
-Because every instance reads the same storage, replicas lag by tens of milliseconds and failover is a promotion rather than a rebuild. Reach for it when you want a familiar SQL dialect with durability and failover handled. The costs are I/O-based billing that surprises write-heavy workloads, engine versions that trail upstream, and total dependence on a storage layer you no longer control.
-
-### Amazon DynamoDB
-**Short:** AWS serverless key-value and document store with partition-key sharding, auto-scaling and global tables.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-stores/key-value-and-embedded @1, data-stores/document @2, platform-delivery/cloud-platform-and-cost @3, data-access/replication-ha-and-backup @3
-
-Items live in partitions chosen by a hash of the partition key, with an optional sort key ordering items inside one; that pair is the only access path unless you add a local or global secondary index, so the schema is designed backwards from the queries. Capacity is enforced per partition, which is why a hot key throttles while the table as a whole looks idle, and why key cardinality and write sharding matter more than the provisioned numbers.
-
-On-demand mode removes capacity planning at a higher per-request price; provisioned with auto-scaling is cheaper for steady load. Conditional writes give optimistic locking and idempotency, a transactional write API covers a bounded multi-item change, TTL expires rows without a delete job, and Streams feed change data capture. Reach for it for predictable key-based access at scale; anything ad-hoc, joined or aggregated belongs elsewhere.
-
 ### Amazon Neptune
 **Short:** AWS managed property-graph and RDF database queried with Gremlin, openCypher or SPARQL.
 **Kind:** tech
@@ -78,6 +58,7 @@ On-demand mode removes capacity planning at a higher per-request price; provisio
 Neptune is AWS's managed graph database. One cluster stores both a property graph, queried with Gremlin or openCypher, and RDF triples queried with SPARQL, on a shared storage layer replicated across availability zones with a single writer and read replicas you can add for query throughput.
 
 Reach for it when the questions are about relationships several hops deep — fraud rings, identity resolution, entitlement chains, recommendation neighbourhoods, knowledge graphs backing retrieval — where the equivalent SQL is a stack of self-joins that degrades with each hop. Pick one model and language per graph up front, since they are not interchangeable, and note there is no self-hosted Neptune, so this is an AWS commitment.
+
 ### Apache AGE
 **Short:** PostgreSQL extension adding property-graph storage and openCypher queries alongside normal relational tables.
 **Kind:** tech
@@ -134,9 +115,9 @@ Reach for it when the workload genuinely mixes both shapes — entity records pl
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/replication-ha-and-backup @2, platform-delivery/cloud-platform-and-cost @3
 
-Aurora keeps the MySQL or PostgreSQL engine but replaces the storage layer with a distributed service that replicates every write across three availability zones. A read replica therefore does not replay a log into its own copy of the data — it reads the same storage the writer does, which is why replicas are cheap to add, lag far less than they would under streaming replication, and can be promoted in seconds on failover.
+Aurora keeps the MySQL or PostgreSQL query engine and replaces everything below it. The engine writes only redo log records, which go to a storage fleet spread over six replicas in three availability zones; storage applies them to build pages, and a write is durable once a quorum acknowledges. There are no full-page writes, no replica separately replaying a log, and no checkpoint stalls, which is where the throughput advantage over the stock engines comes from.
 
-Choose it when you want a familiar SQL engine with durability and failover handled for you. You give up control of the storage layer, and you are pinned to whichever engine versions AWS has certified.
+Because every instance reads the same storage, replicas lag by tens of milliseconds and failover is a promotion rather than a rebuild. Reach for it when you want a familiar SQL dialect with durability and failover handled. The costs are I/O-based billing that surprises write-heavy workloads, engine versions that trail upstream, and total dependence on a storage layer you no longer control.
 
 ### Azure Cognitive Search
 **Short:** Azure managed search service combining keyword, semantic and vector indexes; common RAG/memory backend.
@@ -203,6 +184,7 @@ Reach for it as the Azure landing zone for backups, media, data-lake files and s
 Cassandra has no leader. Every node is identical, rows are placed by hashing the partition key onto a token ring, and each partition's replicas live on the next nodes around that ring, so adding nodes adds both capacity and write throughput roughly linearly. Writes append to a commit log and a memtable and later flush to immutable SSTables, which is why writes are cheap and why reads may have to merge several SSTables and pay a compaction tax in the background.
 
 Consistency is chosen per statement rather than per database: a consistency level of ONE is fast and may read stale data, QUORUM on both reads and writes gives you read-your-writes at higher latency. Reach for it for write-heavy, time-series and per-entity feed workloads whose access patterns you know in advance, because you design tables per query. Avoid it where you need ad-hoc queries, joins, or multi-partition transactions — lightweight transactions use Paxos and cost several round trips.
+
 ### Chroma
 **Short:** Embedded, zero-setup vector database for local development and prototyping of RAG applications.
 **Kind:** tech
@@ -316,6 +298,7 @@ A table is Parquet files plus a `_delta_log` of ordered commits; a reader replay
 Dragonfly reimplements the Redis and Memcached protocols on a multi-threaded, shared-nothing core: the keyspace is partitioned across CPU cores, each partition owned by one thread, so a single instance uses the whole machine instead of one core. That is the difference from Redis, whose single-threaded command loop means the answer to a CPU-bound instance is Redis Cluster and the operational cost of a sharded deployment.
 
 Its internal hash table and snapshotting design also cut memory per key and avoid the fork-time memory spike a background save can cause. Reach for it when one cache node is CPU-bound and you would rather scale up than shard; before you do, check that the commands and modules you rely on are covered, and check that its BSL licence is acceptable for how you intend to run it.
+
 ### DynamoDB
 **Short:** AWS fully managed key-value/document store with predictable latency, optional strong reads and serverless scaling.
 **Kind:** tech
@@ -626,16 +609,6 @@ Every table is a B+tree clustered on the primary key, so the row data sits in th
 
 Writes land in the buffer pool and the redo log, with the change buffer smoothing random secondary-index writes and the doublewrite buffer guarding against torn pages. The default isolation is repeatable read implemented with next-key locks, which lock the gaps between index entries as well as the rows, so two transactions inserting into the same range can deadlock without ever touching the same row.
 
-### MySQL/InnoDB
-**Short:** MySQL with its default InnoDB engine: row-level locking and a clustered B+tree keyed on the primary key.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-stores/relational @1, data-stores/key-value-and-embedded @2
-
-The pairing reads as one name because InnoDB has been the default for so long that MySQL's practical behaviour is InnoDB's: row-level locking rather than table locks, crash recovery from the redo log, foreign keys, and a clustered index on the primary key. The design consequence people most often miss is that choosing the primary key chooses the physical order of the table and the payload of every secondary index, so a random UUID scatters inserts across the tree and bloats every index, while an auto-increment or a time-ordered UUID appends.
-
-The other engines are effectively historical: MyISAM has no transactions and locks whole tables, MEMORY is volatile, ARCHIVE is a niche. If a table in an old schema is still MyISAM, converting it to InnoDB is usually a straight improvement rather than a decision to agonise over.
-
 ### Neo4j
 **Short:** Native property-graph database queried with Cypher; used for knowledge graphs and edge storage for GNNs.
 **Kind:** tech
@@ -702,7 +675,7 @@ OpenTSDB stores every metric as rows in HBase with a carefully packed row key �
 
 It was influential and is largely superseded. A design that scans and aggregates in the query process is slow next to a columnar store, tag dimensionality is limited by the key layout, and running HBase purely for metrics is a great deal of cluster. New systems reach for Prometheus with a long-term store, VictoriaMetrics, InfluxDB or ClickHouse instead.
 
-### Oracle
+### Oracle Database
 **Short:** Oracle Database: the long-standing commercial ACID relational engine with PL/SQL and RAC clustering.
 **Kind:** tech
 **Lang:** *
@@ -711,16 +684,6 @@ It was influential and is largely superseded. A design that scans and aggregates
 Its distinguishing implementation is undo-based MVCC: a reader reconstructs the block as it stood at statement start from the undo tablespace rather than taking a lock, so readers never block writers and writers never block readers, with read committed the practical default and serializable available. PL/SQL puts a full procedural language inside the database, RAC lets several instances share one storage layer for availability, and partitioning, materialized views and a mature cost-based optimizer with honoured hints cover the large-scale end.
 
 Reach for it where it already is — the migration cost of a large PL/SQL estate is what keeps it in place, rather than a feature nobody else has. The reasons to leave are per-core licensing with audits, and the fact that PostgreSQL now covers most of the technical ground. Treat any migration as a rewrite of the procedural layer, not a data copy.
-
-### Oracle DB
-**Short:** Oracle's commercial relational database: MVCC with Read Committed default, PL/SQL, RAC clustering and partitioning.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-stores/relational @1, data-access/transactions-and-consistency @2
-
-The same product under its fuller name; what is worth carrying into a design is the set of behaviours an application actually feels. Sequences are standalone objects and identity columns wrap them. An empty string is stored as null, which breaks assumptions carried over from other engines. The `DATE` type includes a time component, and the two timestamp-with-time-zone variants behave differently. Hierarchical queries can use `CONNECT BY` as well as recursive common table expressions.
-
-Diagnosis has its own vocabulary too: workload and session-history reports sample sessions and wait events, so tuning usually starts from which wait dominates rather than from one execution plan, and optimizer hints are supported and obeyed, unlike in PostgreSQL. Version and edition decide which of these are licensed, so check before designing around partitioning or in-memory columns.
 
 ### Parquet
 **Short:** Columnar on-disk file format with per-column compression and predicate pushdown; the lakehouse default.
@@ -920,16 +883,6 @@ Storage is columnar micro-partitions in the cloud provider's object store, immut
 
 Reach for it when analytics should be a service with no infrastructure and elastic, isolated compute. Watch cost rather than performance: oversized warehouses, generous idle timeouts and large unclustered tables are where the money goes, and auto-scaling makes it easy to spend without noticing.
 
-### Spanner
-**Short:** Google's globally distributed SQL database giving strict serializability via Paxos replication and TrueTime clocks.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-stores/relational @1, data-access/transactions-and-consistency @2, data-access/replication-ha-and-backup @3, platform-delivery/cloud-platform-and-cost @3
-
-Every write goes through the Paxos group owning its key range, and commit timestamps come from TrueTime's bounded-uncertainty clock, which together give strict serializability across regions; snapshot reads at a past timestamp take no locks at all, so long analytical scans never block writers.
-
-In CAP terms it chooses consistency — a partitioned minority of replicas stops serving writes rather than diverging — and leans on Google's redundant network to keep availability high anyway. Schema design decides whether it actually performs: a monotonically increasing primary key funnels every insert into a single split, so hashed or reversed keys and interleaved child tables are what keep the write path spread across the cluster.
-
 ### spring-ai-pgvector-store
 **Short:** Spring AI starter backing a VectorStore with Postgres pgvector for similarity search from Java.
 **Kind:** tech
@@ -979,6 +932,7 @@ For a dedicated pool the distribution key is the whole performance story — joi
 TiDB is a distributed SQL database assembled from three parts: a stateless SQL layer that speaks the MySQL wire protocol, TiKV, a Raft-replicated key-value store that splits data into Regions and moves them between nodes, and PD, which places those Regions and hands out globally ordered timestamps. Transactions use Percolator-style two-phase commit against those timestamps, so a statement spanning many Regions is still ACID without any application-level sharding logic.
 
 TiFlash adds columnar replicas kept in sync through Raft, so analytical scans run on the same cluster without touching the row store — the HTAP claim. Reach for it when a sharded MySQL fleet has outgrown manual resharding and you want to keep the MySQL dialect and drivers. The cost is a multi-component cluster to operate and higher latency on a single point lookup than one MySQL would give you.
+
 ### TigerGraph
 **Short:** Distributed native property-graph database with GSQL, aimed at deep multi-hop queries on huge graphs.
 **Kind:** tech

@@ -168,6 +168,7 @@ Two consequences worth internalizing. Proxying means Cloudflare terminates your 
 CloudFront is AWS's CDN. You define a distribution with one or more origins — an S3 bucket, a load balancer, any HTTP server — and a cache policy that says which headers, cookies and query strings form the cache key; requests then terminate at the nearest edge location, which serves from cache or fetches once from origin. TLS terminates at the edge with an ACM certificate, and AWS WAF and Shield attach there, so filtering happens before traffic reaches your region.
 
 CloudFront Functions run tiny JavaScript at the viewer edge for header rewrites and redirects, and Lambda@Edge handles heavier per-request logic. Reach for it to cut origin load and round-trip latency on anything cacheable; version your asset paths rather than relying on invalidations, which propagate asynchronously and are billed past a small free allowance.
+
 ### dogpile.cache
 **Short:** Python cache front-end with pluggable backends and dogpile locking so one worker recomputes an expired key.
 **Kind:** tech

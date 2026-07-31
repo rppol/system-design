@@ -93,16 +93,6 @@ You write a `.g4` grammar naming lexer tokens and parser rules, and ANTLR genera
 
 Reach for it when the language is yours — a DSL, a query or filter syntax, an expression evaluator, a tool that has to read legacy source. For a format that already has a mature parser, use that instead; a generated grammar is a maintenance commitment worth making only when nobody else has written one.
 
-### ANTLR 4
-**Short:** Parser generator: a .g4 grammar becomes a lexer, parser, parse tree and visitor/listener base classes.
-**Kind:** tech
-**Lang:** *
-**Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/design-patterns-and-principles @3, runtime-systems/text-encoding-and-regex @3
-
-Version 4 replaced the hand-tuned LL(k) machinery of ANTLR 3 with adaptive LL(*), which simulates the parser at runtime to decide between alternatives and therefore accepts left-recursive expression rules written the obvious way. It also moved semantic actions out of the grammar: instead of embedding target-language code in the rules, the tool emits a parse tree plus a listener and a visitor base class, so the same `.g4` grammar generates parsers for Java, Python, Go, C#, C++ or JavaScript unchanged.
-
-That separation is why the grammar stays readable and portable. The cost is a full parse tree in memory and slower parsing than a hand-written recursive-descent parser, which matters only for very large inputs or a hot compilation loop.
-
 ### ANTLR 4 generated BaseVisitor
 **Short:** Generated visitor base class for an ANTLR grammar; you control recursion and return a value per parse-tree node.
 **Kind:** api
@@ -194,15 +184,6 @@ It is the substrate under CGLIB, Byte Buddy, Mockito, Jacoco and most APM agents
 AssertJ gives you one entry point, `assertThat(actual)`, that returns an assertion object typed to whatever you passed, so completion offers only the assertions that make sense — collection assertions for a list, temporal ones for an `Instant` — and they chain into a single readable line. The practical payoff is the failure message: instead of "expected true but was false" you get the actual value, the expected value and the diff, which is often enough to diagnose without rerunning under a debugger.
 
 Beyond simple values it covers exceptions with `assertThatThrownBy`, soft assertions that collect several failures in one run instead of stopping at the first, and recursive field-by-field comparison for whole object graphs. It is the default assertion library in Spring Boot's test starter.
-### AutoValue
-**Short:** Google annotation processor that generates immutable value classes with equals/hashCode/toString and builders.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, apis-frameworks/design-patterns-and-principles @3
-
-You write an abstract class annotated `@AutoValue` with one abstract accessor per property, and the processor generates the concrete subclass with final fields, a correct `equals`, a matching `hashCode`, a readable `toString` and, if you nest an `@AutoValue.Builder`, a builder that fails on a missing required property. The generated class is ordinary source you can read in the build output, so nothing happens at runtime and there is no reflection or bytecode rewriting involved.
-
-The deliberate constraint is that it only generates what it can prove correct — no setters, no mutable collections without an explicit copy. Java records now cover the simple case with no dependency at all; AutoValue still earns its place when you need a builder, a memoized derived property, or an extension such as `@Memoized` or a generated JSON adapter.
 
 ### Awaitility
 **Short:** Java test DSL for asserting asynchronous outcomes: await().atMost(5, SECONDS).until(...) instead of Thread.sleep.
@@ -289,16 +270,6 @@ Reach for it when API collections should be reviewed in pull requests and versio
 Byte Buddy generates bytecode at runtime through a fluent, type-checked API — `new ByteBuddy().subclass(Service.class).method(named("charge")).intercept(...)` — so you express the transformation you want instead of writing ASM visitor callbacks and hand-computing stack frames. It can define the class into a live classloader, emit it at build time, or apply it through a Java agent that transforms classes as they are loaded.
 
 This is the machinery under a lot of the JVM ecosystem: Mockito creates mock subclasses with it, and most APM and tracing agents use it to weave instrumentation into methods they do not own. Reach for it when you must proxy a concrete class — JDK dynamic proxies only implement interfaces — or instrument third-party code. For ordinary application logic, generated types are hard to debug and hard for the next reader to find, and plain composition wins.
-
-### ByteBuddy
-**Short:** Runtime bytecode generation library used to build dynamic proxies and subclasses; powers Mockito and Hibernate.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @2, devtools/testing-and-mocking @3
-
-A fluent API describes the class you want - subclass this type, intercept methods matching this matcher, delegate them to this interceptor - and it emits the bytecode, so you get code generation without writing ASM visitors by hand. The same API drives Java agents: `AgentBuilder` can retransform classes that are already loaded, which is how APM and tracing agents instrument an application they never compiled against.
-
-Reach for it when you need a proxy over a concrete class, since JDK dynamic proxies only cover interfaces. The subclassing approach carries its own limits, and they are the ones people are surprised by: final and private methods cannot be intercepted, and a call from one method of the target to another goes to the real object, bypassing the proxy entirely - the same self-invocation trap as Spring AOP.
 
 ### Bytecode Viewer
 **Short:** GUI tool that decompiles and edits Java class files so you can inspect the bytecode the compiler emitted.
@@ -682,16 +653,6 @@ It is the standard answer to a repository choked by binaries — model weights, 
 **Lang:** *
 **Roles:** devtools/version-control-and-workbench @1
 
-### git-lfs
-**Short:** Git extension storing large binaries out of band as pointers so clones stay small.
-**Kind:** tech
-**Lang:** *
-**Roles:** devtools/version-control-and-workbench @1, data-stores/object-and-file-storage @3
-
-The client side is a set of git filters plus a batch API over HTTPS: `git lfs track` writes a pattern into `.gitattributes`, and from then on matching files are uploaded to the LFS endpoint while a pointer file goes into the commit. Useful controls are `git lfs fetch --recent` and the `lfs.fetchexclude` and `include` filters, which let a CI job or a shallow clone download only the objects it needs instead of the whole set, plus file locking for binary assets that cannot be merged.
-
-Every major forge hosts an endpoint, usually with a storage and bandwidth quota that is easy to exhaust. For very large datasets the storage model fits poorly and DVC or a plain object store with content hashes is the better shape.
-
 ### GitHub/GitLab/Bitbucket
 **Short:** Hosted Git platforms providing pull requests, protected branches, CODEOWNERS review rules and CI.
 **Kind:** tech
@@ -1065,6 +1026,7 @@ That is the difference from a regex sweep, which cannot tell a match inside a st
 JaCoCo attaches as a JVM agent and instruments bytecode as classes load, recording which lines and branches actually executed; the Maven or Gradle plugin merges that execution data into HTML and XML reports and can fail the build below a threshold. It answers one narrow question well: which code did the test suite never touch at all.
 
 Read it as a hint about where invariants are untested — an anemic domain model or a god object usually shows up as a large uncovered region — and never as a target. Line coverage is trivially gamed by tests with no assertions, and even branch coverage says nothing about whether the combination of states that actually breaks was exercised.
+
 ### japicmp
 **Short:** Build plugin that diffs two JARs and fails the build on binary- or source-incompatible API changes.
 **Kind:** tech
@@ -1316,6 +1278,7 @@ Its scope is deliberately narrow. A `.jmod` is a link-time artifact only — you
 Both tools read your compiled code and build metadata and turn it into a dependency graph you can interrogate, rather than reading imports by hand. jQAssistant scans the artifact into a graph database and lets you write rules as queries — no package under `domain` may reference `infrastructure`, no cycles between modules — and fail the build when a rule matches. Structure101 is a commercial visual tool for the same material: you see the tangles and cycles, model the architecture you intended, and measure drift from it.
 
 Use them at architecture review cadence rather than per commit. The findings are structural and slow-moving, and the value is in noticing that a layering rule everyone believes in stopped being true three releases ago.
+
 ### jqwik
 **Short:** QuickCheck-style property-based testing engine for JUnit 5: generators, shrinking and statistics.
 **Kind:** tech
@@ -1362,16 +1325,6 @@ The skeleton is fixed and the framework owns it: `@BeforeAll` once per class on 
 
 The consequence to internalise is isolation: shared mutable state that survives between tests produces order-dependent failures that only appear when someone runs the class in a different order or in parallel. Extensions hook the same phases, so a `@BeforeEach` and an extension callback compose predictably rather than fighting each other.
 
-### JUnit 5.10
-**Short:** The Jupiter test framework for the JVM: lifecycle annotations, parameterized and nested tests, extensions.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/testing-and-mocking @1
-
-A maintenance-line release of the Jupiter programming model, notable mostly for the parameterized-test improvements that arrived with it — a `@ParameterizedTest` name pattern including the argument set index and values, argument-count validation, and `@MethodSource` factory resolution that stopped being surprising. Version numbers in this line matter because Jupiter, the Platform and Vintage are released together and their versions must agree.
-
-Managing them by hand is the usual mistake. Import `junit-bom` as a platform in Gradle or a dependency-management import in Maven and declare artifacts without versions, so the engine, the API and the launcher cannot drift; a mismatch typically shows up as tests silently not being discovered rather than as a dependency error.
-
 ### JUnit 6
 **Short:** The current Java test framework: @Test, @ParameterizedTest, lifecycle callbacks and the @ExtendWith extension model.
 **Kind:** tech
@@ -1409,16 +1362,6 @@ The practical touchpoints are `junit-platform-console-standalone` for running te
 **Roles:** devtools/testing-and-mocking @1, observability/profiling-and-performance @3
 
 Tests are JavaScript modules -- a default exported function each virtual user runs in a loop, plus an `options` object declaring stages, ramps and thresholds -- executed by a Go runtime, so VUs are goroutines rather than OS threads and one machine drives far more concurrency than a thread-per-user tool. Thresholds are what make it CI-native: a rule such as a p95 request duration under 300 ms fails the run with a non-zero exit code, so a performance regression breaks the build instead of sitting in a report nobody opens. Its executors include constant and ramping arrival rate, not just VU counts, which is the correct shape when you care about requests per second rather than concurrency, and results stream out to Prometheus and other backends. Reach for it when load tests should live in the pipeline beside the code; note the script runtime is not Node, so most npm libraries do not work, and browser-level testing needs its separate browser module.
-
-### k6 Cloud
-**Short:** Managed service that runs k6 load tests distributed across regions and stores the result timeseries.
-**Kind:** tech
-**Lang:** *
-**Roles:** devtools/testing-and-mocking @1
-
-The hosted counterpart to the k6 binary: `k6 cloud run` uploads a script, the service provisions load generators in the regions you select, and the aggregated timeseries is stored with percentile breakdowns and per-check results rather than scrolling past in a terminal. Because runs are retained, successive tests are comparable — the point of a performance baseline is the trend, and a local run leaves nothing to trend against.
-
-It is now delivered as part of Grafana Cloud. Reach for it when a single load generator cannot produce enough traffic or when geographic origin matters; it is metered, so develop the script locally against a staging service and use the cloud only for the runs whose scale or location you cannot reproduce.
 
 ### k6-operator
 **Short:** Kubernetes operator that splits a k6 load test across N runner pods and aggregates the results.
@@ -1489,6 +1432,7 @@ It is pure Python with no build step and no code generation, which makes it the 
 Lean 4 is a dependently typed functional language that doubles as an interactive proof assistant. Because types can express propositions, a term of that type is a proof of it, and the ordinary type checker is what verifies the argument — nothing is accepted unless every step checks mechanically. Mathlib supplies a large body of already-formalized mathematics to build on, and tactics automate the routine steps.
 
 Reach for it where being confident is not enough and correctness must be established: an induction proof over an algorithm, a protocol invariant, a safety property. It is also the checker in automated theorem-proving loops, where a model proposes proofs and Lean decides which ones are real. The cost is time — a proof takes far longer to write than a test that probably would have caught the same bug.
+
 ### Liberica NIK
 **Short:** BellSoft's Native Image Kit: a GraalVM-based AOT compiler producing native executables from Java applications.
 **Kind:** tech
@@ -1670,6 +1614,7 @@ That symmetry is the point — one artifact drives both the mock and the conform
 Mockito builds test doubles at runtime: `mock()` returns an object whose methods return type defaults until you stub one with `when(...).thenReturn(...)`, and `verify()` asserts that a collaborator was called the way you expected, with the arguments you expected. The point is isolating the class under test from collaborators that are slow, remote or nondeterministic, so a failure names one unit.
 
 Since 5.0 the inline mock maker is the default, so final classes and final methods mock without an extra dependency. Two habits keep it healthy: prefer stubbing types you own — wrap a third-party client in your own interface rather than mocking its API surface — and treat heavy use of `mockStatic` as a signal that a static dependency should have been injected.
+
 ### Mockito and other test doubles
 **Short:** Mocking libraries that generate proxies recording invocations and returning stubbed values to isolate a unit under test.
 **Kind:** tech
@@ -1761,6 +1706,7 @@ Multiple scenarios cover different distributions or variable sets. Container ins
 mypy reads your annotations and checks the program without running it: argument and return types at every call site, `Optional` handling, generics and variance, and structural conformance to `Protocol` classes. Most of what it catches is the None that was never handled and the refactor that missed a caller, which is exactly the class of bug that unit tests reach last.
 
 It is gradual by design — unannotated functions are skipped, so a large codebase can adopt it module by module — and that also means the default configuration proves very little. `--strict` is where it starts being load-bearing, since it disallows untyped definitions and implicit `Any`. Plugins cover frameworks whose types only exist at runtime, such as the pydantic plugin that teaches it what a model's generated `__init__` looks like.
+
 ### MySQL Workbench
 **Short:** MySQL's GUI client for schema design, query editing and visual EXPLAIN plans against a live server.
 **Kind:** tech
@@ -1786,16 +1732,6 @@ That native test run is the part to insist on, since the differences between a J
 **Kind:** api
 **Lang:** java
 **Roles:** devtools/compiler-toolchain-and-codegen @1, observability/profiling-and-performance @3
-
-### native-image
-**Short:** GraalVM ahead-of-time compiler turning classes and jars into a self-contained native executable with fast startup.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, platform-delivery/container-and-image @3
-
-Given a main class and a classpath, it performs a closed-world points-to analysis to find everything reachable, compiles that into machine code, runs the static initializers it is allowed to run at build time and snapshots the resulting heap into the image, then links it with the SubstrateVM runtime — a small GC and thread implementation replacing HotSpot. The output is one executable with no JVM, no class loading and no JIT.
-
-Everything that makes Java dynamic must therefore be declared: reflection, proxies, resources, serialization and JNI. Unlisted usage is not in the binary, and the failure appears at run time rather than at build. Budget minutes and several gigabytes of memory per build, and expect lower peak throughput than the JVM in exchange for millisecond startup and a small resident set.
 
 ### native-image-agent
 **Short:** GraalVM agent recording reflection, proxy, resource and JNI access and writing native-image config files.
@@ -2152,6 +2088,7 @@ Reach for it when your library must support both, which is the case for anything
 Without this plugin an `async def` test is collected, never awaited, and reported as passing while executing nothing — a silent false green. pytest-asyncio runs such tests on an event loop and does the same for async fixtures, and setting `asyncio_mode = "auto"` in your config removes the need for a per-test marker.
 
 Use it for anything exercising asyncio code: async database drivers, an async HTTP client, async agent or chain calls. The trap is loop scope. By default each test gets a fresh event loop, so a session-scoped fixture holding a connection bound to an earlier loop fails at use, and the fix is matching the fixture's loop scope to the resource's lifetime.
+
 ### pytest-cov
 **Short:** pytest plugin that measures code coverage via coverage.py and reports missing lines or enforces a threshold.
 **Kind:** tech
@@ -2188,16 +2125,6 @@ The suite has to be genuinely independent for this to work, and parallelising is
 **Lang:** *
 **Roles:** devtools/testing-and-mocking @1, runtime-systems/io-networking-and-syscalls @2
 
-### Reachability Metadata Repository
-**Short:** Shared GraalVM repository of reflection and resource metadata for popular libraries, so native builds work unmodified.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @2
-
-GraalVM's closed-world analysis cannot see reflection, proxies, resources or JNI, and most of that lives in third-party libraries. This community repository stores the required metadata JSON per library coordinate and version, and the Native Build Tools plugins fetch and apply it during the build, which is why an application built on mainstream frameworks compiles natively without anyone writing hints by hand.
-
-Coverage is contributed rather than guaranteed, and entries are pinned per version, so a dependency bump can move past the metadata that covered it and an unmaintained library may have none at all. When that happens the fallback order is the library's own bundled `META-INF/native-image` metadata, then a tracing-agent run over your integration suite, then hand-written hints — and always a native test run to confirm.
-
 ### react-diff-viewer
 **Short:** React component rendering side-by-side or inline text diffs, used to show an agent's proposed edits.
 **Kind:** tech
@@ -2227,16 +2154,6 @@ Run it against any operator or adapter you write yourself, because these rules a
 `StepVerifier` turns a `Flux` or `Mono` into an assertable script: subscribe, then declare the expected sequence of signals — `expectNext`, `expectNextCount`, `expectError`, `expectComplete` — and `verify()` runs it and fails if the actual signals differ. That matters because a reactive pipeline is asynchronous and lazy, so an ordinary assertion after the call runs before anything has been emitted, and a bare `block()` throws away the ordering and error information you wanted to check.
 
 `withVirtualTime` replaces the scheduler's clock so a `delayElements` of an hour is verified in milliseconds by advancing time explicitly, and `expectSubscription` plus `thenRequest` drives demand so backpressure behaviour is testable. `TestPublisher` supplies the other side when the source is what you are stubbing.
-
-### reactor-test
-**Short:** Project Reactor's test module: StepVerifier asserts a Flux/Mono's exact signal sequence, with virtual time support.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/testing-and-mocking @1, runtime-systems/concurrency-and-async @2
-
-The artifact is `io.projectreactor:reactor-test`, and it carries three tools. `StepVerifier` asserts the exact signal sequence a publisher emits and fails on any deviation, including the terminal signal, which is what makes an asynchronous stream deterministically testable. Virtual time swaps in a scheduler whose clock you advance by hand, so timeouts, retry backoff and windowing operators are verified without the test sleeping. `TestPublisher` lets a test emit signals on demand, including deliberately non-compliant ones, to check how an operator downstream behaves.
-
-Add it as a test dependency wherever Reactor types cross a method boundary. The habit to build is asserting the whole sequence rather than only the values: most reactive bugs are in completion, error propagation and demand, not in the mapped payload.
 
 ### readelf
 **Short:** binutils CLI that dumps ELF headers, sections, symbols and dynamic linking info from a binary.
@@ -2315,16 +2232,6 @@ As a Maven or Gradle plugin it fails the build on an unaccepted break, which is 
 It is a single compiled binary that reimplements the rules of flake8 and a long list of its plugins, along with isort, pyupgrade and pydocstyle checks, plus a formatter that matches Black's style. Many rules carry autofixes, so a check run can rewrite the code, and it is fast enough to run on every save and over the whole repository in a pre-commit hook rather than only on changed files.
 
 Reach for it to collapse a stack of lint and format tools into one configured in pyproject.toml. Be clear about what it is not: it does not do type inference, so it cannot tell you a call violates a Protocol or that a variable is the wrong type. It complements mypy or pyright rather than replacing them.
-
-### ruff linter
-**Short:** Rust-based Python linter and formatter that reimplements flake8, isort and pyupgrade rules at very high speed.
-**Kind:** tech
-**Lang:** python
-**Roles:** devtools/static-analysis-and-linting @1
-
-One Rust binary that reimplements the rule sets of flake8 and a long list of its plugins, plus isort, pyupgrade, pydocstyle, pep8-naming and bugbear checks, selected by rule prefix in `pyproject.toml`. Many rules carry a safe autofix applied with `--fix`, and a separate formatter matches Black's output, so a project can drop several tools and their conflicting configurations for one.
-
-The speed changes how it is used rather than merely saving time: whole-repository checks on every save and in a pre-commit hook become practical, so violations never accumulate. What it cannot do is type inference — a wrong argument type or a violated Protocol is invisible to it — so mypy or Pyright remains a separate, complementary step.
 
 ### RuntimeHintsRegistrar
 **Short:** Spring AOT interface for declaring reflection, resource and proxy hints needed by a GraalVM native image.
@@ -2707,6 +2614,7 @@ The prerequisites are what make or break it: a fast reliable test suite, small r
 Turborepo runs tasks across a JavaScript or TypeScript monorepo in dependency order. Each task's inputs — source files, dependencies' outputs, environment variables — are hashed, and if that hash already has a stored result the task is skipped and its output replayed from cache, locally or from a cache shared with CI. Combined with filtering by what changed since a git ref, a pull request rebuilds and retests only the packages it can affect.
 
 Reach for it when the full monorepo build has become the CI bottleneck and most pull requests touch one package. It orchestrates and caches; the actual compiling and bundling is still your existing toolchain, and cache correctness depends on declaring each task's inputs and outputs honestly.
+
 ### twine
 **Short:** CLI that uploads built Python distributions to PyPI or a private index.
 **Kind:** tech
@@ -2828,6 +2736,7 @@ Assertions chain from `exchange()`: `expectStatus()`, `expectHeader()`, `expectB
 WireMock starts a real HTTP server on a local port and answers requests according to stubs you define by method, URL, headers or body matchers. Because it is real HTTP, the code under test uses its real client, real serialization, real connection pool and real timeout configuration — all the machinery that is skipped when you mock the client object instead, which is where integration bugs hide.
 
 It also does the awkward cases: stateful scenarios where the second call returns something different, injected latency and dropped connections for resilience tests, request verification after the fact, and record-and-playback against a live API to seed stubs. Reach for it to test outbound HTTP clients and to develop against an API that does not exist yet.
+
 ### xargs
 **Short:** Shell tool building command lines from stdin, with -P to run the resulting commands in parallel.
 **Kind:** tech
