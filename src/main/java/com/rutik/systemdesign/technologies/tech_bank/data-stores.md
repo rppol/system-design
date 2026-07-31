@@ -15,11 +15,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** js
 **Roles:** data-stores/vector-store @1, search-retrieval/ann-index-library @3
 
+The package binds Mastra's storage, vector and memory interfaces to libSQL, the SQLite fork that adds a network protocol, so the same agent code runs against a local file in development and a hosted database in production without changing anything but a URL. Conversation threads, messages, workflow state and embeddings all land in one SQLite-shaped store, with similarity search served by libSQL's own vector index rather than a separate service.
+
+Reach for it as the default when starting a TypeScript agent: there is nothing to provision, and the entire state of a run sits in a file you can open and inspect. Move off it when concurrency or corpus size grows, since SQLite still admits one writer at a time and its vector search is not built for millions of embeddings — the PostgreSQL adapter with pgvector is the usual next step.
+
 ### @mastra/pg
 **Short:** Mastra's PostgreSQL adapter, using pgvector as the vector store and memory backend for TypeScript agents.
 **Kind:** tech
 **Lang:** js
 **Roles:** data-stores/vector-store @1, search-retrieval/ann-index-library @3
+
+It implements the same storage, memory and vector interfaces against PostgreSQL, keeping threads, messages and workflow state in ordinary tables and embeddings in a pgvector column, so an agent's whole runtime state lives in a database the rest of the stack already backs up, monitors and connects to. Similarity search becomes SQL with a metadata filter beside it, which is what makes per-user or per-tenant memory scoping straightforward.
+
+Reach for it once an agent leaves the laptop: connection pooling, concurrent writers and real indexes come for free, and there is no second datastore to operate for vectors. The pgvector caveats apply — pick HNSW or IVFFlat deliberately and tune the recall dial — and for a very large corpus with heavy filtering a dedicated vector database still has more headroom.
 
 ### Aerospike
 **Short:** Distributed real-time key-value store with a flash-optimized storage engine and sub-millisecond reads at large scale.
@@ -27,11 +35,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, caching/distributed-cache @2, data-stores/document @3
 
+Its distinguishing design is a hybrid memory model: the primary index lives entirely in RAM as a small fixed-size entry per record, while the data sits on SSD and is read through a direct large-block interface that bypasses the filesystem, so a lookup costs one index probe plus one device read. Records are distributed by a hash of the key into partitions across the cluster with no manual sharding, and the cluster rebalances itself as nodes join or leave.
+
+Reach for it when the working set is far too large for RAM but you still need sub-millisecond reads at very high throughput — ad tech, real-time bidding, fraud scoring, feature serving. Against that: it is a commercial product with a community edition, the operational model is its own to learn, and if the data fits in memory or the throughput is modest, Redis or DynamoDB needs far less justification.
+
 ### aiobotocore
 **Short:** Async botocore fork; non-blocking AWS SDK calls (S3, SQS, DynamoDB) from asyncio code.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/cloud-platform-and-cost @2
+
+botocore builds and signs AWS requests and parses responses, but sends them over a blocking HTTP client. aiobotocore replaces that layer with aiohttp while keeping botocore's model-driven API generation, so every service and operation is still available and the calls look like boto3 with `await` and an async context manager around the client. The aioboto3 package layers boto3's higher-level resource interfaces on top of it.
+
+Reach for it when an asyncio service makes many AWS calls — S3 uploads, SQS polling, DynamoDB reads — and pushing them onto a thread pool has become the bottleneck. The cost is coupling: it pins to particular botocore versions and can lag new SDK releases, so upgrades are less free than with boto3. For a handful of calls, running boto3 in an executor is simpler and perfectly adequate.
 
 ### Amazon Aurora
 **Short:** AWS MySQL/PostgreSQL-compatible relational engine with a shared distributed storage layer and fast replica failover.
@@ -39,11 +55,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/replication-ha-and-backup @2, platform-delivery/cloud-platform-and-cost @3
 
+Aurora keeps the MySQL or PostgreSQL query engine and replaces everything below it. The engine writes only redo log records, which go to a storage fleet spread over six replicas in three availability zones; storage applies them to build pages, and a write is durable once a quorum acknowledges. There are no full-page writes, no replica separately replaying a log, and no checkpoint stalls, which is where the throughput advantage over the stock engines comes from.
+
+Because every instance reads the same storage, replicas lag by tens of milliseconds and failover is a promotion rather than a rebuild. Reach for it when you want a familiar SQL dialect with durability and failover handled. The costs are I/O-based billing that surprises write-heavy workloads, engine versions that trail upstream, and total dependence on a storage layer you no longer control.
+
 ### Amazon DynamoDB
 **Short:** AWS serverless key-value and document store with partition-key sharding, auto-scaling and global tables.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, data-stores/document @2, platform-delivery/cloud-platform-and-cost @3, data-access/replication-ha-and-backup @3
+
+Items live in partitions chosen by a hash of the partition key, with an optional sort key ordering items inside one; that pair is the only access path unless you add a local or global secondary index, so the schema is designed backwards from the queries. Capacity is enforced per partition, which is why a hot key throttles while the table as a whole looks idle, and why key cardinality and write sharding matter more than the provisioned numbers.
+
+On-demand mode removes capacity planning at a higher per-request price; provisioned with auto-scaling is cheaper for steady load. Conditional writes give optimistic locking and idempotency, a transactional write API covers a bounded multi-item change, TTL expires rows without a delete job, and Streams feed change data capture. Reach for it for predictable key-based access at scale; anything ad-hoc, joined or aggregated belongs elsewhere.
 
 ### Amazon Neptune
 **Short:** AWS managed property-graph and RDF database queried with Gremlin, openCypher or SPARQL.
@@ -60,11 +84,19 @@ Reach for it when the questions are about relationships several hops deep — fr
 **Lang:** *
 **Roles:** data-stores/graph-db @1, data-stores/relational @3
 
+AGE stores a graph as PostgreSQL tables for vertices and edges and adds a `cypher()` function whose argument is an openCypher query returning values you then project in a normal `SELECT`. So a traversal and a relational join can appear in one statement, inside one transaction, backed by one set of backups, roles and replication.
+
+Reach for it when a mostly-relational application has a genuinely graph-shaped corner — an org hierarchy, a permission chain, a small knowledge graph — and standing up Neo4j for it is not worth the operational cost. Do not expect parity: traversal over deep or wide graphs is far behind a native store whose relationships are pointers, Cypher coverage is partial, and the extension has to be available in your managed service, which is not a given.
+
 ### Apache Druid
 **Short:** Real-time OLAP datastore that ingests event streams and answers sub-second time-sliced aggregations.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/warehouse-and-olap @1, data-stores/time-series @2, data-movement/event-streaming-and-processing @3
+
+Druid stores data as time-partitioned, columnar, compressed segments with bitmap indexes on dimension columns, and splits work across process roles: ingestion tasks make freshly arrived events queryable within seconds, historical processes serve older segments from local disk backed by deep storage, and brokers scatter a query across both and merge the answers. Optional rollup aggregates rows at ingest time, trading raw detail for a far smaller dataset.
+
+Reach for it for interactive dashboards over event streams where queries always filter by time and group by a few dimensions — clickstream, ad analytics, operational telemetry. The costs are a multi-process cluster with its own metadata database and coordination service, awkwardness with joins and updates, and heavy overlap with ClickHouse, which delivers much of the same on a much smaller operational footprint.
 
 ### Apache Parquet on S3
 **Short:** Columnar Parquet files kept in S3 as the offline store for training data, backfills and analytical scans.
@@ -72,11 +104,19 @@ Reach for it when the questions are about relationships several hops deep — fr
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, data-stores/warehouse-and-olap @2, ml-lifecycle/ml-platform-and-pipelines @3
 
+This is the plain-files pattern underneath every lakehouse: columnar Parquet objects laid out in Hive-style partition prefixes, so a query engine lists only the prefixes it needs, reads only the columns the projection names, and skips row groups using the min and max statistics in each file's footer. Nothing coordinates the writers, so a directory is only ever as consistent as the job that last wrote to it.
+
+Reach for it for the offline half of a system — training sets, feature backfills, analytical scans, archives — where compute is transient and storage should be cheap and engine-neutral. Its limits are exactly what table formats exist to fix: no atomic multi-file commit, no row-level update or delete, no schema enforcement, and a small-files problem that quietly destroys scan performance. Add Iceberg, Delta Lake or Hudi when those start to hurt.
+
 ### APOC
 **Short:** Neo4j's standard procedure and function library: graph algorithms, import/export, refactoring and utilities.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/graph-db @1
+
+The name stands for Awesome Procedures On Cypher: a library of several hundred stored procedures and functions installed into the database and invoked from Cypher. It covers what the language itself does not — loading JSON, CSV or JDBC results straight into the graph, batching a large write with `apoc.periodic.iterate` so one transaction does not exhaust the heap, refactoring nodes and relationships, date and text utilities, and running dynamically built queries.
+
+In practice, imports and bulk refactors are what you install it for, and the periodic-iterate procedure alone is what lets a multi-million-node update finish. Note the split between a core library bundled with the database and extended procedures that must be enabled deliberately, and that a managed instance permits only a subset — check before designing a pipeline around a procedure your target cannot run.
 
 ### ArangoDB
 **Short:** Multi-model database serving graph, document and key-value workloads through one AQL query language.
@@ -104,17 +144,29 @@ Choose it when you want a familiar SQL engine with durability and failover handl
 **Lang:** *
 **Roles:** data-stores/vector-store @1, search-retrieval/lexical-and-hybrid-search @2, search-retrieval/rag-and-document-processing @3
 
+The service, since renamed Azure AI Search, indexes documents you push or that an indexer pulls from Blob Storage, SQL, Cosmos DB and others, optionally running a skillset — OCR, entity extraction, chunking, embedding — as part of ingestion. One index can hold both an inverted index for keyword scoring and HNSW vector fields, and a hybrid query fuses the two by reciprocal rank fusion, with an optional semantic reranker over the top results.
+
+Reach for it in an Azure estate when you want ingestion, enrichment and retrieval as one managed thing rather than assembling a search engine, an embedding pipeline and a vector store yourself. Against that: tier limits on index size, replicas and vector dimensions shape the design early, cost scales with provisioned search units, and portability is nil next to running OpenSearch or Qdrant.
+
 ### Azure Disk CSI
 **Short:** CSI driver that attaches Azure managed disks as ReadWriteOnce persistent volumes to pods.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/kubernetes-and-orchestration @2
 
+The driver implements the Container Storage Interface for Azure managed disks, so a `PersistentVolumeClaim` against one of its storage classes provisions a disk, attaches it to whichever node the pod is scheduled on, and formats and mounts it. Storage-class parameters map onto the disk SKU and performance tier, and resize and snapshots are supported through the standard Kubernetes objects.
+
+The constraint that shapes everything is attachment: a managed disk attaches to one VM at a time and lives in one zone, so volumes are `ReadWriteOnce`, a pod cannot move to a node in another zone without its disk, and a Deployment backed by one is effectively single-replica. Use it for StatefulSet workloads that own their data — databases, brokers, caches — and Azure Files when several pods must share a filesystem.
+
 ### Azure SQL
 **Short:** Microsoft's managed relational database service with built-in HA, automated backups and elastic scaling.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, platform-delivery/cloud-platform-and-cost @2, data-access/replication-ha-and-backup @3
+
+It is the SQL Server engine run as a service, evergreen rather than versioned, in three shapes worth telling apart: a single database, an elastic pool where many small databases share capacity, and managed instance, which restores near-full instance-level compatibility including the agent and cross-database queries. Purchasing is by vCore or DTU, with a Business Critical tier that keeps local replicas for fast failover and a Hyperscale tier that separates compute from a page-server storage layer for very large databases and quick restores.
+
+Reach for it when the application is already T-SQL and you want backups, patching, geo-replication and threat detection handled. The cost of the managed model is control: no OS access, some instance-level features only in managed instance, and a pricing structure where sizing the tier wrongly is expensive rather than merely slow.
 
 ### BigQuery
 **Short:** Google Cloud serverless columnar data warehouse for analytics, offline feature/metric computation and cost analysis.
@@ -137,6 +189,10 @@ It is the natural home for the offline half of an ML system, computing features 
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/cloud-platform-and-cost @3
+
+Objects are blobs inside containers inside a storage account, and the account is where the consequential choices live: the redundancy option, from locally redundant up to geo-redundant across regions, and the access tier — hot, cool, cold and archive — which trades storage price against retrieval price and, for archive, a rehydration delay measured in hours. Lifecycle rules move or delete blobs by age. Block blobs are the usual type, with append and page blobs for logs and virtual disks.
+
+Reach for it as the Azure landing zone for backups, media, data-lake files and static content, with Data Lake Storage Gen2 adding a real hierarchical namespace for analytics. The usual object-store caveats hold: no in-place edit, paginated listing of a large container, and per-transaction costs that dominate when the objects are small.
 
 ### Cassandra
 **Short:** Leaderless wide-column NoSQL store with LSM storage and tunable consistency; built for massive write throughput.
@@ -163,6 +219,10 @@ It also runs as a standalone server, but the moment you need sharding, high quer
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/replication-ha-and-backup @2, data-stores/warehouse-and-olap @3
 
+Citus turns one PostgreSQL node into the coordinator of a cluster. You declare a distribution column, and rows are hashed into shards — themselves ordinary tables — spread across worker nodes, while small lookup tables can be replicated to every worker as reference tables. The coordinator rewrites an incoming query into per-shard queries, pushes them down and merges the results, so a query filtering on the distribution column touches one shard while an analytical scan runs in parallel across all of them.
+
+Reach for it for multi-tenant SaaS, where distributing by tenant id makes almost every query single-shard, and for parallel analytics over time-series data. The distribution column is the decision you cannot undo cheaply: queries and joins that omit it become cross-shard and slow, and unique constraints have to include it.
+
 ### ClickHouse
 **Short:** Columnar OLAP database with MergeTree storage; very fast analytical scans over huge event, log and time-series tables.
 **Kind:** tech
@@ -178,6 +238,10 @@ The tradeoffs are all on the write side: inserts want to arrive in large batches
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, platform-delivery/cloud-platform-and-cost @2, data-access/replication-ha-and-backup @3
+
+Google's managed instances of MySQL, PostgreSQL and SQL Server: you choose a machine type and disk, and the service handles patching, backups, point-in-time recovery from the transaction log, read replicas and optional high availability with a synchronous standby in a second zone. Connections normally go through the Auth Proxy or a connector library, which handles IAM authentication and TLS so the instance needs no public address.
+
+Reach for it when a Google Cloud workload wants a standard engine without operating it, and note the ceiling: it is one primary instance, so scale-out means read replicas or application-level sharding, not the storage-layer trick Aurora plays. AlloyDB is Google's higher tier for PostgreSQL, and Spanner is the differently shaped option when a single writer genuinely is not enough.
 
 ### CockroachDB
 **Short:** Postgres-compatible distributed SQL database giving serializable ACID across geo-replicated Raft ranges.
@@ -195,17 +259,29 @@ Reach for it when you need multi-region ACID and automatic failover without shar
 **Lang:** *
 **Roles:** data-stores/document @1, data-access/replication-ha-and-backup @3
 
+Documents are JSON accessed over plain HTTP, and every update creates a new revision identified by a `_rev` the client must present with its next write, which is how conflicting updates are detected. Replication is the defining feature: any database can replicate to any other, in either direction, incrementally, over that same HTTP API — so a laptop, a phone and a server hold peers rather than a primary and its copies. When two peers change the same document independently both revisions are kept, a deterministic winner is chosen so reads never fail, and the loser is retained for the application to resolve.
+
+Reach for it for offline-first applications that sync, since PouchDB in the browser speaks the same protocol. Against it: querying is limited next to MongoDB or PostgreSQL, view builds are slow, and conflict resolution is work you must actually do.
+
 ### CSI snapshot controller
 **Short:** Kubernetes controller implementing VolumeSnapshot: point-in-time snapshots and restores of CSI volumes.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, data-access/replication-ha-and-backup @2, platform-delivery/kubernetes-and-orchestration @2
 
+It is a cluster-level controller deployed alongside the CSI drivers rather than inside them. It watches `VolumeSnapshot` and `VolumeSnapshotContent` objects, drives the driver's create-snapshot call, and binds the resulting provider-side snapshot back to the Kubernetes object. A `VolumeSnapshotClass` selects the driver and its parameters, and a new `PersistentVolumeClaim` can name a snapshot as its data source to restore into a fresh volume.
+
+Reach for it as the primitive under any Kubernetes backup tool — Velero and the vendor operators call these APIs rather than inventing their own. Two limits to design around: a snapshot is crash-consistent, not application-consistent, so a database needs a hook to quiesce or flush before it is taken, and snapshots live inside the storage provider, so on their own they are not an off-cluster backup.
+
 ### DataStax Astra DB
 **Short:** DataStax's managed Cassandra-as-a-service with serverless scaling, a REST/GraphQL data API and vector search.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/wide-column @1, data-stores/vector-store @3, platform-delivery/cloud-platform-and-cost @3
+
+It is Cassandra run as a service with the operational model inverted: no nodes to size, no repairs to schedule, capacity that scales with use and, on the serverless tier, scales to zero. Alongside CQL it exposes REST, GraphQL and document APIs plus a data API used by AI frameworks, and it supports vector columns with approximate nearest-neighbour search, which is how it is often used as a retrieval store rather than only a wide-column database.
+
+Reach for it when the data model genuinely wants Cassandra's partition-key design and you would rather not run repairs, compaction tuning and node replacements. The tradeoffs are the usual managed ones — consumption billing that rewards efficient partition design and punishes scatter-gather queries, and a control plane you cannot self-host — while Cassandra's modelling discipline still applies in full.
 
 ### DataStax Studio
 **Short:** Notebook-style GUI for developing and profiling CQL against Cassandra/DataStax clusters.
@@ -218,6 +294,10 @@ Reach for it when you need multi-region ACID and automatic failover without shar
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/warehouse-and-olap @1, data-movement/data-quality-and-lineage @2, ml-lifecycle/ml-platform-and-pipelines @3
+
+A model is a `SELECT` statement in a file; dbt compiles the Jinja templating and `ref()` calls into real table names, derives the dependency graph from those references, and executes the models in order as create-table-as or create-view statements, or incrementally with a merge predicate. Because the graph comes from the code itself, lineage, documentation and a per-model test suite — uniqueness, not-null, accepted values, referential checks — all fall out of the same source.
+
+It transforms inside the warehouse and does nothing else: extraction and loading are someone else's job and all compute belongs to the engine underneath. Reach for it to give analytics code what application code has had for years — version control, environments, tests, CI. The recurring failure is sprawl: hundreds of thin models nobody can prune.
 
 ### Delta Lake
 **Short:** Lakehouse table format adding ACID transactions, schema enforcement and time travel on top of Parquet in object storage.
@@ -270,11 +350,19 @@ The tradeoff is that every operation is a network round trip, so latency sits we
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/kubernetes-and-orchestration @3
 
+It is managed NFS: you provision an instance of a fixed capacity in a service tier, and it exports a share that many Compute Engine VMs or GKE pods mount at once. Performance scales with the provisioned capacity rather than being bought separately, which is why the standard advice is to size for throughput first and space second.
+
+Reach for it when workloads genuinely need POSIX semantics on a shared mount: a `ReadWriteMany` volume for several pods, a shared model or asset directory, or lifting an application that expects a filesystem. It costs far more per gigabyte than object storage and is provisioned rather than elastic, so anything that is really object access — datasets, artifacts, backups — belongs in Cloud Storage, and a single writer is better served by a persistent disk.
+
 ### Firestore
 **Short:** Google Cloud's serverless document database with real-time listeners and offline sync for mobile and web clients.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/document @1, platform-delivery/cloud-platform-and-cost @3, apis-frameworks/rpc-graphql-and-streaming @3
+
+Documents live in collections and may nest subcollections, and every query is served by an index, which is the defining constraint: composite queries need a composite index declared in advance and there are no ad-hoc scans, so query cost tracks results returned rather than data stored. Client SDKs talk to it directly, with security rules — not your backend — deciding what each authenticated user may read or write, and a listener holds an open channel so a changed document is pushed to every subscriber.
+
+The offline cache is the other half: a mobile client reads and writes locally and reconciles when the network returns. Reach for it for mobile and web applications where realtime and offline matter more than query flexibility. Against it: per-document read and write billing punishes fan-out designs, and reporting or aggregation belongs in a warehouse.
 
 ### FoundationDB
 **Short:** Distributed ordered key-value store with strictly serializable ACID transactions, used as a substrate for higher layers.
@@ -282,11 +370,19 @@ The tradeoff is that every operation is a network round trip, so latency sits we
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, data-access/transactions-and-consistency @2, data-access/replication-ha-and-backup @3
 
+It is deliberately a small piece — an ordered key-value store with strictly serializable multi-key transactions and nothing else: no query language, no secondary indexes, no data model. Data is range-partitioned across storage servers, transactions are resolved optimistically by a dedicated conflict-detection layer, and a five-second transaction limit is a design constraint you build around rather than a bug to work past. Higher layers implement the models people actually want on top of that one guarantee.
+
+The famous part is the testing: a deterministic simulation runs an entire cluster inside one process with injected disk, network and process failures, which is why its correctness reputation is what it is. Reach for it when you are building a database rather than using one; an application is better served by something that already has a query layer above it.
+
 ### GCE PD
 **Short:** Google Compute Engine Persistent Disk: network block storage attached to one VM or pod (ReadWriteOnce).
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/kubernetes-and-orchestration @3
+
+A persistent disk is network-attached block storage with a lifetime independent of any VM, presented as a raw device, where the disk type decides the performance profile and IOPS scale with size on the standard types. Snapshots are incremental and can be restored into a new disk in another zone or region.
+
+The attachment rule shapes designs the same way it does on other clouds: a zonal disk is mounted read-write by one instance at a time, so the Kubernetes CSI driver exposes it as `ReadWriteOnce` and a pod using one is pinned to that zone. Regional persistent disks replicate synchronously across two zones for failover at extra cost. Use it for databases and StatefulSet workloads, Filestore when several pods need one filesystem, and Cloud Storage when the access pattern is really objects.
 
 ### GCS
 **Short:** Google Cloud Storage: managed object storage with buckets, storage classes and lifecycle policies.
@@ -294,11 +390,19 @@ The tradeoff is that every operation is a network round trip, so latency sits we
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/cloud-platform-and-cost @2
 
+Objects sit in a flat namespace inside a bucket, with strong read-after-write consistency, optional versioning, and storage classes that trade a lower storage price for retrieval fees and minimum storage durations. A bucket is regional, dual-region or multi-region, which is a durability and latency decision made at creation time, and lifecycle rules handle tiering and expiry. Uniform bucket-level access with IAM is the modern permission model rather than per-object ACLs.
+
+Reach for it as the Google Cloud landing zone for data lakes, backups, model artifacts and static assets fronted by a CDN. The usual object-store caveats hold: no in-place update, no cheap rename, per-operation cost that dominates when objects are small, and class-transition rules that can cost more than they save if the data is read after being tiered down.
+
 ### Gephi
 **Short:** Desktop graph visualization and exploration tool for laying out, filtering and debugging network structure.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/graph-db @1, applied-ml/recommenders-and-graph-ml @3
+
+It is a desktop workbench rather than a database: you import an edge list, GraphML or a database extract, run a force-directed layout such as ForceAtlas2 to make the structure visible, compute metrics like degree, betweenness and modularity-based communities, and map those metrics onto node size and colour. Filters hide parts of the graph interactively, so you can isolate a subgraph without recomputing anything.
+
+Reach for it when a human needs to understand a graph — checking whether a knowledge graph built from documents really has the communities you assumed, spotting a hairball caused by one hub node, or producing a figure. It is memory-bound and single-machine, so hundreds of thousands of nodes is a realistic ceiling; beyond that, compute the metrics in the database or a graph library and visualise a sample.
 
 ### Google Spanner
 **Short:** Google's globally distributed SQL database giving external consistency via TrueTime and 2PC over Paxos.
@@ -316,11 +420,19 @@ External consistency comes from TrueTime: the clock API returns an interval rath
 **Lang:** java
 **Roles:** data-stores/relational @1, data-stores/key-value-and-embedded @2, devtools/testing-and-mocking @2
 
+H2 is a SQL database written in Java that runs inside the application's own JVM, addressed by a URL such as `jdbc:h2:mem:testdb`, and in memory mode the database exists only while a connection is open. That is how it became the default backing store for a `@DataJpaTest`: Spring Boot auto-configures it when it is the only database on the test classpath, so every test class gets a clean schema with no container to start.
+
+The reason to stop using it that way is fidelity. Its dialect, type coercion, sequences, locking behaviour and error codes are close to but not the same as PostgreSQL or MySQL, so tests pass against behaviour production does not have and native SQL fails only after deployment. Testcontainers running the real engine is the modern default; keep H2 for genuinely embedded applications.
+
 ### H2 Database
 **Short:** Embeddable Java SQL database that runs in-memory or on disk, used mostly for fast integration tests.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-stores/relational @1, devtools/testing-and-mocking @2, data-stores/key-value-and-embedded @3
+
+The same engine under its other common name. Beyond in-memory mode there is a file mode backed by its MVStore format, a server mode accepting TCP connections, and a built-in web console that is handy in development and a genuine risk if it is ever exposed. Compatibility modes tell it to imitate PostgreSQL, MySQL, Oracle and others, which improves the odds your SQL parses but does not make the semantics identical.
+
+Choose it when you want a real SQL database with no process to run: a desktop application's store, an embedded appliance, or a fast test fixture. Do not choose it as a stand-in for production, because the compatibility modes cover syntax rather than behaviour under concurrency, and running the real engine in a container costs seconds and removes the whole class of bugs that only appear after the switch.
 
 ### HBase
 **Short:** Hadoop-based wide-column store with strongly consistent row-level reads and writes over HDFS.
@@ -348,11 +460,19 @@ Cardinality is the failure mode to plan for: because tags are indexed, putting a
 **Lang:** *
 **Roles:** data-stores/graph-db @1, data-stores/wide-column @3
 
+JanusGraph is a graph layer rather than a storage engine: it implements the TinkerPop stack and Gremlin traversals over a pluggable backend such as Cassandra, ScyllaDB, HBase or Bigtable, encoding vertices, edges and properties as rows in that store, with an optional external index in Elasticsearch or Solr for full-text and range predicates. Its scaling is therefore the backend's scaling, and so is the operational burden.
+
+Reach for it when a graph must be distributed across a cluster you already run and Gremlin is an acceptable query language. Understand the shape of the cost: each hop becomes round trips into the backing store, so it is far slower per hop than a native store with pointer-based adjacency, supernodes with millions of edges need explicit vertex-centric indexes, and you are now operating three systems rather than one.
+
 ### KeyDB
 **Short:** Multi-threaded Redis fork with active replication, drop-in compatible with the Redis protocol.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, caching/distributed-cache @2
+
+KeyDB is a fork of Redis that made the command loop multi-threaded: several I/O and worker threads share the keyspace behind fine-grained locking, so one instance can use several cores instead of one. It also added active-active replication, where two nodes both accept writes and replicate to each other with last-writer-wins resolution, which stock Redis does not offer, and it stays wire-compatible so existing clients work unchanged.
+
+Reach for it if a single cache node is CPU-bound and sharding is unattractive. Two cautions: active-active on a key-value store means silently discarded writes whenever the same key is touched in both places, so it suits partitioned or idempotent workloads only, and the fork's pace and its divergence from upstream are worth checking before adopting — Valkey and Dragonfly occupy the same niche.
 
 ### LangChain VectorStores
 **Short:** LangChain's uniform interface over many vector databases so retrievers can swap backends.
@@ -366,11 +486,19 @@ Cardinality is the failure mode to plan for: because tags are indexed, putting a
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1
 
+LevelDB is an embedded library storing sorted string keys in an LSM tree: writes go to a write-ahead log and an in-memory memtable, which is flushed as an immutable sorted table file, and background compaction merges those files down through levels so a read consults a bounded number of them. You get ordered iteration and atomic batches, a single-process single-writer model, and no server, no query language and no secondary indexes.
+
+Its main significance now is ancestry — RocksDB forked it and added the concurrency, tuning, column families and compaction strategies that serious embedded use needs, and it is RocksDB you find inside modern databases and stream processors. Reach for LevelDB only for something small and self-contained; anything with real write volume or a need to tune compaction should start from RocksDB.
+
 ### llama-index-vector-stores-pinecone
 **Short:** LlamaIndex integration package binding its VectorStore interface to a Pinecone index.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-stores/vector-store @1, search-retrieval/rag-and-document-processing @2
+
+LlamaIndex ships each integration as its own package, and this one implements the framework's vector-store interface against a Pinecone index. It maps a node's embedding, text and metadata onto a Pinecone vector with its id and metadata fields, translates LlamaIndex metadata filters into Pinecone's filter syntax, and handles batched upserts and top-k queries, so an index built over it behaves like any other to the retriever and query engine above.
+
+Install it when the corpus already lives in Pinecone or you want retrieval without operating a database. What to watch is the boundary: filtering is limited to what the index stores as metadata, sparse or hybrid behaviour depends on the index type you created, and the framework version and the integration package have to move together, which is the usual source of breakage.
 
 ### LMDB
 **Short:** Embedded memory-mapped key-value store using a copy-on-write B+tree; single-writer, lock-free readers.
@@ -378,17 +506,29 @@ Cardinality is the failure mode to plan for: because tags are indexed, putting a
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1
 
+LMDB memory-maps the whole database file and reads straight out of the page cache, so a read is a pointer dereference with no copy, no parsing and no lock: readers never block and never wait on the writer, because writes are copy-on-write on a B+tree and become visible only when a new root page is committed. That gives ACID transactions with one writer at a time, crash safety with no recovery step, and essentially no configuration or background threads.
+
+Reach for it for read-dominated embedded data — a local index, a structured cache, a model or feature lookup table — which is why it turns up inside search and machine-learning tooling. Its constraints are firm: the map size must be set in advance and grown deliberately, a long-running read transaction pins old pages and bloats the file, and one writer means it is not a write-heavy store.
+
 ### Longhorn
 **Short:** Software-defined block storage for Kubernetes providing replicated in-cluster persistent volumes and snapshots.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/kubernetes-and-orchestration @2
 
+Longhorn runs the storage layer inside the cluster: for each volume it starts an engine process on the node using it and places replicas as separate processes on other nodes, writing synchronously to all of them, so a volume survives losing a node and can be reattached elsewhere. Snapshots, scheduled backups to object storage or NFS, and volume expansion are exposed as Kubernetes objects and through a UI, and it is a CNCF project commonly paired with lightweight distributions.
+
+Reach for it on bare metal or edge clusters where there is no cloud block-storage service to lean on and you want replicated persistent volumes with backups. The costs are honest: synchronous replication over the cluster network makes it slower than a local NVMe disk, it consumes CPU and memory on every node, and rebuilds after a node failure are heavy. In a public cloud, the provider's CSI driver is simpler.
+
 ### Memgraph
 **Short:** In-memory property-graph database speaking Cypher, aimed at low-latency and streaming graph workloads.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/graph-db @1, data-stores/key-value-and-embedded @3
+
+Memgraph keeps the graph in memory with an on-disk write-ahead log and periodic snapshots for durability, so a traversal never touches storage, and it uses MVCC so reads do not block writers. It speaks Cypher and the Bolt protocol, which means Neo4j drivers and much of the tooling work against it, and it ships a query-module system where custom procedures can be written in C++ or Python — including a dynamic algorithms library that updates results such as PageRank or community labels as the graph changes rather than recomputing from scratch.
+
+Reach for it when the graph fits in RAM and latency is the point: fraud checks inside a live transaction, network or dependency analysis over streaming updates. The limits follow from the design — memory sizes the graph — so for very large or archival graphs a disk-based or distributed store is the safer choice.
 
 ### Milvus
 **Short:** Distributed, Kubernetes-native vector database built for billion-scale similarity search.
@@ -422,6 +562,10 @@ A replica set gives automatic failover, with write concern and read preference a
 **Lang:** *
 **Roles:** data-stores/document @1, data-access/replication-ha-and-backup @2, data-stores/vector-store @3, platform-delivery/cloud-platform-and-cost @3
 
+Atlas provisions replica sets and sharded clusters on AWS, Azure or Google Cloud and owns everything around them: patching, continuous backup with point-in-time restore, monitoring with index and query advisors, private networking, encryption and IP access lists. Two features push it beyond hosting — Atlas Search embeds Lucene indexes next to the data for real full-text queries, and Atlas Vector Search adds approximate nearest-neighbour indexes so a document and its embedding live in the same collection under the same filter.
+
+Reach for it when MongoDB is the right data model and running it yourself is not worth the staff; the free and serverless tiers make it the default for prototypes. Against it: cost climbs quickly with cluster tier and storage, tuning options are narrower than a self-managed deployment, and the search and vector features exist only here, so building on them is a commitment.
+
 ### MongoDB Compass
 **Short:** Official MongoDB GUI for browsing collections, building queries, analyzing schemas and reading explain plans.
 **Kind:** tech
@@ -438,11 +582,19 @@ Reach for it when diagnosing a slow query, meeting an undocumented collection, o
 **Lang:** *
 **Roles:** data-stores/document @1, observability/profiling-and-performance @2, devtools/version-control-and-workbench @3
 
+The modern shell is a Node.js REPL with the full JavaScript language available, so a query, a loop over its cursor and a bulk write can be one script, and the same file runs non-interactively from CI. It replaced the legacy shell and adds syntax highlighting, completion and better error messages while keeping the same collection API the drivers mirror.
+
+The reason to know it well is diagnosis. Running a query with execution statistics shows whether it used an index and how many documents were examined against how many were returned, the current-operation view finds what is blocking everything else, and index statistics reveal indexes that exist but are never used. Keep destructive one-liners out of production sessions: there is no undo, and an update without a filter reaches every document.
+
 ### mongostat
 **Short:** MongoDB CLI printing a live per-second view of server ops, connections, queues and memory.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/document @1, observability/metrics-and-monitoring @2, observability/profiling-and-performance @2
+
+It samples the server's status counters once a second and prints a fixed-width row per interval: inserts, queries, updates, deletes and cursor fetches, queued readers and writers, connection count, resident and virtual memory, replication state and network throughput. It is MongoDB's answer to `vmstat` — no history, no storage, just what the server is doing right now.
+
+Reach for it in the first minute of an incident to tell the common shapes apart: a rising write queue points at lock or disk contention, a high cursor-fetch rate means something is churning through large scans, and a climbing connection count against flat operation counts means clients are piling up somewhere else. It answers what, not why, so follow it with the current-operation view and an execution-statistics run, and use a real metrics pipeline for anything you need to look at afterwards.
 
 ### MySQL
 **Short:** The mainstream open-source ACID relational database, with InnoDB storage and binlog-based replication.
@@ -460,17 +612,29 @@ Its default isolation is repeatable read with gap locking, stricter than most en
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/transactions-and-consistency @3, data-access/replication-ha-and-backup @3
 
+The 8 line is where MySQL closed most of the gaps people used to leave it over: window functions and common table expressions including recursive ones, a JSON type with a full function set and generated columns you can index, descending and functional indexes, an atomic transactional data dictionary that removed the old per-table metadata files, and four-byte UTF-8 as the default character set.
+
+Operationally the notable changes are roles, invisible indexes that let you test dropping an index without dropping it, and the removal of the query cache, which was a scalability bottleneck rather than a help. The default isolation is still repeatable read with gap locking, which remains the most common source of surprise deadlocks on range conditions, and replication is still asynchronous unless you configure semi-synchronous replication or Group Replication.
+
 ### MySQL InnoDB
 **Short:** MySQL's default storage engine: clustered B+tree indexes, MVCC, row locks and Repeatable Read by default.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, data-stores/key-value-and-embedded @2, data-access/transactions-and-consistency @2
 
+Every table is a B+tree clustered on the primary key, so the row data sits in the leaf of that tree and a secondary index stores the primary-key value rather than a physical pointer — which means every secondary lookup costs a second descent, and a long primary key inflates every index in the table at once. MVCC comes from undo logs: a reader reconstructs the version visible to its snapshot instead of blocking, and old versions are purged later.
+
+Writes land in the buffer pool and the redo log, with the change buffer smoothing random secondary-index writes and the doublewrite buffer guarding against torn pages. The default isolation is repeatable read implemented with next-key locks, which lock the gaps between index entries as well as the rows, so two transactions inserting into the same range can deadlock without ever touching the same row.
+
 ### MySQL/InnoDB
 **Short:** MySQL with its default InnoDB engine: row-level locking and a clustered B+tree keyed on the primary key.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, data-stores/key-value-and-embedded @2
+
+The pairing reads as one name because InnoDB has been the default for so long that MySQL's practical behaviour is InnoDB's: row-level locking rather than table locks, crash recovery from the redo log, foreign keys, and a clustered index on the primary key. The design consequence people most often miss is that choosing the primary key chooses the physical order of the table and the payload of every secondary index, so a random UUID scatters inserts across the tree and bloats every index, while an auto-increment or a time-ordered UUID appends.
+
+The other engines are effectively historical: MyISAM has no transactions and locks whole tables, MEMORY is volatile, ARCHIVE is a niche. If a table in an old schema is still MyISAM, converting it to InnoDB is usually a straight improvement rather than a decision to agonise over.
 
 ### Neo4j
 **Short:** Native property-graph database queried with Cypher; used for knowledge graphs and edge storage for GNNs.
@@ -485,6 +649,10 @@ Relationships are stored as direct pointers between records rather than being re
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/graph-db @1, devtools/version-control-and-workbench @3
+
+The browser is a web application served by the database itself: you connect over Bolt, type Cypher into a command bar, and results come back as a rendered subgraph you can expand node by node, or as a table, or as raw JSON. Labels get colours and captions you set in the UI, and built-in commands report indexes, constraints and store statistics, which makes it the usual medium for teaching a graph model to someone new.
+
+Reach for it to explore a graph, sanity-check a model, or profile a query — `PROFILE` returns the operator tree with database hits, which is how you find a traversal that scanned every node because a label index was missing. It renders exactly what you return, so a query without a limit on a large graph buries the canvas, and non-technical exploration is better served by a purpose-built visualisation tool.
 
 ### nodetool compactionstats
 **Short:** Cassandra nodetool command showing running compactions and pending compaction backlog per table.
@@ -510,11 +678,19 @@ Relationships are stored as direct pointers between records rather than being re
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, runtime-systems/io-networking-and-syscalls @2
 
+NVMe is a protocol over PCIe designed for flash rather than inherited from spinning disks: instead of one shallow queue it allows thousands of deep queues, one per CPU core, so a device stays busy without the lock contention and interrupt overhead older interfaces impose. The result is random reads in the low hundreds of microseconds and multiple gigabytes per second sequentially — roughly two orders of magnitude better on random I/O than a rotating disk.
+
+The consequences reach into database design: cheap fsync latency is what makes a consensus commit or a WAL flush affordable, and read amplification from an LSM tree costs far less than it did on rotating media. What has not changed is that flash wears, rated in drive writes per day, and that an instance's local NVMe is usually ephemeral, disappearing when the instance stops — so it holds caches and replicas, never the only copy.
+
 ### OpenEBS
 **Short:** Software-defined container-attached storage providing dynamically provisioned persistent volumes in-cluster.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/kubernetes-and-orchestration @2
+
+OpenEBS runs storage as containers in the cluster and exposes local disks as persistent volumes through several engines with different tradeoffs: a local-volume engine binds a volume to one node's disk with no replication and no network hop, while its replicated engine uses a userspace storage stack and NVMe over fabrics to mirror synchronously across nodes with far less overhead than earlier designs. Everything is driven through storage classes and CSI, so the engine choice is a class parameter.
+
+Reach for the local engine when the workload replicates its own data — Cassandra, Kafka, Elasticsearch — and you want raw local-disk speed with a Kubernetes-managed lifecycle. Reach for the replicated engine when a single-node database must survive node loss. The general caution applies to all in-cluster storage: you are operating a storage system now, and its failure modes become yours.
 
 ### OpenTSDB
 **Short:** Distributed time-series database storing metrics as rows in HBase, built for very long retention.
@@ -522,11 +698,19 @@ Relationships are stored as direct pointers between records rather than being re
 **Lang:** *
 **Roles:** data-stores/time-series @1, data-stores/wide-column @3
 
+OpenTSDB stores every metric as rows in HBase with a carefully packed row key — a metric id, an hour-aligned timestamp, then tag key and value ids drawn from a lookup table — so one row holds an hour of points for one series and a range scan over that key answers a time query. The id indirection is what keeps the keys small, and the layer is otherwise thin, inheriting HBase's durability, replication and near-unlimited retention.
+
+It was influential and is largely superseded. A design that scans and aggregates in the query process is slow next to a columnar store, tag dimensionality is limited by the key layout, and running HBase purely for metrics is a great deal of cluster. New systems reach for Prometheus with a long-term store, VictoriaMetrics, InfluxDB or ClickHouse instead.
+
 ### Oracle
 **Short:** Oracle Database: the long-standing commercial ACID relational engine with PL/SQL and RAC clustering.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/transactions-and-consistency @3
+
+Its distinguishing implementation is undo-based MVCC: a reader reconstructs the block as it stood at statement start from the undo tablespace rather than taking a lock, so readers never block writers and writers never block readers, with read committed the practical default and serializable available. PL/SQL puts a full procedural language inside the database, RAC lets several instances share one storage layer for availability, and partitioning, materialized views and a mature cost-based optimizer with honoured hints cover the large-scale end.
+
+Reach for it where it already is — the migration cost of a large PL/SQL estate is what keeps it in place, rather than a feature nobody else has. The reasons to leave are per-core licensing with audits, and the fact that PostgreSQL now covers most of the technical ground. Treat any migration as a rewrite of the procedural layer, not a data copy.
 
 ### Oracle DB
 **Short:** Oracle's commercial relational database: MVCC with Read Committed default, PL/SQL, RAC clustering and partitioning.
@@ -534,17 +718,29 @@ Relationships are stored as direct pointers between records rather than being re
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/transactions-and-consistency @2
 
+The same product under its fuller name; what is worth carrying into a design is the set of behaviours an application actually feels. Sequences are standalone objects and identity columns wrap them. An empty string is stored as null, which breaks assumptions carried over from other engines. The `DATE` type includes a time component, and the two timestamp-with-time-zone variants behave differently. Hierarchical queries can use `CONNECT BY` as well as recursive common table expressions.
+
+Diagnosis has its own vocabulary too: workload and session-history reports sample sessions and wait events, so tuning usually starts from which wait dominates rather than from one execution plan, and optimizer hints are supported and obeyed, unlike in PostgreSQL. Version and edition decide which of these are licensed, so check before designing around partitioning or in-memory columns.
+
 ### Parquet
 **Short:** Columnar on-disk file format with per-column compression and predicate pushdown; the lakehouse default.
 **Kind:** spec
 **Lang:** *
 **Roles:** data-stores/warehouse-and-olap @1, apis-frameworks/data-formats-and-api-contracts @2, data-stores/object-and-file-storage @3
 
+A file is a sequence of row groups; inside each, every column is stored contiguously as a chunk of pages, dictionary- and run-length-encoded where that helps and then compressed. Each chunk's metadata carries min and max values and null counts, and the footer holds the schema and the index to all of it — so a reader opens the footer, decides which row groups can possibly match a predicate, and reads only the columns the query projects. Nested structures are flattened using definition and repetition levels rather than stored as blobs.
+
+Reach for it as the default format for anything analytical at rest: columnar layout plus compression typically cuts both storage and scan time by an order of magnitude against CSV or JSON. It is immutable and write-once, so an update means rewriting files — exactly the gap Iceberg, Delta Lake and Hudi were built to fill.
+
 ### pg_hint_plan
 **Short:** PostgreSQL extension adding per-query planner hints; core Postgres has no native hint syntax.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, observability/profiling-and-performance @2
+
+PostgreSQL deliberately ships no hint syntax, on the argument that a hint freezes a decision the planner should keep making as the data changes. This extension adds them anyway, as a specially formatted block comment before the query naming scan methods, join methods, join order, parallelism or corrected row counts. It can also apply hints from a table keyed by query id, so a statement you cannot edit — one generated by an ORM — can still be steered.
+
+Reach for it as a tourniquet: a critical query has picked a catastrophic plan and you need it fixed now. Then find the real cause, which is usually stale or insufficient statistics, a bad estimate on correlated predicates that extended statistics would fix, or a missing index — and remove the hint, because a hint outlives the data distribution that justified it.
 
 ### pg_toast_
 **Short:** PostgreSQL's out-of-line storage: oversized column values are compressed and chunked into a hidden TOAST table.
@@ -557,6 +753,10 @@ Relationships are stored as direct pointers between records rather than being re
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, observability/profiling-and-performance @2, platform-delivery/infrastructure-as-code-and-config @3
+
+It is a calculator, not a daemon: you supply the PostgreSQL version, total RAM, CPU count, storage type and an application profile, and it returns the handful of configuration values whose defaults are wrong for real hardware — `shared_buffers`, `effective_cache_size`, `work_mem`, `maintenance_work_mem`, `max_wal_size`, `random_page_cost` and the parallelism settings. Those defaults exist so the server starts on tiny machines, which is why an untuned instance leaves most of a large box idle.
+
+Treat the output as a starting point rather than an answer. `work_mem` is per sort or hash node per connection, not per query, so multiplying it by an aggressive connection limit is how a server runs out of memory; `random_page_cost` should reflect SSD rather than the spinning-disk assumption behind the default; and none of it helps if autovacuum cannot keep up.
 
 ### pgvector
 **Short:** PostgreSQL extension adding a vector type with exact and HNSW/IVFFlat ANN search, so RAG needs no new datastore.
@@ -584,11 +784,19 @@ Reach for it when you want vector search working today and do not want to operat
 **Lang:** python
 **Roles:** data-stores/vector-store @1, search-retrieval/rag-and-document-processing @2
 
+Haystack builds pipelines from typed components, and this package supplies a Pinecone-backed document store plus the retriever that pairs with it, so an indexing pipeline writes embedded documents into a Pinecone index and a query pipeline retrieves from it. Documents map onto vectors carrying their content and metadata, Haystack filter expressions are translated into Pinecone's filter syntax, and namespaces are exposed for separating tenants or corpora.
+
+Install it when Haystack is the orchestration layer and you would rather not run a vector database. The considerations belong to the integration rather than the framework: filterable fields must exist in the index metadata, store operations that are trivial locally — listing every document, deleting in bulk by filter — map awkwardly onto a remote index, and the package version tracks both Haystack and the Pinecone client, so pin them together.
+
 ### PlanetScale
 **Short:** Managed MySQL platform built on Vitess offering horizontal sharding and branch-and-merge non-blocking schema changes.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/schema-and-migration @2, data-access/replication-ha-and-backup @3, platform-delivery/cloud-platform-and-cost @3
+
+It runs MySQL under Vitess, which is where both distinctive features come from. Sharding is Vitess's: a keyspace is split by a vindex and the routing tier scatters or targets queries, so growing past one write primary does not mean rewriting the application. Branching is a schema workflow built on top — a development branch copies the production schema, changes are made there, and a deploy request applies the diff as an online, non-blocking schema change that can be reverted.
+
+Reach for it when a MySQL application needs horizontal scale and safe schema change without operating Vitess yourself. The constraints follow from Vitess: foreign keys and cross-shard joins are limited, cross-shard transactions are expensive, and portability is reduced, since the branching workflow that makes it pleasant is the part you cannot take with you.
 
 ### PostgreSQL
 **Short:** Open-source ACID relational database with MVCC, WAL, JSONB and a huge extension ecosystem.
@@ -616,6 +824,10 @@ It is written in Rust, single-binary, and runs embedded in memory for tests or c
 **Lang:** *
 **Roles:** data-stores/relational @1, platform-delivery/cloud-platform-and-cost @2, data-access/replication-ha-and-backup @2
 
+RDS provisions an instance running the actual engine — PostgreSQL, MySQL, MariaDB, SQL Server, Oracle — on block storage, and manages everything around it: automated backups with point-in-time recovery, minor-version patching in a maintenance window, parameter and option groups instead of editing config files, read replicas built on the engine's native replication, and Multi-AZ, which keeps a synchronous standby in another availability zone and fails over by moving the endpoint.
+
+Understand what Multi-AZ is and is not: it buys availability, not read capacity, because the classic standby serves no traffic. Reach for RDS when you want a stock engine without operating it. The ceiling is the single writer — vertical scaling and read replicas only — which is where Aurora, application sharding or a distributed SQL engine take over, and there is no superuser or OS access.
+
 ### Redis Sorted Sets
 **Short:** Redis type combining a skip list and hash map: O(log n) score and rank ops; leaderboards, priority queues, windows.
 **Kind:** api
@@ -627,6 +839,10 @@ It is written in Rust, single-binary, and runs embedded in memory for tests or c
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/vector-store @1, caching/distributed-cache @2, data-stores/key-value-and-embedded @3, search-retrieval/ann-index-library @3
+
+Redis Stack's search module lets a hash or JSON field hold a vector and indexes it either flat, which is exact brute force, or with HNSW for approximate search, alongside the numeric, tag and text fields of the same index. A search or aggregate query combines a nearest-neighbour clause with ordinary filters, so similarity and metadata predicates are evaluated together, and all of it lives in the same instance as your cache and key-value data.
+
+Reach for it when Redis is already in the stack and the corpus is modest: it saves a whole system and latency is excellent because everything is in memory. That is also the limit — vectors are large, so memory cost scales unpleasantly with corpus size and dimensionality, and index rebuilds and persistence are memory-bound too. Past a few million vectors, a purpose-built store or pgvector beside your data is cheaper.
 
 ### redis-cli
 **Short:** Redis command-line client for key inspection, MONITOR, latency checks and memory analysis.
@@ -660,11 +876,19 @@ Every node is equal and there is no primary, so a write goes to whichever node t
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1
 
+RocksDB is an embedded LSM-tree engine forked from LevelDB and rebuilt for modern hardware: writes go to a write-ahead log and a memtable, flush to immutable sorted files, and background compaction merges them down through levels, with bloom filters and a block cache keeping most reads from touching more files than necessary. Column families give separate keyspaces sharing one log, and almost every dimension — compaction strategy, compression per level, write stalls, cache sizes — is tunable.
+
+It is a library, not a server, which is why it turns up as the local state store inside so many other systems: Kafka Streams and Flink for operator state, TiKV and CockroachDB and MyRocks for storage, plus countless caches and queues. Reach for it when you need ordered local storage with high write throughput; the price is write and space amplification from compaction, and a tuning surface deep enough to be a specialism.
+
 ### Rook-Ceph
 **Short:** Kubernetes operator running Ceph in-cluster to provide block, shared-file and S3-compatible object storage.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/object-and-file-storage @1, platform-delivery/kubernetes-and-orchestration @2
+
+Rook is an operator that installs and runs Ceph inside Kubernetes: custom resources describe the cluster, the daemons that own each disk, the monitors and the pools, and the operator handles placement, upgrades and recovery. Ceph itself distributes objects with the CRUSH algorithm and replicates or erasure-codes them, and exposes three interfaces from the same cluster — block volumes, a shared filesystem, and an S3-compatible object gateway — so one system covers read-write-once, read-write-many and object needs.
+
+Reach for it on bare metal or in a private cloud where you need all three and have disks to give it. Be honest about the commitment: Ceph is a substantial distributed system with its own failure modes, placement-group tuning and recovery storms, and it wants dedicated nodes and fast networking. In a public cloud, the provider's CSI drivers are far less work.
 
 ### S3
 **Short:** AWS object storage with versioning and lifecycle tiers; also the usual Terraform remote-state backend.
@@ -692,6 +916,10 @@ Because it speaks CQL and works with the same drivers, the migration story is la
 **Lang:** *
 **Roles:** data-stores/warehouse-and-olap @1
 
+Storage is columnar micro-partitions in the cloud provider's object store, immutable and automatically clustered by ingestion order with per-partition metadata used to prune scans. Compute is a virtual warehouse — an independently sized, independently billed cluster that reads that shared storage — so two teams can run heavy queries without contending, and a warehouse suspends when idle. Because storage is immutable and versioned, time travel to an earlier state and zero-copy cloning of a whole database are cheap metadata operations, which is what makes per-developer environments practical.
+
+Reach for it when analytics should be a service with no infrastructure and elastic, isolated compute. Watch cost rather than performance: oversized warehouses, generous idle timeouts and large unclustered tables are where the money goes, and auto-scaling makes it easy to spend without noticing.
+
 ### Spanner
 **Short:** Google's globally distributed SQL database giving strict serializability via Paxos replication and TrueTime clocks.
 **Kind:** tech
@@ -708,11 +936,19 @@ In CAP terms it chooses consistency — a partitioned minority of replicas stops
 **Lang:** java
 **Roles:** data-stores/vector-store @1, search-retrieval/rag-and-document-processing @2
 
+The starter wires a pgvector-backed bean behind Spring AI's `VectorStore` interface, creating the table and vector column, choosing the index type and distance function from properties, and calling your configured embedding model on add, so documents go in as text and come back from a similarity search as documents with scores. Because the interface is shared, moving later to Redis, Qdrant or Milvus is a dependency change and a few properties.
+
+Reach for it when a Java service already runs PostgreSQL: the embeddings sit beside the business rows, inside the same transaction, backup and access control, and there is no second datastore to operate. The caveats are pgvector's — choose HNSW or IVFFlat deliberately and tune the recall dial — plus the reminder that automatic schema initialisation is convenient in development and should be a migration in production.
+
 ### SQL Server
 **Short:** Microsoft's ACID relational database engine with T-SQL, Always On availability groups and columnstore indexes.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1
+
+The engine's distinctive parts are the ones that shape application behaviour. Its default isolation is read committed implemented with locks, so a reader blocks on an uncommitted writer until you enable read-committed snapshot isolation, which switches it to row versioning in `tempdb` and removes most of the blocking people blame on the database. Clustered indexes decide physical row order, columnstore indexes give a compressed columnar copy of the same table for analytics, and in-memory OLTP offers lock-free tables for extreme write rates.
+
+For availability, Always On availability groups replicate a set of databases to synchronous or asynchronous secondaries, some readable. Reach for it in a Microsoft estate or where T-SQL and the reporting and integration tooling already exist; the reasons to move are per-core licensing, and the fact that it now runs on Linux and in containers, so being on Windows is no longer the tie it once was.
 
 ### SQLite
 **Short:** Embedded serializable SQL database in a single file, with a B+tree row store and WAL mode; no server process.
@@ -730,6 +966,10 @@ It is the right answer for an embedded or on-device store, an application file f
 **Lang:** *
 **Roles:** data-stores/warehouse-and-olap @1, data-movement/batch-and-distributed-compute @3, platform-delivery/cloud-platform-and-cost @3
 
+Synapse packages several engines behind one workspace: dedicated SQL pools, which distribute data across compute nodes by hash, round robin or replication; serverless SQL, which queries Parquet and CSV in a data lake with nothing provisioned and bills by data scanned; Spark pools; and pipelines that are the Data Factory engine under another name.
+
+For a dedicated pool the distribution key is the whole performance story — joining two tables distributed on different columns forces a data-movement step, which is where slow queries come from — and pausing the pool is how you avoid paying for it overnight. Weigh adoption carefully: Microsoft's investment has moved to Fabric, which absorbs the same capabilities into a newer platform, so a green-field analytics project in Azure should compare the two before committing.
+
 ### TiDB
 **Short:** MySQL-compatible distributed SQL database with Percolator-style 2PC, horizontal scale-out and an HTAP columnar replica.
 **Kind:** tech
@@ -745,11 +985,19 @@ TiFlash adds columnar replicas kept in sync through Raft, so analytical scans ru
 **Lang:** *
 **Roles:** data-stores/graph-db @1
 
+It stores the graph natively and partitions it across a cluster, and its query language is procedural rather than purely declarative: a query declares vertex sets and accumulators, then repeatedly selects the neighbours of the current frontier, accumulating values as it goes. That accumulator model is a bulk-synchronous traversal, which is why deep multi-hop queries and in-database algorithms parallelise across machines instead of degrading hop by hop.
+
+Reach for it when the workload is genuinely deep traversal at scale — many-hop fraud rings, entity resolution, supply-chain or network impact analysis — on a graph too large for one machine. Against it: the query language is one your team must learn and cannot transfer, it is a commercial product, and for graphs that fit on a single node Neo4j has a far larger ecosystem and Cypher is much more widely known.
+
 ### TiKV
 **Short:** Distributed transactional key-value store using Raft-replicated regions; the storage layer beneath TiDB.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, data-access/transactions-and-consistency @2, data-access/replication-ha-and-backup @3
+
+TiKV presents a single ordered keyspace split into Regions of roughly a hundred megabytes, each replicated by its own Raft group across nodes, while a placement driver decides where Regions live, splits and merges them, and moves them to balance load. Each replica stores its data in RocksDB. Transactions are Percolator-style: an optimistic two-phase commit anchored on a primary lock key and using timestamps from the placement driver, giving snapshot isolation across arbitrary keys with no central lock manager.
+
+It is a CNCF project and the storage layer beneath TiDB, but usable on its own through a raw key-value API or the transactional one. Reach for it when you need a horizontally scalable, strongly consistent key-value store and are prepared to run the placement driver plus a fleet of nodes; for a key-value need without distribution, this is a great deal of machinery to take on.
 
 ### TimescaleDB
 **Short:** PostgreSQL extension for time-series data: hypertable partitioning, native compression and continuous aggregates.
@@ -785,11 +1033,19 @@ The reason to pick it over a purpose-built time-series database is that it is st
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, caching/distributed-cache @1, data-movement/message-broker @3
 
+Valkey is the community continuation of Redis, forked from the last BSD-licensed release and now developed under the Linux Foundation by contributors from several large cloud vendors. It is command- and protocol-compatible, so existing clients, libraries and tooling work unchanged, and it has kept developing rather than freezing — most visibly with a multi-threaded I/O path that lifts per-node throughput above the strictly single-threaded model.
+
+It is what the major managed caching services now offer by default, and most distributions have followed. Reach for it wherever you would have reached for Redis and licence terms matter, such as vendoring it into a product or offering it as a service. The practical caution is divergence over time: features and modules added on either side will not necessarily exist on the other, so check anything beyond the core commands.
+
 ### valkey-cli
 **Short:** Valkey's command-line client and benchmark tool, command-compatible with redis-cli and redis-benchmark.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, caching/distributed-cache @2, devtools/version-control-and-workbench @3
+
+It is the fork's copy of the familiar command-line client, so the interface is the one you already know: interactive command entry, a scan mode that iterates keys without the blocking `KEYS` command, sampling modes that find the single key or the type eating memory, a latency mode that measures round-trip time from where you are standing, and an option to pull a snapshot. A benchmark tool ships alongside it.
+
+Because the protocol is unchanged, the Redis client works against a Valkey server and vice versa, so the choice is mostly about which package your image already has. The same discipline applies as always: `MONITOR` streams every command the server executes and costs real throughput, and any command that touches many keys stalls every other client, because the command loop still runs them one at a time.
 
 ### Voldemort
 **Short:** LinkedIn's Dynamo-style distributed key-value store: masterless, eventually consistent, tunable quorum reads and writes.
@@ -797,11 +1053,19 @@ The reason to pick it over a purpose-built time-series database is that it is st
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, data-access/replication-ha-and-backup @3
 
+Voldemort was LinkedIn's implementation of the Dynamo paper: a consistent-hash ring with no primary, per-request quorum settings so each operation chose its own consistency, vector clocks to detect concurrent writes and hand siblings back to the application, hinted handoff and read repair to converge after a failure, and pluggable storage engines — including a read-only store whose files were built by Hadoop jobs.
+
+That last part was its distinctive use: batch-computed data such as recommendations, built offline and swapped into the serving cluster atomically. As something to adopt it is history, since the project is no longer active and the mainstream Dynamo-style options are Cassandra, ScyllaDB and DynamoDB. It stays worth knowing as a clean worked example of quorum tuning and of what it costs to push conflict resolution onto the client.
+
 ### VoltDB
 **Short:** In-memory partitioned NewSQL database running stored procedures single-threaded per partition for serializability.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/transactions-and-consistency @2, data-stores/key-value-and-embedded @3
+
+Its design removes concurrency control rather than optimising it: the dataset is partitioned across cores, each partition is owned by a single thread executing transactions serially against in-memory data, and a transaction arrives as one stored procedure. With no locks, no latches and no buffer manager, a single-partition transaction is a few microseconds of pure computation, and serializability is a consequence of the execution model instead of a protocol. Durability comes from command logging plus periodic snapshots, and availability from replicating each partition.
+
+Reach for it when the workload is a high rate of short, known-in-advance transactions that partition cleanly — telecom charging, fraud checks, ad decisioning. The constraints are severe by design: the working set must fit in memory across the cluster, cross-partition and ad-hoc queries are expensive because they serialise against every partition, and application logic has to be written as stored procedures.
 
 ### Weaviate
 **Short:** Open-source vector database with built-in hybrid BM25+dense search, filtering and a GraphQL API.
@@ -824,6 +1088,10 @@ Reach for it when queries mix exact terms — a product code, a person's name, a
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, data-stores/document @3
+
+WiredTiger stores each collection and each index as its own B+tree file, building pages in memory and writing them out compressed — never updating in place, since a checkpoint writes new pages and switches the root, so an interrupted checkpoint leaves the previous one intact. Concurrency is MVCC at document level, so two writers touching different documents in the same collection do not block each other, and the journal makes writes durable between checkpoints, flushed on an interval unless the write concern demands otherwise.
+
+Its cache is the tuning surface that matters: it claims roughly half of available memory by default, and a working set larger than that cache turns reads into disk I/O, which is where most MongoDB latency complaints eventually lead. Index and working-set size, not document count, decide the machine you need.
 
 ### YugabyteDB
 **Short:** Distributed SQL database with a PostgreSQL-compatible wire protocol, Raft replication and built-in 2PC.
