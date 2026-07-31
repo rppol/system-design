@@ -201,9 +201,46 @@ Reach for it when the working set fits in memory and you want sub-millisecond re
   record's description.
 
 Also fatal: an unknown `**Kind:**`, language token or role id, a malformed `@weight`, a
-record with zero roles, a duplicate `###` name across shards, and an unknown field name.
+record with zero roles, a duplicate `###` name across shards, an unknown field name, and
+— since 2026-07-31 — a **markdown heading or an emoji** inside a description. Both survive
+the parser and ship as literal escaped text in the reader; `###` opens a new record so it
+can never reach the check, but `##` and below can. The emoji range deliberately carves out
+`U+2713..U+2718`, because the repo style guide asks for `✓`/`✗` and banning the whole
+dingbats block would fail the build on content it requests.
+
 Warn-only: an **orphan** record no module teaches (it can never render) and the shard/tier
 mismatch above. `extract.py` prints coverage both ways every build.
+
+**Deliberately NOT checked: whether a description merely restates its `**Short:**` line.**
+Word-overlap between the two was tried at several thresholds and does not separate — the
+house style opens by recapping the tool and then expands, so well-written records score the
+same as the one genuine offender (five of seven hits were false positives on inspection).
+It shipped as a warning nobody could act on, which is worse than no check. Catch it in
+review.
+
+### The name is the join key, so two exception tables exist
+
+`tech_key()` in `extract.py` decides which written forms are the same tool. The record's
+`###` name must match the DISPLAY name the index settles on, or the record orphans and its
+description never renders. Two hand-kept tables handle what no rule can derive:
+
+| Table | Problem | Example |
+|---|---|---|
+| `TECH_ALIASES` | many names, ONE product | `envoy proxy` -> `envoy`, `grafana loki` -> `loki`, `huggingface transformers` -> `transformers` |
+| `TECH_HOMONYMS` | one name, TWO unrelated products | `medusa` in `llm/` -> `Medusa (speculative decoding)`, leaving `Medusa` to the Cassandra backup tool |
+
+They cannot be one mechanism: the alias key is derivable from the string alone, the homonym
+key needs an outside signal (the section that teaches it).
+
+**A homonym needs BOTH halves of the fix.** Splitting the key yields two rows, but the
+display name is voted on from the surface forms modules actually wrote — and both halves of
+a homonym were written the same way. `_HOMONYM_LABELS` overrides that vote. Without it you
+get two identically-named rows AND, because the bank lookup is keyed on display name, both
+receive the same record: a wrong answer wearing the costume of a duplicate.
+
+**After touching either table, check the coverage line both ways.** `bank coverage: N of N
+indexed tools have a record; 0 bank records no module teaches` is the only thing that
+notices a merge which left an old record stranded.
 
 ### Adding or editing a tool
 

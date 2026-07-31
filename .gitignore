@@ -63,3 +63,10 @@ node_modules/
 # Python bytecode from the build scripts (extract.py imports)
 __pycache__/
 *.pyc
+
+# Throwaway per-session dev scripts. The convention is a leading underscore: a probe
+# written to answer one question during one session, kept out of the tree so it cannot
+# rot into something a future reader mistakes for tooling. Anything worth keeping loses
+# the underscore and gets committed — see scripts/check_render.mjs, which root CLAUDE.md
+# tells authors to run and which sat untracked for a day as a result.
+scripts/_*.mjs

@@ -468,7 +468,8 @@ them. GitHub silently shows a broken fence as an error box, so "it looked fine i
 diff" proves nothing:
 
 ```bash
-node scripts/_check_render.mjs <absolute-file.md>   # untracked dev tool; needs npm ci
+npm ci                                             # once — Puppeteer + pinned mermaid
+node scripts/check_render.mjs <absolute-file.md>   # exit 0 = every fence renders
 ```
 
 **The traps that caused all 20.** Every one of these is a *silent* parse failure — the

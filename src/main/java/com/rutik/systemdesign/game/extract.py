@@ -927,7 +927,16 @@ TB_ROLE = re.compile(r"^(\S+/\S+)\s*@([123])$")
 TB_TEMPLATE_HDR = re.compile(r"^##\s+\d+[.)]\s")
 # Descriptions are ESCAPED and rendered as <p>, with one backtick->code pass. Anything
 # else would leak as literal characters, so reject it at build time rather than ship it.
-TB_BAD_DESC = re.compile(r"(?:```|~~~)|^\s*(?:[-*+]|\d+[.)])\s|^\s*\||\]\(")
+# The `#{1,6} ` arm catches a markdown heading a bulk authoring pass drops in to organise
+# a long description: `###` opens a new RECORD so it can never reach here, but `##` and
+# below survive the parser and ship as a literal "## Overview" in the reader.
+TB_BAD_DESC = re.compile(r"(?:```|~~~)|^\s*(?:[-*+]|\d+[.)])\s|^\s*\||\]\(|^\s*#{1,6}\s")
+# Repo-wide rule: no emojis in any file. Descriptions are the one place a bulk authoring
+# pass is tempted to add them, and the reader escapes rather than strips, so they ship.
+# U+2713..U+2718 is carved OUT of the dingbats range on purpose: the repo rule is "use
+# the/x marks, not the emoji ones", so banning the whole block would fail the build on
+# content the style guide asks for. Typographic marks and box-drawing stay out entirely.
+TB_EMOJI = re.compile("[\U0001F300-\U0001FAFF☀-✒✙-➿⬀-⯿️]")
 
 
 def _tb_paragraphs(lines):
@@ -1077,8 +1086,18 @@ def build_tech_bank():
             for ln in desc:
                 if TB_BAD_DESC.search(ln):
                     errs.append(f"{fn}:{cur_line} '{name}' description carries a fence, "
-                                f"list, table or link -- it is escaped, not rendered")
+                                f"list, table, link or heading -- it is escaped, not rendered")
                     break
+            for ln in desc:
+                if TB_EMOJI.search(ln):
+                    errs.append(f"{fn}:{cur_line} '{name}' description carries an emoji")
+                    break
+            # NOT checked here, deliberately: whether the description merely restates the
+            # short line above it. Word-overlap between the short line and the first
+            # paragraph was tried at several thresholds and does not separate -- the house
+            # style opens by recapping the tool and then expands, so every record scores
+            # like the one genuine offender. It stayed silent as a warning nobody could act
+            # on, which is worse than no check. Catch it in review, not here.
             out = {"k": cur.get("k", ""), "r": cur.get("r", []),
                    "l": cur.get("l", []), "s": cur.get("s", "")}
             if paras:
