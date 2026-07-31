@@ -580,14 +580,6 @@ The whole pipeline -- normalizer, pre-tokenizer, model, post-processor and decod
 
 You usually meet it through `transformers`, where the "fast" tokenizer classes are this library. Reach for it directly when you are training your own vocabulary or tokenizing a large corpus where the pure-Python path would dominate your preprocessing time.
 
-### HuggingFace transformers
-**Short:** The standard Python library for loading, fine-tuning and generating with pretrained transformer, SSM and speech models.
-**Kind:** tech
-**Lang:** python
-**Roles:** applied-ml/nlp-and-text @1, model-training/deep-learning-framework @2, model-training/fine-tuning-and-peft @2, applied-ml/vision-speech-and-multimodal @3, inference/inference-engine @3
-
-Its real product is a single interface, `AutoModel`/`AutoTokenizer`, `from_pretrained` and `generate`, over thousands of architectures on the Hub, so swapping models is usually a string change instead of a rewrite. `generate` carries the whole decoding surface (sampling, beam search, assisted or speculative decoding, KV cache), and the library tends to host the reference implementation of a new architecture, which is why papers get reproduced against it. It is the right tool for research, fine-tuning and one-off scripts, and deliberately not a serving stack: for production throughput move to a batching engine such as vLLM or TGI and keep transformers for tokenization and training.
-
 ### Hunspell
 **Short:** Spell checker and morphological analyzer used for query correction and stemming in search pipelines.
 **Kind:** tech
@@ -1534,7 +1526,7 @@ Reach for it when the question is which part of the model performs a computation
 **Short:** Hugging Face library to load, fine-tune and run pretrained transformer models across text, vision and multimodal tasks.
 **Kind:** tech
 **Lang:** python
-**Roles:** applied-ml/nlp-and-text @1, model-training/deep-learning-framework @2, applied-ml/vision-speech-and-multimodal @2, model-training/fine-tuning-and-peft @2
+**Roles:** applied-ml/nlp-and-text @1, model-training/deep-learning-framework @2, applied-ml/vision-speech-and-multimodal @2, model-training/fine-tuning-and-peft @2, inference/inference-engine @3
 
 The library's organizing idea is that a model id resolves to both weights and the matching preprocessing: `AutoTokenizer.from_pretrained(id)` and `AutoModelForSequenceClassification.from_pretrained(id)` cannot drift apart, which is what makes thousands of community checkpoints interchangeable. `pipeline()` is the one-line inference path, `Trainer` a training loop with distributed, mixed-precision and checkpointing already wired, and `model.generate()` the decoding entry point supporting greedy, beam, top-k and nucleus sampling plus the logits processors that constrain output.
 

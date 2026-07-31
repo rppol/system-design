@@ -59,7 +59,7 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 
 You push records into a dataset -- prompts, model outputs, response pairs, spans to tag -- humans label or rank them in a web UI, and you pull the curated result back as a dataset for training or evaluation. It keeps who labelled what, supports several annotators on the same record, and exposes the disagreement set so a third person can adjudicate.
 
-In this repo it collects preference pairs for DPO, filters synthetic data, and drives two-rater workflows where inter-annotator agreement is the quality signal. Reach for it when human feedback has to be repeatable and auditable; a handful of examples does not justify standing it up.
+Typical jobs are collecting preference pairs for DPO, filtering synthetic data, and running two-rater workflows where inter-annotator agreement is the quality signal. Reach for it when human feedback has to be repeatable and auditable; a handful of examples does not justify standing it up.
 
 ### Arize
 **Short:** SaaS ML/LLM observability: production drift detection, performance tracing and SHAP-based explanation logging.

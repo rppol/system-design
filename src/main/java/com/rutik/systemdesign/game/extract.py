@@ -1288,12 +1288,41 @@ def clean_tech_name(raw):
     return name
 
 
-def tech_key(name):
+# Two hand-kept exception tables. Both exist because vendor naming is not a rule you can
+# derive: stripping a leading vendor word would fold "Grafana Loki" into "Loki" correctly
+# but "Google Cloud Storage" into "Cloud Storage" wrongly, and no suffix rule separates
+# "Redis Cluster" (deliberately its own entry) from "Envoy Proxy" (the same product).
+# So these are enumerated, small, and reviewed -- not inferred.
+TECH_ALIASES = {                       # written this way -> indexed as this
+    "envoy proxy": "envoy",
+    "grafana loki": "loki",
+    "huggingface transformers": "transformers",
+    "hugging face transformers": "transformers",
+}
+# The reverse problem: ONE name, two unrelated products. tech_key merges by name, so a
+# homonym silently fuses them and the entry describes neither. Disambiguated by the section
+# that teaches it. Medusa is the Cassandra backup tool in database/, and the
+# speculative-decoding method in llm/.
+TECH_HOMONYMS = {
+    "medusa": {"llm": "Medusa (speculative decoding)"},
+}
+# Splitting the key is only half the job: the DISPLAY name is voted on from the surface
+# forms the modules actually wrote, and both halves of a homonym were written "Medusa".
+# Without this the screen shows two identically-named rows and the bank lookup (keyed on
+# display name) hands both the same record. The disambiguated key supplies the label.
+_HOMONYM_LABELS = {v.lower(): v for m in TECH_HOMONYMS.values() for v in m.values()}
+
+
+def tech_key(name, section=None):
     """Merge key. "Apache Kafka"/"Kafka" and "Pydantic v2"/"Pydantic" are one tool;
-    "Redis"/"Redis Cluster" are deliberately not."""
+    "Redis"/"Redis Cluster" are deliberately not. `section` disambiguates homonyms."""
     key = re.sub(r"^apache\s+", "", name.lower())
     key = re.sub(r"\s+v\d[\d.]*$", "", key)
-    return re.sub(r"\s+", " ", key).strip(" .")
+    key = re.sub(r"\s+", " ", key).strip(" .")
+    key = TECH_ALIASES.get(key, key)
+    if section and key in TECH_HOMONYMS:
+        return TECH_HOMONYMS[key].get(section, key).lower()
+    return key
 
 
 def _split_outside_parens(cell):
@@ -1464,7 +1493,8 @@ def build_tech_index(bank=None):
                 # table-first-wins rule indexed Triton as 19 CLI flags and no tools.
                 found += tech_from_bullets(body)
                 for name, blurb in found:
-                    entry = tech.setdefault(tech_key(name), {"forms": {}, "uses": []})
+                    # section-aware so a homonym taught in two worlds stays two entries
+                    entry = tech.setdefault(tech_key(name, module.split("/")[0]), {"forms": {}, "uses": []})
                     entry["forms"][name] = entry["forms"].get(name, 0) + 1
                     entry["uses"].append([mi, blurb])
 
@@ -1514,6 +1544,8 @@ def build_tech_index(bank=None):
     tech_out = []
     for key, entry in tech.items():
         name = max(entry["forms"].items(), key=lambda kv: (kv[1], -len(kv[0]), kv[0]))[0]
+        if key in _HOMONYM_LABELS:
+            name = _HOMONYM_LABELS[key]
         # One module may list the same tool in two tables — keep the first blurb only.
         seen, uses = set(), []
         for mi, blurb in entry["uses"]:

@@ -82,12 +82,12 @@ Its trees are symmetric — every node at a given depth splits on the same featu
 **Roles:** model-training/classical-ml-and-boosting @1
 
 ### category_encoders
-**Short:** sklearn-compatible categorical encoders (target, CatBoost, James-Stein, hashing, binary) that scikit-learn lacks.
+**Short:** sklearn-compatible encoders for high-cardinality categoricals: CatBoost, James-Stein, M-estimate, binary, base-N and hashing.
 **Kind:** tech
 **Lang:** python
 **Roles:** model-training/classical-ml-and-boosting @1, ml-lifecycle/ml-platform-and-pipelines @3
 
-It is a set of scikit-learn transformers for turning high-cardinality categorical columns into numbers without one-hot's width explosion: target, CatBoost, James-Stein and M-estimate encoders replace a category with a smoothed statistic of the target, while binary, base-N and hashing encoders compress the identity into a few columns. All follow the `fit`/`transform` contract and accept DataFrames, so they drop straight into a `Pipeline` and a `ColumnTransformer`. The trap is leakage -- any target-based encoding computed on rows that also train the model lets the label leak into a feature, and this library's `TargetEncoder` smooths with a sigmoid weighted by `min_samples_leaf` and does not cross-fit, so wrap it in a fold-aware wrapper such as `NestedCVWrapper` or fit it separately inside each CV fold. Reach for it when a categorical has thousands of levels and one-hot is impractical; for a handful of levels, plain one-hot is safer and simpler.
+It is a set of scikit-learn transformers for turning high-cardinality categorical columns into numbers without one-hot's width explosion: target, CatBoost, James-Stein and M-estimate encoders replace a category with a smoothed statistic of the target, while binary, base-N and hashing encoders compress the identity into a few columns. All follow the `fit`/`transform` contract and accept DataFrames, so they drop straight into a `Pipeline` and a `ColumnTransformer`. The trap is leakage -- any target-based encoding computed on rows that also train the model lets the label leak into a feature, and this library's `TargetEncoder` smooths with a sigmoid weighted by `min_samples_leaf` and does not cross-fit, so wrap it in a fold-aware wrapper such as `NestedCVWrapper` or fit it separately inside each CV fold. Reach for it when a categorical has thousands of levels and you want an encoder scikit-learn does not ship -- CatBoost, James-Stein, M-estimate, base-N or hashing. For plain target encoding scikit-learn's own `TargetEncoder` is now the safer default, since it cross-fits internally; and for a handful of levels one-hot is simpler than either.
 
 ### CleanRL
 **Short:** Single-file, dependency-light reference implementations of RL algorithms, aimed at learning not production.
@@ -238,12 +238,6 @@ Reach for it for TensorFlow, or for a shop running more than one framework that 
 **Kind:** api
 **Lang:** python
 **Roles:** model-training/deep-learning-framework @1, model-training/fine-tuning-and-peft @2, model-training/distributed-training @3
-
-### Hugging Face Transformers
-**Short:** The standard Python library for loading, fine-tuning and running pretrained transformer models from the HF Hub.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/deep-learning-framework @1, model-training/fine-tuning-and-peft @2, applied-ml/nlp-and-text @2, inference/inference-engine @3, applied-ml/vision-speech-and-multimodal @3
 
 ### HuggingFace datasets
 **Short:** Library and hub for loading, streaming, mapping and versioning training and evaluation corpora as Arrow tables.
@@ -420,7 +414,8 @@ Its warmup-stable-decay learning rate schedule is the part worth knowing: the ra
 
 Megatron-LM is NVIDIA's reference implementation of the parallelism strategies that make training beyond a single GPU's memory possible. Tensor parallelism splits the weights of each matrix multiply across GPUs inside a node, where the interconnect is fastest. Pipeline parallelism assigns contiguous layer ranges to stages on different nodes and keeps them busy by streaming microbatches through, and sequence or context parallelism splits activation memory along the sequence dimension. Layered with ordinary data parallelism, these form the grid you tune so that memory fits and the interconnect never idles.
 
-Reach for it for pretraining and continued pretraining at the scale where a single node is not an option — the 70B-and-above range this repository keeps pointing at. For a single-node finetune it is far heavier machinery than the job needs, and its parallelism now also ships as a library embedded inside other training frameworks.
+Reach for it for pretraining and continued pretraining at the scale where a single node is not an option, roughly the 70B-and-above range. For a single-node finetune it is far heavier machinery than the job needs, and its parallelism now also ships as a library embedded inside other training frameworks.
+
 ### mergekit
 **Short:** Toolkit for merging model checkpoints: SLERP, TIES, DARE, linear and passthrough recipes without retraining.
 **Kind:** tech

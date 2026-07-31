@@ -439,12 +439,12 @@ Grafana stores no telemetry of its own: you configure data sources -- Prometheus
 **Roles:** observability/logging @1, observability/metrics-and-monitoring @2, observability/tracing-apm-and-llm-observability @3
 
 ### Grafana Loki
-**Short:** Log aggregation store that indexes only labels, not log content, making it cheap compared with ELK.
+**Short:** Log store that indexes only labels, never log text, keeping compressed chunks in object storage and querying them with LogQL.
 **Kind:** tech
 **Lang:** *
-**Roles:** observability/logging @1
+**Roles:** observability/logging @1, data-stores/object-and-file-storage @3
 
-It stores compressed chunks of log lines in object storage and indexes only the label set that identifies each stream, never the log text. That is why ingestion is cheap and there is no large inverted index to maintain, and it is also the tradeoff: a query first selects streams by label, then brute-force scans the matching chunks, so a narrow label selector over a short window is fast while a full-text search across everything for a week is a lot of scanning.
+It stores compressed chunks of log lines in object storage and indexes only the label set that identifies each stream, never the log text. That is why ingestion is cheap and there is no large inverted index to maintain, and it is also the tradeoff: a LogQL query first selects streams by label, then brute-force filters the matching chunks, so a narrow label selector over a short window is fast while a full-text search across everything for a week is a lot of scanning. The label model is Prometheus's, so the same selectors move between metrics and logs in Grafana.
 
 Reach for it when log volume makes a full-text engine expensive and most of your queries already know which service, namespace and level they want. Keep label cardinality low, since a label carrying a request id, a user id or a trace id creates a stream per value and is the standard way people bring Loki down; put those high-cardinality fields in the log line, where the query filters on them after selection.
 
@@ -933,16 +933,6 @@ Configure the field set deliberately rather than accepting defaults. Full stack 
 **Lang:** python
 **Roles:** observability/logging @1
 
-### Loki
-**Short:** Grafana's log aggregation system: indexes only labels and keeps compressed chunks in object storage, queried with LogQL.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/logging @1, data-stores/object-and-file-storage @3
-
-A log line is stored with a small set of labels and nothing else is indexed, so ingestion is cheap and the bulk of the data is compressed chunks in object storage. A LogQL query selects streams by label first and then brute-force filters the matching chunks over the time range, which makes the cost model explicit: narrow by label, and the scan is small.
-
-The corollary is the rule that governs using it well - label cardinality must stay low. Putting a request ID, user ID or full URL into a label creates a stream per value and degrades both ingestion and query badly; those values belong in the log line, where the filter expression finds them. It fits naturally beside Prometheus because the label model is the same one, so the same selectors move between metrics and logs in Grafana.
-
 ### m * T
 **Short:** Not a tool: the overhead-multiplier times baseline runtime, i.e. what users actually feel while a profiler is on.
 **Kind:** concept
@@ -1188,9 +1178,9 @@ Because the output is ordinary OTLP, it lands in whatever tracing backend you al
 **Lang:** *
 **Roles:** observability/alerting-and-incident-response @1, observability/logging @2, search-retrieval/lexical-and-hybrid-search @3
 
-It is the query and visualization front end for an OpenSearch cluster: Discover for ad-hoc searching over log indices, dashboards assembled from saved visualizations, and the operational plugins — index state management for hot/warm/delete lifecycle, alerting built from monitors and triggers, and snapshot management.
+Day to day it is three surfaces in one app. Discover runs ad-hoc queries against an index pattern and is where an incident actually starts; saved visualizations compose into dashboards for the recurring views; and the operational plugins do the cluster housekeeping that would otherwise be curl against the REST API - index state management moving indices through hot/warm/cold/delete on age or size, alerting built from monitors that run a saved query on a schedule and fire triggers into Slack or PagerDuty, and scheduled snapshots to object storage.
 
-It occupies the same slot Kibana holds in an Elastic stack, and is why teams standardizing on OpenSearch for licensing reasons still get a full log-analysis surface. It is a UI over the cluster and inherits the cluster's limits, so a slow dashboard over billions of documents is fixed by index and shard design, not by the dashboard.
+It is the fork of Kibana taken at the 7.10 Apache-licensed point and has diverged since, so Kibana plugins and newer Elastic features do not carry over - the reason to run it is that your cluster is OpenSearch, not a feature comparison. Remember it is only a UI over that cluster and inherits its limits: a dashboard that takes 40 seconds over billions of documents is fixed by index patterns, shard sizing and rollups, never by anything in this app.
 
 ### OpenSLO
 **Short:** Vendor-neutral YAML specification for declaring service level objectives, error budgets and alert policies as code.

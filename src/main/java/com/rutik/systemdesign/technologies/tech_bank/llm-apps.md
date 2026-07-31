@@ -593,7 +593,7 @@ You declare a signature such as `question -> answer` and compose modules like `C
 
 The SDK starts a sandbox in about a second, then you run code or shell commands inside it, read files back out, and destroy it. The isolation boundary is a Firecracker microVM rather than a container, which is what makes it defensible to execute code an unattended model just wrote.
 
-In this repo it is the code-execution tool behind agents and the runner for code-based rewards during RL training. Reach for it whenever the code is untrusted or the agent can install packages; if the code is yours and known, a subprocess or a plain container is cheaper.
+Its two common jobs are the code-execution tool behind an agent and the runner for code-based rewards during RL training. Reach for it whenever the code is untrusted or the agent can install packages; if the code is yours and known, a subprocess or a plain container is cheaper.
 
 ### Epic
 **Short:** Electronic health record platform; the system of record LLM clinical-documentation features integrate into.

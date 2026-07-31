@@ -286,6 +286,16 @@ Reach for it for local, edge or fully offline inference, for Apple Silicon, and 
 **Lang:** *
 **Roles:** inference/model-format-and-edge @1, inference/inference-engine @3
 
+### Medusa (speculative decoding)
+**Short:** Speculative decoding without a draft model: extra prediction heads propose several next tokens and tree attention verifies them in one pass.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/inference-engine @1
+
+It bolts several extra prediction heads onto an existing model so a single forward pass proposes tokens for the next few positions at once, then tree attention verifies many candidate continuations together instead of one sequence at a time. Because the heads live on the base model there is no second model to load, schedule or keep in sync - the usual operational cost of draft-and-verify speculative decoding disappears.
+
+The price is training: the heads are fitted to one specific base model, so every checkpoint you serve needs its own. Reach for it when a single model dominates your traffic and decode latency is the bottleneck; prefer a draft model when the served checkpoint changes often. Unrelated to the `Medusa` Cassandra backup tool, which shares only the name.
+
 ### MLC-LLM
 **Short:** Compiles and runs LLMs on phones, browsers and laptops by generating device-specific kernels via TVM.
 **Kind:** tech

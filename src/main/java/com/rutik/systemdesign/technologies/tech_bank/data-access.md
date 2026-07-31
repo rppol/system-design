@@ -388,14 +388,14 @@ The abstract change types (`createTable`, `addColumn`) are what make one changel
 **Roles:** data-access/transactions-and-consistency @1, data-stores/relational @3
 
 ### Medusa
-**Short:** Name collision: Cassandra Medusa backup/restore tool, and Medusa multi-head tree-attention speculative decoding.
+**Short:** Cassandra backup and restore tool: ships each node's SSTables to object storage and coordinates that across the cluster.
 **Kind:** tech
 **Lang:** *
-**Roles:** data-access/replication-ha-and-backup @1, inference/inference-engine @2
+**Roles:** data-access/replication-ha-and-backup @1
 
-As a Cassandra tool, it backs up each node's SSTables to object storage and coordinates that across the cluster, keeping the per-node schema and token information needed to restore consistently. It handles both full and differential backups and can restore into a cluster with a different topology, which is what makes it usable for cloning a production keyspace into staging.
+It backs up each node's SSTables to object storage and coordinates that across the cluster, keeping the per-node schema and token information needed to restore consistently. It handles both full and differential backups and can restore into a cluster with a different topology, which is what makes it usable for cloning a production keyspace into staging.
 
-As a decoding technique, it bolts several extra prediction heads onto an existing model so one forward pass proposes tokens for the next few positions at once, and tree attention verifies many candidate continuations in a single pass. Unlike ordinary speculative decoding there is no separate draft model to serve, at the cost of training the heads for the specific base model.
+Unrelated to the `Medusa (speculative decoding)` entry, which is an inference technique that happens to share the name.
 
 ### MHA
 **Short:** MySQL Master HA: an older toolkit automating primary failover and replica promotion; largely superseded today.

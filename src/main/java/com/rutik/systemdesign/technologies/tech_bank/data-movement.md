@@ -103,7 +103,7 @@ Reach for it when a service's actual job is moving and transforming messages bet
 
 Flink runs a dataflow graph continuously over unbounded input, keeping large keyed state in an embedded RocksDB backend and checkpointing it to durable storage, which is how it restores exactly-once semantics after a failure. Event-time processing with watermarks lets it window correctly even when records arrive late or out of order, and its CEP library matches temporal patterns across a stream.
 
-In this repo it is the engine for real-time feature computation and for consuming CDC streams into downstream stores. Reach for it when state is large, correctness under out-of-order data matters, and latency must stay in the sub-second range; if all your data already lives in Kafka and the job is small, Kafka Streams is far less to operate.
+The two jobs it is reached for most are real-time feature computation and consuming CDC streams into downstream stores. Reach for it when state is large, correctness under out-of-order data matters, and latency must stay in the sub-second range; if all your data already lives in Kafka and the job is small, Kafka Streams is far less to operate.
 
 ### Apache Kafka
 **Short:** Distributed partitioned commit log used as a durable message broker and the backbone of event-streaming pipelines.

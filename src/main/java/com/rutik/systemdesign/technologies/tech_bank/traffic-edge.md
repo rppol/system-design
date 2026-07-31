@@ -215,7 +215,7 @@ It is the first command for any problem that turns out to be resolution: propaga
 **Short:** High-performance L7 proxy used as service-mesh sidecar, API gateway, load balancer and rate-limit enforcer.
 **Kind:** tech
 **Lang:** *
-**Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/service-mesh-and-discovery @1, traffic-edge/api-gateway @2, traffic-edge/rate-limiting-and-resilience @2
+**Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/service-mesh-and-discovery @1, traffic-edge/api-gateway @2, traffic-edge/rate-limiting-and-resilience @2, apis-frameworks/rpc-graphql-and-streaming @3
 
 Its configuration is dynamic: listeners, routes, clusters and endpoints are pushed from a control plane over the xDS APIs, which is what lets a service mesh change routing, retry policy, outlier detection and connection limits fleet-wide without a restart or a single line of application code. Istio and Consul are control planes over exactly this data plane.
 
@@ -226,16 +226,6 @@ It terminates and originates mTLS, speaks HTTP/1.1, HTTP/2, HTTP/3 and gRPC nati
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/api-gateway @2, traffic-edge/service-mesh-and-discovery @2
-
-### Envoy Proxy
-**Short:** L7 proxy used as sidecar or edge: load balancing, retries, rate limits, gRPC-Web transcoding and HTTP/3 termination.
-**Kind:** tech
-**Lang:** *
-**Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/service-mesh-and-discovery @2, traffic-edge/api-gateway @2, apis-frameworks/rpc-graphql-and-streaming @3, traffic-edge/rate-limiting-and-resilience @3
-
-Envoy is configured dynamically over the xDS APIs instead of a config file plus reload, which is why nearly every service mesh and modern gateway uses it as the data plane. Per-route it gives retries with budgets, timeouts, outlier detection that ejects a failing host, load-balancing policies, gRPC-Web and gRPC-JSON transcoding, and it terminates HTTP/2 and HTTP/3.
-
-Reach for it as a sidecar or edge proxy when you want those behaviours out of application code and identical across languages. Hand-written Envoy config is verbose and easy to get wrong, so in practice you drive it from a control plane such as Istio or use a gateway built on top of it.
 
 ### Envoy/Istio outlier detection
 **Short:** Mesh-level circuit breaking that ejects an upstream host from the pool after consecutive errors.
