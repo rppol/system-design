@@ -401,26 +401,6 @@ The format is a structured first line — a type, an optional scope, an optional
 
 Adopt it by enforcing the format in a commit-msg hook, since it degrades the moment half the commits are freeform. It says nothing about whether the message is informative — a `fix: bug` still passes the linter.
 
-### Coverage delta
-**Short:** Per-PR coverage of newly added lines only, the figure worth gating on instead of total project coverage.
-**Kind:** concept
-**Lang:** *
-**Roles:** devtools/testing-and-mocking @1
-
-It is computed by intersecting coverage data with the diff for the branch, so the number answers a bounded question: of the lines this change adds or modifies, how many did a test execute. That reframing is what makes coverage gateable. Total project coverage moves too slowly to act on, and a strict absolute threshold on a legacy codebase blocks every pull request until someone backfills tests nobody asked for, so it gets muted within a week.
-
-Gating on the delta ratchets quality upward without a cleanup project: new code is held to a standard, old code improves as it is touched. It still only measures execution, not assertion, so pair it with review — a test that runs a line and asserts nothing counts fully.
-
-### covered
-**Short:** Coverage terminology: a statement counted as covered because the test run executed it at least once.
-**Kind:** concept
-**Lang:** *
-**Roles:** devtools/testing-and-mocking @1
-
-Coverage instrumentation places a counter at each statement or branch and reports the entry as covered when the counter is non-zero after the run. That is the whole definition, and it is why the word promises so much less than it sounds like: a line is covered if any test caused it to execute, regardless of whether the test asserted anything about the result, whether the inputs were meaningful, or whether the other branch was ever taken.
-
-So read it as a lower bound on risk, never as evidence of correctness — uncovered code is definitely untested, while covered code is merely executed. Branch and condition coverage tighten the definition somewhat; mutation testing is the tool that actually asks whether the assertions would notice a change.
-
 ### CUP
 **Short:** Java LALR parser generator with grammar actions written inline in Java; used for legacy grammars.
 **Kind:** tech
@@ -504,12 +484,6 @@ Adopt it on an existing codebase by demoting the noisy checks to warnings first,
 **Roles:** devtools/testing-and-mocking @1
 
 A factory is a class describing how to build one model instance: fields get defaults or sequences, `SubFactory` builds the related object a foreign key needs, and `post_generation` hooks fill many-to-many links -- so a test asks for `UserFactory(is_admin=True)` and receives a valid object with every other field filled plausibly. That is the point: a test should state only the attribute it is about, whereas hand-written fixtures restate every required column and therefore all break together the next time the model changes. It has ORM-specific bases for Django, SQLAlchemy, MongoEngine and plain objects, and pairs with Faker for realistic values. Reach for it once test setup turns repetitive; keep factories minimal and let each test override what it cares about, and remember `build()` never touches the database while `create()` does.
-
-### fail_under = 80
-**Short:** Coverage threshold setting that makes pytest exit non-zero, and CI fail, below the given percentage.
-**Kind:** api
-**Lang:** python
-**Roles:** devtools/testing-and-mocking @1, platform-delivery/ci-cd-and-release @3
 
 ### faker
 **Short:** Generates realistic fake names, addresses and other field data for test fixtures and factories.
@@ -627,6 +601,16 @@ It speaks the OpenAI-compatible chat and completions APIs as well as Triton's, s
 
 Every clone holds the entire object database and history, so commit, branch, diff, blame and log are local operations and the network appears only at fetch, pull and push. That model is why branching is cheap enough to be the default unit of work, and why history can be rewritten freely before it is shared and only with care afterwards. Beyond code it is the honest baseline for versioning anything textual, including prompts, Terraform, Kubernetes manifests and config, which get review, blame and rollback for free; GitOps is built on exactly that observation. Large binaries are its weak spot, which is what LFS exists to patch.
 
+### git bisect
+**Short:** Binary search over commit history: mark one good and one bad commit and git walks you to the one that broke it.
+**Kind:** tech
+**Lang:** *
+**Roles:** devtools/version-control-and-workbench @1
+
+You give it a known-bad and a known-good revision and it checks out the midpoint, you report the result, and it halves the remaining range each time - so a thousand-commit window is about ten tests. `git bisect run <cmd>` automates the loop entirely: any command whose exit status distinguishes good from bad turns the whole search into one invocation.
+
+Reach for it whenever a regression has a cheap reproducible test and the introducing commit is not obvious from the diff, which is most performance regressions and most flaky-behaviour changes. It needs a history that builds at every step - a broken intermediate commit forces `git bisect skip` and widens the answer to a range. Unrelated to Python's `bisect` module, which shares only the name.
+
 ### git filter-repo
 **Short:** Fast git history rewriter that purges leaked secrets or large blobs from every commit; replaces filter-branch.
 **Kind:** tech
@@ -702,16 +686,6 @@ This is how you test an annotation processor properly, because the alternative i
 GraalVM is an OpenJDK distribution whose JIT is the Graal compiler, written in Java, plus two things a stock JDK lacks: the `native-image` ahead-of-time compiler and Truffle, a language-implementation framework whose interpreters for JavaScript, Python, Ruby and WebAssembly are partially evaluated by Graal into optimized machine code and can share objects with Java in one process.
 
 In practice teams adopt it for one of two very different reasons. Run it as a JVM and you get the Graal JIT's stronger escape analysis and inlining on some workloads. Build with `native-image` and you trade peak throughput and every dynamic feature for millisecond startup and a small resident set — the right bargain for CLIs, functions and scale-to-zero services, and usually the wrong one for a long-lived throughput-bound server.
-
-### GraalVM CE
-**Short:** JDK distribution whose native-image AOT compiler turns a JVM application into a fast-starting native binary.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @2
-
-Community Edition is the free, GPLv2-with-Classpath-Exception build of GraalVM, produced from the open-source repository and released on the same six-month cadence as the JDK it tracks. It carries the Graal JIT, `native-image` and the Truffle languages, so functionally it builds the same native binaries as the commercial distribution.
-
-The difference is the optimizer, not the feature list: Oracle GraalVM adds enterprise-only compiler work such as G1 for native images, profile-guided optimization of the AOT build, and additional memory and throughput optimizations, along with a support contract. Start on CE — it is enough to know whether native image suits the application at all — and evaluate Oracle GraalVM, or Red Hat's Mandrel and BellSoft's Liberica NIK, only once the binary's steady-state numbers are the thing you are optimizing.
 
 ### GraalVM native-image
 **Short:** Ahead-of-time compiler that turns a JVM application into a self-contained native binary with fast startup.
@@ -1052,30 +1026,6 @@ As a Maven or Gradle plugin it fails the build when a change violates the rules 
 The reference Java compiler parses source into an AST, resolves and type-checks it, desugars the language features that have no bytecode representation — generics erased, lambdas turned into `invokedynamic` call sites, inner classes given synthetic accessors, enhanced `for` rewritten — and writes class files. It resolves against a classpath, a module path, or both, and `--release N` compiles against the historical API of an older JDK rather than merely targeting its bytecode version.
 
 It is also an extension point: annotation processors run in rounds before compilation completes and may generate new sources, and a compiler plugin such as Error Prone inspects the same AST to turn bug patterns into errors. Two flags earn their keep in any build — `-Xlint:all` and `-Werror`.
-
-### javac --module-path
-**Short:** javac flag compiling against JPMS modules on a module path rather than (or alongside) the flat classpath.
-**Kind:** api
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @2
-
-### javac -g
-**Short:** Compiles with full debug info, keeping LocalVariableTable and LineNumberTable in the class file for debuggers.
-**Kind:** api
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @2
-
-### javac -Xdiags:verbose
-**Short:** javac flag expanding terse inference errors into the required/found/reason block with capture variables named.
-**Kind:** api
-**Lang:** java
-**Roles:** devtools/compiler-toolchain-and-codegen @1, runtime-systems/runtime-internals-and-types @3
-
-### javac -Xlint:all
-**Short:** javac flag enabling every lint category, surfacing unchecked, deprecation and rawtypes warnings builds usually hide.
-**Kind:** api
-**Lang:** java
-**Roles:** devtools/static-analysis-and-linting @1, devtools/compiler-toolchain-and-codegen @2
 
 ### JavaCC
 **Short:** Java parser generator producing recursive-descent LL(k) parsers from a grammar with embedded Java actions.
@@ -1615,16 +1565,6 @@ Mockito builds test doubles at runtime: `mock()` returns an object whose methods
 
 Since 5.0 the inline mock maker is the default, so final classes and final methods mock without an extra dependency. Two habits keep it healthy: prefer stubbing types you own — wrap a third-party client in your own interface rather than mocking its API surface — and treat heavy use of `mockStatic` as a signal that a static dependency should have been injected.
 
-### Mockito and other test doubles
-**Short:** Mocking libraries that generate proxies recording invocations and returning stubbed values to isolate a unit under test.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/testing-and-mocking @1, apis-frameworks/design-patterns-and-principles @3
-
-A mocking library generates a subclass or proxy of the collaborator's type at run time whose methods record each invocation and return either a configured value or the type's default, which is what lets one test control a dependency's behaviour and then assert on how it was called. The vocabulary matters when reading tests: a stub only supplies answers, a mock also has expectations about interactions, a spy wraps a real object and intercepts selected calls, and a fake is a working lightweight implementation such as an in-memory repository.
-
-Use doubles for what is slow, remote or nondeterministic. Mocking types you do not own couples the test to a third party's API shape, and asserting on interactions rather than outcomes produces tests that break on every refactor — a fake is often the more durable choice.
-
 ### Mockito with constructor injection
 **Short:** Testing dependencies as constructor-injected mocks; difficulty doing so is the signal that DIP has been violated.
 **Kind:** concept
@@ -1808,12 +1748,6 @@ That is why it settles arguments no amount of reading source can: whether a call
 It starts a real HTTP server on an ephemeral local port and serves responses you enqueue in order, each with a status, headers, body, optional throttling or a deliberate disconnect; after the call, `takeRequest()` returns the request the server actually received, so the test asserts on the method, path, headers and body that went over the wire.
 
 Because it is real HTTP, the client under test uses its own configuration — interceptors, connection pool, timeouts, retry policy, serialization — which is exactly the layer that a mocked client object skips and where the bugs are. The queue model keeps it small and makes it a poor fit for many interleaved endpoints; WireMock's matcher-based stubbing handles that shape better, and MockWebServer wins on being a single test dependency with no server to configure.
-
-### omit
-**Short:** coverage.py setting excluding files from the report; it shrinks the denominator and inflates the percentage.
-**Kind:** api
-**Lang:** python
-**Roles:** devtools/testing-and-mocking @1
 
 ### Oracle GraalVM
 **Short:** Oracle's GraalVM distribution: a JDK with the Graal JIT and the native-image ahead-of-time compiler.
@@ -2463,16 +2397,6 @@ Around it sit MockMvc and `WebTestClient` for the web layer, `@Sql` for per-test
 **Lang:** python
 **Roles:** devtools/testing-and-mocking @1, apis-frameworks/web-framework-and-http-client @2
 
-### Static checking
-**Short:** Verifying types and errors before execution with tools like mypy or pyright, rather than discovering them at runtime.
-**Kind:** concept
-**Lang:** *
-**Roles:** devtools/static-analysis-and-linting @1, runtime-systems/runtime-internals-and-types @2
-
-A static checker builds a model of the program from its source and annotations and reasons about all paths through it without executing any of them, which is why it finds the branch your tests never took — the `None` that is not handled, the caller a refactor missed, the argument whose type stopped matching. It is a proof about the shapes values may take, not about the values themselves.
-
-That boundary is the thing to keep straight. Types are erased at run time in Python and largely so in Java, so a checker says nothing about data arriving from a request, a file or a database; that still needs validation with Pydantic or explicit checks. And a gradual checker's default configuration proves very little — `--strict` or its equivalent is where it starts being load-bearing.
-
 ### stress-ng
 **Short:** Linux load generator stressing CPU, memory, I/O and other subsystems; used for chaos and capacity experiments.
 **Kind:** tech
@@ -2518,16 +2442,6 @@ That it deploys for real is both the value and the cost: it validates what the p
 A test declares the dependency it needs — `PostgreSQLContainer`, `KafkaContainer`, or `GenericContainer` for anything else — and the library starts that image, waits on a real readiness signal, hands the test a generated JDBC URL or bootstrap-servers string, and tears the container down afterwards. The test therefore runs against the actual engine, so migrations, dialect quirks, isolation-level behavior and serializer wiring are exercised rather than approximated by H2 or an embedded broker.
 
 The cost is startup time and a Docker daemon in CI; container reuse and singleton containers exist to amortize it across a class or a suite. Reach for it for integration tests where fidelity is the point, and keep unit tests container-free.
-
-### Testcontainers 1.20.x
-**Short:** Library that starts real dependencies (Postgres, Kafka, Redis) in throwaway containers for integration tests.
-**Kind:** tech
-**Lang:** java
-**Roles:** devtools/testing-and-mocking @1, platform-delivery/container-and-image @2
-
-The 1.x line is the mature Java branch, and the details that matter in practice sit around the container lifecycle rather than in the API. A `@Container` field on a JUnit 5 test is started per test method if non-static and per class if static; `withReuse(true)` plus an opt-in in `~/.testcontainers.properties` keeps a container alive across runs for a fast local loop; and Ryuk, a sidecar container, reaps anything left behind when the JVM dies so a crashed build does not leak.
-
-Wiring the assigned port into Spring is `@DynamicPropertySource`, or `@ServiceConnection` in recent Boot versions, which removes the boilerplate entirely. Pin the image tag rather than using `latest`, otherwise the test's meaning changes silently when upstream publishes.
 
 ### Testcontainers Kafka
 **Short:** Testcontainers module that boots a real Kafka broker in Docker for integration tests instead of a mock.

@@ -1897,16 +1897,6 @@ Tetragon attaches eBPF programs to kernel hooks covering syscalls, process execu
 
 Reach for it in Kubernetes when you want low-overhead runtime detection, or synchronous enforcement that does not depend on a userspace agent reacting in time. The requirements and costs are real: a recent kernel with the right eBPF support, policies expressed at the syscall and argument level rather than in behavioural language, and a genuine risk of killing legitimate processes if an enforcing policy ships without an observation period. Falco is the neighbouring tool with a broader out-of-the-box rule set.
 
-### TF Privacy
-**Short:** TensorFlow library for differentially private training via gradient clipping, noise and an epsilon accountant.
-**Kind:** tech
-**Lang:** python
-**Roles:** security/privacy-and-compliance @1, model-training/deep-learning-framework @3
-
-The package supplies drop-in differentially private optimizers for Keras and TensorFlow: each example's gradient is clipped to a fixed L2 norm so no single record can dominate an update, Gaussian noise scaled to that bound is added to the summed batch gradient, and microbatching controls the memory-versus-fidelity trade of computing per-example gradients. A separate accountant converts the noise multiplier, sampling probability and step count into the epsilon and delta you can state.
-
-Reach for it when the model trains on personal records and you need a formal bound on what it memorises rather than a policy that it should not. Expect two concrete costs: training is substantially slower because per-example gradients defeat the usual batching, and accuracy degrades as epsilon tightens, especially on small or imbalanced datasets. Choose epsilon before training rather than reporting whatever the run happened to produce, since that number is the claim you will have to defend.
-
 ### Tink
 **Short:** Google's misuse-resistant crypto library over JCA: safe AEAD, signing and key rotation defaults.
 **Kind:** tech

@@ -219,16 +219,6 @@ The file opens with a header of key-value metadata covering architecture, hyperp
 
 It is the format llama.cpp and everything built on it consume, which is why a local model is a single file to download and run. The tradeoffs are that it is a distribution and inference format rather than a training one, so weights are converted into it rather than produced in it, and that every new architecture needs explicit support in both the converter and the runtime before any file can exist.
 
-### GGUF format
-**Short:** Single-file quantized model container used by llama.cpp: weights, tokenizer and metadata in one mmap-friendly file.
-**Kind:** spec
-**Lang:** *
-**Roles:** inference/model-format-and-edge @1, inference/quantization-and-compression @2
-
-Each tensor in the file carries its own quantization type, which is why the format names describe per-tensor schemes rather than one model-wide setting. The k-quant types store weights in blocks with a shared scale and, in the larger variants, a second level of scaling over super-blocks, and the medium and small suffixes describe which tensors get extra bits, since attention and embedding tensors are more sensitive than feed-forward ones. An importance matrix collected from calibration text can steer that allocation further.
-
-The practical consequence is that a model name plus a quantization suffix is a complete description of what you are downloading, and mixing schemes within one file is normal. Choose by fitting the file plus the KV cache into available memory. The mid-range four-bit k-quants are the usual compromise, and dropping to two or three bits degrades quality sharply rather than gracefully.
-
 ### GGUF quantization comparison
 **Short:** The perplexity-versus-size tradeoff table across GGUF quant levels, used to pick a local-model quantization.
 **Kind:** concept
@@ -434,16 +424,6 @@ Reach for it when the model must run on the user's device for privacy, offline u
 Rather than making you pick a conversion path, it takes a model and a dataloader and tries the paths in parallel, across TorchScript, ONNX at several opset levels and TensorRT at several precisions, then verifies each result against the source within a tolerance you set and profiles the ones that survive. What comes back is a package of working formats with their measured latency and throughput, and the failures reported with a reason rather than silently dropped.
 
 That is the value: the usual manual loop of export, hit an unsupported operator, adjust, re-export, then discover the fast variant is numerically wrong, is automated. Reach for it when preparing a model for Triton or TensorRT deployment. It is a build-time tool tied to the NVIDIA stack, and the artifacts it produces, rather than the tool itself, are what you deploy.
-
-### Model serving
-**Short:** The serving layer that exposes a trained model as an endpoint: batching, versioning and replica autoscaling.
-**Kind:** concept
-**Lang:** *
-**Roles:** inference/model-server @1
-
-Serving is a different problem from training even though the model is the same. The system holds weights resident and answers requests under a latency objective, so the operational surface becomes batching policy, replica count and how a new version is introduced. Server-side batching is the lever that decides accelerator economics: requests arriving separately are grouped for a few milliseconds so one forward pass does the work of many, trading tail latency for utilization.
-
-The rest is ordinary production engineering with model-shaped details: versioned artifacts pulled from a registry, readiness probes that account for a slow warm-up, autoscaling on queue depth rather than CPU, canary rollout compared on output quality rather than only on error rates, and logging of inputs and predictions so drift can be detected later. Whether you build this or adopt a server depends mostly on how many models and frameworks you have.
 
 ### Model-control sidecars
 **Short:** A sidecar or init job calling Triton's model-control API, so which models a replica loads is decoupled from its image.
@@ -682,16 +662,6 @@ Reach for it when long contexts and constant memory matter more than peak qualit
 The layout is deliberately dull: a length prefix, a JSON header mapping each tensor name to its dtype, shape and byte range, then the raw tensor data. Loading memory-maps the file and constructs tensors as views over those ranges, so nothing is deserialized and nothing is copied, and pages fault in as they are touched, which is also what makes lazy loading of individual tensors possible. Parsing the header cannot execute anything, because it is data and the format has no callbacks.
 
 That last property is why it became the default. A `.pt` or `.bin` file is a Python pickle, and unpickling runs code by design, so downloading a checkpoint from an untrusted source was arbitrary code execution. Prefer it for anything you publish or consume, and convert legacy checkpoints once rather than loading pickles repeatedly in production.
-
-### Seldon
-**Short:** Kubernetes model-serving control plane: CRDs for inference graphs, ensembles, canary and autoscaling.
-**Kind:** tech
-**Lang:** *
-**Roles:** inference/model-server @1, ml-lifecycle/ml-platform-and-pipelines @2, platform-delivery/kubernetes-and-orchestration @2
-
-You describe an inference graph as a Kubernetes custom resource -- a model, or a pipeline with transformers, a router doing A/B or a bandit, a combiner and an explainer -- and the controller creates the deployments, wiring, metrics and traffic split for you. It runs many runtimes underneath, including Triton, so it composes and routes rather than executing the model itself.
-
-Reach for it when serving many models on Kubernetes should be declarative infrastructure reviewed like any other manifest. For a single model, a plain deployment of your model server is far less machinery, and the licence terms of newer releases are worth checking before you standardise on it.
 
 ### Seldon Core
 **Short:** Kubernetes-native model serving: inference graphs of models and transformers as CRDs, with drift/outlier sidecars.

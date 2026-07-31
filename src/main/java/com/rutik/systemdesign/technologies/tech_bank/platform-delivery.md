@@ -499,16 +499,6 @@ Cilium attaches eBPF programs to kernel hooks on each node, so forwarding, load 
 
 Reach for it when policy must be identity-aware or protocol-aware, when iptables rule volume has become a scaling problem, or when you want mesh features without a sidecar per pod. The price is a recent kernel and a genuinely deep system to debug when something misbehaves; Calico is the simpler choice if plain NetworkPolicy is all you need.
 
-### Cilium eBPF
-**Short:** eBPF-based Kubernetes CNI and service dataplane, replacing kube-proxy with in-kernel load balancing and policy.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/kubernetes-and-orchestration @1, traffic-edge/service-mesh-and-discovery @2, runtime-systems/io-networking-and-syscalls @3
-
-In kube-proxy replacement mode Cilium implements Service semantics in eBPF maps consulted by programs attached at the socket and network-device layers, so a ClusterIP connection from a pod is translated at connect time rather than traversing NAT rules on every packet, and node-port traffic can be handled at the driver's XDP hook before the kernel even builds a socket buffer. Lookups are hash-map based, so their cost does not grow with the number of services the way a linear iptables chain does.
-
-This is what you turn on when a large cluster's iptables rule set has become the bottleneck, with rule regeneration time, connection setup latency and node-port throughput as the symptoms. It requires a modern kernel with the relevant eBPF features, and it moves the service datapath somewhere traditional tools cannot see, so `iptables-save` shows nothing and debugging means `cilium monitor` and Hubble instead of the tooling everyone already knows.
-
 ### CircleCI
 **Short:** Hosted CI/CD service running build, test and deploy pipelines defined in a YAML config inside the repository.
 **Kind:** tech
@@ -1772,14 +1762,6 @@ It suits platform teams standardising delivery on Kubernetes, especially alongsi
 **Kind:** tech
 **Lang:** *
 **Roles:** platform-delivery/infrastructure-as-code-and-config @1, platform-delivery/cloud-platform-and-cost @3
-
-You describe the desired infrastructure in HCL; Terraform reads the current world through provider plugins, diffs it against a state file mapping your resources to real ids, and `plan` shows exactly what it would create, change or destroy before `apply` acts. The state file is the whole operational story: it must live in remote, locked storage because two concurrent applies against one state corrupt it, and anything created outside Terraform is invisible until imported. Reach for it to make environments reproducible and reviewable across clouds and SaaS providers, and always read the plan for replacements, since a seemingly small attribute change can mean destroy-and-recreate. OpenTofu is the community fork that exists because Terraform moved from an open-source licence to the BUSL.
-
-### Terraform CLI
-**Short:** The Terraform binary running init/plan/apply/destroy against providers and state to reconcile declared infrastructure.
-**Kind:** tech
-**Lang:** *
-**Roles:** platform-delivery/infrastructure-as-code-and-config @1
 
 The commands split by what they touch. `init` downloads providers and modules and configures the backend, writing the lock file; `validate` and `fmt` never touch state; `plan` refreshes state against the real world and produces a diff you can save as a file; and `apply` executes it. Around those sit the state operations: `state list`, `state mv` for a refactor that would otherwise destroy and recreate a resource, `import` to bring an existing resource under management, and `apply -replace` for a forced rebuild. Workspaces give one configuration several independent states.
 

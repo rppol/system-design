@@ -763,16 +763,6 @@ The standard defines a run event -- a JSON document naming a job, a run id, a st
 
 Reach for it to avoid coupling pipelines to one catalog vendor: the same emitters work whether events land in Marquez, DataHub, OpenMetadata or a commercial platform, which makes the backend a replaceable decision. What a specification cannot give you is the product -- it collects events, it does not store, visualize or govern them -- and coverage depends on each integration's quality, with column-level lineage still uneven across producers.
 
-### Orchestration
-**Short:** Scheduling and sequencing pipeline steps with a DAG engine such as Airflow or Kubeflow Pipelines.
-**Kind:** concept
-**Lang:** *
-**Roles:** data-movement/workflow-and-durable-execution @1, ml-lifecycle/ml-platform-and-pipelines @2
-
-The defining feature is a central component that owns the graph: it knows the dependencies between steps, decides what may start, records every attempt, retries what failed and holds back what should not proceed. That is what makes a partially failed pipeline restartable from the point of failure rather than from the beginning, and what gives one place to answer when something last ran and why it stopped. The contrast is choreography, where each service reacts to events and nothing holds the whole picture.
-
-Reach for orchestration when steps have real dependencies, when a run must be re-executed over historical dates, and when someone will eventually have to explain a failed run to a stakeholder. The costs are a scheduler and metadata store to operate, and the standing temptation to migrate business logic into pipeline definitions. Event-driven choreography stays looser and scales better across teams, at the price of no single view of a workflow.
-
 ### Pachyderm
 **Short:** Kubernetes-native data versioning and pipeline system giving every run content-addressed, reproducible lineage.
 **Kind:** tech

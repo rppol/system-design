@@ -103,16 +103,6 @@ One API - `create_task_group`, `move_on_after` and `fail_after`, `to_thread.run_
 
 Starlette and FastAPI use it internally, which explains behaviour you will meet directly: a synchronous `def` endpoint or a synchronous dependency is run in anyio's worker thread pool, whose default limiter allows 40 concurrent threads - once blocking calls exceed that, requests queue there rather than in your code. Its bundled pytest plugin runs the same async tests on both backends.
 
-### anyio 4.x
-**Short:** Backend-agnostic async library giving task groups and structured cancel scopes on top of asyncio or trio.
-**Kind:** tech
-**Lang:** python
-**Roles:** runtime-systems/concurrency-and-async @1
-
-Its core idea is structured concurrency: a task group's `async with` block does not exit until every child task has finished, and an exception cancels the siblings and propagates, so a background task cannot be silently orphaned or swallow its own error. Cancel scopes make timeouts composable and nestable -- `move_on_after` and `fail_after` -- and it also provides portable sockets, files, streams, semaphores and `to_thread`.
-
-Reach for it when writing a library that must run under either asyncio or trio without picking for its caller. Plain applications may not need it any more, since asyncio ships its own `TaskGroup` and `timeout`, though anyio's cancel-scope semantics are still the more predictable model.
-
 ### Apache Commons Collections 4 IteratorUtils
 **Short:** Commons Collections helper producing filtering, chaining and looping iterator decorators over any source.
 **Kind:** api
@@ -160,12 +150,6 @@ Reach for it when a protocol genuinely has named states with legal and illegal t
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
-
-### array module
-**Short:** Python stdlib module giving compact, typed, C-backed numeric arrays instead of boxed lists.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/collections-and-algorithms @1, runtime-systems/memory-processes-and-os @3
 
 ### array of ints
 **Short:** A plain int array used as a compact bit set - the hand-rolled backing for Bloom filters and bitmask DP.
@@ -239,12 +223,6 @@ Reach for it when the universe is dense and known, or when implementing somethin
 
 ### asyncio.TaskGroup
 **Short:** Structured-concurrency context manager that spawns child tasks and awaits them all, cancelling on failure.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/concurrency-and-async @1
-
-### asyncio.TaskGroup [3.11]
-**Short:** Python 3.11 structured-concurrency scope that awaits child tasks and raises an ExceptionGroup on failure.
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1
@@ -349,12 +327,6 @@ Reach for it to confirm that an implementation behaves the way its analysis clai
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1, devtools/version-control-and-workbench @2
 
-### bisect module
-**Short:** Python stdlib binary search and sorted-insert helpers over an already-sorted sequence in O(log n).
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/collections-and-algorithms @1
-
 ### Bitset
 **Short:** Compact bit-array structure storing one bit per element; the backing for Bloom filters and bitmask dynamic programming.
 **Kind:** concept
@@ -446,12 +418,6 @@ Reach for it as the first screen on a host you have a terminal into and a vague 
 It is a port of Mozilla's universal charset detector and runs several probers over the byte stream at once: an escape-sequence prober, a multi-byte prober checking whether byte sequences are valid for each candidate, and a single-byte prober comparing character frequencies against per-language models. Each returns a confidence and the highest wins, so the result is a guess with a number attached rather than a fact.
 
 Reach for it only where the encoding is genuinely unknown, such as legacy uploads or scraped pages whose charset header is absent or lying. It needs a reasonable amount of text, the single-byte Windows codepages are frequently indistinguishable on short input, and it returns a confident wrong answer rather than admitting defeat. Where a BOM or header declares the encoding, believe the declaration.
-
-### chars
-**Short:** Java String.chars() streaming UTF-16 code units; contrast with codePoints() when correctness above the BMP matters.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/text-encoding-and-regex @1
 
 ### charset-normalizer
 **Short:** Pure-Python statistical character-encoding detector; heuristic replacement for chardet.
@@ -599,12 +565,6 @@ For a typical server, where strings and their arrays are usually the largest liv
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1
 
-### concurrent.futures.ProcessPoolExecutor
-**Short:** Python executor that runs work in separate processes, sidestepping the GIL for CPU-bound tasks behind a futures API.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/memory-processes-and-os @2
-
 ### concurrent.interpreters
 **Short:** Python stdlib API for multiple interpreters in one process, each with its own GIL, for CPU-bound work without IPC.
 **Kind:** api
@@ -695,32 +655,6 @@ The command line is a thin shell over libcurl, which implements HTTP/1.1, HTTP/2
 
 Its real value is as a reproduction case: a curl line is a bug report anyone can run, and if curl reproduces the failure the client library is not the cause. The timing breakdown separates slow DNS from slow connection setup from slow server think time. Two cautions: `-k` disables certificate verification and has no business in a committed script, and curl is a client, not a load generator.
 
-### curl --http3
-**Short:** curl flag that forces an HTTP/3 over QUIC request, for testing HTTP/3 endpoints from the command line.
-**Kind:** api
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @3, devtools/testing-and-mocking @3
-
-### curl -v
-**Short:** Verbose curl invocation that prints the request/response headers and TLS handshake for endpoint debugging.
-**Kind:** tech
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @3
-
-The `-v` flag makes curl narrate the whole exchange: DNS resolution and connection, the TLS handshake with the negotiated protocol version, cipher and certificate chain, the exact request headers it sent, and the response status and headers it got back. That is how you separate a DNS failure from a TLS failure from a 502, and how you confirm which headers a proxy or gateway actually added, rewrote or stripped on the way through.
-
-Related flags cover the rest: `-i` includes response headers with the body, `-I` sends a HEAD request, `--resolve` pins a hostname to an address so you can test one backend directly, and `--trace-ascii` dumps raw bytes when headers are not enough. Reach for curl before reaching for a client library — if curl reproduces the problem, your application code is not the cause.
-
-### curl -v --http2
-**Short:** curl invocation that negotiates HTTP/2 and prints the handshake, so you can verify protocol and headers.
-**Kind:** tech
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, apis-frameworks/web-framework-and-http-client @2, devtools/testing-and-mocking @3
-
-Over TLS, asking for HTTP/2 means offering `h2` in the ALPN extension during the handshake, and the verbose output prints exactly what was offered and what the server selected, so you can see whether the connection is really HTTP/2 or quietly fell back to HTTP/1.1. Over plaintext the flag attempts the `Upgrade` handshake instead, and a prior-knowledge variant skips negotiation entirely.
-
-Reach for it to establish which protocol each hop actually speaks, since the common surprise is an edge that terminates HTTP/2 from clients and forwards HTTP/1.1 to the origin, with a header lost at the seam. What you do not get is frame-level detail: HPACK table state, stream identifiers and window updates need `nghttp -nv`, `--trace` or a packet capture.
-
 ### Cython with nogil
 **Short:** Compiles annotated Python to C and releases the GIL inside nogil blocks so CPU hotspots run truly in parallel.
 **Kind:** tech
@@ -746,12 +680,6 @@ Reach for it when data-munging code is genuinely a chain of many small transform
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1, runtime-systems/collections-and-algorithms @2, apis-frameworks/design-patterns-and-principles @3
-
-### dataclasses [3.7]
-**Short:** Python decorator generating __init__, __repr__, __eq__ and optional slots/frozen from annotated class attributes.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/runtime-internals-and-types @1, apis-frameworks/data-formats-and-api-contracts @3
 
 ### datetime
 **Short:** Python stdlib module for date and time values, arithmetic with timedelta, time zones and ISO parsing/formatting.
@@ -878,12 +806,6 @@ Reach for it for large collections of numbers, such as identifier sets, counters
 It talks to the network driver beneath the IP stack: `-S` dumps driver and hardware counters, including the per-queue drop counters that explain loss no application log records; `-g` and `-G` read and resize the receive and transmit rings; `-k` and `-K` toggle offloads such as TSO and checksum offload; `-C` tunes interrupt coalescing; and the bare command shows negotiated speed, duplex and link state.
 
 Reach for it when packets are disappearing and you need to know whether the NIC dropped them before the kernel ever saw them; the classic finding is an undersized receive ring under bursty traffic. The costs: counter names are driver-specific so there is no portable meaning, changes do not survive a reboot, and disabling an offload to make a capture readable will cost real throughput if you forget to restore it.
-
-### Executors
-**Short:** java.util.concurrent factory class for thread pools, scheduled pools and virtual-thread-per-task executors.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/concurrency-and-async @1, apis-frameworks/design-patterns-and-principles @3
 
 ### Executors.newVirtualThreadPerTaskExecutor
 **Short:** Java 21 executor that starts one virtual thread per submitted task instead of pooling platform threads.
@@ -1229,12 +1151,6 @@ One side runs as a server and the other as a client; the client opens a control 
 
 Reach for it to establish what a path can carry before blaming an application: a service moving forty megabytes per second across a link that saturates above a gigabit has an application problem. The traps: it needs a cooperating server at the far end, it deliberately saturates the link so it will hurt production traffic sharing that path, and a single TCP stream over a long path is limited by window size rather than the link.
 
-### iperf3 -c server
-**Short:** iperf3 client mode: drives a TCP or UDP stream against a server to measure achievable throughput.
-**Kind:** api
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, devtools/testing-and-mocking @3
-
 ### iptables
 **Short:** Linux netfilter CLI configuring L3/L4 packet filtering, NAT and port-forwarding rules inside the kernel.
 **Kind:** tech
@@ -1413,12 +1329,6 @@ You still meet it everywhere, because Docker's published ports and kube-proxy's 
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @2
 
-### java.util.ArrayDeque
-**Short:** Resizable circular-array deque; the fastest Java stack and queue and the standard iterative DFS/BFS structure.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/collections-and-algorithms @1
-
 ### java.util.Arrays.asList
 **Short:** Wraps an array as a fixed-size List view: writes pass through to the backing array, add and remove throw.
 **Kind:** api
@@ -1484,12 +1394,6 @@ You still meet it everywhere, because Docker's published ports and kube-proxy's 
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/concurrency-and-async @1, apis-frameworks/design-patterns-and-principles @2, apis-frameworks/rpc-graphql-and-streaming @3
-
-### java.util.concurrent.locks.ReentrantLock
-**Short:** JDK mutex offering tryLock, timed acquisition and optional fairness, beyond what synchronized provides.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/concurrency-and-async @1
 
 ### java.util.concurrent.locks.StampedLock
 **Short:** JDK lock offering an optimistic read mode with validation, plus upgradable read and write locks.
@@ -1563,23 +1467,11 @@ You still meet it everywhere, because Docker's published ports and kube-proxy's 
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, apis-frameworks/design-patterns-and-principles @3
 
-### java.util.stream.Collectors
-**Short:** The JDK's built-in terminal collectors for streams: toList, groupingBy, joining, partitioningBy and friends.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/collections-and-algorithms @1
-
 ### java.util.stream.Stream
 **Short:** Java's core stream API: lazy pipelines of map/filter/reduce over a source, with an opt-in parallel execution mode.
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/collections-and-algorithms @1, runtime-systems/concurrency-and-async @3
-
-### java.util.TreeMap
-**Short:** Red-black tree map giving sorted iteration and O(log n) floor, ceiling, headMap and subMap range queries.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/collections-and-algorithms @1
 
 ### javap -p -s <class>
 **Short:** JDK disassembler printing the erased type descriptors and members the JVM actually links against.
@@ -1596,18 +1488,6 @@ This is how you answer questions the source cannot: what a lambda compiled to, w
 **Kind:** api
 **Lang:** java
 **Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2
-
-### JFR event jdk.VirtualThreadPinned
-**Short:** JFR event that fires when a virtual thread pins its carrier, the main scalability trap in Loom code.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/concurrency-and-async @1, observability/profiling-and-performance @2
-
-### jstat -gcutil <pid> 1s
-**Short:** JDK command printing live heap-region utilization and GC counts each second, with no agent attached.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/memory-processes-and-os @1, observability/profiling-and-performance @2, runtime-systems/runtime-internals-and-types @3
 
 ### JVM stack size -Xss
 **Short:** JVM flag setting per-thread stack size (default ~512 KB-1 MB); raise it for deeply recursive algorithms.
@@ -1716,12 +1596,6 @@ Reach for it when a single process must move millions of events per second throu
 It walks every process's file-descriptor table and prints one row per open object with the owning process and user, the descriptor number, its type and its name. Because on Unix nearly everything is a file descriptor, that listing covers regular files, pipes, sockets, memory-mapped libraries and deleted-but-still-open inodes alike, and it filters by address, by process or by directory.
 
 Two situations make it indispensable. A too-many-open-files error is a descriptor leak, and counting a process's rows against its limit shows which kind is accumulating, usually sockets stuck in CLOSE_WAIT because the code never closed its side. And a filesystem reporting full while directory sizes account for nothing is a deleted file still held open, which shows here marked deleted. It is slow on a large host and needs root to see other users.
-
-### lsof -i
-**Short:** lsof invocation listing open network sockets with owning process, port and connection state.
-**Kind:** api
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @3
 
 ### lsquic
 **Short:** LiteSpeed's C implementation of QUIC and HTTP/3, embeddable as a client or server transport library.
@@ -1951,12 +1825,6 @@ Reach for it as the layer beneath curl, because it proves TCP reachability with 
 
 On Linux it is superseded by `ss` from iproute2, which reads socket state over netlink instead of parsing `/proc` and is dramatically faster on a host with many connections; the flags are close enough that `ss -tan` reads the same as `netstat -tan`. Learn to read the states themselves - that knowledge transfers to whichever tool is installed.
 
-### netstat -s
-**Short:** Per-protocol network statistics dump showing retransmits, resets and drops accumulated by the TCP/IP stack.
-**Kind:** api
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, observability/metrics-and-monitoring @3
-
 ### Netty
 **Short:** Asynchronous NIO network framework underlying WebFlux, gRPC-Java and high-throughput WebSocket/UDP/QUIC servers.
 **Kind:** tech
@@ -2044,12 +1912,6 @@ The pairing to remember is ngtcp2 for transport plus nghttp3 for HTTP/3, which i
 It sends crafted packets and infers state from what comes back: a SYN scan tells open from closed from filtered, `-sV` matches banners and probe responses to a service and version, `-O` fingerprints the operating system from TCP/IP stack quirks, and NSE scripts run deeper checks such as enumerating TLS ciphers or known weak configurations.
 
 Reach for it to verify what a host actually exposes against what the security group or firewall rule claims -- the two disagree more often than anyone expects. Scanning infrastructure you do not own or have written permission to test is hostile traffic and in many jurisdictions illegal.
-
-### nmap --scan-flags SYN
-**Short:** nmap invocation sending bare SYN packets to detect open ports without completing the TCP handshake.
-**Kind:** api
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, security/supply-chain-and-runtime-security @2
 
 ### node --trace-opt --trace-deopt
 **Short:** Node flags that log V8 TurboFan optimization and deoptimization decisions, showing which functions keep bailing out.
@@ -2146,16 +2008,6 @@ Essentially every other array library in Python builds on it or copies its inter
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
-
-### O(1) strategy
-**Short:** beartype's default runtime type-check strategy: spot-check one element of a container instead of every element.
-**Kind:** concept
-**Lang:** python
-**Roles:** runtime-systems/runtime-internals-and-types @1
-
-Rather than validating every element of a container, the checker verifies the container's own type and then a single element chosen by an index that varies between calls, so the work per call is constant whether the list holds ten items or ten million. Across the many calls a running service makes, the sampling covers the data statistically, so a systematically wrong element type surfaces quickly.
-
-This is what makes runtime type checking affordable on a hot path, because the honest alternative of walking the data is linear in its size and turns the check into the dominant cost of the function it guards. The trade is stated rather than hidden: detection is probabilistic, so a single mistyped element in a large container can pass unnoticed. Where you need certainty, a validating parser that inspects every field is the right tool.
 
 ### Objects.hash
 **Short:** JDK helper that composes a null-safe hashCode from several fields, matching an equals implementation.
@@ -2280,12 +2132,6 @@ Reach for it when doing conventional inferential statistics and you want the com
 **Kind:** api
 **Lang:** cpp
 **Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/memory-processes-and-os @2
-
-### PriorityQueue
-**Short:** Java's binary min-heap; ordered by comparator on poll, not FIFO despite the name.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/collections-and-algorithms @1
 
 ### ProcessPoolExecutor
 **Short:** Pool of worker processes executing submitted callables in parallel, sidestepping the GIL at IPC cost.
@@ -2422,12 +2268,6 @@ Reach for it when you want a QUIC stack that carries a very large share of a maj
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/text-encoding-and-regex @1
-
-### re module
-**Short:** Python's regular expression engine - a backtracking NFA, so adversarial patterns can blow up to exponential time.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/text-encoding-and-regex @1, runtime-systems/collections-and-algorithms @3
 
 ### RE2
 **Short:** Google's automaton-simulating regex engine: linear-time matching, immune to catastrophic backtracking.
@@ -2693,12 +2533,6 @@ It is the general structure where a Fenwick tree is the specialised one: any ass
 **Lang:** python
 **Roles:** runtime-systems/concurrency-and-async @1, runtime-systems/runtime-internals-and-types @3
 
-### ServiceLoader
-**Short:** JDK service discovery API that loads implementations declared by module provides clauses or META-INF/services.
-**Kind:** api
-**Lang:** java
-**Roles:** runtime-systems/runtime-internals-and-types @1, apis-frameworks/dependency-injection-and-config @2, apis-frameworks/design-patterns-and-principles @3
-
 ### set
 **Short:** Python's built-in hash set: average O(1) add, membership and removal, plus union/intersection/difference operators.
 **Kind:** api
@@ -2747,12 +2581,6 @@ It is the general structure where a Fenwick tree is the specialised one: any ass
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
 
-### SortedDict
-**Short:** sortedcontainers' sorted mapping: O(log n) lookup with sorted iteration; not part of the Python stdlib.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/collections-and-algorithms @1
-
 ### Spliterators
 **Short:** Java's splittable iterator abstraction; implement one to make a custom source decompose well for parallel streams.
 **Kind:** api
@@ -2794,18 +2622,6 @@ Use it to keep sequential primary keys out of public URLs so a customer cannot c
 `ss -tan` lists TCP sockets and their states, `ss -ltn` just the listeners, `ss -s` prints a summary by state, and `-i` adds per-socket TCP internals such as congestion window and smoothed RTT. It reads socket state over netlink rather than parsing `/proc/net/tcp`, which is why it returns instantly on a host with a hundred thousand connections where `netstat` crawls.
 
 The columns that answer real questions are `Recv-Q` and `Send-Q`. On a listening socket they are the current accept-queue depth and the backlog limit — a full queue is direct proof that the application is not accepting fast enough and connections are being dropped, not merely served slowly. Elsewhere, a large pile of `TIME_WAIT` points at connection churn from missing keep-alive, while accumulating `CLOSE_WAIT` sockets means your code is not closing sockets the peer already closed, which is a leak in your application, not a kernel problem.
-
-### ss -tan
-**Short:** Linux socket-statistics command listing every TCP socket with its state and addresses; the modern netstat.
-**Kind:** api
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @2
-
-### ss -tn
-**Short:** Linux ss invocation listing real TCP sockets numerically, used to see actual connections to a database.
-**Kind:** api
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, data-access/drivers-and-connection-pooling @3
 
 ### Stack
 **Short:** Legacy java.util.Stack, a synchronized Vector subclass; ArrayDeque is the modern LIFO replacement.
@@ -2937,12 +2753,6 @@ Reach for it when a heap dump shows character or byte arrays dominating and many
 **Lang:** java
 **Roles:** runtime-systems/text-encoding-and-regex @1, runtime-systems/runtime-internals-and-types @2
 
-### struct module
-**Short:** Python stdlib module packing and unpacking binary data with explicit endianness and C-style field layouts.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/text-encoding-and-regex @1, apis-frameworks/data-formats-and-api-contracts @2, runtime-systems/io-networking-and-syscalls @3
-
 ### Structured Concurrency
 **Short:** Concurrency model binding a task's lifetime to a lexical scope, so no subtask outlives it and errors propagate.
 **Kind:** concept
@@ -3056,12 +2866,6 @@ To get the benefit you usually have to pair it with keeping other work off those
 **Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @3
 
 tcpdump installs a BPF filter in the kernel and copies only matching packets to userspace, which is why an expression like `tcp port 5432 and host 10.0.0.7` is cheap enough to run on a production box -- the filtering happens before the copy, not after. It settles arguments logs cannot: whether the SYN ever left, who sent the RST, whether the TLS handshake completed, how long the server really took to answer, whether retransmissions or a zero receive window explain the latency. Write to a file with `-w` and open it in Wireshark rather than trying to follow a stream on a terminal, and always bound the capture with a narrow filter, a packet count, or a ring buffer so a debugging session does not fill the disk. Reach for it when the two ends of a connection disagree about what happened; it needs elevated privileges and captures payloads that may be sensitive, and on an encrypted connection you see timing and sizes rather than content.
-
-### tcpdump -i eth0 port 5432
-**Short:** tcpdump invocation capturing PostgreSQL wire traffic on eth0 to inspect connection churn, TLS and stalls.
-**Kind:** api
-**Lang:** *
-**Roles:** runtime-systems/io-networking-and-syscalls @1, observability/profiling-and-performance @3
 
 ### Text Blocks
 **Short:** Java multi-line string literals (JEP 378) that strip incidental indentation, for embedded SQL, JSON and HTML.
@@ -3259,16 +3063,6 @@ Its central mechanism is the checkpoint: every operation that can block is a poi
 
 The payoff is that asyncio's characteristic failure modes largely cannot occur: a task cannot be orphaned, an exception cannot vanish into a dropped reference, and a timeout genuinely stops the work. The obstacle is the ecosystem, since asyncio-only libraries need a bridge, so most production Python stays on asyncio and imports the ideas through anyio. Reach for trio when the concurrency structure is the hard part and you control the dependency stack.
 
-### trio 0.33
-**Short:** Alternative Python async runtime built on structured concurrency: nurseries and strict cancel-scope semantics.
-**Kind:** tech
-**Lang:** python
-**Roles:** runtime-systems/concurrency-and-async @1
-
-There is no fire-and-forget: a task is started inside a nursery opened with `async with trio.open_nursery()`, and the block cannot exit until every child has finished, so a child that crashes propagates into the parent instead of vanishing into a dropped task reference. Cancellation is equally strict - `move_on_after` and `fail_after` create cancel scopes whose deadline cancels everything inside them at the next checkpoint - which makes timeouts compose across layers rather than being a per-call argument each library invents separately.
-
-The obstacle is ecosystem. Trio has its own primitives and does not run asyncio libraries directly without a bridge, so most production Python stays on asyncio and adopts the same ideas through anyio or asyncio's own task groups. Reach for it when the concurrency structure is the hard part of the problem and you can choose the whole dependency stack.
-
 ### typeguard
 **Short:** Runtime type checker that enforces annotations on call, using ABCMeta virtual subclass checks.
 **Kind:** tech
@@ -3299,12 +3093,6 @@ Reach for it in tests and continuous integration, where the deep checking is exa
 
 ### typing.Protocol
 **Short:** Python structural-typing construct: a type conforms by having the methods, with no inheritance or registration.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/runtime-internals-and-types @1, apis-frameworks/design-patterns-and-principles @2
-
-### typing.Protocol [3.8]
-**Short:** Python structural subtyping: a class satisfies a Protocol by having the right methods, with no inheritance needed.
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/runtime-internals-and-types @1, apis-frameworks/design-patterns-and-principles @2
@@ -3416,12 +3204,6 @@ In cloud design it is the pragmatic bridge during a migration, giving a VPC reac
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/memory-processes-and-os @1, apis-frameworks/design-patterns-and-principles @2
-
-### weakref module
-**Short:** Python stdlib weak references and weak containers: cache or observe an object without keeping it alive.
-**Kind:** api
-**Lang:** python
-**Roles:** runtime-systems/memory-processes-and-os @1, runtime-systems/runtime-internals-and-types @2, runtime-systems/collections-and-algorithms @3
 
 ### Wireshark
 **Short:** GUI packet capture and protocol analyzer; dissects HTTP/2, QUIC, WebSocket and TLS traffic down to the frame.

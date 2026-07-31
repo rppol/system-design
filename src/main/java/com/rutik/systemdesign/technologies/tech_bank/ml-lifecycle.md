@@ -117,6 +117,16 @@ spending on people. The limit is structural: the annotator is a model, so its bi
 the reward model's biases systematically, and the framework validates the ranking of methods
 rather than absolute quality. A shipping product still needs human preference data at the end.
 
+### API-Bank
+**Short:** Benchmark grading whether a model calls an API when it should, picks the right one, and fills arguments correctly.
+**Kind:** dataset
+**Lang:** *
+**Roles:** ml-lifecycle/evaluation-and-benchmarks @1, llm-apps/tool-use-and-mcp @2
+
+It separates the three abilities that a single pass-rate normally blurs together: deciding a call is needed at all, retrieving the right tool from a catalogue too large to fit in the prompt, and planning a sequence of calls. Each is scored against annotated dialogues with a defined set of tools, so a failure is attributable rather than just a lower number.
+
+Reach for it when you need to know which stage of your tool pipeline is failing - a low score on retrieval and a low score on argument filling call for completely different fixes. It is a graded benchmark, not a live environment, so it says nothing about latency, partial failure or recovery.
+
 ### ARC-AGI-2
 **Short:** Abstract reasoning benchmark of novel grid puzzles used to gauge frontier model generalization, not agent skill.
 **Kind:** dataset
@@ -154,14 +164,6 @@ Typical jobs are collecting preference pairs for DPO, filtering synthetic data, 
 You log production predictions with their features, and later the ground-truth labels when they arrive; Arize joins them, compares the live feature and prediction distributions against a training or prior-window baseline to surface drift, and lets you slice performance by cohort to find the segment where the model actually broke. It stores SHAP-style attribution values alongside, so a drifting feature can be checked against how much the model was leaning on it.
 
 Its open-source companion, Phoenix, covers the LLM side — OpenTelemetry-based tracing of spans, plus evaluation runs over them — and can be self-hosted. Reach for it when models are in production long enough that silent degradation is the real risk; at small scale a scheduled job computing PSI against a stored baseline covers most of the value.
-
-### Arize AI
-**Short:** Commercial ML and LLM observability platform: feature/prediction drift, tracing, explainability, retraining triggers.
-**Kind:** tech
-**Lang:** *
-**Roles:** ml-lifecycle/drift-and-production-monitoring @1, observability/tracing-apm-and-llm-observability @2, ml-lifecycle/evaluation-and-benchmarks @3
-
-You log inference records -- features, predictions, and the ground-truth labels later, when they arrive -- and Arize compares production distributions against a training or prior-window baseline to surface feature drift, prediction drift, and performance decay once labels land. Its practical value is slice analysis: instead of one aggregate accuracy number it finds the cohorts where the model degraded, which is what turns an alert into an actionable retraining decision. Arize Phoenix is the open-source, self-hostable companion aimed at LLM tracing and evaluation, and runs without the hosted platform. Reach for it when a model is in production and label delay makes drift your only early signal; for pure LLM tracing, weigh Phoenix against alternatives like Langfuse.
 
 ### Arthur
 **Short:** Commercial ML/LLM monitoring platform with drift and performance tracking plus a real-time model firewall.
@@ -313,12 +315,6 @@ Run it before optimizing anything, and run it under both the latency and through
 performance hints, which pick very different stream counts. Remember what sits outside the
 measurement: image decode, preprocessing and host-device copies are excluded, and in a real
 pipeline those often dominate.
-
-### Benchmarks
-**Short:** Umbrella entry for tool-use benchmark suites such as ToolBench, API-Bank and ToolAlpaca.
-**Kind:** dataset
-**Lang:** *
-**Roles:** ml-lifecycle/evaluation-and-benchmarks @1, llm-apps/tool-use-and-mcp @3
 
 ### bert_score
 **Short:** Python package computing BERTScore, an embedding-similarity generation metric; use rescale_with_baseline for scale.
@@ -816,44 +812,6 @@ your use. Filter, and read a sample by hand.
 
 Feature definitions are declared in Python and registered once. Feast then materializes them into an online store such as Redis or DynamoDB for millisecond lookups at serving time, while `get_historical_features` reads the same definitions from the offline store and joins them as of your label timestamps. That second call is the real reason it exists, because it is what prevents training-serving skew and the specific temporal leakage of joining a feature value computed after the event you are predicting. It is primarily a registry and serving layer rather than a compute engine, so the batch and streaming jobs that produce the feature values are still yours to build, schedule and monitor.
 
-### Feature engineering
-**Short:** Constructing model input features from raw data; Spark or dbt for batch, Flink for streaming computation.
-**Kind:** concept
-**Lang:** *
-**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, data-movement/batch-and-distributed-compute @2
-
-The mechanics matter less than where the computation lives, because that decides whether the
-feature can exist at serving time. A batch feature computed by Spark or dbt over yesterday's
-data is cheap and arbitrarily complex; a streaming aggregate over the last few minutes needs
-Flink or Structured Streaming and a windowing decision; a request-time feature is computed
-from the payload itself. The same definition has to produce the same value in training and in
-serving, or the model meets a distribution it was never fit on.
-
-Two failures are worth naming. Leakage -- a feature computed from data that did not exist at
-prediction time -- makes offline metrics excellent and production broken; skew is the training
-SQL and the serving code drifting apart. Point-in-time-correct joins address the first, a
-feature store or a shared transformation library the second. Tree ensembles need this work;
-deep models over text and images largely learn representations instead.
-
-### Feature store
-**Short:** The online/offline feature layer itself, not a product: Redis for serving, S3/Hive for training.
-**Kind:** concept
-**Lang:** *
-**Roles:** ml-lifecycle/ml-platform-and-pipelines @1
-
-It is two stores backing one set of definitions. The offline store holds full history in
-columnar storage and answers "what was this feature's value as of each label's timestamp",
-which is a point-in-time join rather than a plain one. The online store is a key-value system
-holding only the latest value per entity and answers a lookup in single-digit milliseconds. A
-registry ties them together so training and serving read the same definition, and a
-materialization job keeps the online copy fresh.
-
-It exists to prevent training-serving skew and temporal leakage, and it earns its cost when
-several models share features or a feature is expensive to compute. It is not free: another
-system to operate, a materialization pipeline, and a freshness lag between the two stores. One
-model with a handful of features derived from the request does not need one -- a shared
-transformation function and a carefully written training query are enough.
-
 ### feature-engine
 **Short:** scikit-learn-compatible feature engineering transformers: outlier capping, lag features, cyclic and rare-label encoding.
 **Kind:** tech
@@ -891,16 +849,6 @@ hundreds of aggregations is the actual work, and use the cutoff-time mechanism, 
 main defence against leakage here. The cost is a combinatorial explosion of mostly useless
 columns needing selection afterwards, and features whose names describe them but whose
 business meaning nobody can explain. A dozen expert-designed features often win.
-
-### Fiddler
-**Short:** SaaS ML observability platform logging production explanations and monitoring SHAP and feature drift.
-**Kind:** tech
-**Lang:** *
-**Roles:** ml-lifecycle/drift-and-production-monitoring @1, applied-ml/interpretability-fairness-and-causal @2
-
-Fiddler ingests production inference logs alongside the training baseline and monitors the distance between them — feature drift, prediction drift, data-integrity violations — then attributes a change back to the features responsible using Shapley-style attributions computed per prediction. Because those explanations are stored at inference time, an individual scored record can be pulled up months later and justified, which is what regulated decisions such as credit or insurance pricing require.
-
-Reach for it when the operational question is model quality rather than service health: the endpoint is up, the latency is fine, and the model has quietly stopped being right. Note the name collides with an unrelated HTTP debugging proxy.
 
 ### Fiddler AI
 **Short:** Commercial ML observability platform: production drift and performance monitoring with explainability and fairness.
@@ -994,25 +942,6 @@ half the benchmark, so a plain mean of the three per-level rates misreports it b
 Report per level. The published question-answer pairs are contaminable, and the task waits
 patiently while the agent thinks -- a real assistant's world does not, which is what the Gaia2
 successor addresses.
-
-### GAIA benchmark
-**Short:** 466-task benchmark for generalist agents across three difficulty levels, scoring multi-step tool-use reasoning.
-**Kind:** dataset
-**Lang:** *
-**Roles:** ml-lifecycle/evaluation-and-benchmarks @1
-
-Every question is written so a model without tools cannot answer it: the fact is not in
-pretraining, or it requires reading an attached file or image, or it requires arithmetic over
-several retrieved values. Answers are short and unambiguous by construction, which is the
-design decision that makes automatic grading possible and is the part worth copying -- the
-hard work is finding the answer, not agreeing on it.
-
-Reach for it as a general-assistant check on the search-and-synthesize axis, and read the
-per-level breakdown rather than the aggregate, which is weighted by task counts that differ a
-lot between levels. It is a static published set, so contamination grows with every
-pretraining run, and it says nothing about long-horizon reliability, recovery from tool errors
-or acting under time pressure. For those, use benchmarks with live environments and
-state-based scoring.
 
 ### Gaia2
 **Short:** Meta's general-assistant agent benchmark, run asynchronously against a wall clock inside the ARE platform.
@@ -1514,27 +1443,26 @@ granting internet access has to check for that explicitly.
 **Lang:** *
 **Roles:** ml-lifecycle/experiment-tracking-and-tuning @1, ml-lifecycle/ml-platform-and-pipelines @2
 
-A run records parameters, metrics, tags and artifacts against an experiment, and autologging hooks the common libraries so a scikit-learn or XGBoost fit captures its hyperparameters, metrics and the fitted model with no extra code. The Model Registry then gives a trained artifact a name, versions and aliases such as `champion`, so what gets deployed is a registry reference rather than a file path somebody remembers.
-
-Reach for it as soon as there are more than a handful of experiments — the value is being able to answer months later which configuration produced a given number. It is a tracking and packaging layer, not an orchestrator or a feature store; something else still has to run the pipeline.
-
-### MLflow 2.10+
-**Short:** Experiment tracking, model registry and packaging platform, with autologging for scikit-learn and GBDT runs.
-**Kind:** tech
-**Lang:** *
-**Roles:** ml-lifecycle/experiment-tracking-and-tuning @1, ml-lifecycle/ml-platform-and-pipelines @2, inference/model-server @3
-
 Beyond tracking, the piece that earns its keep is the model format. A logged model is a
+
 directory with an `MLmodel` file naming one or more flavors, so the same artifact loads as a
+
 native scikit-learn object or through a generic `pyfunc` interface, packaged with the
+
 environment it needs. That is what turns "serve this run's model" into a command rather than a
+
 rewrite, and what lets a registry reference be handed to a deployment target that knows
+
 nothing about the training framework.
 
 The evaluation API extends the same idea to scoring, running a model against a dataset and
+
 logging metrics and diagnostic artifacts into the run. Reach for the packaging layer when
+
 models cross a team boundary and the receiving side should not have to reconstruct an
+
 environment. It remains tracking and packaging -- something else orchestrates -- and the
+
 tracking server needs a real database and artifact store once more than one person uses it.
 
 ### MLflow Model Registry
@@ -1601,26 +1529,6 @@ scenes, since a model strong on general visual question answering can be weak he
 caveats: it measures domain knowledge as much as perception, so a low score may mean the model
 does not know the chemistry rather than cannot see the diagram; and being drawn from public
 exam material makes contamination plausible, with some questions answerable from text alone.
-
-### Monitoring
-**Short:** Watching a deployed model in production for drift and quality decay, with tools such as Evidently, Arize or WhyLogs.
-**Kind:** concept
-**Lang:** *
-**Roles:** ml-lifecycle/drift-and-production-monitoring @1
-
-There are two distinct signals and conflating them is the usual mistake. Service health --
-latency, error rate, throughput -- comes from ordinary application monitoring and says nothing
-about correctness. Model health needs input drift, asking whether features arrive in the
-distribution the model was fit on; prediction drift, asking whether the output distribution
-moved; and eventually performance against labels, which arrive late or never. Label delay is
-precisely why the two drift signals are necessities rather than luxuries.
-
-Start with a scheduled job comparing a stored training baseline against a recent window,
-alerting on a per-feature threshold, plus a deliberately collected slice of ground truth. Move
-to a platform when the aggregate stops being informative and you need cohort-level analysis to
-find which segment broke. The trap is alerting on statistical significance: with enough
-traffic everything drifts detectably, so tie thresholds to an observed effect on the metric
-that matters.
 
 ### Most large tech companies
 **Short:** Not a technology: a table cell referring to the in-house ML platforms large tech companies build for themselves.
@@ -1794,27 +1702,26 @@ Reach for it when product managers and marketers need to run experiments without
 **Lang:** python
 **Roles:** ml-lifecycle/experiment-tracking-and-tuning @1, model-training/classical-ml-and-boosting @3
 
-It is define-by-run: your objective function calls `trial.suggest_float` and friends as it executes, so the search space can branch with ordinary Python control flow -- only sample the tree depth when the trial chose a tree model. A sampler, TPE by default, proposes the next configuration from the history, and a pruner kills unpromising trials early using the intermediate values you report each epoch. A study can persist to a database so many workers search it in parallel.
-
-Reach for it as soon as one trial is expensive enough that grid or random search wastes real money. For a handful of cheap parameters, a grid search is simpler and needs no extra dependency.
-
-### Optuna 3.3+
-**Short:** Define-by-run hyperparameter optimization framework with TPE/CMA-ES samplers and pruning of unpromising trials.
-**Kind:** tech
-**Lang:** python
-**Roles:** ml-lifecycle/experiment-tracking-and-tuning @1
-
 A study is a persistent object rather than a function call: back it with a relational database
+
 and the search resumes after a crash, several machines attach to the same study and search it
+
 concurrently, and the trial history stays queryable afterwards as a DataFrame. On top of that
+
 sit multi-objective optimization returning a Pareto front rather than one winner, CMA-ES for
+
 continuous spaces, user-defined constraints, and built-in plots for optimization history,
+
 parameter importance and slices.
 
 Parameter importance is the underused part -- it tells you which knobs mattered, so the next
+
 search drops the ones that did not and spends the budget where it counts. Reach for the
+
 database-backed setup whenever a search spans machines or more than a few hours. On a single
+
 box with a handful of cheap parameters, an in-memory study or plain grid search is less to
+
 think about.
 
 ### OSWorld
@@ -1873,24 +1780,6 @@ continuity is essentially its remaining value. Otherwise the limits are severe: 
 genre of 1989 newswire, licensed rather than open, and a language-modelling preprocessing that
 discards case, numbers and punctuation so its perplexity barely resembles modern language
 modelling. Universal Dependencies treebanks and modern web corpora are what current work uses.
-
-### Problem formulation
-**Short:** Design-stage step of turning a business goal into a modelling target, label and metric before picking an algorithm.
-**Kind:** concept
-**Lang:** *
-**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, model-training/classical-ml-and-boosting @3
-
-The step that turns a business goal into something learnable, and where most projects are
-actually decided. It fixes four things: the prediction target and its exact definition, the
-label and how it will be obtained including its delay, the unit of prediction, and the offline
-metric plus the online metric it is meant to move. It also names the decision that consumes
-the output -- a score nobody acts on differently is not a project.
-
-The failures here are the expensive ones because they survive every later stage. A label
-defined using information unavailable at prediction time produces an excellent offline model
-that fails in production; a proxy target optimized well can move the real metric the wrong
-way; and an offline metric improving while the business metric does not means the formulation
-was wrong, not the model. Write down what happens with no model before choosing an algorithm.
 
 ### Prodigy
 **Short:** Scriptable human-in-the-loop annotation tool from the spaCy team, with built-in active-learning example ordering.
@@ -2010,12 +1899,6 @@ the raw pool is enormous and unusable as-is: expect substantial compute for filt
 deduplication before a single training step, and expect worse quality than a curated release
 if you take a naive threshold.
 
-### Requirements
-**Short:** Not a technology: the requirements-clarification step of an ML system design interview; no tooling involved.
-**Kind:** concept
-**Lang:** *
-**Roles:** ml-lifecycle/ml-platform-and-pipelines @3
-
 ### Reward Bench
 **Short:** Benchmark scoring how well a reward model ranks chosen over rejected responses across chat, safety and reasoning.
 **Kind:** dataset
@@ -2100,25 +1983,6 @@ still clears a threshold -- which is routinely a fraction of the advertised wind
 it when evaluating a long-context claim or a cache compression scheme. Being synthetic is also
 its weakness: real long-document work is reasoning over prose, not tracking planted tokens, so
 pair it with a natural benchmark.
-
-### RULER benchmark
-**Short:** Synthetic long-context benchmark: 13 tasks in 4 categories evaluated at increasing lengths from 4K upward.
-**Kind:** dataset
-**Lang:** *
-**Roles:** ml-lifecycle/evaluation-and-benchmarks @1
-
-The suite is organized into four families -- needle-in-a-haystack retrieval variants,
-multi-hop variable tracing, aggregation over the whole context, and long-context question
-answering -- and each is run at a ladder of input lengths starting a few thousand tokens and
-doubling upward, with the same generator producing every rung. A model is credited with a
-length only if it stays above the threshold there, so partial credit at long lengths cannot
-inflate the headline.
-
-Run it against your own serving configuration rather than quoting a published table, because
-the answer depends on the deployment: position-encoding scaling settings, quantization and any
-cache-eviction policy all move the effective length, and a model advertised at a large window
-can fall off well before it. Budget for the cost -- every instance at the top of the ladder is
-an expensive request.
 
 ### sacrebleu
 **Short:** Reference implementation of BLEU/chrF with fixed tokenization, so translation scores are reproducible.
@@ -2497,6 +2361,26 @@ anti-forgetting component in a fine-tune, where a slice of pretraining-style dat
 model collapsing onto the new task. Two caveats: several constituent sources have faced
 licensing and copyright challenges, so check before commercial use, and by current standards
 its scale is small -- modern pretraining corpora are orders of magnitude larger.
+
+### ToolAlpaca
+**Short:** Smaller tool-use corpus generated by simulating API responses, aimed at giving compact models tool ability cheaply.
+**Kind:** dataset
+**Lang:** *
+**Roles:** ml-lifecycle/evaluation-and-benchmarks @1, llm-apps/tool-use-and-mcp @3
+
+Its construction is the interesting part: rather than calling live services, a language model plays the API and produces plausible responses, so a multi-turn tool-use corpus can be generated across hundreds of tool specifications without credentials, rate limits or flaky endpoints. Fine-tuning small models on it produces a measurable jump in generalisation to tools never seen in training.
+
+Reach for it as training data when you want tool-calling ability in a compact model and cannot afford real API traffic. The simulation is also the limit: responses are well-formed and cooperative in a way real APIs are not, so error handling, pagination and rate-limit behaviour have to be taught elsewhere.
+
+### ToolBench
+**Short:** Large-scale benchmark and dataset for tool-using LLMs, built from thousands of real REST APIs with multi-step call chains.
+**Kind:** dataset
+**Lang:** *
+**Roles:** ml-lifecycle/evaluation-and-benchmarks @1, llm-apps/tool-use-and-mcp @2
+
+Instructions are generated over a large collection of public REST APIs, and solution paths are searched with a decision tree rather than a single greedy rollout, so the reference answers include multi-tool and multi-step chains rather than one call. Evaluation is pass-rate and win-rate against a reference model, judged automatically, which is what makes it runnable at scale.
+
+Reach for it to compare tool-selection and argument-filling ability across models rather than to predict production behaviour. Two caveats govern its use: the underlying APIs drift and die, so scores across time are not comparable, and an automatic judge inherits its own model's bias.
 
 ### Torchmeta
 **Short:** PyTorch library of episodic N-way K-shot dataloaders for meta-learning benchmarks such as Omniglot and miniImageNet.

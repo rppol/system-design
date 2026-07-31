@@ -101,21 +101,15 @@ Compile with `-lineinfo` so reports point at source lines, and expect a substant
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1
 
+The tool instruments shared-memory accesses and reports pairs that conflict: a write and a read, or two writes, reaching the same address from different threads of a block with no `__syncthreads()` ordering them. Both source locations are named, and a hazard-analysis mode points at the barrier that should have been there rather than only listing the addresses involved.
+
+Reach for it whenever a kernel using shared memory returns an answer that changes with block size, GPU model or a rebuild, because that is what an unsynchronized tile handoff looks like. Compile with `-lineinfo` so hazards map to source lines, and run the smallest input that reproduces: instrumenting every shared access costs an order of magnitude or more. It sees shared memory only, so global-memory races need different reasoning.
+
 ### compute-sanitizer --tool synccheck
 **Short:** CUDA sanitizer mode that flags illegal or divergent barrier use before it deadlocks a kernel.
 **Kind:** api
 **Lang:** cpp
 **Roles:** gpu/gpu-profiling-and-debugging @1
-
-### compute-sanitizer racecheck
-**Short:** CUDA compute-sanitizer mode that detects shared-memory data races caused by missing __syncthreads().
-**Kind:** tech
-**Lang:** cpp
-**Roles:** gpu/gpu-profiling-and-debugging @1, gpu/kernel-programming @3
-
-The tool instruments shared-memory accesses and reports pairs that conflict: a write and a read, or two writes, reaching the same address from different threads of a block with no `__syncthreads()` ordering them. Both source locations are named, and a hazard-analysis mode points at the barrier that should have been there rather than only listing the addresses involved.
-
-Reach for it whenever a kernel using shared memory returns an answer that changes with block size, GPU model or a rebuild, because that is what an unsynchronized tile handoff looks like. Compile with `-lineinfo` so hazards map to source lines, and run the smallest input that reproduces: instrumenting every shared access costs an order of magnitude or more. It sees shared memory only, so global-memory races need different reasoning.
 
 ### Cooperative Groups
 **Short:** CUDA API for composable thread groups and barriers, including warp tiles and grid-wide synchronization.
@@ -599,18 +593,6 @@ It reads the fatbinary embedded in an executable, an object file or a cubin and 
 
 The common use is diagnosing a launch failure on new hardware: if the fatbinary carries SASS only for older architectures and no PTX, there is nothing for the driver to JIT and the kernel simply cannot run. It is the container-aware tool of the pair, while `nvdisasm` works on an extracted cubin and is the one that produces control-flow graphs and per-instruction analysis.
 
-### cuobjdump --dump-sass
-**Short:** Disassembles a CUDA binary to SASS so you can see the exact instructions and memory paths the compiler emitted.
-**Kind:** api
-**Lang:** cpp
-**Roles:** gpu/gpu-profiling-and-debugging @1, devtools/compiler-toolchain-and-codegen @3
-
-### cuobjdump --resource-usage <binary>
-**Short:** Inspects a compiled cubin/fatbin to report per-kernel register and shared-memory usage when you have no source.
-**Kind:** api
-**Lang:** cpp
-**Roles:** gpu/gpu-profiling-and-debugging @1, devtools/compiler-toolchain-and-codegen @2
-
 ### CuPy
 **Short:** NumPy/SciPy-compatible GPU array library; every op dispatches CUDA kernels via cuBLAS/cuFFT/cuSPARSE or generated code.
 **Kind:** tech
@@ -711,9 +693,9 @@ Reach for it when cuBLAS gives you the matmul but not the fusion you need: a cus
 **Lang:** *
 **Roles:** gpu/gpu-profiling-and-debugging @1, observability/metrics-and-monitoring @2
 
-A host daemon collects GPU telemetry, and dcgm-exporter turns fields like `DCGM_FI_DEV_GPU_UTIL`, framebuffer used, power, temperature and ECC error counts into Prometheus metrics, usually as a Kubernetes DaemonSet. It also runs health checks and diagnostics, which is how you find a degrading card before a multi-hour training job lands on it.
+Under Multi-Instance GPU a physical card is partitioned into isolated instances with their own compute slices and memory, and telemetry follows that partitioning: figures are reported per instance, and several whole-device fields either go unpopulated or describe the entire card rather than the slice. A dashboard written against an unpartitioned fleet keeps drawing regardless, quietly presenting one slice's utilisation as though it were the GPU's.
 
-Reach for it for fleet-level monitoring, capacity accounting and alerting across many GPUs. It will not tell you why one kernel is slow -- utilization can read high while the kernel is memory-bound -- so pair it with Nsight Compute or Nsight Systems for per-kernel work.
+The practical consequence is that capacity decisions taken from that dashboard are wrong in both directions, since a saturated card can look idle and a full one can look like it has headroom. Handle it by labelling metrics with the instance id and profile, aggregating across instances explicitly, and checking which fields the driver actually populates. Running GPUs whole avoids the problem entirely when per-slice accounting is not needed.
 
 ### deviceQuery
 **Short:** CUDA sample binary that prints every cudaDeviceProp field, the fastest sanity check of a machine's GPU limits.
@@ -784,16 +766,6 @@ It covers GLA, RetNet, RWKV variants, Mamba-2 style updates and related designs,
 The kernel fuses the whole attention block, the query-key product, the scaling, the mask, the softmax and the value multiply, into one pass that tiles the sequence and keeps intermediates in shared memory and registers. What makes it exact rather than approximate is online softmax: each tile updates a running row maximum and a running normalizer, and the already-accumulated output is rescaled whenever the maximum moves, so the result matches the unfused computation up to floating-point reassociation.
 
 The backward pass makes the same bargain in the other direction, recomputing scores from saved statistics instead of storing the score matrix, trading arithmetic that is cheap here for bandwidth that is not. That is why it cuts activation memory during training as much as it improves speed, and why long-context training plans simply assume it is present rather than treating it as an optimization.
-
-### FlashAttention and FlashInfer
-**Short:** Fused IO-aware attention kernel libraries; FlashInfer additionally targets paged KV layouts used by serving engines.
-**Kind:** tech
-**Lang:** python, cpp
-**Roles:** gpu/gpu-math-libraries @1, inference/inference-engine @2, gpu/kernel-programming @3
-
-They solve the same problem at different points of the pipeline. The FlashAttention kernels assume contiguous query, key and value tensors, which fits training and prefill. FlashInfer targets decoding inside a server, where the KV cache is paged: one sequence's keys and values live in scattered fixed-size blocks, sequences in a batch have different lengths, and blocks are shared between requests with a common prefix. Its kernels take the block table as an input and gather as they go.
-
-A serving engine usually carries both and dispatches per phase, prefill through one and decode through the other. FlashInfer additionally generates and caches kernels for a given page size, head configuration and mask type, so an unusual configuration compiles on first use rather than silently falling back to a slow generic path.
 
 ### Global Load/Store Efficiency
 **Short:** Legacy CUDA profiler metric: requested bytes over transacted bytes, where 100% means perfectly coalesced access.
@@ -1112,18 +1084,6 @@ You write the kernel as a Python function under `@cuda.jit`, index it with `cuda
 nvcc is a driver rather than a compiler: it splits a `.cu` file into host and device code, hands the host part to the system compiler (gcc, clang or MSVC), compiles the device part through NVVM to PTX and then `ptxas` to SASS, and links everything into one binary. `-arch` and `-gencode` decide what goes into that binary — SASS for the architectures you target, plus PTX as a forward-compatible fallback the driver JITs on newer GPUs — which is why a kernel silently fails to launch on hardware nobody compiled for.
 
 Three flags earn their keep: `-lineinfo` so profilers can attribute samples to source lines, `--ptxas-options=-v` to print per-kernel register and shared-memory usage (the numbers that decide occupancy), and `-G` for device-side debugging, which disables optimization and must never be used for measurements.
-
-### nvcc --ptxas-options=-v
-**Short:** nvcc flag printing per-kernel register, shared-memory and local-memory spill usage at compile time, before any launch.
-**Kind:** api
-**Lang:** cpp
-**Roles:** gpu/kernel-programming @1, gpu/gpu-profiling-and-debugging @2, devtools/compiler-toolchain-and-codegen @3
-
-### nvcc -rdc=true
-**Short:** The relocatable-device-code compile/link flag required for any translation unit that issues device-side kernel launches.
-**Kind:** api
-**Lang:** cpp
-**Roles:** gpu/kernel-programming @1, devtools/compiler-toolchain-and-codegen @2
 
 ### nvcuda::wmma
 **Short:** CUDA C++ warp-level matrix-multiply-accumulate API exposing tensor-core fragments for hand-written fused kernels.

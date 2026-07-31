@@ -193,16 +193,6 @@ It renders interpretability views -- attention patterns per head and layer, neur
 
 Reach for it when writing up mechanistic-interpretability work you want a reader to explore rather than squint at. It draws activations and does not compute them, so it pairs with TransformerLens or NNsight for the hooks that produce the tensors. The standing caveat on every attention picture applies: a bright cell shows where weight went, not what the model computed with it.
 
-### Claude 3.5 API
-**Short:** Hosted Claude endpoint with strong vision and document understanding: OCR, charts, and layout-aware extraction.
-**Kind:** model
-**Lang:** *
-**Roles:** applied-ml/vision-speech-and-multimodal @1, search-retrieval/rag-and-document-processing @3, inference/model-server @3
-
-Images travel in the same messages array as text, as content blocks carrying base64 data and a media type, so one request can interleave several pages with instructions about them. The model reads charts, tables, handwriting and layout directly instead of consuming OCR output, which is what lets it answer structural questions -- which column a figure sits in, what a callout points at -- that flattening to text destroys.
-
-Reach for it when documents are messy enough that a rules-based extractor keeps breaking. Cost scales with image tokens, so resolution and page count drive the bill, and there is no bounding-box output, so you cannot cite a location on the page for review. Later Claude generations supersede this one at better accuracy and price; the request shape carries over unchanged.
-
 ### Claude 3.5 Sonnet
 **Short:** Anthropic vision-language model noted for document OCR accuracy and structured extraction from images.
 **Kind:** model
@@ -652,6 +642,16 @@ The API is unusually direct: build a sentence object, call predict on a pretrain
 One sequence-to-sequence model handles every vision task by treating the task itself as part of the prompt: a special token selects captioning, object detection, dense region captioning, phrase grounding, segmentation or OCR, and coordinates are emitted as quantized location tokens in the output text, so a box is just more tokens rather than a separate head. It was trained on an automatically generated annotation corpus far larger than any hand-labelled detection dataset.
 
 That makes it a very strong return on its size -- under a billion parameters covering work that would otherwise need a detector, a captioner and an OCR engine, at a footprint that runs on modest hardware. It follows a fixed set of task prompts rather than free-form instructions, so it is not a conversational VLM; when the requirement is reasoning about an image in dialogue, a chat-tuned model is the fit.
+
+### FLUX (text-to-image)
+**Short:** Black Forest Labs' open-weight rectified-flow text-to-image transformer, notable for prompt adherence and legible text.
+**Kind:** model
+**Lang:** *
+**Roles:** applied-ml/vision-speech-and-multimodal @1
+
+It is a flow-matching diffusion transformer rather than a U-Net latent diffusion model, trained to follow a straighter path from noise to image, which is what lets the distilled variants produce usable results in very few steps. It ships in several forms - a fast schnell variant, a higher-quality dev variant, and a hosted pro tier - and it renders text inside images far more reliably than the previous open generation.
+
+Reach for it when you want open weights you can run and fine-tune yourself rather than a hosted image API. Check the licence per variant before shipping, since they differ, and note the model is large enough that consumer-GPU inference needs quantized weights. Unrelated to Flux CD, the GitOps controller, which shares only the name.
 
 ### Frontier hosted VLMs
 **Short:** The current top-tier hosted vision-language models, used to describe charts and diagrams during document ingest.
@@ -1749,16 +1749,6 @@ A Shapley value is a feature's average marginal contribution to the prediction a
 
 Reach for it when you have to justify individual decisions, such as an adverse-action notice, or when debugging a model that scores well but for the wrong reason. Two caveats matter: the attributions explain the model, not the world, so they are not causal effects, and correlated features share credit in ways that make a single feature look unimportant when the information is simply available elsewhere.
 
-### SHAP 0.44+
-**Short:** Shapley-value attribution library; TreeSHAP computes exact per-feature contributions for any tree ensemble.
-**Kind:** tech
-**Lang:** python
-**Roles:** applied-ml/interpretability-fairness-and-causal @1
-
-The modern interface collapses the old per-method classes into one explainer that inspects the model and dispatches to the right algorithm, returning an explanation object that carries values, base values, data and feature names together -- which is what lets the plotting functions be called on a result rather than on six positional arrays. For tree models there is a real choice underneath: the path-dependent estimator is fast and uses the tree's own coverage, while the interventional one needs a background dataset and gives values consistent with the observational-versus-interventional distinction that matters when features are correlated.
-
-Reach for it as the default attribution library on tabular models. Keep the additivity check on -- when it fails, the model output does not equal the base value plus the contributions, which usually means the wrong background data or a mismatched model wrapper, and silently trusting those numbers is how a wrong reason code ships.
-
 ### shapash
 **Short:** Python library producing turnkey, business-readable SHAP explanation dashboards and reports over a fitted model.
 **Kind:** tech
@@ -2058,6 +2048,16 @@ It exists so you can answer "will this fit and what will it cost" before you sen
 `timm.create_model("vit_base_patch16_224", pretrained=True, num_classes=10)` downloads the checkpoint and swaps in a fresh head in one call, and `timm.data.resolve_data_config` returns the exact preprocessing that checkpoint was trained with — image size, normalization statistics, interpolation. Skipping that second step is the usual explanation for a pretrained backbone that mysteriously underperforms.
 
 Beyond the model zoo it carries the training recipe: RandAugment and Mixup/CutMix, layer-decay optimizer setups, EMA of weights, and schedulers, which is why published vision results are often reproducible from it directly. Reach for it whenever you need an image backbone to fine-tune; the checkpoints live on the Hugging Face Hub, and the catalogue keeps growing, so query `timm.list_models(pretrained=True)` against your pinned version rather than trusting a remembered count.
+
+### TinyBERT
+**Short:** Heavily distilled BERT (about 14M parameters) for classification at CPU latency, used for routing and filtering.
+**Kind:** model
+**Lang:** *
+**Roles:** applied-ml/nlp-and-text @1, inference/quantization-and-compression @3
+
+Distillation happens at several layers rather than only on output logits: embeddings, attention matrices and hidden states of the student are fitted to the teacher's, which is what lets it stay useful at roughly a fifth of DistilBERT's size. The result runs a classification pass in single-digit milliseconds on a CPU core.
+
+Reach for it for the cheap decision in front of an expensive one - routing a query, filtering obvious rejects, detecting intent - where the cost of the classifier must be negligible against the model it protects. It is too small for generation or nuanced semantics; when accuracy matters more than the millisecond, DistilBERT or a full base model earns its keep.
 
 ### tokenizers
 **Short:** Hugging Face's fast Rust-backed tokenizer library: train and apply subword vocabularies, count tokens at speed.

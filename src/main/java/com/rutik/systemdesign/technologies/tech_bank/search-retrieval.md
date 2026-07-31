@@ -21,6 +21,26 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** search-retrieval/lexical-and-hybrid-search @1, data-access/replication-ha-and-backup @2, observability/metrics-and-monitoring @3
 
+### all-MiniLM-L6-v2
+**Short:** Sentence-Transformers' small 384-dimension embedding model: six layers, CPU-fast, the usual default for local retrieval.
+**Kind:** model
+**Lang:** python
+**Roles:** search-retrieval/ann-index-library @1, applied-ml/nlp-and-text @2
+
+It is a six-layer distilled BERT trained with a contrastive objective over roughly a billion sentence pairs, producing 384-dimension mean-pooled embeddings. The small width is the point: vectors are a quarter the size of a 1536-dimension API embedding, so both the index and the memory it needs shrink accordingly, and it runs at usable speed on CPU with no GPU in the deployment.
+
+Reach for it when retrieval quality matters less than cost, latency and keeping text inside your own perimeter, or as the baseline you measure a paid embedding against. Its 256-token input window is the real limit - anything longer is silently truncated, so chunk before you embed.
+
+### all-mpnet-base-v2
+**Short:** Sentence-Transformers' 768-dimension general-purpose embedding model, stronger than MiniLM at roughly triple the cost.
+**Kind:** model
+**Lang:** python
+**Roles:** search-retrieval/ann-index-library @1, applied-ml/nlp-and-text @2
+
+Built on MPNet, which combines masked and permuted language modelling, and fine-tuned with the same large-scale contrastive recipe as the MiniLM models. It is the accuracy end of the classic Sentence-Transformers line: twelve layers and 768 dimensions against MiniLM's six and 384, which shows up on semantic-similarity benchmarks and equally in inference time and index size.
+
+Reach for it when local embedding quality is the bottleneck and you can afford the compute; keep MiniLM when throughput or index memory is. Like MiniLM it truncates beyond a few hundred tokens, and newer open families such as BGE and E5 now beat it on most retrieval benchmarks, so measure before adopting it out of habit.
+
 ### Amazon OpenSearch
 **Short:** AWS-managed OpenSearch: inverted-index search and log analytics, with a k-NN plugin for vector and hybrid retrieval.
 **Kind:** tech
@@ -30,16 +50,6 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 A domain is a managed cluster: you choose data-node instance types and counts, optional dedicated master nodes and storage tiers, and AWS handles patching, snapshots to S3 and blue/green deployments for configuration changes. Access control is layered unusually, with an IAM resource policy over the whole cluster and optional fine-grained control mapping roles down to individual indices, documents and fields. The `k-NN` plugin adds vector fields backed by HNSW graphs, so one domain answers BM25, vector and filtered hybrid queries.
 
 Reach for it when you are already on AWS and want search or log analytics without running nodes yourself. The costs are that capacity is provisioned and billed by the hour whether or not you query it, engine versions trail upstream OpenSearch, and shard sizing mistakes are still entirely yours to make. A serverless collection removes the sizing decision at a different price shape, and self-managed OpenSearch stays cheaper if you have the operational appetite.
-
-### ANN retrieval
-**Short:** Approximate nearest-neighbour search over embeddings, served by libraries like FAISS or managed vector databases.
-**Kind:** concept
-**Lang:** *
-**Roles:** search-retrieval/ann-index-library @1, data-stores/vector-store @2
-
-Exact nearest-neighbour search compares the query against every stored vector, which is linear in corpus size. Approximate methods accept a small, measurable recall loss in exchange for visiting only a fraction of the space: a navigable graph walked greedily as in HNSW, inverted lists over learned centroids as in IVF, random-projection trees, or hashing, usually combined with quantization that compresses each vector so more of the index fits in memory. Every method exposes one knob that trades recall for latency at query time, such as `efSearch` or `nprobe`.
-
-Reach for it once the corpus passes roughly a hundred thousand vectors or the latency budget is tight. An approximate index degrades silently, returning plausible neighbours that are not the true nearest, so recall@k must be checked against brute force on real queries after every tuning change. Below that scale a flat exact index is simpler, always correct, and fast enough.
 
 ### Annoy
 **Short:** Spotify's tree-based approximate nearest-neighbour library; memory-mapped, read-only after build.
@@ -171,16 +181,6 @@ The call takes a query, a list of candidate documents and a `top_n`, and returns
 
 Reach for it when the right passage is somewhere in the top fifty but not the top three, which is the ordinary state of a freshly built RAG pipeline and the cheapest quality win available to it. Cost scales with candidates multiplied by document length, so cap the list and truncate long documents rather than sending everything, and remember the network round trip lands in the middle of your request path. Self-hosting a BGE or MiniLM cross-encoder is the alternative when pricing or data residency rules the API out.
 
-### Cohere Rerank 3.5
-**Short:** Managed cross-encoder reranker that rescores retrieved passages; 100+ languages and a 4096-token context.
-**Kind:** model
-**Lang:** *
-**Roles:** search-retrieval/reranking @1
-
-It reads query and candidate together in a single pass, so the score reflects term-level interaction that first-stage vectors cannot represent, and the wider context window means a long chunk is judged whole rather than on its opening few hundred tokens. Documents may also be sent as structured fields rather than flat text, which lets a title, a body and metadata each contribute in their own right instead of being concatenated and then truncated at an arbitrary point.
-
-Reach for it when the corpus is multilingual, the chunks are long, or the search is over semi-structured records such as products or support tickets where the deciding signal is not in the prose. Latency and price both scale with the number and length of candidates, so rerank a few dozen rather than a few hundred. If none of those conditions apply, a small self-hosted cross-encoder captures most of the improvement for the price of hardware you already have.
-
 ### ColBERT
 **Short:** Late-interaction retrieval model scoring per-token embeddings with MaxSim: near cross-encoder quality, lower latency.
 **Kind:** model
@@ -257,16 +257,6 @@ The two engines share an ancestor and most of their surface, including the Lucen
 
 Treating them as one technology is fine for architecture and for reasoning about indexing, relevance, sharding and capacity. It stops being fine the moment you write configuration or pin a client library, where you must commit to a lineage and read its own documentation. Pick by ecosystem: Elastic's licensed features and Elastic Cloud on one side, the Apache-licensed fork and AWS's managed service on the other.
 
-### Embedding model
-**Short:** A text encoder producing fixed-length vectors for similarity search, e.g. all-MiniLM-L6-v2 at 384 dims on CPU.
-**Kind:** concept
-**Lang:** *
-**Roles:** search-retrieval/ann-index-library @1, applied-ml/nlp-and-text @2
-
-An encoder maps text to a fixed-length vector such that semantically similar text lands nearby under cosine similarity, which turns retrieval into a geometry problem an index can solve quickly. Two properties decide how one behaves: the maximum sequence length, past which input is silently truncated rather than rejected, and whether it was trained symmetrically or asymmetrically, for matching a short query against a long passage. The asymmetric ones generally expect a prefix or instruction marking which side is being encoded.
-
-Choose one by measuring recall on your own queries rather than by leaderboard position, since public benchmarks rarely resemble a specific domain. Dimension is the ongoing cost, because it multiplies through every stored vector and every distance computation, and the switching cost is total, since a new model means re-embedding the whole corpus. Where exact identifiers and rare terms matter, pair it with a lexical retriever.
-
 ### explain API
 **Short:** Elasticsearch/OpenSearch endpoint returning the scoring breakdown for one document against one query.
 **Kind:** api
@@ -282,6 +272,26 @@ Choose one by measuring recall on your own queries rather than by leaderboard po
 In FAISS the index type is the entire design decision. `IndexFlat` is exact brute force and the correctness baseline; `IVF` partitions the space into cells and searches only `nprobe` of them; `HNSW` walks a navigable small-world graph; and product quantization (`PQ`, `IVFPQ`) compresses each vector into a handful of bytes so a billion of them fit in memory, paying for it in recall. IVF and PQ indexes must be trained on a representative sample before vectors are added, and the GPU implementations make both building and searching enormously faster.
 
 It is a library, not a service, and the gap is the point: no metadata filtering, no updates in place beyond add and remove-by-id, no replication, no query language — just an index you can write to a file and load again. That is what a vector database wraps and operates for you. Reach for FAISS directly for offline retrieval, for benchmarking recall against exact search, and for embedding a searchable index inside a process.
+
+### FAISS HNSW
+**Short:** FAISS's graph-based approximate index: navigable small-world layers give log-ish search over millions of vectors.
+**Kind:** tech
+**Lang:** python, cpp
+**Roles:** search-retrieval/ann-index-library @1
+
+It builds a layered proximity graph where each vector links to `M` neighbours, and a query greedily descends from a sparse top layer to the dense base layer. `M` fixes the graph degree and therefore memory; `efConstruction` sets how hard the build searches for good neighbours; `efSearch` trades recall against latency at query time and is the only one you can change afterwards.
+
+Reach for it when the index fits in RAM and you want high recall without a training step. The costs are real: memory is well above the raw vectors, builds are slow at scale, and deletes are tombstones rather than true removals. For billion-scale or memory-bound work an IVF-PQ index or a dedicated vector database is the better shape.
+
+### FAISS IndexFlatIP
+**Short:** FAISS's exact inner-product index: brute-force scan of every vector, so recall is 100% by construction.
+**Kind:** tech
+**Lang:** python, cpp
+**Roles:** search-retrieval/ann-index-library @1
+
+It stores vectors uncompressed and compares the query against all of them, which makes it the only FAISS index with no accuracy/latency knob to tune and no training step before you can add vectors. On normalized vectors inner product is cosine similarity, so this is the usual choice when embeddings are already L2-normalized.
+
+Reach for it up to roughly a hundred thousand vectors, and always as the ground truth you measure an approximate index against - without an exact baseline a recall number means nothing. Beyond that the linear scan dominates latency and `IndexHNSWFlat` or `IndexIVFPQ` is the answer.
 
 ### FlashRank
 **Short:** Tiny, fast cross-encoder reranking library for resource-constrained RAG deployments.
@@ -725,6 +735,26 @@ It runs a masked-language-model head over the input and takes, for every vocabul
 
 Reach for it when you want the vocabulary-mismatch robustness of embeddings while keeping an inverted index, exact-term matching and interpretable per-term scores, which suits hybrid pipelines well. The costs are a neural pass to encode every document at index time and the query at search time, longer postings lists than plain BM25, and an engine that supports impact or term-weight indexing. Without a GPU, BM25 plus a dense retriever is the practical substitute.
 
+### text-embedding-3-large
+**Short:** OpenAI's higher-accuracy hosted embedding model, 3072 dimensions, also truncatable through the dimensions parameter.
+**Kind:** model
+**Lang:** *
+**Roles:** search-retrieval/ann-index-library @1, search-retrieval/rag-and-document-processing @2
+
+The same Matryoshka-style training as the small model, at a wider default of 3072 dimensions and materially better retrieval scores, particularly on multilingual benchmarks. Because a truncated prefix stays usable, the practical decision is not small-versus-large but which dimension count to store: a truncated large vector often beats a full small one at the same index size.
+
+Reach for it when retrieval quality is the bottleneck and the corpus is small enough that embedding cost and vector storage do not dominate. Measure a truncated variant before committing to the full width - the accuracy difference is frequently smaller than the threefold index cost.
+
+### text-embedding-3-small
+**Short:** OpenAI's cheaper hosted embedding model, 1536 dimensions by default and truncatable to fewer via Matryoshka training.
+**Kind:** model
+**Lang:** *
+**Roles:** search-retrieval/ann-index-library @1, search-retrieval/rag-and-document-processing @2
+
+It is trained so that a prefix of the vector is itself a usable embedding, which is what the `dimensions` parameter exposes: ask for 512 and you get a shorter vector that still retrieves sensibly, trading a little accuracy for a much smaller index. That property is the practical difference from the older ada-002, alongside better multilingual retrieval at a lower price.
+
+Reach for it when you want managed embeddings with no GPU and no model to operate. The standing costs are per-token spend that grows with every re-index, text leaving your perimeter, and a model you do not control - re-embedding the whole corpus is the only way to move, so keep the raw text.
+
 ### Thomson Reuters AI
 **Short:** Legal research assistant built into Westlaw and Practical Law, answering over licensed case law with citations.
 **Kind:** tech
@@ -752,16 +782,6 @@ Reach for it for instant search over a catalogue or documentation site when you 
 **Roles:** search-retrieval/rag-and-document-processing @1
 
 It routes a file by type, using layout models and OCR for a scanned PDF and native parsers for `.docx`, HTML, email and slides, and returns a list of typed elements such as `Title`, `NarrativeText`, `Table` and `ListItem`, each carrying metadata like page number and source, instead of one undifferentiated blob of text. Those types are what make structure-aware chunking possible, so a section stays with its heading and a table survives as a unit rather than being sliced through the middle, which is one of the most common causes of nonsense context in RAG. Reach for it when the corpus is real-world documents in mixed formats. The high-resolution strategies are slow and model-backed, so partition once into a store rather than on every query.
-
-### Vector index
-**Short:** Generic term for the structure that makes embedding similarity search fast, from brute-force flat to HNSW or IVF.
-**Kind:** concept
-**Lang:** *
-**Roles:** search-retrieval/ann-index-library @1, data-stores/vector-store @3
-
-The structures divide into a few families. A flat index compares the query against every vector, exact and perfectly adequate up to perhaps a hundred thousand entries. IVF clusters the vectors and searches only the `nprobe` nearest cells. HNSW builds a layered proximity graph and walks it greedily, with `M` fixing graph degree and memory and `efSearch` the query-time breadth. Quantization is orthogonal to all of them, compressing each vector so that more of the index fits in RAM at some loss of precision.
-
-The choice is usually made for you by whichever store you adopted, so the real work is tuning the one knob that trades recall for latency and verifying it against exact search on real queries, because an approximate index degrades silently rather than erroring. Two things teams learn late: a highly selective metadata filter interacts badly with graph indexes, and updates and deletions are cheap in some structures and effectively require a rebuild in others.
 
 ### Voyage AI
 **Short:** Managed embedding provider whose voyage-4 family includes domain models for code, finance and legal text.

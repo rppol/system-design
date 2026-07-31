@@ -99,16 +99,6 @@ Its signature idea is ordered target statistics: to encode a categorical value i
 
 Its trees are symmetric — every node at a given depth splits on the same feature and threshold — which acts as a regularizer and makes inference very fast, since scoring becomes an index computation rather than a branchy walk; missing values, text and embedding features are handled natively too. Reach for it first on tabular data with high-cardinality categoricals; LightGBM often trains faster on wide numeric data, and comparing the two is cheap enough to be worth doing.
 
-### CatBoost 1.2+
-**Short:** Gradient-boosted decision trees with ordered boosting, native categorical handling and symmetric (oblivious) trees.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/classical-ml-and-boosting @1
-
-This is a version pin on the same library rather than a different product; quoting it signals a recipe that depends on the current API surface -- the `cat_features` argument, `Pool` objects carrying categorical and text columns alongside the data, `task_type="GPU"`, and the sklearn-style `CatBoostClassifier` and `CatBoostRegressor` wrappers. The learner underneath is ordered boosting over oblivious trees, one feature and threshold serving every node at a given depth.
-
-Reach for it on tabular data where categorical columns dominate and you would rather not hand-build encodings, since `Pool` plus `cat_features` replaces that whole preprocessing step. Expect slower training than LightGBM on wide, purely numeric data and a larger memory footprint during the permutation-based encoding, and pin the version in your environment, because defaults and available parameters do move between releases.
-
 ### category_encoders
 **Short:** sklearn-compatible encoders for high-cardinality categoricals: CatBoost, James-Stein, M-estimate, binary, base-N and hashing.
 **Kind:** tech
@@ -441,14 +431,6 @@ You normally meet it as scikit-learn's `SVC` and `SVR`. Go to it directly when y
 **Lang:** *
 **Roles:** model-training/classical-ml-and-boosting @1, applied-ml/recommenders-and-graph-ml @2, applied-ml/timeseries-and-anomaly @3
 
-Two design choices explain the speed: continuous features are bucketed into histograms once, so split-finding scans bins rather than sorted values, and trees grow leaf-wise, always splitting the leaf with the largest loss reduction, instead of level by level. Leaf-wise growth reaches a lower loss for the same number of leaves and overfits more readily on small data, which is why `num_leaves` and `min_data_in_leaf` are the parameters that matter most. It handles categorical features natively without one-hot encoding, offers `lambdarank` for learning-to-rank, and takes `scale_pos_weight` or `is_unbalance` for skewed classes. Treat it as the first model to try on tabular and ranking problems and as the baseline any deep-learning proposal has to beat.
-
-### LightGBM 4.0+
-**Short:** Histogram-based gradient boosting library: leaf-wise growth, native categoricals, and the fastest CPU training.
-**Kind:** tech
-**Lang:** *
-**Roles:** model-training/classical-ml-and-boosting @1
-
 The version-pinned form of the same library, quoted where a recipe depends on the current API rather than on gradient boosting in general: the sklearn wrappers taking early stopping and evaluation logging as callbacks rather than `fit()` keywords, `Dataset` objects carrying binning and categorical metadata, and the CUDA and distributed builds. Underneath it is unchanged -- features binned into histograms once, then leaf-wise growth that always splits the leaf promising the largest loss reduction.
 
 Pin it deliberately, because the callback migration and several default changes mean code written against an older release either errors or silently behaves differently. Reach for it as the first model on tabular data, especially wide numeric data where histogram construction is fastest. Where categoricals are numerous and high-cardinality, CatBoost's ordered encoding usually needs less feature engineering to match it.
@@ -554,16 +536,6 @@ Reach for it to combine capabilities tuned separately, or to recover general abi
 **Kind:** api
 **Lang:** python
 **Roles:** model-training/classical-ml-and-boosting @1
-
-### Model training
-**Short:** The training stage of an ML system: a framework, a boosting library, a tuner and a tracker used together.
-**Kind:** concept
-**Lang:** *
-**Roles:** model-training/deep-learning-framework @1, ml-lifecycle/experiment-tracking-and-tuning @3
-
-As a stage rather than a product, it is the point where a dataset, an architecture and an objective become weights, and it is usually assembled from four cooperating pieces: a framework providing tensors and autograd, a library implementing the model family whether deep learning or gradient boosting, a tuner that searches hyperparameters, and a tracker recording what was run and what came out. What varies between shops is which of the four is the framework's job and which is bought in.
-
-The engineering reality is that it is rarely the bottleneck a beginner expects: data quality, leakage-free evaluation and reproducibility decide outcomes far more often than the optimizer or the architecture does. Treat a run as an artifact with inputs to version -- data snapshot, code commit, config, seed -- because the run you cannot reproduce is the one you will be asked to explain.
 
 ### MosaicML/LLM Foundry
 **Short:** Recipe repo for large-scale LLM pretraining and continued pretraining with FSDP and streaming datasets.
@@ -740,16 +712,6 @@ Reach for it when data per group is thin and pooling helps, when you need calibr
 You write ordinary Python and the framework records a tape of the tensor operations that actually executed, so `loss.backward()` differentiates the graph that ran — there is no separate graph-definition phase, which is why a `print` statement or a breakpoint mid-model just works. Tensors carry a device, so `.to("cuda")` moves the work and every operation dispatches a GPU kernel, usually into cuBLAS or cuDNN; `torch.compile` traces and fuses the graph ahead of time to cut kernel-launch and memory-traffic overhead where eager execution leaves performance on the table.
 
 Around that core sit the layers, losses and optimizers in `torch.nn` and `torch.optim`, `DataLoader` with pinned memory and non-blocking copies for feeding the GPU, and `DistributedDataParallel` and FSDP for multi-GPU and multi-node training. It is also the runtime that inference engines such as vLLM build on, which is why their wheels are pinned to a specific PyTorch version. Reach for it as the default for anything neural; for tabular problems a gradient-boosting library is usually both stronger and much cheaper.
-
-### PyTorch 2.x
-**Short:** The dominant tensor and autograd framework; 2.x adds torch.compile graph capture, Inductor codegen and FSDP.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/deep-learning-framework @1, inference/compiler-and-runtime-optimization @2, model-training/distributed-training @2, gpu/kernel-programming @3
-
-The 2.x line's defining addition is `torch.compile`: TorchDynamo hooks CPython's frame evaluation to capture Python code into a graph, falling back to eager execution on anything it cannot trace, and Inductor lowers that graph into fused Triton kernels on GPU and C++ on CPU. The payoff is fewer kernel launches and less memory traffic from the same eager code, and the same capture underpins ahead-of-time export for deployment.
-
-It stayed backward compatible, so compilation is opt-in and the eager model you already have keeps working, which makes adopting it a one-line experiment rather than a migration. Expect a real compilation pause on the first call and a recompile whenever shapes or control flow change, so a workload with highly variable input shapes may see little benefit; measure rather than assume, and try dynamic shapes before giving up.
 
 ### PyTorch DDP
 **Short:** PyTorch DistributedDataParallel: one process per GPU, gradients all-reduced via NCCL; the default data-parallel path.
@@ -1115,16 +1077,6 @@ It separates distillation configuration from your training code. You supply an a
 
 Reach for it when compressing an encoder model for classification, tagging or extraction and you want intermediate-layer supervision, which matters most where the student is much shallower than the teacher and logit matching alone underfits. The layer mapping is the design decision and there is no automatic answer. For generative language models, distillation is now usually done by training on the teacher's sampled outputs instead, needing none of this machinery.
 
-### TF
-**Short:** TensorFlow, Google's deep-learning framework; used here for autoencoders and VAEs with custom architectures.
-**Kind:** tech
-**Lang:** python
-**Roles:** model-training/deep-learning-framework @1, inference/model-format-and-edge @3
-
-The abbreviation for TensorFlow, used where the surrounding text is about the model rather than the framework -- an autoencoder or variational autoencoder built by subclassing the Keras model class and writing the training step around a gradient tape, which is the usual reason to leave the compiled `fit` path. Custom objectives such as a VAE's KL term are added through `add_loss` or computed directly inside that step.
-
-Nothing distinguishes it from the full name, so treat the two as one entry. If you are choosing a framework rather than reading existing code, the considerations are TensorFlow's: strong TPU support and a mature export path to serving, mobile and the browser, set against an ecosystem of papers, checkpoints and inference engines that has largely moved to PyTorch.
-
 ### TF-Agents
 **Short:** Google's official TensorFlow reinforcement learning library: environments, policies, replay buffers and standard agents.
 **Kind:** tech
@@ -1392,16 +1344,6 @@ It learns online, one example at a time, from a sparse text format and the hashi
 Trees are grown over histogram-binned features with second-order gradients, missing values are handled by learning a default branch direction at each split rather than requiring imputation, and overfitting is controlled by shrinkage, row and column subsampling and explicit L1/L2 penalties. That combination is why it remains hard to beat on tabular data without heavy tuning, and why it is the baseline any deep-learning approach on tables has to justify itself against.
 
 The modern API is smaller than the folklore suggests: `tree_method="hist"` covers CPU and GPU with `device="cuda"` selecting the accelerator, categorical features are supported natively without one-hot encoding, and `early_stopping_rounds` is a constructor argument rather than a `fit()` keyword. Ranking objectives make it a standard learning-to-rank model too. Tune depth, learning rate and subsampling together with early stopping on a genuine validation split, and remember trees cannot extrapolate outside the range they were trained on.
-
-### XGBoost 2.0+
-**Short:** Gradient-boosted tree library with GPU hist training, regularized objectives and multi-output support.
-**Kind:** tech
-**Lang:** python, java, cpp
-**Roles:** model-training/classical-ml-and-boosting @1, gpu/gpu-math-libraries @3
-
-The version-pinned form of the same library, quoted when a recipe assumes the current parameter surface rather than boosting in general: `device="cuda"` selecting the accelerator instead of a GPU-specific tree method, native categorical support behind `enable_categorical`, early stopping as a constructor argument, multi-output and vector-leaf trees, and the external-memory path for data that will not fit in RAM.
-
-Pin it, because the renamed GPU parameters and the moved early-stopping argument mean older code either errors or silently trains differently. Reach for it as the tabular baseline, with GPU training worth the switch once you are into millions of rows and repeated tuning runs. On data with many high-cardinality categorical columns, CatBoost usually needs less preparation to reach the same score.
 
 ### XGBoost Dask
 **Short:** XGBoost's Dask integration for training boosted trees across a multi-node cluster (from xgboost import dask).

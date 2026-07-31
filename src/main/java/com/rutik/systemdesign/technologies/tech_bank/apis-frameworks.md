@@ -1183,24 +1183,6 @@ new, prefer DLPack: it is the cross-language standard, is what the array API sta
 Python- only. The shared hazard is the same — the consumer must respect stream ordering, or it
 reads memory a kernel has not finished writing.
 
-### curl -N --no-buffer
-**Short:** Unbuffered curl invocation used to watch a Server-Sent Events or chunked stream arrive token by token from the CLI.
-**Kind:** tech
-**Lang:** *
-**Roles:** apis-frameworks/rpc-graphql-and-streaming @1, runtime-systems/io-networking-and-syscalls @2
-
-`curl` buffers its output when it is not writing to a terminal, which is why a piped streaming
-response appears to hang and then arrive all at once. `-N` (the long form is `--no-buffer`)
-turns that off, so each chunk is written as it is received and you can watch tokens or events
-land in real time. Add `-v` to see the response headers and confirm the content type, and
-`--max-time` so a stream that never ends does not hold the shell.
-
-Reach for it as the first diagnostic on any streaming endpoint, because it isolates the
-question: if `curl -N` streams and the browser does not, the problem is client-side or a
-buffering proxy in between, not the server. What it cannot do is parse — you see raw `data:`
-lines, so for anything beyond confirming that bytes flow, pipe into a small script or use a
-client library.
-
 ### Dagger/Hilt
 **Short:** Compile-time dependency-injection frameworks that generate the wiring code via annotation processing.
 **Kind:** tech
@@ -1571,28 +1553,28 @@ overhead.
 **Lang:** python
 **Roles:** apis-frameworks/web-framework-and-http-client @1, apis-frameworks/data-formats-and-api-contracts @2, apis-frameworks/dependency-injection-and-config @2, apis-frameworks/rpc-graphql-and-streaming @3, inference/model-server @3
 
-It sits on Starlette for the ASGI machinery and Pydantic for data, and the function signature is the contract: path, query and body parameters are parsed, validated and coerced from the type hints, and the OpenAPI schema plus interactive docs are generated from the same annotations. `Depends` gives you dependency injection for database sessions, authentication and per-request setup, with overrides in tests.
-
-Reach for it for Python HTTP APIs and as the front end for a model server. The gotcha to know: a plain `def` endpoint is run in a threadpool, but blocking I/O inside an `async def` endpoint blocks the event loop and stalls every other request on that worker.
-
-### FastAPI 0.140+
-**Short:** Current FastAPI release whose Depends/Security graph and dependency_overrides give the framework its DI container.
-**Kind:** tech
-**Lang:** python
-**Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/web-framework-and-http-client @1, security/authentication-and-identity @3
-
 `Depends` is the whole container. A dependency is any callable, its own parameters are
+
 resolved recursively, and the result is cached for the duration of the request, so a chain
+
 like `get_settings` to `get_engine` to `get_session` is declared once and reused by every
+
 route. A dependency written as a generator yields the resource and resumes after the response
+
 for teardown. `Security` layers OAuth2 scopes on top, and dependencies declared on a router or
+
 on the app apply to everything beneath them.
 
 The feature that makes it testable is `app.dependency_overrides`: a test replaces a dependency
+
 by using the function object itself as the key, so a real database session becomes a
+
 transactional one without touching application code. The limits are that scopes are
+
 per-request only — anything longer-lived belongs in the `lifespan` handler — and that a heavy
+
 dependency graph runs on every request, so expensive setup must be hoisted rather than
+
 injected.
 
 ### FastAPI Depends
@@ -1672,12 +1654,6 @@ gateway. The costs are mostly operational: entity resolvers receive representati
 than typed arguments, so they must be defensive; they are called in batches and are the
 natural home of an N+1 problem unless you add a dataloader; and the subgraph SDL must now pass
 composition in CI, which makes a schema change a cross-team event rather than a local one.
-
-### FilterChain
-**Short:** Servlet chain-of-responsibility: each filter may handle, transform, or pass the request on via doFilter.
-**Kind:** api
-**Lang:** java
-**Roles:** apis-frameworks/aop-middleware-and-scheduling @1, apis-frameworks/design-patterns-and-principles @2
 
 ### Flask
 **Short:** Minimal synchronous Python web framework; common for quick REST endpoints and model-serving prototypes.
@@ -3628,27 +3604,26 @@ It explains behaviour that otherwise looks arbitrary. Strict versus lax mode dec
 **Lang:** python
 **Roles:** apis-frameworks/dependency-injection-and-config @1, security/secrets-and-cryptography @3
 
-A `BaseSettings` subclass declares configuration as typed fields with defaults; at startup the values are read from environment variables, optionally with a prefix, from a `.env` file, or from a secrets directory, then coerced and validated by Pydantic. The point is that a missing or malformed value fails loudly at boot rather than as a `None` deep inside a request an hour later, and `SecretStr` keeps credentials out of reprs, tracebacks and logs.
-
-Reach for it for twelve-factor configuration in any Pydantic application, and instantiate the settings object once and inject it rather than reading `os.environ` at call sites. It lives in its own package since Pydantic v2, so it is a separate dependency from `pydantic` itself.
-
-### pydantic-settings 2.x
-**Short:** Pydantic v2 settings management: typed config from env vars, dotenv and secret files, with SecretStr masking.
-**Kind:** tech
-**Lang:** python
-**Roles:** apis-frameworks/dependency-injection-and-config @1, apis-frameworks/data-formats-and-api-contracts @3
-
 The v2 line is where the source model became extensible. Configuration is declared on
+
 `SettingsConfigDict` — env prefix, dotenv file, case sensitivity, and `env_nested_delimiter`,
+
 which lets `APP__DB__HOST` populate a nested model — and `settings_customise_sources` lets a
+
 settings class reorder or add sources, so a secrets manager, a JSON file or a CLI parser slots
+
 in beside environment variables with a defined precedence. TOML, YAML and CLI sources ship in
+
 the package.
 
 Reach for it whenever a service is already on Pydantic v2, since configuration then uses the
+
 same validation and the same error format as the rest of the application. The costs are that
+
 precedence between sources is a design decision you must get right and document, that a
+
 nested-model layout with delimiters is easy to mis-set, and that the whole model is validated
+
 at construction — which is the point, but means one bad variable stops the process at boot.
 
 ### pydantic.BaseModel
@@ -4049,25 +4024,6 @@ real decision — ignoring extras keeps you forward compatible, rejecting them c
 and you must choose deliberately. Validation also confirms shape, not meaning: a perfectly
 well-formed value can still be hostile.
 
-### Schema versioning
-**Short:** Hashing or versioning a tool or API schema so consumers detect contract drift when a deploy changes it.
-**Kind:** concept
-**Lang:** *
-**Roles:** apis-frameworks/data-formats-and-api-contracts @1, llm-apps/tool-use-and-mcp @2, platform-delivery/ci-cd-and-release @3
-
-Each revision of the contract gets an identity: a semantic version bumped by hand, or a hash
-over the normalized schema so that any change at all produces a new id. Consumers record the
-id they were generated against and compare it at call time or at startup, which converts
-silent drift — a renamed field, a tightened enum — into an explicit mismatch at a point where
-someone is watching.
-
-Reach for it wherever a consumer is generated from or caches the schema: SDK clients, agents
-that cache tool definitions, event consumers holding a reader schema. The cost of hashing is
-noise, since reordering or a comment change yields a new id unless you normalize first, and
-alerts people learn to ignore are worse than none. Pair it with compatibility rules — additive
-fields only, never reuse an identifier — so the common version bump requires no consumer
-action at all.
-
 ### ScopedProxyMode
 **Short:** Spring setting injecting a proxy for a shorter-lived bean so a singleton can hold a request-scoped dependency.
 **Kind:** api
@@ -4233,24 +4189,6 @@ largely historical now, and the cost is significant: the session URL pattern req
 sessions at the load balancer, the fallback transports multiply requests and latency, and the
 extra layer complicates every debugging session. For new work, use WebSocket directly and
 handle failure with reconnection and a polling path only if measurement shows you need one.
-
-### SockJS client
-**Short:** Browser library negotiating a WebSocket-like session, falling back to XHR streaming when WebSocket is blocked.
-**Kind:** tech
-**Lang:** js
-**Roles:** apis-frameworks/rpc-graphql-and-streaming @1
-
-It presents a `WebSocket`-shaped object — `onopen`, `onmessage`, `onclose`, `send` — so
-application code is written once and does not care which transport was negotiated underneath.
-Before connecting it probes the server's `/info` endpoint for capabilities and clock skew,
-then tries transports in order, and it emulates the WebSocket API closely enough that most
-libraries built for a raw socket accept it, which is how it plugs in as a `webSocketFactory`
-for a STOMP client.
-
-Reach for it only when a measured population of clients cannot open a WebSocket. Otherwise the
-costs outweigh it: the fallback transports need sticky routing and generate far more HTTP
-traffic, binary frames are not supported so everything is text, and the emulation is close but
-not identical, which produces subtle differences in close codes and back-pressure behaviour.
 
 ### Spring @Bean methods
 **Short:** A factory method the Spring container calls once per scope, with dependencies supplied as method parameters.

@@ -397,16 +397,6 @@ Data is range-partitioned into splits, each split a Paxos group replicated acros
 
 External consistency comes from TrueTime: the clock API returns an interval rather than an instant, and a transaction waits out that uncertainty before releasing its commit timestamp, so any transaction starting after a commit is guaranteed to observe it. Reach for it when you genuinely need global ACID with SQL and cannot shard by tenant; the cost is commit latency that grows with participant count and geographic spread.
 
-### H2
-**Short:** Embedded Java SQL database, usually run in-memory as the default @DataJpaTest backing store.
-**Kind:** tech
-**Lang:** java
-**Roles:** data-stores/relational @1, data-stores/key-value-and-embedded @2, devtools/testing-and-mocking @2
-
-H2 is a SQL database written in Java that runs inside the application's own JVM, addressed by a URL such as `jdbc:h2:mem:testdb`, and in memory mode the database exists only while a connection is open. That is how it became the default backing store for a `@DataJpaTest`: Spring Boot auto-configures it when it is the only database on the test classpath, so every test class gets a clean schema with no container to start.
-
-The reason to stop using it that way is fidelity. Its dialect, type coercion, sequences, locking behaviour and error codes are close to but not the same as PostgreSQL or MySQL, so tests pass against behaviour production does not have and native SQL fails only after deployment. Testcontainers running the real engine is the modern default; keep H2 for genuinely embedded applications.
-
 ### H2 Database
 **Short:** Embeddable Java SQL database that runs in-memory or on disk, used mostly for fast integration tests.
 **Kind:** tech
@@ -584,16 +574,6 @@ Reach for it in the first minute of an incident to tell the common shapes apart:
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/relational @1, data-access/replication-ha-and-backup @3
-
-InnoDB stores each table as a B+tree clustered on the primary key, so a secondary index holds the primary key rather than a row pointer and every secondary lookup costs a second descent — which is why a wide or randomly ordered primary key hurts read and write paths at once. Durability comes from the redo log and crash recovery, while replication ships the binlog, row-based by default and asynchronous unless you configure otherwise, so a replica can lag and a read served there may be stale.
-
-Its default isolation is repeatable read with gap locking, stricter than most engines and a recurring source of surprise deadlocks on range conditions in otherwise ordinary transactions.
-
-### MySQL 8+
-**Short:** Mainstream open-source relational database: InnoDB storage, window functions, CTEs, JSON columns, binlog replication.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-stores/relational @1, data-access/transactions-and-consistency @3, data-access/replication-ha-and-backup @3
 
 The 8 line is where MySQL closed most of the gaps people used to leave it over: window functions and common table expressions including recursive ones, a JSON type with a full function set and generated columns you can index, descending and functional indexes, an atomic transactional data dictionary that removed the old per-table metadata files, and four-byte UTF-8 as the default character set.
 

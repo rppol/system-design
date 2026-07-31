@@ -213,14 +213,6 @@ Connect was the name given to the mesh capability layered onto the existing serv
 
 Reach for it when Consul is already the discovery layer and you want mTLS and policy without introducing a second control plane. The proxy is Envoy by default, with a simpler built-in option for low-throughput cases. The behaviour to internalise is that intentions are enforced by the proxy, so a workload that bypasses its sidecar bypasses the policy, which is why a mesh is not a replacement for network controls. In a Kubernetes-only estate, Linkerd or Istio is a shorter path.
 
-### Consul service mesh
-**Short:** Consul's mesh layer: sidecar proxies, mTLS between services, intention-based policy and service discovery.
-**Kind:** tech
-**Lang:** *
-**Roles:** traffic-edge/service-mesh-and-discovery @1, traffic-edge/proxy-and-load-balancer @3, security/secrets-and-cryptography @3
-
-The mesh registers each service and runs a sidecar proxy (Envoy by default) beside it; Consul's built-in CA issues every service a certificate, so service-to-service traffic becomes mTLS with a verified identity on both ends rather than trust in a network range. Authorization is expressed as intentions -- allow or deny between two service identities -- enforced by the proxy, which replaces IP-based firewall rules with rules that survive rescheduling. Service defaults, resolvers and splitters then carry traffic shaping: subsets, failover to another datacenter, and weighted splits for canaries. Reach for it when workloads span VMs and Kubernetes or several datacenters, where Consul's federation is stronger than a Kubernetes-only mesh; a single-cluster Kubernetes shop usually finds Istio or Linkerd a shorter path.
-
 ### CoreDNS
 **Short:** Plugin-based DNS server that is the default Kubernetes service-discovery resolver, often with a per-node cache.
 **Kind:** tech
@@ -290,16 +282,6 @@ Pick by protocol: if a routing decision depends on the request it is an ALB, and
 Its configuration is dynamic: listeners, routes, clusters and endpoints are pushed from a control plane over the xDS APIs, which is what lets a service mesh change routing, retry policy, outlier detection and connection limits fleet-wide without a restart or a single line of application code. Istio and Consul are control planes over exactly this data plane.
 
 It terminates and originates mTLS, speaks HTTP/1.1, HTTP/2, HTTP/3 and gRPC natively, translates gRPC-Web for browsers, and emits detailed per-cluster statistics and spans - the observability is a large part of why meshes standardized on it. Rate limiting is deliberately delegated to an external service over gRPC using descriptors, so the quota is shared across every proxy. The costs are real: a sidecar per pod adds a network hop and memory, and hand-written Envoy config is dense enough that most teams only ever touch it through a control plane.
-
-### Envoy as edge proxy
-**Short:** Running Envoy at the edge so the same proxy that powers the mesh sidecars also terminates and routes external traffic.
-**Kind:** tech
-**Lang:** *
-**Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/api-gateway @2, traffic-edge/service-mesh-and-discovery @2
-
-Running the same proxy at the edge that the sidecars run means one configuration model, one set of statistics and one body of expertise covering both hops: the edge listener terminates TLS, applies authentication and rate-limit filters, and routes into the mesh where mTLS and retry policy continue unbroken, all driven from one control plane over xDS. Istio's ingress gateway and the Envoy Gateway project are this pattern packaged with an opinionated API.
-
-Reach for it when a mesh already exists and a separate edge product would duplicate its policy in a second dialect. The differences between the two roles are easy to underestimate: the edge faces untrusted clients, so request-size limits, connection limits, timeouts and a web application firewall matter far more, and it is a shared failure domain needing its own capacity planning. Where the requirement is API packaging, keys and developer onboarding, a managed API gateway still fits better.
 
 ### Envoy/Istio outlier detection
 **Short:** Mesh-level circuit breaking that ejects an upstream host from the pool after consecutive errors.
@@ -442,14 +424,6 @@ Reach for it when a mesh has enough services that nobody holds the call graph in
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/api-gateway @1, traffic-edge/rate-limiting-and-resilience @2, traffic-edge/proxy-and-load-balancer @3
-
-Requests hit an nginx and OpenResty data plane that matches a route to an upstream service and runs a chain of plugins around the proxied call, covering key, JWT and OIDC authentication, rate limiting, request and response transformation, and logging, so cross-cutting policy is configured once at the edge instead of reimplemented in every service. Distributed rate limiting needs shared state: the local counter policy is fast but per-node, so a cluster enforcing one global limit points the plugin at Redis and pays the extra hop. Configuration comes from a database or from a declarative file, and the Kubernetes ingress controller drives the same engine from CRDs. Reach for it when several services need consistent edge policy; a single service is usually better served by middleware in its own framework.
-
-### Kong API Gateway
-**Short:** Plugin-driven API gateway on Nginx/OpenResty: fixed and sliding-window rate limits, auth, transforms.
-**Kind:** tech
-**Lang:** *
-**Roles:** traffic-edge/api-gateway @1, traffic-edge/rate-limiting-and-resilience @2, traffic-edge/proxy-and-load-balancer @2, security/authentication-and-identity @3
 
 Deployment mode is the first architectural decision. The traditional mode keeps configuration in PostgreSQL, DB-less mode loads a declarative YAML file at boot so the gateway is immutable and reproducible, and hybrid mode splits a control plane from data-plane nodes that keep serving if the control plane is down. Plugins run in ordered phases around the proxied call, and beyond the bundled set they can be written in Lua or, through external plugin servers, in other languages.
 

@@ -271,16 +271,6 @@ Migrations are ordered SQL files applied once each in version order and recorded
 
 Wire it into application startup or the deploy pipeline so schema and code ship together. Note that it orders migrations but does not make them safe: a zero-downtime rename is still your job to split into expand-and-contract steps.
 
-### Flyway Community 10.x
-**Short:** SQL-first database migration tool: versioned scripts applied in order, tracked in flyway_schema_history, with callbacks.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-access/schema-and-migration @1, platform-delivery/ci-cd-and-release @3
-
-This is the free, open-source edition, and it defines the model the paid tiers build on: `V<version>__<description>.sql` files applied once each in version order, `R__` repeatable scripts re-applied whenever their checksum changes, and a `flyway_schema_history` table recording version, checksum, duration and outcome. Callbacks such as `beforeMigrate` and `afterMigrate` hook SQL or shell steps around a run, and Java-based migrations cover what SQL cannot express.
-
-Run it from the CLI, the Maven or Gradle plugin, or at application startup through the Spring Boot integration, and let a lock in the history table serialise concurrent instances. Undo migrations, dry runs and drift reports are paid features, so with Community a rollback means writing a forward migration — which is the healthier habit anyway.
-
 ### flyway migrate
 **Short:** Flyway command that applies pending versioned SQL migrations in order, via CLI or the Maven/Gradle plugin.
 **Kind:** api
@@ -395,12 +385,6 @@ Everything above it — Hibernate, jOOQ, Spring's `JdbcClient`, every connection
 **Lang:** java
 **Roles:** data-access/drivers-and-connection-pooling @1, data-access/orm-and-data-mapping @2
 
-### JDBC java.sql
-**Short:** The java.sql package: Connection, Statement, PreparedStatement and ResultSet, the JDK's database API.
-**Kind:** api
-**Lang:** java
-**Roles:** data-access/drivers-and-connection-pooling @1
-
 ### Jedis
 **Short:** Synchronous Java Redis client; needs commons-pool2 for connection pooling.
 **Kind:** tech
@@ -456,16 +440,6 @@ The exceptions are worth knowing: blocking commands like `BLPOP`, transactions, 
 Schema changes are written as changesets — each identified by id, author, and file — in XML, YAML, JSON, or plain SQL. Liquibase records every applied changeset in a `DATABASECHANGELOG` table along with a checksum, so editing an already-applied changeset fails loudly instead of letting environments silently diverge. Preconditions guard a changeset, contexts and labels select which run where, and most change types can generate their own rollback.
 
 The abstract change types (`createTable`, `addColumn`) are what make one changelog portable across database engines, and what people either love or find verbose next to Flyway's plain versioned SQL. Reach for it when you need rollback support, multi-engine portability, or drift detection against a live schema; on any team, the underlying discipline matters more — migrations are forward-only, additive, and deployed before the code that needs them.
-
-### Liquibase OSS 4.x
-**Short:** Declarative schema migration tool: changesets in XML/YAML/SQL with built-in rollback and preconditions.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-access/schema-and-migration @1
-
-This is the free edition, and the shape to understand is the changelog: an ordered file of changesets, each identified by id plus author plus filename, with `include` and `includeAll` splitting them per feature or release. Liquibase checksums every changeset and records it in `DATABASECHANGELOG`, while a `DATABASECHANGELOGLOCK` row stops two instances migrating at once, and preconditions let a changeset assert the state it expects before running.
-
-Its distinguishing feature is the abstract change types, which generate engine-appropriate DDL and, for most of them, their own rollback. Reach for it when portability across engines or scripted rollback matters; if every deployment targets one database and the team is comfortable in SQL, Flyway's plain versioned scripts are less machinery for the same result.
 
 ### Liquibase Pro
 **Short:** Commercial Liquibase tier adding changelog policy checks, structured drift reports and targeted rollback.
@@ -705,12 +679,6 @@ It runs inside a single repeatable-read transaction, so the output is a consiste
 
 That portability is the reason it exists, and it is not a recovery strategy for a large production database: it reads every row through the server, the restore has to rebuild every index, there is no point-in-time recovery, and it covers one database, with roles and other globals needing `pg_dumpall`. Use the physical tools for recovery and pg_dump for moving data.
 
-### pg_dump --schema-only
-**Short:** pg_dump invocation that exports only PostgreSQL DDL, for schema review and version control.
-**Kind:** api
-**Lang:** *
-**Roles:** data-access/schema-and-migration @1, data-access/replication-ha-and-backup @2
-
 ### pg_locks
 **Short:** PostgreSQL system view listing locks currently held and awaited; join with pg_stat_activity to find the blocker.
 **Kind:** api
@@ -928,16 +896,6 @@ Reach for it when one primary is enough capacity and you only want automatic fai
 It is the maintained Python client for Redis, with a synchronous API and an asyncio one under `redis.asyncio` sharing the same command surface, so `INCR`, `SETEX`, pipelines, transactions, pub/sub, registered Lua scripts and cluster mode are reachable from either. Connections come from a pool held for the process lifetime, created once at startup rather than per request.
 
 In practice this is how a service acquires its distributed primitives — rate-limit counters, idempotency keys, circuit-breaker state shared across workers, a token blocklist — with atomicity coming from a single command or a registered Lua script rather than read-modify-write in Python. Set `decode_responses` deliberately: without it every reply is `bytes`, which is a recurring source of comparisons that quietly fail.
-
-### redis-py 6+
-**Short:** The official Python Redis client with async support and connection pooling.
-**Kind:** tech
-**Lang:** python
-**Roles:** data-access/drivers-and-connection-pooling @1, caching/distributed-cache @2
-
-The version line matters mostly for what has been consolidated into it. The asyncio client that used to be the separate aioredis project now lives in `redis.asyncio` with the same command surface, cluster support is in the same package rather than a fork, and typing and connection handling have been tightened. One client object owns a connection pool and is meant to be created once per process, not per request.
-
-Practically this is what a Python service uses for rate-limit counters, idempotency keys, locks and caches, with atomicity coming from a single command, a pipeline with transactions enabled, or a registered Lua script rather than read-modify-write in application code. Set `decode_responses` deliberately if you want `str` instead of `bytes`, and give every key a TTL so a cache cannot quietly become an unbounded store.
 
 ### redis.asyncio
 **Short:** The asyncio Redis client bundled inside redis-py; async connection pool, TTL operations and pub/sub, replacing aioredis.
@@ -1159,31 +1117,11 @@ It is two layers. Core builds SQL expressions against table metadata and can be 
 
 Async support is the same API through `AsyncSession` with an async driver such as asyncpg, with lazy loading deliberately disallowed because it would require implicit IO - relationships must be eager-loaded explicitly. Alembic generates migrations by diffing the same metadata, so schema and models stay one source of truth.
 
-### SQLAlchemy 2.0
-**Short:** Python ORM plus Core SQL toolkit; 2.0 unifies the API and supports full async sessions, paired with Alembic.
-**Kind:** tech
-**Lang:** python
-**Roles:** data-access/orm-and-data-mapping @1, data-access/drivers-and-connection-pooling @3
-
-Core builds SQL as composable expression objects and the ORM maps classes onto tables on top of it; 2.0 unified both behind one `select()` API, added real typing so `Mapped[int]` annotations drive the mapping, and made async first-class through `create_async_engine` and `AsyncSession` over drivers like asyncpg. Alembic generates and versions migrations by diffing your models against the database.
-
-Reach for it when you want the ORM without losing access to the SQL underneath. The async gotcha to know: lazy loading raises under `AsyncSession`, because attribute access cannot do I/O implicitly, so relationships must be eager-loaded with `selectinload` or fetched explicitly.
-
 ### SQLAlchemy 2.0 async_sessionmaker
 **Short:** Factory producing AsyncSession context managers, what a FastAPI yield-dependency hands to handlers.
 **Kind:** api
 **Lang:** python
 **Roles:** data-access/orm-and-data-mapping @1, runtime-systems/concurrency-and-async @2, apis-frameworks/dependency-injection-and-config @3
-
-### SQLAlchemy 2.x
-**Short:** Python ORM and Core toolkit; supplies both sync Session and async AsyncSession, typically wired as a yield dependency.
-**Kind:** tech
-**Lang:** python
-**Roles:** data-access/orm-and-data-mapping @1, data-access/drivers-and-connection-pooling @3
-
-The same library as the 2.0 line: `select()` is the single query construct for Core and ORM alike, `Mapped[]` annotations type the model, and `Session` stays an identity map and unit of work that flushes pending changes before a query and expires attributes at commit. `AsyncSession` mirrors it over an async driver, but it is a different object with a different lifecycle rather than a flag on the old one.
-
-In a FastAPI application the idiom that matters is wiring the session as a yield dependency: build the engine and session factory once at startup, yield a session per request, and commit or roll back at that boundary instead of inside each handler. Two recurring bugs to avoid are sharing one session across concurrent tasks, which is unsupported, and touching a lazy relationship under `AsyncSession`, which raises rather than doing implicit I/O.
 
 ### sqlalchemy.ext.asyncio
 **Short:** SQLAlchemy's async layer: AsyncEngine and AsyncSession usable as async context managers with asyncpg under FastAPI.

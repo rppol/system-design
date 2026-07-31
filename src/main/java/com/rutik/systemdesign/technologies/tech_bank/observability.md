@@ -211,12 +211,6 @@ Burrow consumes the internal offsets topic to follow every consumer group's comm
 
 That sidesteps the threshold problem, where a number tuned for a quiet topic pages constantly on a busy one. Reach for it to watch many groups without per-group configuration; it evaluates status and exposes it over HTTP, leaving notification to something else. Simpler exporters publishing raw lag as a Prometheus gauge remain the common alternative when you would rather write and own the alerting rule yourself.
 
-### c x N
-**Short:** Not a technology: a table shorthand for per-call cost times call count, i.e. total added latency against a budget.
-**Kind:** concept
-**Lang:** *
-**Roles:** observability/profiling-and-performance @3
-
 ### cAdvisor
 **Short:** Google's container advisor exporting per-container CPU, memory, filesystem and network metrics for Prometheus.
 **Kind:** tech
@@ -363,16 +357,6 @@ Per-language tracer libraries auto-instrument common frameworks, HTTP clients an
 
 The reason teams pay for it is correlation: a trace links to the logs emitted during it and to the host metrics at that moment, so triage stops being three tools and a timestamp. The thing to manage is cost — billing is per host plus indexed spans, so sampling rules and retention filters are a design decision, not an afterthought.
 
-### Datadog LLM
-**Short:** Datadog's LLM observability product: auto-instrumented prompt/response traces correlated with infrastructure APM.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/tracing-apm-and-llm-observability @1, observability/metrics-and-monitoring @3
-
-It is a product surface inside Datadog rather than a separate tool: instrument the application with its SDK or an OpenTelemetry pipeline and each request becomes a trace of nested spans for model calls, retrieval steps and tool invocations, carrying prompt and completion text, token counts, latency and computed cost. Because those spans share the platform's tags, they sit in the same trace as the HTTP request and the queries around it.
-
-That correlation is the reason to choose it over a standalone LLM tracer, since a slow answer can be followed into the vector store query or the downstream service. It also means the platform's billing model applies, and prompt text is high-volume unstructured data you are now sending to a vendor. A self-hostable tool such as Langfuse is the alternative when that content cannot leave your own infrastructure.
-
 ### Datadog LLM Obs
 **Short:** Datadog's LLM observability product: prompt/response traces, token cost and quality metrics in existing APM.
 **Kind:** tech
@@ -429,26 +413,6 @@ NVIDIA's Data Center GPU Manager reads driver telemetry, and the exporter turns 
 
 Reach for it for anything GPU-adjacent, because request-level metrics cannot say whether a slow inference server is compute-bound, memory-bound or thermally throttled. Two caveats matter: some fields are profiling counters with a real sampling cost, so enable them deliberately, and under Multi-Instance GPU the values are reported per instance, which quietly makes whole-GPU dashboards wrong in both directions.
 
-### DCGM exporter pairing
-**Short:** Running NVIDIA DCGM's Prometheus exporter next to an inference server so GPU health sits beside request metrics.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/metrics-and-monitoring @1, gpu/gpu-profiling-and-debugging @2
-
-The arrangement is two scrape targets on one node feeding a single Prometheus: the serving process exposing request rate, queue depth, batch size and latency, and the DCGM exporter exposing SM utilisation, framebuffer occupancy, power and clocks for the GPUs that server owns. Matching labels for node, GPU index and, in Kubernetes, the pod are what let one dashboard put the two halves side by side.
-
-It exists because either half alone is nearly useless during an incident. Rising latency with low SM utilisation is a batching or host-side bottleneck, rising latency with clocks dropping is thermal or power throttling, and growing framebuffer use at stable traffic is a leak or a cache that is never freed. The cost is a second exporter per node plus the label discipline that keeps the join working.
-
-### DCGM visibility caveat
-**Short:** Under MIG, DCGM reports per-slice GPU metrics, so whole-GPU dashboards silently show partial data.
-**Kind:** concept
-**Lang:** *
-**Roles:** observability/metrics-and-monitoring @1, gpu/gpu-profiling-and-debugging @2
-
-Under Multi-Instance GPU a physical card is partitioned into isolated instances with their own compute slices and memory, and telemetry follows that partitioning: figures are reported per instance, and several whole-device fields either go unpopulated or describe the entire card rather than the slice. A dashboard written against an unpartitioned fleet keeps drawing regardless, quietly presenting one slice's utilisation as though it were the GPU's.
-
-The practical consequence is that capacity decisions taken from that dashboard are wrong in both directions, since a saturated card can look idle and a full one can look like it has headroom. Handle it by labelling metrics with the instance id and profile, aggregating across instances explicitly, and checking which fields the driver actually populates. Running GPUs whole avoids the problem entirely when per-slice accounting is not needed.
-
 ### depesz EXPLAIN
 **Short:** Web tool that reformats a PostgreSQL EXPLAIN plan into a ranked tree so the expensive node is obvious.
 **Kind:** tech
@@ -482,12 +446,6 @@ That index is also the bill. Storing logs in Elasticsearch costs several times w
 **Kind:** api
 **Lang:** *
 **Roles:** observability/profiling-and-performance @1, data-stores/relational @2, data-access/orm-and-data-mapping @3
-
-### EXPLAIN ANALYZE
-**Short:** SQL command that runs a query and prints the execution plan with real row counts and per-node timing.
-**Kind:** api
-**Lang:** *
-**Roles:** observability/profiling-and-performance @1, data-stores/relational @2
 
 ### EXPLAIN ANALYZE in DBeaver/DataGrip
 **Short:** Database IDE feature rendering an EXPLAIN ANALYZE plan as a visual tree with per-node cost and row estimates.
@@ -811,12 +769,6 @@ Native Memory Tracking must be armed at launch with `-XX:NativeMemoryTracking=su
 
 Reach for it when a container's resident memory sits far above `-Xmx` and the heap is plainly not the problem, which is the classic Kubernetes kill with a healthy-looking heap; the answer is usually thread stacks, metaspace or code cache. Tracking costs a few percent of throughput and some footprint of its own, and it only sees allocations the JVM accounts for, so a library calling `malloc` directly stays invisible.
 
-### jcmd <pid> VM.native_memory summary.diff
-**Short:** Native Memory Tracking diff report showing growth in JVM-internal native memory; blind to raw JNI malloc.
-**Kind:** api
-**Lang:** java
-**Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2
-
 ### jcmd VM.stringtable
 **Short:** jcmd diagnostic printing JVM string-table statistics: entry count, bucket count and histogram.
 **Kind:** api
@@ -861,12 +813,6 @@ Reach for it when a JVM is slow or leaking and you need evidence instead of a gu
 **Lang:** java
 **Roles:** observability/profiling-and-performance @1, runtime-systems/concurrency-and-async @2
 
-### JFR jdk.VirtualThreadPinned event
-**Short:** JDK Flight Recorder event firing when a virtual thread stays pinned to its carrier past 20 ms; on by default.
-**Kind:** api
-**Lang:** java
-**Roles:** observability/profiling-and-performance @1, runtime-systems/concurrency-and-async @2
-
 ### Jira
 **Short:** Atlassian issue tracker; in ops workflows it is where postmortem action items are filed and chased to done.
 **Kind:** tech
@@ -897,18 +843,6 @@ A live histogram prints a class-by-class count and byte total of reachable objec
 
 The modern entry point for both operations is `jcmd`, whose `GC.class_histogram` and `GC.heap_dump` commands do the same work through the supported diagnostic-command interface.
 
-### jmap -clstats <pid>
-**Short:** jmap invocation printing per-classloader class counts and bytes, which quantifies a suspected classloader leak.
-**Kind:** api
-**Lang:** java
-**Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2, runtime-systems/runtime-internals-and-types @3
-
-### jmap -dump:format=b,file=heap.dmp
-**Short:** JDK command that writes a binary heap dump of a live JVM for offline leak analysis in MAT or VisualVM.
-**Kind:** api
-**Lang:** java
-**Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2
-
 ### JMH
 **Short:** Java Microbenchmark Harness: forks a JVM and runs warmup iterations so microbenchmarks survive JIT effects.
 **Kind:** tech
@@ -937,12 +871,6 @@ Reach for it first when a process died and nobody knows why, since the OOM kille
 
 The technique is more useful than the command: take three dumps a few seconds apart, and threads sitting at the same frame in all three are the hang, while a pool whose threads are uniformly BLOCKED or waiting on one downstream resource is exhaustion — which is what a request queue backing up actually looks like from inside. Reach for it first on a hung or unresponsive service; it tells you nothing about which method burns CPU, and that is a profiler's job.
 
-### jstack <pid>
-**Short:** JDK command that dumps every thread's stack for a running JVM; the first tool for deadlocks and BLOCKED threads.
-**Kind:** api
-**Lang:** java
-**Roles:** observability/profiling-and-performance @1, runtime-systems/concurrency-and-async @2
-
 ### jstat
 **Short:** JDK CLI that samples a live JVM's GC, heap generation and class-loading counters without attaching a profiler.
 **Kind:** tech
@@ -952,16 +880,6 @@ The technique is more useful than the command: take three dumps a few seconds ap
 `jstat -gc <pid> 1000` reads the JVM's shared performance-counter file and prints a line per interval: eden, survivor and old capacity and usage, metaspace, and the count and cumulative time of young and full collections. Nothing is instrumented and nothing attaches, so the cost is effectively zero and it works against a JVM that was started with no diagnostic flags at all.
 
 Reach for it for the first thirty seconds of a memory or garbage-collection question: whether old generation grows and is never reclaimed, whether full collections are frequent, whether metaspace is climbing. It gives counters over time and nothing more, with no object, allocation site or stack, so once the shape of the problem is clear you move to a heap dump, Flight Recorder or a profiler for the cause.
-
-### jstat -gcutil
-**Short:** JDK CLI printing live GC utilization per generation and cumulative GC time for a running JVM.
-**Kind:** tech
-**Lang:** java
-**Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2, runtime-systems/runtime-internals-and-types @3
-
-The `-gcutil` view drops absolute sizes and prints percentage utilisation of each space — both survivor spaces, eden, old, metaspace and compressed class — plus young and full collection counts and their cumulative seconds. That normalisation makes a repeating sample readable at a glance: you watch eden fill and reset while old climbs, and the last columns show how much of wall time the process spends collecting.
-
-The diagnosis is in the trend. Old utilisation that never falls after a full collection is a leak or an undersized heap, full-collection time growing faster than young indicates a promotion problem, and a survivor space pinned at full means objects are being promoted prematurely. Reach for it as a live check; for pause distributions and the cause of a particular collection, garbage-collection logs or Flight Recorder are the record you analyse.
 
 ### Kafka Exporter
 **Short:** Exporter that turns Kafka broker/consumer-group state and JMX metrics into Prometheus series for lag dashboards.
@@ -1170,12 +1088,6 @@ Configure the field set deliberately rather than accepting defaults. Full stack 
 There is one pre-configured logger object and you add outputs to it: a file path with rotation, retention and compression handles file management the standard library needs a handler class for, a serialisation flag emits JSON, an enqueue flag makes writes process-safe, and diagnostic tracebacks render an exception with the variable values in each frame. Binding and context managers attach structured context to subsequent records.
 
 Reach for it in a script, a small service, or anywhere the standard library's configuration ceremony is disproportionate to the need. The cost is that it is not the standard library, so a library logging through it imposes it on every consumer, and the diagnostic tracebacks that make it pleasant will happily print secrets held in local variables. Use `logging` with a JSON formatter or structlog where interoperability matters.
-
-### m * T
-**Short:** Not a tool: the overhead-multiplier times baseline runtime, i.e. what users actually feel while a profiler is on.
-**Kind:** concept
-**Lang:** *
-**Roles:** observability/profiling-and-performance @1
 
 ### management.tracing.sampling.probability
 **Short:** Spring Boot property setting the head-based trace sampling rate from 0.0 to 1.0.
@@ -1681,12 +1593,6 @@ It is how a memory-hierarchy claim becomes evidence — the same loop traversed 
 **Lang:** *
 **Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2
 
-### perf stat -e dTLB-load-misses
-**Short:** Linux perf counter measuring data TLB load misses; a high rate says shrink the working set or use huge pages.
-**Kind:** api
-**Lang:** *
-**Roles:** observability/profiling-and-performance @1, runtime-systems/memory-processes-and-os @2
-
 ### pev2
 **Short:** Browser-based PostgreSQL plan visualizer that turns EXPLAIN ANALYZE output into an annotated node tree.
 **Kind:** tech
@@ -1825,16 +1731,6 @@ Reach for it when CPU is the wrong scaling signal, which it usually is for a que
 **Lang:** *
 **Roles:** observability/alerting-and-incident-response @1, observability/metrics-and-monitoring @2
 
-### Prometheus and Grafana
-**Short:** The standard metrics pair: Prometheus scrapes and stores series, Grafana dashboards and alerts on them.
-**Kind:** tech
-**Lang:** *
-**Roles:** observability/metrics-and-monitoring @1, observability/alerting-and-incident-response @2
-
-The division of labour is clean: Prometheus discovers targets, scrapes their metrics endpoints, stores samples locally and evaluates recording and alerting rules over them, while Grafana holds no data and issues PromQL queries to draw panels. Alerting can live on either side, as rules in Prometheus routed through Alertmanager or as Grafana-managed rules with their own routing, and picking one deliberately avoids two half-configured systems.
-
-Reach for the pair as the default self-hosted metrics stack, since the exporter ecosystem means most infrastructure is already instrumented and in Kubernetes a single chart installs both alongside Alertmanager and the standard exporters. What you still own is cardinality discipline and, once retention or a cross-cluster view becomes the constraint, a long-term backend such as Thanos, Mimir or VictoriaMetrics underneath.
-
 ### Prometheus Operator
 **Short:** Kubernetes operator managing Prometheus via CRDs: ServiceMonitor/PodMonitor scrape config and PrometheusRule alerts.
 **Kind:** tech
@@ -1930,12 +1826,6 @@ Its one legitimate use is the service-level outcome of a batch job, meaning last
 py-spy reads the memory of a running CPython process from the outside and reconstructs its call stacks, so it needs no code change, no import, no restart and no cooperation from the target. That is what makes it a production tool: you attach to a pid that is already misbehaving. `py-spy top` gives a live view of where time is going, `record` writes a flame graph, and `dump` prints the current stack of every thread, which is how you find what a hung process is actually blocked on.
 
 Overhead is around one percent because it samples rather than instruments. Two caveats: by default it shows Python frames only, so time inside a C extension appears as the calling frame until you pass `--native`, and attaching needs ptrace permission, which containers commonly drop — you may need to add SYS_PTRACE or run it in the same pid namespace.
-
-### py-spy record --gil
-**Short:** py-spy mode recording only stacks that hold the GIL, showing which code owns the lock in a live process.
-**Kind:** api
-**Lang:** python
-**Roles:** observability/profiling-and-performance @1, runtime-systems/concurrency-and-async @2
 
 ### Pyinstrument
 **Short:** Low-overhead Python statistical profiler that understands await boundaries and groups by async call stack.

@@ -581,12 +581,6 @@ Reach for it for wide, independent investigation and for long jobs whose interme
 **Lang:** *
 **Roles:** llm-apps/prompting-context-and-structured-output @1
 
-### Claude thinking
-**Short:** Anthropic API parameter that lets the model spend extra internal reasoning tokens before answering.
-**Kind:** api
-**Lang:** *
-**Roles:** llm-apps/prompting-context-and-structured-output @1, llm-apps/agent-framework @3
-
 ### claude_desktop_config.json
 **Short:** Claude Desktop's config file declaring which MCP servers to launch, with their commands, arguments and environment.
 **Kind:** api
@@ -702,16 +696,6 @@ Reach for it to avoid writing the tenth scraping tool, and treat the catalogue a
 The loop is draft, verify, revise -- but verification is external. Instead of asking the model to grade itself, the technique has it call tools that supply ground truth about specific claims: run the code, search for the fact, evaluate the expression, hit the API. The evidence returned is what drives the revision, and the cycle repeats while the evidence keeps contradicting the draft.
 
 Its premise is that self-critique adds little because the critic shares the generator's blind spots, while a tool contributes information the model did not have. That bounds where it works: use it wherever a cheap external check exists -- executable code, checkable facts, validatable schemas -- and skip it for judgment, style or taste, where each round is extra latency and tokens for no signal.
-
-### Cursor
-**Short:** AI-first code editor with codebase-aware chat and multi-file agentic edits.
-**Kind:** tech
-**Lang:** *
-**Roles:** llm-apps/agentic-environments @1, devtools/version-control-and-workbench @2
-
-Two mechanisms distinguish it from a chat window bolted onto an editor. It indexes the repository into embeddings so a question retrieves the relevant files rather than only what you have open, and its completion model predicts multi-line and multi-location edits from your recent editing history -- suggesting the next change somewhere else in the file, not just the rest of the current line.
-
-Reach for it when the work is editing an existing codebase in place and you want retrieval and completion tuned to that. The costs are commercial and practical: subscription tiers meter requests so heavy agentic use hits limits, and indexing means code is processed on their servers unless you enable privacy mode. A terminal agent fits better when the loop is build, test, fix.
 
 ### Cursor IDE
 **Short:** AI-native code editor with inline edit, composer and background agents, and a built-in MCP client.
@@ -839,16 +823,6 @@ Decorate a function and the framework derives the tool's JSON schema from its ty
 
 Reach for it for any Python MCP server; the low-level SDK interface is worth dropping to only for unusual protocol work. One wrinkle to watch: an earlier version of this project was absorbed into the official Python SDK while development continued separately, so examples on the internet target different packages with slightly different imports. Check which one you installed.
 
-### Fine-tuned models
-**Short:** Index entry for tool-calling fine-tunes such as Gorilla and ToolLLaMA, trained with a retriever in the loop.
-**Kind:** concept
-**Lang:** *
-**Roles:** llm-apps/tool-use-and-mcp @1, model-training/fine-tuning-and-peft @2
-
-These are models trained specifically to emit valid API calls, with a retriever in the loop during training so the model learns to read retrieved documentation and produce a call against it rather than memorising a fixed catalogue. Gorilla targeted machine-learning and cloud APIs, ToolLLaMA a large crawl of public REST endpoints; both aimed at the case where thousands of tools cannot fit in a prompt.
-
-Reach for one only when you must run locally over a large and stable tool catalogue. Two limits: they are frozen against the API surface they were trained on, so they confidently invent parameters when an endpoint changes, and frontier models with native function calling plus tool search have largely closed the gap they were built to fill.
-
 ### Gemini 3.x
 **Short:** Google's frontier multimodal reasoning model family, with reasoning depth set by the thinking_level enum.
 **Kind:** model
@@ -894,6 +868,16 @@ Reach for it when predictable per-seat pricing and enterprise administration mat
 The repository holds reference server implementations in TypeScript and Python, each a self-contained directory with its configuration snippet, plus a large community index in the README pointing at third-party servers. Because the implementations are deliberately small, reading one end to end is the fastest way to understand the protocol's shape: register handlers, declare capabilities, pick a transport.
 
 Reach for it to copy a server as a starting point or to check whether one already exists. Treat what you find as reference quality: guardrails are minimal -- the filesystem server's directory allowlist is about the extent of it -- maintenance is uneven, and several early servers were retired as vendors published their own. Verify what a server does before it runs beside your agent.
+
+### Gorilla LLM
+**Short:** LLaMA fine-tuned to emit correct API calls against large, changing catalogues by retrieving the documentation first.
+**Kind:** model
+**Lang:** *
+**Roles:** llm-apps/tool-use-and-mcp @1, search-retrieval/rag-and-document-processing @3
+
+Its contribution is retriever-aware training: the model is fine-tuned with retrieved API documentation in the prompt, so it learns to depend on that text rather than on memorised signatures. That is what lets it stay correct when an API changes - update the retrieved docs and behaviour follows, instead of requiring another fine-tune - and it measurably reduces invented endpoints and arguments.
+
+Reach for it when the tool catalogue is large, versioned and outside your control. The pattern matters more than the checkpoint now that hosted models ship native function calling: retrieve the schema, then generate against it, rather than trusting anything the model remembers.
 
 ### Guidance
 **Short:** Microsoft library for prompt templating with constrained generation and token healing into a fixed structure.
@@ -1363,16 +1347,6 @@ Reach for it to smoke-test a server after a change, or to check that a deploymen
 
 Run it against a server command or URL and it starts a local UI that connects as a genuine client: you can list tools, resources and prompts, invoke a tool with arbitrary arguments, and read the raw JSON-RPC messages flowing in both directions. That message log is what makes it the debugging tool, because most MCP failures are a malformed input schema, a capability the server never advertised, or a handler that throws, and all three are visible there immediately. Use it before wiring a server into an agent, so you are debugging one component rather than a server and a model at the same time.
 
-### mcp Python SDK
-**Short:** Official Python SDK for the Model Context Protocol: build MCP servers exposing tools and resources, or clients.
-**Kind:** tech
-**Lang:** python
-**Roles:** llm-apps/tool-use-and-mcp @1
-
-Server authoring is handler registration: one handler lists the tools with their schemas, another dispatches a call by name, and equivalents exist for resources addressed by URI and for prompt templates. A context object passed into handlers carries the plumbing back to the client -- progress notifications for long operations, log messages, and access to lifespan state such as a database pool created once at startup.
-
-Reach for the low-level interface when you need control the decorator API abstracts away: dynamic tool lists, custom lifespan management, unusual transports. For ordinary servers the high-level interface in the same package is far less code. Everything is asynchronous, so blocking work inside a handler stalls the whole server -- push it to a thread or a subprocess.
-
 ### MCP servers
 **Short:** Model Context Protocol servers: processes exposing tools, resources and prompts over stdio or HTTP.
 **Kind:** concept
@@ -1573,6 +1547,16 @@ Consume it to discover servers or to let a client or a downstream registry mirro
 **Lang:** *
 **Roles:** llm-apps/tool-use-and-mcp @1, llm-apps/prompting-context-and-structured-output @2
 
+### OpenAI function-calling JSON schema
+**Short:** The JSON Schema tool-declaration format models emit calls against; effectively the interoperable default across providers.
+**Kind:** spec
+**Lang:** *
+**Roles:** llm-apps/tool-use-and-mcp @1, apis-frameworks/data-formats-and-api-contracts @3
+
+A tool is declared as a name, a description and a JSON Schema for its parameters, and the model returns a structured call naming the tool with an argument object rather than free text you have to parse. Constrained decoding against that schema is what makes the arguments reliably well-formed; the description field does more work than it looks, since it is the only thing telling the model when the tool applies.
+
+It became a de-facto interchange format - Anthropic's tool use and MCP both take the same shape - so one declaration usually moves between providers with minor edits. Schema validity is not semantic validity, though: a well-formed call can still be the wrong tool with plausible arguments, so validate server-side.
+
 ### OpenAI GPT-5.6
 **Short:** OpenAI's frontier hosted model, strong at instruction following and commonly used as the LLM judge in evals.
 **Kind:** model
@@ -1598,16 +1582,6 @@ Study it as a design reference rather than a dependency -- the user-facing contr
 It is a browser console over the API: choose a model, edit the system and user messages, adjust parameters, attach tools and an output schema, run, and copy out code that reproduces the exact request. A comparison mode runs the same input against two configurations side by side, and prompts can be saved and versioned rather than living in a browser tab.
 
 Reach for it for the first ten minutes of any prompt, where seeing the raw request and response beats reading documentation. Two things it is not: it bills your key at normal rates, and it evaluates nothing -- a prompt that looks good on three hand-picked inputs is an anecdote. Move to a dataset and a scoring harness before shipping.
-
-### openai Python SDK
-**Short:** Official OpenAI Python client with sync and async surfaces for chat, responses, embeddings and tool calls.
-**Kind:** tech
-**Lang:** python
-**Roles:** llm-apps/llm-gateway-and-routing @1, llm-apps/agent-framework @3, apis-frameworks/web-framework-and-http-client @3
-
-The client comes in synchronous and asynchronous forms with typed responses, automatic retries and typed errors, and it currently spans two generation surfaces: the older chat completions interface and the newer responses interface that carries server-side state, hosted tools and reasoning items. Parse helpers validate a reply into a declared type, and a separate client class covers Azure deployments.
-
-Reach for it whenever Python calls OpenAI directly. The awkwardness to plan around is the two-surface split -- examples on the internet target one or the other and they are not interchangeable -- so pick one per codebase and be explicit about it, or the request-shaping code accumulates both idioms.
 
 ### OpenAI Responses API
 **Short:** OpenAI's agent-oriented endpoint: hosted tools, remote MCP, computer use and server-side conversation state.
@@ -1832,16 +1806,6 @@ Reach for it when integrating with real robot hardware, where it is effectively 
 The routers are trained on human preference data rather than heuristics: given a prompt, predict whether the weak model's answer would be judged as good as the strong model's, and route accordingly. A threshold controls what fraction of traffic reaches the strong model, and several router types are provided -- a matrix factorisation model, a fine-tuned encoder classifier, and similarity-weighted ranking over labelled examples.
 
 Reach for it when a large share of traffic is genuinely easy and you want a principled way to find it. The catch is calibration: a router trained against one strong-weak pair and one prompt distribution is not calibrated for yours, so the threshold has to be re-tuned against your own traffic and re-checked whenever either model changes.
-
-### Routing classifier
-**Short:** A small fine-tuned classifier that picks which model or tool handles a request, in tens of milliseconds on CPU.
-**Kind:** concept
-**Lang:** *
-**Roles:** llm-apps/llm-gateway-and-routing @1, applied-ml/nlp-and-text @2
-
-A small encoder or even a logistic regression over embeddings, trained on labelled examples of which backend handled a request acceptably, decides which model, tool or index to use before the expensive call happens. It runs on CPU in tens of milliseconds, costs effectively nothing per request, and is inspectable -- you can look at its confusion matrix and argue with it.
-
-Reach for it once volume makes an extra LLM call per request an unreasonable way to make a cheap decision. The costs are the labels, which usually means logging production traffic and grading it, and drift: the classifier is calibrated against a traffic mix and a set of backends, and degrades silently when either shifts, so the routing distribution needs to be a monitored metric.
 
 ### Salesforce Einstein
 **Short:** Salesforce's embedded AI layer for CRM: agent assist, case routing, summarization and predictive scoring.
@@ -2137,15 +2101,15 @@ It serves a large catalogue of open-weight models behind an OpenAI-compatible en
 
 Reach for it to run open models without operating GPUs, and particularly when you want the option to take the weights with you -- fine-tuning that produces a portable artefact is the differentiator against providers that keep the result. The costs are variable latency and throughput on shared capacity unless you pay for dedicated endpoints, and catalogue churn: pin the model string and watch deprecations.
 
-### Tool schema format
-**Short:** The JSON-schema shape describing a callable tool's name, description and parameters to a model.
-**Kind:** spec
+### Tool schema hash
+**Short:** Hashing a tool's declared schema so a deploy can detect that its contract changed and invalidate what depended on it.
+**Kind:** concept
 **Lang:** *
-**Roles:** llm-apps/tool-use-and-mcp @1, apis-frameworks/data-formats-and-api-contracts @2
+**Roles:** llm-apps/tool-use-and-mcp @1, ml-lifecycle/drift-and-production-monitoring @3
 
-Every provider converged on the same three fields: a name, a natural-language description, and a JSON Schema for the parameters, which the runtime serialises into the prompt. The model emits a name and a JSON object, and the runtime parses and dispatches. The division of labour is worth internalising -- the schema decides what the arguments look like, but the description decides whether the tool gets called at all.
+The schema is serialized canonically and hashed, and the digest is stored alongside whatever was derived from it - the tool's embedding in a retrieval index, a cached routing decision, a golden-output eval. When a deploy produces a different digest the dependents are known to be stale, which is what turns a silent contract change into an explicit invalidation.
 
-That makes the description the highest-leverage text in a tool-using system, and it should state when to call the tool, not just what it does. Two costs: schemas consume input tokens on every request, so a large catalogue crowds the context and degrades selection, which is why deferred loading and tool search exist; and the supported schema subset differs per provider, so a schema that validates locally can still be rejected.
+Reach for it once the tool catalogue is large enough that nobody can reason about which downstream artifacts a schema edit touches. Canonicalization is where it goes wrong: key order, whitespace and default values must be normalized first, or every deploy looks like a change and the signal is ignored.
 
 ### Tool-augmented LLM guide
 **Short:** Anthropic's tool-use cookbook: reference guidance on defining tool schemas and structuring a tool-calling loop.
@@ -2168,6 +2132,16 @@ Read it before writing a loop, because the shape is easy to get subtly wrong and
 **Kind:** api
 **Lang:** python
 **Roles:** llm-apps/tool-use-and-mcp @1, llm-apps/agent-framework @2
+
+### ToolLLaMA
+**Short:** LLaMA fine-tuned on ToolBench for multi-step API calling, released as the reference open tool-use model.
+**Kind:** model
+**Lang:** *
+**Roles:** llm-apps/tool-use-and-mcp @1, model-training/fine-tuning-and-peft @3
+
+It is the model half of the ToolBench release: a LLaMA base tuned on the benchmark's decision-tree-searched solution paths, so it learns to plan several calls and to recover when one returns an error rather than emitting a single call and stopping. A retriever selects candidate tools first, which is what lets it work against a catalogue far larger than the context window.
+
+Reach for it as an open baseline when you are measuring tool use without sending traffic to a hosted model. Frontier models with native tool-calling now exceed it on most tool benchmarks, so its value is reproducibility and self-hosting rather than raw capability.
 
 ### TransformersModel
 **Short:** smolagents adapter that backs an agent with a locally loaded Hugging Face transformers model instead of an API.

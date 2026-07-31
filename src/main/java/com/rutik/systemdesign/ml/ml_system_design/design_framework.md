@@ -689,7 +689,7 @@ def should_retrain(
 
 | Step | Tools | Notes |
 |------|-------|-------|
-| Requirements | Whiteboard, interview notes | No tools needed |
+| Requirements | None | No tools needed at this stage |
 | Problem formulation | LightGBM, PyTorch, sklearn | GBT for tabular; transformer for sequence |
 | Feature engineering | Apache Spark, Flink, dbt | Spark for batch, Flink for streaming |
 | Feature store | Feast, Tecton, Redis, S3 | Redis for online, S3/Hive for offline |

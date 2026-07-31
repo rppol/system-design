@@ -33,12 +33,6 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** java
 **Roles:** caching/distributed-cache @1, security/authentication-and-identity @2, apis-frameworks/dependency-injection-and-config @3
 
-### @functools.lru_cache
-**Short:** Python decorator memoizing a function's return values in a bounded in-process LRU; @cache is the unbounded form.
-**Kind:** api
-**Lang:** python
-**Roles:** caching/in-process-cache @1, runtime-systems/collections-and-algorithms @2
-
 ### aiocache
 **Short:** Async Python caching library with memory, Redis and Memcached backends, pluggable serializers and TTLs.
 **Kind:** tech
@@ -92,12 +86,6 @@ Reach for it for a read-mostly key-value workload where DynamoDB's single-digit 
 You choose an engine and AWS runs it: node provisioning, patching, backups, parameter groups, CloudWatch metrics, and for Redis or Valkey a replication group with automatic failover to a replica behind an endpoint that follows the primary. Cluster mode shards across several node groups behind a configuration endpoint, and a serverless option removes node sizing entirely. Data stays inside your VPC, with encryption in transit and at rest and IAM or AUTH-based access control.
 
 Reach for it when you want Redis or Memcached without owning failover, backups and version upgrades, which is most teams. The tradeoffs are the usual managed-service ones: no shell on the box, a restricted set of tunable parameters, no modules you did not get from AWS, and a premium over the same instances run yourself. It is still a cache, so plan for a cold cluster after a failover or a maintenance replacement.
-
-### cache
-**Short:** functools.cache: unbounded dict-backed memoization decorator with O(1) hits.
-**Kind:** api
-**Lang:** python
-**Roles:** caching/in-process-cache @1
 
 ### cachetools
 **Short:** Pure-Python in-process cache library: LRU, LFU, TTL and RR caches plus method decorators, with no infrastructure.
@@ -209,6 +197,16 @@ Its edge is built on Varnish, which is why the configuration language is VCL and
 
 That combination is what lets you cache genuinely dynamic content: set a long TTL and purge on change rather than guessing a short one. Reach for it for news, commerce and API responses that change unpredictably but are read constantly. It is a developer-facing product with a matching learning curve, since VCL is a real language with a real deployment cycle, and its Compute platform runs WebAssembly at the edge for logic VCL cannot express.
 
+### functools.cache
+**Short:** Python's unbounded memoisation decorator: `lru_cache(maxsize=None)` under a clearer name, added in 3.9.
+**Kind:** api
+**Lang:** python
+**Roles:** caching/in-process-cache @1
+
+It is a thin alias for `lru_cache` with the eviction machinery switched off, which is also why it is faster than a bounded `lru_cache` - there is no recency bookkeeping on a hit, just a dict lookup keyed on the arguments. Those arguments must be hashable, and the cache is per-process and per-function, so it does nothing for a second worker.
+
+Reach for it for pure functions over a bounded input domain - parsing a config, a recursive computation, resolving a lookup that never changes. Unbounded is the trap: on unbounded inputs it is a memory leak with a decorator on it, and anything whose result can go stale wants an explicit TTL cache instead.
+
 ### functools.lru_cache
 **Short:** Python stdlib decorator memoizing a function's results in a bounded in-process LRU keyed by its arguments.
 **Kind:** api
@@ -265,12 +263,6 @@ A prefix that has already been processed can be skipped on a later request, but 
 
 The win is on workloads with long, repeated prefixes -- a large system prompt, a retrieved document set, a conversation returning after a gap -- where it turns a full prefill into a load and cuts time to first token sharply. It is worth nothing when prompts are short or genuinely unique, since you pay the transfer either way, and the shared tier adds real infrastructure to operate.
 
-### lru_cache
-**Short:** Python decorator memoizing a function's results in a bounded LRU dict for O(1) hits; watch it pinning self on methods.
-**Kind:** api
-**Lang:** python
-**Roles:** caching/in-process-cache @1, runtime-systems/collections-and-algorithms @3
-
 ### Memcached
 **Short:** Multi-threaded in-memory key-value cache; pure string cache with no persistence, scales a hot key across cores.
 **Kind:** tech
@@ -306,18 +298,6 @@ The gain is a discount on cached input tokens and a shorter time to first token,
 **Kind:** tech
 **Lang:** *
 **Roles:** caching/semantic-and-llm-cache @1, observability/tracing-apm-and-llm-observability @2, platform-delivery/cloud-platform-and-cost @3
-
-### Python functools.cache
-**Short:** Unbounded memoization decorator, an alias for lru_cache(maxsize=None); the one-line way to memoize a recursion.
-**Kind:** api
-**Lang:** python
-**Roles:** caching/in-process-cache @1, runtime-systems/collections-and-algorithms @3
-
-### Python functools.lru_cache
-**Short:** Decorator memoizing a function's results in a bounded per-function LRU cache.
-**Kind:** api
-**Lang:** python
-**Roles:** caching/in-process-cache @1, runtime-systems/collections-and-algorithms @2
 
 ### Reactive Redis
 **Short:** Spring Data Redis's non-blocking template over the Netty-based Lettuce driver, for WebFlux applications.
