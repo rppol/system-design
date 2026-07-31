@@ -15,17 +15,29 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, traffic-edge/proxy-and-load-balancer @2, security/authentication-and-identity @3
 
+A service network is the unit of configuration: you register services with their listeners, associate the VPCs and accounts allowed to reach them, and a client then calls a stable DNS name without VPC peering, transit-gateway routes or overlapping-CIDR gymnastics. Authorization is IAM policy on the service or the network rather than security-group ranges, so a rule saying which role may call which path becomes expressible, and routing rules support weighted targets for canaries over health-checked target groups.
+
+Reach for it when services are spread across many accounts and VPCs and the networking rather than the application is what makes them hard to connect. It is AWS-only and gives less than a full mesh, with no sidecar-level protocol control and no cross-cloud story, and is metered per service and per gigabyte. A mesh such as Istio, or a federated Consul, remains the answer where portability or fine-grained data-plane behaviour matters.
+
 ### API Gateway
 **Short:** AWS API Gateway: managed HTTP front door doing routing, authorization, throttling and Lambda integration.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/api-gateway @1, traffic-edge/rate-limiting-and-resilience @2, platform-delivery/cloud-platform-and-cost @3
 
+A gateway is the single ingress that owns the concerns no individual service should reimplement: TLS termination, authentication and token validation, per-client throttling, request and response shaping, routing to the correct backend, and access logging with a correlation id attached. On AWS this is a managed regional endpoint in front of Lambda functions, containers or any HTTP origin, configured declaratively rather than deployed as instances you size and patch.
+
+Reach for it when several teams publish APIs and you want one enforcement point for authentication and quotas. Two costs recur: it is billed per request, which becomes the dominant line item at high volume and is what pushes teams towards a load balancer or a self-run proxy, and centralising policy makes the gateway a shared failure and change-management surface. Keep business logic out of it and treat its configuration as versioned code rather than console clicks.
+
 ### API Gateway request quotas
 **Short:** Per-client request quotas enforced at the gateway as admission control, shedding load before it reaches services.
 **Kind:** concept
 **Lang:** *
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, traffic-edge/api-gateway @2
+
+A quota is admission control at the boundary: each caller is identified by an API key, token subject or tenant id, counted against a limit over a window, and refused with `429 Too Many Requests` and a `Retry-After` hint, so the rejection costs microseconds at the edge rather than a connection, a thread and a timeout deep inside the system. Two settings are normally configured together: a sustained rate, and a burst depth deciding how much of a spike passes before shedding begins.
+
+Set quotas per client, so one integration stuck in a retry loop cannot consume everyone else's capacity, and publish the limits so callers can back off deliberately. Two limits worth knowing: edge counters are often per node or per region rather than globally exact, making the effective limit a multiple of the configured one, and a quota protects capacity but not correctness, so timeouts and circuit breakers are still needed behind it.
 
 ### Apigee
 **Short:** Google Cloud's full-lifecycle API gateway and management platform: policies, quotas, keys and developer portal.
@@ -43,6 +55,10 @@ Reach for it when you publish APIs to external or partner developers and the pac
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/api-gateway @3
 
+It parses HTTP, so routing decisions can be made on host, path, header, query string, source IP or method, with weighted target groups behind each rule for blue/green and canary shifts. Targets can be instances, IP addresses or Lambda functions; it terminates TLS with certificates from ACM, speaks HTTP/2 and gRPC to targets, and can authenticate users against Cognito or an OIDC provider before a request reaches your code. Per-target-group health checks take failing targets out of rotation.
+
+Reach for it as the default HTTP front door on AWS, since it is far cheaper per request than API Gateway and, with WAF attached, enough of a gateway for first-party traffic. What it is not is an API management product, because there are no usage plans, API keys, request validation or transformations. Its addresses also change, so clients needing a static IP or raw TCP throughput belong behind an NLB or Global Accelerator.
+
 ### AWS API Gateway
 **Short:** Managed AWS ingress that fronts services with auth, throttling quotas, request mapping and usage plans.
 **Kind:** tech
@@ -59,6 +75,10 @@ Two flavours exist: REST APIs carry the full feature set (usage plans, request v
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, platform-delivery/cloud-platform-and-cost @3
 
+It works at the connection level, hashing a flow's addresses and ports to pick a target and forwarding without parsing the payload, which is why it adds very little latency, handles protocols other than HTTP, and can preserve the client's source IP to the target instead of relying on an `X-Forwarded-For` header. It holds a static address per availability zone, or your own Elastic IP, scales without pre-warming, and can terminate TLS while leaving the protocol above it opaque.
+
+Reach for it for TCP and UDP services, for protocols an L7 balancer does not understand, when clients or firewalls need fixed IP addresses, and for extreme throughput. The tradeoff is that everything at layer seven disappears: no path routing, no header manipulation, no per-request logs, and shallower health checks. Idle connections are also silently dropped at the idle timeout, so keepalives matter. Combining it with an ALB behind is how you get both behaviours.
+
 ### AWS Route53 health checks
 **Short:** Route 53 endpoint probes that drive DNS failover, withdrawing records for an unhealthy region or origin.
 **Kind:** api
@@ -71,11 +91,19 @@ Two flavours exist: REST APIs carry the full feature set (usage plans, request v
 **Lang:** *
 **Roles:** traffic-edge/api-gateway @1, platform-delivery/cloud-platform-and-cost @3
 
+The unit of work is a policy document attached to an API, an operation or a product: an XML pipeline with inbound, backend, outbound and error sections in which you validate a JWT, rate-limit by subscription key, rewrite a URL, cache a response, transform a payload or call another service. Most gateway behaviour is therefore declarative configuration hung off an API definition imported from OpenAPI, while products bundle APIs with subscription keys and quotas and a developer portal handles self-service onboarding.
+
+Reach for it when publishing APIs to partners or across an enterprise on Azure, and the packaging, subscriptions and documentation matter as much as the proxying. The tiers differ substantially in throughput, virtual-network integration and availability guarantees, so read that comparison before designing around it, and a self-hosted gateway is the option for keeping traffic on-premises. For simple internal routing, Application Gateway or a container-native ingress is far lighter.
+
 ### Azure Application Gateway
 **Short:** Azure's L7 load balancer with URL-path routing, TLS termination and an optional web application firewall.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/api-gateway @2, platform-delivery/cloud-platform-and-cost @3
+
+It is a regional L7 reverse proxy: listeners terminate TLS, rules map hostnames and URL paths to backend pools of virtual machines, scale sets, App Services or raw addresses, and probes decide which members are healthy. Cookie-based session affinity, connection draining during deployments, zone-redundant autoscaling and header rewriting are built in, and the WAF variant runs OWASP core rule sets in detection or prevention mode within the same hop.
+
+Reach for it when Azure workloads need path-based routing with a web application firewall in front, or as an AKS ingress through its dedicated controller. Note the boundaries: it is regional, so global distribution needs Front Door or Traffic Manager above it, and it is a proxy rather than an API management product, so subscriptions, quotas and developer portals belong to API Management. For plain TCP or UDP the L4 Load Balancer is the right layer.
 
 ### Azure DNS
 **Short:** Azure's managed authoritative DNS service for hosting zones and records.
@@ -83,11 +111,19 @@ Two flavours exist: REST APIs carry the full feature set (usage plans, request v
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/cloud-platform-and-cost @2
 
+Public zones are served from anycast name servers and delegated to by pointing the registrar's NS records at them, while private zones resolve only for the virtual networks you link, with optional auto-registration writing an A record for each virtual machine as it is created, which is how internal names stay off the public internet. Records are ordinary Azure resources, so role-based access control, resource locks, tags and Terraform or Bicep apply to a record set exactly as they do to a virtual machine.
+
+Reach for it when the estate is on Azure and you want DNS under the same identity and infrastructure-as-code control as everything else. It is authoritative hosting rather than traffic management, so weighted, priority and geographic routing with health checks belong to Traffic Manager and global HTTP load balancing to Front Door. Whatever sits above it, remember that any DNS-level change propagates at the mercy of client TTL caching.
+
 ### Azure Load Balancer
 **Short:** Azure's regional L4 load balancer distributing TCP/UDP flows across backend VMs and scale sets.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, platform-delivery/cloud-platform-and-cost @3
+
+It is a software-defined L4 balancer implemented in the platform's own network stack rather than as an appliance in the path, distributing flows by a hash over source and destination address and port. Rules bind a frontend address and port to a backend pool with a health probe, and it does not proxy, so the backend sees the client's connection. Outbound rules with explicitly allocated SNAT ports govern whether those machines can reach the internet at all, and exhausting those ports is a classic and confusing failure.
+
+Reach for it for non-HTTP protocols, for internal balancing between tiers, and when you want the cheapest possible distribution with no per-request processing. Everything at layer seven is missing by definition, with no TLS termination, path routing, header rewriting or per-request logs, so web front ends belong behind Application Gateway or Front Door. The Standard and Basic tiers differ in zone support and default security posture, and that choice is not trivially reversible.
 
 ### Bucket4j
 **Short:** Java token-bucket rate limiter, in-memory or distributed over Redis/Hazelcast/JCache.
@@ -115,11 +151,19 @@ It is a strong default for small and mid-sized edges, internal tools, and anywhe
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/kubernetes-and-orchestration @2, runtime-systems/io-networking-and-syscalls @3
 
+Because Cilium already implements pod networking, policy and load balancing as eBPF programs in the kernel datapath, the mesh reuses that path instead of adding a sidecar to every pod: L3 and L4 policy and load balancing execute in the kernel with no extra hop, and a shared per-node Envoy handles the L7 work, such as HTTP-aware policy, only for traffic that needs it. Workload identity for mTLS is derived from the Kubernetes identity rather than from network location.
+
+Reach for it when sidecar overhead is the objection to adopting a mesh, since there is no per-pod memory and CPU tax, no injection webhook, no init-container ordering problem and one fewer hop per call. The costs are a modern kernel requirement, eBPF as a debugging surface most teams have never touched, and a feature set that trails the sidecar meshes on elaborate traffic shaping. Istio's ambient mode attacks the same complaint from the other direction.
+
 ### circuitbreaker
 **Short:** Lightweight Python decorator that opens a circuit after repeated failures, wrapping sync or async callables.
 **Kind:** tech
 **Lang:** python
 **Roles:** traffic-edge/rate-limiting-and-resilience @1
+
+The decorator counts consecutive failures of the wrapped callable and, once `failure_threshold` is reached, opens: further calls raise `CircuitBreakerError` immediately instead of each one waiting out its own timeout, until `recovery_timeout` elapses and a single trial call decides whether to close again. `expected_exception` is the parameter that matters most, deciding what counts as a failure, so a validation error or a 404 does not trip a breaker meant for a dependency being down.
+
+Reach for it when you want breaker behaviour in a small service without adopting a whole resilience framework, and use the bundled monitor so a health endpoint can report which breakers are open. State lives in the process, so every worker discovers an outage independently and the breaker means less than it appears behind a multi-process server. Always pair it with an explicit request timeout, since a breaker never trips on a call that simply hangs.
 
 ### Cloud DNS
 **Short:** Google Cloud managed authoritative DNS with routing policies and health checks for discovery and failover.
@@ -135,17 +179,29 @@ You create a managed zone and record sets, and Google serves them from its anyca
 **Lang:** *
 **Roles:** traffic-edge/api-gateway @1
 
+It is a proxy you deploy rather than a hosted edge. The Extensible Service Proxy, an Envoy-based container, runs in front of the backend and pulls its configuration from a service definition you upload, generated from an OpenAPI document or a gRPC service configuration. From that specification it validates API keys, verifies JWTs against configured issuers, enforces quotas per consumer project, and reports request metrics and logs into the project's monitoring, so the contract file is the source of truth for the gateway's behaviour.
+
+Reach for it when the backend runs on GKE, Compute Engine or Cloud Run and you want spec-driven authentication and quotas close to the service. Note the direction of travel: Google's newer API Gateway covers similar ground as a fully managed product and Apigee covers the full-lifecycle case, so a new deployment should compare all three rather than defaulting here. The proxy is also an extra container to size, deploy and keep patched.
+
 ### Cloudflare LB
 **Short:** Cloudflare's global L7 load balancer with health checks, geo-steering and failover across origins.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, caching/http-and-cdn-cache @3
 
+You define pools of origins with health monitors and attach them to a hostname; a request arriving at any Cloudflare data centre is steered by the configured policy, whether geographic or region-based steering, latency measured from the edge itself, weighted splits, or a simple failover order, and an origin failing its monitor is removed from the pool. Because the decision is made at the edge on a live connection rather than encoded in a DNS answer, failover is not held hostage by resolver TTL caching.
+
+Reach for it when origins sit in several regions or several providers and traffic should follow health and proximity, particularly if the zone already proxies through Cloudflare so caching, WAF and TLS share the same hop. It balances between origins rather than inside a data centre, so a local balancer is still needed behind it, and all traffic transits a third party's network, which is both a dependency and a data-path consideration.
+
 ### Cloudflare Rate Limiting
 **Short:** Edge rate limiting with geo rules and DDoS protection; counters are per data center, not global.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, caching/http-and-cdn-cache @3, traffic-edge/api-gateway @3
+
+A rule matches requests with an expression over path, method, headers, country or bot score, counts them per a characteristic you choose such as client address, an API key header or a JWT claim, and then blocks, challenges or merely logs once the threshold is crossed, all at the edge before the request leaves the data centre it landed in. That placement is the entire value, because an attack is absorbed on the provider's network rather than on your bandwidth and your servers.
+
+Reach for it for volumetric abuse, credential stuffing and scraping. The counting caveat is the architecturally important one: counters are kept per data centre, so a client distributed across many locations sees an effective limit well above the configured number, and precise per-tenant quotas therefore still belong in your application or gateway on shared state. Treat this layer as coarse protection and keep an exact limiter behind it.
 
 ### Consul
 **Short:** Raft-backed service discovery, health checking, KV config store and service mesh for polyglot services.
@@ -163,6 +219,10 @@ Reads default to being served by the leader — strongly consistent except for a
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, traffic-edge/proxy-and-load-balancer @2, security/authentication-and-identity @3
 
+Connect was the name given to the mesh capability layered onto the existing service catalogue, and that lineage explains its shape. The registry, health checks and KV store already existed, so the mesh added a built-in certificate authority issuing SPIFFE-style workload identities, a sidecar proxy per service instance, and authorization expressed between service identities instead of between IP addresses. The certificate authority can be Consul's own or delegated to Vault, and rotation happens underneath the application.
+
+Reach for it when Consul is already the discovery layer and you want mTLS and policy without introducing a second control plane. The proxy is Envoy by default, with a simpler built-in option for low-throughput cases. The behaviour to internalise is that intentions are enforced by the proxy, so a workload that bypasses its sidecar bypasses the policy, which is why a mesh is not a replacement for network controls. In a Kubernetes-only estate, Linkerd or Istio is a shorter path.
+
 ### Consul service mesh
 **Short:** Consul's mesh layer: sidecar proxies, mTLS between services, intention-based policy and service discovery.
 **Kind:** tech
@@ -176,6 +236,10 @@ The mesh registers each service and runs a sidecar proxy (Envoy by default) besi
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/kubernetes-and-orchestration @2, runtime-systems/io-networking-and-syscalls @3
+
+A CoreDNS server is a chain of plugins compiled into the binary and enabled in a `Corefile`, and the chain is the design: `kubernetes` answers cluster service names from the API server, `forward` sends everything else upstream, `cache` holds answers, and `errors`, `log`, `prometheus`, `rewrite` and `hosts` fill in the rest. Order matters, because each plugin either answers the query or passes it along to the next.
+
+The setting that causes the most trouble is not in CoreDNS at all. With `ndots:5` in a pod's resolver configuration, any name with fewer than five dots is tried against each cluster search domain first, so one external lookup becomes several queries and DNS becomes a surprisingly large share of tail latency. The usual remedies are fully qualified names with a trailing dot, a lower `ndots` in the pod spec, and a per-node cache. Scale the deployment with the cluster, since the two-replica default is a real bottleneck at size.
 
 ### dig
 **Short:** Command-line DNS lookup tool that shows the full resolution chain, record types and TTLs.
@@ -193,11 +257,19 @@ It is the first command for any problem that turns out to be resolution: propaga
 **Lang:** python
 **Roles:** traffic-edge/service-mesh-and-discovery @1, runtime-systems/io-networking-and-syscalls @2
 
+It speaks DNS rather than wrapping the operating system's resolver, so a resolver object can be pointed at a specific nameserver, ask for any record type including `SRV`, `TXT` and `CAA`, read the TTL off the answer, and use TCP, DNS over TLS or DNS over HTTPS. Beyond lookups it parses and generates zone files, performs zone transfers, builds and signs messages and supports dynamic updates, which is what makes it the base for provisioning and auditing tools rather than only for queries.
+
+Reach for it when code has to verify DNS rather than merely use it: confirming a delegation before a cutover, discovering `SRV` endpoints, checking that a customer added the right `TXT` record. Remember that bypassing the OS resolver also bypasses `/etc/hosts`, `nsswitch` and any local cache, so its answers can legitimately differ from what the application sees. Ordinary connection code should keep using the standard library.
+
 ### dnsutils pod
 **Short:** Throwaway debug pod with dig and nslookup, used to test CoreDNS resolution from inside a Kubernetes cluster.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/kubernetes-and-orchestration @2, runtime-systems/io-networking-and-syscalls @2
+
+It is a convention rather than a product: run a small image containing `dig`, `nslookup` and `host` inside the cluster, exec into it, and resolve names from the pod network with the same resolver configuration a real workload receives. That is what separates the candidate causes, which are otherwise indistinguishable from outside: a Service with no ready endpoints, a wrong namespace in the name, a search-domain surprise, a NetworkPolicy blocking port 53, or CoreDNS itself being unhealthy.
+
+Reach for it as the first step whenever a pod cannot reach a service, before changing anything, and test both the short name and the fully qualified `service.namespace.svc.cluster.local` form, since the difference between them tells you whether the search path is the problem. Delete it afterwards, because a long-lived pod full of shell tools is an audit and security nuisance. On a restricted cluster, an ephemeral debug container attached to the affected pod is the better tool.
 
 ### ECS Service Connect
 **Short:** AWS ECS built-in service discovery and sidecar mesh giving named endpoints, mTLS and traffic telemetry.
@@ -205,11 +277,19 @@ It is the first command for any problem that turns out to be resolution: propaga
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/cloud-platform-and-cost @3
 
+You give a service a discoverable name within a namespace and ECS injects a managed proxy into each task; clients then call the logical name, and the proxy resolves it and load-balances across healthy tasks with no load balancer in the path and no registry to operate. Because the proxy sees every request it also emits per-client and per-server metrics covering request counts, errors and latency percentiles, which is the part teams notice first, since that visibility otherwise needs a mesh or instrumentation in every service.
+
+Reach for it for east-west traffic between ECS services when a full mesh is more machinery than the problem deserves. Its scope is exactly that: ECS only, with far less traffic control than a real mesh and nothing outside AWS. Public ingress still needs a load balancer, and workloads spanning ECS, EKS and virtual machines need a service-networking layer that is not tied to one runtime.
+
 ### ELB
 **Short:** AWS Elastic Load Balancing: managed L4 (NLB) and L7 (ALB) load balancers with health checks and TLS termination.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, platform-delivery/cloud-platform-and-cost @3
+
+The name covers a family rather than one product: the Application Load Balancer parses HTTP and routes on host, path and headers, the Network Load Balancer forwards TCP and UDP flows at connection level with static addresses, and the Classic balancer predates both and is best avoided in new work. All of them register targets, run health checks, integrate with ACM for TLS, scale their own capacity, and are billed hourly plus a capacity-unit charge.
+
+Pick by protocol: if a routing decision depends on the request it is an ALB, and if the protocol is not HTTP or the client needs a fixed address or the lowest latency it is an NLB. The shared caveats matter more than the differences: targets in an unhealthy subnet or behind a misconfigured security group never receive traffic, cross-zone balancing behaviour and its charges differ between types, and a balancer is only as available as the subnets it was given.
 
 ### Envoy
 **Short:** High-performance L7 proxy used as service-mesh sidecar, API gateway, load balancer and rate-limit enforcer.
@@ -226,6 +306,10 @@ It terminates and originates mTLS, speaks HTTP/1.1, HTTP/2, HTTP/3 and gRPC nati
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/api-gateway @2, traffic-edge/service-mesh-and-discovery @2
+
+Running the same proxy at the edge that the sidecars run means one configuration model, one set of statistics and one body of expertise covering both hops: the edge listener terminates TLS, applies authentication and rate-limit filters, and routes into the mesh where mTLS and retry policy continue unbroken, all driven from one control plane over xDS. Istio's ingress gateway and the Envoy Gateway project are this pattern packaged with an opinionated API.
+
+Reach for it when a mesh already exists and a separate edge product would duplicate its policy in a second dialect. The differences between the two roles are easy to underestimate: the edge faces untrusted clients, so request-size limits, connection limits, timeouts and a web application firewall matter far more, and it is a shared failure domain needing its own capacity planning. Where the requirement is API packaging, keys and developer onboarding, a managed API gateway still fits better.
 
 ### Envoy/Istio outlier detection
 **Short:** Mesh-level circuit breaking that ejects an upstream host from the pool after consecutive errors.
@@ -255,11 +339,19 @@ It suits a JVM fleet where a client library can do the discovery and the load ba
 **Lang:** java
 **Roles:** traffic-edge/rate-limiting-and-resilience @1
 
+Policies are composed around a call and the nesting order defines the semantics: with a retry, a breaker and a timeout composed together, the outermost policy is applied last, so a timeout inside a retry bounds each attempt while one outside bounds the whole operation. Beyond retry, breaker, timeout and fallback it offers hedging, issuing a second attempt after a delay and taking whichever returns first, which is the cheap fix for tail latency on idempotent reads, plus rate limiters and bulkheads.
+
+Reach for it in plain Java where you want composable resilience without a framework, since it is a small dependency needing no annotations or container and works with synchronous calls, `CompletableFuture` and async execution alike. Resilience4j is the more common choice in Spring applications because of its starter and Micrometer integration, so the surrounding stack usually decides rather than the feature list. As always, state is per JVM, and hedging multiplies load on the dependency.
+
 ### fastapi-limiter
 **Short:** Redis-backed FastAPI rate limiter exposed as a Depends() dependency, safe across multiple app instances.
 **Kind:** tech
 **Lang:** python
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, caching/distributed-cache @3
+
+It is initialised once against a Redis connection and then attached as a route dependency with a permitted count and a window, and the counting is done by a Lua script on Redis so the increment and the expiry are one atomic operation and every application instance shares a single counter. The identifier defaults to client host plus path and is overridable, which is how you limit by authenticated user or API key rather than by address, necessary as soon as clients sit behind a NAT or a proxy.
+
+Reach for it when a FastAPI service needs per-route limits enforced consistently across replicas without introducing a gateway. Two consequences follow from the design: Redis becomes a hard dependency of every request on a limited route, so decide deliberately whether an outage should fail open or closed, and the whole thing is async, so it belongs in an ASGI deployment only. Fleet-wide policy across many services still belongs at the ingress.
 
 ### GatewayFilter
 **Short:** Spring Cloud Gateway filter with ordered pre/post hooks around the proxied call: rate limits, rewrites, breakers.
@@ -273,17 +365,29 @@ It suits a JVM fleet where a client library can do the discovery and the load ba
 **Lang:** *
 **Roles:** traffic-edge/api-gateway @1, traffic-edge/rate-limiting-and-resilience @3, platform-delivery/cloud-platform-and-cost @3
 
+Under Google Cloud it is provisioned as a project resource with organizations, environments and environment groups, running on Google-managed infrastructure, while a hybrid installation places the message processors in your own Kubernetes cluster and keeps the management plane in the cloud. Analytics land in Google's own stack, and identity, billing and Terraform provisioning follow ordinary GCP conventions rather than living in a separate console with a separate account model.
+
+Reach for it on GCP when the requirement is genuine API management, meaning products, monetization, a developer portal and deep analytics, rather than routing. The pricing model and the minimum footprint are substantial, which is exactly why Google also offers a much lighter API Gateway for the plain authentication-and-quota case and Cloud Endpoints for spec-driven proxying beside a service. Choosing the heavyweight where a proxy would do is the common and expensive mistake.
+
 ### GCP Cloud Load Balancing
 **Short:** Google Cloud's global anycast L4/L7 load balancer serving one IP worldwide with regional backends.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, platform-delivery/cloud-platform-and-cost @3
 
+The global external tier is genuinely anycast: one address is announced from Google's edge worldwide, the connection terminates at the nearest point of presence, and the request travels Google's backbone to whichever regional backend has capacity, which removes a slow public-internet path and a DNS round trip from every connection. Backends are grouped into backend services with health checks and capacity scalers, URL maps handle host and path routing, and Cloud CDN and Cloud Armor attach at the same hop.
+
+Reach for it when users are worldwide and you want one address, automatic regional failover and edge TLS termination without owning any of it. The concept count is the real cost, since forwarding rules, target proxies, URL maps, backend services and health checks are five objects for one balancer, and the global tier sits outside your VPC in ways that surprise people debugging source addresses. For a single region the regional or internal variants are simpler and cheaper.
+
 ### Global Accelerator
 **Short:** AWS anycast edge service entering traffic at the nearest PoP over the AWS backbone, with fast regional failover.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, platform-delivery/cloud-platform-and-cost @3
+
+It gives you two static anycast addresses announced from AWS edge locations, so a client's connection is established at the nearest point of presence and then carried over the AWS backbone to the endpoint, skipping most of the public internet's congestion and route churn. Traffic dials weight each endpoint group per region, health checks pull an unhealthy region out within seconds, and because the client-facing address never changes, failover involves no DNS record change and no TTL to wait out.
+
+Reach for it for global TCP and UDP workloads where the latency variance of the open internet is the problem, for gaming and real-time media, and wherever clients must allowlist fixed addresses. It is a network accelerator rather than a CDN, since nothing is cached, so a content-heavy site gains far more from CloudFront. It carries a fixed hourly charge plus a data premium, so measure the improvement from real client locations before adopting it.
 
 ### Guava RateLimiter
 **Short:** Guava's in-process token-bucket limiter that smooths or blocks calls, with an optional warm-up ramp.
@@ -329,11 +433,19 @@ Reach for it when many services in several languages need the same traffic, secu
 **Lang:** *
 **Roles:** traffic-edge/api-gateway @1, traffic-edge/service-mesh-and-discovery @1, traffic-edge/proxy-and-load-balancer @2
 
+It is a standalone Envoy deployment at the cluster edge with no application beside it, configured by the same control plane as the sidecars: a `Gateway` resource declares the ports, protocols and TLS certificates it exposes, and `VirtualService` resources bind hostnames and paths to in-mesh destinations. The traffic rules already used inside the mesh, such as weighted canaries, retries and mirroring, therefore apply identically to external traffic, and telemetry is continuous from edge to workload.
+
+Reach for it when a mesh is already in place and a separate ingress controller would mean maintaining routing rules in two systems. It is a pod like any other, so its replica count, resource requests and autoscaling are yours to size, and its configuration surface is Istio's, which is powerful and easy to get subtly wrong where `Gateway` host matching and `VirtualService` binding interact. Teams standardising on Gateway API can express much of this in that vocabulary instead.
+
 ### Kiali
 **Short:** Istio's observability console: live service topology, traffic flow, mTLS status and config validation.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, observability/tracing-apm-and-llm-observability @2, observability/alerting-and-incident-response @3
+
+It reads Istio's configuration from the Kubernetes API and its telemetry from Prometheus, then joins the two into a live graph of which service calls which, with request rates, error percentages and latency on the edges and mTLS status shown per connection. The other half is validation: it inspects `VirtualService`, `DestinationRule` and `Gateway` objects for the mistakes that produce no error yet silently drop traffic, such as a route referencing a subset that no `DestinationRule` defines.
+
+Reach for it when a mesh has enough services that nobody holds the call graph in their head, and during an incident to see which dependency is actually failing rather than which one is being blamed. It is a console over existing data rather than a data source, so it is only as good as the metrics retention behind it and it does not replace tracing for a single slow request. Its ability to edit mesh configuration should be locked down in production.
 
 ### Kong
 **Short:** Nginx-based API gateway with plugins for auth, Redis-backed rate limiting and traffic policy at the ingress.
@@ -349,11 +461,19 @@ Requests hit an nginx and OpenResty data plane that matches a route to an upstre
 **Lang:** *
 **Roles:** traffic-edge/api-gateway @1, traffic-edge/rate-limiting-and-resilience @2, traffic-edge/proxy-and-load-balancer @2, security/authentication-and-identity @3
 
+Deployment mode is the first architectural decision. The traditional mode keeps configuration in PostgreSQL, DB-less mode loads a declarative YAML file at boot so the gateway is immutable and reproducible, and hybrid mode splits a control plane from data-plane nodes that keep serving if the control plane is down. Plugins run in ordered phases around the proxied call, and beyond the bundled set they can be written in Lua or, through external plugin servers, in other languages.
+
+Reach for it when you want a self-hosted gateway with a large plugin catalogue and no vendor runtime in the path. The recurring operational realities are that rate-limit and other counters are per node unless pointed at Redis, that a long plugin chain is latency paid on every request, and that plugin ordering has to be reasoned about explicitly. A managed gateway removes that work, and a service mesh is the better answer for east-west rather than edge policy.
+
 ### Kubernetes DNS
 **Short:** In-cluster DNS (CoreDNS) resolving Service names to ClusterIPs, the default service-discovery mechanism.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/kubernetes-and-orchestration @2
+
+Every Service gets an `A` record at `name.namespace.svc.cluster.local` resolving to its cluster IP, a headless Service returns the pod addresses directly instead, and `SRV` records expose named ports. Pods are configured with a search path so a bare name resolves within the namespace and `name.namespace` resolves across namespaces. Records are driven by the API server, so they appear and disappear with the objects themselves and no application needs a registry client, since discovery is simply resolution.
+
+The trap lives in the resolver configuration rather than the server. With `ndots:5`, any name containing fewer than five dots is tried against each search domain first, so resolving an external hostname costs several failed queries before the real one, and all of them land on the same few DNS replicas. Use fully qualified names with a trailing dot for external hosts, consider a per-node cache, and scale the DNS deployment with the cluster instead of leaving the default replica count.
 
 ### Kubernetes Services
 **Short:** The Kubernetes object giving a stable virtual IP and DNS name that load-balances across a changing set of Pods.
@@ -383,11 +503,19 @@ Its load balancing is the practical win: an exponentially weighted moving averag
 **Lang:** *
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, caching/distributed-cache @2
 
+Its relevance here is embedding: the interpreter is tiny and has no threads of its own, so a host that is already single-threaded runs a script to completion without interleaving. In Redis that makes an entire script atomic, which is how a rate limiter reads a counter, compares it against a limit and increments it with an expiry as one indivisible operation rather than three racing commands. In nginx, OpenResty embeds LuaJIT into the request phases so authentication, routing and limiting logic run inside the proxy.
+
+Reach for it when several operations must be atomic against shared state, or when a proxy needs logic that configuration cannot express. Keep scripts short, because in Redis a long script blocks every other client on that instance, and scripts must be deterministic to replicate correctly. Past a few dozen lines, moving the logic into a service is far easier to test than a string of Lua embedded in configuration.
+
 ### Lyft ratelimit
 **Short:** Envoy's descriptor-based global rate-limit service, backed by Redis and configured per route or header.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, traffic-edge/service-mesh-and-discovery @2, traffic-edge/api-gateway @3
+
+Envoy does not count requests itself. It computes descriptors, key-value pairs derived from the route, headers or remote address, and asks this service over gRPC whether the request is within limits. The service matches them against a YAML tree of domains and limits and increments counters in Redis, so every proxy in the fleet consults one shared budget instead of each enforcing its own. Nested descriptors are what allow a per-route limit and a per-key limit to be evaluated in the same call.
+
+Reach for it when a mesh or gateway needs a globally accurate quota rather than a per-node approximation. It is another service in the request path, so decide the failure mode deliberately: failing open keeps traffic flowing when the limiter is down and removes the protection exactly when overload is most likely. Local per-proxy limits cost nothing extra and suffice when the limit is a coarse safety valve rather than a contractual quota.
 
 ### MetalLB
 **Short:** Provides Service type=LoadBalancer on bare-metal Kubernetes by advertising external IPs over ARP/NDP or BGP.
@@ -395,11 +523,19 @@ Its load balancing is the practical win: an exponentially weighted moving averag
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, platform-delivery/kubernetes-and-orchestration @2
 
+On a cloud, a Service of type LoadBalancer is fulfilled by the provider's API; on bare metal nothing answers and the Service stays pending forever. MetalLB fills that gap by allocating an address from pools you configure and then advertising it, either in layer-2 mode, where one elected node answers ARP or NDP so all traffic enters through that node, or in BGP mode, where nodes peer with your routers and the address is announced as a route that ECMP hashing spreads flows across.
+
+Reach for it in any self-hosted cluster where you want the standard Service type to work instead of node ports plus an external proxy. Understand the mode: layer-2 is trivial to configure but gives failover rather than balancing, with one node's bandwidth as the ceiling and a brief outage while the address moves, while BGP balances properly but needs the network team and rehashes flows when the topology changes.
+
 ### mitmproxy
 **Short:** Interactive TLS-intercepting proxy for inspecting, replaying and rewriting HTTP traffic while debugging a client.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, runtime-systems/io-networking-and-syscalls @2, devtools/testing-and-mocking @3
+
+It sits between client and server and generates a certificate per host on the fly from its own certificate authority, so once that authority is trusted by the client the session is decrypted, inspected and re-encrypted onwards, making every request and response visible. It runs as an interactive terminal application, a web interface or a headless runner, and its addon API lets Python hooks rewrite headers, inject faults, delay or replay traffic, which turns it from a viewer into a test harness.
+
+Reach for it when the client is not yours to instrument, such as a mobile app or a vendor SDK, and you need to see exactly what it sends, or to fake a backend response. Two constraints decide whether it works at all: certificate pinning defeats interception by design, and it is a debugging tool rather than a production proxy. Treat any capture as containing credentials, because it usually does.
 
 ### Netflix Hystrix
 **Short:** Legacy JVM resilience library providing circuit breakers, bulkheads and fallbacks; superseded by Resilience4j.
@@ -433,11 +569,19 @@ Two defaults cause most of the mystery incidents. `proxy_buffering` is on, so a 
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/api-gateway @2, caching/http-and-cdn-cache @3
 
+The commercial build adds precisely the parts the open-source server leaves out: active health checks that probe upstreams rather than only marking a server bad after a real request fails, an API for adding and removing upstream servers with no configuration reload, session persistence beyond simple hashing, re-resolution of upstream DNS names as they change, a live activity monitoring dashboard, and JWT validation at the edge.
+
+Reach for it when upstreams change frequently and reloading configuration for every change is unacceptable, or when a support contract is a procurement requirement. Weigh it honestly against the alternatives, because that same gap is what most teams close for free with a controller that regenerates and reloads configuration, an Envoy-based proxy fed endpoints by a control plane, or Traefik discovering backends from labels. Licensing is per instance, which makes a large horizontally scaled edge expensive.
+
 ### NodeLocal DNSCache
 **Short:** Per-node DNS cache DaemonSet that removes conntrack pressure and tail latency from Kubernetes service lookups.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/kubernetes-and-orchestration @2
+
+It runs a caching resolver as a DaemonSet on every node and points pods at that local listener instead of at the cluster DNS service address. Two things follow. Cache hits are answered on the node with no network hop at all, and the misses that do leave the node travel to the cluster resolver over a long-lived TCP connection rather than as fresh UDP exchanges through the service's NAT rules, which is the actual fix, because it removes the conntrack churn and UDP entry races behind sporadic five-second lookups.
+
+Reach for it in any busy cluster, and especially where those intermittent multi-second DNS timeouts appear under load. The tradeoffs are ordinary DaemonSet ones: a small resident footprint on every node and one more component to upgrade, plus a cache that can serve a briefly stale answer after an endpoint change. It complements rather than replaces tuning the resolver's `ndots` setting and scaling the cluster DNS deployment itself.
 
 ### on AWS
 **Short:** Placeholder entry for the AWS-hosted service-mesh option in a microservices technology table.
@@ -461,17 +605,29 @@ In .NET it plugs into the HTTP client factory so outbound calls inherit a policy
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, runtime-systems/io-networking-and-syscalls @2, security/authorization-and-policy @3
 
+The pattern is the same wherever it appears. A provider publishes a service behind an internal load balancer, a consumer creates an endpoint that materialises as a network interface holding a private address in their own subnet, and traffic flows over the cloud's internal fabric. Because the connection is one-directional and scoped to a single service, the two networks are not joined: no route exchange, no shared address space, and therefore no CIDR overlap problem, which is what separates it from peering.
+
+Reach for it when a vendor's service must be reachable without an internet path, or when a rule forbids public egress. Costs are charged per endpoint and per gigabyte and multiply across many services and accounts, DNS needs care so the name resolves to the endpoint rather than the public address, and the granularity means one endpoint per service. For broad any-to-any connectivity, peering or a transit hub is still the right shape.
+
 ### PrivateLink
 **Short:** AWS PrivateLink: expose or consume a single service privately over VPC endpoints, never traversing the internet.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/cloud-platform-and-cost @2
 
+An interface VPC endpoint is an elastic network interface in your own subnet with a private address, and it fronts either an AWS service or a service another account published behind a Network Load Balancer. Traffic to it never touches an internet gateway or a NAT gateway, security groups on the interface control who may use it, and an endpoint policy can restrict which API actions and resources are permitted through it.
+
+Reach for it for private access to AWS APIs from isolated subnets and for consuming partner services without peering. Two practical points dominate: private DNS must be enabled or configured so the service's normal hostname resolves to the endpoint, otherwise clients silently keep using the public path, and interface endpoints carry an hourly charge per availability zone plus data processing, which becomes significant across many services and accounts. Gateway endpoints for S3 and DynamoDB are free where they apply.
+
 ### PSC
 **Short:** Google Private Service Connect: exposes one service privately across VPCs or projects without public IPs or peering.
 **Kind:** tech
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, platform-delivery/cloud-platform-and-cost @2
+
+A producer publishes a service attachment in front of an internal load balancer, and a consumer creates an endpoint reserving an internal address in their own VPC that points at it. Connections travel Google's network and reach the producer from a dedicated NAT subnet, which is what allows two organisations with identical private ranges to connect without renumbering anything. The producer explicitly accepts or rejects each consumer project, so exposure is a per-consumer decision rather than a network-wide one.
+
+Reach for it for consuming Google APIs privately, for reaching managed services such as Cloud SQL, and for publishing your own service to other projects or customers without peering. The same caveats apply as elsewhere: an endpoint per service to create and pay for, DNS entries so the intended name resolves privately, and a deliberately one-way connection. Where two networks genuinely need full mutual reachability, VPC peering or a connectivity hub is the right tool.
 
 ### pybreaker
 **Short:** Python circuit-breaker library with configurable failure thresholds, listeners and Redis-backed shared state.
@@ -535,6 +691,10 @@ HashiCorp's Sentinel is an entirely different product — an embedded policy lan
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1
 
+The mechanism is interception. A proxy beside each workload, or a per-node component in the ambient variants, takes over the connection, so retries, timeouts, outlier ejection, load balancing, mTLS with rotating workload identity and uniform request metrics all happen without a library in the application. A control plane distributes that configuration, which is what makes behaviour consistent across languages and changeable at runtime: the fleet's retry policy becomes a configuration push rather than a coordinated release.
+
+Reach for it when many services in several languages need the same traffic and security policy, and the alternative is asking every team to adopt a resilience library correctly. The costs are routinely underestimated: an extra hop on every call, per-pod resources, a configuration surface whose failure modes look exactly like application bugs, and a control plane to operate. Under a dozen services, or in a single language, a library and a good ingress usually win.
+
 ### slowapi
 **Short:** Rate-limiting decorator and middleware for FastAPI/Starlette, backed by the limits library with Redis storage.
 **Kind:** tech
@@ -549,11 +709,19 @@ It wraps the `limits` library and gives you a `Limiter` attached to the app plus
 **Lang:** java
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, apis-frameworks/dependency-injection-and-config @3
 
+It is an abstraction rather than an implementation: you inject a factory, wrap a call with an id, a supplier and a fallback, and whichever starter is on the classpath provides the actual behaviour. Configuration is applied through a customizer bean rather than at the call site, which keeps per-circuit thresholds and timeouts in one place, and a reactive variant covers `Mono` and `Flux` pipelines with the same model.
+
+Reach for it when writing a library or shared code that should not force a resilience implementation on its consumers, or when the surrounding project already leans on the Spring Cloud ecosystem. If the application is going to use Resilience4j anyway, and it usually is, programming against that library's own annotations and configuration properties gives access to settings the abstraction does not expose, such as the full sliding-window and bulkhead options. Abstracting over exactly one implementation is cost without benefit.
+
 ### Spring Cloud Eureka
 **Short:** Spring Cloud's Eureka integration: client-side registration and lookup of service instances from a Spring Boot app.
 **Kind:** tech
 **Lang:** java
 **Roles:** traffic-edge/service-mesh-and-discovery @1
+
+Adding the client starter and enabling discovery makes a Boot application register itself on startup, renew its lease by heartbeat, and pull the instance list into a local cache; discovery is then exposed through the `DiscoveryClient` interface, and combined with the client-side load balancer a call to a logical service name is resolved straight from that cache. Configuration is ordinary properties, so the registry address and the heartbeat and refresh intervals are environment concerns rather than code.
+
+Reach for it in a Spring estate on virtual machines or in a datacentre where discovery has to live in the application layer. Two behaviours must be understood before relying on it: the client's cached view lags reality by the refresh interval, so a stopped instance is still called for a while and calls must be retried against another one, and the registry deliberately favours availability over consistency. On Kubernetes the platform already provides discovery, so running this on top duplicates it.
 
 ### Spring Cloud Gateway
 **Short:** Reactive Spring-native API gateway: routing predicates, filters, Redis-backed rate limiting for JVM microservices.
@@ -576,6 +744,10 @@ Its reactive server is built on Project Reactor and Netty, so it holds many idle
 **Kind:** tech
 **Lang:** java
 **Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/service-mesh-and-discovery @2
+
+The core type is a load balancer that chooses one instance from a supplier of the current list, and the supplier is a chain you compose: the discovery-backed list, then optional filters and caches such as health-check filtering, zone preference, or the same-instance preference used in local development. Because the choice happens inside the caller there is no proxy hop, and the strategy is a bean you can replace outright without touching any call site.
+
+Reach for it in a Spring estate where discovery already exists and you want balancing without deploying infrastructure. Two consequences follow from being client-side: every client holds its own slightly stale view of instance health, and the policy is upgraded by redeploying applications rather than by changing configuration centrally, which is precisely the responsibility a service mesh moves out of the application. It also only balances traffic that goes through Spring's own clients.
 
 ### Spring Framework resilience
 **Short:** Spring's built-in @Retryable/@ConcurrencyLimit support, including retry of optimistic-locking failures.
@@ -609,17 +781,29 @@ It replaced Ribbon and is strictly client-side: no extra network hop and no prox
 **Lang:** java
 **Roles:** traffic-edge/service-mesh-and-discovery @1, apis-frameworks/dependency-injection-and-config @3
 
+The starter pulls in the Eureka client and its auto-configuration, so registration happens on startup from the application name and the configured instance metadata, and a background thread renews the lease on an interval. What matters in practice is the metadata it publishes and the timing around it, because the lease renewal and expiry intervals, together with the client's own registry-fetch interval, decide how long a dead instance keeps being handed to callers.
+
+Reach for it when a Boot service must appear in a Eureka registry. Two configuration mistakes are common enough to name: an instance registering a container hostname or otherwise unreachable address, which needs the prefer-IP-address setting or an explicit hostname, and leaving the default intervals in place while expecting fast failover, which those defaults were never designed for. Behind a Kubernetes Service none of this is needed at all.
+
 ### spring-cloud-starter-netflix-eureka-server
 **Short:** Eureka service registry server: an AP registry with peer-to-peer replication and client-side lease renewal.
 **Kind:** tech
 **Lang:** java
 **Roles:** traffic-edge/service-mesh-and-discovery @1
 
+The server is an ordinary Boot application with an annotation, which is why it is so often run as a small in-house service. Peers replicate registrations to each other instead of electing a leader, so the registry stays available under partition and is eventually consistent, and a client may read from any node. Self-preservation is the behaviour to know: when renewals fall below an expected threshold the server stops expiring leases, on the theory that mass heartbeat loss is more likely a network fault than a mass outage.
+
+Reach for it when a JVM estate outside Kubernetes needs a registry that is trivial to run. That same self-preservation lets stale entries linger, so clients must retry elsewhere rather than trusting the list, and the registry needs several peers across zones or it becomes the single point of failure it was meant to remove. Consul offers a stronger consistency model, and on Kubernetes the platform makes it unnecessary.
+
 ### spring-retry
 **Short:** AOP-based retry for Spring: @Retryable with backoff policies and an @Recover fallback when attempts run out.
 **Kind:** tech
 **Lang:** java
 **Roles:** traffic-edge/rate-limiting-and-resilience @1, apis-frameworks/aop-middleware-and-scheduling @2
+
+It is AOP. `@Retryable` on a method has a proxy intercept the call and re-invoke it according to the configured exception types, maximum attempts and backoff policy, with `@Recover` naming the method that runs once attempts are exhausted. The proxy is also the first thing that bites, because an internal call from one method of a bean to another bypasses it entirely and the retry silently never happens. A `RetryTemplate` provides the same policies programmatically where annotations do not fit.
+
+Reach for it for genuinely transient failures such as a deadlock or optimistic-locking conflict on a write, a connection reset, or a 503. Always set a multiplier and random jitter on the backoff so retries from many instances do not synchronise into a thundering herd, retry only idempotent operations, and be careful retrying inside a transaction that is already doomed. Resilience4j is the fuller library when breakers, bulkheads and metrics are wanted alongside retry.
 
 ### tenacity
 **Short:** Python retry library: decorator-driven backoff, jitter, stop conditions and exception predicates; async-native.
@@ -647,8 +831,16 @@ Reach for it at the edge of a container platform where the topology changes cons
 **Lang:** *
 **Roles:** traffic-edge/proxy-and-load-balancer @1, traffic-edge/service-mesh-and-discovery @2, platform-delivery/cloud-platform-and-cost @3
 
+It works purely in DNS. A client resolving your name receives an answer chosen by the profile's routing method, whether priority for failover, weighted for splits, performance for the lowest-latency region, geographic, subnet or multivalue, and the client then connects directly to that endpoint, so no traffic passes through the service itself. Endpoints can be Azure resources, external hostnames or nested profiles, and health probes remove a failing endpoint from the answers it hands out.
+
+Reach for it for global distribution across regions, clouds or on-premises endpoints, and for protocols other than HTTP, since nothing about it is HTTP-specific. The DNS mechanism is also the limit: answers are cached for the record's TTL and by resolvers that ignore it, so failover takes minutes rather than seconds, and there is no TLS termination, caching, firewall or path-based routing. Front Door is the anycast proxy to reach for when those matter.
+
 ### xDS
 **Short:** Envoy's discovery-service API family: a control plane streams endpoint, cluster, route and listener config to proxies.
 **Kind:** spec
 **Lang:** *
 **Roles:** traffic-edge/service-mesh-and-discovery @1, traffic-edge/proxy-and-load-balancer @2, apis-frameworks/rpc-graphql-and-streaming @3
+
+It is a family of gRPC and REST APIs, with LDS for listeners, RDS for routes, CDS for clusters, EDS for endpoints and SDS for secrets, that a proxy subscribes to and a control plane streams, so configuration is pushed rather than polled and applies without a restart. Consistency across resource types is the hard part: the aggregated variant carries every type on one stream so ordering is well defined, and the delta protocol sends only what changed, which matters when endpoints churn in a large fleet.
+
+You meet it as a protocol to implement rather than to configure, whether writing your own control plane or using the existing libraries. Its significance is that it decoupled the data plane from the control plane and became a de facto standard beyond Envoy, with gRPC clients able to consume it directly for proxyless load balancing. Writing one is a serious undertaking, which is why Istio, Consul and off-the-shelf gateways exist.
