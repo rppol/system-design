@@ -15,11 +15,19 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** *
 **Roles:** data-movement/message-broker @1, apis-frameworks/rpc-graphql-and-streaming @2
 
+Artemis is the successor codebase to ActiveMQ Classic, built on a non-blocking append-only journal and an address model rather than a queue model: producers send to an address, which routes to anycast queues for point-to-point delivery or multicast queues for publish-subscribe. Protocol heads for AMQP 1.0, MQTT, STOMP, OpenWire and its own core protocol all map onto that same addressing, so a message published over one protocol can be consumed over another. High availability is either shared-store or replication between a live and a backup broker.
+
+Reach for it when you need real JMS semantics -- transactions, message selectors, durable subscriptions, scheduled delivery -- or when several protocol families must meet on one broker, which is why it also serves as an external STOMP relay behind WebSocket messaging. The operational work is journal tuning and a paging strategy for when a consumer falls behind. For a replayable log read by many independent consumer groups, Kafka is the different shape you actually want.
+
 ### aio-pika
 **Short:** Asyncio AMQP client for RabbitMQ with connection/channel pooling and per-message consumer tasks.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/message-broker @1, data-access/drivers-and-connection-pooling @2, runtime-systems/concurrency-and-async @3
+
+It wraps the lower-level `aiormq` transport in an awaitable object model: `connect_robust` reconnects and re-declares exchanges, queues and bindings after a broker restart, `declare_queue` hands back an object you can iterate or attach a callback to, and each delivery arrives as a message whose `process()` context manager acks on success and nacks on an exception. Connection and channel pools cap how many channels a process opens, which matters because a channel is not free on the broker side.
+
+Reach for it in asyncio services that publish or consume AMQP without blocking the event loop. The setting that decides behaviour under load is prefetch: an unbounded `qos` with slow handlers buries one worker while others idle, and unacknowledged messages pile up invisibly. For a synchronous Django or Flask codebase, the blocking `pika` client or Celery is the honest fit rather than bolting an event loop onto request handling.
 
 ### aiokafka
 **Short:** asyncio-native Kafka producer and consumer client for Python event-driven services.
@@ -27,17 +35,29 @@ Record format and the full rules: [tech_bank.md](tech_bank.md).
 **Lang:** python
 **Roles:** data-movement/event-streaming-and-processing @1, runtime-systems/concurrency-and-async @2, data-movement/message-broker @3
 
+It is a pure-Python implementation of the Kafka protocol on asyncio rather than a wrapper over librdkafka, exposing `AIOKafkaProducer` and `AIOKafkaConsumer` with consumer-group membership, rebalance listeners, automatic or manual offset commits, and transactional produce via a `transactional_id` for read-process-write exactly-once. Because the poll loop is a coroutine, consumption shares the event loop with your HTTP handlers instead of occupying a background thread that must hand work across a queue.
+
+Reach for it when the service is already asyncio and you want backpressure and cancellation to work naturally through the same primitives as the rest of the code. The cost is throughput: pure-Python framing and deserialization become the bottleneck well before the broker does, and it trails the Java client on newer protocol features. `confluent-kafka-python` over librdkafka is far faster if you can tolerate running a blocking client in an executor.
+
 ### aiormq
 **Short:** Low-level asyncio AMQP 0.9.1 client for RabbitMQ; the transport underneath aio-pika.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/message-broker @1, runtime-systems/concurrency-and-async @2, data-access/drivers-and-connection-pooling @3
 
+It implements AMQP 0.9.1 framing directly on an asyncio transport -- connection and channel negotiation, heartbeats, `basic.publish`, `basic.consume`, publisher confirms -- and hands back futures and frame objects rather than wrapping them in friendlier types. There is no automatic reconnection, no queue object model and no acknowledge-on-exit context manager; when the broker closes a channel after a protocol error, it is your code that has to notice and recover.
+
+You would depend on it directly only when writing your own client abstraction, or when you need control over frames, heartbeat intervals and channel lifecycle that a higher layer hides. For application code the answer is aio-pika, which is built on it and supplies the robust connection, declared-queue objects, channel pools and the per-message process context manager you would otherwise reimplement, generally worse.
+
 ### Airbyte
 **Short:** Open-source ELT platform with hundreds of connectors syncing SaaS and database sources into a warehouse or lake.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-stores/warehouse-and-olap @3, data-movement/data-quality-and-lineage @3
+
+Each connector is a container speaking the Airbyte protocol over stdout -- `spec`, `check`, `discover`, `read` -- so a source emits records and state messages and a destination consumes them. That contract is why connectors can be written in any language and why building a custom one is routine rather than exotic. Syncs run full-refresh or incremental, with the cursor column or CDC log position carried in the state blob the platform persists between runs, and destinations land raw data that a typing-and-deduplication step or dbt turns into modelled tables.
+
+Reach for it when the problem is breadth -- many low-volume SaaS and database sources whose connectors nobody wants to write and maintain -- and self-hosting is acceptable. The costs are uneven quality across the long tail of community connectors and a deployment that is heavier than the volume it moves. Fivetran is the managed alternative when reliability outweighs cost, and a dedicated Debezium pipeline beats it for high-volume database replication.
 
 ### Airflow
 **Short:** DAG scheduler for data and training pipelines: Python-defined tasks, dependency management, retries and backfills.
@@ -55,17 +75,29 @@ The rule people learn late is that Airflow is an orchestrator, not a compute eng
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2, platform-delivery/cloud-platform-and-cost @3
 
+MSK runs genuine open-source Kafka brokers inside your VPC: you choose the version, the instance type and the broker count, and clients connect with unmodified Kafka libraries. AWS owns provisioning, patching, broker replacement and the metadata quorum; you still own topics, partition counts, retention and consumer-group hygiene. Authentication is IAM through a SASL mechanism that maps Kafka authorization onto IAM policy, or SASL/SCRAM from Secrets Manager, or mutual TLS. Tiered storage moves older log segments off broker volumes so retention is not bounded by attached disk.
+
+Reach for it when you want Kafka semantics without operating brokers and the rest of the stack is already in AWS. The costs are broker-hours billed whether or not traffic flows, cross-AZ replication traffic that is charged, and tuning you still have to do. Confluent Cloud bundles Schema Registry, connectors and stream processing if you want the ecosystem rather than just the brokers.
+
 ### Amazon MWAA
 **Short:** AWS-managed Apache Airflow: hosted scheduler, workers and web UI for DAG orchestration without cluster ops.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, platform-delivery/cloud-platform-and-cost @2
 
+It runs the Airflow scheduler, web server and workers as a managed environment: DAG files, plugins and a `requirements.txt` are read from an S3 bucket, workers autoscale between a minimum and maximum count, logs and metrics go to CloudWatch, and the environment sits in your VPC so tasks can reach private databases and services. You pick an Airflow version and an environment size instead of sizing instances, and the metadata database is managed and not directly reachable.
+
+Reach for it when you want Airflow's operator ecosystem without running the scheduler and its database yourself. The costs are the ones every managed Airflow carries: upgrades happen on the provider's cadence, dependency installation is constrained to the requirements file and a bad pin can fail an environment update for half an hour, and you pay continuously even when no DAG is running. Cloud Composer and Astronomer Astro are the equivalents elsewhere.
+
 ### Amazon SQS
 **Short:** Fully managed AWS queue with at-least-once standard and exactly-once FIFO modes, visibility timeouts and DLQs.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/message-broker @1, data-movement/task-queue-and-jobs @2, platform-delivery/cloud-platform-and-cost @3
+
+A queue is a regional endpoint rather than a broker you size: throughput scales on its own, messages are stored redundantly across availability zones, and the payload limit is 256 KB, with larger bodies handled by putting the object in S3 and passing a pointer through the extended client library. Retention defaults to four days and can be raised to fourteen, delay queues postpone first delivery, and long polling holds a receive call open so idle consumers do not burn API calls on empty responses.
+
+Reach for it as the default buffer between an AWS producer and a consumer whose rate you do not control. FIFO queues trade throughput for ordering and deduplication within a message group, so use them only where ordering is a genuine requirement rather than a comfort. Because redelivery is normal rather than exceptional every handler must be idempotent, and anything needing replay or several independent readers of one stream belongs in Kinesis or Kafka.
 
 ### Anthropic Message Batches API
 **Short:** Anthropic endpoint for submitting many messages as one asynchronous batch job at reduced cost.
@@ -78,6 +110,10 @@ The rule people learn late is that Airflow is an orchestrator, not a compute eng
 **Kind:** tech
 **Lang:** java, python, go
 **Roles:** data-movement/batch-and-distributed-compute @1, data-movement/event-streaming-and-processing @2
+
+You write one pipeline against the Beam model -- `PCollection`s transformed by `ParDo`, `GroupByKey`, windows and triggers -- and a runner translates it for Flink, Spark, Dataflow or a local direct runner. The model's real contribution is treating batch as the bounded special case of streaming: windowing, event-time watermarks and triggers decide when a result is emitted and how late arrivals revise it, with identical semantics in both modes. The portability framework lets Python transforms run inside a JVM runner through a language-agnostic SDK harness.
+
+Reach for it when the same logic must run as both a backfill and a live stream, or when you want the option to change execution engines later; on Google Cloud, Dataflow is the fully managed runner and the usual reason people adopt it. The cost is a layer of indirection: runner support for features is uneven, and debugging spans your code, the harness and the runner. If you are committed to one engine, its native API is more direct.
 
 ### Apache Camel
 **Short:** Java integration framework implementing Enterprise Integration Patterns as a route DSL, plus saga orchestration.
@@ -131,6 +167,10 @@ In an ML system it is where offline features get computed and training sets get 
 **Lang:** *
 **Roles:** data-movement/batch-and-distributed-compute @1, applied-ml/recommenders-and-graph-ml @2, data-stores/graph-db @3
 
+A graph is represented as two RDDs, vertices and edges, joined through a triplet view, and the Pregel API expresses iterative algorithms as rounds of message sending, aggregation and vertex-state update -- which is how PageRank, connected components, triangle counting and label propagation scale past one machine. Partitioning is edge-cut based, so the partition strategy you choose is what keeps shuffle volume tolerable on a skewed graph where a few vertices hold most of the degree.
+
+It is a Scala API over RDDs and receives little new development; GraphFrames is the DataFrame-based successor with Python bindings, and a graph database is the right shape for traversals served a request at a time. Reach for GraphX only for batch analytics over a graph that already lives inside a Spark job -- computing components or centrality across billions of edges as one stage of a larger pipeline -- and not as a query layer.
+
 ### Argo Workflows
 **Short:** Kubernetes-native DAG workflow engine where each step is a pod; used for CI, ML and data pipelines.
 **Kind:** tech
@@ -147,11 +187,19 @@ It fits teams already operating Kubernetes who want per-step isolation. If your 
 **Lang:** python
 **Roles:** data-movement/task-queue-and-jobs @1, runtime-systems/concurrency-and-async @3
 
+A job is an async function; enqueuing writes it into a Redis sorted set scored by its scheduled run time, and a worker pops due jobs and runs them as tasks on the event loop, so one process handles many jobs that are all awaiting IO. Deferred and cron-style jobs come out of the same sorted-set mechanism rather than a separate scheduler process, results and job state live in Redis under a TTL, and passing an explicit job id gives you deduplication because a second enqueue with that id is a no-op.
+
+Reach for it in an asyncio service where background work is IO-bound and Celery's configuration surface would be the largest thing in the project. The limits follow directly: Redis is the only backend, a CPU-bound job blocks the loop and everything else on it unless you push it to a process pool, and durability is exactly Redis's durability. For prefork parallelism, multiple brokers and a large ecosystem, Celery remains the answer.
+
 ### Astronomer Astro
 **Short:** Commercial managed Apache Airflow platform with hosted schedulers, deploy tooling and observability for DAGs.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, ml-lifecycle/ml-platform-and-pipelines @3, platform-delivery/cloud-platform-and-cost @3
+
+Astro packages Airflow as a hosted control plane plus deployments you push images to: the `astro` CLI builds a Docker image from your project, runs that same image locally, and deploys it onto a managed scheduler and worker pool, with worker queues letting heavy and light tasks land on differently sized workers. On top of stock Airflow it adds deployment-level access control, alerting, lineage and DAG-run analytics, and it tracks upstream releases closely because much of the maintainer effort comes from the same company.
+
+Reach for it when Airflow is central enough that upgrade cadence, observability and vendor support are worth paying for and you would rather not operate schedulers and a metadata database. The costs are per-deployment pricing and a workflow shaped around image builds rather than syncing DAG files. MWAA and Cloud Composer are the cloud-provider equivalents, and self-hosting on Kubernetes stays free if you have platform engineers.
 
 ### AWS DMS
 **Short:** AWS Database Migration Service: managed one-off migration and ongoing CDC replication between databases.
@@ -168,17 +216,29 @@ Source and target need not be the same engine — Oracle to PostgreSQL is the cl
 **Lang:** *
 **Roles:** data-movement/batch-and-distributed-compute @1, platform-delivery/cloud-platform-and-cost @2
 
+EMR provisions EC2 instances with Hadoop, Spark, Hive, Trino, HBase or Flink installed and configured: a primary node, core nodes that hold HDFS, and task nodes that hold none, which is precisely why task nodes are the ones you buy on Spot. Data normally lives in S3 through the EMRFS connector rather than in HDFS, so a cluster can be transient -- start it, run the step, write results to S3, terminate -- and EMR on EKS and EMR Serverless remove the EC2 layer entirely.
+
+Reach for it for large scheduled Spark or Hive batch work where Spot pricing on task nodes is a real saving and you want direct control over cluster configuration. The costs are the ones open-source Hadoop always carried: version and dependency management, tuning, and debugging a resource manager. Databricks or EMR Serverless trade a higher unit price for far less of that, and are the better answer when engineering time is the scarce resource.
+
 ### AWS SNS
 **Short:** Managed pub/sub notification service fanning a message out to SQS queues, Lambda, HTTP endpoints, email or SMS.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/message-broker @1, observability/alerting-and-incident-response @3, platform-delivery/cloud-platform-and-cost @3
 
+A publish goes to a topic and the service delivers a copy to every subscription, retrying on a per-protocol schedule and optionally capturing what never lands on a subscription-level dead-letter queue. Filter policies evaluate message attributes at the topic, so a subscriber receives only the messages matching its policy and filtering stays out of consumer code. Standard topics are at-least-once and unordered; FIFO topics preserve order within a message group and may only deliver to SQS FIFO queues.
+
+Reach for it when one event must reach several independent consumers, and for the operational notification path where alarms, budget and deployment events go. Its structural weakness is durability at the subscriber: an HTTPS or Lambda endpoint that is down depends entirely on the retry schedule, which is why the durable pattern is always one SQS queue per consumer so the backlog and the redrive policy belong to the consumer rather than the topic.
+
 ### AWS SNS/SQS
 **Short:** AWS managed pub/sub topics (SNS) fanning out to durable queues (SQS) for asynchronous service-to-service messaging.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/message-broker @1, data-movement/task-queue-and-jobs @3, platform-delivery/cloud-platform-and-cost @3
+
+The pairing exists because the two services cover different halves of asynchronous delivery: SNS pushes a copy of every publish to each subscription but holds no backlog, while SQS holds a backlog but has no fan-out. Subscribing one queue per consumer gives each consumer its own visibility timeout, retry behaviour, dead-letter queue and drain rate, raw message delivery strips the SNS envelope so handlers parse the payload directly, and a filter policy per subscription decides which messages reach which queue.
+
+Reach for this shape as the default event-distribution pattern inside AWS: producers publish once, adding a consumer means adding a subscription and a queue, and no producer changes. Its limits are the queue's limits -- no offsets, no replay, and a message a consumer deletes is gone from that consumer's copy only. EventBridge adds richer content-based routing and a schema registry; Kafka or Kinesis is the answer when consumers must re-read history.
 
 ### AWS SQS
 **Short:** Managed queue service: at-least-once standard queues and FIFO queues with a 5-minute dedup window, reached over HTTPS.
@@ -226,6 +286,10 @@ Reach for it when history and CQRS are genuine requirements, not stylistic prefe
 **Lang:** java
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2
 
+It is two things in one process: an event store that appends events to per-aggregate streams with optimistic concurrency on the sequence number, and a message router that tracks which client instances handle which commands and queries. Command routing hashes on the aggregate identifier so every command for one aggregate reaches one instance, which is what lets that aggregate be cached without a distributed lock. Event processors read the global stream by token, and the clustered edition replicates through Raft.
+
+Reach for it when you are running Axon Framework and would rather not assemble an event store on a relational database plus a broker for command and query routing, because it removes most of that wiring and the configuration that goes with it. The cost is a dedicated stateful component whose clustering and multi-context features are commercially licensed, and a choice coupled to one framework. A JDBC event store plus Kafka stays vendor-neutral if you do the routing yourself.
+
 ### BackgroundTasks
 **Short:** FastAPI/Starlette helper that runs short work in-process after the response is sent; no broker, no durability.
 **Kind:** api
@@ -258,6 +322,10 @@ Reach for it when the workflow is a business process that non-engineers need to 
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, data-access/transactions-and-consistency @3
 
+Zeebe is the engine behind Camunda 8, rewritten so that process state is not held in a relational database: workflow instances are partitioned, each partition is replicated through Raft across brokers, every state change is written to an append-only log, and an exporter streams those records to Elasticsearch or another store for the query and history side. Workers are not pushed to -- they subscribe to a job type and activate jobs, then complete or fail them -- which keeps your service topology out of the engine.
+
+Reach for it when BPMN orchestration has to scale past what one database-backed engine handles, or when you prefer the operational shape of a replicated log to that of a transactional engine. The costs are a larger deployment surface -- brokers, gateway, exporter and a search store -- and a command-query split in which running state and the view of it are eventually consistent. Camunda 7's embeddable engine is still simpler for a single application.
+
 ### Celery
 **Short:** Python distributed task queue running background jobs over Redis/RabbitMQ/SQS with retries and scheduling.
 **Kind:** tech
@@ -280,6 +348,10 @@ Delivery is at-least-once, and with `acks_late` a worker crash re-runs the task,
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-stores/warehouse-and-olap @2
 
+The connector consumes the topics you name and batches records into ClickHouse inserts, mapping record fields onto table columns by name. Because ClickHouse rewards large infrequent inserts and punishes small frequent ones with runaway part counts and merge pressure, batch size and flush interval are the settings that actually decide whether the table stays healthy. Idempotence relies on the server deduplicating identical insert blocks, so a retried batch after a task failure does not duplicate rows.
+
+Reach for it when Kafka is already the transport and ClickHouse is the analytics store, and you want ingestion configured rather than coded. The alternative shipped by the database itself is a Kafka table engine feeding a materialized view, which removes Connect from the picture but moves the consumer inside the database, where failures become a database problem. Either way, schema evolution on the topic has to be planned against the table's column set.
+
 ### Conductor OSS
 **Short:** JSON-DSL workflow engine for long-running orchestration and sagas; Netflix-created, now stewarded by Orkes.
 **Kind:** tech
@@ -294,11 +366,19 @@ A workflow is a JSON definition of tasks and their wiring; the server owns state
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2, platform-delivery/cloud-platform-and-cost @3
 
+It runs Kafka as a service with the surrounding ecosystem attached rather than as bare brokers: Schema Registry for Avro, Protobuf and JSON Schema contracts with compatibility enforcement, managed source and sink connectors, stream processing, role-based access control and stream lineage. Cluster types run from a shared multi-tenant tier up to dedicated clusters with private networking, billing is by throughput, storage and connector task rather than broker hours, and retention is effectively unbounded because older segments live in object storage.
+
+Reach for it when you want the platform, not just the log, and would rather not staff a streaming team -- schema governance and connector operations are the parts hardest to replicate in-house. The costs are price at high sustained throughput, egress charges, and coupling in the connectors and access-control model that make an exit real work. MSK is the cheaper option when you genuinely only need brokers.
+
 ### Cosmos
 **Short:** Astronomer Cosmos: renders a dbt project as native Airflow task groups so each model becomes a schedulable task.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/workflow-and-durable-execution @1, data-stores/warehouse-and-olap @3
+
+It parses a dbt project's `manifest.json` and turns each model, seed, snapshot and test into an Airflow task inside a task group, reusing the dependency graph dbt already knows. The consequence is per-model observability: retries, alerting, logs and the Airflow UI apply to an individual model rather than to one opaque `dbt run` step, and a single failed model can be cleared and rerun without re-executing everything upstream of it. Execution can happen in a local virtualenv, a Docker container or a Kubernetes pod per model.
+
+Reach for it when dbt is a large part of the pipeline and you want its structure visible in an orchestrator you already operate. The cost is parse-time work in the scheduler, which is noticeable on a large project unless you render from a committed manifest. A single operator running `dbt build` stays simpler when a whole-project pass or fail is granular enough for the team.
 
 ### Cruise Control
 **Short:** LinkedIn's Kafka operator tool: goal-based partition rebalancing, broker add/remove and anomaly detection.
@@ -306,11 +386,19 @@ A workflow is a JSON definition of tasks and their wiring; the server owns state
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-access/replication-ha-and-backup @2
 
+It builds a model of the cluster from broker and partition metrics, then optimizes replica placement against an ordered list of goals -- replica counts, leader distribution, disk usage, network in and out, rack awareness -- and produces a proposal you can inspect before it executes the reassignment with throttled data movement. The same model drives self-healing: broker failure, disk failure and goal-violation anomalies can trigger a rebalance automatically, and adding or decommissioning a broker becomes an API call rather than hand-written reassignment JSON.
+
+Reach for it once a Kafka cluster is large enough that partitions drift into imbalance faster than anyone wants to fix by hand, and hot brokers start showing up as producer latency. The costs are another service to run plus a metrics reporter on every broker, and the fact that a rebalance moves real data, so throttles and timing matter. Managed Kafka services do this internally, and a small static cluster rarely needs it.
+
 ### custom
 **Short:** Not a product: a placeholder for hand-rolled implementations such as a bespoke CDC relay or A/B harness.
 **Kind:** concept
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @3
+
+The entry stands in for the case where no product is adopted at all -- an outbox relay polling a table and publishing to a broker, a hand-written experiment assignment harness, a bespoke sync job -- because those appear in real designs alongside named tools and need somewhere to sit. What it actually names is a decision to own a mechanism rather than take one off the shelf, usually justified by the narrowness of the requirement.
+
+Hand-rolling is right when the need is genuinely small and a mature product's operational surface would dominate it, and wrong far more often than teams expect, because the parts that get skipped are exactly the ones a real tool has already paid for: restart and resume semantics, ordering, backpressure, dead-lettering, schema change, metrics and a way to see what is stuck. Cost it over the second year, not the first week.
 
 ### custom Kafka-based state machine
 **Short:** Hand-rolled saga orchestrator whose state transitions are driven by Kafka topics rather than a workflow engine.
@@ -318,11 +406,19 @@ A workflow is a JSON definition of tasks and their wiring; the server owns state
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, data-movement/event-streaming-and-processing @2
 
+The pattern is a saga implemented with topics instead of an engine: the saga's state is keyed by a saga id in a compacted topic or a local state store, each participant publishes a completion or failure event, and a processor folds those events into the next state and emits the next command. Ordering per saga follows from keying every message on the saga id, and progress survives a restart because the state store is rebuilt from its changelog rather than held only in memory.
+
+Reach for it when Kafka is already the backbone, the workflow is short and stable, and adding infrastructure is not on the table. What you take on is everything an engine would have given free: timeouts and retries must be modelled as timers you schedule and store yourself, compensation is code paths nobody diagrams, and there is no execution history a support engineer can read. Once the state chart grows branches, Temporal or a BPMN engine costs less than maintaining it.
+
 ### Dagster
 **Short:** Asset-oriented data orchestrator: software-defined assets, scheduling, lineage and built-in data-quality checks.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/workflow-and-durable-execution @1, data-movement/data-quality-and-lineage @2, ml-lifecycle/ml-platform-and-pipelines @3
+
+The unit is a software-defined asset -- a table, a file, a model -- declared as a function whose parameters are its upstream assets, so the graph being scheduled is the graph of data that should exist rather than a list of tasks to run. That inversion is what gives it lineage, per-asset freshness policies and the ability to materialize a subset. Resources are typed and injected, so the same asset runs against a local DuckDB in tests and a warehouse in production, and asset checks attach data-quality assertions to the asset itself.
+
+Reach for it when the pipeline's product is data and you want lineage, partitions and testability as first-class concerns instead of conventions. The costs are a genuine mental shift for a team that thinks in tasks and an integration catalogue smaller than Airflow's. Airflow remains the safer pick for task-shaped orchestration of arbitrary external systems, where the thing being scheduled is not a dataset at all.
 
 ### Dask
 **Short:** Python parallel-computing library scaling NumPy/pandas-style dataframes and task graphs across cores and clusters.
@@ -340,6 +436,10 @@ Everything is lazy until you call `.compute()`, which is what lets it fuse and s
 **Lang:** *
 **Roles:** data-movement/batch-and-distributed-compute @1, ml-lifecycle/ml-platform-and-pipelines @2, data-stores/warehouse-and-olap @2, platform-delivery/cloud-platform-and-cost @3
 
+It is Spark plus a managed control plane: clusters and SQL warehouses run in your cloud account, notebooks and jobs are the interface, and Delta Lake -- Parquet files plus a transaction log -- supplies ACID commits, time travel and schema enforcement over object storage. Unity Catalog centralizes table, volume and model governance with lineage, Photon is a vectorized native engine under SQL and DataFrame queries, and MLflow, declarative pipelines and model serving cover the ML lifecycle in the same workspace.
+
+Reach for it when a team wants batch, streaming, SQL analytics and machine learning over one governed set of tables rather than three separate stacks with three copies of the data. The costs are compute spend that grows quietly, platform units billed on top of cloud instance cost, and enough platform-specific surface that leaving is a project. EMR or self-managed Spark on Kubernetes is cheaper when you have the operations capacity to run it.
+
 ### Debezium
 **Short:** Change-data-capture connector that tails a database's replication log and publishes row changes to Kafka.
 **Kind:** tech
@@ -356,6 +456,10 @@ This is the standard mechanism behind the transactional outbox — write the bus
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-stores/document @3
 
+MongoDB exposes no write-ahead log to outside readers, so this connector opens a change stream -- the server-side resumable feed built on the oplog -- and converts each change into a Kafka record keyed by the document id. It snapshots the collections first and then switches to streaming, and it stores the change stream's resume token as its offset so a restarted connector continues rather than re-snapshotting. Full before-images require pre- and post-image capture enabled on the collection; without it an update event carries only the changed fields.
+
+Reach for it to keep a search index, cache or warehouse in step with a collection, or to run a transactional outbox in a document store. The trap is oplog retention: if the connector is down longer than the oplog window the resume token expires, and recovery means a fresh snapshot of the entire collection while the topic backfills. Size the oplog for your worst realistic outage, not for normal operation.
+
 ### deequ
 **Short:** Spark library that declares data-quality constraints and computes metrics over large datasets.
 **Kind:** tech
@@ -370,11 +474,19 @@ Constraints are declared against a Spark DataFrame (completeness, uniqueness, va
 **Lang:** python
 **Roles:** data-movement/task-queue-and-jobs @1, data-movement/message-broker @3
 
+Tasks are actors -- decorated functions each with their own queue, retry policy and time limit -- and the broker is RabbitMQ or Redis. Delivery is at-least-once with the worker acknowledging only after the actor returns, so a crash redelivers; retries use exponential backoff and a message whose retries are exhausted goes to a dead-letter queue automatically instead of vanishing. Middleware is the extension point, and age limits, time limits, retries, callbacks and metrics are all implemented as middleware you can replace or extend.
+
+Reach for it when you want Celery's job -- durable background work with retries -- with a much smaller configuration surface and defaults that already do the safe thing rather than needing to be discovered. The costs are a smaller ecosystem, fewer prebuilt integrations, and no equivalent of Celery's canvas for composing task graphs. Celery stays the answer where that ecosystem matters, and ARQ or taskiq where the codebase is asyncio throughout.
+
 ### Durable Functions
 **Short:** Azure Functions extension for stateful serverless orchestration: fan-out/fan-in, timers and approval workflows in code.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, platform-delivery/cloud-platform-and-cost @2
+
+An orchestrator function calls activity functions and awaits them, and the extension replays that function from the top on every resumption, consulting an append-only history in Azure Storage to short-circuit the calls that already completed -- which is exactly why an orchestrator must be deterministic and must not read the clock, generate randomness or perform IO directly. Fan-out and fan-in, durable timers, waiting on an external event for human approval, and entity functions holding small addressable state all fall out of that one mechanism.
+
+Reach for it when the code already lives in Azure Functions and you want durable orchestration without standing up an engine, since the state store is a storage account rather than a service to operate. The costs are the replay model's sharp edges, throughput bounded by the storage backend unless you move to an alternative provider, and a strong tie to one cloud. Temporal is the portable equivalent when that matters.
 
 ### DVC
 **Short:** Git-native version control for datasets, models and ML pipelines using content-addressable remote storage.
@@ -398,6 +510,10 @@ Reach for it when reproducibility is the problem — which dataset and which cod
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, search-retrieval/lexical-and-hybrid-search @2
 
+The connector consumes topic records and issues bulk index requests, deriving each document id from the record key so a repeated record overwrites rather than duplicates -- that idempotence is what turns Kafka's at-least-once delivery into an effectively exactly-once index. A null-valued tombstone becomes a delete, batch size and flush timeout govern bulk sizing, and records that fail can be dropped, logged or routed to a dead-letter topic instead of stalling the task forever.
+
+Reach for it to maintain a search read model from an event stream: writes go to the system of record, changes flow through Kafka via change data capture, and the index is rebuildable by replaying the topic from the beginning. The costs are mapping and schema drift, which the connector cannot resolve for you, and bulk rejections when the cluster's write queue saturates, which surface as connector retries rather than as an obvious cluster alarm.
+
 ### event publication registry
 **Short:** Spring Modulith's persisted record of application events, letting an unacknowledged listener be retried after a crash.
 **Kind:** api
@@ -410,11 +526,19 @@ Reach for it when reproducibility is the problem — which dataset and which cod
 **Lang:** *
 **Roles:** data-movement/message-broker @1, data-movement/event-streaming-and-processing @2, platform-delivery/cloud-platform-and-cost @3
 
+Events are JSON envelopes on a bus, and rules match them with content-based patterns over any field rather than just a topic name, then deliver to targets such as Lambda, Step Functions, SQS, Kinesis or an API destination, optionally transforming the payload first. AWS services publish their own events to the default bus, partner buses carry SaaS events, a schema registry can discover shapes and generate bindings, and the scheduler fires rules on cron or rate expressions. Delivery is at-least-once with retries and an optional dead-letter queue; ordering is not guaranteed.
+
+Reach for it when routing decisions belong in configuration rather than consumer code, or when you want one place to react to events emitted by AWS itself. The limits are throughput and latency next to a real broker, per-event pricing at volume, and replay only through the archive feature. SNS is cheaper for plain fan-out, and Kafka or Kinesis is the answer when consumers need offsets and long retention.
+
 ### EventStoreDB
 **Short:** Database purpose-built for event sourcing: the append-only event log is the system of record, plus snapshots.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, apis-frameworks/design-patterns-and-principles @2, data-stores/key-value-and-embedded @3
+
+Writes append to a named stream, normally one per aggregate, and the expected-version check on append supplies optimistic concurrency without a lock. Every event also lands in a global ordered stream, and catch-up subscriptions read from a stored position then follow live, which is how read models are built and rebuilt after a projection change. Server-side projections can fold or re-partition streams, persistent subscriptions add competing consumers with per-event acknowledgement, and stream metadata controls truncation and retention.
+
+Reach for it when the event log genuinely is the system of record and you want append semantics, subscriptions and per-stream concurrency as database features rather than assembled from a relational table plus a broker. The costs are another stateful system to operate and queries that must go through projected read models. Note that the product was renamed KurrentDB, so current documentation and releases appear under that name.
 
 ### Eventuate Tram
 **Short:** Java framework implementing the saga and transactional-outbox patterns over a message broker.
@@ -448,6 +572,10 @@ Reach for it for long-running, human-in-the-loop or approval-shaped processes; i
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, platform-delivery/cloud-platform-and-cost @2
 
+Composer runs Airflow on GKE inside your project: DAG files sync from a Cloud Storage bucket, the scheduler, web server and workers run as cluster workloads, logs and metrics land in Cloud Logging and Monitoring, and workers autoscale between bounds you set. Later generations hide most node management, and the environment's service account is what governs the pipeline's access to BigQuery, Dataflow, Pub/Sub and everything else in the project.
+
+Reach for it when the pipeline mostly orchestrates Google Cloud services and you want Airflow's operators without owning the scheduler and its database. The costs are the familiar managed-Airflow ones: upgrades on the provider's cadence, PyPI dependency installs that can fail an environment update, and a bill that accrues whether or not any DAG runs. MWAA and Astronomer Astro are the equivalents, and self-hosting on Kubernetes is cheaper with a platform team.
+
 ### Google Pub/Sub
 **Short:** GCP's managed pub/sub messaging service: auto-scaled topics and subscriptions over HTTP or gRPC.
 **Kind:** tech
@@ -472,11 +600,19 @@ You assert properties (this column is never null, this value is one of five, thi
 **Lang:** python
 **Roles:** data-movement/task-queue-and-jobs @1
 
+A task is a decorated function; enqueuing pushes it onto a Redis list -- or SQLite, or an in-memory queue for tests -- and a consumer process executes it with a worker type you choose between threads, greenlets and processes. Periodic tasks use a crontab decorator evaluated by the consumer itself, so there is no separate beat process to keep alive, and results, delayed execution, retries, task revocation and locking all fall out of the same small storage interface.
+
+Reach for it when the requirement is genuinely modest -- a handful of background jobs in a Django or Flask app -- and Celery's configuration surface would be the largest thing in the repository; the SQLite backend even removes the broker. The limits are the flip side of that: a small ecosystem, no workflow composition, and monitoring you assemble yourself. Once jobs fan across machines with real routing, Celery or Dramatiq is the better fit.
+
 ### Inngest
 **Short:** SaaS-first durable functions platform for TypeScript and Python: steps that survive restarts, retries and sleeps.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, data-movement/task-queue-and-jobs @2
+
+You write a function as a sequence of `step.run` calls, and each step's output is memoized by the platform, so a crash or a redeploy resumes at the first incomplete step instead of repeating side effects. Functions are triggered by events sent to the platform or by a cron expression, while sleeping, waiting for another event, concurrency limits, throttling and debouncing are declared rather than coded. Execution is HTTP-driven -- the service invokes your endpoint once per step -- which is what makes it work on serverless platforms with short request timeouts.
+
+Reach for it when you want durable execution on a serverless deployment without operating a workflow cluster, and the language is TypeScript or Python. The costs are that your code runs behind a vendor's invocation loop, local development needs the dev server, and per-step pricing adds up at volume. Temporal is the self-hostable alternative when the workflow state must stay inside your own infrastructure.
 
 ### JdbcMessageStore
 **Short:** Spring Integration message store persisting in-flight messages and groups to a database so flows survive restarts.
@@ -508,6 +644,10 @@ You assert properties (this column is never null, this value is one of five, thi
 **Lang:** python
 **Roles:** data-movement/batch-and-distributed-compute @1, runtime-systems/concurrency-and-async @2, model-training/classical-ml-and-boosting @3
 
+Two pieces do most of the work: `Parallel` with `delayed` spreads a loop across threads or processes through a pluggable backend -- loky by default, which reuses a process pool and survives a crashed worker -- and `Memory` caches a function's return value on disk keyed by a hash of its arguments, so an expensive step is skipped on re-run. Its serialization is tuned for NumPy: large arrays are written outside the pickle stream and memory-mapped into workers instead of copied per task.
+
+This is what `n_jobs` means inside scikit-learn, and the usual way a fitted estimator is written to a file. Reach for it for single-machine parallelism over independent work and for caching in a research loop. The costs are process startup and data transfer dominating small tasks, and a persisted model tied to the library versions that wrote it. Ray or Dask is the step up once the work has to span machines.
+
 ### Kafka Connect
 **Short:** Kafka's source/sink connector framework for moving data in and out of the log, including Debezium CDC and S3 sinks.
 **Kind:** tech
@@ -532,17 +672,19 @@ Reach for it when both the input and the output are Kafka and you would rather n
 **Lang:** *
 **Roles:** data-movement/message-broker @1, data-movement/event-streaming-and-processing @2
 
+The three differ mainly in what survives a subscriber being absent. Kafka retains a partitioned log, so a consumer has an offset, can be down for hours and catch up, and can replay history from the beginning. Redis Pub/Sub keeps nothing at all: a message reaches whoever is connected at that instant and is otherwise dropped, which is what makes it extremely fast and unusable as a record. SNS sits between them, with no retention or offsets but managed per-subscription retries and a dead-letter queue.
+
+The choice follows from the consequence of a lost message. Cross-instance WebSocket fan-out, cache invalidation and presence updates lose nothing by using Redis. Notification and integration events inside AWS fit SNS, normally with a queue per consumer so the backlog is durable. Anything another team will later want to re-read, audit or rebuild state from belongs in Kafka, and paying its operational cost for a fire-and-forget signal is the common overcorrection.
+
 ### KurrentDB
 **Short:** Purpose-built event store: append-only streams, optimistic concurrency and native subscriptions; formerly EventStoreDB.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-access/transactions-and-consistency @3, data-stores/key-value-and-embedded @3
 
-### Managed Kafka
-**Short:** Cloud-operated Kafka such as Amazon MSK or MSK Serverless: the same log API without running brokers yourself.
-**Kind:** tech
-**Lang:** *
-**Roles:** data-movement/event-streaming-and-processing @1, platform-delivery/cloud-platform-and-cost @2, data-movement/message-broker @3
+Data is organized as append-only streams, usually one per aggregate, and an append carries an expected version so two concurrent writers cannot both succeed -- that check is the concurrency control an event-sourced aggregate needs. Everything also lands in a global ordered stream, and catch-up subscriptions read from a stored position and then follow live, which is how projections are built and rebuilt after a change. Persistent subscriptions add competing consumers with per-event acknowledgement and a parked-message queue.
+
+Reach for it when the event log is the source of truth and you want stream-level concurrency, subscriptions and retention policy as database features rather than as code over a relational table plus a broker. The costs are another stateful system to operate and queries that must go through projected read models. Postgres with an events table and an outbox is the pragmatic alternative when event sourcing is only one part of the system.
 
 ### Marquez
 **Short:** Open-source metadata and lineage server, the reference implementation of the vendor-neutral OpenLineage standard.
@@ -550,11 +692,19 @@ Reach for it when both the input and the output are Kafka and you would rather n
 **Lang:** *
 **Roles:** data-movement/data-quality-and-lineage @1, ml-lifecycle/ml-platform-and-pipelines @3
 
+It receives OpenLineage run events over HTTP -- each naming a job, a run, and the input and output datasets -- and stores them in PostgreSQL as a versioned model of jobs, datasets and runs, so the lineage graph reflects what actually executed rather than what a static declaration claimed. Because job and dataset versions are tracked over time, you can ask which run produced a table's current contents, what the job's code and schema looked like then, and what downstream consumers a column change would break.
+
+Reach for it when pipelines already emit OpenLineage -- integrations exist for Airflow, Spark, dbt and Flink -- and you want a self-hosted lineage service without adopting a full catalog product. Its scope is deliberately narrow: no business glossary, no quality checks, no access governance. DataHub, OpenMetadata or a commercial catalog is the answer when discovery and governance matter as much as lineage does.
+
 ### Materialize
 **Short:** Streaming database that keeps SQL views incrementally up to date over Kafka and CDC feeds.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-stores/warehouse-and-olap @2, data-stores/relational @3
+
+You define views in ordinary SQL over sources such as Kafka topics or Postgres change data capture, and rather than re-running the query the engine maintains the result incrementally: a change to one input row propagates through joins and aggregations to revise only the affected output rows. That comes from differential dataflow underneath, which is also why multi-way joins and recursion stay correct instead of being restricted the way most streaming SQL is. It speaks the PostgreSQL wire protocol, so results are read with a normal query or streamed with `SUBSCRIBE`.
+
+Reach for it when a dashboard, an alert or a serving path needs a continuously fresh join across streams and you would rather write SQL than maintain a stream-processing job. The costs are memory, because maintained state lives in the cluster, and pricing that follows it. A warehouse refreshed every few minutes is far cheaper whenever seconds of staleness are acceptable, which is most of the time.
 
 ### Maxwell
 **Short:** MySQL binlog reader that publishes row changes as JSON to Kafka, used for outbox and CDC pipelines.
@@ -562,11 +712,19 @@ Reach for it when both the input and the output are Kafka and you would rather n
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1
 
+It registers with MySQL as a replication client -- the same protocol a replica uses -- reads the row-based binary log, and emits one JSON message per inserted, updated or deleted row carrying the database, table, operation, the new row and, for an update, the previous values. Its binlog position is stored in a schema inside the source database, so a restart resumes rather than replays, and a bootstrap command dumps an existing table's contents into the stream before switching to live changes.
+
+Reach for it when the source is MySQL, the destination is Kafka and JSON is an acceptable wire format -- outbox relays and cache or index invalidation are the common uses, and it needs no Kafka Connect cluster to run. The limits are its scope: MySQL only, no schema registry and therefore no Avro or Protobuf contracts, and far fewer destinations and transforms than Debezium, which is where a multi-engine estate ends up.
+
 ### Maxwell's Daemon
 **Short:** MySQL binlog change-data-capture daemon emitting row changes as JSON to Kafka; simpler than Debezium, fewer connectors.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-access/replication-ha-and-backup @3
+
+It runs as a standalone Java process rather than inside a connector framework, which is the practical difference from Debezium: one artifact, a config file, and producers for Kafka, Kinesis, Pub/Sub, RabbitMQ, Redis or stdout. Row-based binary logging is a hard prerequisite on the source, and the account it connects with needs replication privileges plus a schema of its own, because it must track both its binlog position and each table's column layout in order to name fields in the JSON it emits.
+
+Reach for it when you want change data capture out of MySQL with the smallest possible deployment and no cluster to operate. What you give up is the breadth around it: no schema registry, no single message transforms, no framework managing restarts, offsets and scaling for you, and exactly one source engine. Debezium on Kafka Connect is heavier but far more general once more than one database is in scope.
 
 ### MongoDbMessageStore
 **Short:** Spring Integration message store on MongoDB, giving aggregators and queue channels durable persistence.
@@ -580,17 +738,19 @@ Reach for it when both the input and the output are Kafka and you would rather n
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2, platform-delivery/cloud-platform-and-cost @3
 
+You create a cluster and topics and there are no brokers or partitions to size: capacity is allocated for you within per-partition and per-cluster throughput limits, storage grows without provisioning, and billing is by cluster-hour plus data written, read and stored. Authentication is IAM only, so SASL/SCRAM and mutual TLS are not options, and clients otherwise speak the ordinary Kafka protocol with unchanged libraries apart from the IAM callback handler.
+
+Reach for it for spiky or unpredictable workloads where provisioned brokers would sit mostly idle, and for teams that want Kafka semantics without capacity planning at all. The costs are the constraints themselves: throughput ceilings you cannot raise by adding brokers, IAM-only authentication, and a price that overtakes provisioned MSK at steady high volume. Provisioned MSK is the answer for sustained throughput or broker-level configuration.
+
 ### Mule ESB
 **Short:** Enterprise service bus and integration platform routing, transforming and mediating messages between systems.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-movement/message-broker @1, traffic-edge/api-gateway @2
 
-### Native streaming
-**Short:** Index entry for a cloud provider's own streaming primitive, here Kinesis Data Streams as the AWS-native pub/sub log.
-**Kind:** concept
-**Lang:** *
-**Roles:** data-movement/event-streaming-and-processing @1
+An application is a set of flows: a source receives a message, and processors route, transform, enrich and dispatch it, with connectors covering HTTP, JMS, files, databases and SaaS APIs. The bus form buys a canonical message -- payload, attributes and variables travelling together -- while DataWeave expresses the mapping between formats and error handling is declared per flow with retry and until-successful scopes. Flows are authored visually or as XML and deployed to a runtime on premises or on the vendor's hosted plane.
+
+Reach for it in integration-heavy enterprises where connecting many packaged and legacy systems is the actual job, and where governance, API management and vendor support are requirements rather than luxuries. The costs are licensing, DataWeave as a language a team must genuinely learn, and the general shift away from a central bus toward per-service integration. For a new microservice estate, Camel, Spring Integration or plain HTTP clients are much lighter.
 
 ### NATS JetStream
 **Short:** NATS's persistence layer adding durable streams, replay and at-least-once consumers to its very fast pub/sub core.
@@ -598,11 +758,19 @@ Reach for it when both the input and the output are Kafka and you would rather n
 **Lang:** *
 **Roles:** data-movement/message-broker @1, data-movement/event-streaming-and-processing @2, data-stores/key-value-and-embedded @3
 
+A stream captures messages published to a set of subjects and stores them in memory or on disk under a retention policy -- limits, interest, or work-queue -- and consumers are separate server-side objects with their own position, acknowledgement policy and redelivery timer, durable or ephemeral, pull or push. Because the consumer is state on the server rather than an offset in the client, a work-queue stream gives competing consumers while a limits stream gives every consumer its own replayable view. Streams replicate across servers via Raft.
+
+Reach for it when you already run NATS for low-latency request-reply and now need durability, or when you want one small binary rather than a broker cluster plus its coordination layer -- the same subsystem also provides a key-value and object store. It is far less to operate than Kafka. Kafka is still the answer for very high sustained throughput, a mature connector ecosystem and long-term log retention.
+
 ### OpenLineage
 **Short:** Vendor-neutral open standard for emitting data lineage events from pipelines and schedulers.
 **Kind:** spec
 **Lang:** *
 **Roles:** data-movement/data-quality-and-lineage @1
+
+The standard defines a run event -- a JSON document naming a job, a run id, a state transition, and the input and output datasets -- plus facets, versioned extension objects that carry schema, column-level lineage, data-quality metrics or anything else a producer wants to attach without changing the core model. Integrations for Airflow, Spark, dbt, Flink and Dagster emit these events as jobs execute, so lineage is captured from actual runs rather than reverse-engineered from SQL after the fact.
+
+Reach for it to avoid coupling pipelines to one catalog vendor: the same emitters work whether events land in Marquez, DataHub, OpenMetadata or a commercial platform, which makes the backend a replaceable decision. What a specification cannot give you is the product -- it collects events, it does not store, visualize or govern them -- and coverage depends on each integration's quality, with column-level lineage still uneven across producers.
 
 ### Orchestration
 **Short:** Scheduling and sequencing pipeline steps with a DAG engine such as Airflow or Kubeflow Pipelines.
@@ -610,11 +778,19 @@ Reach for it when both the input and the output are Kafka and you would rather n
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, ml-lifecycle/ml-platform-and-pipelines @2
 
+The defining feature is a central component that owns the graph: it knows the dependencies between steps, decides what may start, records every attempt, retries what failed and holds back what should not proceed. That is what makes a partially failed pipeline restartable from the point of failure rather than from the beginning, and what gives one place to answer when something last ran and why it stopped. The contrast is choreography, where each service reacts to events and nothing holds the whole picture.
+
+Reach for orchestration when steps have real dependencies, when a run must be re-executed over historical dates, and when someone will eventually have to explain a failed run to a stakeholder. The costs are a scheduler and metadata store to operate, and the standing temptation to migrate business logic into pipeline definitions. Event-driven choreography stays looser and scales better across teams, at the price of no single view of a workflow.
+
 ### Pachyderm
 **Short:** Kubernetes-native data versioning and pipeline system giving every run content-addressed, reproducible lineage.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/data-quality-and-lineage @1, ml-lifecycle/ml-platform-and-pipelines @2, platform-delivery/kubernetes-and-orchestration @3
+
+Data lives in versioned repositories with commits and branches, and a pipeline specification watches an input repository, runs a container over each new commit, and writes an output commit -- so every output is content-addressed and traceable to the exact input data and image that produced it. The glob pattern on the input decides the unit of parallelism: matching each file separately fans the job across workers, and incrementality follows because only changed datums are reprocessed. It runs on Kubernetes with object storage beneath the repositories.
+
+Reach for it when provenance is the actual requirement -- regulated pipelines, or model training where which data produced which artifact must be answerable -- and the work is already containerized. The costs are a Kubernetes deployment, an unfamiliar data model, and a smaller community than the mainstream orchestrators. DVC covers versioning for a git-centric team, and Airflow or Dagster covers scheduling without the data layer underneath.
 
 ### pandas
 **Short:** Python DataFrame library for tabular loading, joining, grouping and feature transformation in memory.
@@ -622,11 +798,19 @@ Reach for it when both the input and the output are Kafka and you would rather n
 **Lang:** python
 **Roles:** data-movement/batch-and-distributed-compute @1, runtime-systems/collections-and-algorithms @2, ml-lifecycle/ml-platform-and-pipelines @3
 
+A DataFrame is a set of typed columns held as contiguous arrays with an index, so `groupby`, `merge`, `pivot` and window operations execute in compiled code over whole columns instead of a Python loop. That is the entire performance story: vectorized column operations are fast, and `iterrows` or a row-wise `apply` drops back into the interpreter and is orders of magnitude slower. Copy-versus-view semantics are the other recurring surprise, which is what the chained-assignment warnings are about, and Arrow-backed dtypes fix the old costs of object-dtype strings and nullable integers.
+
+Reach for it whenever tabular data fits comfortably in memory, budgeting several times the data's size in RAM for the intermediates that joins and sorts create. Past that point Polars is faster on the same machine, DuckDB handles larger-than-memory queries in SQL without leaving the process, and Dask or Spark spread the same shaped work across a cluster at the cost of real scheduling overhead.
+
 ### pandas-profiling
 **Short:** Automated EDA report over a DataFrame (now ydata-profiling): distributions, correlations, missingness.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/data-quality-and-lineage @1, ml-lifecycle/evaluation-and-benchmarks @3
+
+Given a DataFrame it runs a full pass and renders an HTML report: per-column type inference, distributions and quantiles, missing-value patterns, cardinality and most frequent values, a correlation matrix across several coefficients, duplicate detection, and alerts for constant, highly correlated or heavily skewed columns. The point is that it replaces the twenty exploratory cells someone would otherwise write, and produces an artifact you can send to people who do not open notebooks.
+
+Reach for it at the start of work on an unfamiliar dataset or as a snapshot attached to a data handoff. The cost is compute, because it is multi-pass and the correlation work grows quadratically with column count, so a large table should be sampled rather than profiled whole. The project was renamed ydata-profiling, so install and import under that name; for repeatable pipeline gates an expectation suite or a schema is the right tool instead.
 
 ### pandas.DataFrame
 **Short:** pandas' column-oriented in-memory table built on NumPy; the default Python structure for tabular analytics.
@@ -660,11 +844,19 @@ Reach for it when your pipeline logic is Python and genuinely dynamic, and when 
 **Lang:** python
 **Roles:** data-movement/workflow-and-durable-execution @1, devtools/build-and-dependency-management @3
 
+Airflow's core ships the scheduler, the DAG model and the executor machinery, while everything that talks to an outside system -- the Amazon, Google, Postgres, Snowflake, dbt, Kubernetes and HTTP integrations among hundreds -- lives in separately versioned `apache-airflow-providers-*` distributions. Each contributes operators, hooks, sensors, transfer operators, connection types and sometimes UI components, discovered through an entry point at startup. Because they release on their own cadence, a fix for one integration does not wait for a core release and can be pinned independently.
+
+The practical consequence is dependency management: providers pull real client libraries, so an environment installing many of them accumulates conflicting version constraints, which is the usual reason a managed Airflow environment refuses to update. Install only the providers actually used, pin them, and prefer running work in a container or pod operator when an integration's dependency set would otherwise poison the scheduler's own environment.
+
 ### Pub/Sub
 **Short:** Google Cloud Pub/Sub: managed at-least-once topic and subscription messaging with push or pull delivery.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/message-broker @1, platform-delivery/cloud-platform-and-cost @3
+
+Delivery comes in two shapes: pull, where a subscriber holds a streaming connection and extends the acknowledgement deadline while it works, and push, where the service posts to an HTTPS endpoint and treats the response code as the acknowledgement, backing off when the endpoint fails. Client-library flow control bounds how many messages or bytes may be outstanding, which is the real throttle on a subscriber. Exactly-once delivery can be enabled per subscription, and BigQuery and Cloud Storage subscriptions write straight to those sinks with no consumer code.
+
+Reach for it as the default asynchronous transport on Google Cloud, particularly where load is spiky and you do not want to size anything. The costs are per-message pricing at high volume, ordering that holds only within an ordering key, and a duplicate rate you must design around unless exactly-once is turned on. Kafka remains the choice when consumers need offsets, long retention and replay from an arbitrary point.
 
 ### RabbitMQ
 **Short:** AMQP broker with exchange-based routing and durable queues; common Celery/Dramatiq backend and STOMP relay.
@@ -681,11 +873,19 @@ That is a work-queue model, not a log: once acknowledged a message is gone, and 
 **Lang:** *
 **Roles:** data-movement/message-broker @1, apis-frameworks/rpc-graphql-and-streaming @2
 
+Enabling the plugin adds a STOMP listener alongside AMQP and maps STOMP destinations onto the broker's own objects: a queue destination is a durable queue, an exchange destination publishes with a routing key, a topic destination goes through the topic exchange, and temporary destinations support reply-to. Subscriptions carry an acknowledgement mode, so a client can acknowledge per message rather than relying on auto-ack, and a companion Web STOMP plugin exposes the same protocol over WebSocket so a browser can connect directly.
+
+This matters because an application's built-in simple STOMP broker keeps subscriptions in the memory of one process, so a second instance never sees the first instance's subscribers and fan-out silently breaks the moment you scale out. Pointing the application at RabbitMQ as an external relay moves that state into the broker and makes horizontal scaling work. The cost is a broker in the path of every message and its own capacity to plan.
+
 ### rabbitmq_stomp plugin
 **Short:** RabbitMQ plugin exposing a STOMP listener on port 61613 so an app can relay WebSocket STOMP traffic to a real broker.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/message-broker @1, apis-frameworks/rpc-graphql-and-streaming @2
+
+The plugin ships with the broker and is turned on with `rabbitmq-plugins enable rabbitmq_stomp`, after which it listens on 61613 by default with 61614 the conventional TLS port. Login credentials in the `CONNECT` frame map to ordinary broker users and permissions, so authorization is the broker's rather than the application's, and heartbeat negotiation in that same frame is what detects a dead peer on an otherwise idle connection. A default virtual host and default user can be configured for anonymous clients, which is usually a mistake in production.
+
+Reach for it when application servers should hand WebSocket messaging to a real broker instead of holding subscription state in process memory. The operational point to remember is that every subscription becomes a broker object: an application creating a queue per connected user needs auto-delete and expiry policies, or an idle-user population turns into thousands of queues the broker keeps until someone notices.
 
 ### Ray
 **Short:** Distributed Python compute framework; Train/Tune/Serve/Data on top, and the placement layer for multi-node vLLM.
@@ -703,11 +903,19 @@ Reach for it when Python work must span machines, or when the unit of work is a 
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, devtools/version-control-and-workbench @3
 
+Airflow 3 replaced the Flask-and-Jinja rendered pages with a single-page React application served over the same REST API that external clients use, which is what removed the old plugin model's ability to inject server-rendered views. The gains are grid, graph and asset views that update without full page reloads, DAG-version awareness so a historical run is displayed against the code that actually ran it, and consistency between what the interface shows and what the API returns, because there is now one source rather than two.
+
+For a team the change shows up in customization and upgrades: server-side view plugins written against the old application do not carry over, and anything that scraped or automated the old pages should target the REST API instead. For everyday use the difference is mostly layout, but it is worth knowing that rendering is now a client-side concern, so a stale view usually comes from browser caching rather than the server.
+
 ### Reactor Kafka
 **Short:** Reactive Streams adapter over the Kafka client, giving backpressure-aware Flux producers and consumers.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-movement/event-streaming-and-processing @1, runtime-systems/concurrency-and-async @2
+
+It wraps the Java clients in Project Reactor types: `KafkaReceiver.receive()` returns a `Flux` of records where each element carries a receiver offset you acknowledge explicitly, and `KafkaSender.send()` takes a `Flux` of producer records and emits results. Backpressure is the whole point -- demand from downstream operators throttles the underlying poll loop by pausing partitions, so a slow consumer stops pulling instead of accumulating records in memory. Transactions spanning consume and produce are exposed as sender operators.
+
+Reach for it when a service is reactive end to end and blocking a listener thread would waste the point of that stack. The costs are real: reactive operators make error handling and offset ordering subtle, a mistake with concurrent processing commits offsets for work that has not finished, and stack traces through operator chains are hard to read. Spring Kafka's listener containers are simpler wherever blocking is acceptable.
 
 ### Redis Pub/Sub
 **Short:** Redis fire-and-forget publish/subscribe channels; used to fan messages out across WebSocket server instances.
@@ -721,11 +929,19 @@ Reach for it when Python work must span machines, or when the unit of work is a 
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2, data-stores/key-value-and-embedded @3
 
+`XADD` appends an entry with a monotonically increasing id, and readers either scan ranges with `XRANGE` or block on `XREAD`. Consumer groups add the queue semantics: `XREADGROUP` assigns each entry to exactly one member and records it in that group's pending entries list until `XACK`, so a crashed consumer's unacknowledged work stays visible in `XPENDING` and can be reassigned with `XCLAIM` or `XAUTOCLAIM`. Trimming with `MAXLEN` or `MINID` is what bounds memory, since the stream otherwise grows without limit.
+
+Reach for it when Redis is already deployed and you need at-least-once delivery with replay and consumer groups, which is a substantial step up from Pub/Sub's fire-and-forget for no new infrastructure. The limits are Redis's limits: the stream lives in memory, durability depends on the persistence configuration, and there are no partitions, so one stream is one shard's throughput. Kafka is the answer at real streaming volume or long retention.
+
 ### Redpanda
 **Short:** Kafka API-compatible streaming broker written in C++: no JVM, no ZooKeeper, thread-per-core, drop-in for Kafka clients.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2
+
+It reimplements the Kafka protocol in C++ on a thread-per-core architecture: each core owns its partitions, its memory and its share of the network and disk queues, so there is no shared state to lock and no garbage collector to pause. Raft is used directly for both partition replication and cluster metadata, which removes the separate coordination service, and writes go to disk rather than relying on the page cache, which makes tail latency more predictable. Existing Kafka clients, connectors and tooling work unchanged.
+
+Reach for it when you want Kafka's API with fewer moving parts -- one binary per node, no JVM tuning -- and where p99 latency is a stated requirement rather than a preference. The costs are a smaller operational community and a licence that keeps some enterprise features closed, so the experience you can hire for is thinner. Kafka itself, especially managed, stays the safer default where ecosystem depth matters more than latency.
 
 ### Restate
 **Short:** Durable execution runtime with durable promises and strong consistency; SDKs for TS, Python, Java, Go and Rust.
@@ -733,11 +949,19 @@ Reach for it when Python work must span machines, or when the unit of work is a 
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, data-movement/task-queue-and-jobs @3
 
+Every handler invocation is journaled to a replicated log before it does anything, and each subsequent action -- a call to another handler, a sleep, an external promise, a state read or write -- is appended as an entry, so a crashed handler is re-executed against that journal and replays past completed steps instead of repeating their effects. Virtual objects give a keyed handler exclusive concurrency plus a small piece of consistent state, which removes the usual reason to reach for a distributed lock, and durable promises let one handler await a signal from another.
+
+Reach for it when you want durable execution from a single self-hostable binary rather than a service plus a separate database cluster, and the SDKs' inverted control fits container and function deployments alike. It is younger than the alternatives, so tooling, migration guides and hard-won operational knowledge are thinner. Temporal is the mature choice where a large ecosystem and a long production track record outweigh simplicity of deployment.
+
 ### RQ
 **Short:** Redis Queue: a minimal Python background-job library with prefork sync workers and simple retries.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/task-queue-and-jobs @1
+
+Enqueuing pushes a job onto a Redis list; a worker pops it, forks a child process to execute it, and writes the result and status back to Redis under a TTL. The fork per job is deliberate -- a crashed or memory-hungry job cannot damage the worker -- and it is also why the worker is Unix-only and why throughput is bounded by process creation. Failed jobs land in a failed-job registry with the traceback preserved, and retries, scheduling and job dependencies exist but are deliberately minimal.
+
+Reach for it when you want background jobs in a Python web application with almost no concepts to learn and Redis is already running. The limits are the design: one backend, no complex routing or workflow composition, modest throughput, no Windows support. Celery is where you go for multiple brokers, canvas workflows and a large ecosystem, Dramatiq for safer defaults, and ARQ or taskiq when the application is asyncio.
 
 ### SNS
 **Short:** AWS Simple Notification Service: managed pub/sub topics fanning out to queues, functions and endpoints.
@@ -745,11 +969,19 @@ Reach for it when Python work must span machines, or when the unit of work is a 
 **Lang:** *
 **Roles:** data-movement/message-broker @1, observability/alerting-and-incident-response @3
 
+A topic is an endpoint rather than a stored queue: publishing is a synchronous API call, and delivery to each subscription happens afterwards, so nothing is retained beyond whatever the retry policy for that protocol allows. Subscription protocols cover SQS, Lambda, HTTPS, email, SMS and mobile push, and each has its own retry schedule -- the HTTPS delivery policy is configurable, while the in-AWS targets are internal and effectively reliable. Topics can be encrypted with a managed key and subscribed cross-account by policy.
+
+Reach for it for one-to-many notification inside AWS and for the operational path where alarms, budget events and deployment notices reach people. Its structural weakness is that a subscriber with no durable buffer can miss messages permanently, which is why anything that matters gets an SQS queue per consumer with its own dead-letter policy rather than a direct HTTPS or email subscription.
+
 ### Soda
 **Short:** Data quality platform: declarative checks in SodaCL run against warehouse tables and fail the pipeline on breach.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/data-quality-and-lineage @1
+
+Checks are written in SodaCL, a YAML dialect where each check names a dataset and an assertion -- row count within a range, missing or invalid values under a threshold, freshness inside a window, schema unchanged, or an arbitrary SQL metric compared against a bound. The work is pushed down to the warehouse as SQL rather than pulling data out, so validating a large table costs a query, and results come back as pass, warn or fail with failing rows sampled for triage.
+
+Reach for it when the data already lives in a warehouse and you want quality gates a data team can write and review without touching pipeline code, since the same check file runs in CI, in an orchestrator step or on a schedule. The costs are warehouse compute for every scan and a hosted control plane if you want the collaboration features. Great Expectations goes deeper in Python, and dbt tests are simpler when dbt already owns the models.
 
 ### Spark SQL
 **Short:** Spark's SQL and DataFrame engine with the Catalyst optimizer, for distributed queries over lake and warehouse data.
@@ -757,11 +989,19 @@ Reach for it when Python work must span machines, or when the unit of work is a 
 **Lang:** *
 **Roles:** data-movement/batch-and-distributed-compute @1, data-stores/warehouse-and-olap @2
 
+SQL text and DataFrame calls converge on the same logical plan, which Catalyst rewrites -- predicate pushdown, column pruning, constant folding, join reordering against catalog statistics -- before the planner picks physical operators and whole-stage code generation emits JVM bytecode for them. The choice that dominates performance is the join strategy: a broadcast hash join when one side fits in memory, otherwise a sort-merge join behind a shuffle, with adaptive query execution able to switch strategy and coalesce partitions once real shuffle sizes are known.
+
+Reach for it whenever the work is expressible as a query over lake files or catalog tables, because the optimizer usually beats hand-written RDD code and the code is far shorter. The costs live in the shuffle: skewed join keys stall on a single task while the cluster idles, and a small-file layout destroys scan performance. For single-machine analytics, DuckDB gives the same SQL without a cluster at all.
+
 ### Spark Structured Streaming
 **Short:** Spark's streaming API treating a stream as an unbounded table, with watermarks, windows and exactly-once sinks.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/batch-and-distributed-compute @2
+
+The abstraction is that a stream is a table which keeps growing, and the query is re-evaluated over new rows while the engine keeps whatever state aggregations and joins require in a state store checkpointed to durable storage. That checkpoint, together with source offsets, is what gives end-to-end exactly-once against a replayable source and an idempotent sink. Execution is micro-batch by default with the trigger interval setting latency, and event-time watermarks bound how late data may arrive so state can eventually be evicted.
+
+Reach for it when Spark is already the platform and the latency requirement is seconds rather than milliseconds; the strongest case is one codebase serving both the backfill and the live path over the same lakehouse tables. The costs are micro-batch latency and state-store behaviour under large keyed state, where Flink's continuous model does better. Never delete a checkpoint directory to unstick a job -- it holds the offsets and the state.
 
 ### Spring Batch Tasklet
 **Short:** Spring Batch single-step unit of work with transaction boundaries and repository metadata; restartable on failure.
@@ -774,6 +1014,10 @@ Reach for it when Python work must span machines, or when the unit of work is a 
 **Kind:** tech
 **Lang:** java
 **Roles:** data-movement/workflow-and-durable-execution @1, data-movement/event-streaming-and-processing @2, data-movement/task-queue-and-jobs @2
+
+It is a control plane rather than a runtime: you register applications -- Boot jars or container images -- as sources, processors, sinks or tasks, compose them with a pipe-based DSL, and it deploys each one as a separate process on Kubernetes or Cloud Foundry, wiring the pipes to Kafka or RabbitMQ destinations underneath. Streams are long-running Spring Cloud Stream applications, tasks are finite Spring Batch or Spring Cloud Task jobs whose execution history it records, and a scheduler plus a composed-task runner cover DAGs of tasks.
+
+Reach for it in a Spring shop that already builds Boot applications and wants a catalogue, a UI and a deployment story covering both streaming pipelines and batch jobs. The costs are the server, its database and the messaging middleware to operate, plus an abstraction that only fits Spring-shaped applications. Argo Workflows or Airflow is the general-purpose alternative once the steps are arbitrary containers.
 
 ### Spring Cloud Stream
 **Short:** Spring binder abstraction that writes messaging code once and binds it to Kafka, RabbitMQ, Kinesis or Service Bus.
@@ -791,11 +1035,19 @@ Reach for it when you want messaging code that is portable and free of broker bo
 **Lang:** java
 **Roles:** data-movement/task-queue-and-jobs @1, data-movement/workflow-and-durable-execution @3
 
+A task is a Boot application that runs to completion, and the module's contribution is bookkeeping: at startup it writes a row recording the task name, arguments and start time into a task repository, and on exit it records the end time and exit code, so a finite job launched by a scheduler or a platform has a durable execution record. Task listeners hook that lifecycle, and the batch integration links a task execution to the Spring Batch job execution it ran, so the two histories join.
+
+Reach for it when short-lived jobs run as their own processes -- a Kubernetes job, a platform task, a container per run -- and you need to answer whether a run happened and how it ended without inventing a status table. It is deliberately thin: no scheduling, no distribution, no retry logic of its own. Spring Batch supplies chunk processing and restartability, and a scheduler or Data Flow supplies the trigger.
+
 ### Spring Events module
 **Short:** Spring Modulith event support: transactional application events with a publication registry for reliable handoff.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-movement/event-streaming-and-processing @1, apis-frameworks/design-patterns-and-principles @2, data-movement/message-broker @3
+
+The building block is Spring's ordinary application event, published inside a transaction and consumed by a listener that runs after commit, which lets one module notify another without calling its beans directly. What Modulith adds is durability: before the transaction commits, the event and the identity of each interested listener are written to a publication table, and a row is deleted only when that listener completes, so a crash between commit and delivery leaves an incomplete publication that can be republished at startup or on demand.
+
+Reach for it when modules inside one deployable must stay decoupled and an event must not be lost if the process dies mid-handling -- it is the transactional outbox applied to in-process listeners, and the same events can be externalized to Kafka or AMQP later without changing the publishers. The costs are a table in your operational schema and at-least-once semantics, so listeners must be idempotent. A real broker is still needed once consumers move out of process.
 
 ### Spring Integration
 **Short:** Spring's enterprise integration framework: channels, adapters and transformers implementing EIP patterns.
@@ -803,11 +1055,19 @@ Reach for it when you want messaging code that is portable and free of broker bo
 **Lang:** java
 **Roles:** data-movement/message-broker @1, apis-frameworks/design-patterns-and-principles @2, data-movement/event-streaming-and-processing @3
 
+The model is pipes and filters: messages carrying a payload and headers travel along channels between endpoints, and the endpoint types are the enterprise integration patterns -- transformer, filter, router, splitter, aggregator, service activator -- configured through a Java DSL, annotations or XML. Channel adapters connect the flow to files, FTP, JDBC, JMS, AMQP, HTTP and MQTT; a channel may be direct and synchronous or queue-backed and asynchronous; and a message store makes an aggregator's partial groups survive a restart.
+
+Reach for it when a Spring application's real work is integration -- polling a directory, correlating related messages, mediating between two protocols -- and you want that expressed as a flow rather than nested service code. The costs are a large vocabulary to learn and error handling that lives on error channels instead of in a call stack, which is genuinely harder to follow. For plain broker consumption, Spring Kafka or Spring AMQP directly is far less machinery.
+
 ### Spring Kafka
 **Short:** Spring's Kafka integration: KafkaTemplate producers, @KafkaListener containers, retries and dead-letter topics.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2
+
+`KafkaTemplate` wraps the producer with serialization, transactions and a result callback per send, while `@KafkaListener` runs on a listener container that owns the consumer, the poll loop and the threading model -- concurrency maps to consumer threads within the group, and the acknowledgement mode decides whether offsets commit automatically, per record, or under your control. Error handling is a defaulted chain: a failing record is retried with backoff by the container's error handler and then published to a dead-letter topic with the exception recorded in headers.
+
+Reach for it in any Spring Boot service that produces or consumes Kafka, because the container solves what people get wrong by hand -- rebalance-safe offset commits, retries that do not stall the whole group, and non-blocking retry topics when they would. The trap is assuming an exception in a listener is handled: with no configured error handler and dead-letter topic, a poison record retries forever and its partition stops advancing.
 
 ### Spring State Machine
 **Short:** Spring framework for explicit state machines - states, transitions, guards, actions - fits a saga orchestrator core.
@@ -815,11 +1075,19 @@ Reach for it when you want messaging code that is portable and free of broker bo
 **Lang:** java
 **Roles:** data-movement/workflow-and-durable-execution @1, apis-frameworks/design-patterns-and-principles @2, data-access/transactions-and-consistency @3
 
+You declare states, events and transitions in a configurer, attaching guards that can veto a transition and actions that run on entry, exit or transition, with hierarchical states and orthogonal regions available when one flat chart is not enough. Timers fire transitions on a delay, and the machine's context can be persisted to Redis, JPA or MongoDB so a long-lived machine is rehydrated per entity rather than held in memory. Sending an event returns whether it was accepted, making an illegal transition an explicit outcome rather than a silent no-op.
+
+Reach for it when a domain object has a genuinely complex lifecycle -- an order, a claim, a provisioning request -- and scattered boolean flags have become the source of bugs; as a saga core it hands you the transition table and the compensation entry points. The costs are configuration weight and a persistence design you must make. For a handful of states an enum with an explicit transition map is clearer, and for cross-service durability a workflow engine is the honest answer.
+
 ### spring-amqp
 **Short:** Spring's RabbitMQ integration: RabbitTemplate for publishing, @RabbitListener for consuming, retries and DLX.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-movement/message-broker @1, data-movement/task-queue-and-jobs @3
+
+`RabbitTemplate` handles connections, channels and serialization for publishing and for synchronous request-reply over a reply queue, while `@RabbitListener` runs on a container that manages consumers, prefetch and acknowledgement mode. Topology is declarative: a `Queue`, `Exchange` and `Binding` defined as beans are created on the broker at startup, so it lives with the code. Retry is interceptor-based, a republishing recoverer or the broker's dead-letter exchange catches what still fails, and publisher confirms and returns are available when a lost publish is unacceptable.
+
+Reach for it in any Spring service speaking AMQP, since the container's handling of prefetch, manual acknowledgement and container-level errors is what a hand-rolled client usually gets wrong. The thing to configure deliberately is failure: the default is to requeue on exception, which puts a poison message straight back at the head of the queue and spins a consumer at full speed until somebody notices the CPU graph.
 
 ### spring-cloud-starter-bus-amqp
 **Short:** Spring Cloud Bus over RabbitMQ, broadcasting config-refresh and management events to every instance of a service.
@@ -827,11 +1095,19 @@ Reach for it when you want messaging code that is portable and free of broker bo
 **Lang:** java
 **Roles:** data-movement/message-broker @1, apis-frameworks/dependency-injection-and-config @2
 
+Bus links every instance of every participating application to a shared AMQP topic exchange and turns a management endpoint call into a broadcast: posting to the bus refresh endpoint on one instance publishes a refresh event that all subscribers receive, causing each to re-bind its configuration properties and recreate refresh-scoped beans against the current configuration source. Events carry an originating service id and an optional destination pattern, so a refresh can be aimed at one application or one instance, and custom remote events ride the same channel.
+
+Reach for it when a Config Server backs many instances and restarting them to pick up a property change is unacceptable. The costs are a broker sitting in the configuration path and a refresh that is not atomic, so the fleet is briefly split between old and new values. A git webhook into the Config Server's monitor endpoint automates the trigger; Kubernetes ConfigMap reloading or a feature-flag service covers the same need without a bus.
+
 ### spring-integration-core
 **Short:** Spring's enterprise-integration engine: message channels, endpoints, routers and aggregators in-process.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-movement/message-broker @1, apis-frameworks/aop-middleware-and-scheduling @2, apis-frameworks/design-patterns-and-principles @3
+
+This is the engine without the transport adapters: the channel implementations -- direct, queue-backed, publish-subscribe, executor -- the endpoint types that consume from them, the message handler and message source contracts, and the Java DSL that assembles them into a flow. A direct channel invokes the handler on the caller's thread inside the caller's transaction; swapping in a queue or executor channel changes the concurrency and the transaction boundary of the whole flow, which is the most consequential decision and the easiest one to make by accident.
+
+Reach for the core alone when the endpoints are your own code -- routing, splitting, aggregating and enriching in process -- and no external transport is involved, so you avoid pulling in adapter dependencies you never use. The costs are a real learning curve and stack traces that thread through channel and handler infrastructure. Plain method calls or an in-process event publisher are clearer when there is no correlation, buffering or routing to do.
 
 ### spring-kafka
 **Short:** Spring's Kafka integration: KafkaTemplate, @KafkaListener containers and Kafka transaction management.
@@ -839,11 +1115,19 @@ Reach for it when you want messaging code that is portable and free of broker bo
 **Lang:** java
 **Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2
 
+Configuration flows through a concurrent listener container factory whose concurrency setting decides how many consumers a group runs inside one application -- more than the partition count simply leaves threads idle. Transactions are managed by a Kafka transaction manager, so a listener can commit produced records and consumed offsets atomically, which is the read-process-write exactly-once pattern; chaining it with a database transaction manager still leaves a small dual-commit window. Batch listeners hand you a whole poll when throughput matters more than per-record error handling.
+
+Reach for it as the standard Kafka layer in Spring Boot, where an embedded broker or Testcontainers makes listener behaviour genuinely testable in a way hand-rolled consumers rarely are. The recurring production issue is rebalancing caused by long processing between polls: `max.poll.interval.ms` and `max.poll.records` are the knobs, and pausing the container is the correct move rather than sleeping inside a listener.
+
 ### spring-modulith-events-jpa
 **Short:** Persists published application events in a JPA event registry so they survive a crash and are republished.
 **Kind:** tech
 **Lang:** java
 **Roles:** data-movement/event-streaming-and-processing @1, data-access/transactions-and-consistency @2, data-movement/workflow-and-durable-execution @3
+
+The starter supplies the JPA implementation of the event publication registry: a table holding the serialized event, the target listener's identifier, and the publication and completion timestamps. A row is inserted in the same transaction that publishes the event and marked complete only when that listener returns, so any row with no completion timestamp after a restart is a delivery that never finished. Republication can run at startup or on a schedule, and completed rows are purged under a configurable retention so the table does not grow unbounded.
+
+Reach for it when application events must survive a crash and the application already uses JPA -- it is the transactional outbox applied to in-process listeners, with no broker required. The costs are a table in your operational schema, serialized payloads that must stay deserializable across deploys, and at-least-once redelivery that makes listener idempotency mandatory. JDBC and MongoDB variants exist for stacks that are not JPA.
 
 ### SQS
 **Short:** AWS managed queue with at-least-once delivery, visibility timeouts, DLQs and optional FIFO ordering.
@@ -861,11 +1145,9 @@ Because redelivery is normal rather than exceptional, consumers must be idempote
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, platform-delivery/cloud-platform-and-cost @2
 
-### Stream processing
-**Short:** The stage that computes over a live event log rather than a batch, here Kinesis Data Analytics or Flink over the stream.
-**Kind:** concept
-**Lang:** *
-**Roles:** data-movement/event-streaming-and-processing @1
+A state machine can call a very large number of AWS APIs directly through SDK integrations, so a step that lists objects or writes an item needs no function of its own. Long-running work uses the callback pattern: a task issued with a task token stays pending until something reports success or failure with that token, which is how a human approval or an external system is modelled. Distributed Map fans a state machine out over millions of items with its own concurrency and failure tolerance, and every state declares its own retry and catch behaviour.
+
+Reach for it when orchestration should be infrastructure rather than a service you run, and when a visible execution history is worth as much as the logic itself. The costs are billing per state transition, which makes a chatty loop surprisingly expensive, quotas on execution history size, and a definition language that is neither unit-testable nor portable the way ordinary code is.
 
 ### Task Execution API
 **Short:** Airflow 3.0's Task Execution API, the boundary that lets workers run tasks without direct metadata-DB access.
@@ -879,11 +1161,19 @@ Because redelivery is normal rather than exceptional, consumers must be idempote
 **Lang:** python
 **Roles:** data-movement/workflow-and-durable-execution @1
 
+Airflow 3 separates task execution from the metadata database: task code runs inside a process built on the task SDK that talks to the Task Execution API over HTTP, so a worker no longer holds database credentials and no longer imports the whole scheduler codebase. Variables, connections and cross-task values become API calls, heartbeats and state transitions travel the same way, and the DAG author's import surface narrows to a stable, separately versioned package rather than Airflow internals.
+
+What this buys is isolation and reach: tasks can run on remote or less-trusted workers, in a different network, or eventually in another language once a client exists, and a task's dependency set stops colliding with the scheduler's. It also closes the oldest Airflow security hole, which was that any task could write directly to the metadata database. The cost is a migration for code that reached into internals or the ORM session.
+
 ### taskiq
 **Short:** Async-native distributed task queue for Python - a Celery alternative on asyncio with pluggable brokers/backends.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/task-queue-and-jobs @1, runtime-systems/concurrency-and-async @2
+
+The design mirrors ASGI's separation of concerns: a broker sends and receives task messages, a result backend stores return values, and both are pluggable across NATS, RabbitMQ, Redis and Kafka, while the worker awaits tasks on the event loop rather than forking a process per job. Tasks are declared with a decorator and invoked with a kick method that returns a handle you can await, middleware wraps execution for retries, metrics and logging, and dependency injection borrows the `Depends` style familiar from FastAPI.
+
+Reach for it when a service is asyncio end to end and you want Celery's shape -- durable distributed tasks with a broker and a result store -- without a synchronous worker model bolted onto async code. The costs are a young ecosystem and fewer battle-tested integrations. Celery remains the answer for CPU-bound prefork parallelism and breadth of tooling, and ARQ is smaller still when Redis alone is enough.
 
 ### Temporal
 **Short:** Durable execution engine: workflows written as code survive restarts, with built-in retries, timeouts and sagas.
@@ -917,17 +1207,19 @@ Reach for it when a business process runs for minutes to months across several s
 **Lang:** python
 **Roles:** data-movement/data-quality-and-lineage @1
 
+It computes statistics over a dataset with Apache Beam, so the same code runs on a laptop or on a distributed runner, then infers a schema -- expected features, types, domains, value counts, presence -- that you review once and thereafter treat as a contract. Validating a new batch against that schema yields typed anomalies: an unexpected feature, a missing one, an out-of-domain categorical value, a changed type. Comparing two statistics sets detects training-serving skew and drift between spans using distance measures rather than eyeballed charts.
+
+Reach for it inside a TFX pipeline, where the statistics and schema components make this the standard gate before training, though it also stands alone over a DataFrame or a set of TFRecords. The costs are the Beam dependency, a schema that has to be curated as features evolve, and a protobuf-shaped API that feels heavy outside TensorFlow. Great Expectations, Pandera or a drift-monitoring tool fit a non-TFX stack better.
+
 ### TFDV
 **Short:** TensorFlow Data Validation: infers a data schema, then detects anomalies and training/serving skew in new batches.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/data-quality-and-lineage @1, ml-lifecycle/drift-and-production-monitoring @2
 
-### Tiered storage
-**Short:** Offloading a broker's older log segments to object storage (Kafka KIP-405) so retention is not bound by disk.
-**Kind:** concept
-**Lang:** *
-**Roles:** data-movement/event-streaming-and-processing @1, data-stores/object-and-file-storage @2
+The workflow is three calls: generate statistics for a batch, infer or load a schema, and validate the batch against it. Skew and drift thresholds are configured on the schema itself rather than at call time -- an infinity-norm bound on a categorical feature, a divergence bound on a numeric one -- so the tolerance is versioned alongside the feature definition. The failure modes are worth separating: schema skew is a structural difference between training and serving data, feature skew is a value computed differently in the two paths, and distribution skew is the same pipeline seeing different data.
+
+Reach for it when a training pipeline must fail loudly on a bad batch rather than quietly training on it, since a silently changed upstream column is the classic cause of a model that degrades with no alert firing. Its notebook visualizations are also the fastest way to see what actually changed. Budget for schema maintenance, and expect to relax inferred domains that were too tight on the first sample.
 
 ### Workflows
 **Short:** Serverless state-machine orchestrators (Google Cloud Workflows and peers) that survive restarts between steps.
@@ -935,8 +1227,16 @@ Reach for it when a business process runs for minutes to months across several s
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, platform-delivery/cloud-platform-and-cost @2
 
+The pattern is a state machine written as a declarative document in YAML or JSON, where each step calls an HTTP endpoint or a cloud API, assigns the result to a variable, branches on it, or waits, and the service persists the position after every step so an execution survives infrastructure failure and can sleep without holding a process. Billing follows steps executed rather than time running, retry and error handling are declared per step, and the execution history doubles as the audit trail.
+
+Reach for it to glue managed services together -- call an API, poll until something is ready, then trigger the next job -- where writing that as a long-running function would mean paying for idle time and handling restarts yourself. The costs are a definition language that is neither unit-testable nor portable, awkward expression syntax for anything computational, and no local execution. Real logic belongs in a function the workflow invokes, or in a code-first engine such as Temporal.
+
 ### ydata-profiling
 **Short:** Generates an automated EDA report over a dataframe: distributions, correlations, missingness and leakage hints.
 **Kind:** tech
 **Lang:** python
 **Roles:** data-movement/data-quality-and-lineage @1, ml-lifecycle/ml-platform-and-pipelines @3
+
+One call over a dataframe produces an HTML or JSON report: inferred types, per-column distributions and quantiles, missing-value patterns, cardinality and duplicate detection, a correlation matrix across several coefficients, and alerts for constant, imbalanced, highly correlated or heavily skewed columns. A minimal mode drops the expensive pairwise computations for wide frames, and comparing two reports puts a training set beside a production sample, which is a quick drift check before anything more formal exists.
+
+Reach for it at the start of work on an unfamiliar dataset and as an artifact attached to a data handoff, since it answers most first-hour questions without a notebook full of exploratory cells. The cost is compute: it is multi-pass and quadratic in column count for correlations, so a large table should be sampled. For repeatable gates inside a pipeline an expectation suite or a Pandera schema is the right tool -- profiling is exploration, not enforcement.
