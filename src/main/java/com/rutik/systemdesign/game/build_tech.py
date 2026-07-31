@@ -202,6 +202,21 @@ def build_tech_bank():
     for fn in shard_files:
         shard_tier = os.path.basename(fn)[:-3]
         lines = open(os.path.join(root, fn), encoding="utf-8").read().split("\n")
+
+        # The preamble -- `# <Tier> — technology bank`, the tier marker, and the paragraph
+        # saying what the shard holds -- is the only thing telling a human reader what this
+        # file is. `shard_tier` comes from the FILENAME, so losing the preamble does not
+        # even downgrade the tier check to warnings: it is completely silent.
+        #
+        # It nearly went. A bulk description pass that rebuilds a shard from its `### `
+        # records drops everything above the first one, and one agent did exactly that
+        # before catching it in `git diff --stat`. The next one may not look.
+        if not (lines and lines[0].startswith("# ")):
+            errs.append(f"{fn}:1 lost its `# <Tier> — technology bank` heading -- a bulk "
+                        f"pass that rebuilds from `### ` records drops the preamble")
+        if not any(l.startswith("<!-- tech-bank tier:") for l in lines[:12]):
+            errs.append(f"{fn}:1 lost its `<!-- tech-bank tier: -->` marker")
+
         i, cur, cur_line = 0, None, 0
 
         def close(cur, cur_line, desc):
@@ -334,6 +349,28 @@ TRADE_HDR = re.compile(r"^##\s+(?:\d+[.)]\s*)?trade[\s-]?offs?\b.*$", re.I)
 CATEGORY_HEADS = {"category", "concern", "dimension", "capability", "layer", "area",
                   "aspect", "phase", "stage", "use case", "need", "task", "problem",
                   "requirement", "when", "scenario", "goal", "purpose", "job", "role"}
+
+# The TRANSPOSED case, and the reason the set above is not enough on its own. A feature
+# matrix puts the comparison axis in column 0 and the PRODUCTS across the header row:
+#
+#     | Capability          | AWS              | GCP            | Azure             |
+#     | Run generators on   | ECS/Fargate, EKS | GKE, Cloud Run | AKS, Container Apps |
+#
+# "Capability" is already a CATEGORY_HEAD, but there is no tool-list column for the
+# grouped branch to read, so it fell through to "column 0 is the tool" and indexed
+# `Run generators on`, `gRPC support`, `Production readiness` and `Explicit in signature`
+# as technologies. Six such tables exist; between them they were the bulk of the records
+# whose own short line has to say "comparison-table cell, not a product".
+#
+# The >= 4 column floor (axis + at least three alternatives) is doing real work, not
+# tidiness: `technologies/intel_openvino` has `| Feature | Hardware | Accelerates |`,
+# whose column 0 is AVX-512 VNNI / AMX / XMX / NPU -- genuine tools. Three columns is a
+# normal table that happens to start with a comparison word; you do not build a matrix
+# to compare two things. A two-product matrix is therefore missed, which is the safe
+# direction to be wrong in.
+COMPARISON_HEADS = {"comparison", "capability", "feature", "criterion", "criteria",
+                    "dimension", "aspect", "metric", "property", "attribute", "factor",
+                    "characteristic"}
 TOOLLIST_HEADS = {"tools", "tool", "options", "option", "technologies", "technology",
                   "examples", "example", "libraries", "library", "choices", "products",
                   "stack", "tooling", "tool / library"}
@@ -666,6 +703,15 @@ def build_tech_index(bank=None):
                     h0 = tech_strip_md(hdr[0]).lower() if hdr else ""
                     h1 = tech_strip_md(hdr[1]).lower() if len(hdr) > 1 else ""
                     grouped = h0 in CATEGORY_HEADS and h1 in TOOLLIST_HEADS
+                    # A transposed feature matrix: the axis is in column 0 and the
+                    # products are the remaining HEADER cells. Skip it outright rather
+                    # than harvesting those header products -- they are already indexed
+                    # from the module's real tool table, and reading them here would
+                    # invent index entries ("gunicorn + uvicorn-worker", "uvicorn 0.51+")
+                    # that no bank record covers. Dropping a matrix costs nothing; the
+                    # only thing in its first column is the comparison axis.
+                    if not grouped and h0 in COMPARISON_HEADS and len(hdr) >= 4:
+                        continue
                     for row in rows:
                         if not row or not row[0].strip():
                             continue
