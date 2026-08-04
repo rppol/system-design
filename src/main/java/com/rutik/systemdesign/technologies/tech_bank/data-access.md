@@ -297,6 +297,16 @@ Instead of triggers, it creates a shadow copy of the table, copies rows into it,
 
 Reach for it for a large ALTER on a busy MySQL table that must stay online. It requires row-based binary logging, a suitable unique key, and no foreign keys pointing at the table, and the cutover is a brief lock, so schedule it rather than assume it is invisible.
 
+### go-redis
+**Short:** The de facto Go client for Redis and Valkey, covering cluster, sentinel, pipelining and context-aware commands.
+**Kind:** tech
+**Lang:** go
+**Roles:** data-access/drivers-and-connection-pooling @1, caching/distributed-cache @2
+
+One package covers the standalone, sentinel, cluster and ring topologies behind a common interface, with a built-in connection pool, context deadlines on every call, pipelines and transactions, script helpers that fall back from a hash to the source when the server has forgotten it, and hooks for tracing and metrics.
+
+Reach for it as the default in Go. Two things to get right: give every call a context with a real deadline, since the pool will otherwise happily block, and size the pool against the server rather than the application, because a large fleet multiplying its default pool size is a common way to exhaust a Redis connection limit.
+
 ### hashicorp/raft
 **Short:** HashiCorp's battle-tested Go implementation of the Raft consensus protocol for replicated state machines.
 **Kind:** tech
@@ -356,6 +366,16 @@ That number is the real ceiling on concurrent database work: the eleventh caller
 **Kind:** api
 **Lang:** *
 **Roles:** data-access/transactions-and-consistency @1, observability/profiling-and-performance @3
+
+### ioredis
+**Short:** The widely used Node.js Redis client, with cluster and sentinel support, pipelining and Lua script helpers.
+**Kind:** tech
+**Lang:** js
+**Roles:** data-access/drivers-and-connection-pooling @1, caching/distributed-cache @2
+
+It exposes commands as promise-returning methods, auto-pipelines commands issued in the same event-loop tick, handles cluster slot maps and redirects transparently, follows sentinel failovers, and lets you define a Lua script once as a named command with its own key count. Offline queueing buffers commands issued before the connection is ready, which is convenient and occasionally surprising.
+
+Reach for it as the default in Node. Watch the reconnect and retry settings, since the defaults keep retrying quietly and can turn a dead Redis into a slow application rather than a failing one, and disable offline queueing where you would rather fail fast than replay stale writes.
 
 ### jakarta.persistence.EntityManagerFactory
 **Short:** JPA factory producing EntityManagers and their Query and transaction objects for one persistence unit.

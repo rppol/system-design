@@ -571,7 +571,7 @@ See the [Backend Master Index](src/main/java/com/rutik/systemdesign/backend/READ
 
 ### Database Engineering — Principal Engineer & Interview Prep Guide
 
-A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 29 modules across 7 phases covering relational, NoSQL, emerging, and distributed database concepts.
+A laser-focused, principal-engineer-level reference for database internals, selection strategies, production operations, distributed systems, and real-world case studies. 30 modules across 7 phases covering relational, NoSQL, emerging, and distributed database concepts.
 
 #### Phase 1 — Foundations
 | Module | Key Concepts |
@@ -595,6 +595,7 @@ A laser-focused, principal-engineer-level reference for database internals, sele
 |--------|-------------|
 | [Document Databases](src/main/java/com/rutik/systemdesign/database/document_databases/document_databases.md) | MongoDB WiredTiger, embedding vs referencing, aggregation pipeline, sharding |
 | [Key-Value Stores](src/main/java/com/rutik/systemdesign/database/key_value_stores/key_value_stores.md) | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock |
+| [Redis Internals](src/main/java/com/rutik/systemdesign/database/redis_internals/redis_internals.md) | SDS/listpack/dict encodings, event loop and io-threads, eviction (LRU/LFU), fork + copy-on-write, multi-part AOF, PSYNC and resharding, locks and fencing, Redis 8 vs Valkey 9 |
 | [Wide-Column Databases](src/main/java/com/rutik/systemdesign/database/wide_column_databases/wide_column_databases.md) | Cassandra ring, partition key, compaction strategies, consistency levels |
 | [Search Engines](src/main/java/com/rutik/systemdesign/database/search_engines/search_engines.md) | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
 | [Graph Databases](src/main/java/com/rutik/systemdesign/database/graph_databases/graph_databases.md) | Property graph, Neo4j index-free adjacency, Cypher, fraud detection patterns |

@@ -4,6 +4,15 @@
 senior: key_value_stores.md
 files this module contributes to each curated path; omit a tier to leave it out
 -->
+> **Boundary.** This page teaches the **category** — what a key-value store is for, and the ideas
+> that survive swapping Redis for DynamoDB, etcd or Valkey: data-model choice, the HyperLogLog
+> error/memory trade, expiration versus eviction, the fixed-slot layer, Redlock and its critique.
+> The **product internals** — SDS and listpack layouts, `dict` rehashing, the eight
+> `maxmemory-policy` values and the LRU/LFU algorithms behind them, multi-part AOF, `latest_fork_usec`
+> and copy-on-write, `PSYNC` and the replication backlog, live slot migration with `ASK`/`ASKING`,
+> Functions versus `EVALSHA`, and the Redis-vs-Valkey licence split — live in
+> [Redis Internals](../redis_internals/redis_internals.md). Read this page first.
+
 ## 1. Concept Overview
 
 Key-value stores are the simplest NoSQL data model: a distributed hash map mapping keys to values. Redis is the dominant in-memory key-value store, combining sub-millisecond latency with rich data structures, persistence, pub/sub, Lua scripting, and clustering. Understanding Redis data structures and their internal encodings is critical for building efficient caching, session, rate limiting, and real-time systems.
@@ -102,24 +111,15 @@ error still fits in a cache-friendly 12KB blob.
 
 ### Persistence Modes
 
-**RDB (Redis Database) — Snapshots**:
-```
-Redis forks a child process (copy-on-write semantics).
-Child writes current dataset to a temporary .rdb file.
-Swap: rename temporary file to dump.rdb.
+A key-value store that lives in memory has to answer one question that a disk-backed database
+answers by construction: what survives a restart. There are only two shapes of answer, and Redis
+offers both.
 
-Fork overhead: ~9-13 ms per GB on modern hardware, so ~100-130ms for a 10GB dataset
-               (the page table, not the data, is what gets copied)
-               Old Xen VMs are 20-40x worse; measure via INFO latest_fork_usec
-During fork: parent continues serving requests (CoW = only modified pages are copied)
-
-Configuration (shipped defaults):
-save 3600 1       # Save if ≥1 key changed in 3600 seconds
-save 300 100      # Save if ≥100 keys changed in 300 seconds
-save 60 10000     # Save if ≥10000 keys changed in 60 seconds
-```
-
-`fork()` gives the child a frozen view of every memory page without copying; the kernel only copies a page (copy-on-write) once the parent writes to it, so cost scales with how much the dataset changes during the snapshot, not its total size.
+**RDB (Redis Database) — Snapshots**: a periodic point-in-time dump written by a forked child.
+`fork()` gives the child a frozen view of every memory page without copying; the kernel only copies
+a page (copy-on-write) once the parent writes to it, so cost scales with how much the dataset
+changes during the snapshot, not its total size. You lose everything written since the last
+snapshot.
 
 ```mermaid
 flowchart LR
@@ -152,45 +152,16 @@ flowchart LR
 
 If every page gets touched before the child finishes writing, total memory temporarily doubles — the mechanism behind Pitfall 1's multi-second fork pause on large datasets.
 
-**AOF (Append-Only File)**:
-```
-Every write command is appended to aof file.
-On restart: replay all commands to reconstruct dataset.
+**AOF (Append-Only File)**: every write command is appended to a log and replayed on restart. The
+durability knob is how often that log is `fsync`ed — `always`, `everysec` (the usual production
+choice) or `no` — and the trade is the same one every write-ahead log makes: each step toward
+zero loss costs throughput.
 
-Fsync policies:
-appendfsync always      # Fsync after every command. Slowest, safest (0 data loss)
-appendfsync everysec    # Fsync once per second. Up to 1s data loss on crash (recommended)
-appendfsync no          # Never fsync (OS decides). Fastest, most data loss risk
-
-AOF rewrite: periodic compaction of the AOF file (remove superseded commands)
-auto-aof-rewrite-percentage 100  # Rewrite when AOF doubles in size
-auto-aof-rewrite-min-size 64mb   # Minimum size before auto-rewrite
-```
-
-The three `appendfsync` policies trade durability for throughput; `everysec` sits in the balanced quadrant, which is why most production deployments choose it over the two extremes.
-
-```mermaid
-quadrantChart
-    title appendfsync: durability vs throughput
-    x-axis Low Durability --> High Durability
-    y-axis Low Throughput --> High Throughput
-    quadrant-1 Balanced, recommended
-    quadrant-2 Fastest, riskiest
-    quadrant-3 Rarely useful
-    quadrant-4 Safest, slowest
-    Always: [0.85, 0.15]
-    Everysec: [0.6, 0.75]
-    No: [0.15, 0.9]
-```
-
-`always` fsyncs every write (zero loss, but throughput capped around 1,000 writes/second on HDD); `no` skips explicit fsyncs entirely (highest throughput, most risk); `everysec` fsyncs once per second in the background, losing at most 1 second of writes on a crash while keeping near-native throughput.
-
-**RDB + AOF Hybrid** (`aof-use-rdb-preamble yes`, the shipped default):
-```
-AOF file begins with a compact RDB snapshot,
-followed by AOF commands from that point forward.
-Faster restart (RDB portion loads quickly) + durability (AOF guarantees from that point).
-```
+**Both together** is the normal production shape, since RDB alone loses a snapshot interval and AOF
+alone restarts slowly. The mechanics — the fork cost per GB on real hardware, `latest_fork_usec`,
+Transparent Huge Pages as a copy-on-write amplifier, the `save` and `auto-aof-rewrite-*` defaults,
+what `appendfsync always` actually fsyncs, and what multi-part AOF `[7.0]` changed — are in
+[Redis Internals §6.5–6.7](../redis_internals/redis_internals.md).
 
 ---
 
@@ -252,6 +223,12 @@ flowchart LR
 
 16,384 hash slots split across the primary shards (3 shown here) via `CRC16(key) mod 16384`; each primary has a replica for failover. When a client sends a command, the owning primary executes it directly; if the client's cached slot map is stale, the target node replies `MOVED ip:port` and the client redirects to the correct primary (worked example in Section 5). Key tags such as `{user}.cart` and `{user}.profile` hash only on `{user}`, guaranteeing both land on the same slot so multi-key operations work.
 
+The Redis-specific mechanics — which CRC16 variant, the gossip port, the `CLUSTER SETSLOT
+MIGRATING`/`IMPORTING`/`NODE` sequence a live reshard actually runs, why `ASK` is not `MOVED` and
+what `ASKING` is for, the three hash-tag parsing rules, and the cluster-mode restrictions that
+decide whether an application can migrate at all — are in
+[Redis Internals §6.9](../redis_internals/redis_internals.md).
+
 **Read it like this.** `CRC16(key) mod 16384` says: "never ask which node owns this key — ask which
 of 16,384 fixed slots it falls into, then ask who currently owns that slot." The extra level of
 indirection is the entire design: node membership changes reassign *slots*, so a resharding moves a
@@ -289,19 +266,16 @@ event into a bounded slot migration.
 
 ### Eviction Policies
 
-```
-noeviction     -- Return error when memory full. Use for durability-critical data.
-allkeys-lru    -- Evict least recently used keys from all keys. Common choice.
-volatile-lru   -- LRU eviction only among keys with TTL set.
-allkeys-lfu    -- Evict least frequently used (LFU). Better for non-uniform access.
-volatile-lfu   -- LFU only among keys with TTL.
-allkeys-random -- Random eviction. Rarely useful.
-volatile-random-- Random from TTL keys.
-volatile-ttl   -- Evict keys with shortest TTL first.
+Any store with a memory ceiling has to decide what to throw away, and the choice is two independent
+questions: which keys are *candidates* (all of them, or only the ones you marked expirable) and how
+a victim is *picked* among them (least recently used, least frequently used, random, or soonest to
+expire). Recency suits sessions and sliding windows; frequency suits a Zipfian cache and is the only
+one that survives a nightly full scan; and refusing to evict at all is the right answer for a job
+queue, where losing an entry is a correctness bug rather than a cache miss.
 
-Recommendation: allkeys-lru for general cache, allkeys-lfu for Zipf-distributed access,
-                noeviction for non-cache uses (job queues, sessions that must survive)
-```
+Redis's eight exact policy names, the fact that its shipped default refuses to evict, and the
+approximated-LRU and logarithmic-LFU algorithms behind them are in
+[Redis Internals §6.3](../redis_internals/redis_internals.md).
 
 ### Key Expiration Is Not Eviction
 

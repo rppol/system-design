@@ -1035,6 +1035,16 @@ It builds a tree model of the machine from the operating system and firmware: pa
 
 Reach for it whenever placement matters: pinning a latency-sensitive pool so its threads share an L3, or keeping packet-processing threads on the node the NIC attaches to. The costs are that it describes hardware rather than recommending anything, so the decision and the measurement remain yours and a wrong pinning is worse than none. Inside a container it reports only the cpuset you were granted. `lstopo` is its CLI.
 
+### HyperLogLog
+**Short:** Probabilistic cardinality estimator counting distinct items in fixed memory, trading about one percent error for flat cost.
+**Kind:** concept
+**Lang:** *
+**Roles:** runtime-systems/collections-and-algorithms @1, data-stores/key-value-and-embedded @2
+
+It never stores the members. Each item is hashed and its leading-zero run recorded in one of a fixed number of small registers, and the harmonic mean of those registers estimates how many distinct items must have been seen to produce them. Error falls with the square root of the register count, so accuracy is expensive: halving the error costs four times the memory, which is why implementations pick one register count and stop.
+
+Reach for it for unique visitors, distinct IPs, distinct search terms — anything where the count matters and the members do not, at a cardinality where an exact set would cost gigabytes. It cannot tell you whether a specific item was seen, and unions are cheap while intersections are not.
+
 ### IANA tzdata
 **Short:** The IANA time-zone database of offsets and DST transition rules, shipped with the JDK and most OSes.
 **Kind:** tech
@@ -1570,6 +1580,16 @@ The everyday idiom is to build a result behind a local dummy and return the node
 **Kind:** api
 **Lang:** python
 **Roles:** runtime-systems/collections-and-algorithms @1
+
+### listpack
+**Short:** A contiguous, pointer-free byte-array encoding for small collections, which replaced Redis's ziplist in 7.0.
+**Kind:** concept
+**Lang:** *
+**Roles:** runtime-systems/collections-and-algorithms @1, data-stores/key-value-and-embedded @2
+
+Entries sit back to back with no per-element pointer or allocation, so a small hash or set costs a few hundred bytes instead of a hash table's node-per-entry overhead, and a linear scan over a couple of kilobytes of sequential memory beats a hash lookup's three or four dependent cache misses. Big-O favours the hash table; the cache line favours the scan until the collection grows.
+
+Its predecessor stored each entry's length inside its neighbour, so growing one element could force every following element to grow in a cascade with quadratic worst-case cost. Listpack removes the cause: each element records only its own size, so a change can never propagate. The tradeoff is that the encoding switch is one-way — cross the threshold once and the memory is not reclaimed by shrinking back.
 
 ### LMAX Disruptor
 **Short:** Lock-free ring-buffer inter-thread messaging library; powers Log4j2 async loggers at very low latency.
@@ -2262,6 +2282,16 @@ Reach for it when work is CPU-bound, shares a large in-memory structure that wou
 It is structured as a state machine with no I/O of its own: you hand it received UDP datagrams and it produces datagrams to send plus the deadline at which to call it back, so it drops into whatever event loop the host program already runs. Alongside the Rust crate it exposes a C API, which is how it is embedded into nginx through Cloudflare's patch, and it uses BoringSSL for the TLS 1.3 handshake.
 
 Reach for it when you want a QUIC stack that carries a very large share of a major CDN's edge traffic while keeping control of the I/O path. The costs are the standard QUIC ones plus integration: you own the socket, the timers and connection-identifier routing so a migrated connection reaches the right instance, user-space congestion control burns more CPU per gigabit than kernel TCP, and public deployments need a plan for networks blocking UDP.
+
+### quicklist
+**Short:** Redis's doubly-linked list of listpack nodes, with a per-node byte cap and optional compression of the middle nodes.
+**Kind:** concept
+**Lang:** *
+**Roles:** runtime-systems/collections-and-algorithms @1, data-stores/key-value-and-embedded @2
+
+A plain linked list pays two pointers and an allocation per element, which is ruinous for a million small items; one giant contiguous array pays a full memory move on every push. A quicklist splits the difference by chaining bounded compact nodes, so pushes and pops touch only the node at one end and memory overhead is amortised across the whole node.
+
+Because a queue only ever touches the two ends, the middle nodes can be compressed and never decompressed on the hot path, which can shrink a large backlog dramatically. That setting is exactly wrong for indexed access into the middle, where every read would decompress a node.
 
 ### random
 **Short:** Python stdlib pseudo-random generator used for sampling, shuffling and Monte Carlo simulation.

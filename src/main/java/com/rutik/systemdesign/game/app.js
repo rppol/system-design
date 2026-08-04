@@ -237,7 +237,7 @@ const STUDY_ORDER = {
   database: [
     "database/database_fundamentals","database/storage_engines_internals","database/indexing_deep_dive","database/concurrency_control_and_locking",
     "database/postgresql_internals","database/mysql_innodb_internals","database/sql_query_optimization","database/schema_design_and_normalization","database/database_migrations_zero_downtime",
-    "database/document_databases","database/key_value_stores","database/wide_column_databases","database/search_engines","database/graph_databases","database/time_series_databases",
+    "database/document_databases","database/key_value_stores","database/redis_internals","database/wide_column_databases","database/search_engines","database/graph_databases","database/time_series_databases",
     "database/vector_databases","database/newsql_and_distributed_sql","database/in_memory_databases",
     "database/replication_and_high_availability","database/sharding_and_partitioning","database/distributed_transactions","database/consistency_models_and_consensus","database/database_caching_patterns",
     "database/connection_pool_management","database/database_performance_tuning","database/backup_recovery_and_disaster_recovery","database/database_security_and_compliance",

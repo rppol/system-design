@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 29 Modules (7 Phases)
+## Module List — 30 Modules (7 Phases)
 
 ### Phase 1 — Foundations
 
@@ -31,7 +31,8 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | Module | Level | Q&As | Key Concepts |
 |--------|-------|------|--------------|
 | `document_databases/` | Advanced | 16 | MongoDB WiredTiger, embedding vs referencing, aggregation, sharding, change streams |
-| `key_value_stores/` | Expert | 16 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock |
+| `key_value_stores/` | Expert | 17 | Redis data structures, persistence (RDB/AOF), Cluster, Streams, Redlock — the CATEGORY; Redis product internals belong in `redis_internals/` |
+| `redis_internals/` | Expert | 28 | SDS/listpack/quicklist/intset/dict/skiplist encodings, `ae` loop + `io-threads`, the eight eviction policies + approximated LRU/LFU, jemalloc fragmentation, RDB + multi-part AOF, fork/CoW + THP, `PSYNC`/backlog/`replid2`, live resharding + `ASK`, locks and fencing, Functions vs `EVALSHA`, Redis 8 vs Valkey 9 |
 | `wide_column_databases/` | Advanced | 13 | Cassandra ring, partition key, compaction, consistency levels, tombstones |
 | `search_engines/` | Advanced | 13 | Inverted index, BM25, Elasticsearch ILM, aggregations, deep pagination |
 | `graph_databases/` | Intermediate | 11 | Property graph, Neo4j index-free adjacency, Cypher, fraud detection |
@@ -75,9 +76,9 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ## Learning Paths (Full + Senior + Principal)
 
-`README.md` documents the **Full Path** (all 29 modules — the 7-phase order in
+`README.md` documents the **Full Path** (all 30 modules — the 7-phase order in
 "## Learning Path — 7 Phases" / "## Phase Diagram (ASCII)") plus two curated tiers:
-**Senior** (19 modules) and **Principal** (13). They are different cuts, not nested
+**Senior** (20 modules) and **Principal** (13). They are different cuts, not nested
 depths — senior is the craft, principal is the judgment (which engine at what cost,
 what migration, what you tell a team *not* to do), so principal is usually the smaller
 list and much of it is material senior never sees. Membership is declared ONCE per
@@ -122,7 +123,8 @@ and a 6-week Study Plan (prose; no path impact).
 | Connection pool | `connection_pool_management/` | `../backend/connection_pooling_deep_dive/` |
 | Sharding | `sharding_and_partitioning/` | `../hld/database_sharding/` |
 | CAP theorem | `database_fundamentals/` | `../hld/cap_theorem/`, `consistency_models_and_consensus/` |
-| Cache patterns | `database_caching_patterns/` | `../backend/caching_strategies_deep_dive/`, `key_value_stores/` |
+| Cache patterns | `database_caching_patterns/` | `../backend/caching_strategies_deep_dive/`, `key_value_stores/`, `redis_internals/` |
+| Redis internals | `redis_internals/` | `key_value_stores/`, `in_memory_databases/`, `database_caching_patterns/` |
 | Vector search | `vector_databases/` | `../llm/embeddings_and_similarity_search/` |
 | N+1 query | `sql_query_optimization/` | `../spring/spring_data_jpa/`, `../backend/query_optimization/` |
 | Schema migration | `database_migrations_zero_downtime/` | `../backend/database_migrations/` |
@@ -136,7 +138,8 @@ and a 6-week Study Plan (prose; no path impact).
 | PostgreSQL | 18 (2025) |
 | MySQL | 9.7 (2026 LTS) |
 | MongoDB | 8.3 (2026) |
-| Redis | 8.8 (2026) |
+| Redis | 8.10 (2026) |
+| Valkey | 9.1 (2026) |
 | Cassandra | 5.0 (2024) |
 | Elasticsearch | 9.x (2025+) |
 | ClickHouse | 26.x (2026) |

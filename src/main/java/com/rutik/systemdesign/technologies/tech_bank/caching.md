@@ -43,6 +43,26 @@ The library gives you one interface -- `SimpleMemoryCache`, `RedisCache`, `Memca
 
 Reach for it in an asyncio service that should move from a process-local cache in tests to Redis in production by changing configuration rather than code. Two practical points: the default serializer is JSON, so pickling arbitrary objects is an explicit choice with the security consequences that implies, and stampede protection is opt-in -- a lock helper exists but the decorator does not apply it, so a hot key expiring under load still sends every waiting request to the origin.
 
+### Amazon ElastiCache
+**Short:** AWS's managed Redis and Valkey cache service, with Valkey the default and cheapest engine and cluster mode optional.
+**Kind:** tech
+**Lang:** *
+**Roles:** caching/distributed-cache @1, data-stores/key-value-and-embedded @2, platform-delivery/cloud-platform-and-cost @3
+
+It runs the engine for you — provisioning, patching, failover, backups and a stable endpoint — with the choice between a single primary-replica group and cluster mode across shards made at creation time and awkward to change later. Valkey became the default after the Redis licence change and is priced below the Redis option.
+
+Reach for it when you want Redis semantics without operating the fleet. The tradeoffs are the usual managed ones: no shell on the box, a curated subset of parameters exposed through a parameter group, and a bill that scales with node hours. If a write must not be lost on failover, ElastiCache does not close that gap — MemoryDB does.
+
+### Amazon MemoryDB
+**Short:** AWS's durable Redis-compatible store, committing writes to a multi-AZ transaction log before acknowledging them.
+**Kind:** tech
+**Lang:** *
+**Roles:** caching/distributed-cache @1, data-stores/key-value-and-embedded @1, platform-delivery/cloud-platform-and-cost @3
+
+Ordinary Redis replication is asynchronous, so a primary can acknowledge a write and lose it in a failover. MemoryDB puts a distributed transaction log across availability zones in front of the acknowledgement, which makes it a system of record rather than a cache while keeping the same commands, data structures and clients.
+
+Reach for it when the data in Redis is the truth — session state that cannot be reconstructed, a ledger of in-flight work, anything where a lost acknowledged write is a correctness bug. The cost is write latency measured in single-digit milliseconds rather than microseconds, and a higher price per node, so it is the wrong choice for a plain cache.
+
 ### Anthropic prompt caching
 **Short:** Anthropic API cache_control markers that cache a prompt prefix server-side, cutting cost and latency on reuse.
 **Kind:** api
@@ -319,6 +339,16 @@ Commands execute on a single thread, which is why every command and every Lua sc
 
 Durability is RDB snapshots, an append-only file, or both, and replication is asynchronous, so a failover can lose the most recent writes; Cluster shards by hash slot and multi-key commands must stay within one slot. Reach for it as cache, session and token store, counter, and pub/sub bus, and decide the eviction policy and memory ceiling deliberately — treating it as a system of record means accepting that a crash can lose the tail of your writes.
 
+### Redis Cloud
+**Short:** Redis Ltd's fully managed Redis across AWS, GCP and Azure, including active-active CRDT geo-replication.
+**Kind:** tech
+**Lang:** *
+**Roles:** caching/distributed-cache @1, data-stores/key-value-and-embedded @2, platform-delivery/cloud-platform-and-cost @3
+
+It is the vendor's own hosted offering, so new server capabilities and the full set of core types arrive here first, and the active-active option replicates a database between regions using conflict-free replicated data types rather than a single writer — concurrent writes in two regions converge instead of one of them being rejected.
+
+Reach for it when you want the newest Redis, multi-region writes, or a support relationship with the people who write the server. Against that: it is a separate vendor and bill from your cloud provider, cross-cloud data egress is yours, and the CRDT semantics need designing for rather than assuming.
+
 ### Redis Cluster
 **Short:** Redis's sharded mode: 16,384 hash slots spread over primaries with replicas, for horizontal scale-out.
 **Kind:** tech
@@ -328,6 +358,16 @@ Durability is RDB snapshots, an append-only file, or both, and replication is as
 Every key hashes to one of 16,384 slots and each primary owns a range of them; the client caches the slot-to-node map and is redirected with `MOVED` when it is wrong, or `ASK` while a slot is migrating. Nodes gossip over a second port to detect failure and promote a replica by agreement, which is why there is no separate sentinel process. Multi-key commands must land in one slot, and hash tags in braces are how you force related keys together.
 
 Reach for it when a dataset or a write rate genuinely exceeds one node -- not for availability alone, which replication and failover already provide. The costs are real: a cluster-aware client, no cross-slot `MGET` or Lua across shards, resharding as an operational task, and asynchronous replication that can lose recent writes on failover. Vertical scaling of a single primary with replicas stays simpler for as long as it fits.
+
+### Redis Enterprise
+**Short:** Redis Ltd's self-managed commercial distribution, adding a proxy layer, many databases per cluster and Flash tiering.
+**Kind:** tech
+**Lang:** *
+**Roles:** caching/distributed-cache @1, data-stores/key-value-and-embedded @2
+
+The architectural difference from open-source Redis is a shared-nothing proxy in front of the shards, so clients connect to one endpoint and need no cluster awareness, and the cluster can host many logically separate databases with their own memory limits and policies. Flash tiering keeps cold values on SSD with hot ones in RAM, which changes the cost curve for large datasets.
+
+Reach for it when you are consolidating many Redis instances onto one operated platform, or when the working set is far larger than affordable RAM. The costs are licence fees and a topology that is not the open-source one, so operational knowledge transfers only partly in either direction.
 
 ### Redis SETNX
 **Short:** Atomic set-if-absent, the primitive behind Redis idempotency keys, dedup markers and distributed locks.

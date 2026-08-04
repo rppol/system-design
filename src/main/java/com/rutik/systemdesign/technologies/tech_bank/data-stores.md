@@ -357,6 +357,16 @@ It is deliberately a small piece — an ordered key-value store with strictly se
 
 The famous part is the testing: a deterministic simulation runs an entire cluster inside one process with injected disk, network and process failures, which is why its correctness reputation is what it is. Reach for it when you are building a database rather than using one; an application is better served by something that already has a query layer above it.
 
+### Garnet
+**Short:** Microsoft Research's multi-threaded remote cache-store that speaks the Redis wire protocol, built on .NET.
+**Kind:** tech
+**Lang:** csharp
+**Roles:** data-stores/key-value-and-embedded @1, caching/distributed-cache @1
+
+Garnet keeps the RESP protocol so existing Redis clients connect unchanged, but replaces the single command thread with a thread-per-core design over a shared-memory storage layer, which is where its throughput claims come from. It supports a large part of the string, hash, sorted-set and list surface plus checkpointing and replication, and a tiered store that spills beyond RAM.
+
+Reach for it when a .NET shop wants Redis semantics with vertical scaling on one large machine and is comfortable running a young server. Against that: command coverage is a subset, the ecosystem of tooling and managed offerings around Redis and Valkey does not exist here, and anything depending on Redis modules or exact edge-case semantics needs verifying rather than assuming.
+
 ### GCE PD
 **Short:** Google Compute Engine Persistent Disk: network block storage attached to one VM or pod (ReadWriteOnce).
 **Kind:** tech
@@ -635,6 +645,16 @@ NVMe is a protocol over PCIe designed for flash rather than inherited from spinn
 
 The consequences reach into database design: cheap fsync latency is what makes a consensus commit or a WAL flush affordable, and read amplification from an LSM tree costs far less than it did on rotating media. What has not changed is that flash wears, rated in drive writes per day, and that an instance's local NVMe is usually ephemeral, disappearing when the instance stops — so it holds caches and replicas, never the only copy.
 
+### OBJECT ENCODING
+**Short:** Redis command reporting which internal encoding a key actually uses — the only reliable check that a value is still compact.
+**Kind:** api
+**Lang:** *
+**Roles:** data-stores/key-value-and-embedded @1, runtime-systems/memory-processes-and-os @2
+
+Redis picks a memory layout per value from its size: listpack or intset while small, hashtable or skiplist once a configured threshold is crossed. The upgrade is one-way and silent, so a hash that briefly held one field too many keeps paying several times the memory forever, and the configuration file tells you the threshold rather than the current state.
+
+Reach for it whenever memory jumps without an obvious cause, and in CI over a sample of representative keys, so a threshold crossing is caught by a test rather than by an eviction storm. Pair it with MEMORY USAGE, which gives the bytes rather than the shape.
+
 ### OpenEBS
 **Short:** Software-defined container-attached storage providing dynamically provisioned persistent volumes in-cluster.
 **Kind:** tech
@@ -751,6 +771,16 @@ MVCC lets readers see a consistent snapshot without blocking writers, at the cos
 
 Beyond relational basics it carries JSONB, arrays, full-text search, GIN/GiST/BRIN indexes, and extensions — PostGIS, pgvector, TimescaleDB — which is why it keeps absorbing workloads people were about to buy a specialised store for. Reach for it as the default OLTP database; watch connection count, since every connection is an OS process and a pooler like PgBouncer becomes mandatory well before you expect, and do not mistake it for a columnar analytics engine.
 
+### PSYNC
+**Short:** Redis's replication handshake, carrying a replication ID and byte offset that decide a partial versus a full resync.
+**Kind:** spec
+**Lang:** *
+**Roles:** data-stores/key-value-and-embedded @1, data-access/replication-ha-and-backup @1
+
+A reconnecting replica presents the replication ID it last followed and the offset it reached. If the ID matches and the offset is still inside the primary's circular replication backlog, the primary answers with a continue and streams only the missing bytes. Otherwise it answers with a full resync, forks a child, and ships a whole snapshot — which costs a fork, copy-on-write growth and a burst of I/O on a live primary.
+
+The operational consequence is that the backlog size is a durability-adjacent setting, not a memory footnote: at the shipped default a busy primary holds well under a second of history, so any network blip forces the expensive path. A promoted replica also keeps its former primary's ID in a second slot, which is what lets sibling replicas resync partially rather than all at once after a failover.
+
 ### Qdrant
 **Short:** Rust-based vector database with rich payload filtering, sparse vectors and server-side hybrid fusion; OSS or cloud.
 **Kind:** tech
@@ -771,19 +801,49 @@ RDS provisions an instance running the actual engine — PostgreSQL, MySQL, Mari
 
 Understand what Multi-AZ is and is not: it buys availability, not read capacity, because the classic standby serves no traffic. Reach for RDS when you want a stock engine without operating it. The ceiling is the single writer — vertical scaling and read replicas only — which is where Aurora, application sharding or a distributed SQL engine take over, and there is no superuser or OS access.
 
+### Redis AOF
+**Short:** Redis's append-only command log, replayed on restart, with a per-second or per-acknowledgement fsync policy.
+**Kind:** spec
+**Lang:** *
+**Roles:** data-stores/key-value-and-embedded @1, data-access/replication-ha-and-backup @2
+
+Every write command is appended to an in-memory buffer and flushed at the end of each event-loop iteration; the fsync policy decides whether the flush is followed by a synchronous durability barrier, a once-per-second background one, or none at all. Since Redis 7.0 the on-disk artifact is a directory holding a manifest, a snapshot-formatted base file and incremental files, which removed the unbounded rewrite buffer that used to grow to gigabytes during a compaction.
+
+Reach for it whenever losing a snapshot interval of writes is unacceptable, normally alongside snapshots rather than instead of them. Note that backup scripts written for the old single-file layout copy nothing, and that the per-second policy's honest worst case is closer to two seconds than one when a previous fsync is still in flight.
+
+### Redis RDB
+**Short:** Redis's point-in-time binary snapshot format, written by a forked child and reused as the full-resync payload.
+**Kind:** spec
+**Lang:** *
+**Roles:** data-stores/key-value-and-embedded @1, data-access/replication-ha-and-backup @2
+
+A snapshot forks the server process, which copies the page table rather than the data, and the child walks memory writing a compact, optionally compressed file with a checksum footer. Pages the parent modifies during that window are duplicated by the kernel, so the real cost is proportional to the write rate during the snapshot, not to the dataset size — and Transparent Huge Pages amplifies each of those copies from four kilobytes to two megabytes.
+
+It restarts far faster than replaying a command log and is the natural backup artifact, at the cost of losing everything written since the last one. The usual production shape is to keep it for restart speed and backups but to take it on a replica, so the fork lands where nobody is being served.
+
 ### Redis Sorted Sets
 **Short:** Redis type combining a skip list and hash map: O(log n) score and rank ops; leaderboards, priority queues, windows.
 **Kind:** api
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, runtime-systems/collections-and-algorithms @2, caching/distributed-cache @2
 
+### Redis Stack
+**Short:** The retired Redis distribution that bundled the search, JSON, time-series and probabilistic modules with the server.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/key-value-and-embedded @1, search-retrieval/lexical-and-hybrid-search @2, data-stores/document @3
+
+Stack existed because those capabilities shipped as separate modules that had to be loaded into a server built to accept them, which made "which Redis do I install" a real question. Redis 8 folded the query engine, JSON, time-series and probabilistic types into core under the same licence as the server, and the distribution was discontinued in December 2025.
+
+Encountering the name today means you are reading pre-8.0 material or running a pinned older image. On a current server the answer is simply core Redis; there is nothing extra to install and nothing to load.
+
 ### Redis Vector
-**Short:** Redis Stack's vector index: HNSW or flat similarity search in memory, beside the cache and KV data.
+**Short:** Redis 8's core vector index: HNSW or flat similarity search in memory, beside the cache and KV data.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/vector-store @1, caching/distributed-cache @2, data-stores/key-value-and-embedded @3, search-retrieval/ann-index-library @3
 
-Redis Stack's search module lets a hash or JSON field hold a vector and indexes it either flat, which is exact brute force, or with HNSW for approximate search, alongside the numeric, tag and text fields of the same index. A search or aggregate query combines a nearest-neighbour clause with ordinary filters, so similarity and metadata predicates are evaluated together, and all of it lives in the same instance as your cache and key-value data.
+The query engine, in core since Redis 8 rather than a separate distribution, lets a hash or JSON field hold a vector and indexes it either flat, which is exact brute force, or with HNSW for approximate search, alongside the numeric, tag and text fields of the same index. A search or aggregate query combines a nearest-neighbour clause with ordinary filters, so similarity and metadata predicates are evaluated together, and all of it lives in the same instance as your cache and key-value data.
 
 Reach for it when Redis is already in the stack and the corpus is modest: it saves a whole system and latency is excellent because everything is in memory. That is also the limit — vectors are large, so memory cost scales unpleasantly with corpus size and dimensionality, and index rebuilds and persistence are memory-bound too. Past a few million vectors, a purpose-built store or pgvector beside your data is cheaper.
 
@@ -804,6 +864,26 @@ The rule tying all of that together is that Redis executes commands on a single 
 **Roles:** data-stores/key-value-and-embedded @1, observability/profiling-and-performance @3
 
 RedisInsight connects to a standalone, Cluster or Sentinel deployment and gives you a keyspace browser that walks keys with `SCAN` rather than `KEYS`, plus type-aware editors for hashes, sorted sets, streams and JSON, so inspecting a value does not require composing the right command first. Its Workbench runs commands with inline documentation, the profiler is a UI over `MONITOR`, the slowlog view surfaces commands that exceeded the configured threshold, and memory analysis breaks the keyspace down by prefix and type -- the fastest way to find which key pattern is eating the instance. Reach for it when debugging or exploring an instance by hand rather than for anything automated. Note that `MONITOR` streams every command the server executes and costs real throughput, so profile briefly and never leave it running against a busy production node.
+
+### RedisJSON
+**Short:** Redis's JSON document type and JSON.* commands, allowing atomic reads and updates of a path inside a document.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/document @1, data-stores/key-value-and-embedded @2
+
+Storing JSON as a plain string forces a get-modify-set for every field change, which is both a wasted round trip of the whole document and a lost update waiting to happen. The JSON type parses and stores the document in a tree, so a path expression addresses one field and the update is atomic on the server, and the query engine can index those paths for search.
+
+It is in core since Redis 8 rather than a module to install. Reach for it when documents are genuinely nested and partially updated; a flat object is still cheaper and simpler as a hash, and anything needing cross-document queries beyond an index you declare belongs in a document database.
+
+### RedisTimeSeries
+**Short:** Redis's time-series type with retention, downsampling and compaction rules for metric-shaped data.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/time-series @1, data-stores/key-value-and-embedded @2
+
+Samples are appended to a keyed series with labels, and compaction rules materialise aggregate series — averages, maxima, counts over a bucket — as the raw data arrives, so a dashboard query reads a pre-aggregated series rather than scanning. Retention is per series, which is what keeps memory bounded without a separate cleanup job.
+
+It is in core since Redis 8. Reach for it for recent, high-resolution operational metrics that already sit next to a Redis you run; for long retention, high cardinality or real analytical queries, a purpose-built time-series database is the right tool.
 
 ### Riak
 **Short:** Dynamo-style AP key-value store: masterless replication, tunable quorums, conflict resolution via vector clocks/CRDTs.
@@ -962,7 +1042,7 @@ The reason to pick it over a purpose-built time-series database is that it is st
 **Roles:** data-stores/relational @1, data-access/schema-and-migration @2
 
 ### Valkey
-**Short:** BSD-licensed Linux Foundation fork of Redis 7.2.4; wire-compatible, the default on AWS ElastiCache/MemoryDB.
+**Short:** BSD-licensed Linux Foundation fork of Redis 7.2.4, at 9.1.1; wire-compatible, the default on AWS ElastiCache/MemoryDB.
 **Kind:** tech
 **Lang:** *
 **Roles:** data-stores/key-value-and-embedded @1, caching/distributed-cache @1, data-movement/message-broker @3

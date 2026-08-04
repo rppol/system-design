@@ -891,6 +891,16 @@ It works purely in DNS. A client resolving your name receives an answer chosen b
 
 Reach for it for global distribution across regions, clouds or on-premises endpoints, and for protocols other than HTTP, since nothing about it is HTTP-specific. The DNS mechanism is also the limit: answers are cached for the record's TTL and by resolvers that ignore it, so failover takes minutes rather than seconds, and there is no TLS termination, caching, firewall or path-based routing. Front Door is the anycast proxy to reach for when those matter.
 
+### Twemproxy
+**Short:** Twitter's lightweight Redis and Memcached proxy doing client-transparent sharding, from before Redis Cluster existed.
+**Kind:** tech
+**Lang:** *
+**Roles:** traffic-edge/proxy-and-load-balancer @1, caching/distributed-cache @2
+
+It sits between clients and a pool of servers, hashes each key onto a member of the pool, multiplexes many client connections onto a few backend ones, and drops nodes that stop responding. Clients speak ordinary Redis or Memcached and know nothing about the topology, which is what made large sharded caches feasible before the protocol grew its own cluster mode.
+
+It is legacy today: there is no replication, no failover, and no live resharding, so a node loss loses that shard's data and a topology change means a restart. Reach for it only when you find it already deployed, and treat Redis Cluster or a cluster-aware client as the migration target.
+
 ### waypoint proxy
 **Short:** An Envoy deployed per service or namespace in Istio ambient mode, handling L7 policy only for workloads that need it.
 **Kind:** tech

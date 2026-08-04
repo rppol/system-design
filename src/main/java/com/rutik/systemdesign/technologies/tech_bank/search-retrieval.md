@@ -675,6 +675,16 @@ BM25 scores a document by summing, over the query terms it contains, an inverse-
 
 Reach for it to add lexical matching to a prototype or small hybrid retriever, where exact tokens such as identifiers, error strings and rare names are what embeddings blur. Tokenisation is entirely your responsibility, including lowercasing, stemming and stopwords. Scoring is a linear scan with no inverted index and no persistence, so anything real belongs in a search engine implementing the same formula over postings lists.
 
+### Redis Query Engine
+**Short:** Redis 8's built-in secondary index and search over hash and JSON fields, including vector similarity in the same query.
+**Kind:** tech
+**Lang:** *
+**Roles:** search-retrieval/lexical-and-hybrid-search @1, search-retrieval/ann-index-library @2, data-stores/key-value-and-embedded @3
+
+You declare an index over a key prefix and the fields inside it — text, numeric, tag, geo or vector — and Redis maintains it as those keys change. A query then combines a full-text or nearest-neighbour clause with ordinary filters and evaluates them together, and an aggregation pipeline can group and reduce the results server-side, all in the same instance that holds the cache.
+
+It is in core since Redis 8 rather than a module, which removed the old question of which distribution to install. Reach for it when the corpus already lives in Redis and the queries are filtered lookups rather than relevance-tuned retrieval; a dedicated search engine still owns analyzers, language handling, relevance tuning and disk-scale corpora.
+
 ### RetrievalAugmentationAdvisor
 **Short:** Spring AI advisor that retrieves from a VectorStore and injects the context into the prompt for naive or advanced RAG.
 **Kind:** api

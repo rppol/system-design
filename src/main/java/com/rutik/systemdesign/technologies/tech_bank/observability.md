@@ -955,6 +955,16 @@ Every chain, agent step, retriever call, and raw model call becomes a nested run
 
 Around the traces sit the parts that make it an eval platform: datasets curated from real production traces, offline evaluation runs using heuristics or an LLM judge, annotation queues for human review, and prompt versioning. Reach for it when agent behaviour is the thing you cannot see. It is a hosted service by default, so if traces will contain user content, check where that data lands before you switch it on.
 
+### LATENCY DOCTOR
+**Short:** Redis command turning the latency monitor's recorded events into a prose report with concrete recommendations.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/profiling-and-performance @1, caching/distributed-cache @2
+
+The latency monitor records events the slow log cannot see — the fork for a snapshot, an append-only-file fsync, an expire cycle, an eviction sweep — each with its own time series once a threshold is configured, since it ships disabled. The doctor command reads all of that and writes an explanation naming the dominant event and what usually causes it.
+
+Reach for it the moment a percentile is bad and the slow log is empty, which is the signature of a stall outside command execution rather than a slow command. Read the raw history alongside it: the prose is a starting hypothesis, and the event names are what you correlate against your own deploy and traffic timeline.
+
 ### LIKWID
 **Short:** HPC command-line suite reading hardware performance counters for bandwidth, cache and NUMA behaviour.
 **Kind:** tech
@@ -1089,6 +1099,16 @@ It runs the program under Valgrind and takes periodic snapshots of the heap, rec
 
 The peak snapshot is the payoff, naming which call sites hold the memory when usage is highest, which is precisely the question when a process is killed for exceeding a limit. It slows execution by an order of magnitude or more and measures the heap rather than resident memory, so it belongs in a test run on a representative workload; heaptrack and sampling profilers are the lighter alternatives.
 
+### MEMORY USAGE
+**Short:** Redis command reporting the bytes one key costs, including its key string, object header and encoding structure.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/profiling-and-performance @1, caching/distributed-cache @2
+
+Estimating a data model from payload size is wrong by a wide margin, because per-key overhead — the key string, the dictionary entry, the object header — is roughly a hundred bytes before any value, which is why many tiny keys cost several times what the same fields cost inside one hash. This command reports the real figure and samples nested elements for large collections rather than walking all of them.
+
+Reach for it before committing to a key layout, and again when memory grows without an obvious cause. Pair it with OBJECT ENCODING, which explains why the number is what it is, and with the memory doctor and big-keys sampler for a whole-keyspace view.
+
 ### memory_profiler
 **Short:** Python line-by-line memory profiler; useful but slows the traced function several times over.
 **Kind:** tech
@@ -1108,6 +1128,16 @@ It samples the process's memory rather than tracking allocations, so the figures
 It installs itself as the allocator's tracker, so every allocation and free, native as well as Python-level, is recorded with the stack that requested it and written to a capture file. Reports are generated afterwards: a flame graph of allocations, a table of the largest live allocations at peak, a temporal view of memory over time, and a leaks report of everything that was never released.
 
 Seeing into C and C++ extensions is what distinguishes it, since memory held by NumPy, a database driver or any compiled dependency is invisible to `tracemalloc` and appears here. A live view can attach to a long-running process, and a pytest plugin asserts allocation behaviour in tests. Tracking every allocation costs real runtime and produces large files, so scope the window; it runs on Linux and macOS only.
+
+### memtier_benchmark
+**Short:** Redis Labs' load generator for Redis and Memcached, with mixed read/write ratios, key patterns and multiple threads.
+**Kind:** tech
+**Lang:** *
+**Roles:** observability/profiling-and-performance @1, devtools/testing-and-mocking @2, caching/distributed-cache @3
+
+It goes beyond a single-command loop: a configurable read-to-write ratio, a key pattern that can be sequential or random or Gaussian over a declared range, several threads each with many connections, a data size distribution, pipeline depth, and cluster and TLS support. That combination is what makes a result resemble an application rather than a microbenchmark.
+
+Reach for it when sizing an instance or comparing engines, where the shape of the load decides the answer. The key pattern is the setting that matters most and is most often left alone: hammering one key measures a CPU cache, not a database, and a uniform pattern over a huge range measures memory bandwidth rather than a realistic hit rate.
 
 ### Micrometer
 **Short:** Vendor-neutral JVM metrics facade; one instrumentation API exporting to Prometheus, Datadog, CloudWatch and others.
@@ -2006,6 +2036,16 @@ Always log with parameterized messages rather than string concatenation, so argu
 You write a short YAML spec — the service, the objective such as 99.9%, and the Prometheus queries that count total events and error events — and Sloth expands it into the full rule set: recording rules for the error ratio over several windows, SLO metadata metrics, and multi-window multi-burn-rate alerts where a fast burn pages and a slow burn opens a ticket. The generated rules follow the SRE workbook's structure, which is fiddly to write correctly by hand and drifts between services when each team writes their own.
 
 It generates rules and stops there — Prometheus still evaluates them and Alertmanager still routes them — and it pairs with dashboards that read the metrics it defines. Reach for it once you have more than a couple of SLOs, so that error budget and burn-rate mean the same thing across every service.
+
+### SLOWLOG
+**Short:** Redis's in-memory log of commands exceeding a microsecond threshold — it times execution only, not queueing or fsync.
+**Kind:** api
+**Lang:** *
+**Roles:** observability/profiling-and-performance @1, caching/distributed-cache @2
+
+The clock starts when a command begins executing and stops when it finishes, so the log is exactly right about which commands are expensive and completely blind to everything else: time queued behind another command on the single command thread, socket read and reply write, the snapshot fork, an fsync, an expire burst, a rehash slice, or the process being swapped out.
+
+Reach for it first, because an expensive command is the commonest cause and the log names it immediately. Then treat an empty log beside a bad percentile as information rather than a contradiction, and move to the latency monitor, which sees the events the slow log structurally cannot.
 
 ### spanmetrics connector
 **Short:** OpenTelemetry Collector connector that derives RED metrics - request rate, errors, duration - from the span stream.
