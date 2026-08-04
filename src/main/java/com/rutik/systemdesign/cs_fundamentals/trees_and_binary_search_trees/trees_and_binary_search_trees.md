@@ -157,9 +157,10 @@ flowchart LR
         direction TB
         Z3("z") --> Y3("y")
         Z3 --> T4c(["T4"])
+        Y3 --> T1c(["T1"])
         Y3 --> X3("x")
-        X3 --> T1c(["T1"])
         X3 --> T2c(["T2"])
+        X3 --> T3c(["T3"])
     end
 
     subgraph A2["After: double rotation"]
@@ -177,7 +178,7 @@ flowchart LR
     class Z3 lossN
     class Y3 mathOp
     class X3 base
-    class T1c,T2c,T4c frozen
+    class T1c,T2c,T3c,T4c frozen
     class X4 train
     class Y4,Z4 base
     class T1d,T2d,T3d,T4d frozen
@@ -193,7 +194,7 @@ That last clause is the whole reason rotations are legal. A rotation is not a re
 |--------|------------|
 | `z` | The unbalanced node — the lowest node whose balance factor went out of range |
 | `y` | The pivot. `z`'s taller child, which becomes the new subtree root |
-| `x` | `y`'s taller child. Names the case (left-left vs left-right) but is not moved |
+| `x` | `y`'s taller child. Which side it sits on names the case: in left-left it never moves, in left-right it is the node that becomes the new subtree root |
 | `T1..T4` | The four subtrees hanging off `x`, `y`, `z`. Re-parented, never rewritten |
 | `BF(node)` | `height(left) - height(right)`. Legal AVL range is `-1, 0, +1` |
 | `BF = +2` | Left side is two levels taller. Triggers a right rotation |
@@ -315,7 +316,7 @@ Twenty levels hold 1,048,575 keys; nineteen levels hold only 524,287, which is s
 
 ```
   comparison:      0        1        2        3        4   ...   19       20
-  candidates:  1,000,000  500,000  250,000  125,000  62,500 ...   3        1
+  candidates:  1,000,000  500,000  250,000  125,000  62,500 ...   2        1
 ```
 
 Twenty halvings take a million down to one. That is the identical sequence a binary search over a sorted array walks — a balanced BST is just binary search with the midpoints pre-materialised as nodes, which is why it earns the same `O(log n)` and why the search-path diagram above is a decision tree rather than a data layout.
@@ -604,7 +605,7 @@ def is_valid_bst(root: Optional[TreeNode]) -> bool:
 
 **PostgreSQL B+Tree index** — a B+Tree with page size 8 KB and branching factor ~200 (for integer keys). A table of 1 billion rows has a B+Tree of height ~ceil(log₂₀₀(10⁹)) ≈ 4. Any row lookup costs 4 page reads regardless of table size. Leaf pages are linked in sorted order, enabling range scans in O(k + log n) for k matching rows.
 
-**Linux Completely Fair Scheduler** — the runqueue is a red-black tree keyed by virtual runtime. The leftmost node (minimum virtual runtime) is the next task to run — O(log n) extraction. O(log n) re-insertion when a task becomes runnable again. The red-black tree's O(2 log n) height bound keeps scheduling latency bounded at ~hundreds of nanoseconds.
+**Linux fair-class run queue** — each CPU's runnable tasks live in a red-black tree keyed by virtual runtime. The pick is EEVDF (Earliest Eligible Virtual Deadline First): the scheduler takes the task with the earliest virtual deadline among those that are *eligible* (lag ≥ 0, meaning they have not run past their fair share), so a short interactive task is not made to wait behind a long-running one with the same fairness standing. The tree is augmented with subtree minimums so that pick stays O(log n) rather than a scan, and both insertion and removal of an arbitrary task are O(log n). The red-black 2 log n height bound is what keeps scheduling decisions bounded at ~hundreds of nanoseconds.
 
 **React's Fiber tree** — React's virtual DOM is a tree of Fiber nodes (one per component). Reconciliation is a tree DFS (depth-first). Each Fiber has pointers to child, sibling, and return (parent) — a linked structure enabling interruptible traversal (suspend and resume), which is the key to React Concurrent Mode.
 
@@ -685,7 +686,7 @@ The word doing the work is *guaranteed*. A plain BST on random input is already 
   -----------------------------------------------------------------------------
   descend to insert          29 steps            40 steps            varies
   rebalance walk up          29 checks           40 checks           0
-  rotations performed        <= 2                <= 3                0
+  rotations performed        <= 2                <= 2                0
   ---------------------------------------------------------------------------
   guaranteed read cost       29 nodes            40 nodes         1 .. 1,000,000
 
@@ -693,7 +694,7 @@ The word doing the work is *guaranteed*. A plain BST on random input is already 
              buys a hard ceiling of 29-40 nodes per READ
 ```
 
-Both balanced families cap rotations per insert at a small constant — the rebalance *walk* is `O(log n)`, but the actual pointer surgery is 2-3 rotations at most, each `O(1)`. So the real per-write premium is a few dozen integer comparisons on the way back up.
+Both balanced families cap rotations per *insert* at a small constant — the rebalance *walk* is `O(log n)`, but the actual pointer surgery is at most two rotations, each `O(1)`. So the real per-write premium is a few dozen integer comparisons on the way back up. **Deletion is where the two genuinely part company**: a red-black delete still needs at most three rotations, while an AVL delete can cascade rebalancing all the way to the root and perform `O(log n)` rotations, because fixing one subtree's height can push its parent out of range. That, not insertion, is the main reason red-black is the default in write-heavy kernel and library code.
 
 **Why AVL and red-black split the difference differently.** AVL enforces the tighter `1.44 log n` ceiling, so it rebalances more eagerly and rotates more often — a good trade when reads vastly outnumber writes, which is the database-index profile. Red-black tolerates up to `2 log n`, so it rotates less and inserts faster, at the price of a tree that can be 40 levels instead of 29 — a good trade for write-heavy structures like an OS scheduler's runqueue or Java's `TreeMap`. Neither is "better"; they are the same mechanism with the tolerance dial set for a different read/write mix.
 
@@ -793,20 +794,26 @@ def is_bst_broken(root: Optional[TreeNode]) -> bool:
     if root.right and root.right.val <= root.val:
         return False
     return is_bst_broken(root.left) and is_bst_broken(root.right)
-# BROKEN for: root=10, left=5, left.right=6 (valid child), but 6 > 5 and 6 < 10 -> wrongly True
-# Tree:  10
-#        /
-#       5
-#        \
-#         6    <- 6 > 5 and 6 < 10 but the subtree is valid? Actually this IS a valid BST.
-# Real broken case:  10 -> left=5 -> right=15  (15 > 10 — violates BST but passes local check)
-# FIX: use bounds (lo, hi) as shown in §6.5 above
+# Counterexample — is_bst_broken returns True on a tree that is NOT a BST:
+#
+#   Tree:    10
+#           /
+#          5
+#           \
+#            15     <- 15 sits in 10's LEFT subtree, so it must be < 10
+#
+# Every local check passes: 5 < 10, and 15 > 5. But the invariant is not about
+# parent and child, it is about a node and every descendant: an in-order walk
+# yields 5, 15, 10, which is not ascending. The bug is that the recursion loses
+# the ancestor's constraint the moment it steps down a level.
+# FIX: thread (lo, hi) bounds through the recursion, as in §6.5 above — every
+# node inherits a narrowed interval from every ancestor, not just its parent.
 ```
 
-### Pitfall 2: Off-by-One in Iterative In-Order
+### Pitfall 2: Iterative In-Order That Never Moves Right
 
 ```python
-# BROKEN: forgetting to push the current node when backtracking
+# BROKEN: after visiting a node, control is never handed to its right subtree
 def inorder_iterative_broken(root):
     stack, result = [], []
     while root or stack:
@@ -815,11 +822,26 @@ def inorder_iterative_broken(root):
             root = root.left
         root = stack.pop()
         result.append(root.val)
-        root = root.right   # correct — this is NOT broken; shown for contrast
+        # BROKEN: missing "root = root.right". root still points at the node we
+        # just visited, so the inner while re-pushes it and its entire left
+        # spine, pops it again, appends it again — forever.
     return result
-# Actually the iterative in-order is tricky — the template above is correct.
-# BROKEN pattern: forgetting root = root.right after processing, causing infinite loop.
+# inorder_iterative_broken(tree(2,1,3)) never returns; result grows without bound
+
+# FIX: the one line that makes progress
+def inorder_iterative(root):
+    stack, result = [], []
+    while root or stack:
+        while root:
+            stack.append(root)
+            root = root.left
+        root = stack.pop()
+        result.append(root.val)
+        root = root.right   # hand control to the right subtree
+    return result
 ```
+
+This is not an off-by-one; it is a missing state transition. The loop has three jobs — descend left, visit, go right — and dropping the third leaves the machine in the same state it was in one iteration earlier, which is the definition of a non-terminating loop.
 
 ### Pitfall 3: Tree DP — Forgetting to Reset Global State Between Test Cases
 
@@ -851,7 +873,7 @@ def diameter(root):
 |-------------|---------|-------|
 | `TreeMap` | Java | Red-black BST; O(log n) all ops; `floorKey`, `ceilingKey`, `subMap` |
 | `TreeSet` | Java | Set backed by a red-black BST |
-| `SortedDict` | Python (`sortedcontainers`) | O(log n) lookup + sorted iteration; not in stdlib |
+| `SortedDict` | Python (`sortedcontainers`) | O(log n) lookup + sorted iteration; not in stdlib. Not a tree — a list of bounded sublists with a positional index |
 | `bisect` module | Python | Binary search on sorted lists; O(log n) |
 | B+Tree index | Databases | PostgreSQL, MySQL InnoDB use B+Tree for indexes |
 | `java.util.PriorityQueue` | Java | Min-heap — NOT a BST despite the name |
@@ -896,7 +918,7 @@ Height = floor(log₂ n). Number of nodes in a perfect binary tree of height h =
 In-order traversal counting up to k. O(h + k) time — traverse down to the leftmost node, then visit k nodes in order. With an augmented BST (each node stores the size of its subtree), you can do it in O(h) = O(log n): if k ≤ left-subtree-size, recurse left; if k == left-subtree-size + 1, the root is the k-th element; otherwise recurse right with k - left-subtree-size - 1.
 
 **Q12: What is a self-balancing BST used for in the Linux kernel?**
-The Completely Fair Scheduler (CFS) uses a red-black tree (`rb_tree`) as the run queue. Each runnable task is a node keyed by virtual runtime (vruntime). The leftmost node is always the next task to schedule (smallest vruntime = least CPU time received). `rb_leftmost` is O(log n); insertion after a task preempts is O(log n). The red-black tree is preferred over a heap because it supports efficient deletion of arbitrary nodes (when a task becomes unrunnable) in O(log n), which a heap cannot do efficiently.
+The fair scheduling class uses a red-black tree (`rb_tree`) as the per-CPU run queue, with each runnable task a node keyed by virtual runtime (vruntime). Under EEVDF the pick is not simply the leftmost node: the scheduler selects the task with the earliest virtual *deadline* among those that are eligible (lag ≥ 0), which the tree supports in O(log n) by augmenting each node with its subtree's minimum vruntime. Insertion when a task wakes and removal when it blocks are both O(log n). The red-black tree is preferred over a binary heap because a task can be deleted from an arbitrary position in O(log n) without maintaining a side index of node positions, and because the tree keeps tasks in a total order the scheduler can walk — a heap only ever exposes its root.
 
 **Q13: What is the difference between a tree's depth and its height?**
 The **depth** of a node is the number of edges from the root to that node (root has depth 0). The **height** of a node is the number of edges on the longest downward path from that node to a leaf (leaves have height 0). The **height of the tree** is the height of the root. Some textbooks define these as the number of nodes rather than edges — always clarify in interviews. Both are equivalent for complexity analysis.
@@ -933,7 +955,7 @@ After an insertion, an ancestor node may become unbalanced (|left_height - right
 
 ## 14. Case Study: Design a Leaderboard with Range Queries
 
-**Scenario**: implement a leaderboard supporting: (1) `addScore(player, score)`, (2) `top(k)` — sum of scores of the top-k players, (3) `reset(player)` — reset player's score to 0.
+**Scenario**: implement a leaderboard supporting: (1) `addScore(player, score)`, (2) `top(k)` — sum of scores of the top-k players, (3) `reset(player)` — reset a player's score to 0, which is the same thing as erasing them from the board.
 
 ```python
 from sortedcontainers import SortedList
@@ -941,7 +963,10 @@ from sortedcontainers import SortedList
 class Leaderboard:
     """
     addScore: O(log n). top(k): O(k). reset: O(log n).
-    Uses a sorted list (backed by a balanced BST) for ordered queries.
+    Uses SortedList for ordered queries. Note what it is not: SortedList is a
+    list of bounded sublists with a positional index tree, not a balanced BST.
+    The interface is the ordered-structure interface either way, which is the
+    point — what the design needs is the sorted-order guarantee, not a tree.
     """
 
     def __init__(self) -> None:

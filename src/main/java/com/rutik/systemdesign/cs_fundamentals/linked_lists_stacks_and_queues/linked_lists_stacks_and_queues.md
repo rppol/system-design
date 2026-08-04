@@ -36,7 +36,7 @@ These structures appear constantly in interview problems (reverse a list, detect
 - **Stack — LIFO**: push adds to the top; pop removes from the top. The last element pushed is the first popped. Used for: function call stack, expression evaluation, backtracking, monotonic stack.
 - **Queue — FIFO**: enqueue adds to the back; dequeue removes from the front. Used for: BFS, producer-consumer, sliding window maximum (monotonic deque).
 - **Monotonic stack/deque**: a stack (or deque) that maintains a monotonically increasing or decreasing sequence of values. When a new element violates the monotonic property, pop until it doesn't. Enables O(n) solutions for "next greater element" and "sliding window maximum" problems.
-- **Circular buffer (ring buffer)**: a fixed-size array with head and tail pointers that wrap around modulo capacity. O(1) enqueue and dequeue, O(1) space overhead. Used in OS kernel buffers, network I/O, and Python's `collections.deque` internally.
+- **Circular buffer (ring buffer)**: a fixed-size array with head and tail pointers that wrap around modulo capacity. O(1) enqueue and dequeue, and no per-element pointer overhead. Used in OS kernel buffers, network I/O, audio pipelines, and Java's `ArrayDeque`. Note that CPython's `collections.deque` is *not* a ring buffer — it is a doubly-linked list of 64-element blocks, which is how it grows without a fixed capacity.
 
 ---
 
@@ -182,13 +182,15 @@ That framing matters because "amortized O(1)" is not a probabilistic claim or an
 
 ```
   op            in stack      out stack     pushes/pops   running total
+                (top right)   (top right)
   enqueue 1     [1]           []                  1              1
   enqueue 2     [1,2]         []                  1              2
   enqueue 3     [1,2,3]       []                  1              3
-  dequeue       []            [2,1]               7             10
-                              ^ 3 pops from in, 3 pushes to out, 1 pop from out
-  dequeue       []            [1]                 1             11
-  dequeue       []            []                  1             12
+  dequeue -> 1  []            [3,2]               7             10
+                              ^ 3 pops from in (3,2,1), 3 pushes to out
+                                giving [3,2,1], then 1 pop returns 1
+  dequeue -> 2  []            [3]                 1             11
+  dequeue -> 3  []            []                  1             12
 
   3 elements enqueued and dequeued -> 12 operations -> exactly 4 per element
 ```
@@ -347,9 +349,9 @@ def is_valid(s: str) -> bool:
 
 **Python `collections.deque`** — implemented as a doubly-linked list of fixed-size blocks (each ~64 elements). `appendleft` and `popleft` are O(1) — critical for BFS and sliding window. `list.pop(0)` is O(n) and the most common performance bug in BFS implementations.
 
-**Java `ArrayDeque`** — a resizable circular array with head and tail pointers. Both ends support O(1) operations. Preferred over `LinkedList` for stack/queue use because it has no per-node object overhead and better cache locality. Java docs: "ArrayDeque is likely to be faster than Stack when used as a stack, and faster than LinkedList when used as a queue."
+**Java `ArrayDeque`** — a resizable circular array with head and tail pointers. Both ends support O(1) operations. Preferred over `LinkedList` for stack/queue use because it has no per-node object overhead and better cache locality. Java docs: "This class is likely to be faster than `Stack` when used as a stack, and faster than `LinkedList` when used as a queue."
 
-**Linux kernel run queue (CFS)** — the Completely Fair Scheduler maintains a red-black tree of runnable tasks (sorted by virtual runtime). Each CPU has its own `rq` (run queue). When the current task exhausts its timeslice, the scheduler picks the leftmost node of the BST (lowest virtual runtime) — effectively a priority queue with O(log n) operations. The "ready queue" concept is a generalisation of a linked-list queue.
+**Linux kernel run queue** — the kernel's fair scheduling class keeps each CPU's runnable tasks in a red-black tree keyed by virtual runtime, inside that CPU's own `rq` (run queue). The pick rule is EEVDF (Earliest Eligible Virtual Deadline First): a task is *eligible* when its lag is non-negative — it has not yet run ahead of its fair share — and among the eligible tasks the scheduler takes the one with the earliest virtual deadline, so a short, latency-sensitive task is chosen ahead of a long-running one that is equally "fair". The tree is augmented with subtree minimums so that pick is still O(log n) rather than a scan. Effectively a priority queue; the "ready queue" concept is a generalisation of a linked-list queue.
 
 **Call stack** — every function call pushes a stack frame; every return pops one. When a recursive function exceeds the stack limit, a `StackOverflowError` (Java) or `RecursionError` (Python) is raised. Converting DFS to iterative with an explicit stack simulates this without using OS stack memory.
 
@@ -468,8 +470,23 @@ def reverse(head):
 ### Pitfall 2: Not Handling the Empty Stack in Monotonic Stack
 
 ```python
-# BROKEN: stack.pop() without checking empty causes IndexError
+# BROKEN: the emptiness check is missing, so arr[stack[-1]] indexes an empty list
 def next_greater_broken(arr):
+    stack = []
+    result = [-1] * len(arr)
+    for i, v in enumerate(arr):
+        while arr[stack[-1]] < v:   # BROKEN: IndexError the moment the stack drains
+            idx = stack.pop()
+            result[idx] = v
+        stack.append(i)
+    return result
+# next_greater_broken([2, 1, 3]) -> IndexError: list index out of range
+# It crashes on the very first element (empty stack), and would crash again at
+# i=2 where popping both 1 and 2 empties the stack before the test re-runs.
+
+# FIX: guard the emptiness first — Python's "and" short-circuits, so arr[stack[-1]]
+# is never evaluated on an empty stack
+def next_greater(arr):
     stack = []
     result = [-1] * len(arr)
     for i, v in enumerate(arr):
@@ -477,11 +494,8 @@ def next_greater_broken(arr):
             idx = stack.pop()
             result[idx] = v
         stack.append(i)
-    return result   # actually this is fine — just always check before pop
-
-# BROKEN version that crashes:
-# while arr[stack[-1]] < v:  <-- IndexError when stack is empty
-# FIX: always guard with "while stack and ..."
+    return result
+# next_greater([2, 1, 3]) -> [3, 3, -1]
 ```
 
 ### Pitfall 3: Using `list.pop(0)` for Queue Dequeue — O(n)
@@ -512,7 +526,7 @@ That framing matters because nothing in the source code signals the cost. `pop(0
 | `O(n^2)` | Work grows with the square of `n`. 10x the data, 100x the work |
 | `n(n-1)/2` | Sum of 1 through n-1. What draining the list actually costs |
 | shift | Sliding every later element down one index to close the gap |
-| `deque` | Double-ended queue. A block-linked ring, so both ends are O(1) |
+| `deque` | Double-ended queue. A doubly-linked list of 64-element blocks, so both ends are O(1) |
 
 **Walk one example.** Draining a list of 5 by `pop(0)`, counting elements moved:
 
@@ -618,10 +632,10 @@ Three-pointer iteration: `prev = None`, `curr = head`. Each iteration: save `nxt
 Floyd's cycle detection (tortoise and hare). Two pointers start at head; slow moves 1 step, fast moves 2 steps per iteration. If fast reaches null, no cycle. If slow == fast, there is a cycle. O(n) time, O(1) space. The meeting happens because fast "laps" slow inside the cycle; the time to lap is bounded by the cycle length.
 
 **Q3: How do you find the start of the cycle?**
-After slow and fast meet (inside the cycle), reset slow to head. Advance both slow and fast one step at a time. They meet at the cycle start. Mathematical proof: if the cycle start is distance F from the head, slow travels F steps from head; fast was F steps behind the start inside the cycle (provable from the meeting point calculation), so advancing both one-by-one brings them to the start simultaneously.
+After slow and fast meet (inside the cycle), reset slow to head. Advance both slow and fast one step at a time. They meet at the cycle start. Mathematical proof: let F be the distance from head to the cycle start, C the cycle length, and a the distance from the cycle start to the meeting point. Slow has travelled F + a and fast exactly twice that, and since both sit on the same node, fast's extra distance is a whole number of laps: 2(F + a) - (F + a) = kC, so F + a = kC, hence F = kC - a. Walking F steps from the meeting point therefore advances a + F = kC — an exact multiple of laps — landing back on the cycle start, which is where the pointer restarted from head arrives at the same moment.
 
 **Q4: How do you find the middle of a linked list?**
-Fast-slow pointer. Advance fast 2 steps and slow 1 step per iteration. When fast reaches the end (fast is None or fast.next is None), slow is at the middle. For even-length lists, slow ends at the first of the two middle nodes. This is used as the split point in merge sort for linked lists.
+Fast-slow pointer. Advance fast 2 steps and slow 1 step per iteration. When fast reaches the end (fast is None or fast.next is None), slow is at the middle. Which middle you get on an even-length list depends entirely on how you initialise, and this is the detail people state backwards: starting both at head (`slow = fast = head`) lands slow on the **second** of the two middles — node 3 of 1→2→3→4. If you need the first middle, which is what merge sort's split point wants so the left half is never empty, start fast one node ahead (`fast = head.next`) or loop on `while fast.next and fast.next.next`.
 
 **Q5: How do you remove the Nth node from the end of a linked list in one pass?**
 Two pointers with a gap of n. Advance the first pointer n steps ahead. Then advance both one step at a time until the first pointer reaches the end. The second pointer is now at the (N+1)th node from the end — update its `.next` to skip the target. Edge case: use a dummy head to handle removal of the actual head node. O(n) time, O(1) space.
@@ -630,7 +644,7 @@ Two pointers with a gap of n. Advance the first pointer n steps ahead. Then adva
 A stack that maintains elements in monotonically increasing or decreasing order (by value). For "next greater element": iterate left to right; for each element, pop the stack while the top is smaller than the current element — those popped elements have found their next greater element (the current). Push the current index. O(n) total — each element pushed and popped at most once.
 
 **Q7: How do you implement a queue using two stacks?**
-Stack1 for enqueue, stack2 for dequeue. On dequeue: if stack2 is empty, move all elements from stack1 to stack2 (reversing order → FIFO). Amortized O(1) per operation: each element is pushed to stack1 once, moved to stack2 once, and popped from stack2 once — 3 operations total = O(1) amortized. Worst-case single dequeue is O(n) (when stack2 is empty and all elements must be moved).
+Stack1 for enqueue, stack2 for dequeue. On dequeue: if stack2 is empty, move all elements from stack1 to stack2 (reversing order → FIFO). Amortized O(1) per operation: each element is touched exactly four times in its whole life — pushed to stack1, popped from stack1, pushed to stack2, popped from stack2 — so n elements cost at most 4n stack operations. Worst-case single dequeue is O(n) (when stack2 is empty and all elements must be moved).
 
 **Q8: Why is `ArrayDeque` preferred over `LinkedList` in Java for stack/queue usage?**
 `ArrayDeque` uses a circular array — all elements are contiguous in memory, giving excellent cache performance. `LinkedList` allocates a node object per element — each dequeue or enqueue involves object creation/GC and a pointer dereference (cache miss). Benchmarks show `ArrayDeque` is 2–5× faster than `LinkedList` for stack/queue workloads due to cache efficiency and reduced GC pressure.
@@ -651,7 +665,7 @@ Find the middle (fast-slow pointer), reverse the second half in place, compare e
 A dummy node is a placeholder node prepended to the list that is never returned as part of the answer. It simplifies code by eliminating special cases for operating on the head: insertions and deletions always have a predecessor (the dummy) so the `if head is None` and `if prev is None` checks disappear. Standard pattern: `dummy = ListNode(0); dummy.next = head; ... return dummy.next`.
 
 **Q14: How does a circular buffer implement a queue with O(1) operations?**
-A fixed array with `head` and `tail` integer indices that wrap around: `tail = (tail + 1) % capacity` for enqueue, `head = (head + 1) % capacity` for dequeue. Full condition: `(tail + 1) % capacity == head`. Empty condition: `head == tail`. All operations are O(1) arithmetic, no allocation. Used in OS kernel ring buffers (network packets, I/O events), audio processing, and Python's `collections.deque` internal implementation.
+A fixed array with `head` and `tail` integer indices that wrap around: `tail = (tail + 1) % capacity` for enqueue, `head = (head + 1) % capacity` for dequeue. Full condition: `(tail + 1) % capacity == head`. Empty condition: `head == tail`. All operations are O(1) arithmetic, no allocation. Used in OS kernel ring buffers (network packets, I/O events), audio processing, lock-free SPSC queues, and Java's `ArrayDeque`. A common misattribution to correct: CPython's `collections.deque` is *not* a circular buffer — it is a doubly-linked list of 64-element blocks, which is what lets it grow without a fixed capacity.
 
 **Q15: How do you implement a min-stack (push, pop, top, getMin all in O(1))?**
 Maintain two stacks: the main stack and an auxiliary min-stack. On push: push to main; if the value is ≤ min-stack's top (or min-stack is empty), also push to min-stack. On pop: pop from main; if the popped value equals min-stack's top, also pop from min-stack. `getMin()` returns min-stack's top. The min-stack tracks the minimum at each "level" of the main stack.

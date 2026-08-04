@@ -14,7 +14,7 @@ Each structure addresses a class of problems that simpler structures cannot hand
 
 ## Intuition
 
-A graph is a city road network — intersections are nodes, roads are edges. A trie is an autocomplete index — each character is a node, each root-to-leaf path is a word. Union-Find is a connectivity checker — "are these two nodes in the same component?" in near-O(1). A segment tree is a ledger with branch totals — update one account, re-query any range in O(log n). A Bloom filter is a bouncers list — it might say "not seen" when it has, but never says "seen" for something new (false positives, no false negatives).
+A graph is a city road network — intersections are nodes, roads are edges. A trie is an autocomplete index — each character is a node, each root-to-leaf path is a word. Union-Find is a connectivity checker — "are these two nodes in the same component?" in near-O(1). A segment tree is a ledger with branch totals — update one account, re-query any range in O(log n). A Bloom filter is a bouncer's list — it may say "yes, seen that" about something it has never seen, but it never says "no" about something it really has seen (false positives possible, false negatives impossible).
 
 **Why it matters:** Graphs model virtually every real-world relationship (social networks, dependencies, routing). Tries underpin autocomplete, spell-check, and IP routing tables. Union-Find is the backbone of Kruskal's MST, cycle detection, and network connectivity. Segment trees power range-query databases and game scoreboards.
 
@@ -73,7 +73,7 @@ Adjacency list is the default for sparse graphs (most real graphs). Adjacency ma
 | Structure | Build | Point update | Range query | Range update |
 |-----------|-------|-------------|------------|--------------|
 | Prefix sum array | O(n) | O(n) | O(1) | O(n) |
-| Fenwick tree (BIT) | O(n log n) | O(log n) | O(log n) | O(log n) (diff array) |
+| Fenwick tree (BIT) | O(n log n) naive, O(n) linear build | O(log n) | O(log n) | O(log n) (diff array) |
 | Segment tree | O(n) | O(log n) | O(log n) | O(log n) + lazy |
 | Sparse table | O(n log n) | — (static) | O(1) for idempotent ops | — |
 
@@ -220,7 +220,8 @@ Path compression rewrites every node touched by `find(6)` to point directly at t
 
 **Stated plainly.** "`O(alpha(n))` means: the cost per operation grows so absurdly slowly
 that for every input any computer will ever process, it is at most 4. Treat it as a constant — not
-because we are being sloppy, but because the function provably never exceeds 4 below `n = 10^80`."
+because we are being sloppy, but because the function provably stays at 4 until `n` exceeds a number
+with more digits than the universe has atoms."
 
 The honest statement is that `alpha(n)` is not `O(1)` in theory; it just is in practice, by a margin no
 other complexity class comes close to. Knowing *why* is what makes the claim usable instead of magical.
@@ -234,17 +235,24 @@ other complexity class comes close to. Knowing *why* is what makes the claim usa
 | path compression | On every `find`, re-point each node on the path straight at the root |
 | union by rank | Attach the shorter tree under the taller one, so depth never grows needlessly |
 
-**Walk one example.** How `alpha(n)` behaves as `n` covers everything that exists:
+**Walk one example.** How `alpha(n)` behaves as `n` covers everything that exists. These are the exact
+CLRS breakpoints, where `alpha(n) = min{k : A_k(1) >= n}`:
 
 ```
                     n                          alpha(n)
   --------------------------------------       --------
                     5                              2
-                2,048                              3
-        1,000,000  (a city of users)                4
-   10,000,000,000  (every device on Earth)          4
-            10^80  (atoms in the universe)          4
-        10^(10^6)  (a number you cannot write)      5
+                2,047  (= A_3(1), the last one)    3
+                2,048  (one more, and it ticks)    4
+        1,000,000  (a city of users)               4
+   10,000,000,000  (every device on Earth)         4
+            10^80  (atoms in the universe)         4
+        10^(10^6)  (a number you cannot write)     4   <- STILL 4
+
+  alpha(n) reaches 5 only past A_4(1), which is A_2 applied 2,048 times --
+  a power tower of 2s roughly 2,048 levels tall. Nothing will ever reach it.
+  This is the whole reason "effectively constant" is a fair description: the
+  4 is not an approximation, it is the actual value across every real input.
 
   compare the growth of the alternatives, at n = 1,000,000:
 
@@ -336,12 +344,27 @@ binary tree level by level, left to right. Once numbered that way, moving down a
 ```
 
 **Why the allocation is `4n` and what breaks at `2n`.** A complete binary tree over `n` leaves has `2n-1`
-nodes, which is where the tempting `2n` comes from — but the flat numbering leaves *gaps* whenever `n` is
-not a power of two, because the recursion still descends to the next power of two. For `n = 5` the
-deepest index reached is beyond `2 x 5 = 10`, so `2n` indexes out of bounds; `4n = 20` is always safe
-(the bound is `2 x 2^ceil(log2 n) <= 4n`). This is Pitfall 3, and it fails as an `IndexError` on
-non-power-of-two inputs only — which is why it survives testing on `n = 8` and dies in production on
-`n = 5`.
+nodes, which is where the tempting `2n` comes from — but the recursive mid-split numbering leaves *gaps*
+whenever `n` is not a power of two, because a subtree over `k` leaves is still numbered as if it were a
+perfect tree of depth `ceil(log2 k)`. The count of *nodes* stays at `2n-1`; it is the largest *index* that
+overshoots, and the array has to be sized for the index, not the count.
+
+The smallest input that actually breaks is **`n = 6`**, not any odd number — `n = 5` fits in `2n = 10`
+exactly, which is precisely what makes this bug so good at hiding:
+
+```
+   n     highest index used     slots needed     2n     fits in 2n?
+   4              6                   7           8         yes
+   5              8                   9          10         yes   <- still fine!
+   6             12                  13          12         NO  -> IndexError
+   7             12                  13          14         yes   <- fine again
+  10             24                  25          20         NO
+```
+
+The requirement is `2 x 2^ceil(log2 n)`, which is at most `4n` and (measured across `n` up to 2,000)
+peaks at about `3.82n` — so `4n` is the tight safe bound and nothing smaller works in general. This is
+Pitfall 3, and note the failure is not monotonic in `n`: it strikes at 6 and 10 but not at 5 or 7, so a
+test suite that happens to use `n = 5` and `n = 8` passes and production dies on `n = 6`.
 
 ### Fenwick Tree (BIT) — responsible ranges
 
@@ -685,7 +708,7 @@ class FenwickTree:
 
 **Graph — dependency resolution:** `npm install`, Maven, Gradle all run topological sort on dependency DAGs. Cycles → "circular dependency" errors. Kahn's algorithm is the textbook approach.
 
-**Trie — autocomplete:** Google Search, VS Code IntelliSense, and Redis's `AUTOCOMPLETE` module all use trie or radix-trie structures. A 250,000-word English dictionary fits in ~10 MB as a trie vs ~3 MB as a sorted array — but the trie gives O(L) prefix search vs O(L log n) binary search.
+**Trie — autocomplete:** Google Search, VS Code IntelliSense, and Redis's suggestion commands (`FT.SUGADD` / `FT.SUGGET`, from the search module) all use trie or radix-trie structures. A 250,000-word English dictionary fits in ~10 MB as a trie vs ~3 MB as a sorted array — but the trie gives O(L) prefix search vs O(L log n) binary search.
 
 **Trie — IP routing (longest-prefix match):** Internet routers store CIDR blocks in compressed tries (Patricia tries). A packet's destination IP is matched to the most specific prefix in O(32) steps — constant time for IPv4.
 
@@ -697,7 +720,7 @@ class FenwickTree:
 
 **Fenwick tree — order statistics:** Count of elements ≤ x in a dynamic array (coordinate compression + BIT). Used in merge-sort inversion counting, and in database query planners for histogram approximations.
 
-**Bloom filter — duplicate URL detection:** Google's web crawler uses Bloom filters (billions of bits, k≈7) to skip already-visited URLs without storing every URL explicitly. With a 1% FPR and 10 bits/element, 1 billion URLs costs only ~1.25 GB — vs ~8 GB for a hash set.
+**Bloom filter — duplicate URL detection:** Google's web crawler uses Bloom filters (billions of bits, k≈7) to skip already-visited URLs without storing every URL explicitly. With a 1% FPR and 10 bits/element, 1 billion URLs costs only ~1.25 GB — against ~8 GB for a hash set that keeps just an 8-byte fingerprint per URL, and far more than that if it stores the URL strings themselves.
 
 ```mermaid
 xychart-beta
@@ -707,7 +730,7 @@ xychart-beta
     bar [1.25, 8]
 ```
 
-A Bloom filter needs ~1.25 GB to answer "have I seen this URL?" for 1 billion URLs at a 1% false-positive rate; a hash set storing full keys needs ~8 GB — a 6.4x gap for a structure that never needs to enumerate or delete members.
+A Bloom filter needs ~1.25 GB to answer "have I seen this URL?" for 1 billion URLs at a 1% false-positive rate; a hash set needs ~8 GB just to hold an 8-byte fingerprint per URL, before table overhead and before storing any actual key — a 6.4x gap at minimum, for a structure that never needs to enumerate or delete members.
 
 **Bloom filter — CDN and cache layers:** Akamai and Cloudflare use Bloom filters as a pre-filter before expensive cache lookups. A false positive wastes one cache check; a false negative is impossible, so correctness is maintained.
 
@@ -829,20 +852,37 @@ This module assumes familiarity with:
 
 ## 10. Common Pitfalls
 
-### Pitfall 1: Union-Find without path compression — O(n) degrades to a chain
+### Pitfall 1: Union-Find with only half the optimisation
+
+Be precise about which optimisation buys which bound — this is the most commonly mis-stated pair in the topic. **Union by rank alone gives O(log n), never O(n)**: bounding the height *is* what the rank rule does. The O(n) chain appears only when you drop union by rank as well.
 
 ```python
-# BROKEN: union by rank only, no path compression
+# SLOW (not wrong): union by rank, but no path compression
 class UnionFindBroken:
     def __init__(self, n):
         self.parent = list(range(n))
         self.rank = [0] * n
 
     def find(self, x):
-        # No path compression — walking up chain every time
+        # No path compression — re-walks the same chain on every call.
         while self.parent[x] != x:
-            x = self.parent[x]          # BUG: O(log n) normally, O(n) if ranks equal
+            x = self.parent[x]   # O(log n) worst case: union by rank caps the
+        return x                 # height at log2(n), so this is 20 hops at
+                                 # n = 1,000,000 -- slow, but never O(n).
+
+# TRULY BROKEN: neither optimisation. Union blindly hangs x's root under y's,
+# so unioning 0-1, 1-2, 2-3, ... builds one n-node chain and find() is O(n).
+class UnionFindDegenerate:
+    def __init__(self, n):
+        self.parent = list(range(n))
+
+    def find(self, x):
+        while self.parent[x] != x:
+            x = self.parent[x]
         return x
+
+    def union(self, x, y):
+        self.parent[self.find(x)] = self.find(y)   # BUG: no rank, no compression
 
 # FIX: add path compression in find
 class UnionFindFixed:
@@ -856,7 +896,7 @@ class UnionFindFixed:
         return self.parent[x]
 ```
 
-Without path compression, a union-by-rank tree can have depth O(log n). With both techniques, depth is effectively O(1) amortised — the difference is measurable at n > 10^5 operations.
+Summary of the three cases: neither optimisation gives O(n) per find; either one alone gives O(log n); both together give O(α(n)), effectively constant. The gap between the middle case and the last is measurable at n > 10^5 operations, and the gap between the first and the rest turns Kruskal's MST from seconds into hours.
 
 ### Pitfall 2: Trie memory explosion for long, sparse keys
 
@@ -882,11 +922,14 @@ For a dictionary of English words (~250K), a trie uses ~10 MB and gives O(L) pre
 ### Pitfall 3: Segment tree size — array must be 4×n, not 2×n
 
 ```python
-# BROKEN: segment tree array of size 2n — will index out of bounds for n not power of 2
+# BROKEN: segment tree array of size 2n — indexes out of bounds for most n
 class SegTreeBroken:
     def __init__(self, arr):
         self.n = len(arr)
         self.tree = [0] * (2 * self.n)   # BUG: needs 4*n in general
+# SegTreeBroken([0]*5) -> fine.  SegTreeBroken([0]*6) -> IndexError: list
+# assignment index out of range.  The bug does not track "is n a power of 2";
+# it strikes at n = 6, 10, 11, 12, 13, 14, 18, ... and skips 5, 7, 9.
 
 # FIX: allocate 4*n
 class SegTreeFixed:
@@ -895,7 +938,7 @@ class SegTreeFixed:
         self.tree = [0] * (4 * self.n)   # safe upper bound for any n
 ```
 
-For n = 5 (not a power of 2), the segment tree can have up to 4×5=20 nodes. The standard 4n allocation is always safe. If n is a power of 2, 2n suffices, but 4n is the defensive choice.
+The smallest n that actually blows up is **6**, which needs index 12 and therefore 13 slots against `2n = 12`. Do not reach for an odd number as the counterexample — `n = 5` needs only 9 slots and fits in `2n = 10` fine. The requirement is `2 × 2^ceil(log2 n)`, which peaks near `3.82n`, so `4n` is the tight safe bound; `2n` suffices only when n is a power of 2.
 
 ### Pitfall 4: Forgetting to mark visited in graph BFS/DFS → infinite loop
 
@@ -1011,7 +1054,7 @@ Given a 2D grid of '1' (land) and '0' (water), count connected land components. 
 Insert all dictionary words into a trie. For a query prefix: traverse to the prefix's terminal node, then DFS from that node to collect all words. To rank by frequency: augment each trie node with a max-frequency of words in its subtree — then use a heap-based DFS to return only the top-k completions without visiting all words. Query time: O(L + top-k log k) where L = prefix length.
 
 **Q14: What is the time complexity of building a segment tree and why?**
-O(n). Build proceeds by calling `_build` on each of the 2n-1 nodes of the complete binary tree — O(1) work per node (just a sum of two children). Total: O(n). This is analogous to heapify — work decreases exponentially toward the leaves and sums to O(n) via geometric series.
+O(n). Build visits each of the 2n-1 nodes exactly once and does O(1) work at each — a single addition of two already-computed children. 2n-1 nodes times O(1) is O(n), full stop. Do not reach for the heapify argument here: heapify needs a geometric series because its per-node cost *varies* with the node's height, whereas every segment-tree node genuinely costs the same O(1). The two results agree; only one of them needs the series.
 
 **Q15: Can you explain lazy propagation in segment trees?**
 Lazy propagation handles range updates efficiently. Instead of updating all O(n) leaves for a range-add operation, attach a "pending" delta to each covered segment tree node. When you later query or update a child of that node, you first "push down" the pending delta to both children. This defers work to when it is actually needed — range update and range query both remain O(log n) instead of O(n).
@@ -1141,9 +1184,13 @@ if __name__ == "__main__":
 
     weight, connected = minimum_spanning_tree(n, roads)
     print(f"MST weight: {weight}, connected: {connected}")
-    # MST picks: (1,2,1), (0,2,2), (3,4,3), (1,3,5) = 11
-    # (or: (1,2,1), (0,2,2), (3,4,3), (0,1,4) = 10 — sort will find optimal)
-    # Expected MST: edges (1,2), (0,2), (3,4), (1,3) or similar → weight 10
+    # Expected: MST weight 11, connected True
+    # Edges chosen, in sorted-by-weight order:
+    #   (1,2,1) take   (0,2,2) take   (3,4,3) take
+    #   (0,1,4) SKIP — 0 and 1 are already connected through 2 (would cycle)
+    #   (1,3,5) take   -> 4 edges = n-1, stop; total = 1+2+3+5 = 11
+    # 11 is provably optimal: joining {0,1,2} to {3,4} needs (1,3,5) or (2,4,8),
+    # so 5 is unavoidable, plus 3 to span {0,1,2} and 3 for (3,4).
 ```
 
 **Complexity breakdown:**

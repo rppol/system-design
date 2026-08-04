@@ -31,7 +31,7 @@ A **hash table** maps arbitrary keys to values using a hash function that conver
 ## 3. Core Principles
 
 - **Contiguous memory = O(1) random access**: element at index i is at `base_address + i × element_size`. No pointer chasing.
-- **Dynamic array growth**: Python `list` and Java `ArrayList` allocate 1.5–2× capacity when full and copy all elements. Amortized O(1) append; worst-case single append is O(n).
+- **Dynamic array growth**: on overflow, allocate a larger block and copy all elements. The multiplier is implementation-specific — Java `ArrayList` grows by 1.5× (`old + (old >> 1)`), C++ `vector` by 1.5–2× depending on the standard library, CPython's `list` by only ~1.125× (`newsize + (newsize >> 3) + 6`). Any constant *factor* above 1 gives amortized O(1) append; a constant *increment* (grow by +1, +8) does not. Worst-case single append is still O(n).
 - **Hash function**: maps a key to an integer. Requirements: deterministic, fast (O(1)), and distributes keys uniformly. Python uses `__hash__`; Java uses `hashCode()`.
 - **Hash collision**: two keys map to the same bucket. Resolved by chaining (bucket holds a linked list of entries) or open addressing (probe for the next empty slot).
 - **Load factor**: `n / capacity`. Python dict resizes at ~2/3 load; Java HashMap at 0.75 (default). Higher load = more collisions = slower. Resize copies all entries to a new, larger table.
@@ -44,12 +44,12 @@ A **hash table** maps arbitrary keys to values using a hash function that conver
 
 ### 4.1 Collision Resolution
 
-**Separate chaining (Python dict, Java HashMap up to Java 7)**:
-- Each bucket holds a linked list (Java 8+: converts to a balanced BST when ≥ 8 entries in one bucket).
+**Separate chaining (Java `HashMap`, C++ `std::unordered_map`)**:
+- Each bucket holds a linked list. Java converts a bucket to a red-black tree once it holds ≥ 8 entries **and** the table itself has ≥ 64 buckets — below that capacity it resizes instead, on the theory that a short table's collisions are a capacity problem, not a hash-quality problem.
 - Lookup: compute bucket, scan the chain — O(1) average, O(n) worst case (all keys in one bucket).
 - Load factor controls chain length; at load factor 0.75 average chain length is 0.75 ≈ O(1).
 
-**Open addressing (linear probing, quadratic probing, double hashing)**:
+**Open addressing (linear probing, quadratic probing, double hashing) — CPython `dict`/`set`**:
 - All entries stored in the main array; no separate chains.
 - On collision: probe the next slot according to a formula. Linear: `(h + i) mod cap`. Quadratic: `(h + i²) mod cap`. Double hashing: `(h1 + i × h2) mod cap`.
 - Deletion: cannot simply remove — must leave a tombstone/sentinel, or rehash all following entries.
@@ -72,7 +72,7 @@ A **hash table** maps arbitrary keys to values using a hash function that conver
 | `defaultdict` | Auto-initialises missing keys | Python |
 | `TreeMap` / `SortedDict` | Sorted iteration + range queries in O(log n) | Java / Python `sortedcontainers` |
 | `WeakHashMap` | Entries eligible for GC when keys have no other refs | Java |
-| `ConcurrentHashMap` | Thread-safe, segment-level locking | Java |
+| `ConcurrentHashMap` | Thread-safe; lock-free reads, CAS insert into an empty bin, `synchronized` on the bin head otherwise | Java |
 
 ---
 
@@ -132,21 +132,26 @@ flowchart LR
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     K(["key"]) --> H("h = hash(key) mod cap")
-    H --> D{"slot h empty,<br/>tombstone, or match?"}
-    D -->|"yes"| U(["use slot h"])
-    D -->|"no"| C("collision:<br/>slot occupied<br/>by another key")
-    C --> P("h = (h + 1) mod cap")
+    H --> D{"what is in slot h?"}
+    D -->|"empty"| U(["walk ends:<br/>lookup misses,<br/>insert takes this slot"])
+    D -->|"the key itself"| M(["found: use slot h"])
+    D -->|"tombstone"| T("remember the first one,<br/>then keep walking")
+    D -->|"a different key"| C("collision")
+    T --> P("h = (h + 1) mod cap")
+    C --> P
     P -.-> D
 
     class K io
     class H mathOp
     class D mathOp
     class U io
+    class M train
+    class T base
     class C lossN
     class P mathOp
 ```
 
-This traces `_probe()` from the `HashMap` implementation in §6.2: starting at `hash(key) mod cap`, it walks forward one slot at a time until it lands on an empty slot, a tombstone, or the matching key. `put()`, `get()`, and `delete()` all reuse this same walk, which is why deletion must write a tombstone instead of nulling the slot — nulling would break the probe chain for any key that hashed earlier and landed past the deleted one.
+This traces `_probe()` from the `HashMap` implementation in §6.2: starting at `hash(key) mod cap`, it walks forward one slot at a time until it lands on the matching key or on a genuinely empty slot. `put()`, `get()`, and `delete()` all reuse this same walk. Two rules fall out of it, and both are easy to get wrong. Deletion must write a **tombstone** rather than `None`, because nulling the slot would truncate the probe chain and hide every key that hashed earlier and landed past the deleted one. And the walk must **not stop at a tombstone** either — a tombstone means "something was here, keep going"; stopping there loses exactly the keys the tombstone was invented to protect. It is only remembered, as the slot a subsequent insert of a missing key should reuse.
 
 ---
 
@@ -221,7 +226,7 @@ Amortized is not the same as average-case. Average-case is a statement about ran
   per append   = 1023 / 1024 = 0.999 copies on average  ->  O(1) amortized
 ```
 
-Only 10 of the 1024 appends resize at all. The doubling sequence is a geometric series, and a geometric series summing to just under its own last term is exactly why the total stays linear: `1+2+...+512 = 1023`, which is one less than `1024`. Halve the growth factor to 1.1 and the resizes get *far* more frequent; drop to a fixed `+1` growth and the total becomes `1+2+...+n = n(n+1)/2`, which is O(n^2).
+Only 10 of the 1024 appends resize at all. The doubling sequence is a geometric series, and a geometric series summing to just under its own last term is exactly why the total stays linear: `1+2+...+512 = 1023`, which is one less than `1024`. Drop the growth factor from 2 to 1.1 and the resizes get *far* more frequent (though the total is still linear — any constant factor above 1 works); drop to a fixed `+1` growth and every append after the first resizes, so the total becomes `1+2+...+(n-1) = n(n-1)/2`, which is O(n^2).
 
 | n | O(log n) | O(n) | O(n log n) | O(n^2) |
 |---|---------|------|-----------|--------|
@@ -240,39 +245,61 @@ class HashMap:
     """Open-addressing hash map with linear probing and tombstones."""
 
     _DELETED = object()   # sentinel for deleted slots
+    _MAX_LOAD = 0.75      # (live + tombstones) / cap ceiling
 
     def __init__(self, initial_cap: int = 8) -> None:
         self._cap = initial_cap
         self._keys: list[object] = [None] * self._cap
         self._vals: list[object] = [None] * self._cap
-        self._size = 0
+        self._size = 0    # live entries
+        self._tombs = 0   # tombstoned slots not yet reclaimed
 
-    def _probe(self, key: object) -> int:
+    def _probe(self, key: object) -> tuple[int, bool]:
+        """Walk the chain from hash(key). Returns (slot, found).
+
+        A tombstone does NOT end the walk — only an empty slot does. Stopping
+        at one would hide every key that collided earlier and landed past the
+        deleted slot. The first tombstone seen is remembered instead, as the
+        slot an insert of a missing key should reuse. The loop terminates
+        because _MAX_LOAD counts tombstones, so some slot is always None.
+        """
         h = hash(key) % self._cap
-        while self._keys[h] is not None and self._keys[h] is not self._DELETED and self._keys[h] != key:
+        first_tomb: int | None = None
+        while True:
+            k = self._keys[h]
+            if k is None:
+                return (h if first_tomb is None else first_tomb), False
+            if k is self._DELETED:
+                if first_tomb is None:
+                    first_tomb = h
+            elif k == key:
+                return h, True
             h = (h + 1) % self._cap   # linear probing
-        return h
 
     def put(self, key: object, val: object) -> None:
-        if self._size / self._cap >= 0.75:
+        if (self._size + self._tombs) / self._cap >= self._MAX_LOAD:
             self._resize()
-        idx = self._probe(key)
-        if self._keys[idx] is None or self._keys[idx] is self._DELETED:
-            self._size += 1
+        idx, found = self._probe(key)
+        if found:
+            self._vals[idx] = val     # overwrite; size unchanged
+            return
+        if self._keys[idx] is self._DELETED:
+            self._tombs -= 1          # reclaiming a tombstone
         self._keys[idx] = key
         self._vals[idx] = val
+        self._size += 1
 
     def get(self, key: object) -> object | None:
-        idx = self._probe(key)
-        if self._keys[idx] == key:
-            return self._vals[idx]
-        return None
+        idx, found = self._probe(key)
+        return self._vals[idx] if found else None
 
     def delete(self, key: object) -> None:
-        idx = self._probe(key)
-        if self._keys[idx] == key:
-            self._keys[idx] = self._DELETED  # tombstone
+        idx, found = self._probe(key)
+        if found:
+            self._keys[idx] = self._DELETED  # tombstone, never None
+            self._vals[idx] = None           # drop the value reference
             self._size -= 1
+            self._tombs += 1
 
     def _resize(self) -> None:
         old_keys, old_vals = self._keys, self._vals
@@ -280,10 +307,13 @@ class HashMap:
         self._keys = [None] * self._cap
         self._vals = [None] * self._cap
         self._size = 0
+        self._tombs = 0   # tombstones do not survive a rehash
         for k, v in zip(old_keys, old_vals):
             if k is not None and k is not self._DELETED:
                 self.put(k, v)
 ```
+
+Two details in `put()` and `_resize()` carry more weight than they look. `put()` triggers the resize on `size + tombs`, not on `size`: a workload that inserts and deletes in a steady state adds no live entries, so a tombstone-blind trigger never fires, the table fills with sentinels, and probe chains grow without bound while `len()` reports a small map. And `_resize()` resets `_tombs` to zero because rehashing copies only live entries — the sentinels are the one kind of garbage a rehash is guaranteed to collect.
 
 **Stated plainly.** "A hash table is O(1) only as long as the buckets stay mostly empty — the `0.75` in `put()` is not a magic constant, it is the price you pay to keep lookups from turning into a linear scan."
 
@@ -314,13 +344,15 @@ Read the miss column, not the hit column — that is the one that explodes. Betw
 Now the worst case. Suppose every key hashes to the same bucket:
 
 ```
-  good hash, n = 1,000, m = 1,024      ->  ~1-2 probes per lookup   (O(1))
+  good hash, n = 1,000, m = 2,048      ->  1.5 probes on a hit      (O(1))
+     (alpha = 0.49 — the capacity put() actually settles on, since
+      1,000 / 1,024 = 0.98 would have tripped the resize long before)
   all keys collide, n = 1,000          ->  up to 1,000 probes       (O(n))
 
   1,000 lookups x 1,000 probes = 1,000,000 slot inspections
-  vs the healthy 1,000 x 2     =     2,000 slot inspections
+  vs the healthy 1,000 x 1.5   =     1,500 slot inspections
                                      ------------------------
-                                     500x more work, same code
+                                     667x more work, same code
 ```
 
 **Why this complexity matters — the failure mode.** The named production incident here is **hash-flooding denial of service**. An attacker who knows (or can guess) your hash function crafts thousands of distinct keys that all hash to the same bucket, then submits them as HTTP form fields, JSON keys, or query parameters. Your framework dutifully inserts them into a map, every insert scans the whole chain, and a single request that looks like ordinary input burns CPU quadratically — `n` inserts each costing O(n) is O(n^2) work, so 100,000 colliding keys is 10,000,000,000 comparisons off one request. This landed as a real cross-language vulnerability in 2011/2012 (PHP, Java, Python, Ruby, and others all shipped fixes). The mitigations are the ones you see in modern runtimes: **randomized hash seeds per process** (Python's `PYTHONHASHSEED`, on by default since 3.3) so the attacker cannot precompute collisions, and **treeified buckets** (Java 8's HashMap converting a chain to a red-black tree at ≥ 8 entries, noted in §4.1) so even a fully-collided bucket degrades to O(log n) rather than O(n). The second, quieter failure mode is a **bad `__hash__`/`hashCode` on your own key class** — returning a constant, or hashing only one field of a composite key — which produces the same O(n) collapse with no attacker at all, and shows up as a service that is fast in staging and mysteriously CPU-bound in production where the key cardinality is higher.
@@ -334,7 +366,8 @@ def build_string_broken(chars: list[str]) -> str:
     for c in chars:
         result += c   # new string object created each time
     return result
-# n concatenations of lengths 0,1,...,n-1 = O(n^2) total characters copied
+# iteration i allocates a string of length i and writes i characters into it
+# (i-1 copied from the old string, 1 new), so the total is 1+2+...+n = O(n^2)
 
 # FIX: O(n) — collect parts and join at the end
 def build_string(chars: list[str]) -> str:
@@ -352,30 +385,30 @@ The trap is that the broken version *looks* like an O(1) append. Nothing in `res
 |--------|------------|
 | `n` | Number of pieces being concatenated |
 | `O(n^2)` | Work grows with the *square* of the input. Double n, quadruple the time |
-| `n(n+1)/2` | Sum `1+2+...+n`. The exact character-copy count of the broken loop |
+| `n(n+1)/2` | Sum `1+2+...+n`. The exact character-write count of the broken loop |
 | immutable | The object cannot be changed in place; every "edit" is a new allocation |
 | `''.join(parts)` | Measures the total length once, allocates once, copies each piece once |
 
 **Walk one example.** Build a 5-character string one character at a time with `result += c`:
 
 ```
-  iteration   result before   chars copied into the new string   running total
-      1           ""                        0                          0
-      2           "a"                       1                          1
-      3           "ab"                      2                          3
-      4           "abc"                     3                          6
-      5           "abcd"                    4                         10
+  iteration   result before   chars written into the new string   running total
+      1           ""                        1                           1
+      2           "a"                       2                           3
+      3           "ab"                      3                           6
+      4           "abc"                     4                          10
+      5           "abcd"                    5                          15
 
-  total = 0+1+2+3+4 = 10 characters copied to produce a 5-character string
+  total = 1+2+3+4+5 = 15 characters written to produce a 5-character string
 
-  ''.join(parts): measure total length (5), allocate once, copy 5 chars = 5
+  ''.join(parts): measure total length (5), allocate once, write 5 chars = 5
 ```
 
-Five characters copied versus ten is not alarming. The gap is a *ratio*, and the ratio is `n/2`, so it widens with every element:
+Five characters written versus fifteen is not alarming. The gap is a *ratio*, and the ratio is `(n+1)/2`, so it widens with every element:
 
 ```
    n           broken  s += x        builder / join        ratio
-                n(n+1)/2 copies      n copies
+                n(n+1)/2 writes      n writes
 
    1,000              500,500              1,000            500x
    100,000      5,000,050,000            100,000         50,000x
@@ -560,32 +593,32 @@ def max_sum_k_fixed(arr: list[int], k: int) -> int:
 | `defaultdict` | Python | Auto-init missing keys |
 | `Counter` | Python | Frequency map, arithmetic, `most_common(k)` |
 | `set` | Python | Hash-set, same O(1) ops as dict |
-| `HashMap` | Java | Default cap 16, load 0.75; converts to tree-bin at 8 entries |
+| `HashMap` | Java | Default cap 16, load 0.75; tree-bin at 8 entries in a bin once the table has ≥ 64 buckets |
 | `LinkedHashMap` | Java | Insertion order preserved |
 | `TreeMap` | Java | Red-black BST; O(log n) all ops; sorted iteration |
-| `ConcurrentHashMap` | Java | Thread-safe; segment locking (Java 7) / CAS (Java 8+) |
+| `ConcurrentHashMap` | Java | Thread-safe; lock-free reads, CAS on empty bins, `synchronized` per bin head |
 | `ArrayList` | Java | Dynamic array; amortized O(1) append (growth factor 1.5) |
 | `array` module | Python | Typed, compact C-backed arrays — not hash maps |
-| `collections.OrderedDict` | Python | Legacy; regular dict is ordered since 3.7 |
+| `collections.OrderedDict` | Python | Plain `dict` is ordered since 3.7; `OrderedDict` still adds `move_to_end`, `popitem(last=)`, and order-sensitive `==` |
 
 ---
 
 ## 12. Interview Questions with Answers
 
 **Q1: What is the time complexity of Python dict lookup, and what is the worst case?**
-O(1) average. Worst case O(n) if all keys hash to the same bucket (e.g., adversarial keys with crafted hash collisions). Python randomises the hash seed per process (since Python 3.3) to make collision attacks impractical. For integer keys, `hash(n) == n` (for small integers) so there's no randomisation — be aware when using integer-keyed dicts for security-sensitive applications.
+O(1) average. Worst case O(n) if all keys hash to the same bucket (e.g., adversarial keys with crafted hash collisions). Python randomises the hash seed per process (since Python 3.3) to make collision attacks impractical — but only for `str` and `bytes`. Integer hashing is not randomised at all: `hash(n) == n` for every `n` up to 2**61 - 1 (larger ints are reduced modulo that Mersenne prime, and `hash(-1)` is -2), so an attacker who controls integer keys can still craft colliding input — be aware when using integer-keyed dicts for security-sensitive applications.
 
 **Q2: What is the difference between `defaultdict` and `dict.get(key, default)`?**
 `defaultdict(list)` automatically inserts a new empty `list` when a key is missing and you access it with `d[key]`. `dict.get(key, [])` returns an empty list but does NOT insert it. Use `defaultdict` when you want to immediately modify the value (e.g., `d[key].append(x)` without a prior existence check). Use `dict.get` when you only want to read a default without mutating the dict.
 
 **Q3: Why does Java's HashMap resize at 75% capacity and not 100%?**
-At 100% load factor (with open addressing or long chains), the probability of collision is very high, making average lookup close to O(n). The 0.75 threshold balances time (shorter chains, fewer collisions) against space (table is 25% empty on average). Empirically, 0.75 gives roughly 1.0 extra comparisons per lookup at steady state. The resize doubles the capacity, restoring the load factor to ~0.375.
+0.75 is a deliberate time-space compromise: it keeps the average chain short enough that lookups stay near-constant while leaving only a quarter of the table empty. Note that HashMap uses chaining, so a load factor of 1.0 would not be catastrophic on its own — the mean chain length would still be 1 — but collisions are Poisson-distributed, so the *tail* lengthens fast, and the buckets you actually hit are the crowded ones. Push the factor higher and you trade lookup time for memory; push it lower and you waste memory and rehash more often. The resize doubles the capacity, halving the load factor to ~0.375.
 
 **Q4: Two Sum — what is the O(n) hash-table solution?**
 Iterate through the array; for each element `x`, check if `target - x` is in a hash map of previously seen values; if yes, return the pair. If no, store `x → index` in the map. One pass, O(n) time, O(n) space. Key insight: instead of asking "is there any y such that x + y = target?", rephrase as "was `target - x` seen before?" — a point lookup, not a search.
 
 **Q5: How does Java HashMap's treeification (Java 8) help?**
-When a single bucket's chain grows to ≥ 8 entries, it is converted to a red-black BST, giving O(log n) operations on that bucket instead of O(n). This prevents hash-collision DoS attacks (an attacker sending many keys with the same hash value) from degrading the whole map to O(n) per operation. When the bucket shrinks below 6 entries, it converts back to a linked list.
+When a single bucket's chain grows to ≥ 8 entries, it is converted to a red-black BST, giving O(log n) operations on that bucket instead of O(n). This prevents hash-collision DoS attacks (an attacker sending many keys with the same hash value) from degrading the whole map to O(n) per operation. Two conditions are easy to miss: treeification only happens once the table itself has ≥ 64 buckets (below that, HashMap resizes instead, treating the collisions as a capacity problem), and the tree needs an ordering for keys that are not `Comparable` — it falls back to comparing class names and then identity hash codes. On resize, a tree bin that splits down to ≤ 6 entries is untreeified back into a linked list.
 
 **Q6: What are the time and space complexities of `sorted()` in Python?**
 O(n log n) time (Timsort). O(n) space (a separate list is returned — the original is not modified). For sorting a string: `sorted("anagram")` → O(k log k) where k = string length; then `''.join(sorted(s))` is the canonical anagram key.
@@ -631,7 +664,7 @@ Dict lookup uses `hash(key)` first, then `key == stored_key` (the `__eq__` metho
 ## 13. Best Practices
 
 1. **Default to `dict` + `set`** for lookup problems — they are almost always the right tool for O(n) solutions.
-2. **Use `Counter` for frequency counting** — `Counter(arr).most_common(k)` gives top-k in O(n + k log k).
+2. **Use `Counter` for frequency counting** — `Counter(arr).most_common(k)` gives top-k in O(n + d log k), where d is the number of *distinct* values: building the counter is O(n), and `most_common(k)` is `heapq.nlargest` over the d distinct items against a heap of size k. Calling `most_common()` with no argument sorts instead — O(d log d).
 3. **Use `collections.deque` for O(1) popleft** — never `list.pop(0)` in hot loops.
 4. **Define the sliding window invariant in a comment** before coding the loop — it prevents off-by-one errors.
 5. **Prefer `''.join(parts)` over string concatenation** in any loop that builds a string.
@@ -680,7 +713,8 @@ from collections import Counter
 
 def min_window(s: str, t: str) -> str:
     """
-    O(|s| + |t|) time. O(|t|) space for the frequency maps.
+    O(|s| + |t|) time. Space is O(|t|) for t_count plus one entry per distinct
+    character of s in window_count — O(sigma) for a fixed alphabet.
     """
     if not t or not s:
         return ""
@@ -714,9 +748,10 @@ def min_window(s: str, t: str) -> str:
     return "" if best[0] == float('inf') else s[best[1]:best[2] + 1]
 ```
 
-**BROKEN — naive O(n² × m) approach**:
+**BROKEN — naive all-substrings approach**:
 ```python
-# BROKEN: check every substring — O(n^2 * m) where m = len(t)
+# BROKEN: every substring, recounted from scratch.
+# O(n^2) substrings, and each one is sliced and re-scanned in O(n) => O(n^3).
 def min_window_brute(s: str, t: str) -> str:
     best = ""
     for i in range(len(s)):
@@ -726,7 +761,7 @@ def min_window_brute(s: str, t: str) -> str:
                 if not best or len(window) < len(best):
                     best = window
     return best
-# For |s|=10000, |t|=100: ~10^8 × 100 = 10^10 ops — infeasible
+# For |s|=10000: ~10^8 substrings, each re-scanned in ~10^4 char reads = ~10^12 ops
 # FIX: sliding window above: O(|s|+|t|) — 10000+100 = 10100 ops
 ```
 
@@ -734,8 +769,8 @@ def min_window_brute(s: str, t: str) -> str:
 
 | Approach | Time | Space |
 |----------|------|-------|
-| Brute force (all substrings) | O(n² × m) | O(m) |
-| Sliding window (this solution) | O(n + m) | O(m) |
+| Brute force (all substrings) | O(n³) — n² substrings, each re-scanned in O(n) | O(n) for the slice |
+| Sliding window (this solution) | O(n + m) | O(m + σ) |
 
 **Interview discussion**: "Why does the sliding window work here?" — the window is valid if `formed == required`. Once valid, we can safely shrink from the left (any left-contracted window that becomes invalid will need to re-expand). The monotonic property: making the window larger can only keep it valid or make it valid; making it smaller can only keep it valid or make it invalid. The two-pointer never backtracks → O(n) total moves.
 

@@ -20,7 +20,7 @@ A heap is like a company org-chart where the CEO is always the most (or least) i
 
 **Why it matters:** Top-K problems, k-way merge, Dijkstra's shortest path, median of a stream, OS CPU scheduling — all rely on the O(log n) push/pop with O(1) peek that heaps provide.
 
-**Key insight:** Building a heap from n elements takes O(n) time, NOT O(n log n). Half the nodes are leaves that cost O(1), quarter cost O(log 2) … summing this geometric series gives O(n). This surprises almost every interviewer who has not internalized it.
+**Key insight:** Building a heap from n elements takes O(n) time, NOT O(n log n). Half the nodes are leaves and cost nothing, a quarter sit one level up and can fall at most 1, an eighth can fall at most 2 — the cost doubles as you climb but the node count halves, and summing that series gives O(n). This surprises almost every interviewer who has not internalized it.
 
 ---
 
@@ -87,7 +87,7 @@ flowchart LR
 The default. Push/pop O(log n), peek O(1), build O(n). Stored in a flat array.
 
 ### d-ary Heap (d=3,4,…)
-Each node has d children. Sift-down is faster (fewer levels: log_d n) but each step examines d children instead of 2. Best choice: d=4 gives ~30% fewer comparisons for sift-up-heavy workloads (Dijkstra). Arrays that fit in CPU cache favour larger d.
+Each node has d children, so the tree is shallower: height log_d n instead of log_2 n. That is a straight win for **sift-up**, which does one comparison per level — at d=4 the height is exactly halved (log_4 n = log_2 n / 2), so sift-up does half the comparisons. It is a loss for **sift-down**, which must find the smallest of d children at every level: (d-1) comparisons per level times log_d n levels, which at d=4 is 3/2 × log_2 n, i.e. 50% *more* comparisons than a binary heap. So d=4 pays off exactly when pushes outnumber pops (Dijkstra), and not otherwise. Arrays that fit in CPU cache favour larger d, since the d children are adjacent slots.
 
 ### Fibonacci Heap
 Amortized O(1) decrease-key and O(log n) delete-min. Theoretically optimal for Dijkstra on dense graphs. Too complex for practical use (high constant factors); covered in algorithms textbooks, not production code.
@@ -230,11 +230,24 @@ The index sequence `7 -> 3 -> 1 -> 0` is the whole argument: each step at least 
 ```
 Stream: 5, 2, 8, 1, 9
 
-lower (max-heap): [5, 2, 1]   root=5
-upper (min-heap): [8, 9]      root=8
+lower (max-heap): [5, 2, 1]   root=5     <- lower half, 3 elements
+upper (min-heap): [8, 9]      root=8     <- upper half, 2 elements
 
-median = (5 + 8) / 2 = 6.5   (even count)
+5 values so far, an ODD count, so the extra element lives in `lower`
+and the median is simply lower's root:   median = 5
+sorted check:  1, 2, 5, 8, 9   ->   middle value is 5
+
+Now stream a 6th value, 7:
+
+lower (max-heap): [5, 2, 1]   root=5
+upper (min-heap): [7, 8, 9]   root=7
+
+EVEN count, sizes equal, so average the two roots:
+median = (5 + 7) / 2 = 6.0
+sorted check:  1, 2, 5, 7, 8, 9   ->   (5 + 7) / 2 = 6.0
 ```
+
+The two roots are the only elements the median can depend on: everything in `lower` is ≤ its root and everything in `upper` is ≥ its root, so the boundary between the halves *is* the pair of roots.
 
 ### Build-Heap O(n) — Heapify from bottom up:
 
@@ -248,12 +261,20 @@ Array: [_, 9, 7, 8, 3, 2, 5, 4]
          / \     / \
         3   2   5   4
 
-Heapify index 3 (8): 8 > children(5,4)? yes → swap 8 with 4
-Heapify index 2 (7): 7 > children(3,2)? yes → swap 7 with 2
-Heapify index 1 (9): 9 > children(7,4)? yes → swap 9 with 4 → recurse → swap 4 with 5
+Heapify index 3 (8): 8 > min(children 5, 4)? yes → swap 8 with 4
+                     array is now [_, 9, 7, 4, 3, 2, 5, 8]
+Heapify index 2 (7): 7 > min(children 3, 2)? yes → swap 7 with 2
+                     array is now [_, 9, 2, 4, 3, 7, 5, 8]
+Heapify index 1 (9): children are now 2 and 4 (NOT the original 7 and 8 —
+                     the two steps above already rewrote them)
+                     9 > min(2, 4)? yes → swap 9 with 2, 9 lands at index 2
+                     recurse at index 2: children 3 and 7 → swap 9 with 3
+                     9 lands at index 4, which is a leaf. Done.
 
 Final: [_, 2, 3, 4, 9, 7, 5, 8]
 ```
+
+The middle step is the one to read twice: heapify works bottom-up precisely so that when it reaches a node, both of its subtrees are already heaps. That is what makes a single sift-down per node sufficient — and it is why the root's comparison is against `2` and `4`, the values its children hold *after* the lower levels were fixed, not the `7` and `8` the original array started with.
 
 **What the formula is telling you.** "Half the nodes are leaves and cost nothing at all; the nodes that can fall a long way are so rare that the whole thing adds up to `n`, not `n log n`."
 
@@ -309,9 +330,12 @@ Nine hundred ninety-nine thousand nine hundred eighty-seven, against a million e
   n = 1,000,000
 
   build-heap (sift DOWN from n//2-1)   ~=      1,000,000 operations
-  n successive push() (sift UP)        ~=     20,000,000 operations
+  n successive push() (sift UP)        ~=     20,000,000 operations  <- worst case
                                               ----------
                                               20x difference
+
+  (on RANDOM input the push version is far cheaper than its worst case —
+   see Pitfall 1 in Section 10, which measures the real gap and explains why)
 ```
 
 **The failure mode.** This never announces itself as a bug — both versions are correct and both return a valid heap. It shows up as a startup or batch-load phase that is 20x slower than it needs to be: the service that takes 40 seconds to warm its priority queue instead of 2, blows its readiness-probe deadline, gets killed by the orchestrator, and restarts into the same 40-second load. The `O(n log n)` build is also the reason heapsort's build phase is often mistakenly analyzed as the bottleneck — it is not; the `n` extractions afterward are, and those really are `O(n log n)`.
@@ -476,11 +500,18 @@ class MedianFinder:
 # ─── Heap sort ───────────────────────────────────────────────────────────────
 
 def heap_sort(arr: List[int]) -> List[int]:
-    """O(n log n), O(1) extra space (in-place). Not stable."""
-    import heapq
-    # Python heapq.nlargest uses a heap internally
-    # In-place: build max-heap manually (negate trick not applicable in-place)
-    heapq.heapify(arr)                     # O(n) — min-heap
+    """
+    O(n log n): an O(n) heapify, then n pops at O(log n) each. Not stable.
+
+    Read the space claim carefully — this version is NOT the O(1)-extra-space
+    textbook heapsort. It allocates a new n-element list for the result and it
+    consumes `arr` in the process (heapify mutates in place, heappop drains it).
+    True in-place heapsort builds a MAX-heap and repeatedly swaps the root into
+    the slot just past the shrinking heap, so the sorted tail grows inside the
+    same array; heapq exposes only a min-heap, so that version has to be written
+    by hand using the sift primitives in MinHeap above.
+    """
+    heapq.heapify(arr)                                     # O(n) — min-heap
     return [heapq.heappop(arr) for _ in range(len(arr))]   # O(n log n)
 ```
 
@@ -490,7 +521,7 @@ def heap_sort(arr: List[int]) -> List[int]:
 
 **Dijkstra's shortest path:** A min-heap over `(distance, node)` makes greedy expansion O((V+E) log V) vs O(V²) with a naive array. Every GPS navigation system runs this.
 
-**OS CPU scheduling:** Linux Completely Fair Scheduler (CFS) uses a red-black tree (heap-like ordering by virtual runtime) to pick the next process in O(log n).
+**OS CPU scheduling:** Linux's fair scheduling class keeps runnable tasks in a red-black tree ordered by virtual runtime and picks the next process in O(log n) — under EEVDF, the eligible task with the earliest virtual deadline. Note it is a tree rather than a heap precisely because the scheduler must also *remove* an arbitrary task when it blocks, which a bare heap cannot do without a side index.
 
 **Top-K on streaming data:** Apache Flink and Kafka Streams use heap-backed priority queues to maintain top-K counts over tumbling windows without sorting full batches.
 
@@ -517,8 +548,8 @@ def heap_sort(arr: List[int]) -> List[int]:
 | Cache friendly | Yes (array) | Yes | No (pointers) | No |
 
 **When d-ary heap beats d=2:**
-- d=4 gives height log_4(n) = log_2(n)/2 — half as many sift-up steps (sift-up dominates in Dijkstra since you push often).
-- Sift-down examines d children per level — slightly more comparisons but still fewer cache misses than pointer-following in a BST.
+- d=4 gives height log_4(n) = log_2(n)/2 — half as many sift-up steps, and sift-up does one comparison per step, so push comparisons are halved (sift-up dominates in Dijkstra since you push often).
+- Sift-down pays for it: finding the smallest of d children costs d-1 comparisons per level, so at d=4 it is 3/2 × log_2(n) comparisons against a binary heap's log_2(n). Still fewer cache misses than pointer-following in a BST, since the d children are contiguous slots.
 
 ```mermaid
 xychart-beta
@@ -557,7 +588,7 @@ xychart-beta
 |---------|----------------|------|
 | Top-K elements | min-heap size k | O(n log k) |
 | K-way sorted merge | min-heap size k | O(N log k) |
-| Sliding window maximum | max-deque or max-heap+lazy | O(n log n) |
+| Sliding window maximum | monotonic deque (optimal) / max-heap + lazy delete | O(n) deque, O(n log n) heap |
 | Median of stream | two heaps | O(log n) per add |
 | Shortest path (sparse) | min-heap + dist[] | O((V+E) log V) |
 | Meeting rooms II | min-heap of end times | O(n log n) |
@@ -658,7 +689,12 @@ class Task:
 h = []
 heapq.heappush(h, (1, Task("a")))
 heapq.heappush(h, (1, Task("b")))
-heapq.heappop(h)   # TypeError: '<' not supported between instances of 'Task'
+# TypeError: '<' not supported between instances of 'Task' and 'Task'
+# Note WHERE it fires: the SECOND heappush, not a later pop. Sift-up compares
+# the incoming tuple against its parent, the priorities tie at 1, and the
+# comparison falls through to the Task objects. The heap is already broken at
+# insert time, so a "it only fails on pop" mental model will send you hunting
+# in the wrong place.
 
 # FIX: use a counter as tiebreaker
 import itertools
@@ -668,11 +704,14 @@ heapq.heappush(h, (1, next(counter), Task("b")))
 heapq.heappop(h)   # Works: counter breaks the tie deterministically
 ```
 
-### Pitfall 5: Lazy deletion anti-pattern
+### Pitfall 5: Trying to remove an arbitrary element — use lazy deletion
 
 ```python
-# When you need to "remove" arbitrary elements from a heap,
-# you cannot do it directly. Use a "tombstone" set:
+# A heap has no "remove this element" operation: finding it is O(n), because
+# heap order says nothing about where a non-root value lives. Use a tombstone
+# set and discard entries as they surface. (This is the standard fix, not an
+# anti-pattern — see Best Practices. Its one cost is that _removed grows
+# until the tombstoned entries are popped, so bound it in a long-lived heap.)
 import heapq
 
 class LazyHeap:
@@ -715,7 +754,7 @@ class LazyHeap:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the time complexity of building a heap from n elements?**
-O(n). Calling heapify (sift-down from every internal node) costs O(n) because half the nodes are leaves (O(1) work each), a quarter cost O(log 2), etc. — the geometric sum converges to 2n. Inserting n elements one by one is O(n log n). This is one of the most commonly mis-stated complexities.
+O(n). Calling heapify (sift-down from every internal node) costs O(n) because a node at height h can fall at most h levels, and only about n/2^(h+1) nodes sit at height h — half the nodes are leaves and do zero work, a quarter can fall at most 1, an eighth at most 2. The series sum(h/2^(h+1)) converges to 1, so the total is bounded by n (CLRS states the same bound loosely as 2n). Inserting n elements one by one is O(n log n) in the worst case. This is one of the most commonly mis-stated complexities.
 
 **Q2: Why does Python's heapq.nlargest(k, arr) use a heap instead of sorting?**
 For k << n, maintaining a size-k min-heap costs O(n log k) — you scan all n items but only maintain k items in the heap. Sorting costs O(n log n). When k=1 it is O(n), same as a linear scan. `nlargest` switches internally to `sorted()` when k is close to n.
@@ -724,16 +763,16 @@ For k << n, maintaining a size-k min-heap costs O(n log k) — you scan all n it
 Maintain two heaps: a max-heap `lower` (lower half) and min-heap `upper` (upper half). Keep sizes balanced (differ by at most 1). After each insertion, the median is either the root of `lower` (odd total) or the average of both roots (even total). Each insert is O(log n), each median query O(1).
 
 **Q4: You need to implement Dijkstra. What heap variant should you choose and why?**
-A binary heap gives O((V+E) log V) with simple implementation — good enough for most graphs. A 4-ary heap gives ~30% fewer comparisons for Dijkstra (you push more than you pop). A Fibonacci heap gives O(E + V log V) theoretically but has huge constants; only worth it for extremely dense graphs where E >> V log V.
+A binary heap gives O((V+E) log V) with simple implementation — good enough for most graphs. A 4-ary heap halves the sift-up comparisons (height log_4 n = log_2 n / 2, one comparison per level), which is the operation Dijkstra does most since it pushes far more often than it pops; the price is 3 comparisons instead of 1 per sift-down level. A Fibonacci heap gives O(E + V log V) theoretically but has huge constants; only worth it for extremely dense graphs where E >> V log V.
 
 **Q5: What is the difference between a heap and a BST?**
-A heap only guarantees the root is extreme; arbitrary search is O(n). A BST guarantees full sorted order and supports O(log n) search for any key. Heap push/pop is O(log n) and cache-friendly (array). BST insert/find is O(log h) but pointer-heavy (cache-unfriendly). Choose heap for priority-queue use cases, BST for sorted-set use cases.
+A heap only guarantees the root is extreme; arbitrary search is O(n). A BST guarantees full sorted order and supports O(log n) search for any key. Heap push/pop is O(log n) and cache-friendly (array). BST insert/find is O(h), which is O(log n) only while the tree stays balanced, and it is pointer-heavy (cache-unfriendly). Choose heap for priority-queue use cases, BST for sorted-set use cases.
 
 **Q6: How does Java's PriorityQueue behave when you iterate it?**
 Iteration order is NOT sorted. Java's PriorityQueue is backed by a binary heap array; iterating gives heap-storage order, which is not a sorted traversal. To get sorted output you must drain via poll() or copy to an array and sort. This surprises many Java developers who assume the collection is "sorted."
 
 **Q7: A heap's pop() is O(log n). Can you implement a heap that supports O(1) delete-any-element?**
-Yes — augment with a HashMap `{value → index_in_heap_array}`. When you want to delete element x: look up its index i, swap A[i] with A[last], pop the last, then sift-up or sift-down from i. This is called an "indexed heap" and is used in Prim's MST and some Dijkstra implementations.
+No — O(1) is not achievable, but O(log n) delete-any is, which is the answer the question is fishing for. In a plain heap, *locating* an arbitrary element is O(n) because heap order tells you nothing about where a non-root value sits. Augment it with a HashMap `{value → index_in_heap_array}` and the lookup becomes O(1); the deletion itself is still logarithmic — swap A[i] with A[last], pop the last, then sift-up *or* sift-down from i, since the replacement may be either too small or too large for that position. This is called an "indexed heap" and is used in Prim's MST and some Dijkstra implementations. The bookkeeping catch: every swap during every sift must also update the map, or the indices go stale and the next delete corrupts the heap.
 
 **Q8: Why is heapsort not used in practice even though it is O(n log n) worst-case?**
 Cache performance. Heapsort's access pattern jumps between parent and children in a large array — cache-unfriendly. Quicksort has O(n²) worst case but its sequential access pattern produces fewer cache misses in practice, making it 2–5× faster on real hardware. Introsort (used in C++ std::sort) uses quicksort with heapsort as a fallback to avoid the O(n²) case.
@@ -756,8 +795,8 @@ Perfectly fine — Python allows duplicates in a heap and compares by value. The
 **Q14: What is the "sliding window maximum" problem and can a heap solve it efficiently?**
 Given array nums and window size k, find the max in every k-size window. A max-heap can solve it in O(n log n) with lazy deletion: push (value, index), when you pop, discard entries with index < window_start. A monotonic deque solves it in O(n) — preferred. The heap approach is simpler to implement in an interview when optimal complexity is not required.
 
-**Q15: Describe the two-heap pattern for finding the k-th largest element dynamically.**
-Maintain a min-heap of size k. For each new element: push it. If size > k, pop the minimum. The root of the size-k min-heap is the k-th largest element seen so far. Each operation O(log k). This is the basis for LeetCode 703 "Kth Largest Element in a Stream."
+**Q15: Describe the size-k heap pattern for finding the k-th largest element dynamically.**
+Maintain a min-heap of size k — note this needs one heap, not the two-heap pattern, which solves the running *median* instead. For each new element: push it. If size > k, pop the minimum. The root of the size-k min-heap is the k-th largest element seen so far. Each operation O(log k). This is the basis for LeetCode 703 "Kth Largest Element in a Stream."
 
 **Q16: What happens internally when you call heapq.heappushpop(heap, item) vs heapq.heapreplace(heap, item)?**
 `heappushpop`: pushes item first, then pops min. Equivalent to push+pop but implemented as one operation (avoids sifting twice when item is already ≤ current min). `heapreplace`: pops min first, then pushes item — assumes heap is non-empty. `heapreplace` is faster than a pop+push pair by roughly a factor of 2. Use `heapreplace` in the k-largest window pattern.
