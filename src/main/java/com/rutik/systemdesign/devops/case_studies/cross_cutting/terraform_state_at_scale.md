@@ -10,7 +10,7 @@ Terraform's entire model rests on one file: the **state**. State is the JSON doc
 
 At small scale, state is a local `terraform.tfstate` file and nobody thinks about it. At scale — dozens of engineers, hundreds of pipelines, thousands of resources across multiple environments and regions — state becomes the single most fragile and contested artifact in your infrastructure. The problems are concrete: two CI runs applying at once corrupt the file; a single monolithic state means one `plan` reads a thousand resources and takes minutes; a fat-fingered `terraform destroy` on a shared state takes down production; secrets sit in plaintext in an S3 bucket; and a `-target` flag papers over a problem while quietly leaving state inconsistent.
 
-This file is the shared reference that the DevOps case studies — `design_gitops_delivery_pipeline`, `design_zero_downtime_infra_migration`, `design_internal_developer_platform` — link to for state-management depth. It covers remote backends (S3 + DynamoDB locking, GCS, azurerm), the state-as-blast-radius principle, splitting strategy, `terraform_remote_state` coupling, `import`/`state mv`/`state rm` surgery, drift detection in CI, the dangers of partial/targeted applies, the secrets-in-state problem, KMS encryption, and large-state performance. For backend syntax and the basics of the resource graph, cross-reference [`../../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md`](../../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md); for OpenTofu, Terragrunt, Pulumi, and Crossplane alternatives, cross-reference [`../../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md`](../../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md).
+This file is the shared reference that the DevOps case studies — `design_gitops_delivery_pipeline`, `design_zero_downtime_infra_migration`, `design_internal_developer_platform` — link to for state-management depth. It covers remote backends (S3 with native lockfile locking, GCS, azurerm), the state-as-blast-radius principle, splitting strategy, `terraform_remote_state` coupling, `import`/`state mv`/`state rm` surgery, drift detection in CI, the dangers of partial/targeted applies, the secrets-in-state problem, KMS encryption, and large-state performance. For backend syntax and the basics of the resource graph, cross-reference [`../../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md`](../../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md); for OpenTofu, Terragrunt, Pulumi, and Crossplane alternatives, cross-reference [`../../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md`](../../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md).
 
 ---
 
@@ -32,7 +32,7 @@ This file is the shared reference that the DevOps case studies — `design_gitop
 
 2. **State is a blast-radius boundary.** Group resources into a state by failure domain and change cadence, not by convenience. One `destroy` should never be able to reach across boundaries.
 
-3. **Locking is mandatory, not optional.** Concurrent applies without a lock interleave writes and corrupt state. S3 backends use a DynamoDB lock table (or, since Terraform 1.11, native S3 lockfile locking); GCS and azurerm lock natively.
+3. **Locking is mandatory, not optional.** Concurrent applies without a lock interleave writes and corrupt state. S3 backends lock natively with `use_lockfile = true` (Terraform 1.11+, which also deprecated the older `dynamodb_table` argument); GCS and azurerm lock natively too.
 
 4. **State contains secrets — treat it as a secret.** Any provider attribute, including passwords and private keys, is stored in plaintext within state. Encrypt at rest (SSE-KMS), restrict bucket access, and never commit state.
 
@@ -50,10 +50,10 @@ This file is the shared reference that the DevOps case studies — `design_gitop
 
 | Backend | Storage | Locking mechanism | Encryption |
 |---------|---------|-------------------|------------|
-| `s3` | S3 bucket | DynamoDB table (or native S3 lockfile, TF ≥1.11) | SSE-S3 or SSE-KMS |
+| `s3` | S3 bucket | Native S3 lockfile (`use_lockfile`, TF ≥1.11); DynamoDB table on older versions | SSE-S3 or SSE-KMS |
 | `gcs` | GCS bucket | Native object generation locking | Google-managed or CMEK |
 | `azurerm` | Blob Storage | Native blob lease | Microsoft-managed or CMK |
-| `remote` / `cloud` | Terraform/HCP Cloud | Built-in run queue | Managed by HCP |
+| `cloud` | HCP Terraform | Built-in run queue | Managed by HCP |
 
 **State-splitting strategies**:
 
@@ -104,26 +104,26 @@ flowchart LR
 
 Terraform never trusts the cloud directly — every `plan` recomputes this three-way diff between desired config, recorded state, and actual cloud reality, then reports the delta.
 
-**S3 + DynamoDB remote backend with locking**
+**S3 remote backend with native lockfile locking**
 
 ```mermaid
 sequenceDiagram
     participant A as CI Run A
     participant B as CI Run B
-    participant D as DynamoDB Lock Table
+    participant L as S3 lock object
     participant S as S3 Bucket
 
-    A->>D: conditional PUT LockID
-    D-->>A: lock acquired
-    B->>D: conditional PUT LockID
-    D-->>B: 409 conflict — retry or block
-    Note over D: lock key = state path + md5 suffix
+    A->>L: conditional PUT key.tflock (If-None-Match)
+    L-->>A: lock acquired
+    B->>L: conditional PUT key.tflock
+    L-->>B: 412 PreconditionFailed — retry or block
+    Note over L: lock object sits beside the state at key.tflock
     A->>S: write terraform.tfstate
     S-->>A: new object version (versioning ON)
     Note over S: SSE-KMS, block public access
 ```
 
-CI Run A's conditional PUT wins the lock while CI Run B's write is rejected with a 409 and must retry or block; only the holder may write the next versioned state object into S3.
+CI Run A's conditional PUT wins the lock while CI Run B's write is rejected with a 412 and must retry or block; only the holder may write the next versioned state object into S3.
 
 **State splitting → blast-radius containment**
 
@@ -152,23 +152,23 @@ flowchart LR
     class safe train
 ```
 
-Splitting the 4,000-resource monolith into per-layer state cut plan time from about 6 minutes to under 45 seconds per layer, and independent locks let three teams apply in parallel.
+Splitting the 4,000-resource monolith cut plan time from about 6 minutes to under 45 seconds per state, and independent locks let three teams apply in parallel. Do the division before promising the number: refresh is roughly one provider Read call per resource, so 4,000 resources in ~6 minutes is ~0.09s each, and a sub-45-second plan means holding each state under ~500 resources — about eight states in practice, not the three layers drawn here.
 
 ---
 
 ## 6. How It Works — Detailed Mechanics
 
-**S3 + DynamoDB backend configuration.** The canonical AWS remote backend:
+**S3 backend configuration.** The canonical AWS remote backend, locking natively in S3:
 
 ```hcl
 terraform {
   backend "s3" {
-    bucket         = "acme-tfstate-prod"
-    key            = "networking/terraform.tfstate"   # path = blast-radius unit
-    region         = "us-east-1"
-    dynamodb_table = "acme-tf-locks"                  # lock table
-    encrypt        = true
-    kms_key_id     = "arn:aws:kms:us-east-1:111122223333:key/abcd-1234"
+    bucket       = "acme-tfstate-prod"
+    key          = "networking/terraform.tfstate"   # path = blast-radius unit
+    region       = "us-east-1"
+    use_lockfile = true                             # native S3 lock object
+    encrypt      = true
+    kms_key_id   = "arn:aws:kms:us-east-1:111122223333:key/abcd-1234"
   }
 }
 ```
@@ -193,6 +193,7 @@ resource "aws_s3_bucket_public_access_block" "tfstate" {
   restrict_public_buckets = true
 }
 
+# Only needed on Terraform older than 1.11, which cannot lock in S3 itself.
 resource "aws_dynamodb_table" "tf_locks" {
   name         = "acme-tf-locks"
   billing_mode = "PAY_PER_REQUEST"     # on-demand: no capacity planning for spiky CI
@@ -204,15 +205,15 @@ resource "aws_dynamodb_table" "tf_locks" {
 }
 ```
 
-**Lock mechanics.** On `apply`/`plan -lock=true` (default), Terraform writes a conditional item to DynamoDB keyed by `LockID = <bucket>/<key>-md5`. The conditional put fails if the item exists, so a second run gets `Error acquiring the state lock` and blocks/retries. The lock item carries `Who`, `Created`, and `Operation`. If a run crashes mid-apply the lock can be left dangling and must be cleared with `terraform force-unlock <LOCK_ID>` — only after confirming no apply is actually running.
+**Lock mechanics.** On `apply`/`plan -lock=true` (default) with `use_lockfile = true`, Terraform does a conditional `PutObject` of a `<key>.tflock` object next to the state, using S3's `If-None-Match` conditional write. If the object already exists S3 returns `412 PreconditionFailed`, the second run gets `Error acquiring the state lock` and blocks/retries, and the JSON body of the lock object records `Who`, `Created`, and `Operation`. The DynamoDB path used by pre-1.11 backends is the same idea with a different store: a conditional put keyed `LockID = <bucket>/<key>-md5`, failing with `ConditionalCheckFailedException`. Either way, a run that crashes mid-apply can leave the lock dangling, and it must be cleared with `terraform force-unlock <LOCK_ID>` — only after confirming no apply is actually running.
 
 The lock item moves through a small state machine as CI runs contend for it:
 
 ```mermaid
 stateDiagram-v2
     [*] --> Unlocked
-    Unlocked --> Locked: conditional PUT LockID succeeds
-    Locked --> Locked: concurrent PUT fails (409) — retries or blocks
+    Unlocked --> Locked: conditional PUT succeeds
+    Locked --> Locked: concurrent PUT fails (412) — retries or blocks
     Locked --> Unlocked: apply completes, lock item deleted
     Locked --> Dangling: process crashes mid-apply
     Dangling --> Unlocked: force-unlock, after confirming no live apply
@@ -238,7 +239,7 @@ terraform state mv aws_instance.web aws_instance.frontend
 terraform state rm aws_db_instance.old_replica
 ```
 
-The modern (Terraform ≥1.5) declarative form avoids CLI surgery:
+The declarative form avoids CLI surgery — `moved` since Terraform 1.1, `import` since 1.5:
 
 ```hcl
 import {
@@ -316,7 +317,7 @@ esac
 
 - **HashiCorp's own guidance** evolved from monolithic state to "split by lifecycle and blast radius"; their well-architected material recommends separating long-lived foundational state (networking, IAM) from frequently-changing application state.
 
-- **A 2,000+ resource monolith at a mid-size SaaS** measured `plan` at ~6 minutes (dominated by refresh API calls) and serialized all infra changes behind one lock; splitting into networking/data/compute states cut individual plan times to under 45 seconds and let three teams apply in parallel.
+- **A 2,000+ resource monolith at a mid-size SaaS** measured `plan` at ~6 minutes (dominated by refresh API calls) and serialized all infra changes behind one lock; splitting it into eight networking, data, and per-service compute states of roughly 250 resources each cut individual plan times to under 45 seconds and let three teams apply in parallel.
 
 - **Spacelift / Atlantis / env0** built businesses on serializing Terraform applies safely: PR-triggered plans, lock-aware queuing, and policy gates that prevent the concurrent-apply corruption that DynamoDB locking alone can't fully coordinate across many stacks.
 
@@ -331,8 +332,8 @@ esac
 | State granularity | Monolith | Split by layer/service | Tiny project, one team | Any team scale; bounded blast radius |
 | Environments | Workspaces | Directory-per-env | Quick demos, identical envs | Production; explicit, safer separation |
 | Cross-state | `terraform_remote_state` | Loose coupling (tags/SSM) | Tight, controlled output contracts | Resilience; avoid read-time coupling |
-| Locking (S3) | DynamoDB table | Native S3 lockfile (≥1.11) | Pre-1.11, fine-grained metadata | New setups; one fewer resource |
-| Backend | Self-managed S3 | HCP/Terraform Cloud | Full control, no per-run cost | Managed runs, RBAC, policy built-in |
+| Locking (S3) | DynamoDB table | Native S3 lockfile (≥1.11) | Terraform older than 1.11 | Anything current; one fewer resource |
+| Backend | Self-managed S3 | HCP Terraform | Full control, no per-run cost | Managed runs, RBAC, policy built-in |
 | State surgery | CLI (`state mv/rm`) | Declarative `moved`/`import` blocks | Ad-hoc one-off recovery | Reviewable, repeatable in PRs |
 | Refresh in CI | Always refresh | `-refresh=false` for speed | Drift visibility matters | Huge state, drift caught elsewhere |
 
@@ -443,7 +444,7 @@ Terraform stores every provider-returned attribute in state as plaintext JSON, i
 `terraform state rm` removes the resource from state only, so Terraform forgets it exists but the real cloud object keeps running — useful for handing a resource to another state or stopping management. `terraform destroy -target` (or removing it from config and applying) actually deletes the cloud object. Always back up state with `terraform state pull` before `state rm`, because forgetting a resource you didn't mean to can orphan or double-create infrastructure.
 
 **Q: How do you adopt an existing, manually-created resource into Terraform?**
-Use an import: either the imperative `terraform import aws_s3_bucket.legacy <bucket-name>` or, in Terraform 1.5+, a declarative `import { to = ...; id = ... }` block that's reviewable in a PR and runs during the next apply. After importing, run `plan` and reconcile any diff between the imported reality and your config until plan is clean, otherwise the next apply will try to "fix" the resource. The declarative form is preferred because it's version-controlled and repeatable.
+Use an import: either the imperative `terraform import aws_s3_bucket.legacy <bucket-name>` or, in Terraform 1.5+, a declarative `import` block carrying `to` and `id` arguments, which is reviewable in a PR and runs during the next apply. After importing, run `plan` and reconcile any diff between the imported reality and your config until plan is clean, otherwise the next apply will try to "fix" the resource. The declarative form is preferred because it's version-controlled and repeatable.
 
 **Q: Why do large state files have slow plans, and how do you fix it?**
 Plan time on large state is dominated by refresh — Terraform calls the provider's Read API once per resource to detect drift, so a 2,000-resource state means ~2,000 API calls and often minutes. Fix it primarily by splitting state so each plan refreshes fewer resources, secondarily by `-refresh=false` when drift is caught by a separate scheduled job, and by using `-target` only for recovery. Splitting also unlocks parallel applies, which a monolith's single lock prevents.
@@ -467,7 +468,7 @@ The core fix is state splitting — independent states have independent locks, s
 
 ## 13. Best Practices
 
-1. **Remote, locked, versioned, encrypted — always.** S3 with versioning + SSE-KMS + DynamoDB (or native) lock + block-public-access is the non-negotiable baseline.
+1. **Remote, locked, versioned, encrypted — always.** S3 with versioning + SSE-KMS + `use_lockfile` + block-public-access is the non-negotiable baseline.
 2. **Split state by blast radius and change cadence**, not by convenience. Keep individual plan times under ~60 seconds.
 3. **Directory-per-environment, not workspaces, for prod.** Make the environment explicit.
 4. **Treat state as a secret.** No plaintext secrets in public buckets; restrict IAM to the state path; never commit state.
@@ -476,7 +477,7 @@ The core fix is state splitting — independent states have independent locks, s
 7. **Run continuous drift detection** with `plan -refresh-only -detailed-exitcode` on a schedule.
 8. **Reserve `-target` for recovery**, and always re-converge with a full apply afterward.
 9. **Limit `terraform_remote_state` coupling**; prefer tag/SSM lookups across team boundaries.
-10. **Serialize applies through a platform** (Atlantis/Spacelift/Terraform Cloud) so PRs, locks, and policy gates are enforced consistently.
+10. **Serialize applies through a platform** (Atlantis/Spacelift/HCP Terraform) so PRs, locks, and policy gates are enforced consistently.
 
 ---
 
@@ -494,30 +495,31 @@ terraform {
     bucket = "acme-tfstate"
     key    = "infra/terraform.tfstate"   # EVERYTHING in one state
     region = "us-east-1"
-    # no encrypt, no kms_key_id, no dynamodb_table
+    # no encrypt, no kms_key_id, no locking of any kind
   }
 }
 ```
 
 ```hcl
-# FIX 1: split into layered states; each is its own blast-radius unit with
-# its own lock, encrypted with KMS, locked via DynamoDB.
+# FIX 1: split into ten layered states; each is its own blast-radius unit
+# with its own lock, encrypted with KMS, locked natively in S3.
 
 # envs/prod/networking/backend.tf
 terraform {
   backend "s3" {
-    bucket         = "acme-tfstate-prod"
-    key            = "networking/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "acme-tf-locks"
-    encrypt        = true
-    kms_key_id     = "arn:aws:kms:us-east-1:111122223333:key/abcd-1234"
+    bucket       = "acme-tfstate-prod"
+    key          = "networking/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true
+    encrypt      = true
+    kms_key_id   = "arn:aws:kms:us-east-1:111122223333:key/abcd-1234"
   }
 }
 
-# envs/prod/data/backend.tf  -> key = "data/terraform.tfstate"  (RDS, S3)
-# envs/prod/compute/backend.tf -> key = "compute/terraform.tfstate" (EKS, ASG)
-# Each plans independently in < 45s; destroy in one CANNOT reach another.
+# envs/prod/data/backend.tf     -> key = "data/terraform.tfstate"  (RDS, S3)
+# envs/prod/compute/<svc>/...   -> one state per compute domain (EKS, ASG)
+# No state exceeds ~400 resources, so each plans independently in < 45s;
+# destroy in one CANNOT reach another.
 ```
 
 ```hcl
@@ -554,6 +556,6 @@ terraform show tfplan | grep -E "must be replaced|will be destroyed" \
 terraform apply tfplan
 ```
 
-**Outcome**: per-layer plans dropped from 7 minutes to under 45 seconds, three teams applied in parallel without lock contention, and the destructive-change CI gate blocked any plan that proposed replacing stateful resources. The state bucket was encrypted with KMS and locked down, removing the plaintext-secrets exposure. A `-target` could no longer silently corrupt a shared state because each layer was small and applies were full-graph and reviewed.
+**Outcome**: 3,800 resources at ~7 minutes is ~0.11s of refresh per resource, so holding every state under ~400 resources — ten states, not three — brought per-state plans down from 7 minutes to under 45 seconds; three teams then applied in parallel without lock contention, and the destructive-change CI gate blocked any plan that proposed replacing stateful resources. The state bucket was encrypted with KMS and locked down, removing the plaintext-secrets exposure. A `-target` could no longer silently corrupt a shared state because each layer was small and applies were full-graph and reviewed.
 
 For backend syntax fundamentals and the resource graph model, see [`../../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md`](../../infrastructure_as_code_terraform/infrastructure_as_code_terraform.md); for Terragrunt, OpenTofu state encryption, and Pulumi/Crossplane comparisons, see [`../../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md`](../../terraform_advanced_and_alternatives/terraform_advanced_and_alternatives.md).

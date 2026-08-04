@@ -303,7 +303,7 @@ groups:
 
 The short window in each pair (`5m`, `30m`) is what makes the alert resolve quickly: when the burn stops, the short-window expression drops below threshold within minutes and the alert clears, even though the long window is still elevated.
 
-**The full four-tier Google SRE alert table.** The Workbook actually recommends four burn-rate tiers for a 30-day budget, not two, to cover the full severity spectrum:
+**The full burn-rate tier table.** The SRE Workbook's recommended set for a 30-day budget is three tiers — 14.4x and 6x both page, and 1x over 3 days opens a ticket. Rule generators such as Sloth emit a fourth tier, 3x over 24 hours, so the ticket band is not one lone 3-day window:
 
 | Burn rate | Long window | Short window | Budget consumed | Severity |
 |---|---|---|---|---|
@@ -312,7 +312,7 @@ The short window in each pair (`5m`, `30m`) is what makes the alert resolve quic
 | 3x | 24h | 2h | 10% in 24h | Ticket |
 | 1x | 72h | 6h | 10% in 3 days | Ticket |
 
-The two fast tiers page; the two slow tiers open tickets. The window lengths are chosen so each tier's "budget consumed" is a meaningful, actionable fraction — you never want to page on a burn so small the budget is fine, nor wait so long that the budget is gone before you notice.
+The two fast tiers page; the two slow tiers open tickets. The example rules elsewhere in this file route 6x to a ticket rather than a page, which is a common local softening of the Workbook's recommendation — pick one and apply it consistently. The window lengths are chosen so each tier's "budget consumed" is a meaningful, actionable fraction — you never want to page on a burn so small the budget is fine, nor wait so long that the budget is gone before you notice.
 
 **Deriving budget remaining in PromQL.** Beyond alerting, teams render the remaining budget as a gauge. Over a 28-day window with SLO 99.9%:
 
@@ -558,7 +558,7 @@ groups:
         labels: {severity: page}
 ```
 
-The fix introduces SLI recording rules at four windows and replaces the single alert with a multi-window multi-burn-rate pair. The fast-burn alert pages only when the 1h burn rate hits 14.4x (consuming 2% of the 28-day budget in an hour) AND the 5m short window agrees; the slow-burn alert opens a ticket at 6x over 6h confirmed by 30m:
+The fix introduces SLI recording rules at four windows and replaces the single alert with a multi-window multi-burn-rate pair. The fast-burn alert pages only when the 1h burn rate hits 14.4x (consuming `14.4 × 1/672 = 2.1%` of the 28-day budget in an hour) AND the 5m short window agrees; the slow-burn alert opens a ticket at 6x over 6h confirmed by 30m:
 
 ```yaml
 # FIX: SLI recorded at 5m/30m/1h/6h, then multi-window multi-burn alerts.
@@ -580,14 +580,14 @@ groups:
 
   - name: checkout_burn_alerts
     rules:
-      - alert: CheckoutFastBurn      # 2% of 28d budget in 1h -> page
+      - alert: CheckoutFastBurn      # 2.1% of 28d budget in 1h -> page
         expr: |
           slo:sli_error:ratio_rate1h > (14.4 * 0.001)
           and
           slo:sli_error:ratio_rate5m > (14.4 * 0.001)
         for: 2m
         labels: {severity: page}
-      - alert: CheckoutSlowBurn      # 5% of 28d budget in 6h -> ticket
+      - alert: CheckoutSlowBurn      # 5.4% of 28d budget in 6h -> ticket
         expr: |
           slo:sli_error:ratio_rate6h > (6 * 0.001)
           and

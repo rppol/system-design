@@ -27,7 +27,7 @@ The whole point is to never let a Pod land on a node whose GPUs aren't ready, ne
 
 > A GPU node is a **fighter jet on an aircraft carrier**. It can't just taxi off and fly the moment it's on deck — there's a pre-flight checklist (driver, toolkit, device plugin, health checks) that *must* complete, and the deck crew (taints) physically blocks the runway until the green light. When it's damaged (a failing GPU) or low on fuel (Spot reclaim), there's a strict procedure to recover the pilot (checkpoint), clear the deck (drain), and push the wreck overboard (terminate) — never just abandon it mid-runway where it blocks everything.
 
-**Mental model:** A GPU node has a **readiness gate** that is the inverse of a normal node's. Normal nodes are "ready until proven broken." GPU nodes must be "broken (tainted) until proven ready" — the startup taint is removed only when the device plugin confirms GPUs are advertised. This flip prevents the single most common GPU-cluster bug: Pods scheduling onto a node 90 seconds before its driver finishes loading, then crash-looping with `CUDA driver not found`.
+**Mental model:** A GPU node has a **readiness gate** that is the inverse of a normal node's. Normal nodes are "ready until proven broken." GPU nodes must be "broken (tainted) until proven ready" — the startup taint is removed only when the device plugin confirms GPUs are advertised. This flip prevents the single most common GPU-cluster bug: Pods scheduling onto a node in the ~65-second gap between the kubelet reporting Ready and the driver finishing loading, then crash-looping with `CUDA driver not found`.
 
 **Why it matters:** Every second of lifecycle mishandling is money or lost work. An idle-but-billed node during a 2-minute bring-up, a training run wiped by an ungraceful Spot reclaim, a Pod CrashLooping on a not-ready node, a degraded GPU silently producing NaN gradients — each is a direct, quantifiable cost on hardware that runs $1–$5/hour per GPU.
 
@@ -37,7 +37,7 @@ The whole point is to never let a Pod land on a node whose GPUs aren't ready, ne
 
 ## 3. Core Principles
 
-1. **Taint until ready, untaint on GPU advertisement.** A startup taint (`node.cilium.io/agent-not-ready` style, or NVIDIA's `nvidia.com/gpu.deploy.*` gating) blocks workload Pods until the device plugin reports `nvidia.com/gpu > 0`.
+1. **Taint until ready, untaint on GPU advertisement.** A startup taint applied at bootstrap (Karpenter's `startupTaints`, in the `node.cilium.io/agent-not-ready` style) blocks workload Pods until something confirms the device plugin reports `nvidia.com/gpu > 0` and clears the taint. Do not confuse this with the GPU Operator's `nvidia.com/gpu.deploy.*` keys — those are node *labels* that sequence the operator's own DaemonSets, not taints that gate your workloads.
 2. **The driver must match the CUDA runtime.** A container's CUDA version cannot exceed the node driver's supported version, or every GPU op fails. Pin driver versions; gate AMI/node-image upgrades on a GPU smoke test.
 3. **Health is DCGM-defined, not kubelet-defined.** The kubelet says "Ready" once it registers, but a GPU can have uncorrectable ECC errors or have "fallen off the bus" (XID 79) while the node is kubelet-Ready. GPU health needs DCGM signals.
 4. **Every disruption is a checkpoint opportunity.** Spot 2-minute warnings and planned drains must trigger a final checkpoint for training workloads before the node dies.
@@ -79,7 +79,7 @@ stateDiagram-v2
 
 ## 5. Architecture Diagrams
 
-Bring-up sequence (why a fresh node shows `nvidia.com/gpu: 0` for ~90s):
+Bring-up sequence (why a fresh node shows `nvidia.com/gpu: 0` for its first ~70 seconds, and is billed for ~110s before it can take work):
 
 ```mermaid
 sequenceDiagram
@@ -94,7 +94,7 @@ sequenceDiagram
     E-->>N: instance boots
     Note over N: t=40s — kubelet registers<br/>NotReady, startup taint applied
     N->>G: DaemonSets scheduled
-    Note over G: t=45s — driver-daemonset installs NVIDIA 550.x, ~30-60s<br/>container-toolkit configures containerd<br/>device-plugin waits for driver, enumerates 8 GPUs<br/>dcgm-exporter starts scraping health<br/>mig-manager partitions if labeled
+    Note over G: t=45s — driver-daemonset installs the pinned driver branch, ~30-60s<br/>container-toolkit configures containerd<br/>device-plugin waits for driver, enumerates 8 GPUs<br/>dcgm-exporter starts scraping health<br/>mig-manager partitions if labeled
     G-->>N: device-plugin advertises nvidia.com/gpu: 8
     Note over N: t=110s
     N-->>N: startup taint removed
@@ -143,7 +143,7 @@ metadata: { name: gpu-training }
 spec:
   template:
     spec:
-      startupTaints:                       # removed automatically once the node is fully ready
+      startupTaints:                       # cleared by a tolerating DaemonSet/controller once GPUs are advertised
         - key: nvidia.com/gpu-not-ready
           effect: NoSchedule
       taints:                              # permanent: only GPU Pods (with toleration) ever land
@@ -151,7 +151,7 @@ spec:
           effect: NoSchedule
 ```
 
-The GPU Operator's `gpu-feature-discovery` and validator pods only label/untaint the node after the driver validation pod exits 0 and the device plugin advertises capacity. Verify:
+Karpenter applies startup taints and expects a component that tolerates them to remove them — it does not clear them on a timer. The GPU Operator's `gpu-feature-discovery` and validator pods are what establish the "ready" signal, labelling the node only after the driver validation pod exits 0 and the device plugin advertises capacity; wire the taint removal to that signal (a small controller, or the operator's own taint management if you enable it) rather than assuming it happens by itself. Verify:
 
 ```bash
 kubectl get node ip-10-0-1-42 -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'
@@ -173,13 +173,13 @@ quadrantChart
     quadrant-4 Silent trap, fence now
     Freshly bonded node: [0.85, 0.88]
     XID 79 fault: [0.82, 0.15]
-    Mid bring up node: [0.3, 0.5]
+    Mid bring up node: [0.3, 0.35]
 ```
 *Kubelet readiness and DCGM health are independent axes — the bottom-right quadrant (Ready but unhealthy) is exactly Pitfall 4: a node that passes Kubernetes' checks while a GPU silently degrades.*
 
 DCGM exports health signals to Prometheus; an alert + a remediation controller cordons unhealthy nodes:
 
-```promql
+```yaml
 # Uncorrectable ECC errors climbing -> the GPU memory is degrading
 - alert: GpuEccErrors
   expr: increase(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL[10m]) > 0
@@ -259,8 +259,9 @@ Karpenter's interruption handling (it watches an SQS queue fed by EventBridge Sp
 # Serving nodes: PodDisruptionBudget ensures drain never drops below min replicas
 kubectl drain ip-10-0-1-42 --ignore-daemonsets --delete-emptydir-data \
   --grace-period=120 --timeout=300s
-# Honors PDBs (kubectl drain blocks if eviction would violate a PDB),
-# gives Pods their terminationGracePeriod to checkpoint/flush.
+# Honors PDBs (kubectl drain blocks if eviction would violate a PDB).
+# NOTE: --grace-period OVERRIDES each Pod's own terminationGracePeriodSeconds,
+# so pick a value at least as long as your slowest checkpoint, not shorter.
 ```
 
 ```yaml
@@ -304,7 +305,7 @@ spec:
 | Pricing | On-Demand (stable) | Spot (~70% cheaper) | Spot for checkpointable training; On-Demand for serving SLAs |
 | Health fencing | Manual runbook | Automated controller | Automate at scale; manual is fine for a handful of nodes |
 | Checkpoint frequency | Frequent (every few min) | Infrequent (hourly) | Frequent bounds Spot loss; infrequent saves I/O — bound to your tolerance |
-| Drain timeout | Long (let it checkpoint) | Short (fail fast) | Long enough to checkpoint, under the Spot window (~110s) |
+| Drain timeout | Long (let it checkpoint) | Short (fail fast) | Long enough to checkpoint, comfortably inside the ~120s Spot window (110s is a common setting) |
 
 | Warm pool | Cold provisioning |
 |-----------|-------------------|
@@ -334,9 +335,13 @@ spec:
 **Pitfall 1: No readiness gating → Pods crash-loop on a not-ready node.**
 
 ```yaml
-# BROKEN: GPU NodePool with no startup taint. The kubelet registers Ready at t=45s,
-# but the driver isn't loaded until t=110s. The scheduler binds the pending Pod at t=46s;
-# it starts and immediately fails: "CUDA driver version is insufficient" -> CrashLoopBackOff.
+# BROKEN: GPU NodePool with no startup taint. Between kubelet registration (t=45s)
+# and full GPU readiness (t=110s) the node accepts anything that tolerates the
+# permanent taint. A Pod that does NOT request nvidia.com/gpu — it shells out to the
+# driver, or mounts it by hostPath — binds at t=46s and fails immediately with
+# "CUDA driver version is insufficient". And because the device plugin can advertise
+# capacity a moment before the container toolkit finishes wiring /dev/nvidia*, even a
+# GPU-requesting Pod can land in that gap -> CrashLoopBackOff.
 spec:
   template:
     spec:
@@ -362,7 +367,7 @@ The broken version wastes the bring-up window in crash loops and can mark a job 
 
 **Pitfall 4: Treating kubelet-Ready as GPU-healthy.** A node is kubelet-Ready while a GPU silently produces ECC errors or NaN results. Without DCGM-based health checks, you schedule training onto a degrading card and get corrupted models. Fence on DCGM signals, not just node status.
 
-**Pitfall 5: Idle GPU nodes never scale down.** A misconfigured consolidation policy (or none) leaves emptied GPU nodes running for hours at $3+/hr each. Set `consolidationPolicy: WhenEmpty` + a short `consolidateAfter`, with a hard `limits` cap as a backstop.
+**Pitfall 5: Idle GPU nodes never scale down.** A misconfigured consolidation policy (or none) leaves emptied GPU nodes running for hours — at roughly $3/hr per idle A100, an 8-GPU node burns $30+/hr doing nothing. Set `consolidationPolicy: WhenEmpty` + a short `consolidateAfter`, with a hard `limits` cap as a backstop.
 
 **Pitfall 6: Driver/AMI upgrade without a smoke test.** Bumping the node image to a driver that the workload's CUDA version doesn't support breaks every GPU Pod fleet-wide. Pin driver versions and gate node-image rollouts on a one-Pod GPU smoke test before fleet-wide rollout.
 

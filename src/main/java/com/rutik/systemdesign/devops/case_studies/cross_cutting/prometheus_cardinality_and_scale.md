@@ -36,7 +36,7 @@ This file is the shared reference for cardinality budgeting, measurement, mitiga
 
 3. **Memory is proportional to active series, not samples.** Retention and scrape interval affect disk and ingest rate; cardinality affects RAM. Roughly 1-3 KB head memory per active series. 1M series ≈ 1-3 GB; 10M series ≈ 10-30 GB and instability.
 
-4. **Histograms multiply by bucket count.** A histogram with 12 buckets and 3 other labels at 50 combined combinations produces 50 × (12 + 2) = 700 series (`_bucket` per boundary + `_sum` + `_count`). High-cardinality labels on histograms are the fastest path to explosion.
+4. **Histograms multiply by bucket count.** A histogram with 11 explicit bucket boundaries and 3 other labels at 50 combined combinations produces 50 × (11 + 1 + 2) = 700 series — one `_bucket` series per boundary, one more for the always-emitted `le="+Inf"` bucket, plus `_sum` and `_count`. High-cardinality labels on histograms are the fastest path to explosion.
 
 5. **Measure before you scale.** `count({__name__=~".+"})` gives total series; `topk(20, count by (__name__)({__name__=~".+"}))` finds the worst offenders. Never guess.
 
@@ -268,8 +268,8 @@ A Prometheus scrape returns text-format exposition. Each unique line is parsed i
 - **Persisted blocks** — every 2 hours the head is flushed to an immutable on-disk block (`chunks/`, `index`, `meta.json`). Default `--storage.tsdb.min-block-duration=2h`.
 
 Default operational numbers worth memorizing:
-- Scrape interval default: **15s** (`global.scrape_interval`).
-- Block duration: **2h** head, compacted up to 31d max-block-duration.
+- Scrape interval default: **1m** (`global.scrape_interval`) — 15s is a near-universal convention, not the built-in default.
+- Block duration: **2h** head, then compacted up to `--storage.tsdb.max-block-duration`, which defaults to 10% of the retention time and is capped at 31d.
 - Retention: **15d** default (`--storage.tsdb.retention.time=15d`).
 - Memory per active series: **~1-3 KB** resident in the head.
 
@@ -313,7 +313,7 @@ scrape_configs:
 **Normalizing a path label in app instrumentation (Go):**
 
 ```go
-// BROKEN normalization happens in the app, before the metric is recorded.
+// Normalization happens in the app, before the metric is recorded.
 var reqDuration = prometheus.NewHistogramVec(
     prometheus.HistogramOpts{
         Name:    "http_request_duration_seconds",
@@ -368,7 +368,7 @@ When `sample_limit` is exceeded, the entire scrape is dropped and `up{job="api"}
 
 **Why high cardinality slows queries.** A PromQL query first resolves label matchers against the inverted index to get a postings list of matching series IDs, then reads and decompresses chunks for each. A query like `sum(rate(http_requests_total[5m]))` over 4M matching series must touch 4M postings entries and decompress 4M chunk sets per evaluation step. Query latency is roughly linear in matched series, so a metric at 4M series turns a sub-second query into a multi-second one, and a dashboard with 12 such panels refreshing every 15s can saturate the query engine and starve rule evaluation.
 
-**Native histograms (Prometheus 2.40+).** Classic histograms store one series per bucket boundary, so 11 buckets means 11 `_bucket` series per label combination. Native (sparse) histograms store the entire distribution in a single series with dynamically-sized exponential buckets, collapsing the bucket fanout from 11+ series to effectively 1. For a metric with 200 label combinations, this is 200 series instead of 200 × 13 = 2,600 — a ~13x reduction. They are the strategic fix for histogram cardinality where buckets, not the other labels, are the dominant multiplier.
+**Native histograms (stable since Prometheus 3.8; opt-in until 4.0).** Classic histograms store one series per bucket boundary plus the `+Inf` bucket, so the 11-boundary client default means 12 `_bucket` series per label combination, and 14 series once `_sum` and `_count` are counted. Native (sparse) histograms store the entire distribution in a single series with dynamically-sized exponential buckets, collapsing the bucket fanout to effectively 1 series. For a metric with 200 label combinations, this is 200 series instead of 200 × 14 = 2,800 — a ~14x reduction. They are the strategic fix for histogram cardinality where buckets, not the other labels, are the dominant multiplier.
 
 ---
 
@@ -382,7 +382,7 @@ When `sample_limit` is exceeded, the entire scrape is dropped and `up{job="api"}
 
 - **Uber's M3** was created because Prometheus single-node TSDB could not hold Uber's metric volume; M3DB is a purpose-built distributed TSDB ingesting billions of series.
 
-- **A common SaaS postmortem pattern**: a developer adds `customer_email` to a histogram for "easier debugging." With 200k customers and a 12-bucket histogram, that single change adds 200k × 14 = 2.8M series. The Prometheus head doubles, hits the memory limit, OOM-kills, loses 2 hours of unpersisted head data, and alerting goes blind during the recovery.
+- **A common SaaS postmortem pattern**: a developer adds `customer_email` to a histogram for "easier debugging." With 200k customers and a default 11-boundary histogram (12 `_bucket` series + `_sum` + `_count` = 14), that single change adds 200k × 14 = 2.8M series. The Prometheus head doubles, hits the memory limit, OOM-kills, loses 2 hours of unpersisted head data, and alerting goes blind during the recovery.
 
 - **Kubernetes `kube-state-metrics` + cAdvisor at scale**: a 500-node cluster running 15,000 pods generates millions of series purely from per-pod, per-container labels (`pod`, `container`, `namespace`, `uid`). Teams routinely drop the `id` and `name` cAdvisor labels and the `uid` label via `metric_relabel_configs` to cut this in half, because those labels are unbounded per-container identifiers rarely used in queries.
 
@@ -401,7 +401,7 @@ When `sample_limit` is exceeded, the entire scrape is dropped and `up{job="api"}
 | remote_write to Mimir/Thanos | Horizontal, long retention, dedup | Operational complexity, object storage cost | >5M series or >30d retention |
 | Thanos sidecar + Store | Reuses object storage; downsampling 5m/1h | Query fan-out latency; eventual block upload | Long-term, multi-cluster global query |
 | Histograms | Quantiles + aggregatable | Bucket × label fanout | Latency SLIs with bounded labels |
-| Native histograms (sparse) | Far fewer series than classic buckets | Newer; tooling maturing | Prometheus 2.40+ with high bucket counts |
+| Native histograms (sparse) | Far fewer series than classic buckets | Must be enabled explicitly before 4.0; tooling still maturing | Prometheus 3.8+ with high bucket counts |
 
 ---
 
@@ -437,8 +437,8 @@ When `sample_limit` is exceeded, the entire scrape is dropped and `up{job="api"}
 1. **High-cardinality label on a histogram.** The classic explosion. Buckets multiply every other dimension.
 
 ```go
-// BROKEN: user_id on a 11-bucket histogram. With 1,000,000 users this is
-// 1,000,000 × (11 buckets + _sum + _count) = 13,000,000 series.
+// BROKEN: user_id on the default 11-boundary histogram. With 1,000,000 users
+// this is 1,000,000 × (11 buckets + +Inf + _sum + _count) = 14,000,000 series.
 var d = prometheus.NewHistogramVec(
     prometheus.HistogramOpts{Name: "req_seconds", Buckets: prometheus.DefBuckets},
     []string{"user_id"},
@@ -449,7 +449,7 @@ func obs(uid string, s float64) { d.WithLabelValues(uid).Observe(s) }
 // instead (sampled pointer, not a series). user_id stays in logs/traces.
 var d2 = prometheus.NewHistogramVec(
     prometheus.HistogramOpts{Name: "req_seconds", Buckets: prometheus.DefBuckets},
-    []string{"route", "status_class"}, // ~40 × 5 = 200 combos × 13 = 2,600 series
+    []string{"route", "status_class"}, // ~40 × 5 = 200 combos × 14 = 2,800 series
 )
 func obs2(route, statusClass, traceID string, s float64) {
     d2.WithLabelValues(route, statusClass).(prometheus.ExemplarObserver).
@@ -465,7 +465,7 @@ func obs2(route, statusClass, traceID string, s float64) {
 
 5. **No `sample_limit`.** Without a circuit breaker, one bad deploy ships 10M series and OOM-kills the server, losing the unpersisted head and blinding alerting during the incident.
 
-6. **Forgetting `_bucket`/`_sum`/`_count` triple.** Every histogram series count is `(buckets + 2) × other-label-combinations`. Easy to underestimate by 14x.
+6. **Forgetting the `+Inf` bucket and the `_sum`/`_count` pair.** Every histogram series count is `(explicit_boundaries + 3) × other-label-combinations` — the `le="+Inf"` bucket is always emitted and is the one people forget. Easy to underestimate by 14x at the default 11 boundaries.
 
 ---
 
@@ -473,10 +473,10 @@ func obs2(route, statusClass, traceID string, s float64) {
 
 | Tool | Role | Scale ceiling | Storage model | Notes |
 |---|---|---|---|---|
-| Prometheus (single) | Scrape + local TSDB | ~3-5M active series | Local disk, 2h blocks | 15s scrape, 15d retention default |
+| Prometheus (single) | Scrape + local TSDB | ~3-5M active series | Local disk, 2h blocks | 1m scrape interval and 15d retention by default |
 | Thanos | LT storage + global query | Effectively unbounded | Object storage (S3/GCS) | Sidecar, Store, Querier, Compactor; 5m/1h downsampling |
-| Grafana Mimir | Horizontal LT storage | 1B+ series clusters | Object storage + ingesters | Tenant sharding; Cortex successor |
-| Cortex | Horizontal multi-tenant | Very high | Object storage | Mimir forked from it |
+| Grafana Mimir | Horizontal LT storage | 1B+ series clusters | Object storage + ingesters | Tenant sharding; AGPL-licensed fork of Cortex |
+| Cortex | Horizontal multi-tenant | Very high | Object storage | Apache-2.0 CNCF project, still actively developed; Mimir forked from it |
 | VictoriaMetrics | High-perf TSDB / remote_write | Very high per node | Local + clustered | Lower RAM/series than Prometheus |
 | M3DB (Uber) | Distributed TSDB | Billions | Distributed cluster | Purpose-built for Uber scale |
 
@@ -490,7 +490,7 @@ Diagnostic tooling: `promtool tsdb analyze` (per-block cardinality report), the 
 A time series is a stream of timestamped samples identified by its metric name plus its complete set of label key-value pairs. Two series are distinct if they differ in the metric name or in any single label value — `m{a="1"}` and `m{a="2"}` are two separate, independently-stored series. Internally each is a 64-bit fingerprint of the sorted label set, indexed in the head block. This is why adding label values multiplies, not adds, to your series count.
 
 **Q: How do you calculate the cardinality of a metric?**
-Multiply the cardinalities of each label's value set together. A metric with `method` (5), `status` (8), and `handler` (40) has 5 × 8 × 40 = 1,600 series. For a histogram, also multiply by `(bucket_count + 2)` to account for `_bucket` per boundary plus `_sum` and `_count`. The danger is that one unbounded label turns this finite product into something proportional to traffic or customer count.
+Multiply the cardinalities of each label's value set together. A metric with `method` (5), `status` (8), and `handler` (40) has 5 × 8 × 40 = 1,600 series. For a histogram, also multiply by `(explicit_boundaries + 3)` to account for one `_bucket` series per boundary, the always-emitted `le="+Inf"` bucket, and `_sum` plus `_count`. The danger is that one unbounded label turns this finite product into something proportional to traffic or customer count.
 
 **Q: Why is putting `user_id` on a label catastrophic?**
 Because `user_id` is unbounded — it grows with your customer base and never plateaus, so series count grows linearly with users. With 1M users, a metric gains 1M× its base cardinality, and a histogram gains 14M+ series. Each series costs ~1-3 KB of head RAM, so you add gigabytes and eventually OOM the server. Identifiers belong in logs, traces, or exemplars, never in labels.
@@ -502,7 +502,7 @@ Roughly 1-3 KB of resident memory in the head block — covering the open chunk 
 Run `count({__name__=~".+"})` for the total series count, and `topk(20, count by (__name__)({__name__=~".+"}))` to find the worst metrics. To pinpoint the offending label, use `count(count by (suspect_label) (metric_name))`. The `/tsdb-status` page and `promtool tsdb analyze` on a block give the same breakdown offline. Always measure before scaling — guessing at cardinality is how you scale out a bug.
 
 **Q: Why are histograms more expensive than counters or gauges?**
-A histogram with B buckets produces B+2 series per label combination (one `_bucket` series per boundary, plus `_sum` and `_count`). So a histogram multiplies the cost of every other label by ~14 for the default 11-bucket layout. A counter with the same labels is one series per combination. This is why a high-cardinality label is far more dangerous on a histogram than on a counter — the explosion is amplified 14x.
+A histogram with B explicit boundaries produces B+3 series per label combination: one `_bucket` series per boundary, one more for the `le="+Inf"` bucket that is always emitted, plus `_sum` and `_count`. So a histogram multiplies the cost of every other label by 14 for the default 11-boundary layout. A counter with the same labels is one series per combination. This is why a high-cardinality label is far more dangerous on a histogram than on a counter — the explosion is amplified 14x.
 
 **Q: What is the difference between `metric_relabel_configs` and `relabel_configs`?**
 `relabel_configs` runs before the scrape, on the target's discovered label set, deciding which targets to scrape and how to label them. `metric_relabel_configs` runs after the scrape, on each individual sample, deciding which series to keep and which labels to drop. To kill a high-cardinality label or a runaway metric you use `metric_relabel_configs` with `labeldrop` or `drop`, because that removes the cost before the data ever enters the TSDB.
@@ -559,13 +559,14 @@ First confirm and locate the offender with `topk(20, count by (__name__)(...))` 
 
 **Scenario**: A payments platform runs a single Prometheus scraping 120 API pods at 15s intervals, sitting comfortably at 900k active series and 6 GB RAM. A new feature ships a latency histogram intended to help debug slow checkout. Within 8 minutes Prometheus RAM climbs from 6 GB to 22 GB, hits the cgroup limit, gets OOM-killed, loses ~90 minutes of unpersisted head data, and on restart immediately starts climbing again. Alerting is blind during the incident and a real downstream outage goes unnoticed for 11 minutes.
 
-Investigation with `topk(10, count by (__name__)({__name__=~".+"}))` shows `checkout_latency_seconds_bucket` at 9.8M series. Drilling in with `count(count by (merchant_id) (checkout_latency_seconds_count))` reveals 70,000 distinct `merchant_id` values on an 11-bucket histogram: 70,000 × (11 + 2) = 910,000 base, further multiplied by `region` (8) and `method` (2) → ~14.6M potential series.
+Investigation with `topk(10, count by (__name__)({__name__=~".+"}))` shows `checkout_latency_seconds_bucket` at 9.8M series. Drilling in with `count(count by (merchant_id) (checkout_latency_seconds_count))` reveals 70,000 distinct `merchant_id` values on a default 11-boundary histogram: 70,000 × (11 + 1 + 2) = 980,000 base, further multiplied by `region` (8) and `method` (2) → ~15.7M potential series.
 
 The instrumentation looked like this:
 
 ```go
-// BROKEN: merchant_id is unbounded (70k merchants) on an 11-bucket histogram,
-// multiplied by region and method. ~14.6M series; OOMs a 16 GB Prometheus.
+// BROKEN: merchant_id is unbounded (70k merchants) on the default 11-boundary
+// histogram, multiplied by region and method. ~15.7M series; OOMs a 22 GB
+// Prometheus.
 var checkoutLatency = prometheus.NewHistogramVec(
     prometheus.HistogramOpts{
         Name:    "checkout_latency_seconds",
@@ -583,7 +584,7 @@ The fix removes the unbounded identifier from the label set, keeps only bounded 
 
 ```go
 // FIX: bounded labels only (region 8 × method 2 × merchant_tier 3 = 48 combos
-// × 13 = 624 series). merchant_id/trace_id move to exemplars.
+// × 14 = 672 series). merchant_id/trace_id move to exemplars.
 var checkoutLatency = prometheus.NewHistogramVec(
     prometheus.HistogramOpts{
         Name:    "checkout_latency_seconds",
@@ -603,6 +604,6 @@ func record(region, method, tier, merchantID, traceID string, sec float64) {
 }
 ```
 
-A `sample_limit: 200000` was added to the scrape config as a circuit breaker, plus an alert on `rate(prometheus_tsdb_head_series_created_total[5m]) > 5000` to catch future churn spikes. A `promtool tsdb analyze` check was added to CI asserting no metric exceeds 50k series. Post-fix, `checkout_latency_seconds_bucket` sits at 624 series, total server cardinality returns to ~900k, RAM stabilizes at 6 GB, and engineers still jump from a slow-bucket exemplar straight to the offending merchant's trace.
+A `sample_limit: 200000` was added to the scrape config as a circuit breaker, plus an alert on `rate(prometheus_tsdb_head_series_created_total[5m]) > 5000` to catch future churn spikes. A `promtool tsdb analyze` check was added to CI asserting no metric exceeds 50k series. Post-fix, the whole `checkout_latency_seconds` family sits at 672 series (576 of them `_bucket`), total server cardinality returns to ~900k, RAM stabilizes at 6 GB, and engineers still jump from a slow-bucket exemplar straight to the offending merchant's trace.
 
 **Lesson**: The instinct was to scale out to Thanos to "handle the load." The real fix was a single label removed at instrumentation time. Always diagnose cardinality before scaling — scaling out a cardinality bug just makes it more expensive to crash. See [observability_metrics_prometheus](../../observability_metrics_prometheus/observability_metrics_prometheus.md) for the broader metrics pipeline context.

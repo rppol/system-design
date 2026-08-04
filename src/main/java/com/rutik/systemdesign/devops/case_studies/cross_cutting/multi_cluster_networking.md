@@ -167,12 +167,14 @@ spec:
 
 ```bash
 # Route53 latency record per region, each with a health check on its ingress.
-# Failover is TTL-bound: TTL=30 → clients re-resolve within ~30s of a region drop.
+# An ALIAS record must NOT carry a TTL — Route53 rejects the change batch if it
+# does, and instead serves the target's own TTL (60s for an ELB alias). Failover
+# is therefore bounded by health-check detection (~30s) plus that 60s TTL.
 aws route53 change-resource-record-sets --hosted-zone-id Z123 --change-batch '{
   "Changes": [{
     "Action": "UPSERT",
     "ResourceRecordSet": {
-      "Name": "api.streamly.com", "Type": "A", "TTL": 30,
+      "Name": "api.streamly.com", "Type": "A",
       "SetIdentifier": "us-east-1",
       "Region": "us-east-1",
       "HealthCheckId": "hc-use1",
@@ -245,7 +247,7 @@ End-to-end: a user hits the global LB → lands in the nearest region's cluster 
 
 - **Cilium Cluster Mesh at scale** — used by large platform teams (e.g. clouds and SaaS running Cilium as CNI) to connect dozens of clusters with global Services and identity-aware network policy at the eBPF layer, avoiding a sidecar per pod.
 - **Istio multi-primary** — the documented HA pattern: each cluster runs its own Istiod so no single control plane is a cross-region SPOF; east-west gateways bridge clusters and endpoints are discovered cross-cluster. Common in financial and retail platforms needing regional resilience.
-- **Google Anthos / GKE fleets** — productized multi-cluster Services and config management across a fleet, implementing the MCS API for `ServiceExport`/`ServiceImport`-style discovery across GKE clusters and on-prem.
+- **Google GKE Enterprise fleets** — productized multi-cluster Services and config management across a fleet, implementing the MCS API for `ServiceExport`/`ServiceImport`-style discovery across GKE clusters and on-prem.
 - **AWS EKS + Route53 + Transit Gateway** — regional EKS clusters peered via Transit Gateway with non-overlapping VPC/pod CIDRs, fronted by Route53 latency routing and health checks for regional failover; inter-region data transfer billed at ~$0.02/GB.
 - **Submariner (Red Hat / OpenShift)** — connects on-prem and cloud clusters with flat L3 via IPsec/WireGuard tunnels and a Lighthouse component for cross-cluster DNS discovery, used where a full mesh is overkill but pod-to-pod routing is needed.
 
@@ -266,7 +268,7 @@ End-to-end: a user hits the global LB → lands in the nearest region's cluster 
 | Approach | Control-plane SPOF | Sidecar overhead | L7 features | Setup effort |
 |---|---|---|---|---|
 | Cilium Cluster Mesh | No (per-cluster CNI) | None (eBPF) | L3/L4 + some L7 | Medium |
-| Istio multi-primary | No (Istiod per cluster) | Yes (sidecar/ambient) | Full L7 | High |
+| Istio multi-primary | No (Istiod per cluster) | Sidecar per pod, or none in ambient mode (per-node ztunnel) | Full L7 | High |
 | Istio primary-remote | Yes (primary) | Yes | Full L7 | Medium |
 | Submariner | No | None | L3 only | Medium |
 
@@ -358,13 +360,13 @@ stateDiagram-v2
 | **Submariner** | L3 | Lighthouse DNS | Add-on | Flat pod-to-pod via IPsec/WireGuard |
 | **MCS API** | K8s standard | `ServiceExport`/`ServiceImport` | Implementation-dependent | Vendor-neutral discovery contract |
 | **Route53 / GCLB** | Global DNS LB | N/A (steers users) | N/A | Latency/geo routing + health-check failover |
-| **Linkerd multicluster** | L7 mesh | Mirrored Services + gateway | Yes | Lightweight; gateway-based cross-cluster |
+| **Linkerd multicluster** | L7 mesh | Mirrored Services | Yes | Lightweight; gateway mode, or direct pod-to-pod on a flat network |
 
 Comparison of global-LB strategies:
 
 | Strategy | Failover speed | Granularity | Caveat |
 |---|---|---|---|
-| Route53 latency + health check | TTL-bound (30-60s typical) | Per-region | DNS caching delays failover |
+| Route53 latency + health check | Health-check detection + TTL (60-120s typical) | Per-region | DNS caching delays failover |
 | GCLB (anycast Global LB) | Near-instant | Per-backend | GCP-specific |
 | Anycast (BGP) | Near-instant | Per-PoP | Requires network/BGP control |
 
@@ -379,7 +381,7 @@ Single clusters hit practical ceilings (~5000 nodes, ~110 pods/node, ~150k pods)
 If two clusters use overlapping pod CIDRs (e.g. both `10.0.0.0/16`), a pod IP is ambiguous and packets cannot be routed between clusters. The clean fix is allocating globally-unique, non-overlapping ranges per cluster *before* provisioning the CNI, since changing it later means redeploying networking. If re-IPing is impossible, you can add an egress-gateway/NAT translation layer, but that adds latency and complexity.
 
 **Q: Compare Cilium Cluster Mesh and Istio multi-primary for cross-cluster connectivity.**
-Cilium Cluster Mesh works at the eBPF/CNI layer with no sidecar, giving low-overhead L3/L4 cross-cluster routing and identity-aware policy; Istio multi-primary works at L7 with a full Istiod per cluster and east-west gateways, giving rich traffic management and observability at the cost of sidecar (or ambient) overhead. Both avoid a control-plane SPOF. Choose Cilium for raw connectivity and policy efficiency, Istio when you need L7 routing, retries, and fine-grained traffic shifting.
+Cilium Cluster Mesh works at the eBPF/CNI layer with no sidecar, giving low-overhead L3/L4 cross-cluster routing and identity-aware policy; Istio multi-primary works at L7 with a full Istiod per cluster and east-west gateways, giving rich traffic management and observability at the cost of a sidecar per pod — or, in ambient mode, a per-node ztunnel plus optional waypoint proxies. Both avoid a control-plane SPOF. Choose Cilium for raw connectivity and policy efficiency, Istio when you need L7 routing, retries, and fine-grained traffic shifting.
 
 **Q: How does cross-cluster service discovery work with the MCS API?**
 You create a `ServiceExport` for a Service in its producing cluster, which makes it importable; consuming clusters get a `ServiceImport` and resolve `name.namespace.svc.clusterset.local` to endpoints aggregated across all exporting clusters. It is opt-in and namespaced, so Services are not globally visible by default. The mesh or CNI implementation backs the actual endpoint aggregation and routing.
@@ -438,7 +440,7 @@ Multi-primary runs a full Istiod control plane in every cluster, so each cluster
 
 ## 14. Case Study
 
-**Scenario.** "Streamly," a media platform, runs one large EKS cluster in us-east-1 that has grown to ~4200 nodes and is showing etcd write latency spikes and slow API-server responses during deploys. They also want EU users (currently ~140ms RTT to us-east-1) served locally. The plan: stand up a second cluster in eu-west-1, connect them with Cilium Cluster Mesh, export `payments` and `catalog` via MCS, front both with Route53 latency routing, and add locality-aware routing so EU traffic stays in EU. Targets: EU p50 latency from ~150ms to ~25ms; regional failover within ~60s; cross-region traffic limited to replication and failover only.
+**Scenario.** "Streamly," a media platform, runs one large EKS cluster in us-east-1 that has grown to ~4200 nodes and is showing etcd write latency spikes and slow API-server responses during deploys. They also want EU users (currently ~150ms p50 end-to-end against us-east-1, of which ~80ms is the transatlantic round trip) served locally. The plan: stand up a second cluster in eu-west-1, connect them with Cilium Cluster Mesh, export `payments` and `catalog` via MCS, front both with Route53 latency routing, and add locality-aware routing so EU traffic stays in EU. Targets: EU p50 latency from ~150ms to ~25ms; regional failover within ~2 minutes; cross-region traffic limited to replication and failover only.
 
 During the build, the second cluster is provisioned by copying the first cluster's Terraform, including its CNI config — and cross-cluster pod traffic silently fails after `cilium clustermesh connect` reports "connected."
 
@@ -465,6 +467,6 @@ cilium clustermesh status --wait     # expect both clusters, tunnels established
 # 10.10.0.0/16 ∩ 10.20.0.0/16 = ∅ ; cluster.id 1 ≠ 2 ; names distinct
 ```
 
-After fixing CIDRs and identities, they export Services and add locality routing so EU `payments` calls resolve to EU endpoints first, only spilling to us-east-1 if EU `payments` is unhealthy. Route53 latency records with health checks send EU users to eu-west-1 and fail the region over to us-east-1 on health-check failure (TTL set to 30s for ~60s failover).
+After fixing CIDRs and identities, they export Services and add locality routing so EU `payments` calls resolve to EU endpoints first, only spilling to us-east-1 if EU `payments` is unhealthy. Route53 latency records with health checks send EU users to eu-west-1 and fail the region over to us-east-1 on health-check failure (~30s to declare the health check failed, plus the ELB alias's 60s TTL before every resolver has moved).
 
-**Outcome.** EU p50 drops to ~24ms, the us-east-1 cluster is relieved by moving EU workloads out (node count falls below the etcd strain threshold), and cross-region traffic is now only DR replication plus rare failover — measured at under 3% of total bytes, keeping the ~$0.02/GB line item negligible. A game-day test killing eu-west-1 ingress shifts traffic to us-east-1 in ~50s. The recurring lesson: multi-cluster networking is an addressing-and-identity problem first — the mesh connected fine, but cloning a cluster's CIDR and cluster ID guaranteed unroutable traffic until the addresses and identities were made globally unique.
+**Outcome.** EU p50 drops to ~24ms, the us-east-1 cluster is relieved by moving EU workloads out (node count falls below the etcd strain threshold), and cross-region traffic is now only DR replication plus rare failover — measured at under 3% of total bytes, keeping the ~$0.02/GB line item negligible. A game-day test killing eu-west-1 ingress shifts the bulk of traffic to us-east-1 in ~85s — about 30s for Route53 to fail the health check plus the alias's 60s TTL for stragglers. The recurring lesson: multi-cluster networking is an addressing-and-identity problem first — the mesh connected fine, but cloning a cluster's CIDR and cluster ID guaranteed unroutable traffic until the addresses and identities were made globally unique.

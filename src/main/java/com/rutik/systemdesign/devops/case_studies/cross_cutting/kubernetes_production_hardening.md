@@ -193,12 +193,12 @@ flowchart LR
 ```mermaid
 xychart-beta
     title "Pods schedulable per node: max-pods default vs. ENI IP ceiling"
-    x-axis ["m5.large, no prefix delegation", "Larger instances, no prefix delegation", "kubelet --max-pods default"]
+    x-axis ["m5.large, no prefix delegation", "m5.xlarge, no prefix delegation", "kubelet --max-pods default"]
     y-axis "Pods per node" 0 --> 120
     bar [29, 58, 110]
 ```
 
-*The kubelet's configured ceiling of 110 pods/node is rarely the real limit on AWS: without prefix delegation, ENI IP capacity caps density at ~29 pods on an m5.large and up to ~58 on larger instance types, which is why pods stall in ContainerCreating long before the node looks full on CPU or memory.*
+*The kubelet's configured ceiling of 110 pods/node is rarely the real limit on AWS: without prefix delegation, ENI IP capacity caps density at 29 pods on an m5.large and 58 on an m5.xlarge — the formula is `ENIs × (IPv4 per ENI - 1) + 2`, so 3 × 9 + 2 and 4 × 14 + 2 — which is why pods stall in ContainerCreating long before the node looks full on CPU or memory.*
 
 ---
 
@@ -260,14 +260,14 @@ func main() {
     signal.Notify(stop, syscall.SIGTERM)
     <-stop // SIGTERM from kubelet
 
-    // Stop accepting new requests, drain in-flight up to 25s
-    ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+    // Stop accepting new requests, drain in-flight up to 20s
+    ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
     defer cancel()
     _ = srv.Shutdown(ctx) // returns when in-flight requests finish or ctx expires
 }
 ```
 
-The 25s drain budget sits inside the 30s `terminationGracePeriodSeconds` minus the 5s `preStop sleep`, leaving margin before SIGKILL.
+The grace period covers the preStop hook as well as SIGTERM handling, so the budget is `30s - 5s preStop = 25s`; a 20s drain leaves ~5s of margin before SIGKILL.
 
 **PodDisruptionBudget** caps voluntary evictions:
 
@@ -311,7 +311,7 @@ With 3 replicas across 3 zones and `maxSkew: 1`, the scheduler refuses to place 
 
 - **Spotify's Backstage-driven platform** enforces the `restricted` Pod Security Standard at the namespace level via the built-in Pod Security Admission, blocking pods that run as root or request privileged at admission time rather than after the fact.
 
-- **EKS at scale**: teams hitting the VPC-CNI IP ceiling enable prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) to raise per-node pod density toward the 110 default instead of being capped at ~29-58 IPs per ENI.
+- **EKS at scale**: teams hitting the VPC-CNI IP ceiling enable prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) to raise per-node pod density toward the 110 default instead of being capped at 29-58 pods per node.
 
 ---
 
@@ -422,9 +422,10 @@ spec:
 
 | Tool | Layer | What it enforces / detects | Notes |
 |------|-------|----------------------------|-------|
-| Pod Security Admission (built-in) | Security | baseline/restricted PSS at namespace label | Replaced PodSecurityPolicy (removed 1.25) |
-| Kyverno | Policy | Mutating/validating policies as CRDs (require limits, drop caps) | YAML-native, no Rego |
-| OPA Gatekeeper | Policy | ConstraintTemplates in Rego | More expressive, steeper curve |
+| Pod Security Admission (built-in) | Security | baseline/restricted PSS at namespace label | Namespace labels only; nothing to install or run |
+| `ValidatingAdmissionPolicy` / `MutatingAdmissionPolicy` (built-in) | Policy | CEL expressions evaluated in-process by the API server | Reach for this first: no webhook, no availability risk, no extra component. Validating stable in 1.30, mutating in 1.36 |
+| Kyverno | Policy | Mutating/validating policies as CRDs (require limits, drop caps) | YAML-native, no Rego; use when CEL can't express the rule or you need reports/generation |
+| OPA Gatekeeper | Policy | ConstraintTemplates in Rego | More expressive, steeper curve; Rego v1 syntax |
 | Goldilocks (VPA-backed) | Resources | Recommends right-sized requests/limits | Surfaces over/under-provisioning |
 | kube-bench | Security | CIS Kubernetes Benchmark checks | Node/control-plane hardening audit |
 | Polaris | Audit | Scores workloads on probes, limits, securityContext | CI gate or dashboard |
@@ -463,7 +464,7 @@ At t=0 the pod is marked Terminating; the endpoints controller asynchronously re
 Because endpoint removal is asynchronous and races with SIGTERM — load balancers and kube-proxy may still send new requests for a second or two after termination begins. The `sleep` delays SIGTERM so the pod keeps serving while endpoint removal propagates, eliminating the burst of connection-refused errors at the start of termination. It's a cheap, app-agnostic fix for the most common cause of deploy-time 5xx spikes.
 
 **Q: What are the three Pod Security Standards levels and what does `restricted` enforce?**
-The levels are privileged (unrestricted), baseline (blocks known escalations like hostNetwork, privileged, hostPath), and restricted (hardened). Restricted additionally requires `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, dropping ALL capabilities, seccomp `RuntimeDefault`, and a non-writable root filesystem posture. Enforce it via the namespace label `pod-security.kubernetes.io/enforce: restricted` so violating pods are rejected at admission.
+The levels are privileged (unrestricted), baseline (blocks known escalations like hostNetwork, privileged, hostPath), and restricted (hardened). Restricted additionally requires `runAsNonRoot: true`, `allowPrivilegeEscalation: false`, dropping ALL capabilities (only `NET_BIND_SERVICE` may be added back), a seccomp profile of `RuntimeDefault` or `Localhost`, and volumes restricted to a safe set (configMap, secret, emptyDir, PVC, projected, downwardAPI, ephemeral). It does not require `readOnlyRootFilesystem` — that is a separate hardening control you add yourself. Enforce it via the namespace label `pod-security.kubernetes.io/enforce: restricted` so violating pods are rejected at admission.
 
 **Q: How do you isolate tenants on a shared cluster?**
 Use three walls per namespace: a ResourceQuota caps total CPU/memory/object counts so one tenant can't exhaust the cluster, a LimitRange supplies default requests/limits and per-pod maximums so unbounded pods can't be created, and a default-deny NetworkPolicy blocks cross-namespace traffic until explicitly allowed. For untrusted or compliance-bound tenants, escalate to hard isolation with separate node pools or clusters because shared kernels are a residual risk.
@@ -475,7 +476,7 @@ It's a NetworkPolicy selecting all pods (`podSelector: {}`) with empty `ingress`
 It breaks apps that write to the container filesystem (logs, temp files, PID files) because the root filesystem becomes immutable. The correct fix is to mount writable `emptyDir` volumes at the specific paths the app needs (`/tmp`, cache dirs) rather than disabling the control, which preserves immutability everywhere else. This narrows the attacker's ability to drop binaries or tamper with the image at runtime.
 
 **Q: What is the 110 pods-per-node default and when does it actually bite you?**
-The kubelet's `--max-pods` defaults to 110, but the real ceiling is often lower due to networking: AWS VPC-CNI binds pod IPs to ENI capacity, so an instance might cap at ~29-58 IPs before prefix delegation. It bites when pods get stuck in ContainerCreating with "failed to assign an IP address" despite available CPU/memory. Enable VPC-CNI prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) or choose larger instances to reach the 110 default.
+The kubelet's `--max-pods` defaults to 110, but the real ceiling is often lower due to networking: AWS VPC-CNI binds pod IPs to ENI capacity, so an m5.large caps at 29 pods and an m5.xlarge at 58 before prefix delegation. It bites when pods get stuck in ContainerCreating with "failed to assign an IP address" despite available CPU/memory. Enable VPC-CNI prefix delegation (`ENABLE_PREFIX_DELEGATION=true`) or choose larger instances to reach the 110 default.
 
 **Q: How do topologySpreadConstraints differ from pod anti-affinity for HA?**
 topologySpreadConstraints declaratively bound skew across a topology domain (e.g., `maxSkew: 1` across zones), which scales cleanly as replicas grow and the scheduler optimizes placement. Pod anti-affinity is a harder constraint expressed pairwise that can become unsatisfiable and leave pods Pending as replica count rises. Prefer topologySpreadConstraints with `whenUnsatisfiable: DoNotSchedule` for zone HA, falling back to `ScheduleAnyway` only when capacity is scarce.
@@ -491,7 +492,7 @@ topologySpreadConstraints declaratively bound skew across a topology domain (e.g
 5. **Spread across zones** with topologySpreadConstraints `maxSkew: 1`, `DoNotSchedule` for critical services.
 6. **Handle SIGTERM in code + add `preStop: sleep 5`**, keep drain budget under `terminationGracePeriodSeconds`.
 7. **Default-deny NetworkPolicy per namespace**, then allow explicitly.
-8. **Enforce PSS `restricted`** via namespace labels; back it with Kyverno/Gatekeeper for the rules PSS doesn't cover (e.g., "must set resource limits").
+8. **Enforce PSS `restricted`** via namespace labels; for the rules PSS doesn't cover (e.g., "must set resource limits"), write an in-tree `ValidatingAdmissionPolicy` in CEL first and fall back to Kyverno or Gatekeeper only when CEL can't express the rule.
 9. **Per-tenant ResourceQuota + LimitRange + NetworkPolicy** — all three, not one.
 10. **Audit continuously** with Polaris/kube-bench in CI; gate merges on a minimum hardening score.
 
@@ -499,7 +500,7 @@ topologySpreadConstraints declaratively bound skew across a topology domain (e.g
 
 ## 14. Case Study
 
-**Scenario**: A fintech runs a `ledger-api` (3 replicas) on a shared EKS cluster with mixed-tenant batch jobs. During a nightly batch run, a memory-leaking analytics pod (BestEffort) climbed to 12 GiB on an `m5.xlarge` (16 GiB allocatable). The kubelet hit memory pressure and evicted pods. Because `ledger-api` had requests but no limits and no PDB, two of its three replicas were evicted simultaneously during the same eviction sweep, and a concurrent `kubectl drain` for a node upgrade took the third — a full outage of a regulated service for 90 seconds, violating a 99.95% SLA and triggering a reconciliation backlog.
+**Scenario**: A fintech runs a `ledger-api` (3 replicas) on a shared EKS cluster with mixed-tenant batch jobs. During a nightly batch run, a memory-leaking analytics pod (BestEffort) climbed to 12 GiB on an `m5.xlarge` (16 GiB of RAM, ~14.5 GiB allocatable after system reservations and the eviction threshold). The kubelet hit memory pressure and evicted pods. Because `ledger-api` had requests but no limits and no PDB, two of its three replicas were evicted simultaneously during the same eviction sweep, and a concurrent `kubectl drain` for a node upgrade took the third — a full outage of a regulated service for 90 seconds, violating a 99.95% SLA and triggering a reconciliation backlog.
 
 **Root cause**: `ledger-api` was Burstable-without-limit (evictable), had no PDB (drain took the last replica), and the analytics namespace had no ResourceQuota (the leak was unbounded).
 
@@ -580,6 +581,6 @@ spec:
       max:            { memory: "2Gi" }
 ```
 
-**Outcome**: ledger-api became Guaranteed (survives node pressure), the PDB blocked the drain from taking the second replica until a replacement scheduled in another zone, and the analytics namespace was capped at 8Gi total so the leak self-OOMKilled inside its own quota instead of starving the node. The next quarter saw zero eviction-driven outages of regulated services.
+**Outcome**: ledger-api became Guaranteed (survives node pressure), the PDB blocked the drain from taking the second replica until a replacement scheduled in another zone, and the analytics namespace was walled in twice: the LimitRange's 2Gi per-container maximum meant the leak OOMKilled itself at 2Gi instead of reaching 12, and the 8Gi namespace quota bounded the aggregate regardless of how many pods it spawned. The next quarter saw zero eviction-driven outages of regulated services.
 
 For the admission-control and RBAC layers that prevented future un-hardened deployments, see [`../../kubernetes_security/kubernetes_security.md`](../../kubernetes_security/kubernetes_security.md); for how the cluster autoscaler interacts with PDBs during scale-down, see [`../../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md`](../../kubernetes_scheduling_and_autoscaling/kubernetes_scheduling_and_autoscaling.md).
