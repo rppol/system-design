@@ -1469,6 +1469,41 @@ It is the single supported path Microsoft points at for building agents on .NET 
 
 Reach for it when the organization is already on Azure and .NET, where the alternatives are thin. Elsewhere the Python agent ecosystem is considerably denser, and Microsoft publishes a migration guide for the AutoGen code this supersedes.
 
+### MLflow AI Gateway
+**Short:** MLflow's provider-agnostic LLM endpoint: one API over many providers with keys resolved server-side.
+**Kind:** tech
+**Lang:** *
+**Roles:** llm-apps/llm-gateway-and-routing @1
+
+Configuration is a list of named endpoints, each binding a provider and model to a request
+shape such as chat, completions or embeddings, with credentials resolved on the server so
+application code never holds a key. It is served by the tracking server itself; the standalone
+deployment-server application from MLflow 2, and its `start-server` command, were removed in
+MLflow 3, and the older `routes` and `route_type` configuration keys became `endpoints` and
+`endpoint_type`.
+
+Reach for it when you already operate MLflow and the immediate problem is keys scattered across
+services and notebooks. It is deliberately thin: no semantic cache, no automatic fallback
+chains, no per-tenant budgets. When routing behaviour is itself the product, a dedicated
+gateway is the better fit.
+
+### MLflow Prompt Registry
+**Short:** Versioned, aliased prompt templates in MLflow, promoted and rolled back with the same vocabulary as model versions.
+**Kind:** tech
+**Lang:** *
+**Roles:** llm-apps/prompting-context-and-structured-output @1, ml-lifecycle/experiment-tracking-and-tuning @2
+
+Registering a template creates a numbered version with a commit message, and aliases point at
+whichever version is live, so loading a prompt by alias gives the same instant rollback that
+loading a model by alias does. Traces record which prompt version produced them, which is what
+turns "quality dropped last Tuesday" into an answerable question.
+
+The value is not storage. It is that a prompt edit stops being an untracked string change
+inside a Python file and becomes an attributable, reviewable, revertible version with an
+evaluation attached. Reach for it as soon as more than one person edits prompts, and gate
+promotion on a scored evaluation rather than on a reviewer's judgement, since a prompt change
+has no type system to catch it.
+
 ### modelcontextprotocol/csharp-sdk
 **Short:** Official tier-1 C# SDK for building MCP servers and clients in .NET.
 **Kind:** tech

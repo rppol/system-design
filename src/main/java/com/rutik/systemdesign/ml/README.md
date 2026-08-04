@@ -18,11 +18,11 @@ Key insight: the majority of ML failures are not algorithm failures — they are
 
 ## What This Section Covers
 
-Forty-five modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (37 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-four end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
+Forty-six modules organized across eight learning phases take you from linear algebra through production MLOps. Nine topics contain deep-dive sub-files (37 sub-files total), and `case_studies/cross_cutting/` contains five shared-primitive files, all following the same 14-section template used throughout this repository. Twenty-four end-to-end case studies — each covering a real-world ML system — demonstrate how individual concepts combine into full system designs. A dedicated algorithm-selection module (#33) consolidates the "which algorithm, when and why" rationale referenced by every case study. The section is structured so it can be read sequentially as a learning curriculum or used as a reference when preparing for a specific interview topic.
 
 ---
 
-## All Topics (45 Modules)
+## All Topics (46 Modules)
 
 | # | Topic | Key Concepts | Phase | Difficulty |
 |---|-------|-------------|-------|------------|
@@ -71,6 +71,7 @@ Forty-five modules organized across eight learning phases take you from linear a
 | 43 | [Speech and Audio ML](speech_and_audio_ml/speech_and_audio_ml.md) | Spectrograms/MFCC, ASR (CTC, RNN-T, Whisper, wav2vec2), speaker ID/diarization, TTS, WER, SpecAugment | 4 — Domain Specializations | Advanced |
 | 44 | [Meta-Learning and Few-Shot](meta_learning_and_few_shot/meta_learning_and_few_shot.md) | N-way K-shot, Prototypical Networks, MAML/Reptile, episodic training, metric vs optimization-based | 7 — Advanced Topics | Advanced |
 | 45 | [Fairness and Responsible AI](fairness_and_responsible_ai/fairness_and_responsible_ai.md) | Fairness definitions + impossibility, disparate impact, pre/in/post-processing mitigation, proxies, model cards, EU AI Act | 7 — Advanced Topics | Advanced |
+| 46 | [MLflow Deep Dive](mlflow_deep_dive/mlflow_deep_dive.md) | Tracking server and backend schema, artifact access modes, the `MLmodel` format, signatures and enforcement, registry aliases vs stages, autolog gaps, MLflow 3 migration, tracing and prompt registry | 5 — ML Systems & Infrastructure | Advanced |
 
 ---
 
@@ -255,6 +256,7 @@ Phase 5 — ML Systems & Infrastructure
   data_pipelines_and_processing
   distributed_training
   experiment_tracking_and_versioning
+  mlflow_deep_dive
   gpu_and_hardware_optimization
   active_learning_and_weak_supervision  -->  [sub-file: semi_supervised_learning]
         |
@@ -291,14 +293,14 @@ For interview preparation specifically, the curated subset in the next section i
 
 ## Learning Paths
 
-This section is exhaustive by design — 45 modules from the math spine to production ML and the research frontier. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
+This section is exhaustive by design — 46 modules from the math spine to production ML and the research frontier. That is the right depth for a reference and the wrong shape for someone two weeks from an interview. So there are **two ways through it**; the browser learning game's **Study** view surfaces both as a **Full / Interview** toggle (Full is the default).
 
-### Full Path (45 modules)
+### Full Path (46 modules)
 
 The complete curriculum in the order above — see [Recommended Learning Order](#recommended-learning-order). Use it for genuine mastery: the math foundations, every domain (CV, time series, RL, GNNs), the advanced-research row (causal, SSL, privacy, adversarial, conformal), and every infrastructure deep-dive. Nothing is dropped.
 
 <!-- study-path-table senior -->
-### Senior Path (25 modules)
+### Senior Path (26 modules)
 
 | # | Module | Files |
 |---|--------|-------|
@@ -321,14 +323,15 @@ The complete curriculum in the order above — see [Recommended Learning Order](
 | 26 | [data_pipelines_and_processing](data_pipelines_and_processing/data_pipelines_and_processing.md) | module page only |
 | 27 | [distributed_training](distributed_training/distributed_training.md) | module page only |
 | 28 | [experiment_tracking_and_versioning](experiment_tracking_and_versioning/experiment_tracking_and_versioning.md) | module page only |
-| 31 | [model_serving_and_inference](model_serving_and_inference/model_serving_and_inference.md) | module page only |
-| 32 | [model_compression_and_efficiency](model_compression_and_efficiency/model_compression_and_efficiency.md) | module page only |
-| 33 | [monitoring_and_drift_detection](monitoring_and_drift_detection/monitoring_and_drift_detection.md) | module page only |
-| 34 | [mlops_and_ci_cd](mlops_and_ci_cd/mlops_and_ci_cd.md) | module page only |
-| 41 | [interpretability_and_explainability](interpretability_and_explainability/interpretability_and_explainability.md) | module page only |
-| 44 | [ml_interview_patterns](ml_interview_patterns/ml_interview_patterns.md) | module page only |
+| 29 | [mlflow_deep_dive](mlflow_deep_dive/mlflow_deep_dive.md) | module page only |
+| 32 | [model_serving_and_inference](model_serving_and_inference/model_serving_and_inference.md) | module page only |
+| 33 | [model_compression_and_efficiency](model_compression_and_efficiency/model_compression_and_efficiency.md) | module page only |
+| 34 | [monitoring_and_drift_detection](monitoring_and_drift_detection/monitoring_and_drift_detection.md) | module page only |
+| 35 | [mlops_and_ci_cd](mlops_and_ci_cd/mlops_and_ci_cd.md) | module page only |
+| 42 | [interpretability_and_explainability](interpretability_and_explainability/interpretability_and_explainability.md) | module page only |
+| 45 | [ml_interview_patterns](ml_interview_patterns/ml_interview_patterns.md) | module page only |
 
-**Not in this path** (20 of 45, Full Path only): `linear_algebra_and_calculus`, `recurrent_neural_networks`, `generative_models`, `computer_vision`, `speech_and_audio_ml`, `multi_task_and_multi_objective_learning`, `time_series_forecasting`, `anomaly_detection`, `reinforcement_learning`, `gpu_and_hardware_optimization`, `active_learning_and_weak_supervision`, `graph_neural_networks`, `self_supervised_and_contrastive_learning`, `meta_learning_and_few_shot`, `causal_inference_and_ml`, `adversarial_ml_and_robustness`, `privacy_preserving_ml`, `fairness_and_responsible_ai`, `uncertainty_quantification_and_conformal_prediction`, `model_selection_and_algorithm_choice`
+**Not in this path** (20 of 46, Full Path only): `linear_algebra_and_calculus`, `recurrent_neural_networks`, `generative_models`, `computer_vision`, `speech_and_audio_ml`, `multi_task_and_multi_objective_learning`, `time_series_forecasting`, `anomaly_detection`, `reinforcement_learning`, `gpu_and_hardware_optimization`, `active_learning_and_weak_supervision`, `graph_neural_networks`, `self_supervised_and_contrastive_learning`, `meta_learning_and_few_shot`, `causal_inference_and_ml`, `adversarial_ml_and_robustness`, `privacy_preserving_ml`, `fairness_and_responsible_ai`, `uncertainty_quantification_and_conformal_prediction`, `model_selection_and_algorithm_choice`
 <!-- /study-path-table -->
 
 A ruthless cut to what a **senior ML / MLE interview** actually probes, anchored on the phases this section already flags as highest-yield (classical ML, ML system design, production ML, interview consolidation). Same learning order, a strict subset of the Full Path. Each group below says why it earns senior time.
@@ -353,19 +356,19 @@ A ruthless cut to what a **senior ML / MLE interview** actually probes, anchored
 | 18 | [recommender_systems](recommender_systems/recommender_systems.md) | 3 files |
 | 21 | [multi_task_and_multi_objective_learning](multi_task_and_multi_objective_learning/multi_task_and_multi_objective_learning.md) | module page only |
 | 25 | [ml_system_design](ml_system_design/ml_system_design.md) | 5 files |
-| 30 | [active_learning_and_weak_supervision](active_learning_and_weak_supervision/active_learning_and_weak_supervision.md) | module page only |
-| 33 | [monitoring_and_drift_detection](monitoring_and_drift_detection/monitoring_and_drift_detection.md) | module page only |
-| 34 | [mlops_and_ci_cd](mlops_and_ci_cd/mlops_and_ci_cd.md) | module page only |
-| 38 | [causal_inference_and_ml](causal_inference_and_ml/causal_inference_and_ml.md) | module page only |
-| 39 | [adversarial_ml_and_robustness](adversarial_ml_and_robustness/adversarial_ml_and_robustness.md) | module page only |
-| 40 | [privacy_preserving_ml](privacy_preserving_ml/privacy_preserving_ml.md) | module page only |
-| 41 | [interpretability_and_explainability](interpretability_and_explainability/interpretability_and_explainability.md) | module page only |
-| 42 | [fairness_and_responsible_ai](fairness_and_responsible_ai/fairness_and_responsible_ai.md) | module page only |
-| 43 | [uncertainty_quantification_and_conformal_prediction](uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md) | module page only |
-| 44 | [ml_interview_patterns](ml_interview_patterns/ml_interview_patterns.md) | module page only |
-| 45 | [model_selection_and_algorithm_choice](model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md) | module page only |
+| 31 | [active_learning_and_weak_supervision](active_learning_and_weak_supervision/active_learning_and_weak_supervision.md) | module page only |
+| 34 | [monitoring_and_drift_detection](monitoring_and_drift_detection/monitoring_and_drift_detection.md) | module page only |
+| 35 | [mlops_and_ci_cd](mlops_and_ci_cd/mlops_and_ci_cd.md) | module page only |
+| 39 | [causal_inference_and_ml](causal_inference_and_ml/causal_inference_and_ml.md) | module page only |
+| 40 | [adversarial_ml_and_robustness](adversarial_ml_and_robustness/adversarial_ml_and_robustness.md) | module page only |
+| 41 | [privacy_preserving_ml](privacy_preserving_ml/privacy_preserving_ml.md) | module page only |
+| 42 | [interpretability_and_explainability](interpretability_and_explainability/interpretability_and_explainability.md) | module page only |
+| 43 | [fairness_and_responsible_ai](fairness_and_responsible_ai/fairness_and_responsible_ai.md) | module page only |
+| 44 | [uncertainty_quantification_and_conformal_prediction](uncertainty_quantification_and_conformal_prediction/uncertainty_quantification_and_conformal_prediction.md) | module page only |
+| 45 | [ml_interview_patterns](ml_interview_patterns/ml_interview_patterns.md) | module page only |
+| 46 | [model_selection_and_algorithm_choice](model_selection_and_algorithm_choice/model_selection_and_algorithm_choice.md) | module page only |
 
-**Not in this path** (30 of 45, Full Path only): `linear_algebra_and_calculus`, `probability_and_statistics`, `optimization_theory`, `information_theory`, `supervised_learning`, `ensemble_methods`, `unsupervised_learning`, `feature_engineering`, `model_evaluation_and_selection`, `neural_network_fundamentals`, `convolutional_neural_networks`, `recurrent_neural_networks`, `training_deep_networks`, `generative_models`, `computer_vision`, `natural_language_processing`, `information_retrieval_and_search`, `speech_and_audio_ml`, `time_series_forecasting`, `anomaly_detection`, `reinforcement_learning`, `data_pipelines_and_processing`, `distributed_training`, `experiment_tracking_and_versioning`, `gpu_and_hardware_optimization`, `model_serving_and_inference`, `model_compression_and_efficiency`, `graph_neural_networks`, `self_supervised_and_contrastive_learning`, `meta_learning_and_few_shot`
+**Not in this path** (31 of 46, Full Path only): `linear_algebra_and_calculus`, `probability_and_statistics`, `optimization_theory`, `information_theory`, `supervised_learning`, `ensemble_methods`, `unsupervised_learning`, `feature_engineering`, `model_evaluation_and_selection`, `neural_network_fundamentals`, `convolutional_neural_networks`, `recurrent_neural_networks`, `training_deep_networks`, `generative_models`, `computer_vision`, `natural_language_processing`, `information_retrieval_and_search`, `speech_and_audio_ml`, `time_series_forecasting`, `anomaly_detection`, `reinforcement_learning`, `data_pipelines_and_processing`, `distributed_training`, `experiment_tracking_and_versioning`, `mlflow_deep_dive`, `gpu_and_hardware_optimization`, `model_serving_and_inference`, `model_compression_and_efficiency`, `graph_neural_networks`, `self_supervised_and_contrastive_learning`, `meta_learning_and_few_shot`
 <!-- /study-path-table -->
 
 A different cut, not senior-plus-extras. The Principal Path probes what a staff ML engineer is accountable for beyond a model: problem framing, measurement that survives contact with a business, and the consequences of shipping a wrong prediction. Roughly half of it is material the Senior Path never covers, and it is usually the smaller list -- depth of judgment, not depth of syllabus.

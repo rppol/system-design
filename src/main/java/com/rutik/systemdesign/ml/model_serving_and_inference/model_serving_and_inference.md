@@ -49,6 +49,8 @@ Key insight: The bottleneck is almost never model accuracy — it is latency, th
 
 ## 4. Types / Architectures / Strategies
 
+A note on where the model comes from: MLflow packages and hands off, and the runtimes below run it — `mlflow models serve` is a single-model Python process with no batching scheduler, no multi-model repository and no GPU concurrency control, so the production path is MLflow-as-registry feeding a KServe `InferenceService` or a Triton model repository. See [MLflow Deep Dive](../mlflow_deep_dive/mlflow_deep_dive.md) for the packaging and handoff mechanics.
+
 ### REST API Serving (Flask / FastAPI)
 - Protocol: HTTP/1.1 or HTTP/2, JSON body
 - Best for: prototyping, low-QPS internal services, teams with HTTP expertise

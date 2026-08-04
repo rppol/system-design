@@ -415,6 +415,25 @@ MLC-LLM compiles a model ahead of time through TVM into kernels for whichever ba
 
 Reach for it when the model must run on the user's device for privacy, offline use or per-request cost. The price is that every target platform is another build, and shipping a new model means shipping a new artifact.
 
+### MLflow Models
+**Short:** MLflow's model packaging format: a directory with an MLmodel manifest naming flavours, signature and environment.
+**Kind:** tech
+**Lang:** *
+**Roles:** inference/model-format-and-edge @1, ml-lifecycle/experiment-tracking-and-tuning @2
+
+The manifest is the whole idea. A logged model is a directory containing the weights in
+whatever format the training framework prefers, plus an `MLmodel` YAML file naming one or more
+flavours, a type signature for inputs and outputs, and three renderings of the dependency set.
+A consumer that has never seen the training code reads that one file and knows how to load the
+object, what shape to feed it, and what environment to build.
+
+Every model carries the universal `python_function` flavour alongside its native one, so a
+generic `predict` call works regardless of framework, which is what serving runtimes, Spark
+UDFs and container builders all target. Reach for it whenever a model crosses a team boundary.
+Its honest limit is that dependency capture pins the Python distributions it saw imported and
+cannot see CUDA, system libraries or the base image, so pair the directory with a pinned
+container digest rather than treating it as a complete environment.
+
 ### Model Navigator
 **Short:** NVIDIA tool converting a PyTorch/TF/ONNX model to optimized formats such as TensorRT and verifying accuracy.
 **Kind:** tech

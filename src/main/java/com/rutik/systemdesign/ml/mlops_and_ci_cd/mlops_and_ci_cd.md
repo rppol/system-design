@@ -212,6 +212,8 @@ Five heterogeneous triggers fan into one retraining pipeline, but a fresh model 
 
 ### MLflow Model Logging with Signature
 
+This is the CI gate view of it. For signature depth — what `infer_signature` produces, exactly how enforcement handles reordered, extra, missing and mistyped columns, and what an unsigned model does instead — see [MLflow Deep Dive](../mlflow_deep_dive/mlflow_deep_dive.md).
+
 ```python
 from __future__ import annotations
 

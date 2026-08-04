@@ -243,6 +243,24 @@ earns its complexity. For fast in-process hyperparameter search over a training 
 is lighter, prunes bad trials and needs less ceremony; Ax's value is the trial bookkeeping and
 the multi-objective machinery, not convenience.
 
+### Azure Machine Learning
+**Short:** Microsoft's managed ML platform; uses MLflow as its native tracking and model-packaging format.
+**Kind:** tech
+**Lang:** *
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, ml-lifecycle/experiment-tracking-and-tuning @2
+
+The distinguishing choice is that it did not invent its own tracking API. The workspace exposes
+an MLflow-compatible tracking URI, so code written against MLflow logs into it unchanged, and a
+model in MLflow format deploys to a managed endpoint with no scoring script because the
+platform reads the signature and the environment out of the manifest.
+
+Around that sit the pieces a hosted platform is expected to bring: compute clusters, pipelines,
+a managed feature surface, batch and online endpoints, and identity through the cloud's own
+directory rather than a bolted-on plugin. Reach for it when the organisation is already on
+Azure and the alternative is operating a tracking server, a database and a bucket yourself.
+The tradeoff is the usual one, portability against convenience, softened here because the
+artifact format stays open.
+
 ### baal
 **Short:** PyTorch active-learning library using MC-dropout and BALD to pick the most informative samples to label.
 **Kind:** tech
@@ -444,6 +462,24 @@ less than it appears to.
 Cleanlab takes out-of-fold predicted probabilities from a model you already trained and applies confident learning: where the model is confidently sure of a class other than the recorded label, that example is flagged and ranked by how likely the label is wrong. Because it consumes predictions rather than a specific model, it works with any classifier and needs no clean ground truth beyond the noisy labels you have.
 
 The practical uses follow from that ranking. Spend a limited relabeling budget on the top of the list instead of sampling at random; audit a test set before trusting an accuracy number, since errors in the test set cap measured performance and mislead model selection; and filter pseudo-labels in a semi-supervised loop, where a confidently wrong label would otherwise be trained on and reinforced.
+
+### ClearML
+**Short:** Open-source MLOps suite combining experiment tracking, a model registry, pipelines and remote execution agents.
+**Kind:** tech
+**Lang:** python
+**Roles:** ml-lifecycle/experiment-tracking-and-tuning @1, ml-lifecycle/ml-platform-and-pipelines @2
+
+It occupies the space between a tracker and a platform. Alongside run tracking and a registry it
+ships agents that pull queued tasks onto machines you register, so a logged experiment can be
+cloned, edited and rerun elsewhere from the web interface. That remote-execution loop is the
+feature people actually adopt it for, and it is the thing a pure tracker deliberately does not
+have.
+
+The cost of that scope is that you are adopting an orchestration model as well as a metadata
+store, which competes with whatever scheduler you already run. Reach for it when a small team
+wants one self-hostable system for tracking, queueing and pipelines and has no existing
+orchestrator to defend. If the orchestrator is already chosen, a tracker that refuses to own
+execution fights it less.
 
 ### Comet ML
 **Short:** Experiment tracking platform logging runs, metrics, code snapshots and diffs, with a model registry.
@@ -1444,25 +1480,16 @@ granting internet access has to check for that explicitly.
 **Roles:** ml-lifecycle/experiment-tracking-and-tuning @1, ml-lifecycle/ml-platform-and-pipelines @2
 
 Beyond tracking, the piece that earns its keep is the model format. A logged model is a
-
 directory with an `MLmodel` file naming one or more flavors, so the same artifact loads as a
-
 native scikit-learn object or through a generic `pyfunc` interface, packaged with the
-
 environment it needs. That is what turns "serve this run's model" into a command rather than a
-
 rewrite, and what lets a registry reference be handed to a deployment target that knows
-
 nothing about the training framework.
 
 The evaluation API extends the same idea to scoring, running a model against a dataset and
-
 logging metrics and diagnostic artifacts into the run. Reach for the packaging layer when
-
 models cross a team boundary and the receiving side should not have to reconstruct an
-
 environment. It remains tracking and packaging -- something else orchestrates -- and the
-
 tracking server needs a real database and artifact store once more than one person uses it.
 
 ### MLflow Model Registry
@@ -1474,6 +1501,24 @@ tracking server needs a real database and artifact store once more than one pers
 A registered model is a name with numbered versions, and each version points back at the MLflow run that produced it, so anything in production traces to the code, parameters, dataset, and metrics behind it. Aliases such as `@champion` and `@challenger` are movable pointers that a serving job resolves at load time, which makes promotion a metadata change rather than a redeploy, and tags carry approval or validation state alongside.
 
 It needs the tracking server backed by a real database and an artifact store, not the local-file mode. Reach for it when "what model is live, who approved it, and how was it trained" has to be answerable months later; if you deploy one model from one pipeline, a versioned artifact path in object storage may be all the registry you need.
+
+### MLflow Projects
+**Short:** MLflow's packaging format for runnable code: an MLproject file declaring entry points, parameters and an environment.
+**Kind:** tech
+**Lang:** *
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1
+
+An `MLproject` file names entry points, their typed parameters and an environment, and
+`mlflow run` executes one against a local path or a git URI at a pinned commit. It solved a real
+2018 problem, when containerising a Python ML job was genuinely difficult and reproducing a
+colleague's script meant reconstructing their environment by hand.
+
+Adoption today is near zero and the honest advice is not to start here. The environment problem
+is solved by an image and the execution problem by an orchestrator, and every orchestrator
+brings retries, scheduling, resource requests, secrets and observability that Projects never
+had. MLflow itself moved on: Recipes, the successor abstraction, was removed in MLflow 3. What
+survives is the useful half, passing the run and experiment ids into a job's environment so it
+logs into a run its scheduler created.
 
 ### MLflow Tracking
 **Short:** Open-source run tracking: logs params, metrics and artifacts to a SQL backend, with a linked model registry.
@@ -2479,6 +2524,23 @@ agree with this where it matters.
 You wrap an application so its inputs, retrieved contexts and outputs are recorded, then attach feedback functions that score each record. The triad it is built around localizes failure rather than producing one opaque quality number: low context relevance means retrieval brought back the wrong material, low groundedness means the model asserted things the context did not support, and low answer relevance means it answered a different question.
 
 Reach for it during iteration, when you are comparing prompt, chunking or retriever variants and need to know which stage a change actually improved. As with any judge-based evaluation, the scores are only as trustworthy as the judge, so check a sample of them against your own reading before treating a number as a gate.
+
+### Unity Catalog
+**Short:** Databricks' governance layer for data and models; a model is a three-level catalog.schema.name entity with grants and lineage.
+**Kind:** tech
+**Lang:** *
+**Roles:** ml-lifecycle/ml-platform-and-pipelines @1, ml-lifecycle/experiment-tracking-and-tuning @2
+
+What it changes for models is the identity. A registered model is not a flat name in a
+per-workspace registry but a three-level `catalog.schema.model` object governed by the same
+grants, audit log and lineage graph as the tables that trained it, so "who may promote this"
+and "which table produced this" are answered by one system rather than three.
+
+That also explains a discontinuity worth knowing: Unity Catalog-backed registries never
+supported the older stage field, only aliases and version tags, so migration guidance that
+still mentions stages does not apply. Reach for it when governance is a requirement rather than
+a preference. The obvious limit is that it is Databricks-only, so a portability-first
+architecture keeps the artifact format open and treats the catalog as one deployment target.
 
 ### USB
 **Short:** Unified Semi-supervised learning Benchmark: reference FixMatch/FlexMatch/UDA/Mean Teacher baselines for fair comparison.

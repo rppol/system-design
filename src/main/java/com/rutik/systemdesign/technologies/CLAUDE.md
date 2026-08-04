@@ -21,7 +21,9 @@ duplicating it here. Examples: Kafka is owned by
 [`backend/kafka_deep_dive`](../backend/kafka_deep_dive/kafka_deep_dive.md) — do not add
 `technologies/apache_kafka`; vLLM is owned by
 [`llm/vllm_deep_dive`](../llm/vllm_deep_dive/vllm_deep_dive.md) — do not add
-`technologies/vllm`. This section is for technologies that don't already have a
+`technologies/vllm`; MLflow is owned by
+[`ml/mlflow_deep_dive`](../ml/mlflow_deep_dive/mlflow_deep_dive.md) — do not add
+`technologies/mlflow`. This section is for technologies that don't already have a
 canonical home — an orchestrator like Airflow or an inference server like Triton has
 no single owning section, so it lives here instead.
 

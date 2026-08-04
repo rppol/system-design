@@ -1269,6 +1269,23 @@ It also injects trace and span ids into the logging MDC, which is what lets a lo
 
 In an incident process the useful property is that a channel is both the coordination surface and the record: declaring an incident opens a dedicated channel, responders work there, and the timestamped transcript becomes the raw material for the postmortem timeline instead of somebody reconstructing it from memory. Alerting tools reach it through incoming webhooks or a bot, so a Grafana or PagerDuty notification lands as a card in the right channel with links back to the dashboard, and a meeting attached to the channel gives you a voice bridge without leaving the tool. The failure mode is routing everything into one channel until people mute it -- keep the urgent page on a pager and leave chat for the informational stream and the coordination. Reach for it when the organisation already runs on Teams; the value comes from the discipline of channel-per-incident, not from the product.
 
+### MLflow Tracing
+**Short:** MLflow's GenAI observability surface: OpenTelemetry-shaped spans for retrieval, tool and model calls, stored beside runs.
+**Kind:** tech
+**Lang:** python
+**Roles:** observability/tracing-apm-and-llm-observability @1, ml-lifecycle/evaluation-and-benchmarks @2
+
+Instrumentation comes from a decorator on your own functions plus autologgers for the common
+model and framework clients, and a trace is one root span with children carrying inputs,
+outputs, latency, token counts and errors as attributes. The data model follows OpenTelemetry
+and can be exported to a collector, so it sits beside existing tracing rather than replacing it.
+
+What it adds over a generic tracer is that traces land in the same experiment as training runs
+and can be promoted into an evaluation dataset, which closes the loop from a production
+complaint to a scored regression test. Two operational notes: export is asynchronous, so a
+short-lived process should flush before exiting, and trace volume tracks production request
+volume rather than experiment count, so sample before enabling it on a live service.
+
 ### mongotop
 **Short:** MongoDB CLI reporting per-collection time spent on reads and writes; finds the hot collection in a busy instance.
 **Kind:** tech

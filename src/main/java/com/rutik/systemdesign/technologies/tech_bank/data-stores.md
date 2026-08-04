@@ -529,6 +529,23 @@ Reach for it when the corpus no longer fits a single-node index or when you need
 **Lang:** java
 **Roles:** data-stores/vector-store @1, search-retrieval/rag-and-document-processing @3
 
+### MinIO
+**Short:** S3-API-compatible object storage you run yourself, on-premise or in a cluster, with erasure coding across drives.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/object-and-file-storage @1
+
+Compatibility is the product. It speaks the S3 API closely enough that existing SDKs, tools and
+services point at it by changing an endpoint, which is what makes it the default answer for
+object storage in an air-gapped, on-premise or local-development setting. Durability comes from
+erasure coding across drives and nodes rather than from a cloud provider's guarantee.
+
+Reach for it when a workload assumes S3 but the deployment cannot use one, which in practice
+means regulated environments, edge sites and test harnesses. Two things to plan for: you now own
+capacity, rebuilds and upgrades, and API compatibility is close but not total, so features at
+the margins such as certain replication or lifecycle behaviours need checking against your
+actual usage rather than assumed.
+
 ### MongoDB
 **Short:** Document database storing BSON with flexible schema, rich queries, replica sets and multi-document ACID transactions.
 **Kind:** tech

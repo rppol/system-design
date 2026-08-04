@@ -391,6 +391,23 @@ Reach for it for any CLI that has grown past a couple of flags; the stdlib `argp
 **Lang:** java
 **Roles:** devtools/static-analysis-and-linting @1, security/supply-chain-and-runtime-security @2, runtime-systems/text-encoding-and-regex @3
 
+### conda
+**Short:** Cross-language package and environment manager that resolves binary dependencies, including non-Python system libraries.
+**Kind:** tech
+**Lang:** *
+**Roles:** devtools/build-and-dependency-management @1
+
+Its distinguishing property is that a package may be any binary, not only a Python wheel, so a
+single environment specification can pin a compiler runtime, a BLAS implementation or a CUDA
+toolkit alongside the libraries that link against them. That is why it persists in scientific
+and machine-learning stacks where a pip-only environment cannot express the dependency.
+
+The costs are real and well known: solving a large environment is slow, channel mixing produces
+subtly incompatible builds, and licence terms on the default channel have pushed many teams to
+community channels or to faster reimplementations of the solver. Reach for it when non-Python
+binaries are genuinely part of the dependency graph, and prefer a lockfile plus a container
+image when they are not.
+
 ### Conventional Commits
 **Short:** Commit-message convention (feat:, fix:, BREAKING CHANGE) that drives automated semantic versioning and changelogs.
 **Kind:** spec
@@ -2594,6 +2611,23 @@ Use a template engine when the generated output is mostly fixed text with holes,
 It compares each declared dependency, plugin, parent and property-driven version against what the repositories offer, and reports or applies updates: `display-dependency-updates` and `display-plugin-updates` list what is behind, `use-latest-releases` and `update-properties` rewrite the POMs in place across a multi-module reactor, and `set` changes the project version everywhere at once for a release. `revert` restores the backup POMs when a bulk update turns out badly.
 
 Control it with version rules — an XML ruleset excluding alphas, release candidates and vendor-suffixed versions — because without one it will happily propose a milestone build. It is a manual, whole-repository sweep; Renovate or Dependabot do the same job continuously as pull requests that CI can actually judge one at a time.
+
+### virtualenv
+**Short:** Tool that creates isolated Python environments, each with its own interpreter link and site-packages directory.
+**Kind:** tech
+**Lang:** python
+**Roles:** devtools/build-and-dependency-management @1
+
+The mechanism is deliberately small: a directory holding a link to a base interpreter and its
+own `site-packages`, activated by putting its `bin` directory first on the path. Nothing is
+containerised and nothing is virtualised, which is why creation is fast and why an environment
+still depends on the system interpreter it was built from.
+
+It predates the standard-library `venv` and remains faster and more configurable, including
+support for interpreters other than the one running it. Reach for it when the isolation you
+need is Python-level and the rest of the dependency graph is wheels. It says nothing about
+system libraries or drivers, so a reproducible build still needs a lockfile and, for anything
+with native dependencies, an image.
 
 ### Visual Studio Code
 **Short:** Microsoft's editor; also a first-class MCP client and coding-agent host through GitHub Copilot chat.

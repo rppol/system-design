@@ -5,7 +5,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 
 ---
 
-## Module List — 45 Modules
+## Module List — 46 Modules
 
 | Module Directory | Phase | Key Concepts | Sub-files |
 |-----------------|-------|-------------|-----------|
@@ -32,6 +32,7 @@ Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 | `data_pipelines_and_processing/` | 5 | PySpark, Great Expectations, DVC, schema evolution | — |
 | `distributed_training/` | 5 | DDP, FSDP, DeepSpeed ZeRO, gradient accumulation | — |
 | `experiment_tracking_and_versioning/` | 5 | MLflow, W&B, Optuna, DVC, reproducibility | — |
+| `mlflow_deep_dive/` | 5 | Tracking server + schema, `MLmodel` format, signatures, registry aliases, autolog gaps, MLflow 3 migration, tracing/prompts/gateway | — |
 | `gpu_and_hardware_optimization/` | 5 | CUDA, tensor cores, profiling, gradient checkpointing | — |
 | `model_serving_and_inference/` | 6 | TorchServe, ONNX, dynamic batching, canary, shadow mode | — |
 | `model_compression_and_efficiency/` | 6 | PTQ, QAT, pruning, knowledge distillation, TensorRT | — |
@@ -146,6 +147,7 @@ on explicit request (each needs the full "Adding a New ML Module" procedure + ST
 | `computer_vision/` | `../../llm/multimodal_models/` — VLMs, vision encoders |
 | `model_evaluation_and_selection/` | `../../llm/evaluation_and_benchmarks/` — MMLU, LLM-as-judge, RAGAs |
 | `experiment_tracking_and_versioning/` | `../../llm/llm_observability_and_monitoring/` — Langfuse, Arize Phoenix |
+| `mlflow_deep_dive/` | `mlops_and_ci_cd/` — CI gates and promotion pipelines; `model_serving_and_inference/` and `../../technologies/nvidia_triton_inference_server/` — MLflow packages and hands off, Triton and KServe run the GPU; `../../llm/llm_ops_platforms/` — MLflow's GenAI surface beside Langfuse and LangSmith |
 | `natural_language_processing/` (tokenization, retrieval) | `../../llm/tokenization_and_embeddings/` — BPE/WordPiece/SentencePiece at LLM scale; `../../llm/rag_fundamentals/` — dense retrieval reused by RAG |
 | `adversarial_ml_and_robustness/` | `../../llm/llm_security/` — prompt injection/jailbreaks; `../../llm/guardrails_and_content_safety/` |
 | `uncertainty_quantification_and_conformal_prediction/` | `case_studies/cross_cutting/model_calibration_and_thresholding/`; `../../llm/evaluation_and_benchmarks/` — abstention/uncertainty signals |
