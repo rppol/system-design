@@ -632,6 +632,10 @@ TECH_ALIASES = {                       # written this way -> indexed as this
     "spring-security-oauth2-resource-server": "spring security oauth2 resource server",
     "spring-websocket": "spring websocket",
     "tavily search api": "tavily search",
+    # One product, two written forms: `technologies/temporal_durable_execution` is the
+    # canonical page and writes `Temporal`, while database/ wrote `Temporal.io`. Merged
+    # 2026-08-04 by aliasing the DNS-shaped form and folding its record into `Temporal`.
+    "temporal.io": "temporal",
     "vmstat 1": "vmstat",
     "sklearn": "scikit-learn",
     # --- 2026-07-31 second pass --------------------------------------------------

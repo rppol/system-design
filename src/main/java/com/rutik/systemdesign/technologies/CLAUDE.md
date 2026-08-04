@@ -31,13 +31,35 @@ collisions explicitly in the module's intro — e.g. `nvidia_triton_inference_se
 (OpenAI Triton, the GPU kernel DSL). Same word, unrelated products; both files must
 say so on first mention.
 
+**Two disambiguation precedents, both by extending the slug rather than adding a marker:**
+
+1. *Vendor differs from a same-named product* — spell out the full product descriptor.
+   `nvidia_triton_inference_server` (2026-07) took this route rather than
+   `triton_server` or `triton_nvidia`.
+2. *Vendor and product are the SAME word, and that word is a common English adjective* —
+   extend with the product's own **category term**. `temporal_durable_execution`
+   (2026-08-04) took this route because the convention degenerates here:
+   "Temporal Technologies" makes `temporal_temporal` absurd, and a bare `temporal`
+   would collide with five unrelated senses already in this repo (temporal locality in
+   `cs_fundamentals`, temporal queries in `backend/event_sourcing_and_cqrs`, temporal
+   coupling in `lld/behavioral/command`, temporal decoupling in
+   `backend/event_driven_fundamentals`, and `java.time.temporal.Temporal` in
+   `java/java_time_datetime`) plus Temporal Fusion Transformer in `ml/`. The category
+   term also does real work here: it names the half of the tier role
+   `data-movement/workflow-and-durable-execution` that means Temporal, keeping it
+   distinct from `apache_airflow`, which owns the "workflow" half.
+
 ---
 
-## Module List — 3 Modules
+## Module List — 4 Modules
+
+Listed in `STUDY_ORDER.technologies` order, which pairs the two orchestration modules
+and then the two serving modules as contrast pairs.
 
 | Dir | Category | Key Concepts | Version Studied |
 |-----|----------|-------------|-----------------|
 | [`apache_airflow/`](apache_airflow/apache_airflow.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.3.0 |
+| [`temporal_durable_execution/`](temporal_durable_execution/temporal_durable_execution.md) | Durable execution | Two-plane split (Service never runs your code), event history + replay determinism, activities and the four timeouts, signals/queries/updates, Continue-As-New and the 51,200-event limit, versioning via patching vs Pinned Worker Deployments, shard immutability | Temporal Server 1.31.2 |
 | [`nvidia_triton_inference_server/`](nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU model serving | Model repository, `config.pbtxt`, backends (TensorRT/ONNX/PyTorch/Python), dynamic batching, ensembles/BLS, `perf_analyzer` | NGC release studied inline per module |
 | [`intel_openvino/`](intel_openvino/intel_openvino.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.2 |
 
@@ -108,22 +130,41 @@ release.
 
 ---
 
-## Learning Paths (Full-only for now)
+## Learning Paths (Full-only — tiers deliberately deferred past the threshold)
 
 No module here carries a `<!-- study-paths -->` block, so `questions/paths.json` has no
-`technologies` key and the section is Full-path only — with 3 modules there is still no
-meaningful cut to make. The Study view's tier tabs **auto-hide** for any section absent
-from the derived paths (`book` is the other such section), so this is a deliberate
-omission, not a gap. **Threshold to add one:** once this section reaches **4 or more
-modules**, decide the tiers — Senior (the craft: operate it, debug it) and Principal (the
+`technologies` key and the section is Full-path only. The Study view's tier tabs
+**auto-hide** for any section absent from the derived paths (`book` is the other such
+section), so this is a deliberate omission, not a gap.
+
+**Status 2026-08-04 (owner-set):** the section reached **4 modules** with
+`temporal_durable_execution`, crossing the threshold below — and the tier decision was
+**deliberately deferred** to a separate change once all four planned technology pages
+have landed. Do not read the un-tiered state as an oversight, and do not add a
+`<!-- study-paths -->` block to one module on its own: tiering is a section-wide
+decision plus a one-time `README.md` marker-pair setup, and doing it piecemeal produces
+a Senior path that silently advertises a partial section.
+
+**A caveat to record now, for whoever does the tiering.** At module-page granularity
+with no deep-dive sub-files, the two tiers can only differ by *membership*, so the
+repo-wide "roughly half of each principal list is material senior never sees" property
+cannot yet be expressed here. It becomes expressible the moment the first sub-file
+lands — a `temporal_durable_execution/versioning_and_safe_deploys.md` is the obvious
+first candidate, principal-only, since safe-deploy strategy across a fleet of
+long-lived executions is exactly a judgment call. Treat the eventual first shape as a
+floor, not the design.
+
+**The mechanics, when the deferral ends:** decide the tiers — Senior (the craft: operate it, debug it) and Principal (the
 judgment: adopt it or not, at what cost) are different cuts, not nested depths — then
 write a `<!-- study-paths -->` block at the top of each participating module's page (`<module>.md`) naming the
 files it contributes, paste an empty `<!-- study-path-table senior -->` /
 `<!-- /study-path-table -->` marker pair into `README.md` where the table should sit
 (placement is editorial; `--write-paths` only fills blocks that already exist), and run
 `python3 extract.py --write-paths` to generate it. Also update the toggle-exception
-language in `game/CLAUDE.md` and `game/README.md` in the same commit. There is **no
-array in `app.js`** to add.
+language in `game/CLAUDE.md` in the same commit — it lists `technologies` among the
+sections with no tiers. **`game/README.md` carries no such language** (verified
+2026-08-04 by grep); the older instruction to update it too was stale and is corrected
+here. There is **no array in `app.js`** to add.
 
 ---
 
@@ -303,10 +344,13 @@ when adding a sub-file, only when adding a new top-level module directory.
 
 1. Create `<vendor>_<product>/<vendor>_<product>.md` — 14 canonical sections, 16 Q&As, version
    studied stated up front.
-2. **Append the slug to `STUDY_ORDER.technologies` in `game/app.js` in the same
-   commit.** `extract.py --strict` runs in Pages CI and **fails the deploy** if a
-   module that produced Q&As is missing from `STUDY_ORDER` — this is not optional
-   housekeeping.
+2. **Add the slug to `STUDY_ORDER.technologies` in `game/app.js` in the same commit, at
+   its learning-path position — not necessarily at the end.** The array drives reading
+   order, so related modules belong adjacent: Temporal was inserted at position 2, next
+   to Airflow, because its §8 and §9 are largely "why this is not Airflow", and Triton
+   and OpenVINO stay adjacent as the serving contrast pair. `extract.py --strict` runs
+   in Pages CI and **fails the deploy** if a module that produced Q&As is missing from
+   `STUDY_ORDER` — this is not optional housekeeping.
 3. Update this file's Module List table and `technologies/README.md`'s Module Table /
    Learning Path / Knowledge-Question Map / Study Plan.
 4. Update root `README.md`'s Technologies section and root `CLAUDE.md`'s section

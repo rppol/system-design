@@ -431,6 +431,16 @@ It is Spark plus a managed control plane: clusters and SQL warehouses run in you
 
 Reach for it when a team wants batch, streaming, SQL analytics and machine learning over one governed set of tables rather than three separate stacks with three copies of the data. The costs are compute spend that grows quietly, platform units billed on top of cloud instance cost, and enough platform-specific surface that leaving is a project. EMR or self-managed Spark on Kubernetes is cheaper when you have the operations capacity to run it.
 
+### DBOS
+**Short:** Durable execution library that checkpoints workflow and step state into your own Postgres instead of a separate orchestrator service.
+**Kind:** tech
+**Lang:** python, js, go, java
+**Roles:** data-movement/workflow-and-durable-execution @1, data-access/transactions-and-consistency @3
+
+You annotate a function as a workflow and its calls as steps, and the library records each step's completion in a Postgres schema alongside your own tables, so a crashed process resumes at the first unfinished step when it restarts. Because the durable state lives in the database you already run, there is no separate cluster to operate and a workflow's progress is queryable with ordinary SQL and committed in the same transactional world as your business rows.
+
+Reach for it when you want durable execution without adopting a stateful service, and your Postgres has headroom for the extra write volume. The tradeoffs against Temporal are ecosystem breadth, cross-language reach, and the fact that your database now carries orchestration load as well as application load.
+
 ### Debezium
 **Short:** Change-data-capture connector that tails a database's replication log and publishes row changes to Kafka.
 **Kind:** tech
@@ -1095,7 +1105,9 @@ Reach for it when a service is asyncio end to end and you want Celery's shape --
 
 Workflow code is ordinary Go, Java, Python or TypeScript, but every step's result is persisted to an event history, so when a worker dies the workflow is replayed against that history on another worker and continues exactly where it stopped — which is why sleeping for thirty days is a legitimate line of code. Side effects live in activities, retried independently under a policy you set, and a saga's compensation is simply the code you write after a failure rather than an orchestration DSL.
 
-The determinism requirement is the thing to internalize: workflow code must not read a clock, generate a random number or call a service directly, because replay has to reproduce the same decisions. Reach for it when state must outlive a process — multi-day approvals, payment sagas, long-running agents — and not for work that finishes inside one HTTP request.
+The determinism requirement is the thing to internalize: workflow code must not read a clock, generate a random number or call a service directly, because replay has to reproduce the same decisions. First-class SDKs cover Go, Java, Python, TypeScript and .NET, and the MIT-licensed server can be self-hosted on Cassandra or PostgreSQL or consumed as the vendor-hosted Temporal Cloud.
+
+Reach for it when state must outlive a process — multi-day approvals, payment sagas, provisioning flows, long-running agents — and not for work that finishes inside one HTTP request. The costs are real: a stateful tier to operate or a per-Action bill, and versioning workflow code carefully so a deploy does not break replay of histories still in flight.
 
 ### Temporal child workflows
 **Short:** Temporal feature spawning independently-scheduled durable sub-workflows for long-running parallel work.
@@ -1103,15 +1115,93 @@ The determinism requirement is the thing to internalize: workflow code must not 
 **Lang:** *
 **Roles:** data-movement/workflow-and-durable-execution @1, llm-apps/agent-framework @3
 
-### Temporal.io
-**Short:** Durable execution platform: workflow code checkpointed to a history so long-running sagas survive process restarts.
+### temporal CLI
+**Short:** Single-binary Temporal command line that runs the dev server and drives namespaces, executions, schedules and worker deployments.
 **Kind:** tech
 **Lang:** *
-**Roles:** data-movement/workflow-and-durable-execution @1, data-access/transactions-and-consistency @2, data-movement/task-queue-and-jobs @3
+**Roles:** data-movement/workflow-and-durable-execution @1, devtools/version-control-and-workbench @3
 
-You write ordinary code in Go, Java, TypeScript, Python, or .NET, but the Temporal service persists every step's result to an event history; when a worker dies mid-flight, another worker replays that history to rebuild the exact in-memory state and carries on from the point of failure. Side effects go into Activities, which carry their own retry policies, timeouts, and heartbeats, while the workflow itself must be deterministic — no direct clock reads, no randomness, no I/O — because replay must reproduce the same decisions.
+One binary covers the whole operational surface: `temporal server start-dev` boots a full local Service with a Web UI and a SQLite or in-memory store, and the same command starts workflows, sends signals, runs queries and updates, describes and shows event histories, and cancels, terminates or resets executions. Administrative subcommands manage namespaces, retention, custom search attributes, schedules with backfill, and worker deployment versions with ramping.
 
-Reach for it when a business process runs for minutes to months across several services and "the process died halfway" must not lose state: sagas with compensation, payment and provisioning flows, human-approval steps, long agent runs. The costs are real — operating the service or paying for Temporal Cloud, and versioning workflow code carefully so a deploy does not break replay of histories still in flight.
+Batch operations take a visibility List Filter rather than a list of ids, which is how a bad rollout is terminated or reset in one command. It supersedes the older `tctl`, so new tooling and runbooks should be written against this binary.
+
+### Temporal Cloud
+**Short:** Vendor-hosted Temporal Service: no persistence fleet or Elasticsearch to run, with managed multi-region HA namespaces, billed per Action.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/workflow-and-durable-execution @1, platform-delivery/cloud-platform-and-cost @2
+
+It removes exactly the parts of Temporal that are unpleasant to operate: the Cassandra or PostgreSQL fleet, the Elasticsearch cluster behind advanced visibility, server upgrades and schema migrations, plus managed RBAC, SSO, audit logging, per-namespace export of closed histories, and high-availability namespaces with cross-region failover. What it does not take is your workers, because the Service never runs user code in any deployment shape.
+
+Billing is primarily per Action, roughly one state transition, plus storage measured in GB-hours and a support tier, so chatty polling loops and long retention windows are the two things that dominate a bill. Because the server is MIT licensed, moving between Cloud and self-hosted is a client configuration change plus a history migration rather than a rewrite.
+
+### Temporal Go SDK
+**Short:** Temporal's reference SDK for Go, with the richest worker tuning surface and determinism enforced only by the replayer and a static analyzer.
+**Kind:** tech
+**Lang:** go
+**Roles:** data-movement/workflow-and-durable-execution @1
+
+Workflows are ordinary functions taking a `workflow.Context`, concurrency uses `workflow.Go` and `Selector` rather than raw goroutines and `select`, and activities are registered on a worker bound to a task queue. Because the server itself is written in Go, this SDK usually receives new capabilities first, and it exposes the deepest worker options including slot suppliers, resource-based tuners and automatic poller autoscaling.
+
+The catch is enforcement: nothing at runtime stops workflow code calling `time.Now`, iterating a map, or opening a socket, so the `workflowcheck` static analyzer and replay tests against exported production histories are the safety net rather than a nicety.
+
+### Temporal Java SDK
+**Short:** Temporal's Java SDK, with a workflow deadlock detector, a Saga compensation helper and stable virtual threads on JVM 21 and above.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/workflow-and-durable-execution @1
+
+Workflows are interfaces annotated with `@WorkflowMethod`, `@SignalMethod`, `@QueryMethod` and `@UpdateMethod`, implemented by a class the worker instantiates per execution, with activities reached through typed stubs carrying their own `ActivityOptions`. `Async.function` and `Promise` supply structured concurrency inside a workflow, and a deadlock detector kills any workflow task that blocks the SDK's scheduler thread.
+
+The built-in `Saga` helper is the closest thing in any SDK to a first-class compensation primitive, accumulating undo steps as forward steps succeed and unwinding them newest-first on failure. Sticky cache sizing is a Java-specific concern because the default cached workflow count is far smaller than Go's.
+
+### Temporal Nexus
+**Short:** Temporal's cross-namespace call boundary: Endpoints expose named Operations another team's workflows invoke like activities.
+**Kind:** api
+**Lang:** *
+**Roles:** data-movement/workflow-and-durable-execution @1
+
+### Temporal Python SDK
+**Short:** Temporal's Python SDK, whose workflow sandbox gives the strongest determinism enforcement of any Temporal SDK.
+**Kind:** tech
+**Lang:** python
+**Roles:** data-movement/workflow-and-durable-execution @1
+
+Workflows are classes decorated with `@workflow.defn` whose `@workflow.run` coroutine executes on a deterministic asyncio event loop, so `await` on an activity, a timer or a condition is the whole concurrency model. Signals, queries and updates are decorated methods, and an update may declare a validator that rejects a call without writing anything to history.
+
+The distinguishing feature is the sandbox: workflow modules are re-imported into a restricted environment where non-deterministic standard library calls are blocked at runtime, with `workflow.unsafe.imports_passed_through()` as the escape hatch for known-safe third-party imports. That makes an accidental clock read a loud failure in development rather than a silent replay bug months later.
+
+### Temporal Schedules
+**Short:** Temporal's first-class scheduling resource, supporting pause, trigger, backfill and overlap policies unlike a plain cron workflow.
+**Kind:** api
+**Lang:** *
+**Roles:** data-movement/workflow-and-durable-execution @1
+
+### Temporal TypeScript SDK
+**Short:** Temporal's TypeScript SDK, running workflow code in an isolated bundle where Node I/O is unreachable rather than merely discouraged.
+**Kind:** tech
+**Lang:** js
+**Roles:** data-movement/workflow-and-durable-execution @1
+
+Workflow code is bundled separately from activity code and executed inside an isolated context with a deterministic clock, a deterministic `Math.random` and no access to Node built-ins, so the usual determinism violations are structurally impossible instead of caught after the fact. Activities are reached through `proxyActivities`, which returns a typed proxy whose calls become durable activity invocations.
+
+The bundling step is the thing to plan for: workflow modules cannot import anything that touches the network or the filesystem, so shared code between workflows and activities has to be factored with that boundary in mind.
+
+### Temporal Web UI
+**Short:** Temporal's execution browser: event histories as a timeline, pending activities with attempt counts, visibility search, and cancel or reset controls.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/workflow-and-durable-execution @1, devtools/version-control-and-workbench @3
+
+It is where a stuck execution is actually diagnosed: the event history renders as an ordered timeline, pending activities show their attempt number, last failure and next retry time, and the input and result payloads of every step are readable inline. Visibility search over predefined and custom search attributes drives the list view, and the same List Filter powers batch operations.
+
+Two operational notes. With a payload codec configured the UI shows opaque ciphertext unless you also run a codec server that decrypts under your own authorization rules, and the cancel, terminate and reset buttons carry very different consequences, since only cancellation gives workflow code the chance to run its compensation.
+
+### Temporal Worker Deployments
+**Short:** Temporal's GA versioning mechanism pairing a deployment name with a build id, so executions pin to the version they started on.
+**Kind:** api
+**Lang:** *
+**Roles:** data-movement/workflow-and-durable-execution @1
 
 ### TensorFlow Data Validation
 **Short:** TFX library that infers a data schema and detects skew, drift and anomalies in training and serving data.

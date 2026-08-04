@@ -1009,6 +1009,7 @@ A canonical, senior-engineer-level module per major infrastructure technology â€
 | Module | Category | Key Topics |
 |--------|----------|-----------|
 | [apache_airflow](src/main/java/com/rutik/systemdesign/technologies/apache_airflow/apache_airflow.md) | Workflow Orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler |
+| [temporal_durable_execution](src/main/java/com/rutik/systemdesign/technologies/temporal_durable_execution/temporal_durable_execution.md) | Durable Execution | Event history + replay determinism, the four activity timeouts, signals/queries/updates, Continue-As-New, patching vs Pinned Worker Deployments, immutable `numHistoryShards` |
 | [nvidia_triton_inference_server](src/main/java/com/rutik/systemdesign/technologies/nvidia_triton_inference_server/nvidia_triton_inference_server.md) | GPU Model Serving | Model repository + `config.pbtxt`, backends, dynamic batching, ensembles/BLS, `perf_analyzer` |
 | [intel_openvino](src/main/java/com/rutik/systemdesign/technologies/intel_openvino/intel_openvino.md) | CPU/Edge Inference & Optimization | IR + `ovc`/`convert_model`, device plugins (CPU/GPU/NPU), AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, OVMS, `openvino-genai` |
 
