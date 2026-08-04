@@ -383,48 +383,63 @@ informer.AddEventHandler(handlers)                    // react to deltas, not po
 ## 12. Interview Questions with Answers
 
 **Q1: Describe the Kubernetes control plane components and their roles.**
+**Short:** The API server is the sole hub to etcd, which stores all cluster state via Raft; the scheduler binds pods to nodes; the controller-manager runs reconciliation loops.
 The **API server** is the front door and sole hub — it authenticates, authorizes, admits, validates, and persists every change, and is the only component that talks to etcd. **etcd** is the Raft-based key-value store holding all cluster state (the source of truth). The **scheduler** binds unscheduled pods to nodes. The **controller-manager** runs the reconciliation loops (Deployment, ReplicaSet, Node, etc.). The **cloud-controller-manager** integrates with the cloud (LBs, volumes, node lifecycle).
 
 **Q2: Walk through exactly what happens when you `kubectl apply` a Deployment with 3 replicas.**
+**Short:** The API server admits and persists the Deployment, the Deployment/ReplicaSet controllers create Pods, the scheduler binds them, and each node's kubelet starts the containers.
 kubectl POSTs to the API server, which runs authn → authz (RBAC) → mutating/validating admission → schema validation, then writes the Deployment to etcd. The Deployment controller observes it and creates a ReplicaSet; the ReplicaSet controller sees desired=3, actual=0 and creates 3 Pod objects (Pending). The scheduler picks nodes and writes each Pod's `nodeName`. Each node's kubelet sees its bound Pod, calls the CRI runtime to pull the image and start the container, then reports status; the EndpointSlice controller adds ready pod IPs to the Service.
 
 **Q3: What does "declarative" and "level-triggered" mean, and why does it matter?**
+**Short:** Declarative means specifying desired end state rather than steps, and level-triggered means reconciling current-vs-desired rather than reacting to events — together making the system self-healing.
 Declarative means you specify the desired end state (`spec`), not the steps to get there; controllers compute and apply the diff. Level-triggered means controllers act on the *current* state rather than reacting to a specific event. Together they make the system self-healing: a controller that crashes, misses an event, or restarts simply re-reconciles current vs desired on its next pass and converges anyway — no lost-event fragility.
 
 **Q4: Why do components communicate only through the API server?**
+**Short:** Routing every call through it centralizes authn, authz, admission, and audit, and gives every component a consistent, watchable view of state via etcd.
 It centralizes authentication, authorization, admission, validation, and auditing in one place, and gives every component a consistent, watchable view of state via etcd. Direct component-to-component calls would fragment security and consistency. The cost is that the API server (and etcd) is the scalability and reliability bottleneck — which is why protecting it (rate limits, efficient watches) is critical.
 
 **Q5: What is etcd, and what happens if it fails or fills up?**
+**Short:** etcd is the Raft-based key-value store holding all cluster state, and once it exceeds its default 2 GiB quota it goes read-only, halting all writes including self-healing.
 etcd is the strongly-consistent, Raft-based key-value store holding all cluster state. Lose it without a backup and you lose the cluster's desired state (Deployments, Secrets, everything). It has a default DB size quota of 2 GiB (`--quota-backend-bytes`, with 8 GiB the suggested ceiling); exceeding it raises a NOSPACE alarm and puts etcd read-only, so the cluster stops accepting writes — including self-healing — until you compact/defragment and clear the alarm. Hence: HA (3/5 nodes), scheduled snapshots, tested restores, and size monitoring.
 
 **Q6: Why 3 or 5 etcd nodes and not 2 or 4?**
+**Short:** Quorum is ⌊N/2⌋+1, so an even node count like 4 tolerates the same one failure as 3 while adding write latency and split-vote risk — hence always odd counts.
 etcd needs a majority quorum to commit writes (Raft). With N nodes, quorum is ⌊N/2⌋+1: 3 → quorum 2 (tolerates 1 failure), 5 → quorum 3 (tolerates 2). An even count adds no extra fault tolerance (4 still only tolerates 1, same as 3) while adding write latency and split-vote risk — so you always use odd numbers.
 
 **Q7: What's the difference between `spec` and `status` on an object?**
+**Short:** `spec` is the user's declared desired state, `status` is the system's observed actual state, and a controller's entire job is closing the gap between them.
 `spec` is the user's declared desired state (e.g., `replicas: 3`); `status` is the system's observed actual state (e.g., `readyReplicas: 2`), written by controllers. The entire job of a controller is to drive `status` toward `spec`. When you debug "why isn't this happening," you compare the two and find which controller isn't closing the gap.
 
 **Q8: How does the kubelet fit in — does it talk to etcd?**
+**Short:** No — the kubelet only watches the API server for Pods bound to its node and reports status back to it; it never touches etcd directly.
 No. The kubelet watches the API server for Pods bound to its node, then uses the CRI to pull images and start/stop containers via the runtime, runs probes, and reports Pod status back to the API server. It never touches etcd directly — only the API server does. It's the node-level reconciler ensuring its node's actual containers match the PodSpecs assigned to it.
 
 **Q9: What does kube-proxy do?**
+**Short:** kube-proxy programs node-level networking, via iptables, the recommended nftables mode, or an eBPF dataplane, so a Service's virtual IP load-balances to current pod IPs.
 kube-proxy programs node-level networking so that a Service's stable virtual IP load-balances to the current set of backing pod IPs. It watches Services/EndpointSlices and installs rules via iptables (the default mode) or nftables (the recommended mode on Linux — it scales far better with large Service counts), or is replaced entirely by eBPF dataplanes (Cilium). It implements Service routing; it does not proxy most traffic itself in iptables/nftables modes (the kernel does).
 
 **Q10: How does the scheduler decide where a pod goes?**
+**Short:** It filters nodes for feasibility, such as resources, taints and affinity, then scores the feasible ones and binds the Pod to the top-ranked node.
 For each unscheduled Pod it runs a two-phase process: **filtering** (which nodes are feasible — enough CPU/memory, tolerations match taints, node selectors/affinity satisfied) and **scoring** (rank feasible nodes by spread, resource balance, affinity preferences), then binds the Pod to the top node by writing `nodeName`. It only schedules; the kubelet then starts the containers.
 
 **Q11: A controller you wrote is slowing the whole cluster. What's likely wrong?**
+**Short:** It's almost certainly overloading the API server with full `List()` polling instead of watch-backed informers, missing selectors, or unbounded hot-looping.
 It's almost certainly overloading the API server: polling with full `List()` calls instead of using a watch-backed informer cache, lacking field/label selectors, hot-looping without rate-limited backoff, or doing unbounded reconciles. Fix with shared informers (single watch + local cache), label/field selectors, a rate-limited workqueue, and exponential backoff on errors.
 
 **Q12: Managed vs self-managed control plane — tradeoffs?**
+**Short:** Managed control planes offload API server and etcd operations and backups to the cloud for a fee, while self-managed gives full control but full ownership of etcd HA and upgrades.
 Managed (EKS/GKE/AKS) offloads API server + etcd operation, scaling, patching, and backups to the cloud, removing the riskiest ops burden, at a per-cluster fee and with less control over control-plane internals/versions. Self-managed (kubeadm) gives full control and avoids the fee but makes you responsible for etcd HA/backups, upgrades, and availability — the failure modes most teams shouldn't own.
 
 **Q13: What are admission controllers and where do they run in the request path?**
+**Short:** They intercept authorized requests before persistence to etcd, running mutating webhooks first, then schema validation, then validating webhooks.
 Admission controllers intercept authorized requests *before* they're persisted to etcd, after authn/authz: first **mutating** webhooks (e.g., sidecar injection, defaulting), then schema validation, then **validating** webhooks (e.g., policy checks). They're how OPA Gatekeeper/Kyverno enforce policy and how service meshes inject sidecars — a powerful, cluster-wide enforcement point (and a latency/availability risk if a webhook is slow or down).
 
 **Q14: How does Kubernetes self-heal when a node dies?**
+**Short:** The node lifecycle controller taints the dead node NoExecute, and once the pod's toleration expires its owning controller creates replacements on healthy nodes.
 The node lifecycle controller stops receiving heartbeats, marks the node `NotReady` after a grace period, and applies a `node.kubernetes.io/not-ready` or `node.kubernetes.io/unreachable` `NoExecute` taint; pods carry a default 300-second `tolerationSeconds` for those taints, so once it elapses they are marked for deletion. Their owning controllers (ReplicaSet/StatefulSet) observe replicas below desired and create replacement pods, which the scheduler places on healthy nodes. The level-triggered loops make recovery automatic — no human action needed.
 
 **Q15: Why might a cluster be "slow" even though apps have spare CPU/memory?**
+**Short:** The bottleneck is usually the control plane itself — an overloaded API server, etcd near its size quota, or saturated CoreDNS — not the workloads.
 The bottleneck is usually the control plane, not the workloads: an overloaded API server (heavy list-watch traffic, slow/failing admission webhooks), etcd under disk pressure or near its size quota (slow writes, defrag pauses), or DNS (CoreDNS) saturation. Symptoms are slow `kubectl`, laggy rollouts, and delayed self-healing. You diagnose via API server/etcd latency metrics and request rates, not app dashboards.
 
 ---

@@ -395,51 +395,67 @@ kubectl get endpointslices -l kubernetes.io/service-name=web    # should list po
 ## 12. Interview Questions with Answers
 
 **Q1: What is a Pod and why not deploy bare Pods?**
+**Short:** A Pod is the smallest deployable unit of co-scheduled containers, and bare Pods lack self-healing, so a controller recreates them to maintain the desired count.
 A Pod is the smallest deployable unit: one or more containers sharing a network namespace (same IP, localhost) and volumes, always co-scheduled. You don't deploy bare Pods in production because they have no self-healing — if the node dies, the Pod is gone. A controller (Deployment/StatefulSet) recreates Pods to maintain desired count, giving you self-healing, scaling, and rolling updates.
 
 **Q2: Deployment vs StatefulSet — when each?**
+**Short:** Use a Deployment for interchangeable stateless Pods, and a StatefulSet when Pods need stable identity, stable per-Pod storage, and ordered startup.
 Use a Deployment for stateless workloads: Pods are interchangeable (random name suffixes), share/lack storage, and roll out/back freely. Use a StatefulSet when Pods need stable identity (ordinal names like `db-0`), stable per-Pod persistent storage (via `volumeClaimTemplates`), and ordered startup/rollout — i.e., databases, Kafka, Zookeeper. Using a StatefulSet for a stateless app just adds slower, ordered rollouts for no benefit.
 
 **Q3: Readiness vs liveness vs startup probes?**
+**Short:** Readiness gates traffic without restarting, liveness restarts a permanently broken container, and startup holds off liveness checks until a slow-booting app is up.
 Readiness answers "can this pod serve traffic now?" — failure removes it from Service endpoints (no restart). Liveness answers "is this pod permanently broken?" — failure restarts the container. Startup answers "has it finished booting?" — it holds off liveness checks until the app is up, preventing slow-starting apps from being killed mid-boot. Conflating readiness and liveness causes either dropped traffic or restart storms.
 
 **Q4: How does a zero-downtime rolling update work?**
+**Short:** With `maxUnavailable: 0, maxSurge: 1`, the controller creates one new ready Pod before terminating an old one, so full capacity keeps serving throughout.
 With `strategy: RollingUpdate` and `maxUnavailable: 0, maxSurge: 1`, the controller creates one new Pod (surge), waits for its readiness probe to pass, then terminates one old Pod — repeating until all are new. Because old Pods stay in the Service until new ones are Ready (gated by readiness), there's always the full capacity of ready Pods serving traffic, so no requests are dropped.
 
 **Q5: How do Services find their Pods, and what is an EndpointSlice?**
+**Short:** A Service's label selector drives the EndpointSlice controller to list ready Pod IPs, and kube-proxy routes the Service's virtual IP to those addresses.
 A Service has a label selector; the EndpointSlice controller watches Pods matching that selector and maintains EndpointSlices listing the IPs of *ready* Pods. kube-proxy programs routing from the Service's virtual IP to those Pod IPs. If labels don't match (or no Pods are ready), the EndpointSlice is empty and connections fail — a common "Service routes to nothing" bug.
 
 **Q6: What's the difference between a Secret and a ConfigMap, and is a Secret encrypted?**
+**Short:** Both inject config, but a Secret's value is base64-encoded, not encrypted, by default, requiring etcd encryption-at-rest or an external store for real protection.
 Both inject config (as env vars or mounted files), but Secrets are intended for sensitive data and are base64-*encoded*, not encrypted, by default — anyone with read RBAC or etcd access can decode them. For real protection you enable encryption-at-rest for etcd, restrict RBAC, and/or use an external store (Vault) via the External Secrets Operator. ConfigMaps are for non-sensitive config.
 
 **Q7: When do you use a DaemonSet?**
+**Short:** Use a DaemonSet when you need exactly one Pod per matching node, like log shippers or node exporters, since coverage tracks the node set automatically.
 When you need exactly one Pod per node (or per matching node): log shippers (Fluent Bit), metrics/node exporters, CNI agents, security agents. The DaemonSet controller adds a Pod when a node joins and removes it when the node leaves, so coverage tracks the node set automatically.
 
 **Q8: How do CronJobs avoid piling up after downtime or overlapping?**
+**Short:** `concurrencyPolicy: Forbid` prevents overlapping runs and `startingDeadlineSeconds` skips runs missed past the deadline instead of firing a backlog after downtime.
 `concurrencyPolicy: Forbid` (or `Replace`) prevents overlapping runs; `startingDeadlineSeconds` makes Kubernetes skip runs missed by more than the deadline instead of firing a backlog all at once after the control plane was down; `successfulJobsHistoryLimit`/`failedJobsHistoryLimit` cap retained Job objects. Without these, a control-plane outage can trigger a flood of catch-up Jobs.
 
 **Q9: A new pod gets traffic before it's ready and returns 5xx. Why and fix?**
+**Short:** A missing or misconfigured readiness probe lets the Pod join Service endpoints before it's warmed up; add a real readiness check with `maxUnavailable: 0`.
 There's no readiness probe (or it's misconfigured), so the pod joins the Service's endpoints as soon as the container process starts — before the app has loaded config/warmed up. Add a readiness probe hitting a real health endpoint; combined with `maxUnavailable: 0`, the old pod keeps serving until the new one reports ready, eliminating the gap.
 
 **Q10: What do `requests` and `limits` do at the object level?**
+**Short:** `requests` reserve resources for scheduling and set QoS class, while `limits` are hard ceilings that throttle CPU or OOM-kill on a memory breach.
 `requests` reserve resources for scheduling and determine QoS class (Guaranteed if requests==limits for all containers, else Burstable, else BestEffort), influencing eviction order. `limits` are hard ceilings: a CPU limit throttles, a memory limit triggers an OOM kill on breach. They map directly to cgroup settings on the node (see [linux_and_os_fundamentals](../linux_and_os_fundamentals/linux_and_os_fundamentals.md)).
 
 **Q11: How do you roll back a bad Deployment?**
+**Short:** `kubectl rollout undo deployment/web` reverts to the previous ReplicaSet, which Kubernetes keeps scaled to zero, making rollback fast and safe.
 `kubectl rollout undo deployment/web` reverts to the previous ReplicaSet (Kubernetes keeps old ReplicaSets per `revisionHistoryLimit`). `kubectl rollout history` shows revisions; `--to-revision=N` targets a specific one. Because the old ReplicaSet still exists (scaled to 0), rollback is just scaling it back up and the new one down — fast and safe.
 
 **Q12: What is a headless Service and why do StatefulSets use one?**
+**Short:** A headless Service returns individual Pod IPs via DNS instead of a virtual IP, giving StatefulSet Pods stable per-Pod names clients can address directly.
 A headless Service (`clusterIP: None`) returns the individual Pod IPs via DNS instead of a single virtual IP. StatefulSets pair with one so each Pod gets a stable DNS name (`pg-0.pg-headless.ns.svc`), letting clients address specific members — essential for clustered systems where you must reach a particular replica (e.g., a primary) rather than load-balance across all.
 
 **Q13: Why does the case study need a `preStop` hook in addition to a readiness probe and SIGTERM handling?**
+**Short:** A `preStop` hook holds the container alive briefly after Terminating so in-flight endpoint removal can propagate, since readiness only gates Pods joining, not leaving.
 A `preStop` hook bridges the gap between a Pod being marked Terminating and kube-proxy actually removing it from Service endpoints, which is not instantaneous. Without it, the moment a Pod receives SIGTERM it can stop accepting connections while some nodes haven't yet propagated its removal from the EndpointSlice, so a few in-flight requests get routed to a Pod that's already shutting down and are dropped. The module's fix runs `preStop: sleep 10` to hold the container alive and still finishing requests for 10 seconds after Terminating while endpoint removal propagates, inside a `terminationGracePeriodSeconds: 45` window sized longer than the app's slowest in-flight request. Readiness probes only gate new Pods joining traffic and do nothing for a Pod that's leaving, so always pair a `preStop` drain delay with an app that traps SIGTERM and finishes in-flight work rather than relying on either mechanism alone.
 
 **Q14: What are the Kubernetes Service types and how does each expose Pods?**
+**Short:** There are four `type` values — ClusterIP, NodePort, LoadBalancer, ExternalName — plus the headless variant, each exposing Pods differently from internal-only to internet-facing.
 There are four values of the `type` field — ClusterIP, NodePort, LoadBalancer, ExternalName — plus the headless variant, which is a ClusterIP Service with `clusterIP: None` rather than a type of its own. ClusterIP (the default) gives an internal-only virtual IP for service-to-service calls, and the rest build outward from there for different exposure needs. NodePort opens the same port on every node for simple external access, usually behind an external load balancer; LoadBalancer provisions one cloud load balancer with an external IP per Service; a headless Service skips the virtual IP entirely and returns individual Pod IPs via DNS, which is what StatefulSets use for stable per-Pod addressing; and ExternalName is just a DNS CNAME to an external hostname with no proxying at all. In production, ClusterIP handles internal traffic, an Ingress fronting ClusterIP (or occasionally LoadBalancer directly) handles internet-facing traffic, and NodePort is mostly a dev/debug tool since it exposes a high port on every node. Pick headless only when clients genuinely need to address a specific Pod rather than any ready replica.
 
 **Q15: Why prefer an Ingress over giving every Service its own LoadBalancer?**
+**Short:** An Ingress shares one L7 load balancer and controller across many Services' host and path rules, versus one costly cloud load balancer per Service.
 A cloud LoadBalancer Service provisions one external load balancer per Service, while an Ingress shares a single L7 load balancer and controller across many Services' host and path rules. Ten services fronted by ten `LoadBalancer` Services means ten cloud load balancers billed and managed separately, while the same ten services behind one Ingress controller share a single load balancer and route by hostname or URL path, cutting both cost and the number of moving parts to monitor. Ingress also provides L7 features a plain Service can't: path-based routing, host-based virtual hosting, TLS termination, and header-based rules, all configured declaratively per Ingress object. The tradeoff is an extra layer — the ingress controller itself — to operate and secure, so default to Ingress for HTTP(S) services and reserve raw `LoadBalancer` Services for internet-facing TCP/UDP workloads an Ingress controller can't route.
 
 **Q16: How does a plain Job differ from a CronJob, and what does `backoffLimit` control?**
+**Short:** A Job runs Pods to completion once, a CronJob schedules new Jobs on a cron, and `backoffLimit` caps retries before the Job itself is marked Failed.
 A Job runs Pods to completion a single time when created, while a CronJob is a scheduled wrapper that creates a new Job on a cron schedule. `backoffLimit` caps how many times a failed Pod is retried before the Job itself is marked Failed — the module's backup CronJob sets `backoffLimit: 3`, so a flaky backup gets three attempts before it's treated as a real failure instead of retrying forever. `restartPolicy` on the Pod template must be `Never` or `OnFailure`, never the Deployment default `Always`, since a run-to-completion Pod that restarted forever would never let the Job finish. Jobs are the right primitive for one-off work like a CI/CD database migration that must run exactly once to completion before the app Deployment rolls out, so set `backoffLimit` deliberately rather than leaving it unbounded.
 
 ---

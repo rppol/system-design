@@ -518,51 +518,67 @@ spec: {minAvailable: 2, selector: {matchLabels: {app: web}}}
 ## 12. Interview Questions with Answers
 
 **Q1: How does the scheduler decide where a Pod goes?**
+**Short:** It filters nodes for feasibility on requests, taints, and affinity, then scores the feasible ones and binds the Pod to the highest-scoring node.
 Two phases: filtering (which nodes are feasible — enough allocatable resources for the Pod's *requests*, taints tolerated, node affinity/selectors and topology constraints satisfied) and scoring (rank feasible nodes by resource balance, spread, and affinity preferences). It binds the Pod to the highest-scoring node by setting `nodeName`; the kubelet then starts it. If no node is feasible, the Pod stays Pending and may trigger node autoscaling.
 
 **Q2: Why are requests the most important resource setting?**
+**Short:** The scheduler bin-packs on requests, not actual usage, so under-requesting causes contention while over-requesting wastes money, and requests also drive QoS and HPA.
 The scheduler bin-packs based on requests, not actual usage. Under-request and nodes look empty, so it over-packs and real usage causes contention/OOM/throttling; over-request and nodes look full while idle, wasting money. Requests also determine QoS class and HPA's CPU-utilization denominator. Setting them close to measured real usage is the single highest-leverage tuning decision.
 
 **Q3: Explain QoS classes and their effect.**
+**Short:** Guaranteed Pods (requests equal limits) are evicted last under memory pressure, Burstable are in the middle, and BestEffort are evicted first.
 Guaranteed (requests==limits for all containers) Pods are evicted last under node memory pressure; Burstable (requests<limits) are in the middle; BestEffort (no requests/limits) are evicted first. QoS controls the kubelet's eviction order and `oom_score_adj`, so latency-critical Pods should be Guaranteed to be the least likely to be killed when a node is squeezed.
 
 **Q4: HPA vs VPA vs Cluster Autoscaler — what does each scale?**
+**Short:** HPA scales replica count, VPA right-sizes a Pod's own requests and limits, and Cluster Autoscaler or Karpenter add or remove nodes to fit the Pods.
 HPA scales the number of Pod replicas based on CPU/memory/custom metrics. VPA adjusts a Pod's requests/limits (right-sizing), applying them to running Pods via in-place resize where the change allows and evicting only when it doesn't. Cluster Autoscaler (and Karpenter) add/remove nodes when Pods can't schedule or nodes are underused. They compose: HPA adds Pods, the node autoscaler adds nodes to hold them. Don't run HPA and VPA on the same metric — they fight.
 
 **Q5: How does HPA actually compute the desired replica count?**
+**Short:** It computes `ceil(currentReplicas * (currentMetricValue / targetMetricValue))`, where CPU utilization is a percentage of requested CPU, so requests must be set.
 `desiredReplicas = ceil(currentReplicas * (currentMetricValue / targetMetricValue))`. For CPU utilization, the metric is a percentage of the *requested* CPU averaged across Pods — which is why CPU requests must be set or HPA can't compute it. The controller syncs ~every 15s and applies a stabilization window (default 5min on scale-down) to avoid flapping.
 
 **Q6: What are taints and tolerations, and a use case?**
+**Short:** A taint repels Pods lacking a matching toleration, letting you dedicate nodes — like tainting GPU nodes so only GPU workloads with the toleration land there.
 A taint on a node repels Pods that don't explicitly tolerate it; a matching toleration on a Pod lets it schedule there. Use them to dedicate nodes: taint GPU nodes `nvidia.com/gpu:NoSchedule` so only GPU workloads (which add the toleration) land there, keeping expensive accelerators free of general Pods. Effects: `NoSchedule`, `PreferNoSchedule`, `NoExecute` (also evicts existing Pods).
 
 **Q7: How do you ensure replicas survive a node or AZ failure?**
+**Short:** Spread replicas across zones and hostnames with topology spread constraints or Pod anti-affinity, so an AZ loss degrades capacity by roughly its share only.
 Use `topologySpreadConstraints` (and/or Pod anti-affinity) to spread replicas across `topology.kubernetes.io/zone` and `kubernetes.io/hostname`, so no single node or AZ holds too many. With `maxSkew: 1` across zones, an AZ loss degrades capacity by roughly its share rather than taking the service down. Pair with a PodDisruptionBudget to protect against voluntary disruptions.
 
 **Q8: What is a PodDisruptionBudget and when is it essential?**
+**Short:** A PDB limits how many Pods can be voluntarily disrupted at once, preventing a node drain from evicting all replicas simultaneously during upgrades.
 A PDB limits how many Pods of a set can be *voluntarily* disrupted at once (`minAvailable`/`maxUnavailable`). It's essential during node drains (cluster upgrades, autoscaler scale-down): without it, draining a node can evict all replicas simultaneously and cause an outage during a routine operation. With `minAvailable: 2`, drains block until they can proceed without dropping below 2 ready Pods.
 
 **Q9: Cluster Autoscaler vs Karpenter?**
+**Short:** Cluster Autoscaler scales predefined node groups based on unschedulable Pods, while Karpenter provisions nodes just-in-time per pending Pod without node groups.
 Cluster Autoscaler scales predefined node groups (ASGs) up/down based on unschedulable Pods and underutilization — simple but constrained to the instance types you pre-defined. Karpenter provisions nodes just-in-time, choosing instance types/sizes that best fit pending Pods directly (no node groups), blends spot/on-demand, and aggressively consolidates — typically faster scale-up and lower cost. Karpenter's core lives in `kubernetes-sigs/karpenter` with per-cloud providers layered on top, and its `karpenter.sh/v1` API is stable; Cluster Autoscaler's advantage is breadth, since it ships providers for far more clouds and on-prem platforms.
 
 **Q10: What does KEDA add over HPA?**
+**Short:** KEDA adds event-driven scaling on sources like queue depth or Kafka lag and scale-to-zero, translating those triggers into an HPA underneath.
 KEDA enables event-driven scaling on external sources HPA can't natively use — queue depth (SQS/RabbitMQ), Kafka consumer lag, cron schedules, Prometheus queries — and crucially supports scale-to-zero. Idle workers cost nothing and wake on backlog. Under the hood KEDA drives an HPA, translating external triggers into scaling decisions.
 
 **Q11: Why might you omit CPU limits but keep memory limits?**
+**Short:** A CPU limit causes CFS throttling that spikes tail latency even with spare node CPU, while a memory limit is kept because exceeding it triggers an OOM kill.
 A CPU limit causes CFS throttling: once a Pod uses its quota within a 100ms period, it's paused, spiking tail latency even when the node has spare CPU. For latency-sensitive services, omitting the CPU limit (keeping the request for scheduling) lets the Pod burst into idle CPU. Memory limits are kept because exceeding memory triggers an OOM kill, and unbounded memory growth can take down a node.
 
 **Q12: A Pod is stuck Pending. How do you diagnose it?**
+**Short:** `kubectl describe pod` shows the scheduler's exact reason — insufficient resources, an untolerated taint, a failed affinity rule, or a topology spread violation.
 `kubectl describe pod` shows the scheduler's reason: "Insufficient cpu/memory" (no node has enough requested capacity → node autoscaler should add one, or requests are too high), "node(s) had taint … that the pod didn't tolerate", "didn't match node affinity/selector", "had volume node affinity conflict" (zonal volume mismatch), or "didn't match pod topology spread constraints". The event message points directly at which constraint can't be satisfied.
 
 **Q13: How does VPA differ mechanically from HPA, and why shouldn't they scale the same metric on the same workload?**
+**Short:** VPA rewrites a Pod's own requests and limits from observed usage rather than changing replica count, and pairing it with HPA on the same metric makes both scalers fight.
 VPA right-sizes a Pod's requests/limits from observed historical usage and rewrites those numbers on the Pod itself, unlike HPA which just changes replica count. With `updateMode: InPlaceOrRecreate` the updater resizes a running Pod in place — in-place Pod vertical scaling is a stable, on-by-default Kubernetes feature — and only evicts when the change cannot be applied in place (a memory limit decrease below current usage is skipped rather than applied, and a resize never changes a Pod's QoS class); `updateMode: Recreate` always evicts. Note that a container whose `resizePolicy` for memory is `RestartContainer` restarts in place — the Pod itself is not rescheduled. If both HPA and VPA watch CPU on the same Deployment, they fight: VPA shrinks or grows the request while HPA is simultaneously computing utilization against that same moving target, producing scaling decisions that thrash instead of converging. The fix is to split responsibility — let VPA right-size CPU/memory requests while HPA scales on a different signal such as requests-per-second or queue depth, or run VPA in `Off` (recommendation-only) mode and apply its suggestions manually. Even with in-place resize, a VPA update can still fall back to eviction, so avoid tight VPA update loops on latency-sensitive or stateful workloads.
 
 **Q14: What's the difference between a hard (`DoNotSchedule`) and soft (`ScheduleAnyway`) topology spread constraint?**
+**Short:** `DoNotSchedule` blocks placement outright once the configured skew would be exceeded, while `ScheduleAnyway` places the Pod anyway and only prefers better balance.
 `DoNotSchedule` blocks placement outright once the configured skew would be exceeded, while `ScheduleAnyway` places the Pod anyway and only prefers a more balanced node. In the module's example, the zone-level constraint uses `DoNotSchedule` with `maxSkew: 1` so no zone can ever hold more than one extra Pod versus the least-loaded zone, guaranteeing the spread but risking a Pod stuck Pending if no zone has room. The hostname-level constraint uses `ScheduleAnyway` so node-level balance is a preference, not a hard requirement, keeping Pods schedulable even when perfect balance isn't achievable. Use `DoNotSchedule` where the availability guarantee (cross-zone HA) matters more than schedulability, and `ScheduleAnyway` where running slightly unbalanced beats leaving a Pod Pending.
 
 **Q15: How do node affinity and Pod anti-affinity differ as placement controls?**
+**Short:** Node affinity matches a Pod against node labels, while Pod anti-affinity constrains placement relative to other Pods, such as never co-locating replicas.
 Node affinity constrains which nodes a Pod can land on based on node labels, while Pod anti-affinity constrains placement relative to other Pods, not nodes. Node affinity (and the simpler `nodeSelector`) is a Pod-to-node match — pin to GPU nodes or a specific AZ using node labels — while Pod anti-affinity is a Pod-to-Pod rule that keeps replicas of the same app off the same node or zone, achieving something similar to topology spread constraints but expressed as required/preferred rules against label selectors instead of a numeric skew. Both are evaluated during the scheduler's filter phase alongside taints and resource requests, so a Pod can sit Pending from a failed affinity rule even when plenty of raw CPU and memory is available. Reach for topology spread constraints for even distribution across many replicas, and reserve Pod anti-affinity for specific pairwise rules like never co-locating a primary and its replica.
 
 **Q16: In the case study, why did over-requested resources double the node count even though real CPU utilization was only about 30%?**
+**Short:** The scheduler bin-packed nodes on requests three to four times larger than real usage, so Cluster Autoscaler kept adding nodes the Pods didn't actually need.
 The Deployment requested a full CPU and 2Gi of memory per Pod while actually using roughly 250m CPU and 600Mi, so the scheduler packed nodes as if they were nearly full when they were mostly idle. Because the scheduler bin-packs on requests rather than actual usage, each 1-CPU/2Gi request looked three to four times bigger than what the Pod really consumed, so Cluster Autoscaler kept launching new nodes to fit Pods that appeared to need far more than they did, roughly doubling the fleet to about 80 nodes for flat traffic. Right-sizing requests to measured usage (300m CPU / 768Mi) and switching to Karpenter's consolidation cut the fleet to about 40 nodes and raised average utilization from ~30% to ~60%, taking monthly compute cost from 2x baseline down to roughly 1.05x. Always validate requests against VPA-recommended or profiled real usage before trusting the autoscaler's node count to reflect actual demand.
 
 ---

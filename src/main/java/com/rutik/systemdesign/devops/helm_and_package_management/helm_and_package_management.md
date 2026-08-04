@@ -343,51 +343,67 @@ env:
 ## 12. Interview Questions with Answers
 
 **Q1: What problem does Helm solve over raw `kubectl apply`?**
+**Short:** Helm packages many interrelated manifests into a versioned, templated chart with per-environment values, tracked as one named release with atomic upgrade and rollback.
 A real app is many interrelated manifests that differ per environment. Helm packages them into a versioned, templated chart with default values you override per environment, manages them as one named release, and provides atomic upgrade and rollback. Raw YAML forces you to copy-paste per-env variants and manually track what's installed — Helm gives you parameterization, packaging, and release lifecycle.
 
 **Q2: Helm vs Kustomize — how do they differ fundamentally?**
+**Short:** Helm substitutes values into Go templates and tracks releases for rollback, while Kustomize patches a template-free base with overlays, producing predictable base+patch output.
 Helm uses Go templating: values are substituted into templates to produce manifests, and it tracks releases for rollback. Kustomize is template-free: you patch a base with overlays (strategic-merge/JSON patches), so the output is base+patch — predictable and diffable, with no logic. Helm offers power and packaging; Kustomize offers transparency and simplicity. They're often combined.
 
 **Q3: What is a Helm release and why does it matter?**
+**Short:** A release is a named, versioned chart installation whose revisions Helm records, letting `helm rollback` atomically revert to a prior known-good state.
 A release is a named, versioned instance of a chart installed in the cluster. Each `install`/`upgrade` creates a new revision, and Helm stores the rendered manifests, enabling `helm rollback` to atomically revert to a prior known-good revision. This release lifecycle — not templating — is Helm's distinguishing capability versus plain manifests or Kustomize.
 
 **Q4: How do you safely perform a Helm upgrade?**
+**Short:** Run `helm upgrade --install --rollback-on-failure`, which installs if absent and automatically reverts to the last successful revision if the upgrade fails.
 Use `helm upgrade --install --rollback-on-failure`: `--install` handles first-time installs, and `--rollback-on-failure` reverts to the last successful revision if the upgrade fails (so you never end up half-applied). It implies `--wait=watcher`, which blocks until resources report Ready; left to itself `--wait` defaults to `hookOnly`, meaning Helm waits only on hook Jobs and returns before your Pods are healthy. Preview changes first with the `helm diff` plugin, pin chart versions, and keep `--timeout` sane so a stuck rollout fails cleanly.
 
 **Q5: How do you handle secrets in Helm charts?**
+**Short:** Never put secrets in `values.yaml` — reference an externally-managed Secret via `secretKeyRef` and populate it from Vault via External Secrets Operator or SOPS.
 Never put secrets in `values.yaml` — it ends up in Git. Reference an externally-managed Kubernetes Secret via `secretKeyRef`, and populate that Secret from an external store (Vault) using the External Secrets Operator, or encrypt values with SOPS/helm-secrets if they must live in Git. The chart should reference secret *names*, not secret *values*.
 
 **Q6: What changed between Helm 2 and Helm 3?**
+**Short:** Helm 3 removed the in-cluster Tiller server for client-only operation using kubeconfig RBAC; Helm 4 keeps that and renames `--atomic` to `--rollback-on-failure`.
 Helm 3 removed Tiller — the in-cluster server component that was a major security concern (it held broad cluster permissions). Helm stays client-only, using your kubeconfig credentials and RBAC, and stores release state as Secrets in the release's namespace. Helm 3 also added OCI registry support and three-way merge for drift handling. Helm 4 is the current major version and keeps all of that while replacing three-way merge with server-side apply for new releases (releases created under Helm 3 stay client-side until you opt in with `--server-side`), reworking plugins onto an optional WebAssembly runtime, and renaming `--atomic` to `--rollback-on-failure`.
 
 **Q7: When would you choose Kustomize over Helm?**
+**Short:** Choose Kustomize for first-party apps under GitOps, where transparent base+patch overlays and the GitOps tool's own revisioning make Helm's release feature redundant.
 For first-party applications where you want transparent, diffable, logic-free environment overlays — especially under GitOps, where the GitOps tool (ArgoCD/Flux) already provides revisioning and rollback, so Helm's release feature is redundant. Kustomize's predictability (output is exactly base+patch) also eases code review and avoids template surprises.
 
 **Q8: How do chart dependencies (subcharts) work?**
+**Short:** `Chart.yaml` lists dependencies with versions and an optional `condition` toggle; `helm dependency update` vendors them into `charts/` with their own overridable values.
 A chart's `Chart.yaml` lists dependencies (other charts + versions + repos), optionally toggled by `condition`. `helm dependency update` vendors them into `charts/`. On install, subcharts render with their own (overridable) values. This lets an app chart bundle its datastore (e.g., a PostgreSQL subchart) — but pin versions and review subcharts, as they're third-party code in your cluster.
 
 **Q9: What's a common Helm anti-pattern?**
+**Short:** Over-templating — cramming so much conditional logic into charts that the rendered output becomes unpredictable and hard to review.
 Over-templating: cramming so much conditional logic and indirection into templates that the chart becomes unreadable and the rendered output is hard to predict — the opposite of Kustomize's transparency. Other anti-patterns: secrets in values, unpinned dependency versions, and skipping `--rollback-on-failure`. Keep charts as simple as the use case allows; `helm template` to inspect rendered output.
 
 **Q10: How do Helm/Kustomize fit into GitOps?**
+**Short:** GitOps tools like ArgoCD/Flux natively render Helm charts or Kustomize overlays from Git and reconcile the cluster, making the Git repo the source of truth.
 GitOps tools (ArgoCD/Flux) natively render Helm charts or Kustomize overlays from a Git repo and reconcile the cluster to match. A common split: third-party software via Helm charts (values in Git), first-party apps via Kustomize overlays. The Git repo is the source of truth and provides revisioning, so a `git revert` rolls back the change (see [gitops_argocd_flux](../gitops_argocd_flux/gitops_argocd_flux.md)).
 
 **Q11: How does Helm resolve values when multiple `-f` files and `--set` flags are given?**
+**Short:** Helm merges defaults first, then each `-f` file left-to-right, with `--set`/`--set-string` always winning regardless of position — a deep per-key merge, not file replacement.
 Helm merges values with a strict precedence order where later sources always override earlier ones. Defaults come from the chart's own values.yaml, then each `-f` file listed on the command line merges left-to-right so the last `-f` file's keys win over earlier ones, and `--set`/`--set-string` always win over every `-f` file regardless of where they appear on the command line. The merge is per-key (a deep merge), not whole-file replacement, so an override file only needs to specify the keys that actually change. Keep environment-specific overrides in one explicit, last-listed `-f` file such as values-prod.yaml, and reserve `--set` for one-off CLI overrides like image.tag in a CI pipeline, so precedence stays predictable at a glance.
 
 **Q12: How do you override a subchart's values from the parent chart, and what does `global:` do?**
+**Short:** A parent chart overrides a subchart by nesting values under a key matching the subchart's name, while `global:` is visible to the parent and every subchart at once.
 A parent chart overrides a subchart's values by nesting them under a key that matches the subchart's name in the parent's values.yaml. For a postgresql dependency declared in Chart.yaml, setting postgresql.auth.password in the parent's values.yaml flows down into that subchart's own auth.password value without touching the subchart itself. The special global: block sits outside any single subchart's namespace and is visible to the parent chart and every subchart simultaneously, which is the mechanism for values that must stay consistent everywhere, like global.imageRegistry. Use global sparingly for genuinely cross-cutting values only — overusing it turns subchart behavior into action-at-a-distance that's hard to trace back to its source.
 
 **Q13: How does `helm upgrade --rollback-on-failure` actually perform its automatic rollback?**
+**Short:** Each release revision persists as a Kubernetes Secret, and the flag uses that stored history to revert automatically to the last successful revision within `--timeout`.
 Helm stores every release revision as a Kubernetes Secret, and `--rollback-on-failure` uses that stored history to roll back automatically when an upgrade fails. Each revision persists as a Secret holding the rendered manifests for that revision, so when the flag detects a failed upgrade within the `--timeout` window, Helm rolls back to the last successful revision using that stored history — the same mechanism `helm rollback` uses manually. The flag also forces `--wait=watcher`, since Helm has to actually watch the rollout to know it failed. If the failure takes out the release's namespace or its Secrets along with the upgrade, there is nothing left to roll back from. Size `--timeout` to your actual rollout time so a slow-but-healthy startup isn't mistaken for a failure and rolled back prematurely.
 
 **Q14: Why doesn't `helm upgrade` update CRDs defined in a chart's `crds/` directory?**
+**Short:** Helm installs CRDs from `crds/` only on the initial install and never upgrades or deletes them afterward, since an automatic change could orphan existing custom resources.
 Helm installs CRDs from a chart's crds/ directory only once, during the initial helm install, and never upgrades or deletes them afterward. This is a deliberate safety choice: automatically upgrading or deleting a CRD on every release could destroy existing custom resources, since a removed or incompatible CRD field can orphan or corrupt live CRs, so Helm intentionally leaves that step to the operator. In practice a chart bump that changes its CRDs, like kube-prometheus-stack, requires a manual step — running kubectl apply -f against the chart's crds/ directory before helm upgrade. Never assume helm upgrade updated your CRDs; check the chart's release notes for CRD changes and apply them explicitly as a reviewed step in the pipeline.
 
 **Q15: When would you use a Helm hook versus a Kubernetes Operator for lifecycle logic?**
+**Short:** A Helm hook runs a one-off Job at a specific lifecycle point and finishes, while a Kubernetes Operator continuously reconciles a resource's state indefinitely.
 Helm hooks run a one-off Job at a specific point in a release's lifecycle, while a Kubernetes Operator continuously reconciles a resource's state. A hook is declared with an annotation like helm.sh/hook: pre-upgrade plus a hook-weight for ordering, and it runs imperatively once — a database migration before the new version's Pods start, for example — then it's done until the next release event triggers it again. An Operator's reconcile loop runs indefinitely, reacting to spec changes and correcting drift the moment live state diverges from desired state, which a one-shot hook can never do between releases. Reach for a hook when the task is finite and tied to install/upgrade/delete events; reach for an Operator when the resource needs ongoing management beyond any single release.
 
 **Q16: Why do GitOps pipelines often render with `helm template` instead of running `helm install`/`upgrade` directly?**
+**Short:** ArgoCD renders charts locally like `helm template` and owns the deployed state itself, while Flux's helm-controller drives real `helm install`/`upgrade` actions with genuine Helm release Secrets.
 helm template renders manifests locally without contacting the cluster, which is why GitOps pipelines use it to produce plain YAML for diffing and syncing. That description fits ArgoCD's default Helm integration specifically: it renders a chart with its own internal equivalent of helm template and then applies and reconciles that plain output like any other manifest set, so under ArgoCD the GitOps tool itself — not Helm's release/Secret mechanism — owns the deployed state and drift detection. Flux is the contrast case: its helm-controller reconciles a HelmRelease custom resource by driving genuine helm install/upgrade/test/rollback actions through the Helm SDK and creates real Helm release Secrets, so helm list and helm history return meaningful results against a Flux-managed release in a way they never do under ArgoCD's template-and-apply mode. Never run helm upgrade manually against a release that ArgoCD or Flux also reconciles — under ArgoCD it fights the tool's own template-and-apply loop, and under Flux it races the helm-controller's own install/upgrade actions on that same release.
 
 ---

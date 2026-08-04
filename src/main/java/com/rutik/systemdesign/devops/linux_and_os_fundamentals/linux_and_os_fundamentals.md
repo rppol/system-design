@@ -443,51 +443,67 @@ The proxy stops at `(1024 - 20) / 2 = 502` brokered connections, not 5000, becau
 ## 12. Interview Questions with Answers
 
 **Q1: What actually is a container at the kernel level?**
+**Short:** A container is an ordinary process placed into its own namespaces and constrained by cgroups, with no separate "container" kernel object at all.
 A container is an ordinary Linux process placed into its own set of namespaces and constrained by cgroups, optionally with reduced capabilities and a pivoted root filesystem. There is no "container" object in the kernel — `docker run` calls `clone()` with `CLONE_NEW*` flags, writes cgroup limits, and `execve()`s the entrypoint. This is why containers share the host kernel and start in milliseconds, unlike VMs.
 
 **Q2: A pod is OOMKilled but `kubectl top node` shows free memory. Why?**
+**Short:** The container exceeded its cgroup `memory.max`, triggering a local OOM kill independent of node-level free memory.
 The container exceeded its cgroup `memory.max` (its `resources.limits.memory`), triggering a *cgroup-local* OOM kill independent of node-level free memory. Requests affect scheduling and QoS; limits are a hard ceiling enforced per cgroup. Check `dmesg` for "Memory cgroup out of memory" and `memory.events` `oom_kill` count.
 
 **Q3: Difference between a process's requests and limits, and how do they map to the kernel?**
+**Short:** Requests are a scheduling guarantee mapped to `cpu.weight` or reserved memory, while limits enforce via `cpu.max` throttling or `memory.max` OOM kill.
 Requests are a scheduling guarantee (`cpu.weight` / reserved memory used by the scheduler to place the pod); limits are enforcement — `cpu.max` (CFS quota, causes throttling) and `memory.max` (causes OOM kill on breach). Requests never throttle or kill; limits do.
 
 **Q4: SIGTERM vs SIGKILL — why does graceful shutdown sometimes fail?**
+**Short:** SIGTERM is catchable so a well-behaved app drains gracefully, while SIGKILL is uncatchable, and shutdown drops requests when SIGTERM is ignored or too slow.
 SIGTERM (15) is catchable: a well-behaved app traps it, stops accepting new work, drains in-flight requests, then exits. SIGKILL (9) is uncatchable — the kernel destroys the process immediately. Shutdown "fails" (drops requests) when the app ignores SIGTERM or takes longer than `terminationGracePeriodSeconds`, after which Kubernetes escalates to SIGKILL.
 
 **Q5: What does the OOM killer use to choose a victim?**
+**Short:** It computes an `oom_score` roughly proportional to memory footprint, adjusted by `oom_score_adj`, and kills the highest scorer under pressure.
 It computes `oom_score` per process, roughly proportional to memory footprint, adjusted by `oom_score_adj` (`-1000` = never kill, `+1000` = kill first). Under whole-node pressure it kills the highest scorer; under cgroup pressure it kills within the offending cgroup. Kubernetes sets `oom_score_adj` so BestEffort pods die before Guaranteed ones.
 
 **Q6: Why might a process show 100% CPU but the service is slow, vs low CPU but slow?**
+**Short:** High CPU with slowness is genuinely CPU-bound, rising `throttled_usec` means CFS bandwidth throttling, and high iowait means blocked disk or network I/O.
 High CPU + slow = genuinely CPU-bound (profile the hot path). Low CPU + slow + a rising `nr_throttled`/`throttled_usec` in the cgroup's `cpu.stat` = CFS bandwidth throttling against a CPU limit. Low CPU + slow + high iowait (`vmstat`/`iostat`) = blocked on disk/network I/O. The metrics distinguish the three.
 
 **Q7: What is a zombie process and how does it arise in containers?**
+**Short:** A zombie is a terminated child whose exit status hasn't been reaped by its parent, accumulating when a container's PID 1 spawns children but never reaps them.
 A zombie (`<defunct>`) is a terminated child whose exit status hasn't been reaped by its parent via `wait()`. In containers, if PID 1 is a shell or an app that spawns children but never reaps them, zombies accumulate and can exhaust the PID table. Fix: use an init like `tini`/`dumb-init` as PID 1, or `shareProcessNamespace` with a proper init.
 
 **Q8: How do you debug a running container from the host without a shell inside it?**
+**Short:** Use `nsenter` to enter the container's namespaces with host tools, or `kubectl debug` ephemeral containers, since distroless images have no shell.
 Use `nsenter --target <host-pid> --mount --net --pid` to enter the container's namespaces with host tools, or `kubectl debug` ephemeral containers. Distroless/scratch images have no shell, so host-side `nsenter`, `crictl`, `strace -p`, and `/proc/<pid>/` inspection are essential.
 
 **Q9: What are Linux capabilities and why drop them?**
+**Short:** Capabilities split root's powers into narrow units, and dropping all and adding back only what's needed shrinks the blast radius of a compromise.
 Capabilities split root's powers into ~40 units (`CAP_NET_BIND_SERVICE`, `CAP_SYS_ADMIN`, etc.). Dropping all and adding back only what's needed shrinks the blast radius of a compromise — a container that only needs to bind port 80 gets `CAP_NET_BIND_SERVICE` and nothing else. `securityContext.capabilities.drop: ["ALL"]` is the hardened default.
 
 **Q10: cgroups v1 vs v2 — why does it matter for Kubernetes?**
+**Short:** cgroups v2's single unified hierarchy gives better memory pressure control, since `memory.high` throttles before `memory.max` triggers an OOM kill.
 v2 is a single unified hierarchy with better memory pressure control (`memory.high` throttles before `memory.max` OOMs) and accurate accounting. Kubernetes added GA cgroup v2 support in 1.25; on cgroup v2 nodes, memory QoS and the OOM behavior are more predictable. Mismatches between the runtime's expectation and the node's cgroup version cause subtle resource-enforcement bugs.
 
 **Q11: What does `ulimit -n` control and where does it bite in production?**
+**Short:** It's the per-process soft limit on open file descriptors, so high-connection servers hit `EMFILE` and stop accepting connections once it's exhausted.
 It's the per-process soft limit on open file descriptors (default often 1024). Sockets are FDs, so high-connection servers (proxies, brokers, DB pools) hit `EMFILE` ("too many open files") and stop accepting connections while CPU/memory look fine. Raise it via systemd `LimitNOFILE` or pod limits, and monitor open FDs against the ceiling.
 
 **Q12: How does the page cache affect "memory usage" readings?**
+**Short:** Linux uses free RAM as reclaimable page cache, so "used" memory readings that include cache look alarming even though the cache is reclaimable.
 Linux uses free RAM as page cache for file I/O; tools that report "used" memory including cache look alarming but the cache is reclaimable. `free -m` distinguishes `used` from `buff/cache` and `available`. In cgroups, page cache counts toward `memory.current`, which is why a file-heavy container can approach `memory.max` from cache alone and trigger reclaim.
 
 **Q13: What does the USER namespace isolate, and why is it a key container security boundary?**
+**Short:** The USER namespace remaps UID/GID so a process can be root inside its container while mapping to an unprivileged host UID, so root in a container isn't root on the host.
 The USER namespace remaps UID/GID numbers so a process can be root (UID 0) inside its own namespace while mapping to an unprivileged UID on the host, meaning root in a container is not root on the host. This is what lets rootless container runtimes (Podman, rootless Docker) run without host root privileges at all, shrinking the blast radius if the container is compromised. Without a USER namespace mapping, a container running as UID 0 that escapes its namespace (via a kernel exploit or a misconfigured volume mount) has genuine host root. Combine USER namespace remapping with capability dropping (Q9) for defense in depth rather than relying on either alone.
 
 **Q14: What's the difference between cgroup v2's memory.max and memory.high, and when do you use each?**
+**Short:** `memory.max` is a hard ceiling that OOM-kills on breach, while `memory.high` is a soft throttle applying reclaim pressure before any kill happens.
 memory.max is a hard ceiling that triggers an OOM kill the instant it's breached, while memory.high is a soft throttle that applies reclaim pressure before any kill happens. Setting memory.high below memory.max gives a workload room to shed cache and slow down gracefully instead of being SIGKILLed the moment it spikes, which is valuable for bursty or GC-heavy workloads like the JVM. Kubernetes maps a pod's memory limit to memory.max by default, so relying on memory.high requires deliberate cgroup-level configuration outside the standard resources.limits field. Use memory.max when you need a hard, predictable ceiling, and layer memory.high underneath it when you can tolerate throttling over killing.
 
 **Q15: In the JVM OOMKill case study, why must -XX:MaxRAMPercentage leave headroom below 100%?**
+**Short:** Heap is only part of a JVM's footprint — metaspace, thread stacks, and native buffers consume memory outside it that MaxRAMPercentage must leave room for.
 Heap is only part of a JVM container's memory footprint — metaspace, thread stacks, JIT-compiled code, and native/off-heap buffers all consume memory outside the heap that MaxRAMPercentage sizes. At 75% of a 1Gi limit the heap caps around 768Mi, leaving roughly 256Mi for those non-heap consumers so the container doesn't hit memory.max and get cgroup-OOM-killed even though the heap itself never overflows. Setting MaxRAMPercentage close to 100 reproduces the original bug in a different form, since enough headroom disappears that a modest rise in thread count or metaspace still triggers exit 137. Size MaxRAMPercentage with an explicit non-heap budget in mind — thread count x stack size, expected metaspace — not just as "leave some margin."
 
 **Q16: When would you choose gVisor or Kata Containers over standard namespace-based containers?**
+**Short:** Choose gVisor or Kata for untrusted multi-tenant workloads needing stronger isolation than a shared kernel, at the cost of extra syscall or virtualization overhead.
 Choose gVisor or Kata Containers when running untrusted, multi-tenant workloads that need stronger isolation than a shared kernel provides. gVisor interposes a user-space kernel that intercepts syscalls, and Kata runs each container in a lightweight VM with its own kernel, so a container escape no longer hands an attacker the host kernel directly, at the cost of added syscall-interception or virtualization overhead versus native namespaces/cgroups. This tradeoff matters for platforms like serverless multi-tenant sandboxes or CI runners executing arbitrary customer code, where the isolation strength justifies the performance hit. For trusted, single-tenant workloads such as your own microservices, standard namespace isolation is faster and sufficient.
 
 ---

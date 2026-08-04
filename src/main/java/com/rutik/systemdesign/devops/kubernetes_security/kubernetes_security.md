@@ -363,48 +363,63 @@ roleRef: {kind: ClusterRole, name: cluster-admin, apiGroup: rbac.authorization.k
 ## 12. Interview Questions with Answers
 
 **Q1: How does authentication work in Kubernetes — is there a user database?**
+**Short:** No — Kubernetes has no built-in user store; the API server authenticates via external mechanisms like client certs, OIDC tokens, or ServiceAccount tokens.
 No — Kubernetes has no built-in user store. The API server authenticates requests via external mechanisms: client certificates, OIDC tokens (from an IdP), bearer tokens, or ServiceAccount tokens (for workloads). It extracts a username and groups from the credential and hands those to authorization. "Users" are an external concept; only ServiceAccounts are first-class API objects.
 
 **Q2: Explain RBAC: Role vs ClusterRole, RoleBinding vs ClusterRoleBinding.**
+**Short:** A Role/RoleBinding grant permissions within one namespace, a ClusterRole/ClusterRoleBinding grant them cluster-wide, and RBAC is default-deny until bound.
 A Role grants permissions within a single namespace; a ClusterRole grants them cluster-wide or for cluster-scoped resources. A RoleBinding grants a Role's (or ClusterRole's) permissions to subjects *within a namespace*; a ClusterRoleBinding grants a ClusterRole cluster-wide. RBAC is default-deny — subjects have no permissions until bound. The dangerous combination is binding broad ClusterRoles (especially `cluster-admin`) to widely-used subjects.
 
 **Q3: Why is the ServiceAccount token the most dangerous default credential?**
+**Short:** Every Pod auto-mounts its namespace's default ServiceAccount token, so a compromised Pod inherits whatever RBAC that SA has, making over-privileged SAs a direct escalation path.
 By default every Pod auto-mounts its namespace's `default` ServiceAccount token at a known path. If the Pod is compromised, the attacker has that token and can call the API server with whatever RBAC the SA has. If the SA is over-privileged (or `default` was granted broad rights), this is direct cluster escalation. Mitigate by `automountServiceAccountToken: false` where unneeded and scoping every SA's RBAC to least privilege.
 
 **Q4: What is a hardened securityContext?**
+**Short:** A hardened securityContext runs as non-root, disallows privilege escalation, uses a read-only root filesystem, drops all capabilities, and applies RuntimeDefault seccomp.
 `runAsNonRoot: true` with a non-zero `runAsUser`; `allowPrivilegeEscalation: false`; `readOnlyRootFilesystem: true` (with writable `emptyDir` for `/tmp`); `capabilities.drop: ["ALL"]` adding back only what's required (e.g., `NET_BIND_SERVICE`); `seccompProfile: RuntimeDefault`; never `privileged: true`. Together these ensure a code-execution exploit in the container has minimal local power and can't trivially escape.
 
 **Q5: What replaced PodSecurityPolicy and how does it work?**
+**Short:** Pod Security Admission, enforced per namespace via labels with three built-in Privileged/Baseline/Restricted profiles, is simpler but less flexible than PSP was.
 Pod Security Admission (PSA) with Pod Security Standards (Privileged/Baseline/Restricted), enforced per namespace via labels (`pod-security.kubernetes.io/enforce: restricted`). PSP was removed in 1.25 because it was hard to use and inconsistent. PSA is simpler (three built-in profiles, with `warn`/`audit` modes for safe rollout) but less flexible. For custom rules, reach first for the in-tree CEL policies — a `ValidatingAdmissionPolicy` plus a `ValidatingAdmissionPolicyBinding` in `admissionregistration.k8s.io/v1`, which run inside the API server with no webhook to deploy — and layer OPA Gatekeeper or Kyverno when you need policy logic, external data, or reporting that CEL alone can't express.
 
 **Q6: Are Kubernetes Secrets encrypted? How do you actually protect them?**
+**Short:** Secrets are only base64-encoded plaintext in etcd by default, so protect them with KMS envelope encryption, tight RBAC, or an external store like Vault.
 By default Secrets are only base64-encoded and stored as plaintext in etcd — anyone with `get secrets` RBAC or etcd access can read them. To protect them: enable encryption-at-rest with a KMS provider (envelope encryption) so etcd holds ciphertext; tightly scope RBAC on secrets; and prefer an external store (Vault) via the External Secrets Operator so the sensitive material never lives in etcd at all.
 
 **Q7: How do admission controllers enforce security, and what's the risk?**
+**Short:** Mutating then validating webhooks intercept requests after authn/authz to reject non-compliant objects, but a slow or down webhook can block or silently allow writes.
 After authn/authz, mutating then validating admission webhooks intercept the request before persistence. Validating webhooks (Gatekeeper/Kyverno/PSA) reject non-compliant objects — e.g., Pods running as root, missing limits, or using unsigned images. The risk: a slow or unavailable webhook can block all writes (if `failurePolicy: Fail`) or silently allow violations (if `Ignore`), so webhook latency, availability, and failure policy must be designed carefully. That risk is the reason to express what you can as a `ValidatingAdmissionPolicy` or `MutatingAdmissionPolicy` instead: those evaluate CEL inside the API server itself, so there is no extra Deployment to keep highly available and no network hop in the write path.
 
 **Q8: How do you avoid storing long-lived cloud credentials in the cluster?**
+**Short:** Workload identity federation like EKS IRSA or GKE Workload Identity binds a ServiceAccount to a cloud IAM role via OIDC, issuing short-lived rotated credentials with no static keys.
 Use workload identity federation: EKS IRSA or GKE Workload Identity bind a Kubernetes ServiceAccount to a cloud IAM role via a projected OIDC token. The Pod assumes the role and gets short-lived, automatically-rotated cloud credentials — no static access keys in Secrets to leak. This eliminates the most commonly exfiltrated secret type. On EKS there are two supported bindings: IRSA, where the IAM role's trust policy names the cluster's OIDC provider, and EKS Pod Identity, where an association maps a ServiceAccount to a role and EKS itself owns the trust relationship — the latter is the simpler choice for new clusters because one role works across clusters without per-cluster trust-policy edits.
 
 **Q9: How does NetworkPolicy contribute to security?**
+**Short:** NetworkPolicy lets you default-deny the otherwise-flat Pod network and explicitly allow only required flows, containing a compromised Pod's lateral movement.
 By default all Pods can talk to all Pods (flat network), enabling lateral movement after a breach. NetworkPolicy lets you default-deny and explicitly allow only required flows (e.g., api→db on 5432), containing a compromised Pod. It's only enforced if the CNI supports it (Calico/Cilium). Remember to allow DNS egress when default-denying egress (see [kubernetes_networking](../kubernetes_networking/kubernetes_networking.md)).
 
 **Q10: What's the difference between Baseline and Restricted Pod Security Standards?**
+**Short:** Baseline blocks known privilege escalations while staying broadly compatible, while Restricted additionally requires non-root, drops all capabilities, and restricts volume types.
 Baseline blocks known privilege escalations (no host namespaces, no privileged containers, no hostPath) while staying broadly compatible — a sane default for most apps. Restricted is hardened further: requires non-root, drops all capabilities, requires seccomp `RuntimeDefault`, disallows privilege escalation, and restricts volume types — appropriate for security-sensitive or multi-tenant workloads, at the cost of needing apps to be well-behaved.
 
 **Q11: How would you secure a multi-tenant cluster?**
+**Short:** Layer namespace-per-tenant Restricted PSA, default-deny NetworkPolicy, per-tenant RBAC, resource quotas, and sandboxed runtimes for untrusted workloads.
 Layer controls: namespace-per-tenant with Restricted PSA; default-deny NetworkPolicy with explicit allows; per-tenant RBAC (no cross-namespace access); ResourceQuotas/LimitRanges to prevent resource starvation; separate node pools or sandboxed runtimes (gVisor/Kata) for untrusted workloads; encrypted secrets with tenant-scoped RBAC; and admission policy (Gatekeeper/Kyverno) enforcing all of it. For strong isolation (hostile tenants), separate clusters beat soft multi-tenancy.
 
 **Q12: How do you detect a compromise at runtime?**
+**Short:** Runtime tools like Falco or Tetragon watch syscalls and events via eBPF, alerting on suspicious behavior such as a spawned shell or unexpected outbound connections.
 Runtime security tools like Falco or Tetragon (eBPF) watch syscalls/events and alert on suspicious behavior — a shell spawned in a container, writes to sensitive paths, unexpected outbound connections, or privilege escalation attempts. They complement preventive controls (which reduce the chance of breach) by detecting the breaches that get through, feeding alerts into incident response.
 
 **Q13: What is the principle of least privilege in a Kubernetes context, concretely?**
+**Short:** Every identity — ServiceAccounts, containers, network flows — gets only the narrow permissions it actually needs, verified with `kubectl auth can-i --list`.
 Every identity gets the minimum it needs: ServiceAccounts bound to narrow Roles (specific verbs on specific resources, even `resourceNames`), `automountServiceAccountToken: false` when the app doesn't call the API, containers with dropped capabilities and non-root users, NetworkPolicies allowing only required flows, and no use of `cluster-admin` for workloads. You verify it with `kubectl auth can-i --list --as=<sa>`.
 
 **Q14: How do you audit a cluster's security posture?**
+**Short:** Run `kube-bench` for CIS compliance, `kubectl auth can-i` for effective permissions, image scanning, and checks for root/privileged Pods and encryption.
 Run `kube-bench` for CIS Benchmark compliance (control-plane and node config); enumerate dangerous bindings (`grep cluster-admin` in ClusterRoleBindings); use `kubectl auth can-i` to test effective permissions; scan images and running workloads with Trivy/Grype; check for Pods running as root/privileged; verify encryption-at-rest and audit logging are enabled; and review NetworkPolicy coverage. Continuous scanning (in CI and runtime) beats point-in-time audits.
 
 **Q15: What's "assume breach" and how does it shape design?**
+**Short:** It architects the cluster to minimize what a compromised container can achieve, layering non-root, least-privilege RBAC, default-deny networking, and runtime detection.
 It's the assumption that a container *will* be compromised, so you architect to minimize what that achieves rather than only trying to prevent it. Concretely: non-root + read-only + dropped caps (limit local damage), least-privilege RBAC + no auto-mounted token (limit cluster access), default-deny NetworkPolicy (limit lateral movement), encrypted/external secrets (limit data theft), and runtime detection (catch what gets through). Defense in depth so no single failure is catastrophic.
 
 ---

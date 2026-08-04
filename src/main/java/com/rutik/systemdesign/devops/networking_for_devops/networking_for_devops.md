@@ -464,51 +464,67 @@ UnhealthyThresholdCount: 3   # tolerate transient blips before draining
 ## 12. Interview Questions with Answers
 
 **Q1: A service is intermittently unreachable. Walk through your diagnosis.**
+**Short:** Diagnose hop by hop — DNS resolution, port reachability, LB health, security group/NACL rules, then TLS — since intermittent failures often mean unhealthy targets.
 Go hop by hop: `dig` the name (is DNS resolving, is the TTL caching a dead IP?), `nc -zv host port` (is the port reachable?), check the LB's healthy target count (is a failing health check draining the pool?), check security groups/NACLs (is the port and return path allowed?), and `curl -v`/`openssl s_client` for TLS/cert issues. "Intermittent" often means a load balancer with *some* unhealthy targets, or DNS round-robin including a dead endpoint.
 
 **Q2: L4 vs L7 load balancer — when each?**
+**Short:** L4 load balancers route on IP:port with lowest latency for TCP/gRPC, while L7 parses HTTP for path/host routing, WAF, and sticky sessions.
 L4 (NLB) routes on IP:port, is protocol-agnostic, lowest latency, gives a static IP — use for gRPC/TCP, non-HTTP, or ultra-low-latency. L7 (ALB) parses HTTP, enabling path/host routing, header-based rules, WAF, redirects, and sticky sessions — use for web APIs and microservice routing. You often have both: NLB for raw ingress, L7 (ingress controller) inside.
 
 **Q3: Explain CIDR `/24` vs `/16` and a Kubernetes implication.**
+**Short:** A `/N` CIDR gives `2^(32-N)` addresses, so a `/24` supports far fewer pod IPs than a `/16` under the AWS VPC CNI, making subnet sizing a one-way door.
 `/N` means N network bits, so `2^(32-N)` addresses: `/24` = 256, `/16` = 65,536. With the AWS VPC CNI, each pod takes a real subnet IP, so a `/24` subnet supports ~250 pods. Large clusters exhaust subnet space — you size subnets for peak pod count, and subnet sizing is hard to change later (a one-way door).
 
 **Q4: Why does "the request reaches the server but the client times out"?**
+**Short:** The inbound path is allowed but the return path isn't, often from a stateless NACL missing outbound ephemeral-port rules or asymmetric routing.
 Asymmetric connectivity: the inbound path is allowed but the return path isn't. Common causes — a stateless NACL allowing inbound but not outbound ephemeral ports, a missing egress rule, or asymmetric routing where responses take a path with no return route. Security groups avoid this because they're stateful (return traffic is auto-allowed).
 
 **Q5: Stateful security group vs stateless NACL?**
+**Short:** A security group is stateful, auto-allowing return traffic, while a NACL is stateless and requires explicit rules for both inbound and outbound.
 A security group is stateful: allow inbound on a port and the response is automatically permitted. A NACL is stateless and subnet-wide: you must explicitly allow both inbound *and* the outbound ephemeral-port return traffic. NACLs are coarse-grained guardrails; SGs are the primary instance-level control.
 
 **Q6: Where should you terminate TLS, and what are the tradeoffs?**
+**Short:** Edge TLS termination is simplest but leaves internal traffic plaintext, while end-to-end mTLS encrypts the whole path at the cost of certificate lifecycle complexity.
 Edge termination (at the LB) is simplest, offloads crypto, and centralizes cert management, but traffic is plaintext inside the network. End-to-end/mTLS encrypts the whole path and provides identity (zero-trust) at the cost of cert lifecycle complexity. Re-encryption terminates at the edge for inspection/routing then re-encrypts to the backend — the compliance-friendly middle ground.
 
 **Q7: What is NAT source-port exhaustion and how do you fix it?**
+**Short:** A NAT gateway's 55,000-connection-per-destination limit per IP gets exhausted by many connections to one endpoint, fixed with VPC endpoints or connection pooling.
 A NAT gateway SNATs many hosts behind one IP, and each of its IPv4 addresses supports only 55,000 simultaneous connections to a given unique destination (destination IP + port + protocol). Thousands of connections to the *same* endpoint exhaust that pool — and because Linux holds each closed socket in `TIME_WAIT` for 60 s, sustained churn never lets it refill — so new egress connections time out while bandwidth is unused; `ErrorPortAllocation` on the NAT gateway is the giveaway. Fixes: VPC endpoints (PrivateLink) to reach AWS services without NAT, connection pooling/reuse, secondary IPv4 addresses on the gateway (up to 8), or a NAT gateway per AZ with clients split across them.
 
 **Q8: How does DNS TTL affect failover, and what's the tradeoff?**
+**Short:** Low TTL propagates failover quickly but raises query volume, while high TTL reduces load but leaves clients hitting a dead IP longer after a change.
 TTL is how long resolvers cache a record. Low TTL (e.g., 30–60s) means failover/changes propagate quickly but generates more queries (and cost); high TTL reduces query load but means clients keep hitting a dead/old IP after a change. For failover-critical records, keep TTL low; for stable records, keep it higher.
 
 **Q9: What's the `ndots:5` problem in Kubernetes?**
+**Short:** `ndots:5` retries any name with fewer than 5 dots against every search domain first, so external names trigger several wasted lookups before the real one.
 CoreDNS injects a `search` list and `ndots:5` into pod `/etc/resolv.conf`. A name with fewer than 5 dots and no trailing dot is tried against each search domain first, so `api.example.com` triggers several failed lookups (`api.example.com.ns.svc.cluster.local`, …) before the real one — adding latency and DNS load. Fix: use FQDNs (trailing dot) for external names or tune `ndots`.
 
 **Q10: How do you debug a TLS handshake failure?**
+**Short:** `openssl s_client -connect host:443 -servername host` reveals the certificate chain, protocol, and expiry, exposing failures like an expired cert or SNI mismatch.
 `openssl s_client -connect host:443 -servername host` shows the presented chain, negotiated protocol/cipher, and validity dates; `openssl x509 -noout -dates` checks expiry. Common failures: expired cert, missing intermediate (incomplete chain), SNI mismatch (`-servername` matters), or protocol/cipher mismatch (old client vs TLS 1.3-only server).
 
 **Q11: What does a health check actually control, and what's a safe configuration?**
+**Short:** A health check controls which targets the LB routes to, and a too-strict check can drain the whole pool into a self-inflicted outage.
 The LB only routes to targets passing the health check; a failing check removes a target from rotation. A too-strict check (auth-required path, 1 failure = drain) can empty the whole pool and cause a self-inflicted outage. Safe config: a dedicated unauthenticated `/healthz` that reflects real readiness, a sane interval (10–15s), and an unhealthy threshold > 1 to tolerate transient blips.
 
 **Q12: Why prefer VPC endpoints over routing AWS traffic through a NAT gateway?**
+**Short:** VPC endpoints keep AWS traffic on the AWS backbone without the NAT gateway, avoiding its data-processing cost and source-port exhaustion.
 VPC endpoints (Gateway for S3/DynamoDB, Interface/PrivateLink for others) keep traffic on the AWS network without traversing the NAT gateway. Benefits: lower cost (NAT data-processing charges avoided), no source-port exhaustion against high-volume AWS endpoints, and traffic that never leaves the AWS backbone (security/compliance).
 
 **Q13: Why can't you put a CNAME record at a zone's apex (e.g., example.com itself), and how do cloud DNS providers work around it?**
+**Short:** DNS specs forbid a CNAME from coexisting with the NS/SOA records the apex must hold, so providers use a proprietary ALIAS or ANAME type instead.
 DNS specs forbid a CNAME from coexisting with other record types at the same name, but the zone apex must also hold NS and SOA records, so a bare CNAME there is invalid. Cloud providers solve this with a proprietary apex-safe alias — AWS's ALIAS, or an ANAME-equivalent — which behaves like a CNAME to the resolver's client but is resolved server-side by the DNS provider, letting you point the naked domain at an ALB or CloudFront distribution. Using a real CNAME at the apex instead breaks under strict resolvers or during zone validation, a classic "works until it doesn't" DNS trap. Reserve CNAME for subdomains and use your provider's ALIAS/ANAME type whenever you need to alias the zone apex itself.
 
 **Q14: What is the 4-tuple, and how does each networking hop act on it?**
+**Short:** The 4-tuple of source/destination IP and port uniquely identifies a connection, and each networking hop either rewrites, inspects, or terminates it.
 The 4-tuple — source IP, source port, destination IP, destination port — uniquely identifies a connection, and every hop either rewrites it, inspects it, or terminates it. NAT rewrites the source IP/port (SNAT) so a private host appears as the gateway's public IP; a load balancer rewrites the destination by routing to a backend; a firewall or security group inspects the tuple against allow/deny rules without changing it; and TLS/L7 termination ends the connection entirely and starts a new one to the backend. Framing a network bug as "which hop touched the tuple, and did it break in a way I can see" turns a vague timeout into a specific, checkable hypothesis at each layer. Use this framing before reaching for tcpdump, since most connectivity bugs resolve to one hop mishandling the tuple.
 
 **Q15: When do you reach for tcpdump/Wireshark instead of curl -v or dig?**
+**Short:** Reach for tcpdump only after curl, dig, and openssl fail to explain a symptom, since it shows ground-truth wire bytes but needs more setup to interpret.
 Reach for tcpdump only after application-level tools (curl -v, dig, openssl s_client) fail to explain the symptom — it shows ground-truth bytes on the wire but needs more setup to interpret. curl -v tells you what your own client saw (DNS answer, TLS handshake, headers), which covers most failures; tcpdump is needed when something between client and server is silently mangling packets — asymmetric routing, a misbehaving NAT, or a device dropping specific flags — that no single endpoint's own logs would reveal. It's also the only tool that can prove a packet left the host at all, which matters when a firewall drop looks identical to an application timeout from the client's point of view. Treat tcpdump as the last-resort, ground-truth layer, not the first diagnostic step.
 
 **Q16: In the payments-API case study, why did switching to a pooled HTTP client reduce exposure to the stale DNS entries?**
+**Short:** A pooled client reuses warm connections instead of re-resolving DNS every call, structurally reducing how often a request re-samples the stale round-robin set.
 A pooled client resolves DNS once and reuses warm, already-connected sockets, so once a request lands on one of the two healthy IPs it keeps reusing that connection instead of re-rolling the DNS dice on every call. The broken code created a new client per request, forcing a fresh DNS lookup and TCP connect each time, so roughly half of all calls had an even chance of landing on one of the two stale IPs and paying the full ~3s timeout. Pooling doesn't fix the underlying stale-DNS problem, but it structurally reduces how often a request re-samples the round-robin set, and the added explicit 1s connect timeout capped the worst case regardless. Pair connection reuse with a short connect timeout, since pooling alone still leaves the first connection per pool member exposed to a stale IP.
 
 ---

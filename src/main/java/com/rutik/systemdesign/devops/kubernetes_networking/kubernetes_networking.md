@@ -454,48 +454,63 @@ egress:
 ## 12. Interview Questions with Answers
 
 **Q1: What are the rules of the Kubernetes network model?**
+**Short:** Every Pod gets its own IP and can reach every other Pod across nodes without NAT, and a Pod sees its own IP the same way others reach it.
 Every Pod gets its own IP; all Pods can communicate with all other Pods across nodes without NAT; nodes can reach all Pods without NAT; and a Pod sees its own IP as the same one others use to reach it. This flat model is implemented by the CNI plugin and is what lets Services and DNS work uniformly regardless of which node a Pod lands on.
 
 **Q2: What is a ClusterIP, and what's actually listening on it?**
+**Short:** A ClusterIP is a virtual IP with nothing listening on it; kube-proxy DNATs packets destined for it to one of the Service's ready Pod IPs.
 A ClusterIP is a *virtual* IP for a Service — no machine or NIC holds it. kube-proxy installs iptables/nftables rules so packets destined for the ClusterIP are DNAT'd to one of the Service's ready Pod IPs. Nothing listens on the ClusterIP itself; the kernel rewrites the destination. Understanding this resolves most "I can't reach my Service" confusion.
 
 **Q3: What does the CNI do?**
+**Short:** It's invoked by the kubelet at Pod creation to allocate the Pod's IP and wire up routing so the flat Kubernetes network model holds.
 The Container Network Interface plugin is invoked by the kubelet when a Pod is created to allocate the Pod's IP and wire up connectivity (routes, overlay/VXLAN, or BGP) so the network-model rules hold. Different CNIs implement it differently — AWS VPC CNI hands out real VPC IPs, Calico uses BGP/overlay, Cilium uses eBPF — and some (Calico/Cilium) also enforce NetworkPolicy.
 
 **Q4: How does kube-proxy work, and what are its modes?**
+**Short:** kube-proxy programs the node dataplane from Services and EndpointSlices — sequential iptables chains, the O(1) nftables verdict map, or eBPF replacing it entirely.
 kube-proxy watches Services and EndpointSlices and programs the node's dataplane so Service VIPs route to ready Pod IPs. In iptables mode (the default) it installs chains the kernel evaluates sequentially, so per-packet cost grows with Service count; in nftables mode — the recommended mode on Linux — it installs a single verdict map, giving O(1) dispatch that stays flat into the tens of thousands of Services; with Cilium/eBPF, kube-proxy is replaced by eBPF programs entirely. In iptables/nftables modes it doesn't proxy bytes itself — the kernel forwards.
 
 **Q5: Walk a packet from the internet to a container.**
+**Short:** The cloud LB hands the packet to the ingress controller, kube-proxy DNATs it from the Service ClusterIP to a ready Pod IP, then the CNI routes it to the container.
 Client DNS resolves to a cloud LB; the LB forwards to the ingress controller Pod, which terminates TLS and routes by host/path to a Service ClusterIP; kube-proxy's rules DNAT the ClusterIP to a ready Pod IP; the CNI's routing delivers the packet to that Pod on its node; the container receives it on `targetPort`. The response retraces the path (with SNAT where needed).
 
 **Q6: How does service discovery / DNS work in Kubernetes?**
+**Short:** CoreDNS resolves names like `orders.default.svc.cluster.local` to a stable ClusterIP, decoupling clients from churning Pod IPs.
 CoreDNS runs as a Service and resolves names like `orders.default.svc.cluster.local` to the Service's ClusterIP (and headless Services to individual Pod IPs). Pods get `/etc/resolv.conf` pointing at CoreDNS with a `search` list and `ndots:5`. Apps call Services by name; CoreDNS returns the stable VIP, decoupling clients from churning Pod IPs.
 
 **Q7: Explain the `ndots:5` problem.**
+**Short:** `ndots:5` retries any name with fewer than 5 dots against each search domain first, so an external name triggers several wasted lookups before the real one.
 `ndots:5` means any name with fewer than 5 dots is tried against each `search` domain before being queried as-is. So `api.vendor.com` (2 dots) triggers 4 lookups (3 failed search-domain attempts + the real one). Across many requests this multiplies CoreDNS load and adds latency. Fixes: trailing-dot FQDNs, NodeLocal DNSCache, or lowering `ndots` via Pod `dnsConfig`.
 
 **Q8: A Service exists but clients get "connection refused." How do you debug?**
+**Short:** Check whether the Service's EndpointSlices are empty — meaning the selector doesn't match Pod labels or no Pod is passing readiness — before suspecting anything else.
 Check the EndpointSlices: `kubectl get endpointslices -l kubernetes.io/service-name=<svc>`. If empty, either the Service selector doesn't match any Pod labels, or no Pod is passing its readiness probe (only ready Pods become endpoints). Verify Pod labels match the selector and that readiness succeeds. If endpoints exist but it still fails, check NetworkPolicy and the `targetPort`.
 
 **Q9: How does NetworkPolicy work and what's the default?**
+**Short:** All Pod traffic is allowed by default, but selecting a Pod in any direction makes that direction default-deny, and enforcement requires CNI support.
 By default all Pod-to-Pod traffic is allowed. The moment a NetworkPolicy selects a Pod for a direction (Ingress/Egress), that direction becomes default-deny for that Pod, and only the policy's explicit `from`/`to` rules are permitted. Policies are additive (union of allows). Crucially, NetworkPolicy is only enforced if the CNI supports it — Flannel doesn't, AWS VPC CNI needs an add-on.
 
 **Q10: Ingress vs LoadBalancer Service vs Gateway API?**
+**Short:** A LoadBalancer Service provisions one costly L4 LB per Service, Ingress routes many Services through one L7 controller but is feature-frozen, and Gateway API is its GA successor.
 A `LoadBalancer` Service provisions one cloud LB per Service (costly, L4). Ingress lets one ingress controller (behind a single LB) route HTTP by host/path to many Services with TLS termination — far cheaper and L7-aware, though the Ingress API itself is feature-frozen. Gateway API is its GA successor and the target for new work: role-separated `GatewayClass`/`Gateway`/`HTTPRoute`, with native traffic splitting and header matching instead of Ingress's per-controller annotations.
 
 **Q11: Why does AWS VPC CNI risk IP exhaustion?**
+**Short:** It assigns each Pod a real VPC subnet IP via ENIs, so a small subnet caps Pod count regardless of node count and dense clusters exhaust it.
 It assigns each Pod a real IP from the VPC subnet (via ENIs), so Pod IPs consume subnet address space directly. A `/24` subnet (~250 usable IPs) supports only ~250 Pods regardless of node count, so dense clusters exhaust subnets and Pods get stuck Pending with IP-allocation errors. Mitigations: larger/secondary CIDRs, prefix delegation (assign /28 prefixes per ENI), or an overlay CNI.
 
 **Q12: What happens to a Service's traffic during a rolling update?**
+**Short:** New Pods' IPs join the Service's endpoints as they pass readiness and old Pods' IPs leave as they terminate, so with `maxUnavailable: 0` only ready Pods ever get traffic.
 As new Pods pass readiness, the EndpointSlice controller adds their IPs to the Service's endpoints; as old Pods are terminated and fail readiness/are deleted, their IPs are removed. kube-proxy updates the dataplane accordingly. With readiness probes and `maxUnavailable: 0`, only ready Pods ever receive traffic, so the Service load-balances seamlessly across the transition.
 
 **Q13: Why might in-cluster DNS suddenly get slow under load?**
+**Short:** High QPS, often amplified by `ndots:5` search-domain expansion and no client-side caching, saturates CoreDNS's CPU and shows up as app latency.
 CoreDNS is a finite, shared Service; high QPS — often amplified by `ndots:5` search-domain expansion and per-request lookups (no client caching/keep-alive) — saturates its CPU and causes slow or timed-out resolution, which then looks like app latency. NodeLocal DNSCache, autoscaling CoreDNS, FQDNs, and connection reuse address it.
 
 **Q14: What is a headless Service and when do you need it?**
+**Short:** A headless Service has no virtual IP and returns individual Pod IPs via DNS, letting StatefulSet members be addressed directly by stable per-Pod names.
 A headless Service (`clusterIP: None`) has no virtual IP; DNS returns the individual Pod IPs instead. It's used by StatefulSets so each Pod has a stable, directly-addressable DNS name (`db-0.db.ns.svc`), which clustered systems need to reach specific members (e.g., a database primary) rather than load-balancing blindly across all replicas.
 
 **Q15: How does eBPF (Cilium) change the dataplane?**
+**Short:** Cilium's eBPF programs implement Service load balancing, NetworkPolicy, and observability directly in the kernel, bypassing iptables and scaling far better.
 Cilium uses eBPF programs attached to kernel hooks to implement Service load balancing, NetworkPolicy, and observability directly in the kernel datapath — bypassing iptables entirely (it can replace kube-proxy). This scales far better at high Service/endpoint counts (no linear iptables chains), enables identity-based policy and L7 visibility (Hubble), and reduces latency from rule traversal.
 
 ---

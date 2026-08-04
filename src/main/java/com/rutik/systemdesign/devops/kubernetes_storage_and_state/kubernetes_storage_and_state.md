@@ -333,51 +333,67 @@ The two green outcomes — `WaitForFirstConsumer` and `Retain` — are exactly t
 ## 12. Interview Questions with Answers
 
 **Q1: Explain PV, PVC, and StorageClass.**
+**Short:** A PV is real storage with its own lifecycle, a PVC is a Pod's request for storage, and a StorageClass defines a provisioner that dynamically creates a matching PV.
 A PersistentVolume (PV) is a cluster resource representing real storage with its own lifecycle. A PersistentVolumeClaim (PVC) is a Pod's request for storage (size, access mode). A StorageClass defines a *type* of storage (provisioner + parameters + reclaim policy) and enables dynamic provisioning — a PVC referencing it auto-creates a matching PV via the CSI driver. The separation lets Pods request abstract storage without knowing the backend.
 
 **Q2: Why does a PVC outlive the Pod, and why does that matter?**
+**Short:** The PVC-to-PV binding is independent of any Pod, so a rescheduled StatefulSet Pod's volume detaches and reattaches to the new node, letting data survive reschedules.
 The PVC↔PV binding is independent of any Pod, so when a (StatefulSet) Pod is rescheduled, its PVC and the underlying volume detach from the old node and reattach to the new one — the data follows the Pod. This is the whole point of persistent storage: Pods are disposable, but their state survives reschedules, node failures, and restarts.
 
 **Q3: What's the difference between access modes, and what backs each?**
+**Short:** RWO allows one node read-write, ReadWriteOncePod restricts to a single Pod, RWX allows many nodes read-write via shared filesystems, and ROX is many nodes read-only.
 ReadWriteOnce (RWO) allows one node read-write (cloud block storage like EBS/PD); ReadWriteOncePod restricts to a single Pod; ReadWriteMany (RWX) allows many nodes read-write (shared filesystems like EFS/NFS/CephFS); ReadOnlyMany (ROX) is many nodes read-only. Block storage is single-attach (RWO); only networked/shared filesystems support RWX.
 
 **Q4: Why is `volumeBindingMode: WaitForFirstConsumer` important in multi-AZ clusters?**
+**Short:** It delays provisioning a zonal cloud volume until the scheduler picks a node, guaranteeing the volume lands in the same AZ as the Pod.
 Cloud block volumes are zone-scoped. With `Immediate` binding, the volume is provisioned (in some AZ) before the Pod is scheduled, and if the scheduler later places the Pod in a different AZ, the volume can't attach and the Pod hangs Pending. `WaitForFirstConsumer` delays provisioning until the scheduler picks a node, then creates the volume in that node's AZ, guaranteeing they match.
 
 **Q5: What does the reclaim policy control, and which should production use?**
+**Short:** It controls what happens to storage when a PVC is deleted — `Delete` destroys the volume while `Retain` keeps it, and production should use `Retain`.
 It controls what happens to the underlying storage when the PVC is deleted: `Delete` destroys the volume (data gone); `Retain` keeps it for manual recovery. Production stateful workloads should use `Retain` so an accidental PVC deletion (or `helm uninstall`) doesn't irrecoverably destroy data — combined with snapshots/backups.
 
 **Q6: Why can a Pod using an RWO volume fail to move quickly after a node dies?**
+**Short:** The cloud still considers the volume attached to the dead node until it's force-detached, which can take minutes and delays a replacement Pod elsewhere.
 The cloud still considers the volume attached to the dead node until the node is confirmed gone and the volume is force-detached, which can take minutes. Until then, a replacement Pod on another node gets a "Multi-Attach" / attach-timeout error because RWO permits only one node. This is why RWO failover isn't instant and why truly HA stateful systems replicate data rather than relying on volume re-attach.
 
 **Q7: What is CSI and why does it matter?**
+**Short:** CSI is a standard plugin API decoupling Kubernetes from storage backends, letting vendors ship drivers implementing provisioning, attach, snapshot, and expansion uniformly.
 The Container Storage Interface is a standard plugin API decoupling Kubernetes from storage backends. Vendors ship CSI drivers (EBS, EFS, Ceph) implementing provision/attach/mount/snapshot/expand operations. It means new storage systems integrate without changing Kubernetes core, and features like snapshots and volume expansion are available uniformly across backends that support them.
 
 **Q8: How do you safely run a database on Kubernetes — or should you?**
+**Short:** Use a StatefulSet with per-Pod volumeClaimTemplates, Retain reclaim, and CSI snapshots if self-hosting — but most teams should prefer a managed database service instead.
 If you must: use a StatefulSet with `volumeClaimTemplates` (per-Pod PVCs), `Retain` reclaim policy, `WaitForFirstConsumer` binding, anti-affinity across AZs, PodDisruptionBudgets, and CSI snapshots/Velero backups — ideally via a mature operator (e.g., CloudNativePG). But for most teams a managed service (RDS/Cloud SQL) is preferable, because failover, backups, patching, and zonal-volume constraints are substantial operational burden.
 
 **Q9: emptyDir vs persistent volume — when each?**
+**Short:** `emptyDir` is scratch space destroyed when the Pod is deleted or rescheduled, fine for caches, while anything you can't lose needs a PVC-backed volume.
 `emptyDir` is scratch space tied to the Pod's lifetime — fine for caches, temp files, or sharing data between containers in a Pod, but it's destroyed when the Pod is deleted or rescheduled. Use a PVC-backed volume for anything you can't lose. A frequent incident is someone using `emptyDir` for a database and losing all data on the first reschedule.
 
 **Q10: How do volume snapshots and expansion work?**
+**Short:** A `VolumeSnapshot` triggers the driver to snapshot the volume, restored via a PVC's `dataSource`, while expansion grows an existing PVC's size upward but never shrinks it.
 With a CSI driver supporting them: a `VolumeSnapshot` object triggers the driver to snapshot the underlying volume; you restore by creating a PVC with `dataSource` referencing the snapshot. Expansion requires `allowVolumeExpansion: true` on the StorageClass — you edit the PVC's requested size upward and the driver grows the volume and filesystem (online for many drivers). Shrinking is not supported.
 
 **Q11: What's the risk of `hostPath` volumes?**
+**Short:** `hostPath` mounts a node's filesystem into the Pod, tying it to that specific node with no portability and letting a compromised Pod touch the host filesystem.
 `hostPath` mounts a node's filesystem path into the Pod. It ties the Pod to that specific node's data (no portability), bypasses storage abstraction, and is a security risk (a compromised Pod can read/write the host filesystem). It's appropriate for node-level agents (DaemonSets needing `/var/log` or `/proc`) but not for application data.
 
 **Q12: How does storage factor into Kubernetes disaster recovery?**
+**Short:** DR backs up both the cluster's object definitions and PVC data — Velero captures both via CSI snapshots and manifest export for restore into a new cluster.
 You back up two things: the Kubernetes objects (manifests/etcd) and the PVC data. Velero captures both — taking CSI snapshots of PVCs and exporting object definitions — enabling restore into a new cluster. Reclaim policy `Retain`, cross-region snapshot copies, and tested restores are the pillars; relying on volume re-attach alone is not DR (see [disaster_recovery_and_resilience](../disaster_recovery_and_resilience/disaster_recovery_and_resilience.md)).
 
 **Q13: What's the difference between ReadWriteOnce and ReadWriteOncePod, and why is it a common gotcha?**
+**Short:** RWO only restricts a volume to a single node, letting multiple Pods on that node mount it, while ReadWriteOncePod is the stricter mode limiting it to exactly one Pod.
 ReadWriteOnce (RWO) restricts a volume to a single *node* but does not stop multiple Pods scheduled onto that same node from all mounting it simultaneously. This surprises engineers who assume RWO means "one Pod," when in fact ReadWriteOncePod is the stricter CSI access mode that genuinely limits the volume to exactly one Pod cluster-wide, closing the gap for a single-writer database that would otherwise silently corrupt data. Use ReadWriteOncePod whenever true single-writer semantics matter, not RWO, since RWO's node-level guarantee is weaker than its name implies.
 
 **Q14: When would you run in-cluster software-defined storage (Rook-Ceph, OpenEBS, Longhorn) instead of cloud CSI block storage?**
+**Short:** Choose it when you need capabilities cloud block storage lacks, like RWX volumes or bare-metal support, accepting the added operational burden of running it.
 Choose in-cluster software-defined storage when you need capabilities cloud block storage doesn't offer natively, such as RWX shared volumes or a backend for bare-metal clusters. The tradeoff is real operational cost: Ceph and Longhorn are themselves distributed stateful systems you now run and upgrade, layering storage-cluster operations on top of Kubernetes operations. On a cloud provider with mature CSI drivers, prefer the managed cloud primitive; reach for in-cluster storage mainly for on-prem clusters or sharing needs the cloud CSI driver can't satisfy.
 
 **Q15: What does a StatefulSet's `volumeClaimTemplates` give you that a shared PVC on a Deployment doesn't?**
+**Short:** It provisions one dedicated PVC per replica bound to its stable ordinal identity, so each Pod always reattaches to its own volume rather than sharing one.
 `volumeClaimTemplates` provisions one dedicated PVC per replica, named and bound to that replica's stable ordinal identity, so each Pod always reattaches to *its own* volume across reschedules. A Deployment's Pods are interchangeable and typically share nothing or use RWX for shared state, which is wrong for a database where each replica must own distinct, non-interchangeable data such as its own WAL. This per-identity PVC binding is what makes StatefulSets the correct primitive for self-hosted databases, not Deployments.
 
 **Q16: Why isn't spreading StatefulSet replicas across AZs enough for stateful high availability by itself?**
+**Short:** Topology spread only guarantees where Pods land, not that data is replicated between them, so real stateful HA needs database-level replication too.
 Each replica's PVC is still a single zonal RWO volume, and topologySpreadConstraints only guarantees where the *Pods* land, not that the *data* is replicated between them. Losing the AZ holding the primary's volume still loses that replica's data if nothing has copied it elsewhere, so real HA requires the application or database layer to replicate data across the spread replicas — Postgres streaming replication, or an operator like CloudNativePG — so a failover promotes a replica that already has the data. Combine topology spread for placement with DB-level replication for actual failover; one without the other leaves a gap.
 
 ---

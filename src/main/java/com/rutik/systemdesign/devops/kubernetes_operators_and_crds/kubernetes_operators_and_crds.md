@@ -349,51 +349,67 @@ controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error { mutate(cj); retu
 ## 12. Interview Questions with Answers
 
 **Q1: What is a CRD and what does it give you?**
+**Short:** A CRD registers a new API type with the API server, giving schema validation, `kubectl`, RBAC, watches, and etcd storage for free — but no behavior without a controller.
 A CustomResourceDefinition registers a new API type with the API server, so you can `kubectl apply` instances of it (custom resources) just like built-in objects — with OpenAPI schema validation, `kubectl get`, RBAC, watches, and storage in etcd, all for free. A CRD alone adds a *type*, not behavior; pairing it with a controller (operator) adds the reconciliation logic.
 
 **Q2: What is the operator pattern?**
+**Short:** It encodes operational expertise as a controller that watches custom resources and reconciles them, automating day-2 operations an SRE would otherwise do by hand.
 It's encoding operational/domain expertise as a custom controller that watches custom resources and reconciles them to desired state — applying Kubernetes' "declare + reconcile" model to complex software. Instead of an SRE manually backing up, failing over, and upgrading a database, an operator does it automatically in response to a declarative CR. It captures day-2 operations as code.
 
 **Q3: How does an operator's reconcile loop work?**
+**Short:** It watches CRs, reads spec, observes real-world state, applies one corrective step, updates status, and requeues — level-triggered and idempotent.
 The same loop as built-in controllers: it watches CRs (via informers), and on each event (or periodic resync) it reads the CR's `spec`, observes the real-world state it manages, computes the diff, and applies one corrective step — then updates the CR's `status` and requeues. It's level-triggered (acts on current state) and idempotent (safe to re-run), so it self-heals after missed events and restarts.
 
 **Q4: Why must reconciliation be idempotent?**
+**Short:** The loop runs repeatedly and may re-run after a restart, so non-idempotent side effects like unconditional creation produce duplicates and drift.
 Because the loop runs repeatedly — on every relevant event and on periodic resyncs — and may re-run after a controller restart. If reconciliation has non-idempotent side effects (e.g., unconditionally creating a child object), you get duplicates and drift. Idempotent reconciliation (create-or-update, skip-if-already-correct) means running it once or a hundred times converges to the same correct state.
 
 **Q5: What is level-triggered vs edge-triggered, and why does it matter for operators?**
+**Short:** Level-triggered acts on current observed state regardless of which event led there, which operators need because restarts and dropped events make edge-triggering unreliable.
 Edge-triggered reacts to specific events (the "create" happened); level-triggered acts on the current observed state regardless of which event led there. Operators must be level-triggered: a controller restart replays no events, and watch streams can drop events, so reconciling from current state (with periodic resync) is the only way to reliably converge and self-heal. Edge-triggered operators silently leave resources unmanaged after restarts.
 
 **Q6: What are finalizers and why do operators need them?**
+**Short:** A finalizer blocks an object's deletion until removed, letting an operator clean up external resources like cloud volumes before the CR disappears.
 A finalizer is a key on an object that blocks its deletion until removed. Operators use finalizers to perform external cleanup before a CR is deleted — e.g., delete the S3 backup bucket, cloud volumes, or DNS records a `PostgresCluster` created. Without a finalizer, deleting the CR orphans those external resources, leaking cost and creating drift between Kubernetes and the cloud.
 
 **Q7: When should you write your own operator vs use an existing one?**
+**Short:** Use a mature community operator whenever one fits, since getting idempotency, finalizers, and status right is subtle, and write your own only for genuinely novel needs.
 Use a mature community operator (Prometheus Operator, cert-manager, CloudNativePG) whenever one fits — operators are subtle (idempotency, finalizers, status, leader election, edge cases) and a buggy one can destroy data. Write your own only for genuinely novel needs: a custom platform abstraction, proprietary software with no operator, or organization-specific automation. Building an operator is a real engineering investment to maintain.
 
 **Q8: How do you build an operator?**
+**Short:** Typically with Kubebuilder/controller-runtime, which scaffolds CRD types and a Reconcile method you fill in with idempotency, finalizers, status, and leader election.
 Typically with Kubebuilder/controller-runtime (Go), which scaffolds CRD types, a manager, informers, workqueues, and a `Reconcile` method you implement. The Operator SDK wraps this and also supports Ansible/Helm-based operators; kopf (Python) lowers the barrier. You define the CRD schema, implement idempotent reconciliation, manage finalizers, update status, and use leader election so only one replica reconciles at a time.
 
 **Q9: What's the difference between a CRD-with-operator and a Helm chart?**
+**Short:** A Helm chart is a one-time template render with no ongoing logic, while a CRD-plus-operator continuously reconciles and performs day-2 automation like failover.
 A Helm chart is a one-time (or upgrade-time) template render — it installs objects but has no ongoing logic. A CRD+operator provides *continuous* reconciliation and day-2 automation: it keeps watching and acting (failover, backup, scaling) long after install. Use a chart when you just need to deploy static manifests; use an operator when the software needs ongoing operational logic.
 
 **Q10: How does an operator report progress, and why does status matter?**
+**Short:** It updates the CR's `status` subresource, letting users and other controllers observe real state without inspecting internals.
 By updating the CR's `status` subresource (e.g., `status.phase: Ready`, conditions, observed replicas). This lets users (`kubectl get pgc`) and other controllers observe the real state without inspecting internals, and enables tools/automation to wait on readiness. The status subresource also allows separate RBAC and avoids spec/status update conflicts. Reflecting reality in status is part of being a good API citizen.
 
 **Q11: What is leader election in an operator and why is it needed?**
+**Short:** Leader election, via a Lease, ensures only one operator replica actively reconciles at a time so multiple replicas for availability don't fight over the same resources.
 When you run multiple operator replicas for availability, only one should actively reconcile at a time — otherwise two controllers fight over the same resources. Leader election (via a Lease object) ensures exactly one replica is the active leader; the others stand by and take over if the leader fails. controller-runtime provides this out of the box; forgetting it causes duplicate, conflicting actions.
 
 **Q12: How do CRDs get schema validation, and why use it?**
+**Short:** The API server validates every custom resource against the CRD's mandatory structural OpenAPI schema at admission, with CEL `x-kubernetes-validations` covering rules OpenAPI can't express.
 A CRD includes an OpenAPI v3 schema; the API server validates every custom resource against it at admission (types, required fields, enums, min/max), rejecting malformed CRs before they're stored or reconciled. In `apiextensions.k8s.io/v1` that schema is mandatory and must be *structural* — every object and array item carries a non-empty `type`, and unknown fields are pruned rather than persisted. Constraints OpenAPI can't express — cross-field rules, or "this field is immutable once set" — go in `x-kubernetes-validations` as CEL expressions, which the API server type-checks when the CRD is created and evaluates on every write. This catches user errors early (e.g., `replicas: 0` where minimum is 1) with clear messages, rather than the operator having to defensively handle garbage input at runtime.
 
 **Q13: What do OwnerReferences give you that finalizers don't?**
+**Short:** OwnerReferences let the garbage collector auto-delete in-cluster children when the owner is deleted, while finalizers gate the owner's own deletion for external cleanup.
 OwnerReferences let Kubernetes' built-in garbage collector automatically delete child objects when their owner is deleted. A finalizer instead blocks and gates deletion of the *owner itself* until custom cleanup logic runs, so setting `controllerutil.SetControllerReference(&cr, cj, r.Scheme)` on a created CronJob means deleting the parent `Database` CR cascades to delete that CronJob for free with no reconcile code required, while a finalizer handles cleanup the garbage collector cannot do, like deprovisioning an external S3 bucket. In practice you use both: OwnerReferences for in-cluster children, finalizers for anything that lives outside the cluster's own garbage collection.
 
 **Q14: How do you evolve a CRD's schema without breaking existing custom resources?**
+**Short:** Add a new CRD API version rather than editing the schema in place, mark one version `storage: true`, and use a conversion webhook to translate between versions.
 Add a new API version to the CRD rather than mutating the existing version's schema in place, and mark exactly one version `storage: true` so etcd has a single source of truth while all served versions remain readable. When the new version's shape genuinely differs from the old one, you provide a **conversion webhook** that the API server calls to translate CRs between versions on the fly, so old and new clients both get a valid object. Skipping this and just editing the schema in place risks the API server rejecting every existing CR the next time it's read or reconciled.
 
 **Q15: Why must an operator's RBAC be scoped to least privilege?**
+**Short:** An operator runs continuously with real privileges, so scoping RBAC to exactly what the reconciler touches limits damage from a bug or compromised image.
 An operator is a powerful, always-running controller, so a compromised or buggy one with cluster-wide access can modify or destroy far more than its intended scope. Scoping RBAC to exactly the API groups, verbs, and namespaces the reconciler actually touches means a bug or a supply-chain-compromised operator image can only damage what it legitimately needed to manage, not the whole cluster. This is the same least-privilege principle applied to CI tokens, just for a controller that runs continuously rather than a pipeline that runs once.
 
 **Q16: What do the operator capability levels (1-5) actually distinguish?**
+**Short:** The capability levels measure how much day-2 operational knowledge is encoded, from Level 1 install-only through Level 5 autonomous scaling and remediation.
 The maturity model measures how much day-2 operational knowledge is encoded in the controller, not how well it's built. Level 1 just installs the application, Level 2 adds patch/minor upgrades, Level 3 adds lifecycle operations like backup and failure recovery, Level 4 adds insights such as metrics and alerts, and Level 5 ("autopilot") adds autonomous scaling, tuning, and remediation without human intervention. Most production operators (CloudNativePG, Prometheus Operator) sit at Level 3-4, since reaching Level 5 is rare — autonomous remediation for stateful systems is genuinely hard to get safely right, and a Level 1 operator from OperatorHub still requires you to build your own backup/failover automation around it.
 
 ---

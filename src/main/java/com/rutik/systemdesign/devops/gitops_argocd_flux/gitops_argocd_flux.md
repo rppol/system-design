@@ -366,51 +366,67 @@ kubectl scale deploy/orders --replicas=10
 ## 12. Interview Questions with Answers
 
 **Q1: What is GitOps and what are its core principles?**
+**Short:** GitOps stores desired state declaratively and immutably in Git, and an in-cluster agent pulls and continuously reconciles the cluster to match it.
 GitOps is an operational model where the desired state of the system is declared in Git (the single source of truth) and an in-cluster agent continuously reconciles the actual state to match. Its four principles: the state is declarative, versioned/immutable in Git, pulled automatically by an agent, and continuously reconciled (drift is detected and corrected). Deploy = commit; rollback = revert; the cluster is downstream of Git.
 
 **Q2: Push-based CD vs pull-based GitOps — what's the difference and why prefer pull?**
+**Short:** Push-based CD exposes cluster credentials in CI with no drift detection, while pull-based GitOps has an in-cluster agent reconcile, keeping credentials internal and drift self-correcting.
 In push-based CD the pipeline holds cluster credentials and runs `kubectl apply` — credentials are exposed in CI, there's no drift detection, and the audit trail is just pipeline logs. In pull-based GitOps an in-cluster agent watches Git and reconciles, so no external system needs cluster access, drift is continuously detected and corrected, and Git history is a complete audit log. Pull improves security (no external creds), auditability, and recoverability.
 
 **Q3: How does drift detection and self-healing work?**
+**Short:** The GitOps agent continuously diffs Git's desired state against the live cluster and, with self-heal enabled, re-applies the Git state to correct any drift.
 The GitOps agent continuously diffs the desired state (Git) against the actual cluster state. If they differ — because someone made an out-of-band change or a resource was deleted — it marks the app OutOfSync and, with self-heal enabled, re-applies the Git state to correct the drift. This guarantees the cluster matches Git and that manual changes don't silently persist; the only durable change is a Git change.
 
 **Q4: How do you roll back under GitOps?**
+**Short:** Roll back by `git revert`-ing the offending commit and pushing, or, in ArgoCD, by running `argocd app rollback` to a previously synced revision.
 `git revert` the offending commit and push — the agent reconciles the cluster back to the previous good state, and the revert is itself an audited commit. ArgoCD also offers `argocd app rollback` to revert the live Application to a previously synced revision for immediate relief. Either way, the rollback is declarative and traceable, unlike re-running a push pipeline.
 
 **Q5: Why shouldn't you `kubectl edit` production under GitOps?**
+**Short:** A `kubectl edit` becomes drift that self-heal reverts on the next sync, undoing your fix — the only durable change is a commit to Git.
 Because Git, not the cluster, is the source of truth. A manual `kubectl` change is drift that the agent (with self-heal) reverts on the next sync — so your fix is undone, often reigniting the incident. The correct action is to change the Git repo (commit the fix), which the agent then applies durably. For emergencies you can temporarily pause auto-sync, but you must reconcile Git promptly.
 
 **Q6: ArgoCD vs Flux — how do they differ?**
+**Short:** ArgoCD is app-centric with a rich UI and the `Application` CRD, while Flux is a set of composable GitOps Toolkit controllers driven via CRDs and CLI.
 ArgoCD is app-centric with a rich web UI, the `Application` CRD, app-of-apps and ApplicationSets, and strong visualization/diffing — popular where teams want a GUI and clear sync status. Flux is a set of composable GitOps Toolkit controllers (source, kustomize, helm, notification, and the two image-automation controllers) driven via CRDs/CLI, favoring a more GitOps-native, automation-first style with minimal UI. Both implement the same pull-based reconciliation; choice is largely workflow/UI preference.
 
 **Q7: How do you handle secrets in GitOps if everything is in Git?**
+**Short:** Never commit plaintext secrets — use SOPS-encrypted manifests, Sealed Secrets, or the External Secrets Operator to reference a value that stays in Vault.
 You never commit plaintext secrets. Options: SOPS-encrypted manifests (the agent decrypts via a KMS key), Sealed Secrets (encrypted to a cluster-specific key only the in-cluster controller can decrypt), or the External Secrets Operator (commit a *reference*; ESO fetches the real value from Vault/cloud at runtime). The Git repo holds ciphertext or references, never the secret value itself.
 
 **Q8: What is the app-of-apps pattern?**
+**Short:** App-of-apps is an ArgoCD pattern where one root `Application` manages a directory of child Applications, so a single commit onboards or removes many apps at once.
 An ArgoCD pattern where a single root `Application` points at a directory of child `Application` definitions, so one Application manages many. Committing to that directory onboards or removes entire applications declaratively — used to bootstrap a whole cluster (gateway controller, monitoring, cert-manager, team apps) from one root. ApplicationSets generalize this further with templating across clusters/environments.
 
 **Q9: How does CI hand off to GitOps CD?**
+**Short:** CI builds and pushes the image, then only writes a tag-bump commit into the config repo (directly or via an image updater) — it never touches the cluster.
 CI builds and pushes the artifact (image), then updates the *config* repo — either by committing a new image tag into the manifests, or via an image-update controller (Argo CD Image Updater / Flux image automation) that watches the registry and commits the bump automatically. The GitOps agent then reconciles the config repo and deploys. Crucially, CI never touches the cluster — it only writes to Git.
 
 **Q10: What's the risk of `prune` and how do you mitigate it?**
+**Short:** With `prune: true`, removing a manifest from Git deletes the matching live resource, so an accidental deletion or bad refactor can wipe production.
 With prune enabled, removing a manifest from Git deletes the corresponding live resource — so an accidental deletion or bad refactor can wipe production resources. Mitigate with config-repo protections (required reviews, CODEOWNERS), diff previews before sync, sync windows, and options like `PruneLast`/manual confirmation for critical apps. Prune is powerful (keeps the cluster matching Git) but demands repo discipline.
 
 **Q11: How does GitOps improve disaster recovery?**
+**Short:** Because desired state lives entirely in Git, recovering a cluster is pointing a fresh ArgoCD or Flux at the repo and letting it reconcile everything back.
 Because the entire desired state lives in Git, recovering a cluster is "deploy a fresh ArgoCD/Flux and point it at the repo" — the agent reconciles everything back. The cluster is reproducible from Git rather than a hand-tuned snowflake. Combined with etcd/PVC backups for stateful data, GitOps makes the *configuration* portion of DR fast and deterministic (see [disaster_recovery_and_resilience](../disaster_recovery_and_resilience/disaster_recovery_and_resilience.md)).
 
 **Q12: How does GitOps relate to progressive delivery?**
+**Short:** GitOps supplies the reconciled source of truth while Argo Rollouts or Flagger layer metric-gated canary or blue-green analysis on top, all declared in Git.
 GitOps provides the source of truth and reconciliation; progressive delivery (Argo Rollouts/Flagger) provides metric-gated canary/blue-green. They compose: you declare a Rollout CR in Git, ArgoCD/Flux reconciles it, and the Rollouts controller executes the canary with automated analysis and rollback. The release strategy is declarative and audited in Git, and an auto-abort is reflected as the controller reverting to the stable version (see [deployment_strategies](../deployment_strategies/deployment_strategies.md)).
 
 **Q13: How do ApplicationSets scale GitOps to many clusters without per-cluster copy-paste?**
+**Short:** An ApplicationSet uses a generator like `clusters: {}` to template one `Application` per registered cluster automatically, instead of hand-writing each one.
 An ApplicationSet uses a generator, such as `clusters: {}`, to template one `Application` per matching cluster instead of hand-writing each one. Each generated Application substitutes variables like `{{name}}` and `{{server}}` into the template, so a single ApplicationSet with a `clusters/{{name}}` path can fan out to 25 per-cluster Applications from one repo, as in this module's fleet case study. Adding a cluster to the fleet means registering it and letting the generator produce its Application automatically, rather than writing new YAML by hand. Use ApplicationSets instead of manually maintained Applications once you're managing more than a handful of clusters or environments from one repo.
 
 **Q14: Why do teams keep the config repo separate from the application code repo?**
+**Short:** Separating them lets CI push only image and tag-bump changes into the config repo while CD watches config alone with zero visibility into application source.
 Separating them decouples the deploy concern (what version runs where) from the code-change concern (what the app does). CI owns the app repo and only pushes a built image plus a tag-bump commit into the config repo; CD (ArgoCD/Flux) watches only the config repo, so it never needs read access to application source at all. This also lets one config repo hold per-environment or per-cluster overlays, and lets platform teams gate config changes (CODEOWNERS, required reviews) independently of the app repo's own review rules. Split app and config repos once you have more than one environment, or want the CD agent to have zero visibility into application source.
 
 **Q15: Does the GitOps agent see a Git push instantly, or does it poll?**
+**Short:** It polls Git on an interval by default — Flux's fetch and apply intervals compose, so a push can take minutes to reach the cluster without a webhook.
 By default it polls Git on an interval rather than reacting instantly, though a webhook can shorten the delay. Flux's `GitRepository` source polls every `interval: 1m` and its `Kustomization` reconciles every `interval: 5m` in this module's example, so a commit can take minutes to reach the cluster without a webhook configured. ArgoCD works the same way — periodic polling plus an optional webhook — so "pull-based" means the agent decides when to check, not that it's notified the instant you `git push`. Configure a Git webhook to the agent's endpoint if you need near-instant reconciliation instead of relying on the polling interval alone.
 
 **Q16: What does the `retry`/`backoff` block in an ArgoCD Application spec do?**
+**Short:** It makes ArgoCD retry a failed sync with exponential backoff, spacing attempts further apart, instead of giving up after a single try.
 It controls how ArgoCD retries a failed sync instead of giving up after one attempt, spacing retries with exponential backoff. With `limit: 5` and `backoff: {duration: 5s, factor: 2}`, retries land at 5s, 10s, 20s, 40s, then 80s apart — about 2.5 minutes of total retry window — before ArgoCD gives up and marks the Application degraded. This absorbs transient failures, like a momentarily unreachable admission webhook or a CRD that hasn't registered yet, without a human needing to manually re-trigger sync. Raise `limit` and `backoff` for Applications with known-flaky dependencies rather than leaving every app on the same default.
 
 ---
