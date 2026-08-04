@@ -91,21 +91,28 @@ question there.
 
 | Section | Was parked | State at unparking | Now |
 |---------|-----------|--------------------|-----|
-| `devops/` | 2026-07-29 | 27 audit units none started; 650 Q&As, 0 Short | **in scope** |
-| `cs_fundamentals/` | 2026-07-29 | 24 audit units none started; 701 Q&As, 0 Short | **in scope** |
-| `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **in scope** |
+| `devops/` | 2026-07-29 | 27 audit units none started; 650 Q&As, 0 Short | **audit DONE, Short 650/650** |
+| `cs_fundamentals/` | 2026-07-29 | 24 audit units none started; 701 Q&As, 0 Short | **audit DONE, Short 704/704** |
+| `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **audit DONE, Short 427/427** |
 | `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **still out** |
 
-**Report against these numbers.** The audit denominator is **295 units** (`book/` was never
-in it). The Short-migration denominator is **9,503 Q&As** — every parsed Q&A except
-`book/`'s 1,402. The old parked-era figures (230 units, 8,489 Q&As) are dead; do not quote
-them, and do not carry forward a worklist built against them.
+**Both passes are COMPLETE for all 15 in-scope sections** (2026-08-04, commit `6ce35a6`;
+the three unparked sections were audited and migrated the same day). Every non-book Q&A in
+the repo now carries an authored `**Short:**` line — verify with `extract.py`'s own
+"authored **Short:** summaries: N of M parsed Q&As", where `M - N` should equal `book/`'s
+count exactly and nothing else. `cs_fundamentals` reads 704 against the 701 recorded at
+unparking because the Case-B reflow recovered 3 questions that had been written on the same
+line as the END of the previous answer, where `is_question_line()` could not see them.
 
-**The `cuda` trap, for whoever audits it.** Units 48-52 are genuinely audited and committed
-(`b223d21`). Units 53-57 have an **interrupted partial batch** committed as `2fca64f`: five
-files carry real corrections, but the agent was stopped mid-§14 and never produced a verdict
-record, so those units are deliberately still `status != done`. **Re-audit those five files
-from the top** — treat that commit as a partial improvement, never as an audited result.
+Only `book/`'s 1,402 remain unmigrated, by design. Do not rebuild a worklist against the
+parked-era figures (230 units, 8,489 Q&As) or the unparking-era ones (295 units, 9,503
+Q&As) — both are dead, and the second is dead because the work behind it is finished.
+
+**The `cuda` trap is CLEARED — recorded so nobody re-opens it.** Units 53-57 once held an
+interrupted partial batch (`2fca64f`) whose five files carried real corrections but no
+verdict record, and the standing instruction was to re-audit them from the top. That
+re-audit happened. All 24 cuda modules are audited; treat `2fca64f` as history, not as a
+pending item.
 
 Working state (`audit_manifest.json`, per-unit `status`) lives in the session scratch
 directory, which is ephemeral. This table is the durable record; if the manifest is gone,

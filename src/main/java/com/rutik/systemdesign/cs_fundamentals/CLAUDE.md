@@ -11,7 +11,7 @@ Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 | Work | State |
 |------|-------|
 | Factual audit | **DONE — all 24 modules + all 26 `dsa_patterns` files**, ~2,500 claims verified, ~170 code blocks hand-executed, ~100 corrections. Commits `640ce22`, `b31a6b0`, `faf44a1`, `1923ffe` |
-| `**Short:**` MCQ summaries | **701 outstanding (of 701)** — runs next, deliberately AFTER the audit |
+| `**Short:**` MCQ summaries | **DONE — 704 of 704**, run after the audit. The count rose from 701: the Case-B reflow split apart 3 questions that had been written on the same line as the END of the previous answer, where `is_question_line()` could not see them. Commit `6ce35a6` |
 | Case studies | **not audited** (6 walkthrough case studies) |
 
 ### How this section audits — read before dispatching anything here

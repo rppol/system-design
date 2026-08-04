@@ -13,7 +13,7 @@ Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 | Work | State |
 |------|-------|
 | Factual audit | **DONE — all 24 modules**, ~1,000 claims verified, ~145 corrections. Commits `312d0b4`, `ed1400a`, `e984f8c`, `60eed53` |
-| `**Short:**` MCQ summaries | **427 outstanding (of 427)** — runs next, deliberately AFTER the audit |
+| `**Short:**` MCQ summaries | **DONE — 427 of 427**, run after the audit as the ordering rule requires. Commit `6ce35a6` |
 | Case studies | **not audited** (6 case studies + `cross_cutting/`) |
 
 ### What the audit found here, and why it is not what you would guess

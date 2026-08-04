@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: apis-frameworks -->
 
-The 512 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 490 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **APIs & app frameworks** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.

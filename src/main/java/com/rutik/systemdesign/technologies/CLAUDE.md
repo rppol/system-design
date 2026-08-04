@@ -340,6 +340,23 @@ lives in exactly one shard and declares all of its roles there, so Redis is file
 Caching and still carries its key-value, rate-limiting, broker and semantic-cache roles.
 A record whose primary tier disagrees with its shard is a **warning**, not an error.
 
+**Each shard's preamble opens with a tool count, and it is a SNAPSHOT that nothing
+validates.** It counts exactly the `### ` records in that file — verified 2026-08-04
+against the index, where "records in the shard" and "indexed tools whose primary role is
+this tier" are the same set by construction, so there is no second meaning to hunt for.
+All 18 had drifted (17 wrong, one accidentally correct because a module addition happened
+to close the gap) and were recomputed. Nothing in the build checks them, so update the
+number in the same commit that adds or removes a record:
+
+```bash
+cd technologies/tech_bank
+for f in *.md; do [ "$f" = tech_bank.md ] && continue
+  printf '%-22s preamble=%-5s actual=%s\n' "$f" \
+    "$(grep -ohE '^The [0-9]+ tools whose PRIMARY' $f | grep -oE '[0-9]+')" \
+    "$(grep -c '^### ' $f)"
+done
+```
+
 ### The record contract — the `**Short:**` Q&A contract, applied to a tool
 
 ```markdown

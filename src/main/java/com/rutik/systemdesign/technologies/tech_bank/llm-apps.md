@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: llm-apps -->
 
-The 255 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 244 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **LLM apps & agents** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.

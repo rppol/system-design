@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: runtime-systems -->
 
-The 484 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 449 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Runtime & OS** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.

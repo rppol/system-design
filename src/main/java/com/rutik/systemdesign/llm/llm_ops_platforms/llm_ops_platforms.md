@@ -6,7 +6,7 @@
 
 LLMOps platforms provide the operational infrastructure needed to develop, evaluate, deploy, and monitor large language model applications. Three distinct categories address different phases of the LLM lifecycle:
 
-**Experiment Tracking** platforms capture what happened during model training — hyperparameters, loss curves, evaluation metrics, checkpoints, and dataset versions. MLflow, Weights & Biases (W&B), Neptune.ai, and Comet ML are the primary tools in this category. They were originally built for tabular ML but have been extended to support fine-tuning workflows.
+**Experiment Tracking** platforms capture what happened during model training — hyperparameters, loss curves, evaluation metrics, checkpoints, and dataset versions. MLflow, Weights & Biases (W&B), Neptune, and Comet ML are the primary tools in this category. They were originally built for tabular ML but have been extended to support fine-tuning workflows.
 
 **LLM-specific Observability** platforms capture what happens at inference time in production — which prompts were sent, which tools were called, how many tokens were consumed, what each call cost, and where latency was spent. LangSmith, LangFuse, Arize Phoenix, Helicone, and Braintrust fill this role. Standard APM tools (Datadog, New Relic) cannot capture the nested call structure of an LLM agent chain, which is why this dedicated category exists (concepts deep dive: [LLM Observability & Monitoring](../llm_observability_and_monitoring/llm_observability_and_monitoring.md)).
 
@@ -54,7 +54,7 @@ The three categories form a feedback loop: experiment tracking informs what to t
 |----------|------------|-------------|-------------|
 | MLflow | Training run tracking, model registry | Both | Open source, Databricks-native |
 | Weights & Biases (W&B) | Training visualization, hyperparameter sweeps | Hosted | Best-in-class sweep and Bayesian search |
-| Neptune.ai | Research experiment tracking | Hosted | Strong metadata querying |
+| Neptune | Research experiment tracking | Hosted | Strong metadata querying |
 | Comet ML | Training + production monitoring | Hosted | CI/CD model evaluation integration |
 
 These platforms were designed around the training loop: start a run, log scalars per step, save artifacts when done, compare runs in a UI. They excel at training-time observability but have limited support for the nested span structure of LLM agent calls.
@@ -86,9 +86,9 @@ Automated evaluation uses an LLM judge to score outputs on specific criteria (fa
 
 A model registry is a central catalog of model versions with metadata, lineage, and deployment state. MLflow Model Registry and W&B Artifact Registry both support:
 
-- **Lifecycle stages**: None → Staging → Production → Archived
-- **Transition approvals**: require sign-off before promoting to Production
-- **Champion/challenger tracking**: compare the current Production model against a Staging candidate on the same evaluation dataset
+- **Named pointers to versions**: MLflow uses aliases such as `champion` and `challenger` (stages — None/Staging/Production/Archived — were deprecated in MLflow 2.9 and never existed in Unity Catalog registries); promotion is an alias move, which is a metadata write, so nothing redeploys
+- **Approvals**: gate the alias move in CI, not in the registry — the OSS registry has no built-in sign-off step
+- **Champion/challenger tracking**: compare the version behind `champion` against the one behind `challenger` on the same evaluation dataset
 - **Lineage links**: each version points back to the training run that produced it
 
 The registry is the integration point between experiment tracking (where models are produced) and deployment systems (where models are served). Without it, teams rely on file system conventions or naming schemes — both of which fail at scale.
@@ -487,9 +487,10 @@ Rollback procedure:
   Total rollback time: 4 hours, not 3 weeks
 
 Model Registry makes it simpler:
-  - Production model version in registry points to run_id
-  - Previous production version still in Registry as "Archived"
-  - Rollback = mlflow.register_model(previous_run_id) + transition to Production
+  - The "champion" alias points at a version, which points at its run_id
+  - The previous version is still in the Registry, just no longer aliased
+  - Rollback = set_registered_model_alias("champion", previous_version)
+    (an alias move is a metadata write — nothing redeploys)
 ```
 
 ### DeepEval Automated Evaluation
@@ -748,7 +749,7 @@ A golden eval dataset created in Month 1 reflects the query distribution at laun
 ## 11. Technologies & Tools
 
 **MLflow** (Databricks, open-source 2018)
-- Components: MLflow Tracking (run logging), MLflow Projects (reproducible runs), MLflow Models (model packaging), MLflow Registry (model lifecycle)
+- Components: MLflow Tracking (run logging), MLflow Models (packaging), MLflow Model Registry (lifecycle), MLflow Projects (reproducible runs), plus the MLflow 3 GenAI surfaces — Tracing, Prompt Registry, Evaluation and the AI Gateway. Internals at [`ml/mlflow_deep_dive`](../../ml/mlflow_deep_dive/mlflow_deep_dive.md)
 - Backend stores: local filesystem, PostgreSQL, MySQL, SQLite; artifact stores: S3, Azure Blob, GCS, DBFS
 - Integration: native Databricks, scikit-learn, PyTorch, TensorFlow, HuggingFace Transformers autologging
 - Self-host with `mlflow server --backend-store-uri postgresql://... --default-artifact-root s3://...`
@@ -811,7 +812,7 @@ The most common mistake is adding observability and eval tooling reactively — 
 
 **Q: What does W&B do that MLflow does not, and vice versa?**
 **Short:** W&B leads on Bayesian-optimization sweeps and collaboration, while MLflow leads on being fully self-hostable open source with a more mature model registry.
-W&B's primary advantage is its Sweeps system — automated hyperparameter search using Bayesian optimization, which is significantly more efficient than grid search and is built into the platform. W&B also has a richer collaboration layer (shared reports, team dashboards). MLflow's primary advantage is that it is fully open-source, self-hostable without a commercial agreement, and is the native format in the Databricks ecosystem. MLflow's Model Registry with staging/production lifecycle is more mature than W&B's artifact registry. For a pure research lab doing many hyperparameter sweeps, W&B; for an enterprise team on Databricks or requiring full self-hosting, MLflow.
+W&B's primary advantage is its Sweeps system — automated hyperparameter search using Bayesian optimization, which is significantly more efficient than grid search and is built into the platform. W&B also has a richer collaboration layer (shared reports, team dashboards). MLflow's primary advantage is that it is fully open-source, self-hostable without a commercial agreement, and is the native format in the Databricks ecosystem. MLflow's Model Registry — versions promoted by moving an alias such as `champion`, with lineage back to the producing run — is more mature than W&B's artifact registry. For a pure research lab doing many hyperparameter sweeps, W&B; for an enterprise team on Databricks or requiring full self-hosting, MLflow.
 
 **Q: What problems does LangSmith solve that Datadog or New Relic cannot?**
 **Short:** Standard APM tools see only HTTP timing, while LangSmith captures the nested LLM-specific span structure with per-call token counts, prompts, and tool call details.

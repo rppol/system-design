@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: security -->
 
-The 217 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 215 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Security & identity** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -1339,16 +1339,6 @@ It gathers evidence from the artifacts in a build - jar manifests, POM coordinat
 
 Two things make or break it in practice. It needs a populated local vulnerability database and an NVD API key, so the first run is slow and a stale cache silently reports old news. And CPE matching produces false positives, so a suppression file with a documented reason per entry is part of the job. Remember what the result means: it finds a known-vulnerable version on the classpath, not a vulnerable call path, so triage is still human work.
 
-### OWASP SQLMap
-**Short:** Penetration-testing CLI that automatically finds and exploits SQL injection to prove a parameter is unsafe.
-**Kind:** tech
-**Lang:** *
-**Roles:** security/supply-chain-and-runtime-security @1, data-stores/relational @3
-
-You give it a request, whether a URL, a saved HTTP request file or a proxy log, and it fingerprints the backend and works through the injection techniques: boolean-based blind, time-based blind, error-based, UNION query, stacked queries and out-of-band. Once a parameter is confirmed it enumerates databases, tables and columns, dumps data, and on permissive configurations reads or writes files and opens an operating system shell.
-
-Its real use is proving exploitability, turning a scanner's tentative finding into an argument that ends when the tool returns actual table names. Two cautions matter more than usual: it sends destructive and heavy traffic, so run it against a test environment with written authorisation and never casually against production, and the fix it motivates is always the same, parameterised queries rather than an escaping helper or a firewall rule.
-
 ### OWASP ZAP
 **Short:** OWASP's DAST scanner: crawls and attacks a running application to find injection, XSS and auth flaws.
 **Kind:** tech
@@ -1840,6 +1830,16 @@ Reach for it for social or enterprise sign-in in a browser application, and for 
 RSocket has no HTTP request to hang security off, so this module works on frames. Enabling it installs a payload interceptor, credentials arrive in the setup frame or in per-request metadata using the standard authentication metadata extension as either simple username and password or a bearer JWT, and authorization rules match on the route, with method-level annotations available on the message-mapping handlers.
 
 Reach for it whenever an RSocket endpoint is exposed beyond a trusted network, since the transport itself provides nothing. The model to keep straight is the connection lifetime: setup-frame authentication establishes one identity for the whole connection including long-lived streams and channels, so an expiring token is not re-checked mid-stream unless you authenticate per request. The security context propagates through the Reactor context, so reading the principal from a thread-local will not work.
+
+### sqlmap
+**Short:** Penetration-testing CLI that automatically finds and exploits SQL injection to prove a parameter is unsafe.
+**Kind:** tech
+**Lang:** *
+**Roles:** security/supply-chain-and-runtime-security @1, data-stores/relational @3
+
+You give it a request, whether a URL, a saved HTTP request file or a proxy log, and it fingerprints the backend and works through the injection techniques: boolean-based blind, time-based blind, error-based, UNION query, stacked queries and out-of-band. Once a parameter is confirmed it enumerates databases, tables and columns, dumps data, and on permissive configurations reads or writes files and opens an operating system shell.
+
+Its real use is proving exploitability, turning a scanner's tentative finding into an argument that ends when the tool returns actual table names. Two cautions matter more than usual: it sends destructive and heavy traffic, so run it against a test environment with written authorisation and never casually against production, and the fix it motivates is always the same, parameterised queries rather than an escaping helper or a firewall rule.
 
 ### ssl
 **Short:** Python stdlib module that wraps sockets in TLS and controls certificate verification, hostname checks and cipher policy.

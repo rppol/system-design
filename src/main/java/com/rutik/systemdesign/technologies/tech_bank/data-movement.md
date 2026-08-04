@@ -2,7 +2,7 @@
 
 <!-- tech-bank tier: data-movement -->
 
-The 135 tools whose PRIMARY role — the first, best-weighted one — sits in
+The 145 tools whose PRIMARY role — the first, best-weighted one — sits in
 the **Queues & streaming** tier. A tool appears in exactly one shard and carries all
 of its roles here, so Redis is filed under Caching and still declares its
 key-value, rate-limiting, broker and semantic-cache roles.
@@ -174,7 +174,7 @@ In an ML system it is where offline features get computed and training sets get 
 ### Apache Spark GraphX
 **Short:** Spark's distributed graph-processing API with a Pregel model for iterative algorithms like PageRank over huge graphs.
 **Kind:** tech
-**Lang:** *
+**Lang:** java
 **Roles:** data-movement/batch-and-distributed-compute @1, applied-ml/recommenders-and-graph-ml @2, data-stores/graph-db @3
 
 A graph is represented as two RDDs, vertices and edges, joined through a triplet view, and the Pregel API expresses iterative algorithms as rounds of message sending, aggregation and vertex-state update -- which is how PageRank, connected components, triangle counting and label propagation scale past one machine. Partitioning is edge-cut based, so the partition strategy you choose is what keeps shuffle volume tolerable on a skewed graph where a few vertices hold most of the degree.

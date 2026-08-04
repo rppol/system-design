@@ -538,7 +538,7 @@ REVOKE SELECT ON users FROM app_user;  -- access only via function
 | Prowler               | AWS security config audit                   |
 | AWS Macie             | PII detection in S3 (backup data)           |
 | Snyk                  | Dependency and secret scanning in CI        |
-| OWASP SQLMap          | SQL injection testing tool                  |
+| sqlmap                | SQL injection testing tool (not an OWASP project) |
 
 ---
 
