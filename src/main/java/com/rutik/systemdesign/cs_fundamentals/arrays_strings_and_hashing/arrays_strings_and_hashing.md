@@ -606,57 +606,75 @@ def max_sum_k_fixed(arr: list[int], k: int) -> int:
 ## 12. Interview Questions with Answers
 
 **Q1: What is the time complexity of Python dict lookup, and what is the worst case?**
+**Short:** Python dict lookup is O(1) average but degrades to O(n) worst case if adversarial keys collide into the same bucket.
 O(1) average. Worst case O(n) if all keys hash to the same bucket (e.g., adversarial keys with crafted hash collisions). Python randomises the hash seed per process (since Python 3.3) to make collision attacks impractical — but only for `str` and `bytes`. Integer hashing is not randomised at all: `hash(n) == n` for every `n` up to 2**61 - 1 (larger ints are reduced modulo that Mersenne prime, and `hash(-1)` is -2), so an attacker who controls integer keys can still craft colliding input — be aware when using integer-keyed dicts for security-sensitive applications.
 
 **Q2: What is the difference between `defaultdict` and `dict.get(key, default)`?**
+**Short:** `defaultdict(list)` inserts an empty list into the dict on missing-key access, while `dict.get(key, [])` returns a default without inserting anything.
 `defaultdict(list)` automatically inserts a new empty `list` when a key is missing and you access it with `d[key]`. `dict.get(key, [])` returns an empty list but does NOT insert it. Use `defaultdict` when you want to immediately modify the value (e.g., `d[key].append(x)` without a prior existence check). Use `dict.get` when you only want to read a default without mutating the dict.
 
 **Q3: Why does Java's HashMap resize at 75% capacity and not 100%?**
+**Short:** 0.75 is a time-space compromise: it keeps chains short for fast lookups while leaving only a quarter of the table empty, since collisions are Poisson-distributed and tails lengthen fast.
 0.75 is a deliberate time-space compromise: it keeps the average chain short enough that lookups stay near-constant while leaving only a quarter of the table empty. Note that HashMap uses chaining, so a load factor of 1.0 would not be catastrophic on its own — the mean chain length would still be 1 — but collisions are Poisson-distributed, so the *tail* lengthens fast, and the buckets you actually hit are the crowded ones. Push the factor higher and you trade lookup time for memory; push it lower and you waste memory and rehash more often. The resize doubles the capacity, halving the load factor to ~0.375.
 
 **Q4: Two Sum — what is the O(n) hash-table solution?**
+**Short:** Iterate once, checking for each `x` whether `target - x` is already in a hash map of seen values before storing `x`, giving O(n) time and O(n) space.
 Iterate through the array; for each element `x`, check if `target - x` is in a hash map of previously seen values; if yes, return the pair. If no, store `x → index` in the map. One pass, O(n) time, O(n) space. Key insight: instead of asking "is there any y such that x + y = target?", rephrase as "was `target - x` seen before?" — a point lookup, not a search.
 
 **Q5: How does Java HashMap's treeification (Java 8) help?**
+**Short:** A bucket chain of 8+ entries converts to a red-black tree once the table has 64+ buckets, turning O(n) lookups into O(log n) and defeating hash-collision DoS attacks.
 When a single bucket's chain grows to ≥ 8 entries, it is converted to a red-black BST, giving O(log n) operations on that bucket instead of O(n). This prevents hash-collision DoS attacks (an attacker sending many keys with the same hash value) from degrading the whole map to O(n) per operation. Two conditions are easy to miss: treeification only happens once the table itself has ≥ 64 buckets (below that, HashMap resizes instead, treating the collisions as a capacity problem), and the tree needs an ordering for keys that are not `Comparable` — it falls back to comparing class names and then identity hash codes. On resize, a tree bin that splits down to ≤ 6 entries is untreeified back into a linked list.
 
 **Q6: What are the time and space complexities of `sorted()` in Python?**
+**Short:** Python's `sorted()` runs Timsort in O(n log n) time and O(n) space, returning a new list rather than mutating the original.
 O(n log n) time (Timsort). O(n) space (a separate list is returned — the original is not modified). For sorting a string: `sorted("anagram")` → O(k log k) where k = string length; then `''.join(sorted(s))` is the canonical anagram key.
 
 **Q7: What is the longest substring without repeating characters, and what is the approach?**
+**Short:** A sliding window tracked with a character set solves it in O(n) time, since each character enters and leaves the window at most once.
 Sliding window. Maintain a set of characters in the current window [left, right]. Expand right; when a duplicate is found, shrink left until the duplicate is removed. Track the maximum window size seen. O(n) time — each character enters and leaves the window at most once.
 
 **Q8: What makes a good hash function?**
+**Short:** A good hash function is deterministic, fast, uniform across the table, and exhibits the avalanche effect so a one-bit input change flips about half the output bits.
 A good hash function is: (a) deterministic — same input always gives the same output; (b) fast — O(1) or O(k) for a k-byte key; (c) uniform — maps keys uniformly across the table, minimising collisions; (d) avalanche effect — a single bit change in the key changes ~50% of the hash bits, preventing clustering. Bad: summing character ASCII values (all anagrams collide). Better: polynomial rolling hash (used in Rabin-Karp and Java String's `hashCode`).
 
 **Q9: You need to find all pairs in an array that sum to zero. What is the O(n) approach?**
+**Short:** Build a frequency map with `Counter`, then for each distinct value x check whether `-x` is also present, deduplicating by only keeping pairs where `x <= -x`.
 Build a frequency map (`Counter`). For each distinct value x, if `-x` exists in the map, it forms a pair. Handle duplicates carefully: the pair (0, 0) requires at least two zeros; (x, -x) for x ≠ 0 requires both x and -x to be present. Deduplicate results by storing pairs with `x <= -x`.
 
 **Q10: How does Python's `set` differ from a `frozenset`?**
+**Short:** `set` is mutable and unhashable, while `frozenset` is immutable and hashable, so only a `frozenset` can serve as a dict key or a set element.
 Both are hash sets with O(1) membership testing. `set` is mutable (supports `add`, `discard`, `update`). `frozenset` is immutable and therefore hashable — it can be used as a dictionary key or as an element of another set. `frozenset` is useful when you need a set as a cache key (e.g., grouping states in a BFS problem).
 
 **Q11: What is the time complexity of `in` for Python list vs set?**
+**Short:** `x in list` is an O(n) linear scan while `x in set` is an O(1) average hash lookup, so using a list for membership checks in a loop silently creates O(n^2) code.
 `x in list` — O(n) linear scan. `x in set` — O(1) average hash lookup. The mistake of using a list where a set is appropriate is one of the most common sources of accidental O(n²) code: checking membership inside a for loop.
 
 **Q12: How would you implement an LRU cache in O(1) time for all operations?**
+**Short:** Combine a hash map for O(1) key lookup with a doubly-linked list for O(1) eviction, which `OrderedDict`'s `move_to_end`/`popitem(last=False)` implement directly.
 Combine a `dict` (for O(1) key lookup) with a doubly-linked list (for O(1) LRU eviction). On access: move the node to the head of the list (most recently used). On eviction: remove the tail node (least recently used). Python's `OrderedDict` has `move_to_end` and `popitem(last=False)` which implement this pattern with a single built-in structure. See `case_studies/design_lru_cache.md` for the full walkthrough.
 
 **Q13: What is Java's `LinkedHashMap` and how does it maintain insertion order?**
+**Short:** `LinkedHashMap` extends `HashMap` with a doubly-linked list of `before`/`after` pointers on every entry, giving O(n) insertion-order iteration at O(1) extra overhead per op.
 `LinkedHashMap` extends `HashMap` with a doubly-linked list connecting all entries in insertion (or access) order. Each entry stores `before` and `after` pointers in addition to `next` (for the hash chain). This adds O(1) overhead per operation and O(n) extra memory. Iteration is O(n) in insertion order. It is the standard Java building block for an LRU cache (`LinkedHashMap(cap, 0.75, true)` in access-order mode).
 
 **Q14: What happens when you use a mutable default argument in Python?**
+**Short:** A mutable default like `def f(lst=[])` is created once at function definition, so every call sharing the default also shares mutations made to it.
 This is a Python gotcha related to hashing: `def f(lst=[])` — the default `lst` is created ONCE when the function is defined, not on each call. All calls that use the default share the same list. Mutations in one call persist in the next. Fix: `def f(lst=None): if lst is None: lst = []`. The same issue occurs with dicts and sets as default arguments.
 
 **Q15: Given an array of integers 1..n with one duplicate, find the duplicate in O(n) time and O(1) space without modifying the array.**
+**Short:** Treat the array as a linked list where `arr[i]` points to the next index and run Floyd's cycle detection to find the duplicate as the cycle entry.
 Two approaches: (a) Floyd's cycle detection — treat the array as a linked list where `arr[i]` points to the next node. The duplicate creates a cycle; find the cycle entry with fast-slow pointers. (b) Sum: sum(arr) - n(n+1)/2 = the duplicate if exactly one number appears twice (fails if multiple duplicates or numbers outside 1..n).
 
 **Q16: What is the time complexity of Python's list `.pop()` vs `.pop(0)`?**
+**Short:** `list.pop()` is O(1) amortized, but `list.pop(0)` is O(n) because every remaining element must shift left — use `collections.deque` for O(1) `popleft`.
 `list.pop()` — O(1) amortized (removes the last element, no shifting). `list.pop(0)` — O(n) (removes the first element, shifts all remaining elements left). For a FIFO queue, use `collections.deque` which gives O(1) popleft. This distinction is a common performance bug in sliding window or BFS implementations.
 
 **Q17: How do you detect if two strings are anagrams in O(n) time?**
+**Short:** Build a frequency counter for one string and decrement it while scanning the other, checking all counts return to zero, giving O(k) time and O(1) space for a fixed alphabet.
 Two strings are anagrams if they contain the same characters with the same frequencies. Approaches: (a) sort both and compare — O(k log k); (b) build a frequency counter for one, decrement for the other, check all zeros — O(k) time, O(1) space (26 characters for lowercase alphabet). The O(k) approach is preferred.
 
 **Q18: What is the difference between `==` and `is` for checking key equality in Python dicts?**
+**Short:** Dict lookup compares keys with `==` (value equality via `__eq__`) after hashing, while `is` checks object identity and should never be used for value comparisons.
 Dict lookup uses `hash(key)` first, then `key == stored_key` (the `__eq__` method). `is` checks identity (same object in memory), not equality. Two distinct objects with the same value compare equal (`"abc" == "abc"`) but `is` would be False unless Python interns them. Never use `is` for value comparisons. For small integers (-5 to 256) and interned strings, Python caches objects so `is` incidentally returns True, but this is an implementation detail, not a language guarantee.
 
 ---

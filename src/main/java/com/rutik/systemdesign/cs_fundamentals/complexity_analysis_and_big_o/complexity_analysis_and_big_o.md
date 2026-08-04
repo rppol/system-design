@@ -706,60 +706,79 @@ In adversarial inputs (hash collision attacks), a naive hash function can cause 
 ## 12. Interview Questions with Answers
 
 **Q1: What is the difference between O, Θ, and Ω?**
+**Short:** O is an upper bound, Ω is a lower bound, and Θ is a tight bound holding both O and Ω simultaneously.
 O is an upper bound, not necessarily a tight one: `f ≤ c·g` for large n. (O is orthogonal to best/average/worst — you can bound any of the three with O.) Ω is a lower bound: `f ≥ c·g`. Θ is a tight bound: both O and Ω hold simultaneously. In interviews "this runs in O(n)" is often used loosely to mean Θ(n) — clarify if precision matters. The key gotcha: O(n) includes O(1), O(log n), etc. — O is not equality.
 
 **Q2: Is the amortized cost of a dynamic array append O(1) or O(n)?**
+**Short:** It is O(1) amortized but O(n) worst case, since a resize copying all n elements is spread over the n appends before the next resize.
 O(1) amortized, O(n) worst case. A single append may trigger a resize that copies all n elements, costing O(n). But the resize doubles capacity, so the next resize won't happen for another n appends. Spreading the O(n) resize cost over n appends gives O(1) amortized. In real-time / latency-critical systems this distinction matters — a worst-case O(n) spike can miss a deadline even if the average is O(1).
 
 **Q3: What is the time complexity of building a heap from an unsorted array?**
+**Short:** Heapify is O(n), not O(n log n), because most nodes sit near the leaves and only need a short sift-down.
 O(n), not O(n log n). The naive explanation "insert n elements, each O(log n)" gives O(n log n), but `heapify` (sift-down from the middle) is O(n). The key insight: most nodes are near the leaves and sift-down distance is small; only about n/4 nodes are height-1, n/8 are height-2, etc. Summing sift-down work over all heights gives ∑_{h≥0} h · n/2^(h+1) = n, since ∑_{h≥0} h/2^h = 2.
 
 **Q4: Quicksort is O(n log n) average and O(n²) worst case. When does the worst case occur?**
+**Short:** The O(n^2) worst case hits when the pivot is always the min or max, which happens on sorted input with a naive first-element pivot.
 When the pivot is always the minimum or maximum element — producing partitions of size 0 and n-1. This happens on already-sorted or reverse-sorted input with a naive "pick first element" pivot. Fix: randomise the pivot (expected O(n log n)), use median-of-three, or use introsort (switches to heapsort when recursion depth exceeds 2 log n).
 
 **Q5: Two nested for-loops — is it always O(n²)?**
+**Short:** No — the complexity depends entirely on the inner loop's range, so a two-pointer inner loop that never resets still totals O(n).
 No. The inner loop's range determines the complexity. If the inner loop runs a fixed number of times (constant), the total is O(n). If the inner pointer advances monotonically and never resets (two-pointer), total iterations are O(n). If the inner loop iterates i times for outer index i, the total is n(n-1)/2 = O(n²). Always count total iterations across both loops, not just per iteration of the outer loop.
 
 **Q6: What is the time complexity of Python's `in` operator for a list vs a set?**
+**Short:** `x in list` is O(n) linear scan while `x in set` is O(1) average hash lookup, so checking membership in a list inside a loop causes O(n^2) bugs.
 `x in list` is O(n) — linear scan. `x in set` is O(1) average — hash lookup. This is a common source of O(n²) bugs: checking membership in a list inside a loop. Fix: convert the list to a set before the loop.
 
 **Q7: What is the space complexity of a recursive DFS on a graph with n nodes and E edges?**
+**Short:** It is O(n) for the visited set plus O(h) call-stack space, which becomes O(n) on a path graph but only O(log n) on a balanced tree.
 O(n) for the visited set, O(h) for the call stack where h is the maximum recursion depth. In the worst case (a path graph), h = n, so total space is O(n). For a balanced binary tree, h = O(log n), so stack space is O(log n). The graph's edge list or adjacency matrix is O(E) or O(n²) but is usually considered input space, not auxiliary.
 
 **Q8: Can O(n) be faster than O(1) in practice?**
+**Short:** Yes — for small n, a cache-hot O(n) linear scan can beat an O(1) hash lookup that misses L3 cache, since Big-O hides constants.
 Yes, for small n. An O(1) operation with a large constant (e.g., looking up a value in a huge hash table that exceeds L3 cache) can be slower than an O(n) scan over a small, cache-hot array. The crossover point depends on hardware and cache effects. In practice for n < 8–16, a linear scan often beats a hash table due to cache locality.
 
 **Q9: What is the Big-O of a loop that runs log n times inside a loop that runs n times?**
+**Short:** It is O(n log n), since the n outer iterations each run the log n inner loop.
 O(n log n). The outer loop runs n times; the inner loop runs log n times per outer iteration → n × log n total iterations.
 
 **Q10: What is the time complexity of `sorted()` in Python?**
+**Short:** It is O(n log n) via Timsort, dropping to O(n) on already-sorted or nearly-sorted input thanks to natural run detection, and it is stable.
 O(n log n). Python uses Timsort, a hybrid merge sort / insertion sort. It is O(n) on already-sorted or nearly-sorted input due to the natural run detection, but O(n log n) in general. It is stable (preserves relative order of equal elements).
 
 **Q11: What is the amortized time complexity of Python dict operations?**
+**Short:** Get, set, and delete are O(1) amortized, since the rare O(n) rehash-on-resize cost is spread across many operations.
 O(1) amortized for get, set, and delete. Python dicts use open addressing with a load factor of roughly 2/3; when exceeded, the dict is resized (rehashed) to a new table. The resize copies all n entries at O(n) cost but is rare — amortized O(1) per operation. Python 3.7+ also preserves insertion order (via a separate compact array), but the complexity is the same.
 
 **Q12: You have an O(n²) algorithm and an O(n log n) algorithm. For what value of n do they cross over (assuming constants c₁ = 1000 for O(n log n) and c₂ = 1 for O(n²))?**
+**Short:** Solving `1000·n·log2(n) = n^2` converges to a crossover near n ≈ 13,750, showing constants dominate at moderate n even though O(n^2) always loses eventually.
 Solve `1000 × n log₂ n = 1 × n²` → `n = 1000 log₂ n`, which has no closed form; iterate it and it converges to n ≈ 13,750 (check at n = 14,000: 1000 × 14,000 × 13.77 = 1.93 × 10⁸ versus 14,000² = 1.96 × 10⁸ — n² has just overtaken). The lesson: constants matter at moderate n; at large n the O(n²) always loses.
 
 **Q13: What is the time complexity of finding the Kth smallest element?**
+**Short:** Quickselect gives O(n) average time (O(n^2) worst case with a random pivot, O(n) worst case with median-of-medians), and interviewers expect you to know it.
 Multiple approaches: (a) sort and index — O(n log n); (b) min-heap of size n + extract k times — O(n + k log n); (c) max-heap of size k — O(n log k); (d) quickselect — O(n) average, O(n²) worst case with random pivot, O(n) worst case with median-of-medians. Interviews expect you to know quickselect's O(n) average.
 
 **Q14: What is the time complexity of checking whether a string is a palindrome?**
+**Short:** It is O(n) time and O(1) extra space with a two-pointer scan, since the input string itself is not typically counted as auxiliary space.
 O(n) time, O(1) extra space (two-pointer), or O(n) space if you reverse and compare. The hidden question is whether you count the input string as space — typically O(n) input space is not counted.
 
 **Q15: Is merge sort better than quicksort in all cases?**
+**Short:** No — merge sort guarantees O(n log n) worst case but needs O(n) auxiliary space, while quicksort is in-place with better cache behavior for arrays.
 No — merge sort is stable and O(n log n) worst case, but requires O(n) auxiliary space. Quicksort is in-place (O(log n) stack space) and has better cache behaviour in practice due to sequential partition access, making it faster for arrays despite the same asymptotic average. Use merge sort when stability is required or when sorting linked lists (no random access). Use quicksort (with randomised pivot) or introsort for in-memory array sorting.
 
 **Q16: What is the complexity of looking up a key in a balanced BST vs a hash table, and when would you prefer the BST?**
+**Short:** A BST gives O(log n) lookup with ordering, while a hash table gives O(1) average lookup with no order — prefer the BST for range queries or sorted iteration.
 BST: O(log n) lookup, O(log n) insert, always ordered. Hash table: O(1) average lookup and insert, no ordering. Prefer BST (TreeMap, `SortedDict`) when you need: range queries (all keys between A and B), floor/ceiling (nearest key ≤ / ≥ x), sorted iteration, or deterministic O(log n) without hash collision risk. Prefer hash table for pure point-lookups where order does not matter.
 
 **Q17: A function calls itself twice with input n-1. What is its time complexity?**
+**Short:** The recurrence T(n) = 2T(n-1) + O(1) gives O(2^n), as in naive recursive Fibonacci, which memoization fixes to O(n).
 The recurrence is T(n) = 2T(n-1) + O(1). This is O(2^n). The call tree has 2^n leaf nodes. Classic example: naive recursive Fibonacci. Fix: memoise (O(n) time and space) or use bottom-up DP (O(n) time, O(1) space with rolling variables).
 
 **Q18: What is the time complexity of matrix multiplication, and is there a better algorithm?**
+**Short:** Naive multiplication is O(n^3), Strassen's algorithm improves it to O(n^2.807), and the best known theoretical bound is around O(n^2.371).
 Naive: O(n³) for two n×n matrices. Strassen's algorithm: O(n^2.807) using 7 recursive multiplications instead of 8. The current best theoretical bound is O(n^2.3714) (Alman, Duan, Vassilevska Williams, Xu, Xu and Zhou, "More Asymmetry Yields Faster Matrix Multiplication", ω < 2.371339), but these advanced algorithms have huge constants and are not practical for typical matrix sizes. In practice, highly optimised BLAS libraries approach O(n³) with vectorised AVX/CUDA operations that have tiny constants.
 
 **Q19: What makes counting sort/radix sort O(n), when comparison sorts have a lower bound of Ω(n log n)?**
+**Short:** The Ω(n log n) bound only applies to comparison-based sorts, and non-comparison sorts like counting sort avoid it by keying directly on numeric value.
 The Ω(n log n) lower bound applies to *comparison-based* sorting — any algorithm that can only compare elements has at least n log n comparisons in the decision tree. Counting sort and radix sort are *non-comparison* — they use the numeric value of keys to place them directly. This sidesteps the comparison lower bound. Counting sort: O(n + k) where k is the range of values. Radix sort: O(d(n + k)) where d is digits and k is digit range (10 for decimal). If k = O(n), both are O(n). Trade-off: requires integer keys with a bounded range; cannot sort arbitrary comparable objects.
 
 ---
