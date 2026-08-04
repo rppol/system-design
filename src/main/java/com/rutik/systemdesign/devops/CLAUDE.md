@@ -4,16 +4,57 @@ Section root: `src/main/java/com/rutik/systemdesign/devops/`
 Global conventions (formatting, templates, Q&A rules): see root `CLAUDE.md`.
 Build manifest / status tracker: `README.md` §8 — check NEXT UP pointer and per-file status before starting a new module.
 
-## Scope — fully in scope (parking lifted 2026-08-04)
+## Scope — unparked 2026-08-04; the factual audit is COMPLETE
 
-This section was parked 2026-07-29 and re-opened by the owner on 2026-08-04. Every
-improvement pass applies here: the factual audit, the `**Short:**` MCQ-summary migration,
-and modernization. **There is no longer any restriction on dispatching agents here.**
+Parked 2026-07-29, re-opened 2026-08-04, and audited the same day.
 
-| Work | State at unparking |
-|------|--------------------|
-| Factual-audit units | 27, none started |
-| Q&As awaiting `**Short:**` summaries | 650 (of 650) |
+| Work | State |
+|------|-------|
+| Factual audit | **DONE — all 41 modules**, ~1,560 claims verified against upstream docs, ~215 corrections. Commits `7f98bf4`, `9462731`, `ecd9414` |
+| `**Short:**` MCQ summaries | **650 outstanding (of 650)** — runs next, and deliberately AFTER the audit |
+| Case studies | **not audited.** 13 case studies + `cross_cutting/`; only one defect was fixed there opportunistically (4 invalid HCL blocks in `design_multi_region_dr_architecture.md`) |
+
+**Why the Short migration comes second here.** A `**Short:**` line written against an
+answer the audit later corrects becomes a wrong answer shipping as the CORRECT MCQ option,
+and no check catches it. See root `CLAUDE.md` -> "ORDER: audit a version-sensitive section
+BEFORE migrating its Shorts". This section is the most version-sensitive in the repo, so
+the ordering mattered most here.
+
+### What the audit found, for whoever writes the next module
+
+Three classes, and only the first is what people expect an audit to be:
+
+1. **Currency** — IPVS deprecated (v1.35, nftables is the recommended mode), ingress-nginx
+   retired March 2026, Helm 4, CDKTF archived, Crossplane v2 removed Claims, Strimzi
+   requires KafkaNodePool, SLSA has no Build-track L4, OPA v1 Rego, DORA is five metrics,
+   and a long list of dead products (Opsgenie, Grafana OnCall OSS, Kaniko, Drone, Jeli,
+   Lightstep, Deployment Manager, tfsec, Promtail, Bitnami charts).
+2. **Wrong numbers in modules nobody suspected** — an etcd quota given as 8 GB default in
+   six places (it is 2 GiB), a Prometheus `scrape_interval` default of 15s in five places
+   (it is 1m), NAT exhaustion modelled per 5-tuple instead of per destination, a GPU
+   module whose monthly cost was 4x wrong on top of a per-GPU decimal slip that fed five
+   downstream tables, three wrong CIS control IDs.
+3. **Code examples that cannot run** — 15 invalid one-line HCL blocks across two syntaxes
+   (`;` and `,`), a Tekton YAML collapsing into a single string, a removed OTel exporter,
+   `set -o pipefail` documented as returning the FIRST non-zero exit, `--force-with-lease`
+   advice that was exactly inverted, a Rego rule matching a field the resource no longer
+   has, and a "build once, promote the same artifact" fix passing a digest through
+   `$GITHUB_ENV`, which is job-scoped.
+
+**The lesson for authors: class 2 and 3 outnumbered class 1 and are invisible to a
+"is this still current" reading.** Recompute the arithmetic and parse the code.
+
+### Deliberately left unverified
+
+Do not "fix" these by substituting a plausible number — each was checked and could not be
+sourced: DORA's benchmark bands (dora.dev no longer publishes them; the stale 15% was
+removed, not replaced), Salesforce/Hyperforce's claimed 4-hour RTO, Karpenter's 30-50%
+savings, Trivy's DB size, Loki/ELK compression ratios, and Kafka's ~4,000
+partitions-per-broker ceiling.
+
+Two NEGATIVE results worth keeping, because both look stale and are not: **Docker Hub's
+100 pulls / 6h is still correct** (the announced 10/hour change was reverted), and **Argo
+CD 3.x has not removed ApplicationSet fasttemplate** (`goTemplate: true` remains opt-in).
 
 ---
 
