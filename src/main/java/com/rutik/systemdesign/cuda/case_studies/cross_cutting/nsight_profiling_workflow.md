@@ -39,8 +39,8 @@ flowchart TD
     classify -->|"one kernel dominates\nthe timeline"| kernelslow["Nsight Compute:\nprofile that kernel alone"]
 
     kernelslow --> solcheck{"SOL bars: memory-bound\nor compute-bound?"}
-    solcheck -->|"DRAM bar near\nthe roof, SM bar low"| memfix["Fix: coalescing, shared-\nmemory reuse, fewer\nbytes moved"]
-    solcheck -->|"SM bar near\nthe roof, DRAM low"| compfix["Fix: fewer instructions,\nTensor Cores, less\ndivergence"]
+    solcheck -->|"Memory bar near\nthe roof, SM bar low"| memfix["Fix: coalescing, shared-\nmemory reuse, fewer\nbytes moved"]
+    solcheck -->|"SM bar near\nthe roof, memory low"| compfix["Fix: fewer instructions,\nTensor Cores, less\ndivergence"]
 
     transfer --> remeasure["Re-measure:\nnsys + ncu"]
     launch --> remeasure
@@ -100,9 +100,9 @@ section's case studies cite when justifying a fix.
 | **DRAM throughput (% of peak)** | Bytes moved to/from HBM as a fraction of the GPU's peak bandwidth (e.g. ~3 TB/s on H100 HBM3) | Near the roof (80-95%+) means the memory pipe is nearly saturated — good if every byte moved is useful, bad if most of it is wasted on uncoalesced transactions. |
 | **Compute (SM) throughput (% of peak)** | Issued FLOPs/instructions as a fraction of the SM's peak issue rate | Near the roof means the ALUs are the bottleneck; low alongside high DRAM throughput is the classic memory-bound signature. |
 | **Warp stall reasons** | A histogram of why warps were *not* eligible to issue an instruction on a given cycle | `long scoreboard` (waiting on a global memory load) → memory-bound; `barrier` (waiting at `__syncthreads`) → sync/tiling imbalance; `not selected` (scheduler chose another eligible warp) → usually benign, means enough parallelism exists; `short scoreboard` → shared-memory or texture-load latency. |
-| **Sectors per request / global load-store efficiency** | How many 32-byte DRAM sectors were fetched or written per warp memory instruction, versus the minimum needed | A coalesced 128-byte transaction across 32 threads should need 4 sectors per warp; strided or misaligned access inflates this — 100% efficiency means zero wasted bytes, 25% means 4x the necessary traffic. |
-| **SOL (Speed-Of-Light) Memory bar** | DRAM throughput normalized to 0-100% of the chip's physical peak | The headline "how close to the memory roof are we" number shown at the top of the `ncu` report. |
-| **SOL Compute bar** | SM compute throughput normalized to 0-100% of peak | The headline "how close to the compute roof are we" number, shown side-by-side with the memory bar. |
+| **Sectors/Req** (`l1tex__average_t_sectors_per_request_*`) | How many 32-byte sectors L1TEX had to touch per warp memory *request*, versus the minimum the access pattern needs. Shown as the `Sectors/Req` column of the Memory Workload Analysis tables | A warp of 32 threads reading contiguous 4-byte elements is 128 bytes = **4 sectors/request**, the floor. A fully scattered 4-byte-per-thread access needs 32 sectors/request — 8x the traffic for the same useful bytes. `ncu`'s "Uncoalesced Global Accesses" rule reports the same finding as a count of *excessive sectors*. |
+| **Memory Throughput (SOL)** | The GPU Speed Of Light bar for the memory system, 0-100% of peak. It is the **maximum across several memory-subsystem throughputs** (L1TEX, L2, DRAM and their interconnects), not DRAM alone — a kernel can pin this bar at 90% while DRAM sits idle, because it is thrashing L1 or L2 | The headline "how close to *some* memory roof are we" number. Always open the GPU Throughput Breakdown (or read the separate **DRAM Throughput** row) to learn *which* subsystem is the one at the roof, because the fix differs: an L1 roof means access pattern, an L2 roof means reuse/footprint, a DRAM roof means bytes moved. |
+| **Compute (SM) Throughput (SOL)** | The companion SOL bar: SM pipeline throughput as 0-100% of peak, again the max over its constituent pipelines | The headline "how close to the compute roof are we" number, shown side-by-side with the memory bar. |
 | **Roofline chart** | Plots the kernel's measured arithmetic intensity (FLOPs/byte) and achieved performance against the GPU's memory-bandwidth roof and compute-peak roof | Below the sloped (bandwidth) roof → memory-bound, the fix is fewer bytes/better coalescing; at the flat (compute) roof → compute-bound, the fix is fewer/cheaper instructions or Tensor Cores. See [roofline_and_arithmetic_intensity.md](./roofline_and_arithmetic_intensity.md) for how to compute arithmetic intensity by hand before you ever open `ncu`. |
 
 **Reading the two SOL bars together is the single fastest triage step.** High memory / low
@@ -114,10 +114,13 @@ serialization from atomics/barriers) — check occupancy and warp-stall reasons 
 
 ## A Worked Optimization Session
 
-**Setup:** a naive matrix-transpose kernel on a 4096x4096 `float32` matrix (64 MB). Each
-thread reads one element from the source (row-major, coalesced) and writes it to the
+**Setup:** a naive matrix-transpose kernel on a 4096x4096 `float32` matrix — 64 MiB per
+matrix, so the transpose has to move 128 MiB (134 MB) of *useful* traffic, 64 in and 64 out.
+Each thread reads one element from the source (row-major, coalesced) and writes it to the
 destination (column-major, so consecutive threads in a warp write to addresses 4096
-elements — 16 KB — apart). This is the canonical transpose problem covered in
+elements — 16 KB — apart). Numbers below are from an H100 SXM5 (3.35 TB/s HBM3 peak); treat
+them as illustrative of the *shape* of the result and re-measure on your own part. This is
+the canonical transpose problem covered in
 [memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md](../../memory_coalescing_and_access_patterns/memory_coalescing_and_access_patterns.md).
 
 **Step 1 — `nsys` baseline.** The system-level timeline shows one dominant kernel occupying
@@ -140,18 +143,22 @@ The report shows:
 
 | Metric | Value |
 |--------|-------|
-| SOL Memory (DRAM throughput) | 88% of peak |
-| SOL Compute (SM throughput) | 12% of peak |
-| Global store efficiency | 25% (4 sectors fetched per useful sector) |
+| Kernel time | 0.21 ms |
+| Memory Throughput (SOL) | 86% of peak |
+| Compute (SM) Throughput (SOL) | 12% of peak |
+| DRAM Throughput | 86% of peak (~2.9 TB/s), 604 MB moved |
+| Sectors per global **store** request | 32 (the floor for this access is 4) |
 | Achieved occupancy | 71% |
 | Top stall reason | `long scoreboard` — 61% of stall cycles |
 
-**Step 3 — hypothesize.** DRAM throughput is nearly at the roof while compute throughput is
-far below it — the textbook memory-bound signature (see the roofline read above). But 88%
-DRAM throughput is not "healthy saturation": the 25% store efficiency says three out of every
-four bytes moved on the write side are wasted, because each strided write pulls in a whole
-128-byte transaction to service a single 4-byte element. The kernel is memory-bound *and*
-most of that bandwidth is being burned on waste, not useful work. Occupancy at 71% is already
+**Step 3 — hypothesize.** Memory throughput is nearly at the roof while compute throughput is
+far below it — the textbook memory-bound signature (see the roofline read above). The
+breakdown confirms DRAM is the subsystem at the roof, so this is genuinely a bytes-moved
+problem and not L1/L2 thrashing. But 86% is not "healthy saturation": 32 sectors per store
+request against a floor of 4 means the write side moves **8x** the bytes it needs to — every
+strided store touches its own 32-byte sector to deliver a single 4-byte element, so the 134 MB
+the algorithm actually requires arrives as 604 MB of DRAM traffic. The kernel is memory-bound
+*and* seven of every eight bytes on the write side are waste. Occupancy at 71% is already
 enough to hide most memory latency, so raising occupancy further will not help — the fix has
 to reduce wasted bytes, not add more parallelism.
 
@@ -192,16 +199,17 @@ nsys profile -o transpose_fixed ./transpose_app
 
 | Metric | Naive | Tiled |
 |--------|------:|------:|
-| Kernel time | 3.1 ms | 0.61 ms |
-| SOL Memory (DRAM throughput) | 88% | 91% |
-| Global store efficiency | 25% | 100% |
+| Kernel time | 0.21 ms | 0.048 ms |
+| Memory Throughput (SOL) | 86% | 84% |
+| DRAM traffic moved | 604 MB | 134 MB |
+| Sectors per global store request | 32 | 4 |
 | Achieved occupancy | 71% | 68% |
 
-DRAM throughput barely moves — the kernel is *still* memory-bound, which is correct, a
+Memory throughput barely moves — the kernel is *still* memory-bound, which is correct, a
 transpose has arithmetic intensity near zero and always will be. What changed is that the
-same ~90% of peak bandwidth is now spent entirely on useful bytes instead of three-quarters
-waste, so the same roofline ceiling is reached roughly 5x faster. This is the general
-lesson: **when SOL Memory is already high, the fix is never "add more compute" — it is
+same ~85% of peak bandwidth is now spent entirely on useful bytes instead of seven-eighths
+waste, so the same roofline ceiling is reached 4.4x faster. This is the general
+lesson: **when the memory SOL bar is already high, the fix is never "add more compute" — it is
 "move fewer, better-coalesced bytes,"** which is exactly what the roofline model predicts for
 a kernel sitting below the memory-bandwidth slope.
 
@@ -243,10 +251,14 @@ ncu -k kernelname --launch-skip 5 --launch-count 1 -o out ./app
 ncu --section SpeedOfLight --section MemoryWorkloadAnalysis -k kernelname -o out ./app
 ```
 
-**Compare two profiles (baseline vs after-fix) as CSV for a diff or CI gate:**
+**Compare two profiles (baseline vs after-fix) as CSV for a diff or CI gate.** Note that `-o`
+suppresses console output unless a `--page` is named, so collect the reports first and convert
+them with `--import` — `ncu --csv ... -o report ./app > out.csv` writes an empty CSV:
 ```bash
-ncu --csv --set full -k kernelname -o baseline ./app > baseline.csv
-ncu --csv --set full -k kernelname -o after ./app > after.csv
+ncu --set full -k kernelname -o baseline ./app
+ncu --set full -k kernelname -o after    ./app
+ncu --import baseline.ncu-rep --csv --page details > baseline.csv
+ncu --import after.ncu-rep    --csv --page details > after.csv
 diff <(cut -d, -f1,3 baseline.csv) <(cut -d, -f1,3 after.csv)
 ```
 
@@ -298,11 +310,15 @@ regression) cannot be attributed to any one change. Apply one fix, re-measure, t
 the next hypothesis — this is the discipline the loop diagram at the top of this file exists
 to enforce.
 
-**Reading DRAM throughput in isolation.** 90%+ DRAM throughput looks like "the kernel is
-using the hardware well," but as the worked example above shows, it can equally mean "the
-kernel is saturating the memory pipe with mostly wasted bytes." Always pair it with global
-load/store efficiency (sectors per request) before deciding the kernel is already
-memory-optimal.
+**Reading the memory throughput bar in isolation.** 90% memory throughput looks like "the
+kernel is using the hardware well," but as the worked example above shows, it can equally mean
+"the kernel is saturating the memory pipe with mostly wasted bytes." Two habits stop this:
+open the GPU Throughput Breakdown so you know *which* subsystem the bar is reporting (it is
+the max over L1TEX, L2 and DRAM, not DRAM alone), and pair it with `Sectors/Req` before
+deciding the kernel is already memory-optimal. Do not go looking for `gld_efficiency`,
+`gst_efficiency`, or a "Global Load/Store Efficiency" row — those are `nvprof` metric names,
+and `nvprof` and the legacy Visual Profiler no longer ship. The Nsight Compute expression of
+the same idea is sectors per request plus the "Uncoalesced Global Accesses" rule.
 
 ---
 

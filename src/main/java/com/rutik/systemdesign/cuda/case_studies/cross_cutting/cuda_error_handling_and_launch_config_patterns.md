@@ -78,8 +78,9 @@ import cupy as cp
 
 def cuda_check(result_code: int, context: str) -> None:
     if result_code != 0:  # cudaSuccess == 0
-        name = cp.cuda.runtime.getErrorName(result_code)
-        raise RuntimeError(f"CUDA error in {context}: {name} ({result_code})")
+        # CUDARuntimeError formats the status as "cudaErrorXxx: human-readable text".
+        err = cp.cuda.runtime.CUDARuntimeError(result_code)
+        raise RuntimeError(f"CUDA error in {context}: {err}")
 
 # CuPy raises on its own for cp.cuda.runtime.malloc / memcpy, so this helper
 # is mainly for cp.RawKernel launches you dispatch manually — see below.
@@ -131,8 +132,13 @@ void launchAdd(const float* d_a, const float* d_b, float* d_c, int n) {
 ```
 
 **Why two `cudaGetLastError()` calls, not one.** The first call clears whatever error the
-*launch itself* produced (config-time). The second call, made only after the forced sync,
-reports whatever the *kernel body* produced (run-time). Skipping the first call and only
+*launch itself* produced (config-time) — `cudaGetLastError` both reads and resets the flag,
+which is why the second call can report something new (use `cudaPeekAtLastError` when you
+want to read it without clearing it). The second call, made only after the forced sync,
+reports whatever the *kernel body* produced (run-time). Note that `cudaDeviceSynchronize()`
+returns that execution error itself, so in the snippet above the wrapped sync is normally
+what fires; the trailing `cudaGetLastError()` is the belt-and-braces that still catches an
+error recorded by some unchecked call in between. Skipping the first call and only
 syncing later means a config error and an execution error can be conflated into a single
 generic report, which makes debugging launch-parameter mistakes (see the BROKEN→FIX example
 below) much harder than it needs to be.
@@ -231,13 +237,16 @@ this file only covers the API call you reach for.
 
 ## The Grid-Stride Loop
 
-A kernel launched with exactly `blocks = ceil(n / threads)` only works correctly if that
-grid size is achievable — for very large `n`, the computed `blocks` can exceed the hardware
-grid-dimension limit, and even when it does not, launching a fresh, precisely-sized grid for
-every problem size prevents you from tuning grid size independently (e.g., to match the
-number of SMs for a persistent-kernel style workload). The **grid-stride loop** solves both
-problems: launch a *fixed*, reasonably-sized grid regardless of `n`, and have each thread
-process multiple elements by striding forward by the total number of threads in the grid.
+A kernel launched with exactly `blocks = ceil(n / threads)` ties grid size to problem size,
+which costs you two things. First, you cannot tune the grid independently — you cannot pin it
+to a multiple of the SM count for a persistent-kernel style workload, or shrink it to leave
+capacity for a concurrent kernel. Second, the grid must stay inside the hardware dimension
+limits, and only the x dimension is generous: `gridDim.x` maxes out at 2,147,483,647 blocks
+while `gridDim.y` and `gridDim.z` cap at 65,535 each. A 1-D launch driven by a 32-bit element
+count will never reach the x limit, but a 2-D or 3-D decomposition hits 65,535 easily. The
+**grid-stride loop** removes both constraints: launch a *fixed*, reasonably-sized grid
+regardless of `n`, and have each thread process multiple elements by striding forward by the
+total number of threads in the grid.
 
 ```cuda
 __global__ void gridStrideAdd(const float* a, const float* b, float* c, int n) {
@@ -258,8 +267,8 @@ CUDA_CHECK(cudaGetLastError());
 ```
 
 **Why this is the idiom, not just an alternative.** (1) It decouples correctness from grid
-size — the kernel handles `n` larger than `blocks * threads` for free, with no risk of
-exceeding the grid-dimension limit for huge `n`. (2) It improves **hardware reuse** — the
+size — the kernel handles `n` larger than `blocks * threads` for free, so no decomposition
+can walk into a `gridDim` limit. (2) It improves **hardware reuse** — the
 same warp stays resident and keeps issuing work instead of the block finishing and a new one
 being scheduled, amortizing the per-block launch/teardown overhead. (3) It lets you **tune
 grid size independently of problem size** — e.g., pin `blocks` to a multiple of the SM count
@@ -338,9 +347,13 @@ CUDA_CHECK(cudaMemcpy(h_out, d_result, sz, cudaMemcpyDeviceToHost));
 **The fix is the same discipline as the async section above**: sync-and-check immediately
 after every kernel launch during development (or under `compute-sanitizer`), so the sticky
 error is attributed to the launch that actually caused it, not to an innocent bystander call
-made later. Once sticky, the only recovery within the process is destroying and recreating
-the CUDA context (in practice: exit and restart the process) — there is no in-process reset
-API for a corrupted context.
+made later. Once sticky, the context must be destroyed and recreated before anything works
+again: `cudaDeviceReset()` is the Runtime API that does it (the Driver API equivalent is
+`cuCtxDestroy` followed by a fresh `cuCtxCreate`). It is a demolition, not a repair — every
+device allocation, stream, and event on that device in this process becomes invalid, and any
+other host thread still holding those handles breaks with it. That is why the practical
+recovery in almost every production codebase is to let the process exit and restart rather
+than to reset in place.
 
 ---
 

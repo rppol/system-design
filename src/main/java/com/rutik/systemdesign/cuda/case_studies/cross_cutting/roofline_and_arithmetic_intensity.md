@@ -36,26 +36,27 @@ A kernel to the **left** of the ridge point is **memory-bound** — its arithmet
 ```
  attainable
  TFLOP/s (log)
-    67 |. . . . . . . . . . . |----------------------  FP32 / FP64-TC roof (67 TFLOP/s)
-       |                    /:
-       |   bandwidth      /  :
-       |   roof =       /    :
-       |   3.35 TB/s x I/     :
-    20 |            /ridge    :  <- compute-bound region:
-       |          /  (20)     :     more AI buys nothing here
-     8 |        /  ^GEMM tiled:      ^GEMM tiled + reg-block
-       |      /    Tw=32 (I=8):       Tw=32,R=8 (I=64)
-   1.1 |    /  ^stencil tiled (I=1.1)
- 0.375 |  /  ^stencil naive (I=0.375)   ^GEMM naive (I=0.25)
- 0.083 |/  ^SAXPY (I=0.083)
+    67 |. . . . . . . . . . . |----------------------     FP32 / FP64-TC roof (67 TFLOP/s)
+       |   bandwidth roof = / :  ^GEMM tiled + reg-blocked, Tw=32,R=8 (I=64)
+       |   3.35 TB/s x I  /   :   sits ON the flat roof: it is compute-bound
+       |                /     :
+       |              /       :
+       |            /         :  <- compute-bound region:
+       |          /           :     more AI buys nothing here
+  26.8 |        /  ^GEMM tiled:
+       |      /    Tw=32 (I=8):
+   3.8 |    /  ^stencil tiled (I=1.1)
+   1.3 |  /  ^stencil naive (I=0.375)    ^GEMM naive (I=0.25)
+  0.28 |/  ^SAXPY (I=0.083)
        +--+----+-----+--------+---------+------> arithmetic
          0.1   1     10       20        64     intensity (FLOP/byte)
                               ridge
+
    register/shared-memory blocking slides a kernel right along its OWN roofline;
    it does not change the roof — only where the kernel sits under it.
 ```
 
-*Schematic, log-ish spacing (not to scale) — the roof drawn here is H100 FP32 / FP64-Tensor-Core (67 TFLOP/s, ridge = 20 FLOP/byte), the roof a kernel written in plain CUDA C++ actually runs under. Tensor Core precisions (TF32/BF16/FP16/FP8) have their own, much higher roofs and ridge points — see the table below; the same kernels would sit further left relative to those roofs.*
+*Schematic, log-ish spacing (not to scale) — the roof drawn here is H100 FP32 / FP64-Tensor-Core (67 TFLOP/s, ridge = 20 FLOP/byte), the roof a kernel written in plain CUDA C++ actually runs under. Read the two axes in different units: the horizontal axis is arithmetic intensity in FLOP/byte, while the y-ticks are the **attainable rate** at that point — for anything left of the ridge that is just `AI x 3.35 TB/s`, which is why SAXPY's 0.083 FLOP/byte becomes 0.28 TFLOP/s and the Tw=32 tiled GEMM's 8 FLOP/byte becomes 26.8 TFLOP/s. Anything right of the ridge is pinned at the flat roof regardless of how far right it sits. Tensor Core precisions (TF32/BF16/FP16/FP8) have their own, much higher roofs and ridge points — see the table below; the same kernels would sit further left relative to those roofs.*
 
 ---
 
@@ -70,7 +71,7 @@ AI (FLOP/byte) = total FLOPs performed / total bytes moved between the SM and DR
 Two ways to get the numbers, and they usually disagree — know which one you are quoting:
 
 - **Theoretical (hand-counted) AI** — count FLOPs and bytes directly from the algorithm: one multiply-add per element, N bytes read, N bytes written. Fast to compute, useful for reasoning about an optimization *before* writing code, but it assumes every byte requested is a byte actually moved — which is false the moment access is uncoalesced, the working set doesn't fit L2, or atomics are involved.
-- **Achieved (profiler-measured) AI** — FLOPs and bytes as actually executed and moved, read from Nsight Compute counters (`dram__bytes.sum` for the denominator). This is ground truth. An uncoalesced 4-byte-per-thread access still pulls a full 128-byte transaction per warp-sector touched, so measured bytes moved are routinely several times the theoretical minimum — which silently lowers achieved AI below what the hand count predicted, and can push a kernel that "should" be compute-bound back across the ridge into memory-bound territory.
+- **Achieved (profiler-measured) AI** — FLOPs and bytes as actually executed and moved, read from Nsight Compute counters (`dram__bytes.sum` for the denominator). This is ground truth. Memory moves in 32-byte sectors, so a scattered 4-byte-per-thread access makes a single warp touch up to 32 distinct sectors — 1,024 bytes in flight to deliver the 128 the warp asked for, an 8x inflation. Measured bytes moved are routinely several times the theoretical minimum, which silently lowers achieved AI below what the hand count predicted, and can push a kernel that "should" be compute-bound back across the ridge into memory-bound territory.
 
 Rule of thumb for this file's worked examples: use theoretical AI to decide *what to try next* (tile bigger, fuse, quantize), then confirm with measured AI in Nsight Compute (see below) before declaring victory — the two converge only once access is coalesced and cache reuse matches what you assumed.
 
@@ -115,7 +116,7 @@ AI = 2 / 24 ~= 0.083 FLOP/byte
 
 ### 2. 5-point 2D stencil — reuse recovers some ground, not enough
 
-`out[i,j] = c0*in[i,j] + c1*(in[i-1,j] + in[i+1,j] + in[i,j-1] + in[i,j+1])`, single precision (4-byte words):
+`out[i,j] = c0*in[i,j] + c1*in[i-1,j] + c2*in[i+1,j] + c3*in[i,j-1] + c4*in[i,j+1]`, single precision (4-byte words). Five independent coefficients, so five multiplies — a symmetric stencil that factors to `c0*in[i,j] + c1*(...)` costs only 2 multiplies and 6 FLOPs, and its arithmetic intensity is correspondingly two-thirds of the numbers below:
 
 ```
 FLOPs  = 5 multiplies + 4 adds = 9 FLOPs per output point
@@ -171,8 +172,8 @@ Nsight Compute ships a **Speed Of Light Roofline Chart** section (`ncu --set ful
 
 - **`dram__bytes.sum`** — measured DRAM traffic for the kernel launch. Use this, not the hand-counted byte estimate, as the denominator for achieved AI once you suspect uncoalesced access, L2 misses, or atomics are inflating traffic beyond the theoretical minimum.
 - **`sm__throughput.avg.pct_of_peak_sustained_elapsed`** — Compute (SM) Throughput, as a percentage of the roof for whichever precision path the kernel actually issued.
-- **`dram__throughput.avg.pct_of_peak_sustained_elapsed`** — Memory Throughput, as a percentage of peak HBM bandwidth.
-- **Fast triage heuristic**: memory throughput% >> compute throughput% -> memory-bound, confirm against the ridge table; both high and roughly balanced -> the kernel is sitting near its ridge, which is usually the terminal state of an optimization pass, not a bug.
+- **`dram__throughput.avg.pct_of_peak_sustained_elapsed`** — DRAM Throughput, as a percentage of peak HBM bandwidth. This is the one to use for a roofline argument. Do not substitute the Speed Of Light section's **Memory Throughput** bar for it: that bar is the *maximum* across several memory-subsystem throughputs (L1TEX, L2, DRAM), so it can read 90% on a kernel whose DRAM traffic is negligible.
+- **Fast triage heuristic**: DRAM throughput% >> compute throughput% -> memory-bound, confirm against the ridge table; both high and roughly balanced -> the kernel is sitting near its ridge, which is usually the terminal state of an optimization pass, not a bug.
 - **Achieved Occupancy** is reported alongside but answers a *different* question (see Pitfalls) — do not read a low compute-throughput% as "increase occupancy," read it against the roofline chart first.
 - **Sanity-check the reference roof NCU picked.** If a kernel mixes precisions (e.g. FP16 inputs accumulated in FP32), the auto-selected roofline can quote the wrong nominal ceiling; cross-check against the table above before trusting the chart's classification.
 
@@ -213,7 +214,7 @@ The loop is deliberately the same shape every time: **measure, classify, apply t
 
 ## Pitfalls
 
-- **Hand-counted AI vs. measured AI disagree, and the disagreement is informative, not noise.** An uncoalesced 4-byte-per-thread access still pulls a full 128-byte transaction per touched sector; `dram__bytes.sum` will be several times the theoretical minimum, and the kernel will sit further left (more memory-bound) than the source code suggested.
+- **Hand-counted AI vs. measured AI disagree, and the disagreement is informative, not noise.** An uncoalesced 4-byte-per-thread access pulls a whole 32-byte sector for each of the warp's 32 lanes; `dram__bytes.sum` will be several times the theoretical minimum, and the kernel will sit further left (more memory-bound) than the source code suggested.
 - **Quoting sparse Tensor Core FLOP/s instead of dense.** Spec sheets list ~2x higher numbers for structured 2:4 sparsity; unless the kernel produces genuinely sparse weights and uses the sparse MMA path, use the dense figures in the ridge table or every downstream conclusion is off by 2x.
 - **Treating occupancy as a proxy for "correctly optimized."** A kernel can report 100% achieved occupancy and still be firmly memory-bound — more resident warps hides latency, it does not raise the bandwidth ceiling. Read the roofline chart before reaching for `__launch_bounds__` or a smaller block size.
 - **Comparing AI against the wrong ridge.** The ridge point is a property of the precision path actually issued (FP32 ridge 20 vs. BF16 Tensor Core ridge 295 on the same H100) — classifying a raw CUDA-core kernel as "compute-bound" using a Tensor Core ridge (or vice versa) inverts the diagnosis.

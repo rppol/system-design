@@ -23,11 +23,11 @@ FLOP/s of the equivalent FP32 CUDA-core path on the same die.
 |--------|------------------------------------------|-----------|------------------------|----------------------------|-------------|
 | FP64 | 1 / 11 / 52 | 64 | ~1e-308 .. 1e308 | ~15-17 digits | Scientific/HPC accumulation, reference correctness checks |
 | FP32 | 1 / 8 / 23 | 32 | ~1e-38 .. 3.4e38 | ~7 digits | Default training/inference math, CPU-reference comparisons |
-| TF32 (Ampere+) | 1 / 8 / 10 (stored in a 32-bit register) | 19 used | ~1e-38 .. 3.4e38 (FP32 range) | ~3 digits | **Default** Tensor-Core path for FP32 matmul on Ampere+ (opt-out, see §4) |
+| TF32 (Ampere+) | 1 / 8 / 10 (stored in a 32-bit register) | 19 used | ~1e-38 .. 3.4e38 (FP32 range) | ~3 digits | Tensor-Core math mode for FP32 matmul on Ampere+ — on by default in some libraries and off in others, see §4 |
 | FP16 | 1 / 5 / 10 | 16 | ~6.0e-5 .. 65504 | ~3 digits | Mixed-precision training/inference; needs loss scaling (narrow range underflows/overflows) |
 | BF16 | 1 / 8 / 7 | 16 | ~1e-38 .. 3.4e38 (FP32 range) | ~2 digits | Mixed-precision training without loss scaling (same range as FP32, less precision) |
 | FP8 E4M3 | 1 / 4 / 3 | 8 | ~1.5e-2 .. 448 | ~1-2 digits | Forward-pass weights/activations (Hopper/Ada Transformer Engine, inference) |
-| FP8 E5M2 | 1 / 5 / 2 | 8 | ~1.5e-5 .. 57344 | ~1 digit | Gradients/backward pass (needs more range, tolerates less precision) |
+| FP8 E5M2 | 1 / 5 / 2 | 8 | ~6.1e-5 .. 57344 | ~1 digit | Gradients/backward pass (needs more range, tolerates less precision) |
 | FP4 / FP6 (Blackwell) | FP4 E2M1: 1/2/1 (4 bits); FP6 E2M3/E3M2 (6 bits) | 4 / 6 | Very narrow — requires microscaling | <1 digit alone | Inference-only, always paired with a per-block scale factor (NVFP4/MXFP4); 5th-gen Tensor Cores |
 
 **Reading the table as an interview gotcha:** BF16 and FP16 are both "16 bits," but they are not
@@ -51,8 +51,10 @@ explicit range-vs-precision trade. This is the whole reason BF16 does not need l
 cannot underflow at FP16's magnitudes because it shares FP32's exponent field width.*
 
 See [`../../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md`](../../tensor_cores_and_mixed_precision/tensor_cores_and_mixed_precision.md)
-for how these formats map onto WMMA fragments, `mma` PTX instructions, and cuBLAS/cuDNN
-Tensor-Core code paths.
+for how these formats map onto Tensor-Core code paths: `nvcuda::wmma` fragments cover
+FP16/BF16/TF32 (and FP64 on the data-center parts), while FP8 and the Blackwell
+microscaling formats are reachable only through the `mma`/`wgmma` PTX family, cuBLASLt,
+and the Transformer Engine — there is no FP8 `wmma` fragment type.
 
 ---
 
@@ -123,39 +125,51 @@ nvcc -O3 --use_fast_math kernel.cu -o kernel_fast
 
 ---
 
-## 4. TF32 — the Silent Default on Ampere+
+## 4. TF32 — On by Default in Some Paths, Off in Others
 
-**TF32 (TensorFloat-32) is the default math mode for FP32 matrix multiplies on Ampere and later**
-whenever the operation goes through a Tensor-Core-eligible path (cuBLAS GEMM, cuDNN convolution,
-`torch.matmul`/`nn.Linear` on CUDA). Your code still stores tensors as 32-bit FP32 — TF32 is a
-computation mode, not a storage format: cuBLAS/cuDNN round the FP32 inputs down to TF32's 10
-mantissa bits internally, multiply-accumulate at that reduced precision (usually still
-accumulating in full FP32), and hand back an FP32 result. This is the single most common
-"why did my accuracy silently drop" / "why is this suddenly 4-8x faster with no code change"
-gotcha when moving a model from a Volta/Turing GPU to Ampere+ or from CPU to Ampere+ GPU.
+**TF32 (TensorFloat-32) is a Tensor-Core *math mode*, not a storage format.** Your tensors stay
+32-bit FP32 in memory; on Ampere and later, a TF32-enabled path rounds the FP32 inputs down to
+TF32's 10 mantissa bits, multiply-accumulates on Tensor Cores (accumulating in full FP32), and
+hands back an FP32 result — 4-8x the FP32 CUDA-core throughput at roughly 3 decimal digits of
+mantissa instead of 7.
+
+The trap is not that TF32 is "always on". It is that **whether it is on is decided per library,
+and the libraries disagree** — so the same FP32 model can be running IEEE math in its linear
+layers and TF32 math in its convolutions, on the same GPU, in the same process:
+
+| Path | TF32 by default? | How you control it |
+|------|------------------|--------------------|
+| cuBLAS GEMM | **No.** `CUBLAS_COMPUTE_32F` is "at least 32-bit" compute | Opt in with compute type `CUBLAS_COMPUTE_32F_FAST_TF32` (`cublasGemmEx` / `cublasLtMatmul`), or `cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH)` for the legacy BLAS entry points. `CUBLAS_COMPUTE_32F_PEDANTIC` goes further than plain FP32 — it also disables algorithmic shortcuts such as 3M complexity reduction |
+| PyTorch `torch.matmul` / `nn.Linear` on FP32 | **No** — full IEEE FP32 | `torch.backends.cuda.matmul.fp32_precision = "tf32"` to allow it |
+| PyTorch convolutions (cuDNN) | **Yes** | `torch.backends.cudnn.conv.fp32_precision = "ieee"` to turn it off |
+| Everything on the box at once | — | `NVIDIA_TF32_OVERRIDE=0` in the environment overrides every default and every programmatic setting, disabling TF32 across NVIDIA libraries |
 
 ```python
 import torch
 
-# On an Ampere+ GPU, torch.matmul on FP32 tensors uses TF32 by DEFAULT — you did
-# not ask for reduced precision, but you are getting ~3 decimal digits of mantissa.
 a = torch.randn(4096, 4096, device="cuda")          # dtype=torch.float32
 b = torch.randn(4096, 4096, device="cuda")
-c_tf32 = a @ b                                        # TF32 path, fast, ~3-digit mantissa
+c = a @ b                                           # IEEE FP32 by default: ~7-digit mantissa
 
-# Opt out explicitly to get the full FP32 (single-rounding-per-MAC, IEEE) path:
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False               # convolutions go through cuDNN separately
-c_fp32 = a @ b                                        # true FP32, slower, ~7-digit mantissa
+# Trade mantissa for throughput, per backend, as an explicit decision:
+torch.backends.cuda.matmul.fp32_precision = "tf32"  # matmul may now use Tensor Cores
+c_tf32 = a @ b                                      # ~4-8x faster, ~3-digit mantissa
+
+# The reverse direction is the one people forget: convolutions are ALREADY TF32.
+torch.backends.cudnn.conv.fp32_precision = "ieee"   # force full FP32 convolutions
+
+# Or set one policy for every backend at once:
+torch.backends.fp32_precision = "ieee"
 ```
 
-In raw CUDA C++, the same choice is made explicitly at the `mma`/cuBLAS API level — the default
-`CUBLAS_COMPUTE_32F` mode on Ampere+ opts into TF32 automatically for eligible shapes; requesting
-`CUBLAS_COMPUTE_32F_PEDANTIC` disables the TF32 shortcut and forces full FP32 accumulation.
+`torch.set_float32_matmul_precision("highest" | "high" | "medium")` is the coarser knob over the
+same behavior — `"highest"` keeps IEEE FP32, `"high"` permits TF32.
 
-**Rule of thumb:** if a numerical-correctness test or a scientific-computing kernel that used to
-pass on Volta/Turing starts failing an `atol`/`rtol` check after moving to an Ampere+ box, check
-TF32 first — it is often the entire explanation, and it is on by default, silently.
+**Rule of thumb:** if a numerical-correctness test that passed on Volta/Turing starts failing an
+`atol`/`rtol` check on an Ampere+ box, check the *convolution* path first — that is the one that
+changed precision without being asked. If a GEMM-only kernel is suddenly slower than a colleague's
+identical code, check the matmul path for the opposite reason: they opted into TF32 and you did
+not. Either way, record the setting in the experiment config; it is not a property of the GPU.
 
 ---
 
@@ -260,8 +274,11 @@ torch.backends.cudnn.deterministic = True             # forces cuDNN to pick det
 torch.backends.cudnn.benchmark = False                # benchmark mode profiles multiple algorithms
                                                        # and its choice can vary run to run — must
                                                        # be off for determinism
-torch.backends.cuda.matmul.allow_tf32 = False          # optional: also remove TF32's own precision
-torch.backends.cudnn.allow_tf32 = False                # loss from the comparison (see Section 4)
+torch.backends.fp32_precision = "ieee"                 # optional: also take TF32's precision loss
+                                                       # out of the comparison, every backend at
+                                                       # once (see Section 4) — note this is about
+                                                       # precision, not determinism: TF32 is
+                                                       # perfectly reproducible, just less precise
 ```
 
 `torch.use_deterministic_algorithms(True)` is the load-bearing call: it makes PyTorch **fail
@@ -282,7 +299,7 @@ CI gate that also checks wall-clock performance.
 |--------|-------|-------------------------------|-------------|
 | FMA contraction (`--fmad=true`, default) | faster (fewer instructions) | usually *more* accurate per-op (single rounding), but diverges from a non-fused reference | Always, unless bit-matching a naive reference |
 | `--use_fast_math` | up to several x on transcendental-heavy kernels | approximate `sin`/`cos`/`exp`/`log`/`div`/`sqrt`, denormals flushed to zero | Throughput-critical kernels where the error budget has been validated end-to-end (e.g. inside a normalization whose output is itself re-normalized) |
-| TF32 (Ampere+ default) | ~4-8x FP32 CUDA-core throughput on eligible GEMMs | mantissa drops from 23 to 10 bits (~7 to ~3 decimal digits) | Training/inference where the model's own noise floor dwarfs a 3-digit rounding error (the common case) — opt out (Section 4) for scientific/finance-grade FP32 correctness |
+| TF32 (Ampere+) | ~4-8x FP32 CUDA-core throughput on eligible GEMMs | mantissa drops from 23 to 10 bits (~7 to ~3 decimal digits) | Training/inference where the model's own noise floor dwarfs a 3-digit rounding error (the common case) — opt in for matmul, opt out for convolution, and never assume either (Section 4) |
 | Deterministic algorithms (`torch.use_deterministic_algorithms`, fixed-tree reductions) | 10-30%+ slower | none beyond speed — this is the "give up speed to get reproducibility" trade | Regulatory audit trails, bit-exact regression CI, bisecting a training divergence |
 | BF16 vs FP16 mixed precision | comparable to each other | BF16: less mantissa precision, no loss scaling needed; FP16: more mantissa precision, needs loss scaling to avoid gradient underflow | BF16 default on Ampere+/LLM training; FP16 still common on older GPUs (Volta/Turing lack native BF16 Tensor-Core support) |
 
@@ -299,12 +316,15 @@ CI gate that also checks wall-clock performance.
   only as a temporary debugging aid to isolate whether contraction is the source of a difference,
   never as the production build.
 
-- **BROKEN: silently training/serving at TF32 precision without realizing it.** A model ported
-  from a Volta box (no TF32 hardware) to an A100/H100 gets a free 4-8x GEMM speedup and a
-  simultaneous, unannounced mantissa cut from 23 to 10 bits — teams have chased "accuracy
-  regressions after a GPU upgrade" for days before finding TF32 was the cause.
-  **FIX:** treat `torch.backends.cuda.matmul.allow_tf32` (and the cuDNN equivalent) as an explicit
-  decision to record in the experiment config, not an invisible default.
+- **BROKEN: assuming TF32 is either uniformly on or uniformly off.** A convolutional model ported
+  from a Volta box (no TF32 hardware) to an A100/H100 gets an unannounced mantissa cut from 23 to
+  10 bits in every convolution, because the cuDNN path allows TF32 by default — while the
+  `nn.Linear` layers in the same model keep running IEEE FP32, because the matmul path does not.
+  Teams have chased "accuracy regressions after a GPU upgrade" for days looking at the matmuls.
+  **FIX:** treat the per-backend precision setting (`torch.backends.cudnn.conv.fp32_precision`,
+  `torch.backends.cuda.matmul.fp32_precision`, or one global `torch.backends.fp32_precision`) as
+  an explicit decision recorded in the experiment config, and read it back at run start rather
+  than assuming a default.
 
 - **BROKEN: calling a training run "flaky" when it is a `benchmark=True` + non-deterministic-op
   interaction.** `torch.backends.cudnn.benchmark = True` profiles several convolution algorithms
@@ -333,9 +353,11 @@ point addition is not associative, so both differences are expected, not bugs; c
 tolerance, not equality.
 
 **Why did my model's accuracy change after moving from a V100 to an A100 with no code changes?**
-Ampere+ defaults FP32 matrix multiplies through the TF32 Tensor-Core path, silently cutting the
-mantissa from 23 to 10 bits; set `torch.backends.cuda.matmul.allow_tf32 = False` (and the cuDNN
-equivalent) to restore full FP32 precision if the accuracy delta matters.
+Volta has no TF32 hardware and Ampere does, and PyTorch's cuDNN path allows TF32 for FP32
+convolutions by default — so every convolution silently dropped from a 23-bit to a 10-bit
+mantissa while the matmuls, which do *not* default to TF32, stayed at full FP32. Set
+`torch.backends.cudnn.conv.fp32_precision = "ieee"` (or `torch.backends.fp32_precision = "ieee"`
+for every backend at once) to restore full FP32 precision if the accuracy delta matters.
 
 **What is the actual difference between FP16 and BF16 if both are 16 bits?** FP16 spends more
 bits on mantissa (10 vs 7, more precision) and fewer on exponent (5 vs 8), so it has a narrower

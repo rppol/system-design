@@ -22,7 +22,7 @@ Nsight Compute, but these are the figures to reason with in an interview.
 | Shared memory / L1 | ~20-30 cycles | tens of TB/s aggregate across all SMs (on-chip SRAM) | thread block | block (until the block retires) | Shared mem: not cached, it IS the scratchpad; L1: caches local/global loads |
 | L2 cache | ~200 cycles | several TB/s, device-wide (shared by every SM) | device (all SMs) | until evicted | Cached, hardware-managed, unified across the chip |
 | Global memory (HBM) | ~400-800 cycles | ~3 TB/s (HBM3, H100) | device / grid | application (until `cudaFree` or context teardown) | Backed by L2 (and L1 if not bypassed) |
-| Host memory over PCIe | ~microseconds round-trip | PCIe Gen5 x16 ~64 GB/s; NVLink (GPU-GPU) ~900 GB/s | system (host + device) | process lifetime (pinned) | Not cached by the GPU; pinned memory is DMA'd directly |
+| Host memory over PCIe | ~microseconds round-trip | PCIe Gen5 x16 ~64 GB/s per direction; NVLink 4 (GPU-GPU) ~450 GB/s per direction (~900 GB/s counting both) | system (host + device) | process lifetime (pinned) | Not cached by the GPU; pinned memory is DMA'd directly |
 
 **Read the table as a ladder, not a list.** Each step down is roughly one to two orders of
 magnitude higher latency and one to two orders of magnitude more capacity than the step above.
@@ -37,7 +37,7 @@ an inner loop, shared memory reuses a tile across a thread block) buys you.
 ```
                               +-------------------+
                               |     REGISTERS     |     ~1 cycle
-                              |  64K x 32-bit/SM   |     thread-private
+                              |  64K x 32-bit/SM  |     thread-private
                               +-------------------+
                              /                     \
                             +-----------------------+
@@ -56,11 +56,12 @@ an inner loop, shared memory reuses a tile across a thread block) buys you.
                         +-------------------------------+
                        /                                 \
                       +-----------------------------------+
-                      |   HOST MEMORY (over PCIe/NVLink)   |    ~microseconds
-                      |   PCIe Gen5 ~64 GB/s, NVLink ~900  |    system-scoped
+                      |  HOST MEMORY (over PCIe/NVLink)   |     ~microseconds
+                      |  PCIe Gen5 ~64, NVLink ~450 GB/s  |     system-scoped
                       +-----------------------------------+
 
   Each descending tier: ~10-100x more capacity, ~10-100x higher latency, lower BW per byte.
+  Link figures are PER DIRECTION; NVLink 4 is ~900 GB/s only when both directions are summed.
   Performance engineering = keep the working set as high in this pyramid as it will fit.
 ```
 
@@ -79,11 +80,11 @@ spaces** the CUDA memory model exposes — several of which alias onto the same 
 
 | Space | Qualifier | Scope | Lifetime | Typical Use | Gotcha |
 |-------|-----------|-------|----------|--------------|--------|
-| Register | (implicit — automatic scalar variables) | thread | thread (kernel launch) | loop counters, accumulators, intermediate values | Register spilling: exceed the 64K x 32-bit/SM budget (or an `__launch_bounds__` cap) and the compiler silently spills to **local memory** — same latency as global, no warning at compile time beyond `-Xptxas -v` output |
+| Register | (implicit — automatic scalar variables) | thread | thread (kernel launch) | loop counters, accumulators, intermediate values | Register spilling: exceed the 255-register-per-thread architectural limit (or a `-maxrregcount` / `__launch_bounds__` cap) and the compiler silently spills to **local memory** — same latency as global, no warning at compile time beyond `-Xptxas -v` output |
 | Local | (implicit — spilled registers, large/indexed automatic arrays) | thread | thread | large per-thread scratch arrays, register overflow | Despite the name, "local" memory is physically **global memory (HBM)** — it is thread-private in scope only, not in physical location or speed |
-| Shared | `__shared__` | thread block | block (until the block retires) | tile staging for GEMM/convolution, reduction scratch, inter-thread communication within a block | Bank conflicts: 32 banks of 4 bytes each — threads in a warp hitting *different addresses in the same bank* serialize; the classic fix is padding a `[N][N+1]` array |
+| Shared | `__shared__` | thread block | block (until the block retires) | tile staging for GEMM/convolution, reduction scratch, inter-thread communication within a block | Bank conflicts: 32 banks of 4 bytes each — threads in a warp hitting *different 32-bit words in the same bank* serialize (hitting the *same* word broadcasts, for free); the classic fix is padding a `[N][N+1]` array |
 | Global | `__device__` / `cudaMalloc` | device (grid) | application (until `cudaFree` or context destroyed) | primary data storage — input/output tensors, model weights, activations | Uncoalesced access: a warp whose 32 threads touch non-contiguous addresses fragments one 128-byte transaction into many, up to 8-32x slower |
-| Constant | `__constant__` | device (grid), read-only inside kernels | application | values every thread reads identically — convolution coefficients, scaling factors, small lookup tables | Fast only on **broadcast** (every thread in the warp reads the same address); divergent addresses serialize through the small (64 KB) constant cache |
+| Constant | `__constant__` | device (grid), read-only inside kernels | application | values every thread reads identically — convolution coefficients, scaling factors, small lookup tables | Fast only on **broadcast** (every thread in the warp reads the same address); divergent addresses serialize into one transaction per distinct address. The constant *space* is 64 KB; it is served by a much smaller per-SM constant cache tuned for broadcast, not for scattered reads |
 | Texture / Surface | texture object (`cudaTextureObject_t`) / surface object | device | application (bound for the object's lifetime) | 2D/3D spatially-local reads — image processing, stencils, hardware bilinear interpolation | The win depends on 2D/3D spatial locality; a purely linear-access kernel gets no benefit over a plain global read and still pays object-creation overhead |
 
 ---
@@ -129,7 +130,7 @@ Using the section's canonical constants (`../../README.md` §5): a kernel that r
 the value is usable — during which the SM's warp scheduler ideally swaps in other resident
 warps to keep the ALUs fed (this is *why* occupancy exists). The same read served from
 **shared memory** after a single cooperative load-and-`__syncthreads()` costs ~20-30 cycles —
-a 15-25x latency reduction — which is the entire arithmetic behind why a tiled GEMM
+a 15-40x latency reduction — which is the entire arithmetic behind why a tiled GEMM
 outperforms the naive one-global-read-per-multiply-add version. A **register**-resident value
 (the running accumulator in that same GEMM tile) costs ~1 cycle: effectively free, which is
 why the register-blocking rung of the GEMM optimization ladder (each thread computes a small
@@ -149,7 +150,7 @@ hints:
 | `.ca` (cache all) | Default: cache in L1 and L2 | General-purpose reads with reuse at the block level |
 | `.cg` (cache global) | Cache in L2 only, bypass L1 | Data too large to profit from L1, or to avoid evicting a tile you deliberately staged in L1/shared |
 | `.cs` (cache streaming) | Evict-first hint — cached but marked for early eviction | Streaming reads touched exactly once (a pass over a huge array with no reuse) |
-| `__ldg()` intrinsic | Route through the read-only texture-path cache | Read-only global data aliased with `const __restrict__` — frees up the normal L1/L2 path |
+| `__ldg()` intrinsic | Issue a non-coherent read-only load (`ld.global.nc`) | Read-only global data. On Volta+ the read-only path *is* the unified L1, so the win is the non-coherent hint rather than a separate cache — and `nvcc` already emits `ld.global.nc` on its own when a pointer is marked `const __restrict__`, so reach for the intrinsic only when you cannot express that |
 
 The practical takeaway: if a kernel's profiled DRAM throughput is far below the HBM ceiling and
 the access pattern is already coalesced, check whether it is fighting itself for L1/L2 space
@@ -168,7 +169,7 @@ the memory-relevant deltas are:
 | Volta (7.0) | Independent thread scheduling changes what "the same warp" means for shared-memory races — `__syncwarp()` becomes necessary where lockstep used to be implicit |
 | Ampere (8.0/8.6) | Adds asynchronous copy (`cp.async`) — global-to-shared transfers that bypass registers entirely, freeing the register file and overlapping the copy with compute; L2 grows to 40 MB (A100) |
 | Hopper (9.0) | Adds the Tensor Memory Accelerator (TMA) — a dedicated engine for bulk async global-to-shared tile copies with hardware-managed bounds checking; adds thread-block clusters and **distributed shared memory**, where one SM can address another SM's shared memory directly within a cluster — a new rung between "shared memory" and "L2" that did not exist before |
-| Blackwell (10.0) | Extends the Transformer Engine and NVLink domain size; the tiered latency/bandwidth *shape* in §1 still applies, with a larger register file and L2 budget |
+| Blackwell (10.0) | Extends the Transformer Engine and the NVLink domain size, and moves to HBM3e; the tiered latency/bandwidth *shape* in §1 still applies, with a larger L2 and more HBM bandwidth. The register file is unchanged — 64K x 32-bit per SM, the same as every generation since Volta |
 
 The one number worth internalizing beyond the §1 table: on Hopper+, a well-written tiled
 kernel increasingly issues its shared-memory loads via TMA rather than per-thread `ld.shared`
@@ -185,9 +186,11 @@ shifting from "every thread" to "a dedicated copy engine."
 - **Treating "local" as on-chip.** Local memory is a *scope*, not a *tier* — it's just as
   slow as global memory. A kernel with heavy register spilling into local memory can be
   slower than a naive global-memory kernel with no spilling at all.
-- **Assuming constant memory is always fast.** It is a 64 KB cache tuned for broadcast; a
-  kernel where each thread in a warp indexes a *different* constant-memory address gets no
-  benefit over global memory and can be worse due to the smaller cache.
+- **Assuming constant memory is always fast.** It is a 64 KB space fronted by a small per-SM
+  cache tuned for broadcast; a kernel where each thread in a warp indexes a *different*
+  constant-memory address serializes into one transaction per distinct address, gets no
+  benefit over global memory, and can be worse because the cache behind it is far smaller
+  than L1.
 - **Sizing a shared-memory tile without checking the per-SM budget.** Shared memory is a
   finite per-SM resource shared with the blocks resident on that SM — an oversized
   `__shared__` array silently caps how many blocks can be co-resident, which caps occupancy,
