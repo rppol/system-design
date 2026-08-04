@@ -914,54 +914,71 @@ void fixed_explicit_streams(int num_chunks, int chunk_n, float* h_pinned,
 ## 12. Interview Questions with Answers
 
 **Q: Why doesn't `cudaMemcpyAsync` overlap with kernel execution when the host buffer came from a plain `malloc`?**
+**Short:** Pageable host memory forces the driver to stage the copy through an internal pinned bounce buffer, serializing the transfer despite the non-blocking API call.
 Pageable host memory forces the driver to stage the copy through an internal pinned bounce buffer first, which serializes the transfer in practice even though the API call itself is non-blocking. The code still produces the correct result — it just delivers none of the expected speedup, making this a silent performance bug rather than a crash. The fix is allocating the host buffer with `cudaHostAlloc`/`cudaMallocHost` so the DMA engine can transfer directly.
 
 **Q: Why does putting all my kernels and copies on the default stream give zero concurrency, even with multiple `cudaMemcpyAsync` calls?**
+**Short:** The legacy null stream implicitly synchronizes with every other stream on the device in both directions, blocking all concurrency for anything issued to it.
 The legacy (null) default stream implicitly synchronizes with every other stream on the device in both directions. Any operation issued without an explicit stream argument lands there, and it both waits for all prior device work and blocks all later work on every other stream — the single most common reason a multi-stream design measures no speedup at all.
 
 **Q: Does `cudaStreamSynchronize` block the whole GPU or just other streams?**
+**Short:** It blocks the host thread until only that one stream's queued operations complete, leaving other streams unaffected — cheaper than `cudaDeviceSynchronize`.
 It blocks the calling CPU host thread until every operation queued in that one specific stream has completed, and has no effect on any other stream's progress. This makes it strictly cheaper than `cudaDeviceSynchronize`, which waits for the entire device, and is the right tool when only one stream's completion actually needs to be observed.
 
 **Q: Can two kernels from different streams truly run at the same time on one GPU?**
+**Short:** Yes, genuinely in parallel across SMs — but only for small or resource-light kernels, since a kernel already filling the device leaves nothing for a second one.
 Yes — blocks from both kernels can be resident simultaneously across the SMs, which is genuine parallel execution, not time-slicing. The catch is resources rather than the execution model: a single kernel that already fills the device with blocks leaves nothing for a second one, so concurrent kernel execution only materializes for small or resource-light kernels. That is why the reliable overlap opportunity in practice is copy engines running alongside compute, not compute-vs-compute.
 
 **Q: Is `--default-stream per-thread` a free way to get full concurrency?**
+**Short:** No — it only makes each thread's default stream independent of other threads', fixing one serialization source without touching pageable copies or chunking.
 No — it only makes each host thread's own default stream independent of other threads' default streams; it does nothing to fix pageable-memory copies or chunk your workload for you. It solves exactly one specific serialization source (the shared legacy null stream across threads), not the whole overlap problem.
 
 **Q: What happens if a CUDA runtime API is called from inside a `cudaLaunchHostFunc` callback?**
+**Short:** Undefined behavior and a well-documented deadlock risk, since the callback runs on an internal driver thread, not the thread that issued the enqueue.
 This is undefined behavior and a well-documented way to deadlock the process, because the callback executes on an internal driver thread, not the thread that issued the enqueue. Any work the callback needs to trigger on the GPU must be enqueued from the original host thread instead, using the callback only to signal or read host-side state.
 
 **Q: Are events accurate enough to time a single warp instruction inside a kernel?**
+**Short:** No — `cudaEventElapsedTime` has roughly 0.5 microsecond resolution, fine for whole kernels but far too coarse for sub-microsecond intra-kernel measurement.
 No — `cudaEventElapsedTime` has roughly 0.5 microsecond resolution, which is more than sufficient for timing whole kernels, streams, or overlap regions but far too coarse for sub-microsecond intra-kernel measurement. For that finer granularity, Nsight Compute's per-warp/per-instruction metrics are the correct tool, not events.
 
 **Q: Do streams guarantee that a copy and a kernel actually overlap just because they're on different streams?**
+**Short:** No — different streams are necessary but not sufficient; overlap also needs pinned memory, free engine resources, and enough independent chunks in flight.
 No — different streams are necessary but not sufficient for overlap. Concurrency additionally requires pinned host memory for the copy, enough free hardware resources on the relevant engines, and, in practice, enough independent chunks in flight to fill the pipeline.
 
 **Q: What is a CUDA stream, in one sentence?**
+**Short:** An in-order, asynchronous host-issued queue with no ordering guarantee relative to any other stream, which is exactly what enables concurrency.
 A stream is an in-order, asynchronous queue of GPU operations issued from the host, where operations within one stream execute in the order enqueued but carry no ordering guarantee relative to any other stream. That lack of cross-stream ordering is precisely what makes concurrency possible.
 
 **Q: How many copy engines does a typical data-center GPU like the A100 or H100 have, and why does that matter?**
+**Short:** Query `cudaDeviceProp::asyncEngineCount` rather than assume — A100 and H100 both report 3, letting H2D, compute, and D2H run at once for a 3x overlap speedup.
 Query it rather than assume: `cudaDeviceProp::asyncEngineCount` reports `1` if the device can overlap a copy in one direction with kernel execution and `2` or more if it can do H2D, D2H, and compute simultaneously — A100 and H100 both report `3`. Two or more is what allows a well-pipelined program to have H2D, compute, and D2H running at once on three different chunks, which is the mechanism behind the 3x asymptotic overlap speedup; on a part reporting `1`, the ceiling is 2x instead, because the two transfer directions must share one engine.
 
 **Q: What is the practical difference between the legacy default stream and the per-thread default stream?**
+**Short:** The legacy default stream implicitly synchronizes with every other stream process-wide; the per-thread default stream gives each host thread its own private one.
 The legacy default stream is a single, process-wide stream that implicitly synchronizes with every other stream on the device. The per-thread default stream, enabled via a compile flag, instead gives each host thread its own regular, non-synchronizing default stream — explicit non-default streams behave identically either way.
 
 **Q: How do CUDA stream priorities actually affect scheduling?**
+**Short:** `cudaStreamCreateWithPriority` tags a stream so the scheduler prefers dispatching its ready blocks first — a hint, not a preemption guarantee for running blocks.
 `cudaStreamCreateWithPriority` tags a stream with a priority from `cudaDeviceGetStreamPriorityRange`, where a lower numeric value means higher priority. The scheduler then prefers dispatching ready blocks from the higher-priority stream when both streams have work ready — but it is a scheduling hint, not a preemption guarantee, so a low-priority block already executing on an SM is not interrupted mid-flight.
 
 **Q: How do you express a fine-grained dependency between two streams without a full device synchronization?**
+**Short:** Record a `cudaEvent_t` in the producing stream and call `cudaStreamWaitEvent` on the consuming stream, enforcing only that dependency while everything else runs free.
 Record a `cudaEvent_t` in the producing stream via `cudaEventRecord`, then call `cudaStreamWaitEvent` on the consuming stream with that event. Only the specific dependency is enforced — every other operation queued on either stream that doesn't depend on that event remains free to run concurrently, unlike `cudaDeviceSynchronize`, which stalls everything.
 
 **Q: What happens if too many streams each request large pinned-memory buffers?**
+**Short:** Pinned memory is a finite, non-swappable OS resource, so over-allocating it can starve the rest of the system and degrade overall performance, not just the GPU.
 Pinned (page-locked) memory is a finite, non-swappable OS resource, so over-allocating it can starve the rest of the system of usable memory and even degrade overall performance, not just GPU throughput. The practical guidance is to pin only the buffers actually on the hot transfer path, sized to what the pipeline needs, not the entire dataset.
 
 **Q: How do streams relate to CUDA graphs?**
+**Short:** A stream's exact operation sequence can be captured once into a CUDA graph and replayed with one cheap launch call, attacking per-launch CPU overhead on repeats.
 A stream's exact sequence of operations can be captured once via `cudaStreamBeginCapture`/`cudaStreamEndCapture` into a CUDA graph. That graph is then instantiated and replayed with a single, much cheaper launch call on subsequent iterations — streams still express the underlying concurrency, while graphs attack the separate problem of per-launch CPU overhead when the same sequence repeats many times; see [cuda_graphs](../cuda_graphs/cuda_graphs.md) for the full mechanics.
 
 **Q: Can a single stream be partially synchronized, waiting for only some of its queued operations?**
+**Short:** Not directly — `cudaStreamSynchronize` waits for everything queued; waiting for one point requires recording an event and calling `cudaEventSynchronize` on it.
 Not directly — `cudaStreamSynchronize` waits for everything currently queued in that stream. Waiting for a specific point requires recording an event at that point and calling `cudaEventSynchronize` on it, which blocks only until that particular marker has been reached, ignoring anything enqueued after it.
 
 **Q: Are streams shared across multiple GPUs in a multi-GPU program?**
+**Short:** No — a stream is bound to whichever device was active when it was created, so a multi-GPU pipeline must manage separate streams per device.
 No — a stream is bound to whichever device is active (via `cudaSetDevice`) at the moment it is created, so a multi-GPU pipeline must create and manage separate streams per device. Coordinating work across those per-device streams for collective operations is the domain of [multi_gpu_programming_and_nccl](../multi_gpu_programming_and_nccl/multi_gpu_programming_and_nccl.md).
 
 ---

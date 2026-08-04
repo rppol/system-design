@@ -810,51 +810,67 @@ The vectorized version replaces 100,000 launches with one (or a small constant n
 ## 12. Interview Questions with Answers
 
 **Q: Why is a Python `for` loop that calls a tiny GPU op per element almost always slow, even though each op itself runs on the GPU?**
+**Short:** Every iteration pays a fixed 5-20 microsecond kernel-launch overhead that dominates when per-call arithmetic is tiny; fix by vectorizing into one launch.
 Every iteration pays a fixed kernel-launch overhead of roughly 5-20 microseconds of CPU-side driver work, and when the per-call arithmetic is tiny, that fixed cost — not the math — dominates wall-clock time. The fix is always the same: vectorize or fuse so the whole operation is one kernel launch instead of N.
 
 **Q: Does writing GPU code in CuPy or Numba mean the computation runs "in Python"?**
+**Short:** No — Python only describes and launches the kernel; the actual computation executes as compiled PTX/SASS on the SMs, identical to a CUDA C++ kernel.
 No — Python only describes and launches the kernel; the actual computation executes as compiled PTX/SASS on the SMs, identical to a CUDA C++ kernel doing the same work. The interpreter's overhead is limited to dispatch, never the arithmetic itself.
 
 **Q: Why can copying data between CuPy and PyTorch with `.get()` followed by `torch.tensor(...)` be a hidden performance bug?**
+**Short:** It forces a real device-to-host then host-to-device copy through pageable memory even though both arrays already live on the same GPU; DLPack shares the buffer instead.
 It forces a real device-to-host copy and then a host-to-device copy through pageable memory, even though both arrays already live on the same GPU and never needed to leave device memory. DLPack (or the dunder-protocol `torch.from_dlpack(cupy_array)`) shares the identical buffer with zero copies instead.
 
 **Q: What is DLPack, and does it copy any data?**
+**Short:** A framework-neutral descriptor of device pointer, shape, strides, dtype and device id that lets frameworks share a GPU allocation by exchanging metadata, never copying data.
 DLPack is a small, framework-neutral descriptor — device pointer, shape, strides, dtype, and device id — that lets one framework construct a view over another framework's existing GPU allocation. It never copies or serializes the underlying data; it only exchanges metadata about where that data already is.
 
 **Q: Is Numba CUDA a good substitute for CUDA C++ for production performance-critical kernels?**
+**Short:** Yes for elementwise, reduction, or stencil kernels since `@cuda.jit` lowers to the same PTX target; weaker for WMMA, cooperative-group sync, or dynamic parallelism.
 Often yes for straightforward elementwise, reduction, or stencil kernels, since `@cuda.jit` lowers to the same PTX target `nvcc` produces. It is a weaker substitute when a kernel needs advanced features with narrower or slower-updated support — Tensor Core WMMA intrinsics, cooperative-group grid-wide sync, dynamic parallelism — where CUDA C++ remains the primary, best-supported path.
 
 **Q: What is CuPy, in one sentence?**
+**Short:** A NumPy/SciPy-API-compatible array library whose arrays live in GPU memory, dispatching CUDA kernels, cuBLAS, or cuFFT underneath every operation.
 CuPy is a NumPy/SciPy-API-compatible array library where every array lives in GPU memory. Every operation dispatches a CUDA kernel underneath — CuPy's own generated kernels for elementwise ops, cuBLAS for linear algebra, cuFFT for transforms.
 
 **Q: What is the difference between CuPy's `ElementwiseKernel` and `RawKernel`?**
+**Short:** `ElementwiseKernel` takes a per-element expression and auto-generates the kernel wrapper; `RawKernel` takes a literal CUDA C source you write and compile via NVRTC.
 `ElementwiseKernel` takes a per-element expression and CuPy generates and fuses the surrounding kernel wrapper automatically. `RawKernel` takes a literal CUDA C source string you write in full and compile via NVRTC, giving complete control at the cost of writing real CUDA C.
 
 **Q: How does a Numba `@cuda.jit` kernel differ from writing the same logic in CUDA C++?**
+**Short:** You still write explicit thread/block indexing and manage shared memory by hand; Numba only swaps which compiler lowers the code to PTX, not the mental model.
 You still write explicit thread/block indexing and manage shared memory by hand, exactly like CUDA C++. Numba only changes which compiler lowers the code to PTX (LLVM/NVVM instead of `nvcc`), not the underlying memory-hierarchy or occupancy mental model.
 
 **Q: When would you choose PyCUDA over CuPy or Numba?**
+**Short:** When you need driver-API-level control the higher-level libraries abstract away — explicit context management, module/function-handle loading, or fine-grained streams.
 When you need driver-API-level control that the higher-level libraries deliberately abstract away. That includes explicit CUDA context management, custom module/function-handle loading, fine-grained stream orchestration, or extending an existing legacy PyCUDA codebase.
 
 **Q: What is a PyTorch custom CUDA/C++ extension, and when do you actually need one?**
+**Short:** A hand-written .cu kernel plus a pybind11 launcher compiled into an autograd-registerable PyTorch op; needed when an op can't be composed from ATen without extra HBM round-trips.
 It is a hand-written `.cu` kernel plus a `pybind11`-bound C++ launcher, compiled via `torch.utils.cpp_extension`, that becomes an ordinary autograd-registerable PyTorch op. It's needed when an operation doesn't exist in ATen/cuDNN and can't be composed from existing ops without paying for extra HBM round-trips between them.
 
 **Q: How does `torch.utils.cpp_extension.load()` work?**
+**Short:** It JIT-compiles the given .cpp/.cu sources via `nvcc` orchestrated by `ninja`, content-hash-caches the result, and returns a module with no setup.py needed.
 It JIT-compiles the given `.cpp`/`.cu` sources with the system C++ compiler and `nvcc`, orchestrated via `ninja`. It content-hash-caches the resulting shared library and returns a Python module exposing the `pybind11`-bound function, with no manual `setup.py` build step required.
 
 **Q: What does `torch.compile`/TorchInductor actually generate under the hood on GPU?**
+**Short:** It traces operations into an FX graph and its GPU codegen backend emits fused kernels, typically Triton, combining pointwise/reduction chains into fewer launches.
 It traces the model's operations into an FX graph and its GPU codegen backend emits fused kernels, typically Triton kernels. These combine chains of pointwise and reduction operations into fewer kernel launches than unfused eager-mode execution would issue.
 
 **Q: If `torch.compile` already auto-fuses kernels, why would an engineer still write a custom CUDA extension?**
+**Short:** Inductor's automatic fusion covers pointwise/reduction chains well but invents no novel algorithms — a custom attention variant still needs a hand-written extension.
 Inductor's automatic fusion covers pointwise/reduction chains well but does not invent genuinely novel algorithms. A custom attention variant or a bespoke Tensor Core data layout still needs the hand-written extension escape hatch, since it falls outside what Inductor's fusion heuristics can reach.
 
 **Q: Why does `cupy.ElementwiseKernel` typically outperform the same expression composed from several separate CuPy calls?**
+**Short:** Separate calls launch one kernel per op and round-trip every intermediate through HBM; the fused kernel does the whole expression in one launch and one HBM pass.
 Composing separate calls launches one kernel per operation and writes every intermediate result to HBM before the next op reads it back. The fused `ElementwiseKernel` performs the entire expression in a single kernel launch and a single pass over HBM, eliminating the intermediate round-trips entirely.
 
 **Q: What data does a DLPack capsule actually carry, and can it share memory across two different GPUs?**
+**Short:** A device pointer, shape, strides, dtype, and device id — enough to build a matching view on the same device, but cross-device sharing still requires an explicit copy.
 It carries a device pointer, shape, strides, dtype, and device type/id — enough for the consumer to build a matching view over the exact same allocation. It cannot zero-copy-share across two different GPU devices, since cross-device sharing still requires an explicit copy.
 
 **Q: Why is arithmetic-intensity/roofline awareness still relevant even when writing GPU code entirely at the CuPy or Numba level?**
+**Short:** A friendlier Python API changes how much code you write to launch a kernel, not whether it's memory-bound or compute-bound — roofline reasoning still applies.
 Wrapping a kernel in a friendlier Python API changes how much code you had to write to launch it, not whether the kernel is memory-bound or compute-bound. The same roofline reasoning from `../cuda_math_and_dnn_libraries/` still determines what optimization actually moves the needle.
 
 ---

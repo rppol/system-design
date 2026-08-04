@@ -884,12 +884,14 @@ __global__ void reduce_unrolled4(const float* in, float* out, int n) {
 ## 12. Interview Questions with Answers
 
 **Q: Is higher occupancy always better?**
+**Short:** No — occupancy hides latency, not a target itself; many kernels peak at 50-60% occupancy, and pushing higher can force spilling or wreck ILP.
 No — occupancy is a means to hide latency, not a
 performance target itself; many kernels peak in performance around 50-60% occupancy, and
 pushing higher can force register spilling or destroy the ILP a compute-bound kernel relies
 on, making the "more occupied" kernel slower.
 
 **Q: Why does a kernel using 128 registers/thread get capped at ~25% occupancy?**
+**Short:** 128 regs/thread allows only 512 resident threads (16 of 64 warps) on a 65,536-register SM — a full occupancy-halving cliff, not a gradual decline.
 With 65,536
 32-bit registers per SM and 128 regs/thread, only 65536/128 = 512 threads (16 warps) can be
 resident, and 16/64 = 25% of the 64-warp ceiling on a modern SM. Crossing from 64 to 128
@@ -897,6 +899,7 @@ registers/thread is a full occupancy-halving cliff, not a gradual decline, becau
 blocks are resident as whole units.
 
 **Q: What are the three resources that limit occupancy?**
+**Short:** Registers, shared memory, and fixed block/warp slot counts — whichever yields the fewest resident blocks is the binding limiter.
 Registers (65,536 32-bit
 registers/SM), shared memory (48 KB/block default, raised by opt-in to 163 KB/block on A100
 and 227 KB/block on H100), and fixed block/warp slot counts (32 blocks and 64 warps per SM on
@@ -904,12 +907,15 @@ A100/H100/B200, 48 or 32 warps on the lower compute capabilities). Whichever pro
 smallest number of resident blocks is the *binding limiter* for that launch configuration.
 
 **Q: What does `__launch_bounds__` actually do, and how does it differ from
-`-maxrregcount`?** `__launch_bounds__(maxThreads, minBlocksPerSM)` is a per-kernel compiler
+`-maxrregcount`?**
+**Short:** `__launch_bounds__` caps registers per-kernel from a resident-block promise; `-maxrregcount` caps every kernel in the file, risking starvation.
+`__launch_bounds__(maxThreads, minBlocksPerSM)` is a per-kernel compiler
 hint that derives a register budget from the promise of `minBlocksPerSM` resident blocks of
 `maxThreads` size; `-maxrregcount=N` is an nvcc flag that caps registers for *every* kernel in
 the compiled file, risking starvation of unrelated kernels that need more registers.
 
 **Q: What is register spilling, and where do spilled values actually live?**
+**Short:** The compiler spilling excess live values into local memory — physically ordinary global memory cached through L1/L2, far slower than a register.
 Register spilling
 is the compiler storing excess live values in **local memory** when a kernel's register
 demand exceeds the assigned budget; local memory is physically ordinary global memory
@@ -917,6 +923,7 @@ demand exceeds the assigned budget; local memory is physically ordinary global m
 cache-missed global load costs — far more than a true register.
 
 **Q: Why can forcing higher occupancy make a kernel slower?**
+**Short:** A register cap below the kernel's natural need forces spilling, and the extra global-memory traffic can outweigh the added latency hiding.
 If the forced register cap is
 below the kernel's natural register need, the compiler spills the excess to local memory;
 the extra global-memory traffic from spilling can cost more than the latency-hiding benefit
@@ -924,12 +931,14 @@ of the additional resident warps gains — the classic anti-pattern this module 
 a measured 21% slowdown in §10.
 
 **Q: Why must block size be a multiple of 32?**
+**Short:** A warp is the hardware's 32-thread scheduling unit; a non-multiple block wastes an entire warp's masked-off lanes for its whole lifetime.
 A warp is the hardware's atomic scheduling
 unit of 32 threads; a block of 100 threads still occupies 4 full warp-slots (128 threads
 worth), with the last warp masking off 28 inactive lanes — those 28 lanes' throughput is
 permanently wasted for the kernel's whole lifetime, not just at boundaries.
 
 **Q: What is the "tail effect" (wave quantization) and how do you avoid it?**
+**Short:** Under-utilization when grid size isn't a multiple of the wave size, so a near-empty final wave still costs a full wave; fix with a grid-stride loop.
 It's the
 under-utilization that happens when the grid size isn't a multiple of `SM_count x
 blocks_per_SM` — the final wave of blocks fills only part of the GPU but still takes nearly a
@@ -937,6 +946,7 @@ full wave's time; fixing it means sizing the grid to a multiple of the wave or u
 grid-stride loop to decouple grid size from data size entirely.
 
 **Q: How do you compute theoretical occupancy from a kernel's register usage?**
+**Short:** Divide 65,536 registers by threads-per-block times regs-per-thread for reg-limited blocks/SM, then take the smallest of all three limiters.
 Divide the
 65,536-register SM budget by `threads_per_block x registers_per_thread` to get reg-limited
 blocks/SM, multiply by warps/block, and divide by the SM's max warps (64 on 7.0/8.0/9.0/10.x,
@@ -944,16 +954,19 @@ blocks/SM, multiply by warps/block, and divide by the SM's max warps (64 on 7.0/
 smallest blocks/SM number sets the actual occupancy.
 
 **Q: What CUDA runtime API suggests a good block size automatically?**
+**Short:** `cudaOccupancyMaxPotentialBlockSize` returns the block size and minimum grid size that maximize theoretical occupancy for a kernel.
 `cudaOccupancyMaxPotentialBlockSize` returns the block size (and matching minimum grid size)
 that maximizes theoretical occupancy for a specific kernel and dynamic-shared-memory size,
 without you hand-computing the register/shared-mem arithmetic.
 
 **Q: How do you inspect the actual register and shared-memory usage of a compiled kernel?**
+**Short:** Compile with `nvcc --ptxas-options=-v` at build time, or call `cudaFuncGetAttributes` at runtime to read the compiler's ground truth.
 Compile with `nvcc --ptxas-options=-v` to see it at build time, or call
 `cudaFuncGetAttributes` at runtime to read `numRegs` and `sharedSizeBytes` from the compiled
 `cudaFuncAttributes` struct — both report the ground truth ptxas assigned, not an estimate.
 
 **Q: What is the difference between theoretical and achieved occupancy?**
+**Short:** Theoretical occupancy is the hardware ceiling from register/shared-mem/block-size math; achieved occupancy is what Nsight Compute measures at runtime, often lower.
 Theoretical
 occupancy is the ceiling the hardware permits given a kernel's register/shared-memory/block
 size (what the occupancy calculator computes); achieved occupancy is what Nsight Compute
@@ -961,6 +974,7 @@ measures actually happening at runtime, and is often lower due to the tail effec
 imbalance, or warps exiting early on divergent branches.
 
 **Q: How does occupancy relate to latency hiding via Little's Law?**
+**Short:** Hiding an L-cycle memory stall needs enough independent ready warps in flight, supplied by either more resident warps or more per-warp ILP.
 To keep an SM's warp
 schedulers issuing an instruction every cycle through an L-cycle stall (L ~ 400-800 cycles
 for an uncached global load), you need roughly `L / (average cycles between a warp's
@@ -969,13 +983,16 @@ warps (occupancy) or more instruction-level parallelism per warp (unrolling); th
 substitutes for the same underlying need.
 
 **Q: Why do compute-bound kernels like GEMM microkernels intentionally run at low
-occupancy?** They keep many values (accumulators, operands) live in registers per thread to
+occupancy?**
+**Short:** They keep many values live per thread for reuse and ILP, so a handful of warps already saturates the ALUs/Tensor Cores with no latency left to hide.
+They keep many values (accumulators, operands) live in registers per thread to
 maximize reuse and instruction-level parallelism per warp, so a handful of resident warps
 already saturates the ALUs/Tensor Cores — adding more resident warps at the cost of register
 pressure would only introduce spilling for no latency-hiding benefit, since there's no
 latency left to hide.
 
 **Q: How does shared memory per block cap the number of resident blocks?**
+**Short:** The per-SM shared-memory pool divided by one block's request gives shared-mem-limited blocks/SM, separate from the 48 KB per-block opt-in cap.
 The per-SM
 shared-memory pool (164 KB on A100, 228 KB on H100/B200, 100 KB on 8.6/8.9/12.x) divided by
 the shared memory one block requests gives the shared-mem-limited blocks/SM; a 32 KB tile
@@ -986,18 +1003,23 @@ which raises its per-block ceiling to 163 KB (A100) or 227 KB (H100/B200) — th
 opt-in and the per-SM pool are two different limits, and both must be satisfied.
 
 **Q: Why does the maximum resident block count (e.g. 32 blocks/SM) matter even when registers
-and shared memory are abundant?** Very small blocks (e.g. 32-64 threads) can hit the fixed
+and shared memory are abundant?**
+**Short:** Very small blocks can hit the fixed block-slot ceiling before registers or shared memory bind, wasting warp capacity a larger block size would use.
+Very small blocks (e.g. 32-64 threads) can hit the fixed
 32-blocks/SM hardware ceiling before registers or shared memory become binding, wasting warp
 capacity — e.g. 32 blocks of 32 threads is only 32 warps (50% of 64), even though the
 register/shared-mem budget could support far more warps at a larger block size.
 
 **Q: How does dynamic shared memory interact with occupancy differently than static shared
-memory?** A statically declared `__shared__` array is baked into the kernel binary, fixing
+memory?**
+**Short:** Static `__shared__` bakes its size into the binary, fixing occupancy at compile time; dynamic `extern __shared__` lets one kernel trade size for occupancy at launch.
+A statically declared `__shared__` array is baked into the kernel binary, fixing
 its shared-memory footprint (and thus occupancy) at compile time; `extern __shared__` with a
 byte count passed at launch lets the same compiled kernel trade shared-memory size for
 occupancy at runtime, which is how libraries dynamically select among several tile sizes.
 
 **Q: Why does maximum warps/SM differ between GPU generations (32 vs 48 vs 64)?**
+**Short:** The ceiling is set by compute capability, not architecture name — 64 on 7.0/8.0/9.0/10.x, 48 on 8.6/8.9/12.x, 32 on Turing 7.5.
 The ceiling
 is set by compute capability, not by the architecture's marketing name. Compute capability
 7.0, 8.0 (A100), 9.0 (H100) and 10.x (B200) hold 2048 threads/SM (64 warps); 8.6, 8.9 and
@@ -1007,14 +1029,18 @@ has a different theoretical occupancy ceiling on each, so read
 `cudaDeviceProp::maxThreadsPerMultiProcessor` and re-verify per deployed part.
 
 **Q: Nsight Compute reports low achieved occupancy despite good theoretical occupancy — what
-causes the gap?** Common causes are the tail effect (the final wave of blocks under-filling
+causes the gap?**
+**Short:** The tail effect, load imbalance across blocks, and warp divergence causing early exits — none of which the static theoretical number reflects.
+Common causes are the tail effect (the final wave of blocks under-filling
 the GPU), load imbalance across blocks (some finish early and leave the SM under-occupied),
 and warp divergence causing some warps to exit a loop and go idle well before others — none
 of these show up in the theoretical occupancy number, which only reflects the static
 register/shared-memory/block-size arithmetic.
 
 **Q: What is the practical, empirically-observed occupancy "sweet spot" for many real
-kernels?** Roughly 50-60% — past that point additional resident warps typically provide no
+kernels?**
+**Short:** Roughly 50-60% — beyond that, extra resident warps rarely hide more latency while the pressure needed to reach it can hurt.
+Roughly 50-60% — past that point additional resident warps typically provide no
 further latency-hiding benefit for a kernel whose stalls are already hidden, while the
 register or shared-memory pressure needed to reach 100% can actively hurt via spilling or
 reduced per-thread ILP.

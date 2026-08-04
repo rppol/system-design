@@ -1067,48 +1067,63 @@ multi-day CUDA C++ investment.
 ## 12. Interview Questions with Answers
 
 **Q: What is the single most common Triton kernel bug, and what causes it?**
+**Short:** Forgetting the boundary mask on `tl.load`/`tl.store`, so the last program instance's offsets run past N and silently corrupt or misread adjacent memory.
 A: Forgetting the boundary mask on `tl.load`/`tl.store` when the problem size is not an exact multiple of `BLOCK_SIZE`. Because Triton always launches whole blocks (`grid = ceil(N / BLOCK_SIZE)`), the last program instance's offsets run past the valid range unless every load/store passes `mask=offs < N` — the failure is silent (extra reads land in adjacent allocated memory, extra writes corrupt it) rather than an immediate crash, making it easy to miss until a shape happens to trigger a hard illegal-memory-access error.
 
 **Q: What does it mean that Triton programs operate on blocks, not threads?**
+**Short:** A kernel is written from the view of one program instance operating on a whole tile at once; the compiler's layout pass assigns which threads own which elements.
 A: A Triton kernel is written from the view of one program instance that operates on a whole tile of data at once, not one CUDA thread computing a single element. There is no `threadIdx` anywhere in Triton source; the compiler's layout-assignment pass decides which of the launched warp's threads own which elements of that tile and lowers the block-level `tl.load`/`tl.dot`/`tl.store` to the corresponding per-thread SASS instructions.
 
 **Q: If you hardcode `BLOCK_SIZE=32` for a Triton matmul kernel, what goes wrong?**
+**Short:** The tile under-fills shared memory and registers, typically landing 30-40% below an autotuned config's throughput — correct results, but a silent performance bug.
 A: A tile that small under-fills the SM's shared memory and register file, leaving too little work in flight to hide memory latency. It typically lands 30-40% below an autotuned configuration's achieved throughput on the same GPU and shape, even though the kernel still produces correct results — this is a silent performance bug, not a correctness bug, which is exactly why it survives unnoticed until someone profiles against a reference implementation.
 
 **Q: What does `triton.autotune` actually search over, and how does it decide the winner?**
+**Short:** It brute-force benchmarks a declared list of Configs against the real input shape and caches the fastest one per shape key, bounded by that list's quality.
 A: It benchmarks a declared list of `Config`s — tile sizes, `num_warps`, `num_stages` — against the real input shape and caches the fastest one. This is a brute-force grid search over your candidate list, run once per shape key (`key=[...]`) and cached thereafter, not a heuristic or gradient-based search, so the quality of the result is bounded by how good your declared config list is.
 
 **Q: What is the practical downside of `triton.autotune`'s first-call search cost?**
+**Short:** The first call for a new shape pays the full benchmarking cost of every config, adding tens to hundreds of milliseconds unless a harness warms up first.
 A: The first invocation for any new input shape pays the full benchmarking cost of every candidate config, adding tens to hundreds of milliseconds. A naive timing harness will misreport this as the kernel's steady-state latency if it doesn't warm up first; in production, serving many distinct shapes (variable batch size or sequence length) can mean recurring recompilation/re-search churn unless shapes are bucketed to a small set of canonical sizes.
 
 **Q: What does the Triton compiler manage that a CUDA C++ author has to write by hand?**
+**Short:** Shared-memory staging and pipelining, thread-to-data layout assignment, and Tensor-Core dispatch for `tl.dot`, replacing hand-written `__shared__` arrays and barriers.
 A: Shared-memory staging and pipelining for tiled operations, the thread-to-data layout assignment underneath every block-level op, and Tensor-Core instruction dispatch for `tl.dot`. This replaces the `__shared__` arrays, double-buffered loads, and `__syncthreads()` barriers a hand-written tiled GEMM needs; what remains the programmer's job is choosing tile shapes, writing correct boundary masks, and structuring the algorithm itself.
 
 **Q: Does memory coalescing still matter when you write Triton instead of CUDA C++?**
+**Short:** Yes — coalescing is a property of the access pattern expressed, not granted automatically; a strided Triton offset compiles to the same uncoalesced pattern as CUDA.
 A: Yes — coalescing is a property of the access pattern you express, not something either language grants automatically. A `tl.load` over a contiguous, `tl.arange`-derived offset range compiles to the same 128-byte coalesced transactions a correctly indexed CUDA kernel would produce; a strided or gather-style offset pattern in Triton compiles to the same uncoalesced access pattern the equivalent CUDA index math would produce. Triton changes who writes the index math, not the hardware rule about what counts as coalesced.
 
 **Q: How close does a well-tuned Triton kernel get to hand-written CUDA C++ or CUTLASS on a typical GEMM shape?**
+**Short:** Roughly 80-95% of hand-tuned throughput, for 3-5x less code and a minutes-long autotune loop instead of a days-long manual CUDA re-derivation.
 A: Roughly 80-95% of hand-tuned CUDA C++/CUTLASS throughput on common shapes, in exchange for 3-5× less code and a search-based re-tuning loop measured in minutes instead of the days a manual CUDA re-derivation takes. The remaining 5-20 percentage points come from instruction-level control (exotic MMA variants, warp-specialized producer/consumer pipelines) that Triton's language does not currently expose.
 
 **Q: Why does `torch.compile` matter to someone who has never written a Triton kernel by hand?**
+**Short:** TorchInductor generates fused Triton kernels, not CUDA C++, for captured graphs — every `torch.compile` speedup is an autogenerated Triton kernel underneath.
 A: Because TorchInductor, `torch.compile`'s backend, generates fused Triton kernels — not CUDA C++ — for the graphs it captures. Every speedup a PyTorch user sees from `torch.compile` on eligible ops is, underneath, an autogenerated Triton kernel doing the fusion, so understanding Triton's cost model (fewer HBM round-trips, autotuned tile shapes) explains why `torch.compile` helps on some graphs and not others.
 
 **Q: What is a Triton tensor descriptor (`tl.make_tensor_descriptor`), and why use it over manual offset/mask arithmetic?**
+**Short:** A strided tile view described by pointer, shape, and strides, read via `desc.load` with out-of-range lanes padded automatically; on Hopper/Blackwell it lowers to hardware TMA.
 A: A tensor descriptor describes a strided tile view directly on a tensor's memory — base pointer, shape, strides, block shape — and you then read and write whole tiles by offset with `desc.load([m, n])` / `desc.store([m, n], value)`, with out-of-range lanes padded automatically instead of masked by hand. It is functionally equivalent to hand-rolled `offsets`/`mask` arithmetic for simple cases but scales more cleanly to multi-dimensional tiled kernels like matmul, and on Hopper and Blackwell it lowers to the hardware TMA copy engine rather than ordinary loads. It requires a host-side scratch allocator (`triton.set_allocator`). The older `tl.make_block_ptr` form, which you will still meet in existing kernels, expresses the same idea with `tl.advance`/`boundary_check` and now emits a deprecation warning.
 
 **Q: When would you deliberately choose hand-written CUDA C++ over Triton for a new kernel?**
+**Short:** When the kernel needs instruction-level control Triton doesn't expose — exotic `mma` variants, warp-specialized pipelines, inline PTX — or is already at peak via cuBLAS/CUTLASS.
 A: Choose CUDA C++ when the kernel needs instruction-level control Triton does not expose, or is the single hottest production kernel where the last few percent of throughput is worth dedicated engineering time. Concretely: specific `mma` instruction variants, warp-specialized pipelines, inline PTX, grid-level cooperative synchronization — or an operation already solved at 95-100% of peak by cuBLAS/cuDNN/CUTLASS, where there is nothing left to fuse.
 
 **Q: Why do most open-source FlashAttention reimplementations outside NVIDIA's own CUTLASS-based kernel use Triton?**
+**Short:** FlashAttention's fused online-softmax needs exactly the shared-memory tiling and pipelining Triton's compiler automates, at a fraction of a hand-written kernel's code.
 A: Because FlashAttention fuses the online-softmax computation into the same kernel as the QKᵀ and softmax·V matmuls, avoiding materializing the full attention matrix in HBM. That fusion needs exactly the shared-memory tiling and pipelining Triton's compiler automates, at a fraction of the code a CUDA C++/CUTLASS implementation needs — making the technique accessible to ML engineers adapting it to a new head dimension or attention variant without CUDA-C++ expertise. See [../case_studies/build_a_flash_attention_kernel.md](../case_studies/build_a_flash_attention_kernel.md).
 
 **Q: What is the difference between Numba CUDA and Triton, given both are Python?**
+**Short:** Numba CUDA keeps the CUDA C++ execution model with manual `threadIdx` indexing in Python syntax; Triton changes the abstraction to compiler-managed block-level SPMD.
 A: Numba CUDA keeps the CUDA C++ execution model exactly — you still write `threadIdx`-indexed kernels and manage `cuda.shared.array` shared memory by hand, just in Python syntax JIT-compiled via LLVM's NVPTX backend. Triton changes the *abstraction level* itself to block/tile-level SPMD with compiler-managed shared memory and layout. Being Python is incidental for Numba (a syntax choice) but central to Triton's productivity story (the block abstraction is what removes the manual tiling work, not the language).
 
 **Q: Is a Triton kernel still compiled to PTX and SASS, or does it run through some other execution path?**
+**Short:** Yes — it compiles through Triton IR, GPU IR, LLVM IR, PTX, and `ptxas` to the same SASS a CUDA C++ kernel produces, so Nsight Compute profiles it identically.
 A: Yes — the pipeline is Python AST → Triton IR → Triton GPU IR (layout assignment and pipelining passes) → LLVM IR → PTX → `ptxas` → SASS, the same final NVIDIA instruction set a CUDA C++ kernel produces. Triton is a different compiler front end targeting the same backend, not an interpreted or alternative execution model — this is why Nsight Compute profiles a Triton kernel exactly like any other CUDA kernel.
 
 **Q: How does Mojo's positioning differ from Triton's?**
+**Short:** Mojo aims to unify high-level tensor code and low-level thread/SIMD control in one language, while Triton commits to a single block-level SPMD abstraction.
 A: Mojo aims to unify high-level tensor code and low-level thread/SIMD control in one language, whereas Triton commits to a single abstraction level (block-level SPMD). Mojo is a younger ecosystem with fewer production deployments as of this writing; Triton already underlies `torch.compile` and multiple production inference engines.
 
 ---
