@@ -745,6 +745,7 @@ Note also the staleness column implied here: with a 20,000/sec consumer group, a
 - Kafka Streams — embedded Java library for stateful stream processing. No separate cluster required.
 - ksqlDB — SQL-like query engine for Kafka streams. Suitable for simpler aggregations without full Java code.
 - Kafka Connect — scalable framework for source and sink connectors, with a large catalogue on Confluent Marketplace (formerly Confluent Hub): JDBC, Elasticsearch, S3, Debezium CDC and so on. Do not quote a connector count — Confluent's own pages state 120+, 150+ and 200+ depending on which product surface is being counted, so there is no figure worth carrying.
+  - Debezium — the CDC source-connector family that runs inside Kafka Connect. This module owns Kafka itself; [`technologies/debezium_change_data_capture`](../../technologies/debezium_change_data_capture/debezium_change_data_capture.md) owns the connector: snapshots, replication slots, offsets and schema history, the `EventRouter` outbox transform, and why a stalled connector fills the source database's disk. It also states the direction of influence on the DBLog story above — Netflix's watermark technique was adopted **by** Debezium, as incremental snapshots.
 - Kafka MirrorMaker 2 — cross-cluster replication for disaster recovery and geo-replication.
 
 **Schema Management**

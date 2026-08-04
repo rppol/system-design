@@ -79,6 +79,16 @@ Druid stores data as time-partitioned, columnar, compressed segments with bitmap
 
 Reach for it for interactive dashboards over event streams where queries always filter by time and group by a few dimensions — clickstream, ad analytics, operational telemetry. The costs are a multi-process cluster with its own metadata database and coordination service, awkwardness with joins and updates, and heavy overlap with ClickHouse, which delivers much of the same on a much smaller operational footprint.
 
+### Apache Iceberg
+**Short:** Open table format that gives object-storage data warehouse behaviour: ACID commits, schema evolution, hidden partitioning and time travel.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-stores/warehouse-and-olap @1, data-movement/event-streaming-and-processing @3
+
+A table is a tree of metadata files over immutable data files: each commit writes a new metadata snapshot pointing at a manifest list, so a reader sees one consistent version and a writer's commit is an atomic pointer swap. That is what makes concurrent writers, row-level deletes and rollback possible over object storage, and hidden partitioning means a query filters correctly without the author knowing the partition scheme. Schema changes are metadata-only, so renaming or reordering a column does not rewrite data.
+
+It is engine-neutral -- Spark, Flink, Trino, Snowflake and others read and write the same tables -- which is the main reason to prefer a table format over a proprietary warehouse for a shared lake. Reach for it when several engines must share one dataset with correctness guarantees; the cost is that snapshot expiry, small-file compaction and manifest maintenance become jobs somebody has to schedule.
+
 ### Apache Parquet on S3
 **Short:** Columnar Parquet files kept in S3 as the offline store for training data, backfills and analytical scans.
 **Kind:** tech

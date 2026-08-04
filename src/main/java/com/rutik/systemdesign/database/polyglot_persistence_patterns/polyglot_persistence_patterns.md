@@ -243,6 +243,8 @@ public class ProductQueryService {
 
 Debezium connects to PostgreSQL as a logical replication client. It reads WAL changes and publishes them to Kafka topics.
 
+> This module owns the **pattern** — why the outbox exists, what dual writes break, and the PostgreSQL-to-Elasticsearch worked example below. [`technologies/debezium_change_data_capture`](../../technologies/debezium_change_data_capture/debezium_change_data_capture.md) owns the **product**: the `EventRouter` SMT's defaults (`aggregateid`, `aggregatetype`, `outbox.event.${routedByValue}`) and therefore why the config below has to override all three of `route.by.field`, `table.field.event.key` and `route.topic.replacement`, plus replication-slot mechanics, snapshot modes, offsets and schema history, and the failure modes behind the war stories in §10.
+
 ```yaml
 # Debezium PostgreSQL connector configuration
 {

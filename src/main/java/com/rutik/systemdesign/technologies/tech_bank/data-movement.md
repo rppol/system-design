@@ -69,6 +69,16 @@ You write a DAG in Python: tasks are operator instances, dependencies are `>>` e
 
 The rule people learn late is that Airflow is an orchestrator, not a compute engine: tasks should trigger Spark, dbt, or a training job and let data move through storage, because passing real data between tasks via XCom pushes it through the metadata DB. Reach for it for scheduled batch work with real dependency structure; it is a poor fit for streaming, sub-minute latency, or a workflow that branches differently for every event.
 
+### Amazon Kinesis
+**Short:** AWS-managed streaming service whose Data Streams shards carry ordered records for a fixed retention window.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2
+
+A stream is divided into shards, each an ordered sequence with its own throughput ceiling, and the partition key decides which shard a record lands on -- the same design decision Kafka's partition key makes, with the same consequence that ordering exists per shard and never per stream. Consumers track their own position through the Kinesis Client Library or enhanced fan-out, and records are retained for a configurable window rather than indefinitely, so replay is bounded by retention rather than by disk.
+
+Reach for it when the workload is already inside AWS and you would rather size shards than operate brokers; provisioned mode makes you manage shard counts while on-demand scales for you at a higher unit cost. It is the usual sink for a Kafka-free Debezium Server deployment, and the tradeoff against Kafka is fewer moving parts against a shorter retention window and a weaker replay story.
+
 ### Amazon MSK
 **Short:** AWS-managed Apache Kafka: provisioned or serverless brokers with tiered storage, IAM auth and less tuning surface.
 **Kind:** tech
@@ -140,6 +150,16 @@ The two jobs it is reached for most are real-time feature computation and consum
 A topic is split into partitions, each an append-only log on disk replicated across brokers, and consumers track their own offset — so reading is a pointer move, and a new consumer group can replay the whole retained history without the producer knowing. Ordering is guaranteed per partition, never per topic, which is why the partition key is the central design decision: anything that must stay ordered together has to hash to the same partition. Cluster metadata is managed by a quorum of KRaft controllers rather than a separate ZooKeeper ensemble.
 
 Reach for it when many independent consumers need the same durable stream, or when replay matters — event sourcing, projections, saga event distribution. A work queue with one consumer and no replay requirement is better served by a simpler broker.
+
+### Apache Pulsar
+**Short:** Messaging and streaming platform that separates stateless brokers from BookKeeper storage, so a broker can be replaced without moving data.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, data-movement/message-broker @2
+
+A topic's data lives in BookKeeper ledgers rather than on the broker's own disk, which is the architectural difference that matters: a failed broker's topics are immediately servable by any other broker, with no re-replication step. On top of that sits a richer subscription model than a partitioned log usually offers -- exclusive, failover, shared and key-shared subscriptions let one topic behave as a queue or as a stream depending on the consumer, and tiered storage offloads older ledgers to object storage.
+
+Reach for it when the multi-tenancy, geo-replication or queue-and-stream duality is worth a second stateful system in the deployment, or when broker replacement without data movement is an operational requirement. The cost is exactly that second system: BookKeeper and ZooKeeper are their own operational surfaces, and the ecosystem around Kafka remains considerably larger.
 
 ### Apache Spark
 **Short:** Distributed compute engine for large-scale batch and streaming jobs; the usual home of offline feature computation.
@@ -451,6 +471,26 @@ Debezium usually runs as a source connector inside Kafka Connect, reading Postgr
 
 This is the standard mechanism behind the transactional outbox — write the business row and an outbox row in one local transaction, let Debezium publish it — and behind keeping search indexes, caches and analytics warehouses in step without dual writes. The operational hazard is on the database side: a stopped connector means an unconsumed replication slot, and Postgres will retain WAL indefinitely for it until the primary's disk fills.
 
+### Debezium Engine
+**Short:** Embeddable library that runs a Debezium connector inside your own JVM and hands each change event to a callback.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/event-streaming-and-processing @1
+
+The `debezium-embedded` artifact hosts the same connector code Kafka Connect would run, minus Connect itself: you configure a connector, supply a change consumer, and the engine drives snapshot and streaming in your process. `AsyncEmbeddedEngine` has been the only implementation since 3.2, replacing the older single-threaded engine. Offsets and, where the connector needs one, schema history are stored wherever you point them -- a file, a database table, Redis or Kafka.
+
+Reach for it when the consumer is the application and a broker in the path would only add latency, or when you are building a product that embeds change capture. What you take on is everything Connect was doing for you: supervision, restart, offset durability and back-pressure are now your code's responsibility, and the default file-based offset store is not durable on ephemeral infrastructure.
+
+### Debezium JDBC sink connector
+**Short:** Kafka Connect sink that consumes Debezium change events and applies them to a relational target as upserts and deletes.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/event-streaming-and-processing @1
+
+It reads either the full change envelope or an already-flattened record, derives the primary key from the message key, and writes an upsert for creates and updates and a delete for tombstones, so a source-to-relational-sink pipeline needs no third-party connector and no custom consumer. Table and column names can be mapped, schema evolution can create or alter the target table, and batching is configurable so a high-volume stream does not become one statement per row.
+
+Reach for it when the destination is an ordinary SQL database and the transformation is nothing more than shape. Its insert mode and primary-key mode are the two settings that decide correctness under redelivery, and getting them wrong turns at-least-once delivery into duplicate rows rather than idempotent writes.
+
 ### Debezium MongoDB connector
 **Short:** Kafka Connect source that turns MongoDB change streams into an ordered stream of change-data-capture events.
 **Kind:** tech
@@ -460,6 +500,46 @@ This is the standard mechanism behind the transactional outbox — write the bus
 MongoDB exposes no write-ahead log to outside readers, so this connector opens a change stream -- the server-side resumable feed built on the oplog -- and converts each change into a Kafka record keyed by the document id. It snapshots the collections first and then switches to streaming, and it stores the change stream's resume token as its offset so a restarted connector continues rather than re-snapshotting. Full before-images require pre- and post-image capture enabled on the collection; without it an update event carries only the changed fields.
 
 Reach for it to keep a search index, cache or warehouse in step with a collection, or to run a transactional outbox in a document store. The trap is oplog retention: if the connector is down longer than the oplog window the resume token expires, and recovery means a fresh snapshot of the entire collection while the topic backfills. Size the oplog for your worst realistic outage, not for normal operation.
+
+### Debezium Operator
+**Short:** Kubernetes operator that reconciles a DebeziumServer custom resource into a running Debezium Server deployment.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/event-streaming-and-processing @1, platform-delivery/kubernetes-and-orchestration @2
+
+The custom resource declares the source connector's configuration, the sink, the offset and schema-history storage, and the runtime image, and the operator materialises the deployment, config secret and volumes for it. That turns a Debezium Server pipeline into a GitOps artifact instead of a properties file somebody copied onto a node, and it is the piece Debezium Platform drives underneath its UI.
+
+Reach for it when you run Debezium Server on Kubernetes and want the pipeline declared alongside the rest of your manifests. It does not manage Kafka Connect -- a Connect-hosted Debezium is Strimzi's territory -- and the operator does not absolve you of choosing a durable offset store, which is still the most common way a Debezium Server pipeline loses its position.
+
+### Debezium Platform
+**Short:** Web UI and control layer for Debezium Server pipelines, built as a Conductor backend plus a Stage front end.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/event-streaming-and-processing @1, platform-delivery/kubernetes-and-orchestration @3
+
+Conductor holds pipeline definitions -- source, transforms, sink -- and drives the Debezium Operator to run them, while Stage is the browser interface for authoring and watching them. It replaced the `debezium-ui` project, whose repository was archived in September 2025, and it is the project's answer to managing capture pipelines without hand-editing properties files.
+
+The expectation to correct before deploying it: it manages Debezium Server, not Kafka Connect. Teams running Debezium as a Connect connector reach for it as "the Debezium UI" and find it drives a different runtime entirely; for Connect the management surface remains the Connect REST API and whatever console the Kafka distribution ships.
+
+### Debezium Quarkus Outbox Extension
+**Short:** Quarkus extension that writes and immediately deletes a transactional outbox row when your code fires a CDI event.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/event-streaming-and-processing @1, apis-frameworks/web-framework-and-http-client @3
+
+You fire a CDI event implementing `ExportedEvent` and the extension inserts the corresponding row into the outbox table inside the current transaction, then deletes it in the same transaction. The delete is the clever part: the row exists only long enough for the write-ahead log to record it, so change capture sees the insert while the table itself stays empty and never needs a janitor.
+
+Reach for it in Quarkus services already using the outbox pattern with Debezium's EventRouter transform on the read side, since the two are designed against the same default column names. It requires Java 21, it assumes a JTA transaction is in scope, and it is Quarkus-specific -- Spring services implement the same shape by hand or with an outbox library of their own.
+
+### Debezium Server
+**Short:** Standalone Quarkus application that runs one Debezium connector and writes change events to a non-Kafka sink.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/event-streaming-and-processing @1
+
+It wraps the embedded engine in a supervised process configured by a properties file, with sink adapters for Kinesis, Google Pub/Sub, Pulsar, Redis Streams, NATS JetStream, RabbitMQ, HTTP and others. That removes Kafka and Kafka Connect from the deployment entirely, which is the right trade when Kafka would exist for no reason other than to carry change data, and the wrong one when several independent consumers need to replay the same stream.
+
+The failure to design against is the offset store: it defaults to a local file, so a container without a persistent volume loses its position on every reschedule and the connector re-snapshots. Configure a Redis or Kafka offset store, or mount a real volume. It requires Java 21, and supervision, restart and back-pressure are the operator's responsibility rather than a cluster's.
 
 ### deequ
 **Short:** Spark library that declares data-quality constraints and computes metrics over large datasets.
@@ -551,11 +631,31 @@ It implements the transactional outbox in Java: your service writes its business
 
 Eventuate Tram Sagas layers orchestrated sagas on top, with a saga definition that names each participant's command and its compensating command. Reach for it in Spring/JPA microservices that want correct event publishing without hand-rolling an outbox; if you already run Debezium for CDC or a durable workflow engine for orchestration, those cover the same ground.
 
+### Fivetran
+**Short:** Managed ELT service with prebuilt connectors that land SaaS and database sources into a warehouse on a schedule.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, data-movement/data-quality-and-lineage @3
+
+Connectors are fully managed: schema detection, incremental syncs, log-based change capture for the database sources, automatic handling of upstream schema changes, and dbt transformation runs on the loaded tables. The appeal is that nobody on your team maintains a connector, a replication slot or an offset store, which is most of the operational surface of a self-hosted capture pipeline.
+
+The cost model is the thing to check before adopting it: pricing is per monthly active row, so a nightly batch that rewrites fifty million rows costs the same whether or not any value changed. Reach for it when the destination is one warehouse and the sources are long-tail SaaS APIs; a self-hosted Debezium pipeline stays cheaper and far more controllable for high-volume database replication with several consumers.
+
 ### FlatFileItemReader
 **Short:** Spring Batch reader that streams CSV or fixed-width lines into domain objects with restartable read state.
 **Kind:** api
 **Lang:** java
 **Roles:** data-movement/batch-and-distributed-compute @1, apis-frameworks/aop-middleware-and-scheduling @2
+
+### Flink CDC
+**Short:** Flink connector suite that embeds Debezium's capture code in a job, streaming database changes without Kafka Connect.
+**Kind:** tech
+**Lang:** java
+**Roles:** data-movement/event-streaming-and-processing @1, data-movement/batch-and-distributed-compute @3
+
+The connectors run inside the Flink job rather than in a separate runtime, so a pipeline is one system instead of three: capture, transformation with full stream SQL, and the sink all live in the same checkpointed dataflow, and exactly-once to the sink comes from Flink's checkpoints plus a two-phase-commit sink rather than from Kafka transactions. Its pipeline connectors also handle whole-database synchronisation and schema evolution as a first-class feature.
+
+Reach for it when Flink already exists and the shape is one source, some transformation and one sink. The moment a second consumer appears the calculus inverts: each job re-reads the source, which on PostgreSQL means another replication slot on the primary with its own write-ahead-log retention, and that is precisely what a durable log in the middle exists to avoid.
 
 ### Flowable
 **Short:** BPMN workflow engine with modelled processes, human tasks and timers; also RxJava's Flowable stream type.
@@ -576,6 +676,16 @@ Reach for it for long-running, human-in-the-loop or approval-shaped processes; i
 Composer runs Airflow on GKE inside your project: DAG files sync from a Cloud Storage bucket, the scheduler, web server and workers run as cluster workloads, logs and metrics land in Cloud Logging and Monitoring, and workers autoscale between bounds you set. Later generations hide most node management, and the environment's service account is what governs the pipeline's access to BigQuery, Dataflow, Pub/Sub and everything else in the project.
 
 Reach for it when the pipeline mostly orchestrates Google Cloud services and you want Airflow's operators without owning the scheduler and its database. The costs are the familiar managed-Airflow ones: upgrades on the provider's cadence, PyPI dependency installs that can fail an environment update, and a bill that accrues whether or not any DAG runs. MWAA and Astronomer Astro are the equivalents, and self-hosting on Kubernetes is cheaper with a platform team.
+
+### Google Cloud Datastream
+**Short:** Google Cloud's serverless change-data-capture service, streaming from PostgreSQL, MySQL, Oracle and SQL Server into BigQuery or storage.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, data-access/replication-ha-and-backup @3
+
+It reads the source's own replication log, performs a backfill and then streams the delta, and writes into BigQuery or Cloud Storage with no infrastructure to size. Because it is managed, the replication slot, the offset store and the schema history -- the three objects that make self-hosted capture operationally demanding -- are the provider's problem rather than yours.
+
+Reach for it when the destination is BigQuery, there is one consumer, and nobody on the team wants to be paged about a replication slot. It is point-to-point, so it gives you no durable fan-out to several independent consumers and little control over the event shape; that is the boundary at which a self-hosted pipeline over a log starts to pay for itself.
 
 ### Google Pub/Sub
 **Short:** GCP's managed pub/sub messaging service: auto-scaled topics and subscriptions over HTTP or gRPC.
@@ -677,6 +787,16 @@ The three differ mainly in what survives a subscriber being absent. Kafka retain
 
 The choice follows from the consequence of a lost message. Cross-instance WebSocket fan-out, cache invalidation and presence updates lose nothing by using Redis. Notification and integration events inside AWS fit SNS, normally with a queue per consumer so the backlog is durable. Anything another team will later want to re-read, audit or rebuild state from belongs in Kafka, and paying its operational cost for a fire-and-forget signal is the common overcorrection.
 
+### ksqlDB
+**Short:** Streaming SQL engine over Kafka that turns continuous queries into Kafka Streams topologies with no application code.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1
+
+You declare streams and tables over topics and write persistent queries in SQL; the engine compiles each into a Kafka Streams topology, runs it in the ksqlDB server, and writes results back to a topic. Joins, windowed aggregations and stream-table enrichment are all expressible without a JVM project, and pull queries can read the materialised state directly for simple lookups.
+
+It fits naturally over a change stream, where the usual job is joining a change-data-capture topic against a reference table and writing an enriched result. The limits arrive with complexity: it is Kafka-only, the SQL dialect covers less than Flink's, and a topology that outgrows the dialect has to be rewritten as a Kafka Streams application anyway, so choose it when the query really is the whole job.
+
 ### KurrentDB
 **Short:** Purpose-built event store: append-only streams, optimistic concurrency and native subscriptions; formerly EventStoreDB.
 **Kind:** tech
@@ -772,6 +892,26 @@ Reach for it when you already run NATS for low-latency request-reply and now nee
 The standard defines a run event -- a JSON document naming a job, a run id, a state transition, and the input and output datasets -- plus facets, versioned extension objects that carry schema, column-level lineage, data-quality metrics or anything else a producer wants to attach without changing the core model. Integrations for Airflow, Spark, dbt, Flink and Dagster emit these events as jobs execute, so lineage is captured from actual runs rather than reverse-engineered from SQL after the fact.
 
 Reach for it to avoid coupling pipelines to one catalog vendor: the same emitters work whether events land in Marquez, DataHub, OpenMetadata or a commercial platform, which makes the backend a replaceable decision. What a specification cannot give you is the product -- it collects events, it does not store, visualize or govern them -- and coverage depends on each integration's quality, with column-level lineage still uneven across producers.
+
+### OpenLogReplicator
+**Short:** Open-source C++ reader of Oracle redo logs that emits change events without LogMiner or a GoldenGate licence.
+**Kind:** tech
+**Lang:** cpp
+**Roles:** data-movement/event-streaming-and-processing @1, data-access/replication-ha-and-backup @3
+
+It parses Oracle's redo log files directly, in a separate process, rather than mining them through the database's own LogMiner package -- which is what removes the CPU and I/O cost that LogMiner imposes on the source instance. Output can go to a network endpoint or a file, and Debezium's Oracle connector can drive it as the `OLR` adapter instead of LogMiner or XStream.
+
+Reach for it when Oracle change capture is stalling on either of the two usual blockers: LogMiner is too expensive on a busy production instance, and XStream requires a GoldenGate licence nobody will buy. What you take on is a less-travelled path -- another process to deploy and monitor, and a much smaller community than the LogMiner adapter has.
+
+### Oracle GoldenGate
+**Short:** Oracle's commercial replication product, whose XStream API is one of the ways a change-capture connector reads Oracle.
+**Kind:** tech
+**Lang:** *
+**Roles:** data-movement/event-streaming-and-processing @1, data-access/replication-ha-and-backup @2
+
+It captures committed changes from the redo stream and applies them to heterogeneous targets, with its own trail files, extract and replicat processes and conflict handling, and it is the product Oracle shops reach for when replication has to be supported rather than assembled. Its XStream API exposes that capture to outside readers, which is how Debezium's Oracle connector can push changes rather than mine them.
+
+The decisive fact is commercial rather than technical: XStream requires a GoldenGate licence, so an Oracle capture project frequently chooses LogMiner or OpenLogReplicator on cost grounds despite XStream being the lighter option for the source instance. Confirm the licence position before designing around it.
 
 ### Pachyderm
 **Short:** Kubernetes-native data versioning and pipeline system giving every run content-addressed, reproducible lineage.

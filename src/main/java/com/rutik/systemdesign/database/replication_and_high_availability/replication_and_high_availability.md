@@ -628,6 +628,8 @@ Setting `max_slot_wal_keep_size = 10GB` removes the countdown entirely: past tha
 | WAL-G           | WAL archiving + continuous backup         | PostgreSQL   |
 | Debezium        | CDC from replication log to Kafka         | PG/MySQL/Mongo|
 
+This module owns logical replication and the replication slot as general primitives. [`technologies/debezium_change_data_capture`](../../technologies/debezium_change_data_capture/debezium_change_data_capture.md) owns Debezium's own contribution to them: `flush.lsn.source`, `heartbeat.interval.ms` defaulting to 0, the idle-captured-table case where a healthy connector still cannot advance the slot, `lsn.flush.timeout.action`, and the four-quadrant recovery table for a lost offset or schema history.
+
 ---
 
 ## 12. Interview Questions with Answers

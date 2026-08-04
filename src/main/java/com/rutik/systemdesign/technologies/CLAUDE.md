@@ -33,7 +33,7 @@ collisions explicitly in the module's intro — e.g. `nvidia_triton_inference_se
 (OpenAI Triton, the GPU kernel DSL). Same word, unrelated products; both files must
 say so on first mention.
 
-**Four disambiguation precedents, all by extending the slug rather than adding a marker:**
+**Five disambiguation precedents, all by extending the slug rather than adding a marker:**
 
 1. *Vendor differs from a same-named product* — spell out the full product descriptor.
    `nvidia_triton_inference_server` (2026-07) took this route rather than
@@ -77,10 +77,31 @@ say so on first mention.
    follow the ENGINEERING name — repo, module path, package, docs domain — not the
    marketing or corporate-ownership name. Put the ownership fact in §1 instead**, which
    `hashicorp_vault.md` does under `### Vendor, licence and governance`.
+5. *Vendor is a corporate SPONSOR whose own same-named product is a DIFFERENT artifact, and
+   the product name is a single coined token with no built-in descriptor* — extend with the
+   product's own **category term**. `debezium_change_data_capture` (2026-08-04) took this
+   route, and it is precedent 2's mechanic reached for a different reason: Temporal extended
+   because the vendor half *degenerated*, Debezium extends because the vendor half is
+   *wrong*. `redhat_debezium` names the **Red Hat build of Debezium**, a separately
+   versioned downstream product inside Streams for Apache Kafka with its own lifecycle —
+   so the slug would name the distribution while the page teaches upstream. `cncf_debezium`
+   is unavailable: Debezium is **not** a CNCF project (Apache 2.0, community-governed, no
+   foundation). Precedent 3's mechanic yields nothing either — Envoy resolved to
+   `envoy_proxy` because its self-name carries a descriptor (`envoyproxy.io`), while
+   Debezium's self-name is one coined token (`debezium.io`, org `debezium`, docs titled
+   "Debezium Documentation") with no second token to borrow. The category term also states
+   the boundary against [`backend/kafka_deep_dive`](../backend/kafka_deep_dive/kafka_deep_dive.md)
+   in the module id itself, which is exactly the work precedent 2's term does against
+   `apache_airflow`. **Spelled out, not `debezium_cdc`, for a checkable reason:**
+   `titleize()` in `game/app.js` title-cases each token against the `ACRONYMS` map and
+   **`cdc` is not in it** (the map has `cdn`, `cqrs`, `cd`, `ci`), so `debezium_cdc` would
+   render "Debezium **Cdc**" in the reader nav, the command palette, `fileLabel()` and the
+   Study tree. Do NOT fix that by adding `cdc` to `ACRONYMS` — that edits game code to
+   rescue a naming choice and title-cases `cdc` in every unrelated file label.
 
 ---
 
-## Module List — 6 Modules
+## Module List — 7 Modules
 
 Listed in `STUDY_ORDER.technologies` order, which pairs the two orchestration modules
 and then the two serving modules as contrast pairs, with `envoy_proxy` **appended** at
@@ -95,6 +116,15 @@ domain rather than completing the second pair. That slot is therefore **still op
 future traffic/edge page belongs adjacent to `envoy_proxy`, which now means inserting at
 position 6 and pushing Vault to 7, not appending at 7. Do not append blindly.
 
+`debezium_change_data_capture` is **appended at position 7** for the same kind of reason
+and it too leaves the edge pair slot open: Debezium moves *data between stores*, not
+*traffic to workloads*, so it does not complete Envoy's edge/data-plane pair and it was
+deliberately not inserted at 3 beside Temporal, which would split the orchestration pair
+this list protects. Appending it opens a **fourth pair slot at 8** for a future
+data-integration page (a stream processor, a table format, a warehouse-ingest technology),
+which belongs adjacent to Debezium. So there are now two open slots to respect: traffic/edge
+next to `envoy_proxy`, and data-integration next to `debezium_change_data_capture`.
+
 | Dir | Category | Key Concepts | Version Studied |
 |-----|----------|-------------|-----------------|
 | [`apache_airflow/`](apache_airflow/apache_airflow.md) | Workflow orchestration | Scheduler loop, executors (Local/Celery/Kubernetes), DAGs, deferrable operators, backfills, HA scheduler | Airflow 3.3.0 |
@@ -103,6 +133,7 @@ position 6 and pushing Vault to 7, not appending at 7. Do not append blindly.
 | [`intel_openvino/`](intel_openvino/intel_openvino.md) | CPU/edge inference & model optimization | `ov::Core` + device plugins (CPU/GPU/NPU), IR (`.xml`/`.bin`), `ovc`/`convert_model`, AUTO/HETERO + performance hints, async infer requests, NNCF INT8/INT4, model caching, `PrePostProcessor`, OVMS, `openvino-genai` | OpenVINO 2026.2 |
 | [`envoy_proxy/`](envoy_proxy/envoy_proxy.md) | L7 proxy / service-mesh data plane | Listener/filter-chain/route/cluster/endpoint model, xDS (LDS/RDS/CDS/EDS/SDS, ADS, Delta), LB policies plus locality/priority/panic mode, outlier detection and the `enforcing_*` trap, circuit breaking as five resource ceilings, retry budgets, the seven-layer timeout stack, stats cardinality, `%RESPONSE_FLAGS%`, Wasm/Lua/ext_authz/ext_proc/dynamic modules, admin interface and draining | Envoy 1.39.0 |
 | [`hashicorp_vault/`](hashicorp_vault/hashicorp_vault.md) | Secrets management / identity broker | Barrier and the four-layer key hierarchy, seal/unseal and why recovery keys are not unseal keys, Integrated Storage, every secrets-engine family, the KV v2 policy trap, **leases and the lease-count arithmetic** (halving the TTL changes nothing and doubles issuance), auth methods and secret-zero, `bound_claims` vs `claim_mappings`, policies and identity, response wrapping, audit refusal, Agent/VSO/CSI, quotas, rekey vs rotate, and the OpenBao delta | Vault 2.0.3, OpenBao 2.6.1 |
+| [`debezium_change_data_capture/`](debezium_change_data_capture/debezium_change_data_capture.md) | Change data capture | The two questions — where do I start, can I keep reading; logical decoding and output plugins; what a replication slot pins (`restart_lsn`, `confirmed_flush_lsn`, `catalog_xmin`); `flush.lsn.source`, heartbeats and the idle-captured-table trap; `REPLICA IDENTITY` and the `before: null` consequence; TOAST and `__debezium_unavailable_value`; snapshot modes and their removals; the incremental-snapshot watermark algorithm; the four-quadrant position-loss recovery table and why a lost slot is data loss; the never-compact schema-history topic; ordering per key / per table / never across tables; `ExtractNewRecordState` and the five tombstone modes; the `EventRouter` defaults; why `tasks.max` is ignored | Debezium 3.6.0.Final |
 
 ---
 
@@ -150,7 +181,7 @@ when that happens.
 
 **16 Q&As minimum per module** — the repo floor is 15 (root `CLAUDE.md`); this section
 standardizes one above the floor, and flagship modules go well past it when the
-technology's surface demands it (the flagship modules carry 22, 30 and 32). Format from the start: `**Q: <question>?**` bolded
+technology's surface demands it (the flagship modules carry 22, 30, 32 and 34). Format from the start: `**Q: <question>?**` bolded
 question prefixed `Q: `, plain-text answer, first sentence a self-contained direct
 answer 15–220 characters (see root `CLAUDE.md` Interview Q&A Rules and the Game/Reader
 Q&A extraction contract — the length window and bold-question rule are load-bearing
@@ -180,11 +211,12 @@ section), so this is a deliberate omission, not a gap.
 
 **Status 2026-08-04 (owner-set):** the section reached **4 modules** with
 `temporal_durable_execution`, crossing the threshold below, and **5 modules** with
-`envoy_proxy` and **6 modules** with `hashicorp_vault`, all the same day — and the tier
+`envoy_proxy`, **6 modules** with `hashicorp_vault` and **7 modules** with
+`debezium_change_data_capture`, all the same day — and the tier
 decision was
 **deliberately deferred** to a separate change once all four planned technology pages
-have landed. The deferral **still stands** at 6 modules; `envoy_proxy` and
-`hashicorp_vault` both deliberately
+have landed. The deferral **still stands** at 7 modules; `envoy_proxy`,
+`hashicorp_vault` and `debezium_change_data_capture` all deliberately
 carry no `<!-- study-paths -->` block. Do not read the un-tiered state as an oversight, and do not add a
 `<!-- study-paths -->` block to one module on its own: tiering is a section-wide
 decision plus a one-time `README.md` marker-pair setup, and doing it piecemeal produces
