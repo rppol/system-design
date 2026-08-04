@@ -280,7 +280,7 @@ The two pointers start `3` apart and every step closes that gap by at least `1`,
 | Problem | Difficulty | Variation | Recognition cue / twist |
 |---|---|---|---|
 | [Valid Palindrome (LC 125)](https://leetcode.com/problems/valid-palindrome/) | Easy | Opposite ends on string | Skip non-alphanumeric chars while comparing |
-| [Two Sum II — Sorted (LC 167)](https://leetcode.com/problems/two-sum-ii-input-array-is-sorted/) | Easy | Base pair-sum template | Array guaranteed sorted, return 1-indexed |
+| [Two Sum II — Sorted (LC 167)](https://leetcode.com/problems/two-sum-ii-input-array-is-sorted/) | Medium | Base pair-sum template | Array guaranteed sorted, return 1-indexed |
 | [Move Zeroes (LC 283)](https://leetcode.com/problems/move-zeroes/) | Easy | Same-direction compaction | Maintain relative order of non-zero elements |
 | [Remove Duplicates from Sorted Array (LC 26)](https://leetcode.com/problems/remove-duplicates-from-sorted-array/) | Easy | Same-direction compaction | In-place, return new length |
 | [Reverse String (LC 344)](https://leetcode.com/problems/reverse-string/) | Easy | Opposite ends, swap | Trivial but establishes the pattern |
@@ -292,7 +292,7 @@ The two pointers start `3` apart and every step closes that gap by at least `1`,
 | [Sort Array By Parity (LC 905)](https://leetcode.com/problems/sort-array-by-parity/) | Easy | Same-direction partition | Partition by predicate, not value |
 | [Is Subsequence (LC 392)](https://leetcode.com/problems/is-subsequence/) | Easy | Two-sequence advance | Advance the pattern pointer only on a match |
 | [Squares of a Sorted Array (LC 977)](https://leetcode.com/problems/squares-of-a-sorted-array/) | Easy | Opposite-ends merge | Largest squares come from the two ends; fill the result back-to-front |
-| [Backspace String Compare (LC 844)](https://leetcode.com/problems/backspace-string-compare/) | Medium | Two-sequence merge from the back | Scan right-to-left, skipping characters consumed by `#` |
+| [Backspace String Compare (LC 844)](https://leetcode.com/problems/backspace-string-compare/) | Easy | Two-sequence merge from the back | Scan right-to-left, skipping characters consumed by `#` |
 | [Trapping Rain Water (LC 42)](https://leetcode.com/problems/trapping-rain-water/) | Hard | Opposite ends + running max | Track left_max/right_max; move pointer with smaller max |
 | [Minimum Size Subarray Sum (LC 209)](https://leetcode.com/problems/minimum-size-subarray-sum/) | Medium | Boundary case (anti-signal) | Often miscategorized as two pointers — it's sliding window |
 
@@ -359,7 +359,7 @@ def two_sum_sorted_fixed(nums: list[int], target: int) -> list[int]:
 ## 11. Interview Q&A
 
 **Q: Why does two pointers require the array to be sorted (or sortable)?**
-Because the algorithm's correctness depends on monotonicity: moving `left` right strictly increases the candidate sum, and moving `right` left strictly decreases it. Without sorted order, you cannot conclude that "the current pair sum is too small, so the *only* way to increase it is to move `left`" — there could be a larger value anywhere in the array. Sorting establishes the monotonic structure that lets you discard half the remaining search space at each step, which is what gives O(n) instead of O(n^2).
+Because the algorithm's correctness depends on monotonicity: moving `left` right can only increase the candidate sum, and moving `right` left can only decrease it (never strictly, since duplicates leave it unchanged — which is exactly why the 3Sum dedup checks compare against the *adjacent* element). Without sorted order, you cannot conclude that "the current pair sum is too small, so the *only* way to increase it is to move `left`" — there could be a larger value anywhere in the array. Sorting establishes the monotonic structure that lets you discard half the remaining search space at each step, which is what gives O(n) instead of O(n^2).
 
 **Q: If sorting costs O(n log n), how is two pointers ever better than a hashmap approach which is O(n)?**
 For a single pair-sum query, a hashmap *is* asymptotically better (O(n) vs O(n log n)). Two pointers wins when (a) the input is already sorted, (b) you need O(1) extra space (hashmap is O(n)), or (c) you need to find *all* pairs/triplets without duplicates — the sorted order makes deduplication trivial (skip adjacent equal elements), whereas deduplicating hashmap-based results requires extra set bookkeeping.

@@ -126,7 +126,8 @@ Sliding Window Maximum -- monotonic DEQUE (decreasing values)
 def next_greater_elements(nums: list[int]) -> list[int]:
     n = len(nums)
     result = [-1] * n
-    stack: list[int] = []          # holds indices; nums[stack] strictly decreasing
+    stack: list[int] = []          # holds indices; nums[stack] non-increasing
+                                   # (the strict `>` pop keeps equal values)
 
     for i in range(n):
         while stack and nums[i] > nums[stack[-1]]:
@@ -159,7 +160,8 @@ def daily_temperatures(temperatures: list[int]) -> list[int]:
 from collections import deque
 
 def max_sliding_window(nums: list[int], k: int) -> list[int]:
-    dq: deque[int] = deque()       # holds indices; nums[dq] strictly decreasing
+    dq: deque[int] = deque()       # holds indices; nums[dq] non-increasing
+                                   # (the strict `<` pop keeps equal values)
     result = []
 
     for i, num in enumerate(nums):
@@ -289,7 +291,7 @@ Index `6` triggers three pops in one outer iteration — the scary-looking case.
 
 - **Next/previous greater/smaller element** — the base template; direction (left-to-right or right-to-left scan) and comparison (`>`, `>=`, `<`, `<=`) determine which of the four variants you get ([Next Greater Element I (LC 496)](https://leetcode.com/problems/next-greater-element-i/))
 - **Distance to next greater** — instead of the *value*, return the *index distance* ([Daily Temperatures (LC 739)](https://leetcode.com/problems/daily-temperatures/))
-- **Stock span** — "previous greater or equal" framed as a running count ([Online Stock Span (LC 901)](https://leetcode.com/problems/online-stock-span/))
+- **Stock span** — "previous strictly greater" framed as a running count: pop while the top price is `<=` today's, and the span is the distance back to the first strictly greater price ([Online Stock Span (LC 901)](https://leetcode.com/problems/online-stock-span/))
 - **Largest rectangle / maximal rectangle** — "previous/next smaller" used to bound a rectangle's width; extends to 2D by treating each row as a histogram ([Maximal Rectangle (LC 85)](https://leetcode.com/problems/maximal-rectangle/))
 - **Trapping rain water (stack variant)** — pop when a taller bar is found, computing trapped water layer by layer ([Trapping Rain Water (LC 42)](https://leetcode.com/problems/trapping-rain-water/) — also solvable with two pointers, see [two_pointers.md](two_pointers.md))
 - **Monotonic deque for sliding window max/min** — the deque variant; front of deque is always the current window's extremum ([Sliding Window Maximum (LC 239)](https://leetcode.com/problems/sliding-window-maximum/))
@@ -304,7 +306,7 @@ Index `6` triggers three pops in one outer iteration — the scary-looking case.
 |---|---|---|---|
 | [Next Greater Element I (LC 496)](https://leetcode.com/problems/next-greater-element-i/) | Easy | Base template | Map results back via a lookup of `nums2` |
 | [Daily Temperatures (LC 739)](https://leetcode.com/problems/daily-temperatures/) | Medium | Distance, not value | Store index, return `i - prev_index` |
-| [Online Stock Span (LC 901)](https://leetcode.com/problems/online-stock-span/) | Medium | Streaming "previous greater or equal" | Stack stores `(price, span)` pairs |
+| [Online Stock Span (LC 901)](https://leetcode.com/problems/online-stock-span/) | Medium | Streaming "previous strictly greater" | Stack stores `(price, span)` pairs |
 | [Next Greater Element II (LC 503)](https://leetcode.com/problems/next-greater-element-ii/) | Medium | Circular array | Iterate `2n` times, index `i % n` |
 | [Largest Rectangle in Histogram (LC 84)](https://leetcode.com/problems/largest-rectangle-in-histogram/) | Hard | Width via prev/next smaller | Append sentinel 0 to flush stack |
 | [Maximal Rectangle (LC 85)](https://leetcode.com/problems/maximal-rectangle/) | Hard | 2D extension | Per-row histogram + LC 84 |

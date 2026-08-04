@@ -348,8 +348,8 @@ the loop `C -> E -> F -> C`. Only the in-degree of `C` changes, from 2 to 3.
   the stuck nodes, each waiting on the next:
 
       C --> E --> F
-      ^                 |
-      +-----------------+
+      ^           |
+      +-----------+
 
   every one of C, E, F has in-degree 1, and the only edge that could
   zero it comes from another member of the same cycle -- so none of
@@ -699,9 +699,10 @@ resulting order matches the target exactly.
 **Why doesn't Union-Find work for detecting cycles in directed graphs the way
 it does for undirected graphs?**
 Union-Find merges two nodes into the same set when an edge connects them,
-treating the edge as bidirectional for connectivity purposes. But a directed
-cycle `a -> b -> a` and two separate directed edges `a -> b` and `b -> a` that
-*aren't* part of a cycle in context look identical to Union-Find — it can't
-distinguish edge *direction*. Detecting a directed cycle requires tracking the
+treating the edge as bidirectional for connectivity purposes. Because it can't
+distinguish edge *direction*, it reports a cycle on any DAG whose paths
+reconverge: `a -> b`, `a -> c`, `b -> d`, `c -> d` is perfectly acyclic, yet by
+the fourth edge `c` and `d` are already in the same set, and the undirected
+test declares a cycle that doesn't exist. Detecting a directed cycle requires tracking the
 current DFS path (the GRAY state in 3-color DFS) — information Union-Find
 doesn't maintain.

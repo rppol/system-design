@@ -187,23 +187,34 @@ right=1 'D': need[D]=-1                     window="AD"
 right=2 'O': need[O]=-1                     window="ADO"
 right=3 'B': need[B]=0, missing=1           window="ADOB"
 right=4 'E': need[E]=-1                     window="ADOBE"
-right=5 'C': need[C]=0, missing=0           window="ADOBEC"      VALID! len=6, best=6
-   shrink: left=0 'A', need[A]=1>0, missing=1 -> stop shrinking  window="DOBEC"
+right=5 'C': need[C]=0, missing=0           window="ADOBEC"      VALID!
+   record len=6 -> best=6
+   drop 'A' (left 0->1): need[A]=1 > 0 -> missing=1, stop        window="DOBEC"
 
-right=6 'O': need[O]=0                      window="DOBECO"
-right=7 'D': need[D]=0                      window="DOBECOD"
-right=8 'E': need[E]=0                      window="DOBECODE"
+right=6 'O': need[O]=-2                     window="DOBECO"
+right=7 'D': need[D]=-2                     window="DOBECOD"
+right=8 'E': need[E]=-2                     window="DOBECODE"
 right=9 'B': need[B]=-1                     window="DOBECODEB"
-right=10 'A': need[A]=0, missing=0          window="DOBECODEBA"  VALID! len=10 > best, but try shrink
-   shrink: left=1 'D', need[D]=1>0, missing=1 -> stop            window="OBECODEBA"
+right=10 'A': need[A]=0, missing=0          window="DOBECODEBA"  VALID!
+   record len=10 -> best stays 6
+   drop 'D' (left 1->2): need[D]=-1, still valid                 window="OBECODEBA"
+   record len=9;  drop 'O' (left 2->3): need[O]=-1, still valid  window="BECODEBA"
+   record len=8;  drop 'B' (left 3->4): need[B]=0,  still valid  window="ECODEBA"
+   record len=7;  drop 'E' (left 4->5): need[E]=-1, still valid  window="CODEBA"
+   record len=6;  drop 'C' (left 5->6): need[C]=1 > 0 -> stop    window="ODEBA"
 
-right=11 'N': need[N]=-1                    window="OBECODEBAN"
-right=12 'C': need[C]=-1                    window="OBECODEBANC"
+right=11 'N': need[N]=-1                    window="ODEBAN"
+right=12 'C': need[C]=0, missing=0          window="ODEBANC"     VALID!
+   record len=7;  drop 'O' (left 6->7): need[O]=0, still valid   window="DEBANC"
+   record len=6;  drop 'D' (left 7->8): need[D]=0, still valid   window="EBANC"
+   record len=5;  drop 'E' (left 8->9): need[E]=0, still valid   window="BANC"
+   record len=4 -> best=4
+   drop 'B' (left 9->10): need[B]=1 > 0 -> missing=1, stop       window="ANC"
 
--- end of string. final answer: best = 6 ("ADOBEC")? -- but expected is "BANC" (len 4)
+-- end of string. best = 4, the window "BANC" recorded on the last shrink burst.
 ```
 
-Wait — the trace above shows `best=6` after the first valid window, but the *correct* answer is `"BANC"` (length 4). Let's continue the shrink at `right=12` more carefully — the algorithm keeps shrinking *while* `missing == 0`, and at `right=12` we never re-entered the `while` loop because `missing` was reset to 1 at `right=10`'s shrink. The full correct trace requires tracking that after `right=12`, `need[C]` becomes 0 again (`missing=0`), which re-triggers shrinking — shrinking from `left=1` all the way to `left=9` ("BANC"), giving `best=4`. This illustrates why the `while missing == 0` loop must run to exhaustion at *every* `right` step, not just the first time validity is reached — the window can become valid multiple times as `right` advances.
+The answer surfaces only on the **last** of three separate validity episodes (`right=5`, `right=10`, `right=12`), and it depends entirely on the `while missing == 0` loop running to **exhaustion** each time. At `right=10` that means walking `left` from 1 to 6 — past four surplus characters — before the window finally breaks on `C`; a shrink that stopped at the first dropped character would leave `left=2` and never expose `"BANC"` at `right=12`. Note too that dropping a character with a *negative* `need` count (a surplus, like the `D` at index 1) does not invalidate the window: only a drop that pushes `need` back above zero does. Confusing "this character is in the window" with "this character is still needed" is the classic way this template stalls at the first valid window and reports 6 instead of 4.
 
 ---
 
@@ -331,9 +342,9 @@ flowchart LR
 
 ```python
 # BROKEN — assumes shrinking the window always decreases the sum monotonically.
-# Fails when nums contains negative numbers: shrinking can DECREASE the sum
-# below target, but expanding again might overshoot — the window state
-# oscillates and the algorithm produces wrong counts or infinite-loops logic.
+# Fails when nums contains negative numbers: a valid subarray can sit inside
+# a window whose running sum already exceeded k, so the shrink discards the
+# very prefix that made it valid — the algorithm silently undercounts.
 def subarray_sum_equals_k_broken(nums: list[int], k: int) -> int:
     left = 0
     window_sum = 0
@@ -365,7 +376,7 @@ def subarray_sum_equals_k_fixed(nums: list[int], k: int) -> int:
     return count
 ```
 
-**Trigger**: `nums = [1, -1, 0]`, `k = 0`. The broken version: at `right=0`, `window_sum=1 > 0` is false (1 > 0 is true actually — let's use `k=1`)... Concretely, with negatives, `window_sum` can decrease as `right` advances (e.g., `nums = [3, -2, 1]`, `k = 1`: subarrays `[3,-2]` sums to 1, `[1]` sums to 1, `[3,-2,1]` sums to 2 — the valid windows are not contiguous in a shrinkable sense). The broken sliding window will miss or double-count these. The prefix-sum approach correctly finds both in O(n) regardless of sign — see [prefix_sum.md](prefix_sum.md).
+**Trigger**: `nums = [3, -2, 1]`, `k = 1`. Two subarrays sum to 1 — `[3,-2]` and `[1]` — so the correct answer is `2`; the broken version returns `0`. Walk it: at `right=0` the sum is 3, which exceeds `k=1`, so the shrink fires and throws away the `3` (`left=1`, sum 0) — discarding the very element that the valid subarray `[3,-2]` needed. From then on the running sum is `-2`, then `-1`, and `window_sum == k` never holds again. The shrink was not *wrong* about the sum being too big; it was wrong to assume a too-big sum can only be repaired from the left, which is exactly the monotonicity that a negative element destroys. The prefix-sum version returns `2` regardless of sign — see [prefix_sum.md](prefix_sum.md).
 
 ---
 
@@ -412,7 +423,7 @@ Fixed-size: a single `for` loop where `right` and `left = right - k + 1` move in
 Build a `Counter` (or 26-length array) for the pattern string `s1`. Slide a fixed-size window of length `len(s1)` over `s2`, maintaining a `Counter` of the current window. At each position, compare the two counters for equality (`==` on `Counter` objects works in Python, or compare the 26-length arrays). A match means the current window is a permutation of `s1`.
 
 **Q: What if the "contiguous subarray" constraint is actually about a circular array?**
-Two common approaches: (1) concatenate the array with itself (`nums + nums`) and run the sliding window with a window-length cap of `n`, or (2) for sum-based problems, compute `total_sum - min_subarray_sum` (the complement of the minimum non-circular subarray gives the maximum circular subarray) — see [Maximum Sum Circular Subarray (LC 918)](https://leetcode.com/problems/maximum-sum-circular-subarray/).
+Two common approaches: (1) concatenate the array with itself (`nums + nums`) and run the sliding window with a window-length cap of `n`, or (2) for sum-based problems, compute `total_sum - min_subarray_sum` (the complement of the minimum non-circular subarray gives the maximum circular subarray), then take the better of that and the plain non-circular maximum. The second half is not optional: when every element is negative, `min_subarray_sum` is the whole array and the complement is the *empty* subarray, giving 0 — so guard with "if `min_subarray_sum == total_sum`, return the non-circular maximum." See [Maximum Sum Circular Subarray (LC 918)](https://leetcode.com/problems/maximum-sum-circular-subarray/).
 
 **Q: Is sliding window always O(n) space, or can it be O(1)?**
 Space depends on what's tracked, not on the pointer mechanism itself. A running sum (fixed/variable window over numeric sums) is O(1) extra space. A frequency map (Counter) is O(|Σ|) — bounded by alphabet size, often treated as O(1) if the alphabet is fixed (e.g., 26 lowercase letters). It is *not* O(n) unless you're storing per-index data structures, which is unusual for this pattern.

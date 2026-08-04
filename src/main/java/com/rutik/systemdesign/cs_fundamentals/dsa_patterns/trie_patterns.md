@@ -248,11 +248,11 @@ def find_words(board: list[list[str]], words: list[str]) -> list[str]:
 ## 4. Annotated Walkthrough
 
 **Problem**: [Word Search II (LC 212)](https://leetcode.com/problems/word-search-ii/)
-`board = [["o","a"],["e","t"]]`, `words = ["oa", "oat", "eat"]`
+`board = [["o","a"],["e","t"]]`, `words = ["oa", "oat", "at"]`
 
 **Build the trie**: insert "oa" (marks 'a' as end, `word="oa"`), then "oat"
-(extends through 'a' -> 't', marks 't' as end, `word="oat"`), then "eat"
-(separate branch from root, marks final 't' as end, `word="eat"`).
+(extends through 'a' -> 't', marks 't' as end, `word="oat"`), then "at"
+(separate branch from root, marks final 't' as end, `word="at"`).
 
 ```mermaid
 flowchart TD
@@ -265,20 +265,20 @@ flowchart TD
     classDef base    fill:#e5c07b,stroke:#f39c12,color:#1a1a1a
 
     root(["root"]) --> o("o")
-    root --> e("e")
+    root --> a2("a")
     o --> a1("a<br/>end: oa")
-    e --> a2("a")
     a1 --> t1("t<br/>end: oat")
-    a2 --> t2("t<br/>end: eat")
+    a2 --> t2("t<br/>end: at")
 
     class root io
-    class o,e,a2 req
+    class o,a2 req
     class a1,t1,t2 train
 ```
 
 Green nodes mark the three dictionary words the DFS below is hunting for;
 `oa` sits on the same path as `oat`, so finding one costs nothing extra
-toward finding the other.
+toward finding the other. Note the board's `e` at `(1,0)` matches no trie
+branch at all — a dead cell the very first character check rejects.
 
 **DFS from (0,0) = 'o'**:
 
@@ -305,11 +305,20 @@ dfs(0,0,root): board[0][0]='o', root.children has 'o' -> nxt = o-node
 ```
 
 **DFS from (0,1)='a', (1,0)='e', (1,1)='t'** (outer loop continues): from
-`(1,0)='e'`, the trie has an `e` branch — DFS finds `e -> a -> t` = "eat" via
-`(1,0) -> (0,1) -> (1,1)`, appending `"eat"`.
+`(0,1)='a'` the trie has an `a` branch — DFS walks `a -> t` = "at" via
+`(0,1) -> (1,1)`, appending `"at"`. From `(1,0)='e'` the root has no `e`
+child, so that call returns immediately; from `(1,1)='t'` the root has no `t`
+child either.
 
-**Final result**: `["oa", "oat", "eat"]` (order may vary based on traversal
+**Final result**: `["oa", "oat", "at"]` (order may vary based on traversal
 order, but all three are found).
+
+Note what the board's 4-directional adjacency does and does not allow: `(1,0)`
+touches only `(0,0)` and `(1,1)`, so a word like `"eat"` — needing `e`
+adjacent to `a` — is **unspellable here** even though all three letters are on
+the board. Diagonals are not moves, and checking that before trusting an
+example is the single most common way a hand-built Word Search trace goes
+wrong.
 
 ---
 
@@ -578,7 +587,7 @@ def dfs_broken(r, c, node, board, rows, cols, result):
 ```
 
 **Trace the bug** on `board = [["o","a"],["e","t"]]`,
-`words = ["oa", "eat"]`:
+`words = ["oa", "at"]`:
 
 ```
 Outer loop starts dfs_broken(0,0,root) for 'o':
@@ -588,28 +597,21 @@ Outer loop starts dfs_broken(0,0,root) for 'o':
   -> dfs_broken(0,1, o-node) for 'a':
        'a' matches o-node's child ("oa" found!) -> result=["oa"]
        mark board[0][1] = '#'   (NEVER RESTORED)
-       ... no further matches from here, returns
+       neighbor (1,1)='t': o-a-node has no 't' child -> dead end
+       returns
 
   dfs_broken(0,0) returns. board[0][0] is STILL '#', board[0][1] is STILL '#'.
 
-Outer loop continues to (1,0)='e':
-  dfs_broken(1,0, root) for 'e': matches root's 'e' child
-  mark board[1][0] = '#'
+Outer loop continues to (0,1) -- the start cell "at" needs:
+  board[0][1] is '#', not 'a'
+  '#' is not in root.children -> return immediately
 
-  neighbor (0,0) = '#' -> SKIPPED (but it should be 'o', irrelevant to "eat" anyway)
-  neighbor (1,1) = 't': 'e'-node has no 't' child for "eat"... wait,
-  "eat" = e-a-t, so e-node's child should be 'a'.
+Outer loop continues to (1,0)='e': 'e' not in root.children -> return
+Outer loop continues to (1,1)='t': 't' not in root.children -> return
 
-  neighbor (0,0)='#' -- this is where 'a' WOULD need to be reached via a
-  DIFFERENT path for some inputs, but here neighbor (1,1)='t' is checked:
-  't' not in e-node.children ('a' expected) -> dead end.
-
-  The only OTHER neighbor of (1,0) that could hold 'a' is (0,0) -- but it's
-  permanently '#' from the first DFS call. "eat" requires e->a->t where 'a'
-  must come from (0,1), which is ALSO permanently '#'.
-
-Result: ["oa"] only -- "eat" is silently missed because cells (0,0) and (0,1)
-were left marked '#' from the FIRST outer-loop iteration.
+Result: ["oa"] only -- "at" is silently missed. Its start cell (0,1) holds a
+perfectly good 'a', but the FIRST outer-loop iteration left it marked '#'
+and never put it back.
 ```
 
 **Fix**: restore `board[r][c] = ch` after the loop over neighbors, so each
@@ -638,10 +640,11 @@ def dfs_fixed(r, c, node, board, rows, cols, result):
 **Re-trace with the fix**: after `dfs_fixed(0,1, o-node)` finishes finding
 "oa", `board[0][1]` is restored to `'a'`. After `dfs_fixed(0,0, root)`
 finishes, `board[0][0]` is restored to `'o'`. When the outer loop reaches
-`(1,0)='e'`, both `(0,0)` and `(0,1)` are back to their original characters,
-so `dfs_fixed(1,0,root)` can correctly traverse `e -> a (via (0,1)) -> t (via
-(1,1))`, appending `"eat"`. **Final result: `["oa", "eat"]`** — both words
-found.
+`(0,1)`, the cell reads `'a'` again, so `dfs_fixed(0,1, root)` matches root's
+`'a'` child and walks on to `(1,1)='t'`, appending `"at"`. **Final result:
+`["oa", "at"]`** — both words found. The only difference between the two runs
+is one line of restore, and it is the difference between a correct answer and
+a silently short one.
 
 ---
 

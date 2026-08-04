@@ -314,11 +314,11 @@ first root at the second and never compresses. Apply
 ```
   naive (no rank, no compression)      with rank + compression
   -------------------------------      -------------------------------
-        0                                          6
+        0                                       root 0
         |                                +---+---+---+---+---+
-        1                                0   1   2   3   4   5
+        1                                1   2   3   4   5   6
         |
-        2                              find(0) = 1 hop
+        2                              find(6) = 1 hop
         |
         3                              find(any) = 1 hop
         |
@@ -326,7 +326,7 @@ first root at the second and never compresses. Apply
         |
         5
         |
-        6
+        6  <- root of the chain
 
   find(0) walks 0->1->2->3->4->5->6 = 6 hops
   find(0) on n nodes = n - 1 hops
@@ -667,10 +667,13 @@ them, then `u` and `v` were already connected via some other path — adding
 edge `(u, v)` would create a cycle. This works because undirected
 connectivity is symmetric and transitive — exactly what Union-Find's
 equivalence-class structure models. Directed graphs need **direction-aware**
-cycle detection (3-color DFS in [`topological_sort.md`](topological_sort.md))
-because `a -> b` and `b -> a` together form a cycle, but `a -> b` and `a -> c`
-(with `b` and `c` unrelated) do not — Union-Find would incorrectly treat both
-scenarios the same way (both unions of `{a,b,c}`).
+cycle detection (3-color DFS in [`topological_sort.md`](topological_sort.md)),
+because Union-Find only records "these two are now related," never which way
+the edge points. Run it on the DAG `a -> b`, `a -> c`, `b -> d`, `c -> d` and
+it reports a cycle that isn't there: by the fourth edge, `c` and `d` already
+share a root, even though the graph is perfectly acyclic. Distinguishing that
+harmless reconvergence from a real back edge is exactly what the GRAY-ancestor
+test does and Union-Find cannot.
 
 **Q: How does Union-Find fit into Kruskal's MST algorithm?**
 Sort all edges by weight ascending. For each edge `(u, v, w)` in that order,

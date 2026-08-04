@@ -210,11 +210,14 @@ further optimizations if time permits.
   sufficient; many L5 loops specifically probe space ("can you do this in
   O(1) extra space?").
 - **Stopping at the first complexity without considering whether it's
-  optimal** — even a brief "I believe O(n log k) is close to optimal here
-  because we fundamentally need to look at every element at least once, and
-  selecting top-k from an unsorted collection has an O(n log k)
-  lower bound with comparison-based heaps" shows depth, even if you don't
-  pursue the bucket-sort follow-up.
+  optimal** — even a brief "we have to examine every element at least once,
+  so O(n) is the floor for this problem; the extra `log k` is the price of
+  the heap, not something the problem forces, and a bucket-sort variant would
+  remove it" shows depth, even if you never implement the follow-up. Note the
+  shape of that sentence: it separates the *problem's* lower bound from *this
+  solution's* cost. Asserting that your current complexity IS the lower bound
+  is a common and expensive overreach — here it would be flatly wrong, since
+  §5's transcript goes on to solve the same problem in O(n).
 
 ---
 
@@ -623,12 +626,14 @@ xychart-beta
     title "45-Minute Loop - Budget Ceiling by Phase (minutes)"
     x-axis ["Understand", "Match", "Plan", "Implement", "Review", "Evaluate", "Buffer"]
     y-axis "Minutes (upper bound)" 0 --> 20
-    bar [5, 3, 5, 20, 5, 3, 7]
+    bar [5, 3, 5, 20, 5, 3, 4]
 ```
 
 Bars use the upper bound of each phase's stated range (3-5, 2-3, 3-5, 15-20,
-3-5, 2-3 min) plus the 5-7 min follow-up buffer — Implement dwarfs every other
-phase, which is exactly why it is the one most likely to run over.
+3-5, 2-3 min), which totals 41, leaving the 4-minute buffer shown at the right
+— that is the whole loop at its ceiling, and the arithmetic is worked through
+in the table below. Implement dwarfs every other phase, which is exactly why it
+is the one most likely to run over.
 
 If Implement runs long (common), it eats into Review/Evaluate first — never
 skip Understand or Match, since a wrong pattern wastes the ENTIRE remaining

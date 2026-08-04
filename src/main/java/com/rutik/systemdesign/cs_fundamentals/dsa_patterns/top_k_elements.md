@@ -417,7 +417,7 @@ def top_k_largest(nums: List[int], k: int) -> List[int]:
     return heap
 ```
 
-Re-tracing with the fix gives `heap = [3, 5, 4]` -> `{3, 4, 5}`, the correct
+Re-tracing with the fix gives `heap = [3, 4, 5]` -> `{3, 4, 5}`, the correct
 top-3. **Rule of thumb**: "k LARGEST" -> min-heap (evict small). "k SMALLEST"
 -> max-heap, i.e., negate values (evict large). Negation flips which end of
 the heap you're discarding from — get this backwards and the result is wrong
