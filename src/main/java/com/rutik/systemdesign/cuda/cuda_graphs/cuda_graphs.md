@@ -123,7 +123,7 @@ the eager cost is a *product* while the graph cost is a *constant*:
 | Symbol | What it is |
 |--------|------------|
 | `T_launch` | Fixed CPU/driver tax to submit one kernel, `5-10 us`. Independent of how long the kernel runs |
-| `N` | Number of kernel launches in the step. A 32-layer decode step issues on the order of `60` |
+| `N` | Number of kernel launches in the step. A decode step issuing five kernels per layer across 12 layers has `N = 60`; a 32-layer model at the same five-per-layer rate has `N = 160` |
 | `T_gpu` | Actual GPU execution time for the step's kernels — "a handful of microseconds" each |
 | `N x T_launch` | Total eager CPU cost. Grows linearly with node count |
 | `cudaGraphLaunch` | One submission for the whole DAG. Costs `T_launch` once, regardless of `N` |
@@ -174,9 +174,13 @@ kernels run, in what order, with what launch configuration — will be
 **identical on every replay**, and only scalar arguments or buffer pointers
 may differ. That is exactly true of a fixed-shape training step or a
 fixed-batch-size decode step run thousands of times, and exactly *not* true of
-code whose control flow depends on data (an early-exit loop, a
-variable-length sequence bucket that changes every call, a Python `if`
-branching on a tensor value). Graphs win precisely where the answer to "will
+code whose *host-side* control flow decides which kernels to issue (a Python
+`if` branching on a tensor value that has to be copied back to the CPU, a
+variable-length sequence bucket that changes the op sequence every call).
+Data-dependent branching that can be expressed *inside* the DAG — run this
+sub-graph if a device flag is set, repeat it until a device flag clears — is
+the job of a conditional node, which keeps the topology static and moves the
+decision onto the GPU. Graphs win precisely where the answer to "will
 this exact sequence of kernels run again unchanged?" is yes — and the capture
 cost is amortized over however many replays follow, so the more times you
 replay, the closer the per-replay overhead approaches zero.
@@ -196,8 +200,11 @@ replay, the closer the per-replay overhead approaches zero.
   the kernel runs for 2 microseconds or 2 milliseconds on the GPU.
 - **A graph node is more than a kernel.** Nodes can be kernel launches,
   `cudaMemcpy`/`cudaMemset` operations, host-function callbacks, child graphs
-  (graphs embedding other graphs), or event record/wait operations — the
-  graph captures the full dependency DAG among all of them, not a flat list.
+  (graphs embedding other graphs), empty (ordering-only) nodes, event
+  record/wait operations, external-semaphore signal/wait operations, memory
+  alloc/free nodes, or **conditional nodes** (IF, WHILE, SWITCH) whose body
+  graph runs based on a value a kernel writes on the device — the graph
+  captures the full dependency DAG among all of them, not a flat list.
 - **Two construction paths exist: stream capture and explicit graph
   construction.** Stream capture records ordinary CUDA stream API calls you
   would have written anyway; explicit construction builds the graph node-by-
@@ -216,6 +223,11 @@ replay, the closer the per-replay overhead approaches zero.
   dimensions, and same node count and dependency structure must hold on every
   replay; only pointer values and scalar kernel arguments are allowed to
   change between replays, and only through an explicit update mechanism.
+  The one escape hatch is a **conditional node**, whose body graph is itself
+  static but whose execution (IF), repetition count (WHILE), or selected
+  branch (SWITCH) is decided at replay time by a device-written condition
+  value — so data-dependent control flow is expressed *as part of* the static
+  DAG rather than by changing it.
 - **`cudaGraphExecUpdate` (or per-node setters like
   `cudaGraphExecKernelNodeSetParams`) update an already-instantiated graph's
   parameters without a full re-instantiate**, provided the topology is
@@ -429,7 +441,9 @@ void captureAndReplay(float* d_in, float* d_mid, float* d_out, size_t n,
 
     // --- Instantiate: compile the captured DAG into a fixed executable.
     // This is the expensive, one-time step -- do it once, replay many times.
-    CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr, 0));
+    // Signature is (pGraphExec, graph, flags); flags == 0 is the ordinary
+    // host-launched graph.
+    CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, 0));
 
     // --- Launch (replay): one CPU call regardless of how many nodes.
     for (int i = 0; i < numReplays; ++i) {
@@ -476,7 +490,7 @@ void buildGraphExplicitly(float* d_in, float* d_mid, float* d_out, size_t n) {
     CUDA_CHECK(cudaGraphAddKernelNode(&nodeB, graph, &nodeA, 1, &paramsB));
 
     cudaGraphExec_t graphExec;
-    CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr, 0));
+    CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, 0));
 
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
@@ -512,8 +526,7 @@ void replayWithNewBuffers(cudaGraphExec_t graphExec, cudaStream_t stream,
         // Topology mismatch (different node count/shape/kernel) -- update
         // is not possible; must fall back to a full re-instantiate.
         CUDA_CHECK(cudaGraphExecDestroy(graphExec));
-        CUDA_CHECK(cudaGraphInstantiate(&graphExec, newGraph, nullptr,
-                                          nullptr, 0));
+        CUDA_CHECK(cudaGraphInstantiate(&graphExec, newGraph, 0));
     }
 
     CUDA_CHECK(cudaGraphLaunch(graphExec, stream));
@@ -636,8 +649,8 @@ variable-batch decode serving).
   wraps the compiled region's hot path in CUDA graphs when it detects a
   launch-bound region with a stable shape, requiring no manual
   `torch.cuda.graph` calls from the user.
-- **Hugging Face `transformers` static KV cache + CUDA graphs** — recent
-  `generate()` code paths pair a fixed-size (pre-allocated) KV cache with
+- **Hugging Face `transformers` static KV cache + CUDA graphs** — the
+  `generate()` code path pairs a fixed-size (pre-allocated) KV cache with
   graph capture specifically because a graph cannot tolerate the cache
   reallocating or resizing mid-replay.
 - **cuDNN/cuBLAS-heavy training loops with a fixed batch shape** — any
@@ -724,10 +737,12 @@ the one-time capture/instantiate cost worth amortizing.
   phase before the first capture.
 
 **Avoid CUDA graphs when:**
-- The workload has **data-dependent control flow** — a Python `if` branching
-  on a tensor's runtime value, an early-exit loop, or any code path that may
-  add or remove kernels between calls; the graph's topology cannot follow
-  the data.
+- The workload has **host-side data-dependent control flow** — a Python `if`
+  branching on a tensor's runtime value copied back to the CPU, or any code
+  path that may add or remove kernels between calls; the graph's topology
+  cannot follow the host's decisions. (Branching and looping that stay on the
+  device — an early-exit loop, a speculative-decode accept/reject — belong in
+  a conditional node instead, which keeps the topology static.)
 - **Shapes vary per call** (batch size, sequence length) without a bucketing
   strategy — each new shape either forces a fresh capture (expensive if it
   happens every call) or simply doesn't fit an existing graph.
@@ -783,7 +798,7 @@ for (int layer = 0; layer < 50; ++layer) {
     tinyKernel<<<grid, block, 0, stream>>>(d_state[layer], n);
 }
 CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
-CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr, 0));
+CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, 0));
 
 for (int step = 0; step < numSteps; ++step) {
     CUDA_CHECK(cudaGraphLaunch(graphExec, stream));
@@ -866,6 +881,9 @@ CUDA_CHECK(cudaGraphDestroy(newGraph));
 | `cudaGraphLaunch` | Replay an instantiated graph with a single CPU call |
 | `cudaGraphExecUpdate` | Bulk-patch an instantiated graph's node parameters when topology is unchanged |
 | `cudaGraphExecKernelNodeSetParams` | Patch a single node's kernel parameters in place |
+| `cudaGraphConditionalHandleCreate` / `cudaGraphSetConditional` | Create a device-writable condition handle and set it from inside a kernel, driving IF / WHILE / SWITCH conditional nodes |
+| `cudaGraphAddNode` with `cudaGraphNodeTypeConditional` | Add a conditional node whose body graph runs (or repeats, or is selected) according to that handle's value |
+| `cudaGraphInstantiate(..., cudaGraphInstantiateFlagDeviceLaunch)` + `cudaGraphUpload` | Instantiate and upload a graph so it can be relaunched from *device* code — fire-and-forget, tail, or sibling launch — with no host round trip at all |
 | `cudaGraphDestroy` / `cudaGraphExecDestroy` | Release graph / executable resources |
 | Nsight Systems | Timeline view distinguishing graph-launch overhead from per-node eager launches; visualizes graph node dependency structure |
 | `torch.cuda.CUDAGraph` | PyTorch's raw capture object (`capture_begin`/`capture_end`/`replay`) |
@@ -924,14 +942,23 @@ that requirement isn't met?** It requires the new graph's topology — node
 count, node types, and dependency structure — to exactly match the currently
 instantiated executable's topology; if it doesn't match, the call fails and
 returns an error that must be checked, at which point the only remaining
-option is a full re-instantiate.
+option is a full re-instantiate. Matching topology is necessary but not
+sufficient: a kernel node's owning context, a memcpy node's transfer kind or
+memory type, an external-semaphore node's semaphore count, and a conditional
+node's handle ordering or body-graph count are all frozen at instantiate time
+and will fail the update even when the shape lines up, so always branch on the
+return status rather than assuming a same-shape graph is always patchable.
 
-**Q: Why can't a CUDA graph handle data-dependent control flow, like an
-early-exit loop?** A graph's node structure is fixed at capture/instantiate
-time — it is a static DAG — so any code path where the number or identity of
-kernels to run depends on a runtime value cannot be represented without
-re-capturing for every possible branch outcome, which defeats the purpose of
-amortizing capture cost.
+**Q: How does a CUDA graph handle data-dependent control flow, like an
+early-exit loop?** Through a conditional node: a WHILE node re-runs its body
+graph for as long as a device-written condition value stays non-zero, so the
+trip count varies at replay time while the DAG's topology does not. IF nodes
+(with an optional else-body) and SWITCH nodes cover the branching cases, and a
+kernel inside the graph sets the value through a `cudaGraphConditionalHandle`,
+so the decision never leaves the GPU. What a graph still cannot absorb is
+*host-side* branching — a Python `if` on a tensor value copied back to the CPU
+that changes which kernels get issued — because that changes the node set
+itself, and the only remedy there is a separate captured graph per outcome.
 
 **Q: Why must you warm up a stream before capturing it into a graph?**
 The
@@ -957,10 +984,12 @@ payoff, while one run thousands of times (a long decode loop or many
 training steps) reaps nearly the full benefit.
 
 **Q: What kinds of GPU work can a graph node represent besides a kernel
-launch?** Memory copies, memsets, host-function callbacks, event
-record/wait operations, and even child graphs embedding other graphs — the
-DAG is a general description of dependent GPU (and host-callback) work, not
-solely a sequence of kernel launches.
+launch?** Memory copies, memsets, host-function callbacks, empty
+ordering-only nodes, event record/wait operations, external-semaphore
+signal/wait operations, memory alloc/free nodes, conditional nodes (IF, WHILE,
+SWITCH), and child graphs embedding other graphs — the DAG is a general
+description of dependent GPU (and host-callback) work, not solely a sequence
+of kernel launches.
 
 **Q: Why do inference engines like vLLM capture separate CUDA graphs per
 batch-size "bucket" instead of one graph for all batch sizes?** A graph's
@@ -1025,10 +1054,10 @@ into a graph once it's verified correct.
 
 ### Scenario: a batch-1 LLM decode loop is launch-bound
 
-A team serves a 32-layer decoder-only model for single-user chat inference.
-Each generated token issues roughly 60 kernel launches (per-layer layernorm,
-QKV projection, attention, output projection, MLP up/activation/down, plus
-residual adds) at batch size 1. Profiling shows the GPU is idle between
+A team serves a 12-layer decoder-only model for single-user chat inference.
+Each generated token issues 60 kernel launches — five per layer (layernorm,
+QKV projection, attention, output projection, and a fused MLP block) across
+12 layers — at batch size 1. Profiling shows the GPU is idle between
 kernels far more than it's busy: each kernel's actual execution time is only
 2-4 microseconds at this tiny batch size, while the CPU/driver overhead per
 launch is a fairly constant 5-10 microseconds — the step is dominated by CPU
@@ -1105,8 +1134,7 @@ struct DecodeLoopGraphed {
                                             cudaStreamCaptureModeGlobal));
         runAllLayersEagerly(layerCount, stream);
         CUDA_CHECK(cudaStreamEndCapture(stream, &graph));
-        CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr,
-                                          0));
+        CUDA_CHECK(cudaGraphInstantiate(&graphExec, graph, 0));
     }
 
     void generateToken(int currentSlot) {
@@ -1133,7 +1161,7 @@ struct DecodeLoopGraphed {
 |--------|----------------------------|--------------------------------------|
 | Kernel launches per token (CPU round trips) | ~60 | 1 |
 | CPU/driver overhead per token | ~300-600us (60 x 5-10us) | ~5-10us (single `cudaGraphLaunch`) |
-| GPU execution time per token (unchanged) | ~150-250us (sum of kernel work) | ~150-250us |
+| GPU execution time per token (unchanged) | ~120-240us (60 x 2-4us of kernel work) | ~120-240us |
 | GPU idle time between kernels | Large — CPU round trip between every node | Near zero — GPU scheduler fires nodes with no CPU wait |
 | Approximate decode throughput change | baseline | ~1.2-2x tokens/sec |
 
@@ -1155,7 +1183,7 @@ pre-resolved dependency chain between all 60 nodes.
 - What would happen to correctness if `setKvCacheSlot` changed which KV-cache
   *buffer* the kernels reference — not just which slot within a fixed
   buffer — without a corresponding `cudaGraphExecUpdate`?
-- This case study captures a fixed 32-layer, fixed-batch-1 decode step — how
+- This case study captures a fixed 12-layer, fixed-batch-1 decode step — how
   would speculative decoding (accepting a variable number of draft tokens
   per step) interact with the requirement that a graph's topology be
   static, and what would you need to bucket on instead?

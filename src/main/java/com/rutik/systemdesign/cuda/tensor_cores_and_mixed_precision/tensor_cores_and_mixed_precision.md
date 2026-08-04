@@ -6,7 +6,7 @@ files this module contributes to each curated path; omit a tier to leave it out
 -->
 ## 1. Concept Overview
 
-A **Tensor Core** is a specialized execution unit, separate from the ordinary CUDA cores, that computes a small, fixed-shape **matrix-multiply-accumulate (MMA)** in hardware — for example `D = A × B + C` where `A` is 16×16, `B` is 16×16, and `D`/`C` are 16×16 — as a *single warp-level instruction* rather than as thousands of individual scalar fused-multiply-adds. Introduced in Volta (V100, 2017) and present in every NVIDIA data-center GPU since, Tensor Cores are the single largest source of the FLOP/s gap between a GPU's "CUDA core" peak and its advertised AI-training/inference peak: on an H100, ordinary FP64 CUDA-core throughput is roughly 34 TFLOP/s, FP64 routed through the Tensor Cores is roughly 67 TFLOP/s, and dense FP16 through the Tensor Cores is roughly 1000 TFLOP/s — nearly 15× the non-Tensor-Core FP64 rate.
+A **Tensor Core** is a specialized execution unit, separate from the ordinary CUDA cores, that computes a small, fixed-shape **matrix-multiply-accumulate (MMA)** in hardware — for example `D = A × B + C` where `A` is 16×16, `B` is 16×16, and `D`/`C` are 16×16 — as a *single warp-level instruction* rather than as thousands of individual scalar fused-multiply-adds. Introduced in Volta (V100, 2017) and present in every NVIDIA data-center GPU since, Tensor Cores are the single largest source of the FLOP/s gap between a GPU's "CUDA core" peak and its advertised AI-training/inference peak: on an H100, ordinary FP64 CUDA-core throughput is roughly 34 TFLOP/s, FP64 routed through the Tensor Cores is roughly 67 TFLOP/s, and dense FP16 through the Tensor Cores is roughly 1000 TFLOP/s — nearly 30× the non-Tensor-Core FP64 rate, or about 15× the FP64 Tensor Core rate (§8 works both divisions, because quoting one without naming its baseline is how this figure ends up off by 2×).
 
 This module covers Tensor Cores from the kernel author's angle: what the hardware MMA operation actually does, the `nvcuda::wmma` fragment API that exposes it in CUDA C++, the lower-level `mma.sync` PTX instruction it compiles to, the precision formats Tensor Cores support (FP16, BF16, TF32, FP8 in two flavors, INT8), the accumulation-precision and loss-scaling concerns that make mixed-precision training numerically safe, and how the consumer-facing libraries — cuBLAS, cuDNN, CUTLASS, and PyTorch's `torch.autocast` — route ordinary matmuls onto this hardware automatically (or silently fail to). The kernel-vs-library boundary matters here more than almost anywhere else in this section: very few engineers write raw WMMA code in production, but every ML engineer depends on it firing correctly under the hood, and diagnosing when it *doesn't* fire is a top-tier interview and production-debugging skill.
 
@@ -22,7 +22,7 @@ Historically, this is also where the "GPU vs CPU" and "AI accelerator vs general
 
 **Why it matters**: Every large model — training or inference — spends the overwhelming majority of its FLOPs in matrix multiplies (attention projections, FFN layers, convolutions), and those FLOPs are 8–16× cheaper per unit of silicon when routed through Tensor Cores in a supported precision than left on CUDA cores in FP32. The gap between "my model trains" and "my model trains at the GPU's advertised TFLOP/s" is almost always a Tensor Core engagement question — the wrong dtype, an unpadded dimension, or a library call that silently fell back to a slower path. Interviewers ask this because it separates engineers who know mixed precision is "a `torch.autocast` context manager" from engineers who know *why* it works and *when it silently doesn't*.
 
-**Key insight**: Three questions decide whether your matmul is fast: (1) *is the precision one Tensor Cores accept* (FP16/BF16/TF32/FP8/INT8 — never FP32/FP64 as a native Tensor Core input), (2) *are the M/N/K dimensions multiples of the hardware's tile granularity* (8 for the library heuristics, 16 for the canonical WMMA tile), and (3) *is the accumulator precision wide enough to survive the reduction* (FP32 accumulation, plus loss scaling for FP16's narrow exponent range). Get all three right and the library — cuBLAS, cuDNN, or `torch.autocast` — does the rest silently; get any one wrong and you silently fall back to CUDA cores or silently corrupt gradients, with no error raised in either case.
+**Key insight**: Three questions decide whether your matmul is fast: (1) *is the precision one Tensor Cores accept* (FP16/BF16/TF32/FP8/INT8 — never FP32/FP64 as a native Tensor Core input), (2) *are the M/N/K dimensions and the leading dimensions aligned to the hardware's tile and vector-load granularity* (16 bytes, which for 2-byte FP16/BF16 means multiples of 8 elements; 16 for the canonical WMMA tile), and (3) *is the accumulator precision wide enough to survive the reduction* (FP32 accumulation, plus loss scaling for FP16's narrow exponent range). Get all three right and the library — cuBLAS, cuDNN, or `torch.autocast` — does the rest silently; get the precision wrong and you drop to CUDA cores, get the alignment wrong and you stay on Tensor Cores but at a fraction of their throughput, and get the accumulator wrong and you silently corrupt gradients. No error is raised in any of the three cases.
 
 ---
 
@@ -31,12 +31,12 @@ Historically, this is also where the "GPU vs CPU" and "AI accelerator vs general
 - **Tensor Cores execute a fixed-shape warp-level MMA, not a per-thread FMA.** A single instruction (`wmma::mma_sync` in CUDA C++, `mma.sync` at the PTX level) computes an entire small tile multiply-accumulate cooperatively across all 32 threads of a warp; no thread computes one output element independently the way it does in a CUDA-core kernel.
 - **Only specific input precisions are accepted**: FP16, BF16, TF32, FP8 (E4M3 and E5M2 variants), and INT8/INT4 depending on generation. Plain FP32 and FP64 are never native Tensor Core *inputs* — FP64 is supported only via a dedicated FP64 Tensor Core path on Ampere+ at roughly 2× ordinary FP64 CUDA-core throughput, still far below the FP16/BF16 rate.
 - **Accumulation always happens in a wider format than the inputs.** FP16/BF16/TF32 inputs accumulate in FP32; FP8 inputs typically accumulate in FP16 or FP32 depending on the library. This is not optional — it is what keeps summing hundreds of K-dimension products from losing all precision.
-- **Tensor Cores engage only when dimensions are multiples of the hardware tile granularity and the operands are in a supported precision.** cuBLAS/cuDNN's heuristics look for M/N/K multiples of 8 (and prefer multiples of 16) in a supported dtype before routing to Tensor Cores; anything else falls back to the ordinary CUDA-core path with no error, only a silent performance cliff.
-- **TF32 is the *default* precision for FP32 matmuls on Ampere and later** unless explicitly disabled. It occupies a 32-bit register (so existing FP32 code needs zero source changes) but only the top 19 bits — 1 sign, 8 exponent, 10 mantissa — participate in the Tensor Core multiply, giving FP32's dynamic range at roughly FP16's mantissa precision.
+- **Precision decides *whether* Tensor Cores engage; alignment decides *how fast* they run.** cuBLAS from 11.0 onward uses Tensor Cores wherever it can for a supported dtype, with no hard dimension or alignment requirement outside FP8 — the old "M/N/K must be multiples of 8 or you fall back to CUDA cores" rule is gone. What remains is a performance cliff, not a functional one: peak throughput needs the operands and their leading dimensions aligned to 16 bytes, which for 2-byte FP16/BF16 is a multiple of 8 elements. Miss it and cuBLAS picks a kernel that cannot issue wide vector loads and has to handle a ragged tile, so you keep the Tensor Cores and lose much of their benefit — with no error, only a number in the profile.
+- **TF32 is the format Ampere and later use for FP32 Tensor Core matmuls**, and whether it is on by default depends on the layer you are calling from: cuBLAS/cuDNN permit it, PyTorch ships with `torch.backends.cudnn.allow_tf32 = True` for convolutions but `torch.backends.cuda.matmul.allow_tf32 = False` for matmuls, so an FP32 `torch.matmul` is exact FP32 until you opt in. TF32 occupies a 32-bit register (so existing FP32 code needs zero source changes) but only the top 19 bits — 1 sign, 8 exponent, 10 mantissa — participate in the Tensor Core multiply, giving FP32's dynamic range at roughly FP16's mantissa precision.
 - **FP16 has a narrow dynamic range (5 exponent bits) and needs loss scaling.** Small gradient values common in deep learning routinely underflow FP16's smallest representable magnitudes; multiplying the loss by a scale factor before backward (and dividing gradients by the same factor before the optimizer step) shifts those values into FP16's representable range without changing the math.
 - **BF16 needs no loss scaling.** It trades FP16's extra mantissa bits for FP32's full 8-bit exponent range, so it can represent the same *magnitudes* as FP32 (just with less precision) — the underflow problem loss scaling solves for FP16 simply does not occur in BF16.
 - **The library stack has three altitudes**: raw `mma.sync` PTX (compiler/library-internal), the `nvcuda::wmma` fragment API (what a kernel author writes by hand), and CUTLASS/cuBLAS/cuDNN (production libraries that generate the tiling, pipelining, and epilogue code around `mma.sync` so you rarely hand-write WMMA in a real system).
-- **Which element types a fragment can hold is gated by compute capability, not just by the CUDA Toolkit version.** BF16 and TF32 fragment types require `sm_80` (Ampere) or later; FP8 fragment types require `sm_89`/`sm_90` (Ada/Hopper) or later — compiling WMMA code with an `-arch` target older than the precision you request either fails to compile or silently compiles a code path that never existed on the deployed GPU, depending on how the fallback is written.
+- **Which element types a fragment can hold is gated by compute capability, not just by the CUDA Toolkit version.** BF16 and TF32 fragment types require `sm_80` (Ampere) or later — compiling WMMA code with an `-arch` target older than the precision you request fails to compile. FP8 is the exception that catches people out: `nvcuda::wmma` has no FP8 fragment type at all, on any architecture. FP8 MMA is reachable only through `mma.sync` PTX, CUTLASS, or a vendor library, so a kernel that wants FP8 Tensor Cores cannot be written against the WMMA API.
 - **Structured (2:4) sparsity is a second, independent throughput multiplier on top of precision** — it exploits a hardware-recognized zero pattern in the weight matrix rather than a numeric format, so it composes with (does not replace) the FP16/BF16/FP8 choice.
 
 ---
@@ -103,13 +103,14 @@ Starting with Ampere, Tensor Cores also support **2:4 structured sparsity**: if 
 
 ### 4.4 Library heuristic minimum vs. WMMA native tile alignment
 
-Two different alignment thresholds are easy to conflate — the *minimum* that lets a library heuristic consider Tensor Cores at all, and the tile size the hardware actually executes natively:
+Three alignment levels are easy to conflate — what the library *requires*, what it needs to reach *peak*, and the tile size the hardware actually executes natively:
 
 | Alignment level | Threshold | What it governs |
 |-------------------|-----------|--------------------|
-| Library heuristic minimum | M/N/K multiples of 8 (FP16/BF16) | The smallest alignment cuBLAS/cuDNN's internal heuristic will consider before falling back to CUDA cores |
-| WMMA / `mma.sync` native tile | 16×16×16 (FP16/BF16), 16×8×32 or similar for FP8 | The literal hardware instruction shape; a library-selected kernel internally pads or tiles further within this granularity even when the source dimension only satisfies the multiple-of-8 minimum |
-| Recommended practice | Multiples of 64 | Not required by any single heuristic, but the conventional "safe" alignment (also friendly to shared-memory bank widths and thread-block tile sizes) used across production model configs — the LM head padding in §14 uses 64 for this reason |
+| Library hard requirement | None, outside FP8 | Since cuBLAS 11.0 there is no dimension or alignment restriction on using Tensor Cores for FP16/BF16/TF32/INT8; the library engages them wherever it judges them faster. FP8 GEMMs are the exception and still carry alignment restrictions |
+| Peak-performance alignment | 16 bytes — a multiple of 8 elements for 2-byte FP16/BF16 | What the *fast* kernels need. Below it cuBLAS can still use Tensor Cores but must fall back to a variant that cannot issue 128-bit vector loads and must handle a ragged edge tile; this is the real cliff people attribute to "Tensor Cores not engaging" |
+| WMMA / `mma.sync` native tile | 16×16×16 (FP16/BF16), 16×8×32 for FP8 | The literal hardware instruction shape; a library-selected kernel tiles and pads internally to this granularity regardless of the source dimension |
+| Recommended practice | Multiples of 64 | Not required by anything, but the conventional "safe" alignment (also friendly to shared-memory bank widths and thread-block tile sizes) used across production model configs — the LM head padding in §14 uses 64 for this reason |
 
 ### 4.5 Where mixed precision sits in the model lifecycle
 
@@ -372,7 +373,7 @@ mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32
 
 Each of the 32 threads in the warp supplies a small, architecture-defined slice of the fragment in its own registers — the exact per-thread mapping is undocumented at the PTX level and differs across compute capabilities, which is precisely why `nvcuda::wmma` exists: it is the portable abstraction over an instruction whose per-lane register layout you are not meant to hand-code.
 
-The FP8 variant (Hopper+) follows the identical instruction shape with a different type suffix and a wider K dimension per instruction, reflecting FP8's smaller element size:
+The FP8 variant (Hopper+) follows the identical instruction shape with a different type suffix and a wider K dimension per instruction, reflecting FP8's smaller element size. Because `nvcuda::wmma` has no FP8 fragment type (§6.3), this PTX form — or the CUTLASS templates that emit it — is the *only* way a hand-written kernel reaches FP8 Tensor Cores:
 
 ```ptx
 // A single m16n8k32 Tensor Core MMA at the PTX level (Hopper+), fp8 e4m3
@@ -395,9 +396,10 @@ Not every WMMA element type is available on every architecture — attempting to
 | `int8_t` / `uint8_t` (INT8) | 7.5 | T4 (Turing) |
 | `precision::tf32` (TF32) | 8.0 | A100 (Ampere) |
 | `__nv_bfloat16` (BF16) | 8.0 | A100 (Ampere) |
-| `__nv_fp8_e4m3` / `__nv_fp8_e5m2` (FP8) | 8.9 / 9.0 | L4/L40S (Ada) / H100 (Hopper) |
+| `double` (FP64) | 8.0 | A100 (Ampere) |
+| FP8 (E4M3 / E5M2) | **not exposed by WMMA on any architecture** | Use `mma.sync` PTX, CUTLASS, or cuBLAS instead |
 
-Compiling for the wrong `-arch` target with a too-new element type fails the build outright (§12) — the safer of this module's two failure modes compared to a cuBLAS dimension/dtype mismatch, which fails silently at runtime instead.
+Compiling for the wrong `-arch` target with a too-new element type fails the build outright (§12) — the safer of this module's two failure modes compared to a cuBLAS dtype mismatch, which fails silently at runtime instead. The FP8 row is the one that surprises people: FP8 Tensor Cores are real from Ada/Hopper onward, but `nvcuda::wmma` never gained a fragment type for them, so a kernel author reaching for FP8 has to drop to the `mma.sync` layer in §6.2 or let CUTLASS generate it.
 
 ### 6.4 CUTLASS — the layer above hand-written WMMA
 
@@ -438,7 +440,7 @@ import torch
 
 model = MyTransformer().cuda()
 optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
-scaler = torch.cuda.amp.GradScaler()   # dynamic loss scaling -- needed for fp16
+scaler = torch.amp.GradScaler("cuda")  # dynamic loss scaling -- needed for fp16
 
 for batch in dataloader:
     optimizer.zero_grad()
@@ -503,18 +505,22 @@ loss.backward()   # no scaler -- bf16's 8 exponent bits match fp32's range,
 
 ### 6.6 Checking (and controlling) TF32
 
-TF32 is on by default for FP32 matmuls and convolutions on Ampere+ — worth checking explicitly rather than assuming, since it silently changes numerical results relative to true FP32:
+PyTorch's two TF32 switches do not default the same way, which is the detail that surprises people: convolutions get TF32 for free, matmuls do not.
 
 ```python
-print(torch.backends.cuda.matmul.allow_tf32)   # default varies by PyTorch version
-print(torch.backends.cudnn.allow_tf32)         # True by default on Ampere+
+print(torch.backends.cuda.matmul.allow_tf32)   # False -- fp32 matmul is exact fp32
+print(torch.backends.cudnn.allow_tf32)         # True  -- fp32 convolutions use TF32
 
-# Explicitly opt in (for speed) or out (for FP32-exact reproducibility/testing):
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+# Opt matmuls in (for speed), or opt convolutions out (for FP32-exact tests):
+torch.backends.cuda.matmul.fp32_precision = "tf32"    # or "ieee" for true FP32
+torch.backends.cudnn.conv.fp32_precision = "ieee"     # or "tf32"
 ```
 
-At the raw CUDA level, the same switch is `cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH)` (or the reverse, `CUBLAS_DEFAULT_MATH`, to force true FP32).
+The `fp32_precision` form above is the current per-backend, per-operator API; the older
+boolean `allow_tf32` flags still work and set the same state. There is also a process-wide
+shorthand, `torch.set_float32_matmul_precision("high")`, which turns TF32 on for matmuls.
+
+At the raw CUDA level, cuBLAS is the opposite of PyTorch's matmul default: `CUBLAS_DEFAULT_MATH` already permits TF32 for FP32 GEMMs on Ampere and later, and you opt *out* with a pedantic compute type (`CUBLAS_COMPUTE_32F_PEDANTIC`) to force true FP32. So the same FP32 matmul is exact through `torch.matmul` and TF32 through a direct `cublasGemmEx` — a real source of "the same model gives different numbers in C++ and Python."
 
 ### 6.7 Benchmarking mixed-precision throughput end to end
 
@@ -609,7 +615,7 @@ Setting the environment variable `CUBLASLT_LOG_LEVEL=5` (or `CUBLAS_LOGINFO_DBG=
 
 ### 6.9 Sweeping GEMM shapes to find the alignment cliff
 
-Because Tensor Core fallback is silent, a small sweep script is a fast way to *see* the alignment cliff from §4.4 rather than take it on faith:
+Because the alignment penalty is silent, a small sweep script is a fast way to *see* the cliff from §4.4 on your own hardware rather than take it on faith:
 
 ```python
 import torch
@@ -632,19 +638,20 @@ for k in (4096, 4095, 4088, 4080, 4064):
     print(f"K={k:5d}  ({'mult of 8' if k % 8 == 0 else 'NOT aligned':12s}): "
           f"{tflops:6.1f} TFLOP/s")
 
-# Typical output on an A100 -- the cliff at an unaligned K is immediate:
+# Illustrative shape of the result on an A100 -- re-measure on your own
+# hardware and cuBLAS version, since the exact magnitude of the drop moves:
 #   K= 4096  (mult of 8   ):  265.3 TFLOP/s
-#   K= 4095  (NOT aligned ):   34.1 TFLOP/s   <-- CUDA-core fallback
+#   K= 4095  (NOT aligned ):   34.1 TFLOP/s   <-- unaligned leading dimension
 #   K= 4088  (mult of 8   ):  261.7 TFLOP/s
 #   K= 4080  (mult of 8   ):  259.4 TFLOP/s
 #   K= 4064  (mult of 8   ):  256.9 TFLOP/s
 ```
 
-A single element off the alignment boundary (`K=4095` above) is enough to trigger the entire fallback — the cliff is not gradual, which is exactly why "it's probably close enough" reasoning about matmul shapes is a trap.
+A single element off the alignment boundary (`K=4095` above) is enough to trigger the whole drop — the cliff is a step, not a slope, which is exactly why "it's probably close enough" reasoning about matmul shapes is a trap. What has changed since the Volta era is the *mechanism*, not the advice: cuBLAS is still using Tensor Cores at `K=4095`, but with an odd leading dimension it cannot issue 128-bit vector loads and must run an edge-case kernel, so a run that looks like a total fallback in the profile is really a fast kernel the library was not allowed to pick.
 
 ### 6.10 Why accumulation precision and dimension alignment both gate Tensor Core engagement
 
-Two independent conditions must both hold for cuBLAS/cuDNN to route a call onto Tensor Cores: the operand dtype must be one of FP16/BF16/TF32/FP8/INT8, **and** the GEMM's M, N, K dimensions must be multiples of the library's tile granularity (8 as the minimum heuristic threshold, 16 to hit the canonical WMMA/`mma.sync` tile exactly). Neither condition failing raises an error — cuBLAS simply falls back to its CUDA-core GEMM path at ordinary throughput, and the only symptom is a profile that doesn't match the GPU's advertised peak. This is covered further in §10's BROKEN→FIX pair.
+Two conditions govern a cuBLAS/cuDNN call, and they fail differently. The **dtype** is the hard gate: an FP32 or FP64 operand has no Tensor Core path at all outside TF32/FP64-TC, so the call runs on CUDA cores. The **alignment** is a soft gate: since cuBLAS 11.0 there is no dimension restriction on Tensor Core use for FP16/BF16/TF32/INT8, but reaching peak needs operands and leading dimensions aligned to 16 bytes (a multiple of 8 elements at 2 bytes each), and a misaligned call is served by a slower Tensor Core kernel that cannot vectorize its loads. Neither failure raises an error, and the only symptom of either is a profile that doesn't match the GPU's advertised peak — which is why the two are so often confused for each other. This is covered further in §10's BROKEN→FIX pair.
 
 ```mermaid
 flowchart LR
@@ -658,25 +665,25 @@ flowchart LR
 
     start(["GEMM /<br/>conv call"]) --> precQ{"Precision in<br/>FP16/BF16/TF32/<br/>FP8/INT8?"}
     precQ -- "no (FP32/FP64)" --> cudaCore["CUDA-core path<br/>(silent fallback)"]
-    precQ -- "yes" --> dimQ{"M/N/K multiple<br/>of 8 (min) or<br/>16 (native tile)?"}
-    dimQ -- "no" --> cudaCore
-    dimQ -- "yes" --> tcPath(["Tensor Core<br/>path engaged"])
+    precQ -- "yes" --> dimQ{"Dims and leading<br/>dims 16-byte aligned?<br/>(mult of 8 at fp16)"}
+    dimQ -- "no" --> slowTC["Tensor Cores, but a<br/>non-vectorized edge<br/>kernel (silent cliff)"]
+    dimQ -- "yes" --> tcPath(["Tensor Core<br/>path at full speed"])
 
     class start io
     class precQ,dimQ mathOp
-    class cudaCore lossN
+    class cudaCore,slowTC lossN
     class tcPath train
 ```
 
-Both gates are silent AND conditions — there is no third branch that raises a warning, which is exactly why "did it compile and run" is never sufficient evidence that the Tensor Core path (green) was actually taken instead of the fallback (red).
+Both gates are silent — nothing raises a warning on either branch — but they are not the same failure. A wrong dtype leaves the Tensor Cores entirely (left red box); a wrong alignment keeps them and throws away most of their throughput (middle red box). Either way, "did it compile and run" is never sufficient evidence that the full-speed path (green) was taken.
 
 ---
 
 ## 7. Real-World Examples
 
 - **cuBLAS / `cublasGemmEx`**: every `torch.matmul`, `nn.Linear`, and `tf.matmul` call on a supported dtype/shape ultimately reaches this API, which selects a Tensor Core kernel automatically when the precision/dimension conditions in §6.10 hold. cuBLAS ships dozens of hand-tuned kernel variants per shape/precision/architecture combination and picks among them with an internal heuristic (or an explicit algorithm ID via `cublasGemmAlgo_t` for advanced tuning).
-- **cuDNN convolutions**: `Conv2d` layers route to Tensor Core kernels the same way GEMMs do, provided channel counts are multiples of 8 (FP16) — a common reason vision models pad channel counts to 8/16/32 rather than using "natural" numbers like 3 (RGB) directly into the first Tensor-Core-eligible layer. cuDNN additionally requires the `NHWC` (channels-last) memory layout to hit its fastest Tensor Core convolution kernels on many architectures — `NCHW` can silently take a slower path even with an aligned channel count.
-- **PyTorch Automatic Mixed Precision (AMP)**: `torch.autocast` + `torch.cuda.amp.GradScaler`, the industry-standard training recipe since 2019; used in virtually every large-scale PyTorch training run since Ampere-generation GPUs became standard. `torch.compile` composes with `autocast` transparently — the compiled graph still respects the per-op precision allowlist established at trace time.
+- **cuDNN convolutions**: `Conv2d` layers route to Tensor Core kernels the same way GEMMs do, and reach their fastest kernels when channel counts are multiples of 8 (FP16) — a common reason vision models pad channel counts to 8/16/32 rather than using "natural" numbers like 3 (RGB) directly into the first Tensor-Core-eligible layer. cuDNN additionally requires the `NHWC` (channels-last) memory layout to hit its fastest Tensor Core convolution kernels on many architectures — `NCHW` can silently take a slower path even with an aligned channel count.
+- **PyTorch Automatic Mixed Precision (AMP)**: `torch.autocast` + `torch.amp.GradScaler("cuda")`, the industry-standard training recipe since 2019; used in virtually every large-scale PyTorch training run since Ampere-generation GPUs became standard. `torch.compile` composes with `autocast` transparently — the compiled graph still respects the per-op precision allowlist established at trace time.
 - **NVIDIA Transformer Engine (Hopper/Blackwell)**: automatically selects FP8 E4M3 vs E5M2 per tensor and computes per-tensor scaling factors on the fly, used inside Megatron-LM and NeMo to train trillion-parameter models at roughly 2× the throughput of BF16 with comparable convergence. It exposes drop-in replacement layers (`te.Linear`, `te.LayerNormLinear`) that a Megatron-LM or NeMo model swaps in for the standard PyTorch layer with minimal code change.
 - **TensorRT-LLM / vLLM FP8 inference**: production LLM-serving stacks quantize weights and KV-cache to FP8 E4M3 for inference, using calibration to bound accuracy loss — see [`../../llm/optimization_and_quantization/`](../../llm/optimization_and_quantization/optimization_and_quantization.md) for the quantization-specific mechanics. Storing the KV-cache itself in FP8 rather than FP16 roughly halves KV-cache memory, directly increasing the batch size (and therefore throughput) a fixed amount of HBM can serve.
 - **CUTLASS-based FlashAttention kernels**: FlashAttention's CUDA kernels are hand-tuned around `mma.sync`/CUTLASS primitives to fuse the softmax directly onto the Tensor Core accumulator, avoiding an HBM round-trip for the attention-score matrix — see [`../cuda_math_and_dnn_libraries/`](../cuda_math_and_dnn_libraries/cuda_math_and_dnn_libraries.md). FlashAttention-3 specifically targets Hopper's 4th-generation Tensor Cores and asynchronous `mma.sync` pipelines to reach roughly 75% of the H100's peak FP8 FLOP/s for the attention operation alone.
@@ -698,7 +705,7 @@ Both gates are silent AND conditions — there is no third branch that raises a 
 | FP16 / BF16 (Tensor Core) | ~1000 | ~29x |
 | FP8 (Tensor Core) | ~2000 | ~59x |
 
-This is the concrete basis for the "FP64 vs FP16" gap engineers quote informally — an H100 running dense FP16 GEMMs through its Tensor Cores has roughly 15x the throughput of the same GPU running the identical operation in FP64 on ordinary CUDA cores, before sparsity is even considered. HPC/scientific-computing workloads that must stay in FP64 for correctness (climate modeling, certain linear-solver-heavy simulations) are the primary reason the FP64 Tensor Core path exists at all — it recovers roughly 2x over the CUDA-core FP64 rate without leaving double precision.
+This is the concrete basis for the "FP64 vs FP16" gap engineers quote informally — an H100 running dense FP16 GEMMs through its Tensor Cores has roughly 29x the throughput of the same GPU running the identical operation in FP64 on ordinary CUDA cores, or roughly 15x if you measure against the FP64 Tensor Core path instead, before sparsity is even considered. HPC/scientific-computing workloads that must stay in FP64 for correctness (climate modeling, certain linear-solver-heavy simulations) are the primary reason the FP64 Tensor Core path exists at all — it recovers roughly 2x over the CUDA-core FP64 rate without leaving double precision.
 
 ```
 ratio = peak TFLOP/s (precision) / peak TFLOP/s (baseline)
@@ -765,8 +772,8 @@ FP32 CUDA-core throughput (~67 TFLOP/s, NVIDIA's published H100 non-Tensor-Core 
 
 | KV-cache precision | Bytes per token per sequence | Total at 32K context | Max concurrent sequences on 80 GB |
 |-----------------------|----------------------------------|----------------------------|--------------------------------------|
-| FP16/BF16 (2 bytes) | 2 × 80 × 2 × 8 × 128 = 327,680 bytes | ~10.5 GB | ~7 (before weights even loaded) |
-| FP8 (1 byte) | 163,840 bytes | ~5.2 GB | ~14 |
+| FP16/BF16 (2 bytes) | 2 × 80 × 2 × 8 × 128 = 327,680 bytes | ~10.7 GB (10.0 GiB) | ~7 (before weights even loaded) |
+| FP8 (1 byte) | 163,840 bytes | ~5.4 GB (5.0 GiB) | ~14 |
 
 Halving KV-cache bytes per token by moving it to FP8 does not touch the model weights at all, but it directly doubles how many concurrent long-context sequences a fixed GPU memory budget can serve — the reason FP8 KV-cache is frequently adopted before FP8 weights in latency-sensitive serving stacks.
 
@@ -804,12 +811,14 @@ The bar heights are the same 7-vs-14 figures from the table above — halving th
 
 ## 10. Common Pitfalls
 
-**BROKEN — matmul dimensions not multiples of 8/16, Tensor Cores never engage:**
+**BROKEN — matmul dimensions not multiples of 8/16, Tensor Cores run far below peak:**
 
 ```cpp
-// A GEMM with K = 100 (not a multiple of 8) — cuBLAS silently falls back to
-// the CUDA-core path. No error, no warning -- just a profile that never hits
-// the GPU's advertised Tensor Core TFLOP/s.
+// A GEMM with K = 100 (not a multiple of 8) — cuBLAS still routes this to
+// Tensor Cores, but a K of 100 fp16 elements is a 200-byte stride, so it
+// must select a kernel that cannot issue 128-bit vector loads and has to
+// handle a ragged edge tile. No error, no warning -- just a profile that
+// never gets near the GPU's advertised Tensor Core TFLOP/s.
 half *A, *B;  float *C;
 int M = 1024, N = 1024, K = 100;   // <-- 100 is not a multiple of 8
 cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K,
@@ -821,7 +830,7 @@ cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K,
 ```cpp
 // FIX -- pad K up to the next multiple of 16 (zero-padding the extra rows/
 // cols of A and B contributes 0 to the dot product, so results are identical,
-// and cuBLAS's Tensor Core heuristic now engages).
+// and cuBLAS can now select its fully vectorized Tensor Core kernel).
 int K_padded = ((K + 15) / 16) * 16;   // 100 -> 112
 // allocate A, B with the K_padded extent, memset the padding region to 0
 cublasGemmEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K_padded,
@@ -863,6 +872,7 @@ Additional pitfalls:
 - **Assuming TF32 is FP32**: a numerical unit test comparing GPU output to a CPU FP32 reference can fail spuriously at the default TF32 tolerance; either relax the tolerance intentionally or disable TF32 for the test.
 - **Padding with garbage instead of zero**: padding a GEMM's K dimension for alignment (as in the fix above) must zero-fill the padding region — padding with uninitialized memory silently corrupts every output element.
 - **Not checking `compute_XX`/`sm_XX` target**: WMMA code compiled for `sm_70` (Volta) does not expose BF16 or TF32 fragment types — a wrong `-arch` flag produces a compile error or, worse, a silently slower code path if a fallback exists.
+- **Expecting an FP8 `wmma::fragment` to exist**: it does not, on any architecture. FP8 Tensor Cores are reachable only through `mma.sync` PTX, CUTLASS, or a vendor library, so a hand-written FP8 kernel cannot be built on the WMMA API no matter how new the `-arch` target is.
 - **Computing the loss itself inside a FP16 `autocast` region**: `autocast`'s allowlist already excludes most loss functions, but a hand-written custom loss that does its own reduction inside the `with autocast(...):` block can still accumulate in FP16 if it isn't recognized by the allowlist — cast logits/targets to FP32 explicitly before a custom reduction rather than trusting the context manager to catch every case.
 - **Benchmarking with a shape too small to saturate the GPU**: a 128×128×128 GEMM barely fills a single SM's worth of Tensor Core tiles regardless of precision, so a "no speedup from FP16" benchmark result on a toy shape says nothing about the production shape — always benchmark at the actual production batch/sequence/hidden dimensions.
 - **Channels-last vs. contiguous layout mismatches on convolutions**: cuDNN's fastest Tensor Core convolution kernels typically require `NHWC` (`torch.channels_last`) memory format; a model that never calls `.to(memory_format=torch.channels_last)` can silently sit on a slower `NCHW` Tensor Core path or no Tensor Core path at all.
@@ -878,7 +888,7 @@ Additional pitfalls:
 | CUTLASS | Templated C++ GEMM/convolution library | Custom epilogue fusion at near-cuBLAS performance; what cuBLAS is built on internally |
 | cuBLAS / cuBLASLt | Dense linear algebra library | The default path for `torch.matmul`/`nn.Linear`; automatic Tensor Core routing |
 | cuDNN | Deep-learning primitives (conv, pooling, normalization) | Automatic Tensor Core routing for convolutions under the same dimension/precision rules |
-| PyTorch AMP (`torch.autocast` + `GradScaler`) | Training-loop mixed precision | The standard training recipe since 2019; per-op precision allowlist |
+| PyTorch AMP (`torch.autocast` + `torch.amp.GradScaler("cuda")`) | Training-loop mixed precision | The standard training recipe since 2019; per-op precision allowlist |
 | NVIDIA Transformer Engine | Automated FP8 scaling for transformer layers | Hopper/Blackwell; used inside Megatron-LM/NeMo for trillion-parameter training |
 | TensorRT-LLM | FP8/INT8 quantized inference engine | Calibration-based quantization for production LLM serving |
 | Nsight Compute | Kernel profiler | The `sm__pipe_tensor_op_hmma_cycles_active` (and FP8/INT8 equivalents) metric directly answers "did Tensor Cores engage" |
@@ -892,13 +902,13 @@ Additional pitfalls:
 ## 12. Interview Questions with Answers
 
 **Q: Why isn't my matmul getting the Tensor Core speedup I expected?**
-The most common cause is a dimension that is not a multiple of the hardware's tile granularity (8 as the library minimum, 16 for the canonical WMMA tile) — cuBLAS/cuDNN silently fall back to the CUDA-core GEMM path with no error, and the only symptom is throughput far below the GPU's advertised peak. Check the actual M/N/K of the failing call, not just the "obvious" batch dimension. Padding the offending dimension to a multiple of 16 with zeros is the standard fix.
+The most common cause is a dimension or leading dimension that is not 16-byte aligned — a multiple of 8 elements at FP16/BF16's two bytes each. Since cuBLAS 11.0 that no longer kicks you off Tensor Cores entirely, but it does force the library to pick a kernel that cannot issue 128-bit vector loads and must handle a ragged edge tile, so throughput lands far below the GPU's advertised peak with no error raised. Check the actual M/N/K of the failing call, not just the "obvious" batch dimension. Padding the offending dimension to a multiple of 16 (64 by convention) with zeros is the standard fix. The other cause, and the one that really does leave Tensor Cores idle, is a dtype with no Tensor Core path at all: plain FP32 with TF32 disabled, or FP64.
 
 **Q: Why did my FP32 unit test start failing after I upgraded to an Ampere GPU?**
-TF32 is the default precision for FP32 matmuls and convolutions on Ampere and later, and it truncates FP32's 23 mantissa bits down to 10 before the multiply — producing results that differ from true FP32 at roughly FP16 precision. Either relax the test's numerical tolerance to account for TF32, or explicitly disable it (`torch.backends.cuda.matmul.allow_tf32 = False` / `cublasSetMathMode(..., CUBLAS_DEFAULT_MATH)`) when exact FP32 reproducibility is required.
+TF32 truncates FP32's 23 mantissa bits down to 10 before the Tensor Core multiply, producing results that differ from true FP32 at roughly FP16 precision — and on Ampere and later it is enabled by default for *convolutions* in PyTorch (`torch.backends.cudnn.allow_tf32` is `True`) and for FP32 GEMMs issued straight through cuBLAS. It is *not* on by default for `torch.matmul`, where `torch.backends.cuda.matmul.allow_tf32` is `False`, so a failing matmul test usually means something in the stack turned it on explicitly (`torch.set_float32_matmul_precision("high")` is the common culprit). Either relax the test's tolerance to account for TF32 or pin the precision explicitly — `torch.backends.cudnn.conv.fp32_precision = "ieee"` on the PyTorch side, a pedantic compute type such as `CUBLAS_COMPUTE_32F_PEDANTIC` on the cuBLAS side.
 
 **Q: My FP16 training run is producing NaN losses after a few hundred steps — why?**
-The near-universal cause is missing loss scaling: FP16's 5 exponent bits give it a much narrower dynamic range than FP32, so small gradient values common in deep learning underflow to zero, and once enough gradients vanish the optimizer state or a subsequent division produces NaN/Inf. Wrap the training step in `torch.cuda.amp.GradScaler` (which multiplies the loss up before backward and divides gradients back down before the optimizer step, skipping any step where it detects an overflow) or switch to BF16, which does not need loss scaling at all.
+The near-universal cause is missing loss scaling: FP16's 5 exponent bits give it a much narrower dynamic range than FP32, so small gradient values common in deep learning underflow to zero, and once enough gradients vanish the optimizer state or a subsequent division produces NaN/Inf. Wrap the training step in `torch.amp.GradScaler("cuda")` (which multiplies the loss up before backward and divides gradients back down before the optimizer step, skipping any step where it detects an overflow) or switch to BF16, which does not need loss scaling at all.
 
 **Q: What is a Tensor Core, mechanically?**
 It is a dedicated hardware unit, separate from ordinary CUDA cores, that computes a fixed-shape matrix-multiply-accumulate — for example a 16×16×16 tile — as one warp-level instruction instead of many independent scalar FMAs. Each of the 32 threads in a warp holds a small, architecture-defined slice of the input/output tiles in registers (a "fragment"), and a single `mma_sync`/`mma.sync` instruction retires the entire tile's multiply-accumulate in a handful of cycles.
@@ -919,13 +929,13 @@ Loss scaling multiplies the loss by a constant (or dynamically adjusted) factor 
 Static loss scaling fixes one scale factor for the entire run, requiring manual tuning to avoid both underflow (scale too low) and overflow (scale too high). Dynamic loss scaling (PyTorch's `GradScaler` default) starts at a large scale, halves it whenever it detects an Inf/NaN in the unscaled gradients (skipping that optimizer step entirely), and grows it back by a small factor after a run of clean steps — self-tuning to the largest scale that doesn't overflow.
 
 **Q: What is TF32 and why is it described as a "free" speedup?**
-TF32 is a 19-bit compute format — FP32's 8 exponent bits, FP16's 10 mantissa bits — that Tensor Cores consume while the data still lives in ordinary 32-bit FP32 storage, so existing FP32 model code needs zero source changes to benefit; the truncation to 19 bits happens only inside the Tensor Core multiply. It has been the default for FP32 matmul/convolution on Ampere and later since its introduction, trading some mantissa precision (roughly FP16-level) for FP32's full dynamic range and a 4-8x throughput gain.
+TF32 is a 19-bit compute format — FP32's 8 exponent bits, FP16's 10 mantissa bits — that Tensor Cores consume while the data still lives in ordinary 32-bit FP32 storage, so existing FP32 model code needs zero source changes to benefit; the truncation to 19 bits happens only inside the Tensor Core multiply. It trades some mantissa precision (roughly FP16-level) for FP32's full dynamic range and a 4-8x throughput gain. "Free" is about the source diff, not about it being automatic: cuBLAS permits TF32 by default on Ampere and later and PyTorch enables it for convolutions, but PyTorch leaves it *off* for matmuls, so a large part of the win needs one explicit opt-in line.
 
 **Q: What is the difference between FP8 E4M3 and E5M2, and when do you use each?**
 E4M3 (4 exponent bits, 3 mantissa bits) has a smaller maximum magnitude (~448) but more mantissa precision, making it the default choice for weights and activations in forward-pass inference. E5M2 (5 exponent, 2 mantissa) trades precision for a much larger range (~57344), which better suits gradients during backward passes where dynamic range varies more widely — NVIDIA's Transformer Engine picks between the two per-tensor automatically rather than requiring a manual choice.
 
 **Q: How does cuBLAS decide whether to route a GEMM onto Tensor Cores?**
-cuBLAS's internal heuristic checks the operand dtype (must be FP16/BF16/TF32/FP8/INT8) and whether the M/N/K dimensions meet the tile-alignment threshold (8 as the practical minimum, 16 to hit the canonical tile exactly); if both hold, it selects a Tensor Core kernel variant, and if either fails, it silently falls back to its ordinary CUDA-core GEMM kernel with no error or warning. This is why profiling actual achieved TFLOP/s against the GPU's advertised peak — not just "did the code run" — is the only reliable way to confirm engagement.
+From cuBLAS 11.0 onward it uses Tensor Cores wherever it judges them faster for a supported dtype — FP16, BF16, TF32, INT8 — with no hard dimension or alignment requirement outside FP8, which still carries one. What alignment governs is *which* Tensor Core kernel gets picked: 16-byte-aligned operands and leading dimensions unlock the vectorized variants, and anything else falls to an edge-case kernel at a fraction of the throughput. An unsupported dtype (FP32 with TF32 off, or FP64) is the only thing that puts the work back on CUDA cores outright. Because none of these choices raises a warning, profiling achieved TFLOP/s against the GPU's peak — or asking `cublasLtMatmulAlgoGetHeuristic` which kernel it would pick — is the only reliable confirmation.
 
 **Q: What is CUTLASS and when would you reach for it instead of cuBLAS?**
 CUTLASS is NVIDIA's open-source C++ template library implementing the full tiling hierarchy (thread-block tile → warp tile → `mma.sync` instruction) with pipelining and customizable epilogues, and it is what cuBLAS itself is built from internally on newer architectures. Reach for CUTLASS directly when you need a fused operation cuBLAS's fixed epilogue set doesn't offer — for example a GEMM fused with a custom activation and a quantization rescale in a single kernel — trading a steep template-metaprogramming learning curve for near-cuBLAS performance plus fusion.
@@ -940,7 +950,7 @@ FP16's narrow 5-bit exponent range is the near-universal cause: gradients or act
 It is a Hopper/Blackwell-generation software+hardware feature that automates FP8 mixed-precision training for transformer layers — selecting E4M3 vs E5M2 per tensor and computing per-tensor scaling factors dynamically each step, rather than requiring a hand-tuned static quantization scheme. It is used inside frameworks like Megatron-LM and NeMo to reach roughly 2x the throughput of BF16 training with comparable convergence on very large models.
 
 **Q: How would you use Nsight Compute to confirm a kernel is actually using Tensor Cores?**
-Profile the kernel and look at pipeline-utilization metrics such as `sm__pipe_tensor_op_hmma_cycles_active` (or the analogous IMMA/FP8 metric) — a near-zero value means the launch never engaged Tensor Cores regardless of what the source code intended, while a high value close to the SM's tensor-pipe capacity confirms engagement. This is the only reliable confirmation; a kernel that "runs correctly" and even runs "fast" by CUDA-core standards can still be silently missing Tensor Core engagement entirely if a dimension/precision condition failed.
+Profile the kernel and look at pipeline-utilization metrics such as `sm__pipe_tensor_op_hmma_cycles_active` (or the analogous IMMA/FP8 metric) — a near-zero value means the launch never engaged Tensor Cores at all — almost always an unsupported dtype — while a high value close to the SM's tensor-pipe capacity confirms healthy engagement. The reading to watch for is the middle one: a low-but-clearly-nonzero percentage means the Tensor Cores *are* running and an alignment problem has pushed cuBLAS onto its unvectorized edge kernel, which is a different fix (pad the shape) from a dtype miss (change the dtype). This metric is the only reliable confirmation either way; a kernel that "runs correctly" and even runs "fast" by CUDA-core standards can still be leaving most of the tensor pipe idle.
 
 **Q: When would you deliberately avoid Tensor Cores / lower precision even though they're available?**
 When the operation is a small, precision-sensitive reduction that's cheap in FLOPs regardless (softmax, layernorm, a loss computation) — the accuracy risk isn't worth the negligible time saved, which is exactly why `autocast`'s allowlist already excludes these ops by default. Also avoid forcing it onto dimensions too small or irregular to pad without dominating the actual tile size, and avoid it entirely when a workload demands bit-exact FP32 reproducibility, such as certain scientific-computing or regulated financial calculations.
@@ -949,7 +959,7 @@ When the operation is a small, precision-sensitive reduction that's cheap in FLO
 INT8 Tensor Cores (available since Turing, 2nd generation) compute integer matrix multiplies at roughly double FP16's throughput, but require a quantization scheme — a per-tensor or per-channel scale factor mapping the original floating-point range into the 8-bit integer range `-128..127` — established via calibration on representative data or quantization-aware fine-tuning, rather than the drop-in dtype cast that FP16/BF16 autocast provides. This is the inference-time counterpart to FP8, generally reserved for post-training deployment rather than training itself — see [`../../ml/model_compression_and_efficiency/`](../../ml/model_compression_and_efficiency/model_compression_and_efficiency.md) for the calibration mechanics.
 
 **Q: What happens if you request a WMMA fragment type the target architecture doesn't support?**
-The compilation fails outright rather than silently degrading — a BF16 or TF32 `wmma::fragment` declaration compiled with `-arch=sm_70` (Volta) produces a compile-time error because those element types simply don't exist in that architecture's header definitions. This is actually the safer failure mode compared to the dimension/dtype mismatches elsewhere in this module: a wrong `-arch` flag for WMMA code fails loudly at build time, whereas a wrong dimension for a cuBLAS call fails silently at runtime with only a throughput regression to notice.
+The compilation fails outright rather than silently degrading — a BF16 or TF32 `wmma::fragment` declaration compiled with `-arch=sm_70` (Volta) produces a compile-time error because those element types simply don't exist in that architecture's header definitions. This is the safer failure mode compared to the alignment and dtype problems elsewhere in this module: a wrong `-arch` flag for WMMA code fails loudly at build time, whereas a misaligned cuBLAS call fails silently at runtime with only a throughput regression to notice. One request fails at every `-arch`: there is no FP8 fragment type in `nvcuda::wmma` at all, so FP8 Tensor Cores must be reached through `mma.sync` PTX, CUTLASS, or a vendor library rather than by bumping the architecture target.
 
 **Q: How does structured 2:4 sparsity interact with the precision choice covered in this module?**
 They are independent, multiplicative levers rather than alternatives — 2:4 sparsity (available from Ampere onward) exploits a hardware-recognized zero pattern in the weight matrix to roughly double throughput on top of whatever precision speedup (BF16, FP8, etc.) is already in effect, at the cost of a separate prune-then-fine-tune cycle to reach the required pattern without unacceptable accuracy loss. A common mistake is treating sparsity as "instead of" a precision choice rather than "in addition to" it.
@@ -963,7 +973,7 @@ Yes — Tensor Cores raise the compute *ceiling*, but a kernel that is memory-ba
 
 1. **Default to BF16 autocast on Ampere+ hardware** unless you have a specific reason (Volta-only deployment, an existing FP16 pipeline) to use FP16 — it eliminates the entire loss-scaling failure mode.
 2. **Always verify Tensor Core engagement with a profiler**, not by reading source code — `sm__pipe_tensor_op_hmma_cycles_active` in Nsight Compute is the ground truth; "the code calls `cublasGemmEx`" is not.
-3. **Pad matmul/convolution dimensions to multiples of 8 (ideally 16)** when a shape is under your control (e.g. vocabulary size, channel count) — a small amount of wasted compute on padding is nearly always cheaper than a full CUDA-core fallback.
+3. **Pad matmul/convolution dimensions to multiples of 8 (ideally 16, 64 by convention)** when a shape is under your control (e.g. vocabulary size, channel count) — cuBLAS will use Tensor Cores either way, but only an aligned shape lets it pick the vectorized kernel, and a small amount of wasted compute on padding is nearly always cheaper than running every step on the edge-case variant.
 4. **Never accumulate a long reduction in the same narrow format as the inputs** — accumulate in FP32 (or let WMMA's built-in accumulator type do it for you) and only cast down once, at the end.
 5. **Explicitly log or assert your TF32 setting** in any benchmark or reproducibility-sensitive code path — its default state has changed across PyTorch versions and silently changes numerical results relative to true FP32.
 6. **Keep precision-sensitive ops (softmax, norm, loss) in FP32** — rely on `autocast`'s default allowlist rather than casting an entire model to half precision by hand.
@@ -977,7 +987,7 @@ Yes — Tensor Cores raise the compute *ceiling*, but a kernel that is memory-ba
 
 ## 14. Case Study
 
-**Scenario:** A team fine-tunes a 7B-parameter transformer on 8×A100 GPUs. Two problems show up in the same week: (1) profiling shows the model's FFN layers are running at roughly 140 TFLOP/s per GPU — far below the A100's ~312 TFLOP/s dense FP16 peak — and (2) training loss goes to NaN around step 400 whenever they switch from BF16 to FP16 to try to match a colleague's older Volta-era recipe.
+**Scenario:** A team fine-tunes a 7B-parameter transformer on 8×A100 GPUs. Two problems show up in the same week: (1) profiling shows the model's matmul kernels averaging roughly 140 TFLOP/s per GPU — far below the A100's ~312 TFLOP/s dense FP16 peak — and (2) training loss goes to NaN around step 400 whenever they switch from BF16 to FP16 to try to match a colleague's older Volta-era recipe.
 
 **Diagnosis — problem 1, Tensor Cores not engaging:**
 
@@ -990,23 +1000,27 @@ ncu --metrics sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_ac
 ```
 
 ```
-Nsight Compute reports sm__pipe_tensor_op_hmma_cycles_active near zero
-for the FFN GEMM kernels. Inspecting the model config:
+Nsight Compute reports sm__pipe_tensor_op_hmma_cycles_active at a healthy
+fraction of peak for the FFN GEMMs, but in the low single-digit percents
+for the LM head kernel. Inspecting the model config:
 
   hidden_dim = 4096, ffn_dim = 11008     <- 11008 / 8 = 1376, divides evenly
   vocab_size = 50257                     <- 50257 / 8 = 6282.125, does NOT divide
 
 The LM head projection (hidden_dim -> vocab_size) has an N dimension of
-50257 -- not a multiple of 8 -- so cuBLAS silently falls back to the
-CUDA-core GEMM path for every LM head matmul, which dominates wall-clock
-time at this model's vocabulary size.
+50257 fp16 elements -- an odd 100,514-byte stride. cuBLAS still picks a
+Tensor Core kernel, but only one that can cope with an unaligned leading
+dimension: no 128-bit vector loads, and a ragged edge tile on every
+thread block. That kernel dominates wall-clock time at this model's
+vocabulary size, which is why the profile looks like the Tensor Cores are
+barely running even though they are technically engaged.
 ```
 
 **BROKEN → FIX (dimension padding):**
 
 ```python
 # BROKEN -- vocab_size = 50257 is not a multiple of 8; the LM head GEMM
-# (hidden_dim x vocab_size) never engages Tensor Cores.
+# (hidden_dim x vocab_size) is stuck on cuBLAS's unaligned-edge kernel.
 lm_head = torch.nn.Linear(hidden_dim, vocab_size, bias=False)  # vocab_size=50257
 ```
 
@@ -1022,7 +1036,7 @@ lm_head = torch.nn.Linear(hidden_dim, vocab_size_padded, bias=False)
 logits = lm_head(hidden_states)[..., :vocab_size]    # slice back to real vocab
 ```
 
-This single change raised the LM head GEMM from the CUDA-core fallback path to the Tensor Core path, and because the LM head is one of the largest single matmuls in a language model (hidden_dim × vocab_size), overall step time improved by roughly 15% with no change to model quality.
+This single change let cuBLAS select its fully vectorized Tensor Core kernel for the LM head GEMM instead of the unaligned-edge variant, and because the LM head is one of the largest single matmuls in a language model (hidden_dim × vocab_size), overall step time improved by roughly 15% with no change to model quality.
 
 **Diagnosis — problem 2, FP16 underflow without loss scaling:**
 
@@ -1050,7 +1064,7 @@ optimizer.step()
 ```python
 # FIX -- add GradScaler for dynamic loss scaling (or, simpler on Ampere+,
 # switch to bfloat16 entirely and drop fp16/GradScaler altogether).
-scaler = torch.cuda.amp.GradScaler()
+scaler = torch.amp.GradScaler("cuda")
 
 with torch.autocast(device_type="cuda", dtype=torch.float16):
     loss = model(batch).loss
@@ -1070,9 +1084,9 @@ scaler.update()
 
 ```
                           Before fix          After both fixes
-FFN + LM head TFLOP/s     140 TFLOP/s          ~290 TFLOP/s per A100
-Tensor Core engagement    LM head: no          LM head: yes (padded to 50304)
-                          FFN: yes              FFN: yes
+FFN + LM head TFLOP/s     140 TFLOP/s          ~270 TFLOP/s per A100
+Tensor Core utilization   LM head: ~3% of peak LM head: near FFN's level
+                          FFN: healthy          FFN: healthy (padded to 50304)
 Training stability        NaN at step ~400     Stable through full run (bf16)
 Step time (8xA100)        1.85 s/step          1.55 s/step  (~16% faster)
 ```
@@ -1081,10 +1095,10 @@ Step time (8xA100)        1.85 s/step          1.55 s/step  (~16% faster)
 
 | Problem | Symptom | Root cause | Fix | Section |
 |---------|---------|------------|-----|---------|
-| LM head slow | 140 TFLOP/s, far below peak | `vocab_size=50257` not a multiple of 8 | Pad output dim to 50304, slice logits back | §10 BROKEN→FIX 1 |
+| LM head slow | 140 TFLOP/s, far below peak | `vocab_size=50257` not a multiple of 8, so cuBLAS is stuck on an unaligned-edge Tensor Core kernel | Pad output dim to 50304, slice logits back | §10 BROKEN→FIX 1 |
 | NaN loss at step ~400 | Training diverges | FP16 gradients underflow with no loss scaling | Add `GradScaler` or switch to BF16 | §10 BROKEN→FIX 2 |
 
-Notice that both root causes are silent by construction — neither raised an exception, a compiler warning, or even a non-zero exit code; both were only observable by profiling a specific hardware counter (Tensor Core utilization) and by watching a training curve over hundreds of steps, respectively. That asymmetry — instant, loud failure for a WMMA compile-time architecture mismatch (§12) versus silent, statistical failure for a cuBLAS heuristic miss or an underflowing gradient — is precisely why this module treats "verify, don't assume" as the load-bearing practice across §6, §10, and §13.
+Notice that both root causes are silent by construction — neither raised an exception, a compiler warning, or even a non-zero exit code; both were only observable by profiling a specific hardware counter (Tensor Core utilization) and by watching a training curve over hundreds of steps, respectively. That asymmetry — instant, loud failure for a WMMA compile-time architecture mismatch (§12) versus silent, statistical failure for a cuBLAS alignment miss or an underflowing gradient — is precisely why this module treats "verify, don't assume" as the load-bearing practice across §6, §10, and §13.
 
 **Discussion questions:**
 1. Why does padding the vocabulary dimension not change the model's actual predictions, and where exactly must the slice back to the true vocab size happen (before or after the loss)?

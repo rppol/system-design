@@ -41,7 +41,8 @@ on), and [warp_level_primitives_and_cooperative_groups](../warp_level_primitives
 **Mental model**: Every kernel launch — host-side or device-side — is a
 transaction with fixed bookkeeping cost: the runtime allocates grid/block
 state, registers the launch for completion tracking, and (for a child grid)
-reserves device memory to support the parent's ability to wait on it. That
+holds a slot in the device runtime's launch pool for as long as the child
+grid is in flight, along with the memory for its parameters and stream. That
 cost is roughly constant regardless of how little work the launched grid
 does. A flat, host-launched grid pays it once for potentially billions of
 threads; dynamic parallelism pays it again for every child grid a device
@@ -85,22 +86,25 @@ better served by a flat grid, a persistent kernel, or a captured graph.
   requiring separable compilation (`nvcc -rdc=true`) linked against
   `libcudadevrt`.
 - **A device-side launch is asynchronous with respect to the launching
-  thread** and, under the modern CDP2 execution model (the default since
-  CUDA 10.1 and the only supported model as of CUDA 12.0 — the original CDP1
-  model with its explicit per-thread `cudaDeviceSynchronize()` requirement is
-  deprecated), is implicitly synchronized only when the **parent grid as a
-  whole** completes, not at the launching thread's return.
-- **Device-side launches carry their own bookkeeping overhead, typically
-  larger than a host-side launch's** — roughly 3-8 microseconds per child
-  launch versus roughly 5-10 microseconds for a host-side launch at the
-  driver/queue level. Multiplied across a large thread count, this overhead
-  dominates quickly.
-- **CDP enforces a hardware nesting-depth limit** (default 24 levels,
-  configurable via `cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, depth)`)
-  and a **pending launch count limit**
-  (`cudaLimitDevRuntimePendingLaunchCount`, default 2048) — exceeding either
-  aborts further launches with `cudaErrorLaunchPendingCountExceeded` or a
-  nesting-depth failure.
+  thread and cannot be waited on from device code.** Under the CDP2 execution
+  model — the default since CUDA 12.0 and the only model available on compute
+  capability 9.0 and higher — a parent grid is simply not considered complete
+  until every grid descended from it has completed. There is no device-side
+  `cudaDeviceSynchronize()`: referencing it from device code is a compile
+  error, and a parent that needs to *consume* a child's output launches the
+  consumer into the `cudaStreamTailLaunch` stream instead, which runs after
+  the parent grid and its children finish.
+- **Device-side launches carry their own bookkeeping overhead, on the same
+  order as a host-side launch's** — single-digit microseconds per child grid,
+  charged whether the child grid does one element's worth of work or a
+  million. The overhead is per *child grid*, not per unit of work, so
+  multiplied across a large thread count it dominates quickly.
+- **CDP enforces a hardware nesting-depth limit of 24 levels** and a
+  **pending launch count limit** — the device runtime tracks every launched
+  grid in a fixed-size launch pool holding 2048 pending launches by default,
+  resizable with `cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount,
+  n)` — and overflowing the pool fails further launches with
+  `cudaErrorLaunchPendingCountExceeded`.
 - **A persistent kernel launches exactly once**, with a grid sized to the
   number of blocks that can be simultaneously resident across every SM
   (`cudaOccupancyMaxActiveBlocksPerMultiprocessor` × SM count) — not the
@@ -140,8 +144,8 @@ size). Two historical implementations exist:
 
 | Model | Introduced | Synchronization semantics | Status |
 |-------|-----------|---------------------------|--------|
-| CDP1 | CUDA 5.0 (Kepler, sm_35) | Explicit per-thread `cudaDeviceSynchronize()`; a parent thread block does not complete until every child grid *it* launched completes | Deprecated since CUDA 11.6, removed in CUDA 12.0 |
-| CDP2 | CUDA 10.1 | Implicit synchronization at *parent grid* completion; no per-thread explicit sync required; simpler and measurably faster launch path | Default since CUDA 10.1; the only supported model from CUDA 12.0 onward |
+| CDP1 | CUDA 5.0 (Kepler, sm_35) | Explicit per-thread `cudaDeviceSynchronize()`; a parent thread block does not complete until every child grid *it* launched completes | Device-side `cudaDeviceSynchronize()` deprecated in CUDA 11.6. Selectable only below compute capability 9.0, with `-DCUDA_FORCE_CDP1_IF_SUPPORTED`; slated for removal |
+| CDP2 | CUDA 12.0 | No device-side sync at all; a parent grid completes only once every descendant grid has completed, and a `cudaStreamTailLaunch` launch is how a parent's work gets to observe a child's results | The default since CUDA 12.0, and the only model on compute capability 9.0 and higher |
 
 ### The device-side launch nesting model
 
@@ -160,7 +164,7 @@ flowchart LR
     C1 --> D1{"Runtime<br/>decision"}
     D1 -->|"no work"| R1(["Thread returns"])
     D1 -->|"launch child"| C2["Child grid<br/>nest level 2..24"]
-    C2 --> Cap(["Depth cap:<br/>syncDepth limit"])
+    C2 --> Cap(["Depth cap:<br/>24 nest levels"])
 
     class H driver
     class P,C1,C2 gpu
@@ -169,10 +173,12 @@ flowchart LR
     class Cap slow
 ```
 
-Each nesting level reserves its own device-memory sync state up front, which
-is exactly why `cudaLimitDevRuntimeSyncDepth` bounds how deep a child grid can
-launch a grandchild — the AMR code in Section 6.1 walks this same
-parent-to-child-to-grandchild path one refinement level at a time.
+Nesting is capped at 24 levels in hardware, and every grid still in flight
+holds a slot in the device runtime's fixed-size launch pool along with the
+device memory for its launch parameters and stream state — so a recursion that
+fans out widely runs out of pool long before it runs out of depth. The AMR
+code in Section 6.1 walks this same parent-to-child-to-grandchild path one
+refinement level at a time.
 
 Best-fit use cases: **AMR** — a coarse grid evaluates a local
 error/refinement criterion per cell and launches a child grid only for cells
@@ -367,7 +373,7 @@ check. Both are required, not either one.
 ### Resident-block sizing for a persistent kernel (ASCII grid)
 
 ```
-Device: 108 SMs (H100-class), occupancy calculator says 2 resident
+Device: 108 SMs (A100-class), occupancy calculator says 2 resident
 blocks/SM fit at this kernel's register/shared-mem usage.
 
 Resident blocks = SMs x blocksPerSM = 108 x 2 = 216 blocks, launched ONCE.
@@ -398,7 +404,7 @@ without a relaunch.
 
 | Symbol | What it is |
 |--------|------------|
-| `SMs` | Streaming multiprocessors on the device, from `cudaDevAttrMultiProcessorCount`. `108` here |
+| `SMs` | Streaming multiprocessors on the device, from `cudaDevAttrMultiProcessorCount`. `108` here (an A100; an H100 SXM5 reports `132`) |
 | `blocksPerSM` | How many blocks of *this* kernel fit resident on one SM, from `cudaOccupancyMaxActiveBlocksPerMultiprocessor`. Set by register and shared-memory usage |
 | `Resident blocks` | `SMs x blocksPerSM` — the grid size. The GPU is exactly full, no block ever waits to be scheduled |
 | `g_nextWorkItem` | Global counter every resident block bumps with `atomicAdd` to claim its next chunk |
@@ -449,6 +455,9 @@ correctness hazard for any pattern (`grid.sync()`) assuming every block runs
 // estimate exceeds a threshold, it launches a child grid that refines just
 // that cell -- classic adaptive mesh refinement (AMR). Compile with
 // `nvcc -rdc=true` and link against `libcudadevrt` for device-side launches.
+__global__ void refineSubCells(float* coarseGrid, int parentCellId,
+                                float errorThreshold);   // forward declaration
+
 __global__ void refineCoarseGrid(float* coarseGrid, int numCells,
                                   float errorThreshold) {
     int cellId = blockIdx.x * blockDim.x + threadIdx.x;
@@ -462,10 +471,14 @@ __global__ void refineCoarseGrid(float* coarseGrid, int numCells,
         dim3 childBlock(64);   // 64 sub-cells per refined region
         refineSubCells<<<childGrid, childBlock>>>(coarseGrid, cellId,
                                                     errorThreshold * 0.5f);
-        // Asynchronous relative to this thread; under CDP2 (CUDA 10.1+, the
-        // only supported model since CUDA 12.0) it is implicitly
-        // synchronized when the *parent grid* completes -- no per-thread
-        // cudaDeviceSynchronize() needed here.
+        // Asynchronous relative to this thread. Under CDP2 (the default from
+        // CUDA 12.0, and the only model on cc 9.0+) this parent grid is not
+        // complete until every descendant grid is -- and there is no
+        // device-side cudaDeviceSynchronize() to call here even if you
+        // wanted to wait: referencing it from device code fails to compile.
+        // A parent that must READ what a child wrote launches the reader
+        // into the cudaStreamTailLaunch stream, e.g.
+        //   consumeRefined<<<g, b, 0, cudaStreamTailLaunch>>>(coarseGrid);
     }
 }
 
@@ -475,9 +488,9 @@ __global__ void refineSubCells(float* coarseGrid, int parentCellId,
     float subError = estimateSubCellError(coarseGrid, parentCellId, subCellId);
 
     // A sub-cell still above threshold recurses one level deeper -- bounded
-    // by the nesting-depth limit (default 24, configurable via
-    // cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, depth); each level
-    // reserves device memory up front for its sync state).
+    // by the hardware nesting-depth limit of 24 levels, and in practice by
+    // the device runtime's launch pool long before that, since every grid
+    // still in flight holds a slot in it.
     if (subError > errorThreshold) {
         refineSubCells<<<1, 64>>>(coarseGrid, parentCellId * 64 + subCellId,
                                     errorThreshold * 0.5f);
@@ -489,7 +502,8 @@ __global__ void refineSubCells(float* coarseGrid, int parentCellId,
 // Set device-runtime limits BEFORE the first kernel that might launch
 // children -- raising them after launches begin has no effect.
 void configureAndLaunchAMR(float* d_coarseGrid, int numCells) {
-    cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, 8);          // bound nesting
+    // Grow the launch pool past its 2048-entry default so a wide refinement
+    // fan-out does not fail with cudaErrorLaunchPendingCountExceeded.
     cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, 4096);
 
     int threads = 256;
@@ -697,7 +711,7 @@ kernel((num_sms * blocks_per_sm,), (256,), (queue_gpu, num_items, results_gpu))
 | Persistent kernel + work queue | 1 (host), zero thereafter | Irregular work of any size, known or unknown ahead of time | Near-zero marginal cost per work item (an atomicAdd plus a loop iteration) | Medium-high — must size to occupancy exactly; busy-wait/fencing bugs are easy to introduce |
 | Producer-consumer | 1 (host) | Work that is *generated* at runtime by some blocks and consumed by others | Same as persistent kernel, plus queue-management (ring buffer, fences) overhead | High — concurrent data structure correctness on top of persistent-kernel sizing |
 | Megakernel / fusion | 1 (host) | Many small logical stages better run as one long kernel | Eliminates per-stage launch + HBM round-trip cost entirely | High — register pressure hurts occupancy; internal branching complicates every profile |
-| [CUDA graphs](../cuda_graphs/cuda_graphs.md) | 1 (capture) + 1 (replay, ~1 microsecond regardless of node count) | A *static*, known sequence of kernels, even with irregular argument values | Lowest possible overhead for a fixed, predictable launch sequence | Low-medium — no code restructuring, but the sequence itself must be fixed |
+| [CUDA graphs](../cuda_graphs/cuda_graphs.md) | 1 (capture) + 1 (replay, one launch's worth of host overhead regardless of node count) | A *static*, known sequence of kernels, even with irregular argument values | Lowest possible overhead for a fixed, predictable launch sequence | Low-medium — no code restructuring, but the sequence itself must be fixed |
 
 ---
 
@@ -762,8 +776,8 @@ readiness for fence/atomic correctness.
 unknown until runtime (a refinement decision, a recursion depth, a graph
 fan-out) *and* the resulting child launches are coarse enough to amortize
 launch overhead; recursion meaningfully simplifies the code versus manual
-flattening; and nesting stays shallow (well under the 24-level default) with
-pending launches comfortably under the 2048 default.
+flattening; and nesting stays shallow (well under the 24-level hardware cap)
+with pending launches comfortably under the launch pool's 2048 default.
 
 **Avoid dynamic parallelism when:** each parent thread would launch its own
 tiny child grid — the single most common CDP misuse, covered as the primary
@@ -890,8 +904,10 @@ __global__ void producerConsumerFixed(float* data, float* out) {
   issuing a device-side launch — the build fails or silently produces a
   kernel that cannot launch children.
 - **Assuming CDP1's per-thread `cudaDeviceSynchronize()` semantics still
-  apply.** Code rebuilt under CUDA 12+ (CDP2-only) needs re-auditing: sync
-  now happens at parent-grid completion, not per launching thread.
+  apply.** Under CDP2 that call does not exist in device code — it is a
+  compile error, not a behaviour change — so a CDP1-era kernel that read its
+  child's output right after synchronizing has to be split, with the reader
+  moved into a `cudaStreamTailLaunch` launch.
 - **Exceeding `cudaLimitDevRuntimePendingLaunchCount`** by fanning out too
   many pending child launches — returns `cudaErrorLaunchPendingCountExceeded`
   rather than silently queuing, so an uncaptured error looks like a hang
@@ -909,8 +925,10 @@ __global__ void producerConsumerFixed(float* data, float* out) {
 |------------|---------|
 | `kernel<<<grid, block, shmem, stream>>>()` (device-side) | Child kernel launch from within a `__global__` function — CUDA Dynamic Parallelism |
 | `nvcc -rdc=true` + `libcudadevrt` | Required compile/link flags for any translation unit issuing device-side launches |
-| `cudaDeviceSetLimit(cudaLimitDevRuntimeSyncDepth, n)` | Configure the nesting-depth ceiling (default 24) before the first CDP launch |
-| `cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, n)` | Configure the max concurrently-pending child launches (default 2048) |
+| `cudaDeviceSetLimit(cudaLimitDevRuntimePendingLaunchCount, n)` | Resize the device runtime's launch pool, which holds 2048 pending launches by default; overflowing it returns `cudaErrorLaunchPendingCountExceeded` |
+| `kernel<<<g, b, 0, cudaStreamTailLaunch>>>()` | Under CDP2, the only way a parent's own work can observe what its children wrote — the tail-launched grid runs after the parent grid and all its descendants complete |
+| `kernel<<<g, b, 0, cudaStreamFireAndForget>>>()` | Launch a child the parent will never read back from; it still gates the parent grid's completion, but skips the tail-launch ordering machinery |
+| `-DCUDA_FORCE_CDP1_IF_SUPPORTED` | Compiles the legacy CDP1 interface on devices below compute capability 9.0; CDP1 is slated for removal, so this is a porting stopgap, not a target |
 | `cudaOccupancyMaxActiveBlocksPerMultiprocessor` | Computes exactly how many blocks of a given kernel fit resident per SM — the persistent-kernel sizing input |
 | `cudaDeviceGetAttribute(..., cudaDevAttrMultiProcessorCount, ...)` | Reads SM count, the other half of persistent-kernel sizing |
 | `cudaLaunchCooperativeKernel` | Required launch entry point for kernels that call `grid.sync()` |
@@ -940,14 +958,16 @@ almost always worse than inlining the child's logic into a flat grid-stride
 loop.
 
 **Q: What is the CUDA Dynamic Parallelism nesting-depth limit, and why does it
-matter?** The device runtime defaults to a maximum of 24 nested-launch levels
-(`cudaLimitDevRuntimeSyncDepth`) because each level reserves device memory up
-front for its synchronization state, so deep recursion either hits the
-ceiling and fails or consumes memory proportional to the configured depth.
+matter?** CUDA caps nesting at 24 levels in hardware, but the limit you
+actually hit first is the device runtime's launch pool: every grid still in
+flight holds a slot in it plus device memory for its launch parameters and
+stream state, so a recursion that fans out widely exhausts the pool many
+levels above 24. Bound the recursion yourself with a size threshold rather
+than relying on either ceiling to stop it.
 
 **Q: What is `cudaLimitDevRuntimePendingLaunchCount`, and what happens if you
-exceed it?** It caps how many child grids can be concurrently pending at
-once (default 2048); exceeding it returns
+exceed it?** It sizes the device runtime's launch pool, which holds 2048
+concurrently-pending child grids by default; exceeding it returns
 `cudaErrorLaunchPendingCountExceeded` rather than silently queuing further
 launches, so an unchecked error here often surfaces as a confusing
 downstream failure.
@@ -959,18 +979,31 @@ the device can run simultaneously, the excess blocks queue forever behind a
 resident set that never yields, deadlocking any grid-wide assumption
 (busy-wait signaling, `grid.sync()`).
 
-**Q: What is the deprecation status of CDP1 versus CDP2, and what build flags
-does dynamic parallelism require?** CDP1 (explicit per-thread
-`cudaDeviceSynchronize()`, CUDA 5.0) has been deprecated since CUDA 11.6 and
-removed from CUDA 12.0 in favor of the simpler, faster CDP2 model shipped in
-CUDA 10.1; either model requires compiling with `nvcc -rdc=true` and linking
+**Q: What is the status of CDP1 versus CDP2, and what build flags does
+dynamic parallelism require?** CDP2 is the default from CUDA 12.0 onward and
+the only model available on compute capability 9.0 and higher, while CDP1 —
+the original CUDA 5.0 model built around a per-thread device-side
+`cudaDeviceSynchronize()` — survives only as an opt-in below cc 9.0 via
+`-DCUDA_FORCE_CDP1_IF_SUPPORTED` and is slated for removal. The practical
+consequence is that device-side `cudaDeviceSynchronize()` no longer exists:
+referencing it from device code is a compile error, so any CDP1-era kernel
+that waited on its children has to be restructured around tail launches.
+Either model requires compiling with `nvcc -rdc=true` and linking
 `libcudadevrt`.
 
 **Q: How does a child grid launch differ from a host launch in its
-synchronization semantics?** A child launch is asynchronous relative to the
-launching thread and, under CDP2, is implicitly synchronized only when the
-entire parent grid completes — code written against CDP1's per-thread
-`cudaDeviceSynchronize()` expectations must be re-audited for CDP2.
+synchronization semantics?** A host launch can be waited on with
+`cudaDeviceSynchronize()` or a stream sync; a child launch cannot be waited
+on from device code at all. Under CDP2 the parent grid simply does not count
+as complete until every grid descended from it has completed, and a launching
+thread gets no way to block until its own child finishes. When the parent's
+logic genuinely needs the child's output, the reader is launched into the
+`cudaStreamTailLaunch` stream, which runs after the parent grid and all its
+descendants — the fire-and-forget stream
+(`cudaStreamFireAndForget`) is for children whose results the parent never
+reads. Code written against CDP1's per-thread `cudaDeviceSynchronize()`
+expectations does not just behave differently under CDP2, it fails to
+compile.
 
 **Q: What is a persistent kernel, and how does it avoid relaunch overhead?**
 A
@@ -1016,8 +1049,8 @@ rather than one output value.
 **Q: When would you prefer CUDA graphs over dynamic parallelism or a persistent
 kernel?** When the sequence of kernels is static and known ahead of time,
 even if argument values differ per run — graphs capture that sequence once
-and replay it for a fraction of a microsecond of host overhead regardless of
-node count.
+and replay it for a single launch's worth of host overhead regardless of how
+many nodes the sequence contains.
 
 **Q: What is a megakernel, and why do some ray tracers and inference engines
 use one?** A megakernel fuses many logically separate stages (intersection,
