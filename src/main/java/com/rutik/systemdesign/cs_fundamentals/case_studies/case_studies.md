@@ -81,7 +81,7 @@ flowchart LR
     lru -->|"augmented<br/>structure pattern"| topk
     dpat -.->|"easier if<br/>read first"| rec
     gts -->|"trie = a graph;<br/>DFS on trie"| acs
-    gts -->|"topological<br/>sort variant"| ivl
+    gts -->|"scheduling follow-up<br/>to Course Schedule"| ivl
     ivl -->|"heap-based<br/>priority order"| topk
 
     class lru,dpat,gts train
@@ -90,7 +90,7 @@ flowchart LR
     class rec frozen
 ```
 
-*Arrows point from a prerequisite case study to the one that benefits from reading it first. Green marks the three case studies with no prerequisites (start anywhere); teal marks the bridge file that both consumes and forwards a pattern; gold marks the two convergence points where multiple upstream techniques combine; purple marks the one dotted, soft (not hard) recommendation pointing outside this directory to the `recursion_and_problem_solving_patterns` concept module.*
+*Arrows point from a prerequisite case study to the one that benefits from reading it first. Green marks the three case studies with no prerequisites (start anywhere); teal marks the bridge file that both consumes and forwards a pattern; gold marks the two terminal studies, of which only `top_k_and_streaming_problems` is a true convergence point — it inherits from both `design_lru_cache` and `interval_and_scheduling_problems`, while `autocomplete_and_string_search` has the single upstream shown; purple marks the one dotted, soft (not hard) recommendation pointing outside this directory to the `recursion_and_problem_solving_patterns` concept module.*
 
 ---
 
