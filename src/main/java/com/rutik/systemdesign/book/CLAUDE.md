@@ -3,27 +3,58 @@
 Section root: `src/main/java/com/rutik/systemdesign/book/`
 Global conventions (formatting, Q&A rules, diagram rules): see root `CLAUDE.md`.
 
-## PARKED — to be done later (owner-set 2026-07-28)
+## Scope — STILL OUT (owner-reaffirmed 2026-08-04, when the other three were re-opened)
 
-This section is **out of scope for everything** — the repo-wide factual audit, the
-`**Short:**` MCQ-summary migration, and the modernization pass — until the owner re-opens
-it. **Parked, not cancelled**: all 6 books are complete, pushed, and still ship in the game
-(one Study node per book).
+`devops/`, `cs_fundamentals/` and `cuda/` were unparked on 2026-08-04. **`book/` was
+deliberately left out**, on the owner's reasoning that the other three are *educational
+modules* — they teach a subject and are answerable to reality — whereas this section is
+**a chapter-by-chapter summary of six specific books**, answerable only to its sources.
+That is a difference in kind, not a difference in scheduling, so it does not expire.
 
-| Paused work | Amount |
-|-------------|--------|
-| Factual-audit units | none — `book/` was never entered into the audit manifest |
-| Q&As awaiting `**Short:**` summaries | 1,402 |
+**Why the factual audit is not merely deferred here but wrong here.** A book summary is
+faithful to its source. "Is this claim true and current as of today" is the wrong test: a
+2017 claim in DDIA is *correctly* reported as what DDIA says, and "correcting" it to 2026
+reality would make the summary wrong about the book. The repo-wide modernization rule
+(REPLACE, DO NOT ANNOTATE) inverts here for the same reason — swapping Kleppmann's example
+for a newer one is a fabrication attributed to a named author.
 
-Note the audit reason is specific to this section: a book summary is **faithful to its
-source**, so "is this claim true and current as of today" is the wrong test — a 2017 claim
-in DDIA is correctly reported as what DDIA says. That is why `book/` is excluded from the
-audit outright rather than merely deferred. The Short migration is only deferred.
+If a pass is ever scheduled for this section it must ask a different question:
 
-**Do not dispatch audit or Short-migration agents at this section.** Adding or editing
-chapters normally is unaffected. The durable scope table is in root `CLAUDE.md` ->
-"Deferred / To Be Planned"; the other parked sections are `devops/`, `cuda/` and
-`cs_fundamentals/`.
+| Elsewhere the audit asks | Here it would have to ask |
+|--------------------------|---------------------------|
+| Is this claim true today? | Does the book actually say this? |
+| Is this API/version/product current? | Is the chapter/section attribution right? |
+| Replace anything stale | Change nothing the book states, however dated |
+
+A **fidelity** finding is real: the summary attributes a claim to the wrong chapter, states
+a number the book does not state, inverts an argument, or presents the summarizer's opinion
+as the author's. A **currency** finding is not a finding here. Where the gap between the
+book and today is genuinely instructive it belongs in an explicitly-marked editorial aside,
+never as a silent correction.
+
+**The `**Short:**` migration is a separate question — and it was MEASURED on 2026-08-04.**
+Unlike the audit it is fidelity-neutral: an added one-line display summary of an answer the
+section already wrote, changing nothing about what the book is reported to say. book's
+1,402 Q&As do ship in the MCQ bank, so today every one of them quizzes on a *derived*
+option. The measurement (reproduce `make_short()` per Q&A and classify the result):
+
+| Derived option | Count | Share | Worth authoring? |
+|----------------|-------|-------|------------------|
+| Reads fine as-is | 967 | 69.0% | no |
+| **TRUNCATED** — `make_short()` cut the real first sentence, ships as a mid-clause fragment | **302** | 21.5% | **yes** |
+| Opens with a referring word ("It targets engineers who…") | 125 | 8.9% | marginal |
+| Under 40 chars ("Your application code is.") | 8 | 0.6% | yes |
+| Contains code-fence / table debris | 0 | 0.0% | n/a |
+
+**Conclusion: a blanket 1,402-line migration is NOT justified here; a targeted pass over
+roughly 310 Q&As is.** The truncated ones are broken regardless of context — the option
+literally stops mid-thought. Discount the 125 referring-word cases: the quiz renders the
+question directly above the options, so "It" resolves for a reader and they are merely
+weak, not wrong. Rerun the measurement rather than trusting this table if the section has
+changed; the script pattern is in the 2026-08-04 session scratch and is ~40 lines.
+
+`book/` has never been entered into the audit manifest and still is not — the 295-unit
+denominator in root `CLAUDE.md` excludes it.
 
 This section is **organized by book**, not by topic. Each book is a folder; each chapter is
 a sub-folder holding a single page named for that folder

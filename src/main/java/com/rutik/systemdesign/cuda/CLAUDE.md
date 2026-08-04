@@ -6,16 +6,17 @@ Build manifest / status tracker: `README.md` §8 — check the NEXT UP pointer a
 
 This section teaches GPU programming from the **kernel author's** viewpoint. It deliberately **cross-references** the GPU material in `ml/`, `llm/`, and `devops/` instead of duplicating it — see the non-overlap boundary in `README.md` §2 and the GPU Non-Overlap Boundary below.
 
-## PARKED — to be done later (owner-set 2026-07-29)
+## Scope — fully in scope (parking lifted 2026-08-04)
 
-This section is **out of scope** for the repo-wide factual audit and the `**Short:**`
-MCQ-summary migration until the owner re-opens it. **Parked, not cancelled** — the content
-is complete and still ships in the game.
+This section was parked 2026-07-29 and re-opened by the owner on 2026-08-04. Every
+improvement pass applies here: the factual audit, the `**Short:**` MCQ-summary migration,
+and modernization. **There is no longer any restriction on dispatching agents here** — but
+read the trap below before touching the audit.
 
-| Paused work | Amount |
-|-------------|--------|
-| Factual-audit units | 14 of 19 (5 complete) |
-| Q&As awaiting `**Short:**` summaries | 427 |
+| Work | State at unparking |
+|------|--------------------|
+| Factual-audit units | 14 of 19 outstanding (5 complete) |
+| Q&As awaiting `**Short:**` summaries | 427 (of 427) |
 
 **THE TRAP — the section is in three states, not two.** Anyone resuming must know which:
 
@@ -27,11 +28,6 @@ is complete and still ships in the game.
 
 The middle row is the hazard: those files *look* audited in `git log` and are not. The
 commit message says so explicitly. Do not mark those units done on the strength of it.
-
-**Do not dispatch audit or Short-migration agents at this section** until the owner
-re-opens it. Adding or editing modules normally is unaffected. The durable scope table is
-in root `CLAUDE.md` -> "Deferred / To Be Planned"; the other parked sections are `devops/`,
-`cs_fundamentals/` and `book/`.
 
 One correction to record while it is fresh: this file has claimed the section missed the
 repo-wide `Q: ` prefix sweep. All five audited modules already carry the prefix, so that

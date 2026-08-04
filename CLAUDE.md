@@ -74,44 +74,34 @@ only because GitHub falls back to a folder's README, and there is none any more.
 
 ---
 
-## Deferred / To Be Planned — parked sections (owner-set)
+## Scope — 15 sections in scope; only `book/` is still out (owner-set 2026-08-04)
 
-Four sections are **parked, not cancelled**. They are out of scope for the factual audit and
-the `**Short:**` MCQ-summary migration until the owner re-opens them. Their content is
-untouched and still ships in the game; only the improvement passes are paused.
+`devops/`, `cs_fundamentals/` and `cuda/` were parked on 2026-07-29 and **re-opened on
+2026-08-04**. Every improvement pass now applies to them: the factual audit, the
+`**Short:**` MCQ-summary migration, modernization, and new prose or Q&As.
 
-| Section | Parked | Audit units parked | Q&As not migrating yet |
-|---------|--------|--------------------|------------------------|
-| `book/` | 2026-07-28 | n/a (never in the audit) | 1,402 |
-| `devops/` | 2026-07-29 | 27 (none started) | 650 |
-| `cs_fundamentals/` | 2026-07-29 | 24 (none started) | 701 |
-| `cuda/` | 2026-07-29 | 14 of 19 (5 done, committed) | 427 |
+**`book/` stays out, and its exclusion does not expire.** The owner's reasoning: the other
+three are *educational modules*, answerable to reality; `book/` is a chapter-by-chapter
+summary of six specific books, answerable only to its sources. A currency audit is not
+deferred there, it is the wrong test — "correcting" a 2017 DDIA claim to 2026 reality makes
+the summary wrong about the book, and REPLACE-DO-NOT-ANNOTATE inverts into fabrication
+attributed to a named author. See `book/CLAUDE.md` for what a fidelity pass would ask
+instead, and for why the `**Short:**` migration is a genuinely separate, still-open
+question there.
 
-**Effect on every progress number:** the audit denominator is **230 in-scope units, not
-295**; the Short migration denominator is **8,489 in-scope Q&As, not 10,618**. Report against
-the in-scope figure and name the parked sections — never quote a bare percentage of the full
-repo, which understates the work by making parked scope look unfinished.
+| Section | Was parked | State at unparking | Now |
+|---------|-----------|--------------------|-----|
+| `devops/` | 2026-07-29 | 27 audit units none started; 650 Q&As, 0 Short | **in scope** |
+| `cs_fundamentals/` | 2026-07-29 | 24 audit units none started; 701 Q&As, 0 Short | **in scope** |
+| `cuda/` | 2026-07-29 | 5 of 19 units audited; 427 Q&As, 0 Short | **in scope** |
+| `book/` | 2026-07-28 | never in the audit manifest; 1,402 Q&As, 0 Short | **still out** |
 
-**Do not dispatch work at these sections** until the owner re-opens them.
+**Report against these numbers.** The audit denominator is **295 units** (`book/` was never
+in it). The Short-migration denominator is **9,503 Q&As** — every parsed Q&A except
+`book/`'s 1,402. The old parked-era figures (230 units, 8,489 Q&As) are dead; do not quote
+them, and do not carry forward a worklist built against them.
 
-**What "parked" does and does not cover (owner-clarified 2026-07-30).** Parked means the
-CONTENT passes are paused: the factual audit, the `**Short:**` migration, modernization,
-and any authoring of new prose or Q&As. It has never meant the files are frozen. Repo-wide
-STRUCTURAL and CORRECTNESS work still applies to every section, parked or not, because
-leaving four sections behind on a mechanical change is what creates the next inconsistency:
-
-- renames and file-layout changes (e.g. the 2026-07-30 `README.md` -> `<folder>.md` pass,
-  which the owner explicitly directed to run "everywhere", naming book, cs_fundamentals
-  and devops)
-- link fixes, dead-link repair, and cross-reference updates
-- build-machinery and wiring changes (`study-paths` markers, `STUDY_ORDER`, generated blocks)
-- broken-diagram and broken-fence repair
-
-If you are an agent and a parked section appears in a structural task, that is intended;
-do not refuse it on the strength of the paragraph above. Refuse only if the task would
-CHANGE THE PROSE OR THE Q&As of a parked section.
-
-**The `cuda` trap, for whoever resumes it.** Units 48-52 are genuinely audited and committed
+**The `cuda` trap, for whoever audits it.** Units 48-52 are genuinely audited and committed
 (`b223d21`). Units 53-57 have an **interrupted partial batch** committed as `2fca64f`: five
 files carry real corrections, but the agent was stopped mid-§14 and never produced a verdict
 record, so those units are deliberately still `status != done`. **Re-audit those five files
@@ -271,6 +261,27 @@ rules below) but because it is trimmed at a clause boundary and ships as the opt
 **Measure migration coverage per parsed Q&A, never per file.** A file-level count read
 llm as complete at 125 of 127 files while `vllm_deep_dive/vllm_deep_dive.md`'s 18 Q&As had no
 summaries at all — the per-Q&A count (2054 of 2072) was the one that saw it.
+
+### ORDER: audit a version-sensitive section BEFORE migrating its Shorts (owner-set 2026-08-04)
+
+**A `**Short:**` line written against an answer the audit later corrects becomes a wrong
+answer that ships as the CORRECT option.** This is not merely rework. The audit agent edits
+the answer body; the stale summary sitting above it now contradicts it; and nothing catches
+that — the line is still 15–220 chars, still parses, still passes `--strict`. It is the
+same shape as every other silent-loss bug in this repo: a wrong value indistinguishable
+from a right one.
+
+So sequence by **how version-sensitive the content is**, not by which pass is cheaper:
+
+| Content | Order | Why |
+|---------|-------|-----|
+| Named products, APIs, versions, cloud services, CLI flags (`devops`, `technologies`, much of `llm`/`ml`) | **audit, then Short** | the audit will rewrite answers; a Short written first is dead on arrival |
+| Timeless theory — complexity, automata, number representation, OS primitives (`cs_fundamentals`) | Short first is safe | modernization has almost nothing to change |
+| Mixed (`cuda`: stable warp/memory semantics, volatile toolkit and Nsight specifics) | audit the un-audited units first | judge per unit, not per section |
+
+**And regardless of order, the audit owns the Short line.** Any pass that changes an answer
+MUST re-read the `**Short:**` line above it and update it in the same edit. Add this to
+every audit prompt — it is the one place a correct fix can introduce a new defect.
 
 **In the reader** the line is hidden by default and revealed by the Summaries row in the
 typography popover (`sd_reader_short`). It is never part of `answerFull` and never
